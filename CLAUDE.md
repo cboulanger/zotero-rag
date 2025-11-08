@@ -1,0 +1,100 @@
+# General Coding Guidelines
+
+## Python Environment
+
+- **Python Version**: 3.13
+- **Package Manager**: Always use `uv` for all Python operations
+- **Virtual Environment**: All Python commands must be executed within the uv-managed virtual environment
+  - Use `uv run <command>` for one-off commands
+  - Use `uv pip install <package>` for installing dependencies
+  - Never use global Python or pip directly
+
+## Testing
+
+### Python Tests
+- Use Python's built-in `unittest` framework
+- Test files should be named `test_*.py` and placed in a `tests/` directory
+- Run tests with: `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
+- Aim for comprehensive coverage of all library methods and services
+- Write tests before or alongside implementation (TDD encouraged)
+
+### Node.js Tests
+- Use Node.js built-in test runner (available in Node 23)
+- Test files should be named `*.test.js` or placed in a `test/` directory
+- Run tests with: `node --test`
+- Test all plugin UI interactions and API communication logic
+
+## Code Organization
+
+- **Modularity**: Organize code into reusable modules to keep business logic clean and lightweight
+- **Separation of Concerns**: Separate API routes, business logic, data access, and utilities into distinct modules
+- **Single Responsibility**: Each module/class should have a single, well-defined purpose
+- **DRY Principle**: Avoid code duplication by extracting common functionality into shared utilities
+
+## Project Structure
+
+### Backend (Python/FastAPI)
+```
+backend/
+├── api/              # FastAPI routes and endpoint handlers
+├── services/         # Core business logic (embeddings, LLM, RAG)
+├── models/           # Pydantic models and data schemas
+├── db/               # Database interfaces and repositories
+├── utils/            # Shared utilities and helpers
+├── tests/            # Unit and integration tests
+├── pyproject.toml    # UV project configuration
+└── .env.example      # Environment variable template
+```
+
+### Plugin (Node.js/JavaScript)
+```
+plugin/
+├── src/
+│   ├── bootstrap.js      # Plugin lifecycle
+│   ├── ui/               # Dialog and UI components
+│   ├── api/              # Backend communication
+│   ├── zotero/           # Zotero API interactions
+│   └── utils/            # Shared utilities
+├── locale/               # Localization files
+├── test/                 # Plugin tests
+├── manifest.json         # Plugin manifest
+└── package.json          # Node.js dependencies
+```
+
+## Code Quality
+
+- **Type Hints**: Use Python type hints for all function signatures and class attributes
+- **Docstrings**: Document all public functions, classes, and modules using clear docstrings
+- **Error Handling**: Implement proper error handling with specific exception types
+- **Logging**: Use appropriate logging levels (DEBUG, INFO, WARNING, ERROR) for operational visibility
+- **Code Style**: Follow PEP 8 for Python, Standard JavaScript style for Node.js
+
+## Version Control
+
+- Write clear, descriptive commit messages
+- Make atomic commits that represent single logical changes
+- Reference issues/tasks in commit messages when applicable
+
+## Documentation
+
+- Maintain up-to-date README.md files in each major directory
+- Document API endpoints with request/response examples
+- Include setup and installation instructions
+- Document configuration options and environment variables
+- Keep inline comments focused on "why" rather than "what"
+
+## Security
+
+- Never commit secrets, API keys, or credentials to version control
+- Use environment variables for all sensitive configuration
+- Validate and sanitize all user inputs
+- Use parameterized queries to prevent injection attacks
+- Keep dependencies updated to patch security vulnerabilities
+
+## Performance
+
+- Implement batch processing for large datasets
+- Use async/await for I/O-bound operations
+- Consider caching for frequently accessed data
+- Profile code to identify bottlenecks before optimizing
+- Document performance considerations for resource-intensive operations
