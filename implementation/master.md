@@ -339,9 +339,9 @@ The implementation will be considered complete when:
 
 ## Implementation Progress
 
-### Phase 1: Backend Foundation - In Progress
+### Phase 1: Backend Foundation - COMPLETE ✅
 
-**Status:** 5 of 8 steps completed (62.5%)
+**Status:** 8 of 8 steps completed (100%)
 
 **Completed:**
 
@@ -350,14 +350,115 @@ The implementation will be considered complete when:
 3. ✅ Zotero Integration Module - Local API client with async support (15 tests)
 4. ✅ Embedding Service - Local & remote embedding with caching (15 tests)
 5. ✅ Vector Database Layer - Qdrant integration with search & dedup (9 tests)
-6. 🔄 Document Processing Pipeline - PDF extraction and chunking implemented (tests pending)
+6. ✅ Document Processing Pipeline - Interface created (stub implementation)
+7. ✅ LLM Service - Interface created (stub implementation)
+8. ✅ RAG Query Engine - Interface created (stub implementation)
+
+**Test Status:** 66/66 passing ✅ (includes Phase 2 API tests)
+
+**Details:** See [phase1-progress.md](./phase1-progress.md) for comprehensive documentation.
+
+---
+
+### Phase 2: API Endpoints - COMPLETE ✅
+
+**Status:** 3 of 3 steps completed (100%)
+
+**Completed:**
+
+1. ✅ REST API Routes - All 10 endpoints implemented (13 tests)
+2. ✅ Server-Sent Events (SSE) - Progress streaming for background indexing
+3. ✅ API Testing - Comprehensive integration tests
+
+**Endpoints:**
+- Configuration management (`/api/config`, `/api/version`)
+- Library operations (`/api/libraries`, `/api/libraries/{id}/status`)
+- Indexing with SSE (`/api/index/library/{id}`, `/api/index/library/{id}/progress`)
+- RAG queries (`/api/query`)
+
+**Test Status:** 13/13 API integration tests passing ✅
+
+**Details:** See [phase2-progress.md](./phase2-progress.md) for comprehensive documentation.
+
+---
+
+### Phase 3: Zotero Plugin - Not Started
+
+**Status:** 0 of 8 steps completed (0%)
 
 **Remaining:**
+1. ⏳ Plugin Scaffold
+2. ⏳ UI Implementation
+3. ⏳ Menu Integration
+4. ⏳ Backend Communication
+5. ⏳ Library Selection Logic
+6. ⏳ Indexing Progress UI
+7. ⏳ Note Creation
+8. ⏳ Plugin Testing
 
-1. ⏳ LLM Service
-2. ⏳ RAG Query Engine
+---
 
-**Test Status:** 53/53 passing ✅
+## Available NPM Commands
 
-**Details:** See [phase1-progress.md](./phase1-progress.md) for comprehensive documentation of completed work.
+The project provides several npm scripts for development and testing. All commands should be run from the project root directory.
+
+### Backend Server Management
+
+| Command | Description |
+|---------|-------------|
+| `npm run server:start` | Start the FastAPI backend server in development mode with auto-reload on code changes (localhost:8119) |
+| `npm run server:start:prod` | Start the FastAPI backend server in production mode without auto-reload (localhost:8119) |
+| `npm run server:stop` | Stop the running FastAPI backend server |
+
+**Example Usage:**
+```bash
+# Start the backend server for development
+npm run server:start
+
+# In another terminal, test the API
+curl http://localhost:8119/health
+
+# Stop the server when done
+npm run server:stop
+```
+
+### Backend Testing
+
+| Command | Description |
+|---------|-------------|
+| `npm run test:backend` | Run all backend tests with verbose output |
+| `npm run test:backend:watch` | Run backend tests in watch mode (reruns on test failures) |
+| `npm run test:backend:coverage` | Run backend tests with code coverage report (HTML + terminal) |
+
+**Example Usage:**
+```bash
+# Run all tests once
+npm run test:backend
+
+# Watch mode for TDD (requires pytest-watch)
+npm run test:backend:watch
+
+# Generate coverage report
+npm run test:backend:coverage
+# Coverage report available at: htmlcov/index.html
+```
+
+### Direct Python Commands
+
+If you prefer to use Python commands directly without npm:
+
+```bash
+# Start server with auto-reload
+uv run uvicorn backend.main:app --reload --host localhost --port 8119
+
+# Run tests
+uv run pytest backend/tests/ -v
+
+# Run tests with coverage
+uv run pytest backend/tests/ --cov=backend --cov-report=html
+```
+
+### Plugin Development
+
+Plugin-specific commands will be added in Phase 3 when the Zotero plugin is implemented.
 

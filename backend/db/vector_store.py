@@ -224,15 +224,15 @@ class VectorStore:
                 ]
             )
 
-        # Search
-        results = self.client.search(
+        # Search using query_points (replaces deprecated search method)
+        results = self.client.query_points(
             collection_name=self.CHUNKS_COLLECTION,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             score_threshold=score_threshold,
             query_filter=query_filter,
             with_payload=True,
-        )
+        ).points
 
         # Convert to SearchResult objects
         search_results = []
