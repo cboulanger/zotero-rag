@@ -3,12 +3,13 @@
 ## Project Overview
 
 A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
+
 - **FastAPI Backend**: Handles embeddings, vector database, LLM inference, and exposes REST/SSE APIs
 - **Zotero Plugin**: Provides UI for querying libraries and creates note items with answers
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────┐         ┌──────────────────────┐
 │  Zotero Plugin      │◄────────┤  FastAPI Backend     │
 │  (Node.js/Firefox)  │  HTTP   │  (Python/FastAPI)    │
@@ -30,38 +31,101 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 ## Required Dependencies & Information
 
 ### Zotero Plugin Development
+
 - **Framework**: Zotero 7/8 plugin architecture 2.0 (bootstrapped plugins)
+  - Prioritize Zotero 8 APIs when available (backward compatibility not required)
 - **Language**: JavaScript (Firefox extension environment)
 - **Key APIs**:
   - Zotero plugin API (UI, notes, collections)
   - Zotero local data API (localhost:23119)
 - **Reference**: [zotero-sample-plugin/src-2.0](../zotero-sample-plugin/src-2.0)
 - **Documentation**:
-  - https://www.zotero.org/support/dev/client_coding
-  - https://www.zotero.org/support/dev/zotero_8_for_developers
+  - <https://www.zotero.org/support/dev/client_coding>
+  - <https://www.zotero.org/support/dev/zotero_8_for_developers>
 
 ### Backend RAG Stack
+
 - **Framework**: FastAPI (Python 3.13)
 - **Embedding Models**:
   - Local: sentence-transformers, nomic-embed-text-v1.5
   - Remote option: OpenAI/Cohere embeddings API
-- **Vector Database**: Qdrant (supports both in-memory and persistent modes)
+- **Vector Database**: Qdrant
+  - Persistent storage by default in user data directory
+  - Configurable storage location (supports external SSD)
 - **LLM Options**:
   - Local: Transformers + quantized models (Qwen2.5, Llama 3, Mistral)
   - Remote: OpenAI API, Anthropic API, vLLM endpoints
-- **PDF Processing**: PyPDF2, pdfplumber, or pypdf
-- **Zotero Access**: pyzotero library
+  - Configurable model weight storage location (supports external SSD)
+- **Text Processing**: spaCy for semantic chunking at paragraph/sentence level
+- **PDF Processing**: PyPDF2, pdfplumber, or pypdf (with page number extraction)
+- **Zotero Access**: pyzotero library for local API (localhost:23119)
 - **Package Management**: uv (Python 3.13)
 
 ### Reusable Implementation from zoterorag
+
 - PyZotero library integration for accessing libraries
 - Qdrant vector database usage patterns
-- Multimodal document processing (text + images from PDFs)
+- Text extraction and processing from PDFs
 - Batch indexing pipeline
+- Note: Multimodal support (images/figures) excluded from initial implementation
+
+## Configuration Decisions
+
+### Model Selection
+
+- **Strategy**: User-configurable with named presets
+- **Presets**: Extensible configuration profiles for different hardware scenarios:
+  - `mac-mini-m4-16gb`: Optimized for Mac Mini M4 with 16GB RAM
+    - Embedding: nomic-embed-text-v1.5 (~550MB)
+    - LLM: Qwen2.5-3B-Instruct (4-bit quantized, ~2GB)
+    - Total memory budget: ~6-7GB leaving headroom for system and Qdrant
+  - `gpu-high-memory`: For systems with dedicated GPU and >24GB RAM
+    - Embedding: sentence-transformers/all-mpnet-base-v2
+    - LLM: Mistral-7B-Instruct (8-bit quantized)
+  - `cpu-only`: CPU-optimized smaller models
+    - Embedding: all-MiniLM-L6-v2 (~80MB)
+    - LLM: TinyLlama-1.1B (4-bit quantized)
+  - `remote-api`: Using remote inference endpoints
+- **Model Storage**: Configurable location for model weights (supports external SSD)
+
+### Vector Database
+
+- **Storage**: Persistent by default in user data directory
+- **Location**: Configurable path (supports external storage)
+- **Embedding Cache**: Content-hash based caching to avoid recomputation
+
+### Chunking Strategy
+
+- **Approach**: Paragraph and sentence-level chunking for academic papers
+- **Method**: Semantic chunking using spaCy that preserves document structure
+- **Metadata**: Track page numbers and chunk text previews (first 5 words) for citation anchoring
+- **Page Tracking**: Store page number with each chunk to enable precise citation links
+
+### Security & Privacy
+
+- **Authentication**: Local-only trusted access (no auth initially)
+- **Data Privacy**: All data stays local, PDFs are published documents
+- **Logging**: Configurable log level, logs to standard locations
+
+### Plugin Configuration
+
+- **Backend URL**: Configurable in plugin preferences (default: localhost:8119)
+- **Concurrent Queries**: Limit 3-5 simultaneous queries
+- **Note Format**: HTML with Zotero item links to source PDFs (`zotero://select/library/items/ITEM_ID`)
+- **Citations**: Link to source PDFs with page numbers when available, or text anchors (first 5 words of chunk)
+- **Progress Display**: Percentage with current document count
+- **Offline Behavior**: Fail immediately with clear error message
+- **Version Checking**: API endpoint for backend/plugin version compatibility
+
+### Deduplication
+
+- **Cross-Library**: Use Zotero's `relations.owl:sameAs` property to identify copied items
+- **Content-Based**: Fallback to content hashing for deduplication
 
 ## Implementation Steps
 
 ### Phase 1: Backend Foundation
+
 1. **Project Setup**
    - Initialize FastAPI project with uv
    - Set up project structure with modules:
@@ -70,85 +134,109 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
      - `models/` - Data models and schemas
      - `db/` - Vector database interface
      - `zotero/` - Zotero API client wrapper
-   - Configure environment variables (.env)
+     - `config/` - Configuration presets and model definitions
+   - Configure environment variables (.env) with storage paths
 
-2. **Zotero Integration Module**
+2. **Configuration System**
+   - Implement configuration presets for different hardware profiles
+   - Support for custom model weight locations
+   - Vector database path configuration
+   - Logging configuration
+   - Version metadata for API compatibility checks
+   - Write unit tests
+
+3. **Zotero Integration Module**
    - Implement Zotero local API client (localhost:23119)
    - Create methods to:
      - List libraries
-     - Get library items with metadata
+     - Get library items with metadata (including `relations` property)
      - Retrieve PDF attachments
      - Extract full-text content
    - Write unit tests
 
-3. **Embedding Service**
+4. **Embedding Service**
    - Implement modular embedding interface supporting:
      - Local models (sentence-transformers)
      - Remote APIs (OpenAI, Cohere)
-   - Configuration-based model selection
+   - Configuration-based model selection from presets
+   - Content-hash based caching for embeddings
    - Batch processing for efficiency
    - Write unit tests
 
-4. **Vector Database Layer**
-   - Set up Qdrant client with configurable storage (in-memory/persistent)
+5. **Vector Database Layer**
+   - Set up Qdrant client with persistent storage (configurable location)
    - Implement collections for:
-     - Document chunks (text embeddings)
-     - Metadata (Zotero item info)
+     - Document chunks (text embeddings + metadata)
+     - Deduplication tracking (content hashes, Zotero relations)
    - CRUD operations for vectors
    - Similarity search functionality
    - Write unit tests
 
-5. **Document Processing Pipeline**
-   - PDF text extraction from Zotero attachments
-   - Text chunking strategies (semantic, fixed-size)
-   - Metadata enrichment from Zotero items
+6. **Document Processing Pipeline**
+   - PDF text extraction from Zotero attachments with page number tracking
+   - spaCy-based paragraph and sentence-level semantic chunking
+   - Metadata enrichment from Zotero items:
+     - Store page number for each chunk
+     - Store chunk text preview (first 5 words) as citation anchor
+     - Track source PDF item ID
+   - Deduplication logic using relations and content hashing
    - Batch indexing with progress tracking
    - Write unit tests
 
-6. **LLM Service**
+7. **LLM Service**
    - Modular LLM interface supporting:
      - Local models (transformers with quantization)
      - Remote APIs (OpenAI, Anthropic, vLLM)
-   - Configuration-based model selection
+   - Configuration-based model selection from presets
+   - Configurable model weight storage location
    - Context window management
    - Write unit tests
 
-7. **RAG Query Engine**
+8. **RAG Query Engine**
    - Implement retrieval logic:
      - Query embedding
      - Vector similarity search
      - Context assembly from retrieved chunks
    - LLM prompting with retrieved context
-   - Response generation
+   - Response generation with source tracking:
+     - Track source PDF item IDs
+     - Include page numbers for each source
+     - Include text anchors (first 5 words) for precise location
    - Write unit tests
 
 ### Phase 2: API Endpoints
-8. **REST API Routes**
+
+9. **REST API Routes**
    - `POST /api/index/library/{library_id}` - Trigger library indexing
    - `GET /api/libraries` - List available libraries
    - `GET /api/libraries/{library_id}/status` - Check indexing status
-   - `POST /api/query` - Submit RAG query
-   - `GET /api/config` - Get available models/config
-   - `POST /api/config` - Update model configuration
+   - `POST /api/query` - Submit RAG query (returns answer with source citations)
+     - Response includes: answer text, source item IDs, page numbers, text anchors
+   - `GET /api/config` - Get available model presets and current config
+   - `POST /api/config` - Update model configuration and storage paths
+   - `GET /api/version` - Get backend version for compatibility checking
 
-9. **Server-Sent Events (SSE)**
-   - `GET /api/index/library/{library_id}/progress` - Stream indexing progress
-   - Event types: started, progress (percentage), completed, error
-   - Implement proper SSE formatting and connection management
+10. **Server-Sent Events (SSE)**
+    - `GET /api/index/library/{library_id}/progress` - Stream indexing progress
+    - Event types: started, progress (percentage + document count), completed, error
+    - Implement proper SSE formatting and connection management
 
-10. **API Testing**
+11. **API Testing**
     - Write integration tests for all endpoints
-    - Test SSE streaming behavior
+    - Test SSE streaming behavior with progress updates
+    - Test version checking endpoint
     - Error handling validation
 
 ### Phase 3: Zotero Plugin
-11. **Plugin Scaffold**
+
+12. **Plugin Scaffold**
     - Create manifest.json (Zotero 7/8 compatible)
     - Set up bootstrap.js with lifecycle hooks
     - Configure build process for XPI generation
+    - Implement preferences UI for backend URL configuration (default: localhost:8119)
 
-12. **UI Implementation**
-    - Create dialog XUL/HTML:
+13. **UI Implementation**
+    - Create dialog XUL/HTML (use Zotero 8 APIs where beneficial):
       - Question text input
       - Library multi-select dropdown with checkboxes
       - Submit button
@@ -157,127 +245,89 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
     - Implement localization (en-US strings)
     - Style with plugin CSS
 
-13. **Menu Integration**
+14. **Menu Integration**
     - Add "Ask Question" menu item under Tools
     - Implement keyboard shortcut (optional)
     - Handle dialog open/close events
 
-14. **Backend Communication**
+15. **Backend Communication**
     - HTTP client for FastAPI endpoints
+    - Version compatibility checking on plugin startup
     - SSE client for progress streaming
-    - Error handling and retry logic
+    - Error handling for offline backend (fail immediately with clear message)
+    - Concurrent query management (limit 3-5 simultaneous)
     - Timeout management
 
-15. **Library Selection Logic**
+16. **Library Selection Logic**
     - Get currently selected library/collection
     - Populate multi-select with all available libraries
     - Default to current library (checked)
     - Validate at least one library is selected
 
-16. **Indexing Progress UI**
-    - Subscribe to SSE progress endpoint
-    - Show/update progress bar
+17. **Indexing Progress UI**
+    - Subscribe to SSE progress endpoint for unindexed libraries
+    - Show/update progress bar with percentage and document count
     - Handle indexing completion
     - Handle errors gracefully (non-blocking)
 
-17. **Note Creation**
+18. **Note Creation**
     - Get currently selected collection
     - Create standalone note item
-    - Format note content:
+    - Format note content as HTML:
       - Question as title/header
       - Answer as body
+      - Citations as Zotero links to source PDFs: `<a href="zotero://select/library/items/ITEM_ID">`
+      - Include page numbers in citations when available (e.g., "Source, p. 42")
+      - Include text anchors (first 5 words) when page numbers unavailable
       - Metadata (timestamp, libraries queried)
     - Handle note creation errors
 
-18. **Plugin Testing**
+19. **Plugin Testing**
     - Manual testing in Zotero 7/8
     - Test all UI interactions
     - Test with multiple libraries
-    - Test error scenarios
+    - Test version compatibility warnings
+    - Test concurrent query limits
+    - Test error scenarios (backend offline, no results, etc.)
 
 ### Phase 4: Integration & Polish
-19. **End-to-End Testing**
-    - Full workflow: plugin → backend → note creation
+
+20. **End-to-End Testing**
+    - Full workflow: plugin → backend → note creation with HTML citations
     - Test with real Zotero libraries
     - Performance testing with large libraries
-    - Multi-library query validation
+    - Multi-library query validation with deduplication
+    - Test Mac Mini M4 16GB preset configuration
 
-20. **Configuration & Documentation**
-    - Backend configuration guide (model selection, hardware requirements)
+21. **Configuration & Documentation**
+    - Backend configuration guide:
+      - Hardware preset selection (mac-mini-m4-16gb, etc.)
+      - Model weight storage configuration
+      - Vector database location setup
     - Plugin installation instructions
     - API documentation
     - Troubleshooting guide
 
-21. **Error Handling & Edge Cases**
+22. **Error Handling & Edge Cases**
     - Network failures
-    - Backend unavailable
+    - Backend unavailable (immediate failure with clear message)
     - No results found
     - Invalid library IDs
     - Unsupported attachment types
-
-## Open Questions & Decisions
-
-### Backend
-- [ ] **Model Selection Strategy**: Default local model for CPU vs GPU systems? Recommend specific models?
-  - CPU: Smaller models (Qwen2.5-3B, TinyLlama)
-  - GPU: Medium models (Qwen2.5-7B, Mistral-7B)
-  - Need hardware detection or user configuration?
-
-- [ ] **Vector Database Storage**: Default to in-memory or persistent? Where to store persistent data?
-  - Suggest: Persistent by default in user data directory
-  - Configuration option for location
-
-- [ ] **Chunking Strategy**: What chunk size and overlap for academic papers?
-  - Academic papers have distinct structures (abstract, sections, references)
-  - Consider semantic chunking vs fixed-size
-
-- [ ] **Authentication**: Does the backend need authentication/API keys, or assume local-only trusted access?
-  - Suggest: Start with no auth (localhost-only), add optional auth later
-
-- [ ] **Multi-library Merging**: How to handle duplicate documents across libraries? Merge or keep separate?
-  - Need to decide on deduplication strategy
-
-- [ ] **Caching**: Should we cache embeddings to avoid re-computing on re-indexing?
-  - Suggest: Yes, cache based on document hash
-
-### Plugin
-- [ ] **Backend Discovery**: How does plugin find backend? Hardcoded localhost:8000 or configurable?
-  - Suggest: Configurable in plugin preferences, default localhost:8000
-
-- [ ] **Concurrent Queries**: Allow multiple simultaneous queries or queue them?
-  - Suggest: Allow concurrent, limit to reasonable number (3-5)
-
-- [ ] **Note Format**: Plain text, Markdown, or HTML notes? Include citations?
-  - Suggest: Markdown with citations to source items
-
-- [ ] **Progress Granularity**: What level of progress detail? Per-document, per-batch, percentage only?
-  - Suggest: Percentage with current document count
-
-- [ ] **Offline Behavior**: What happens if backend is unreachable? Queue queries or fail immediately?
-  - Suggest: Fail with clear error message, don't queue
-
-- [ ] **Zotero 8 Compatibility**: Are there breaking changes from Zotero 7 to 8 we need to handle?
-  - Need to verify plugin API compatibility
-
-### Cross-Cutting
-- [ ] **Data Privacy**: Should we include privacy/data retention policies? Is data stored beyond vector DB?
-  - Suggest: Document that all data stays local
-
-- [ ] **Logging**: What level of logging? User-accessible logs?
-  - Suggest: Configurable log level, logs to standard locations
-
-- [ ] **Updates**: How to handle backend/plugin version mismatches?
-  - Suggest: Version check API endpoint, warn user
+    - Version mismatch warnings
+    - Concurrent query limit enforcement
 
 ## Reference Documents
 
 Additional implementation details and API specifications will be documented in:
+
 - `implementation/zotero-api-reference.md` - Zotero local API endpoints and data structures
 - `implementation/rag-architecture.md` - Detailed RAG pipeline design and model options
 
 ## Success Criteria
 
 The implementation will be considered complete when:
+
 1. Backend can index a Zotero library and answer questions about its content
 2. Plugin successfully creates notes with answers in the selected collection
 3. Progress indication works during indexing of new libraries
