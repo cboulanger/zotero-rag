@@ -12,6 +12,7 @@
 ## Testing
 
 ### Python Tests
+
 - Use Python's built-in `unittest` framework
 - Test files should be named `test_*.py` and placed in a `tests/` directory
 - Run tests with: `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
@@ -19,6 +20,7 @@
 - Write tests before or alongside implementation (TDD encouraged)
 
 ### Node.js Tests
+
 - Use Node.js built-in test runner (available in Node 23)
 - Test files should be named `*.test.js` or placed in a `test/` directory
 - Run tests with: `node --test`
@@ -34,6 +36,7 @@
 ## Project Structure
 
 ### Backend (Python/FastAPI)
+
 ```
 backend/
 ├── api/              # FastAPI routes and endpoint handlers
@@ -47,6 +50,7 @@ backend/
 ```
 
 ### Plugin (Node.js/JavaScript)
+
 ```
 plugin/
 ├── src/
@@ -82,6 +86,11 @@ plugin/
 - Include setup and installation instructions
 - Document configuration options and environment variables
 - Keep inline comments focused on "why" rather than "what"
+
+## Implementation progress documentation
+
+- When implementing the master implementation plan,  create an document for each phase where you document what has been implemented and, after a phase is complete,  add short summary at the end of `master.md` and link to this document.
+- If a step in a phase is complex, document that step separately. The master and the implementation documents should allow you to resume work in separate sessions any time.
 
 ## Security
 
