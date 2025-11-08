@@ -382,19 +382,24 @@ The implementation will be considered complete when:
 
 ---
 
-### Phase 3: Zotero Plugin - Not Started
+### Phase 3: Zotero Plugin - COMPLETE ✅ (Pending Manual Testing)
 
-**Status:** 0 of 8 steps completed (0%)
+**Status:** 8 of 8 steps completed (100%)
 
-**Remaining:**
-1. ⏳ Plugin Scaffold
-2. ⏳ UI Implementation
-3. ⏳ Menu Integration
-4. ⏳ Backend Communication
-5. ⏳ Library Selection Logic
-6. ⏳ Indexing Progress UI
-7. ⏳ Note Creation
-8. ⏳ Plugin Testing
+**Completed:**
+
+1. ✅ Plugin Scaffold - Manifest, bootstrap, build process
+2. ✅ UI Implementation - Dialog, preferences, localization
+3. ✅ Menu Integration - Tools menu "Ask Question" item
+4. ✅ Backend Communication - HTTP client, SSE, version checking
+5. ✅ Library Selection Logic - Library listing and current selection
+6. ✅ Indexing Progress UI - Real-time SSE streaming, progress bar
+7. ✅ Note Creation - HTML formatting with citations and page numbers
+8. ⏳ Plugin Testing - Manual testing in Zotero 7/8 required
+
+**Build Status:** XPI created successfully ✅ (`plugin/dist/zotero-rag-0.1.0.xpi`)
+
+**Details:** See [phase3-progress.md](./phase3-progress.md) for comprehensive documentation.
 
 ---
 
@@ -460,5 +465,24 @@ uv run pytest backend/tests/ --cov=backend --cov-report=html
 
 ### Plugin Development
 
-Plugin-specific commands will be added in Phase 3 when the Zotero plugin is implemented.
+| Command | Description |
+|---------|-------------|
+| `npm run plugin:build` | Build the Zotero plugin and create XPI archive (output: plugin/dist/zotero-rag-{version}.xpi) |
+
+**Example Usage:**
+```bash
+# Build the plugin
+npm run plugin:build
+
+# Install the XPI in Zotero:
+# 1. Open Zotero 7/8
+# 2. Go to Tools > Add-ons
+# 3. Click gear icon > Install Add-on From File
+# 4. Select plugin/dist/zotero-rag-0.1.0.xpi
+```
+
+**Plugin Files:**
+- Source: `plugin/src/`
+- Build output: `plugin/build/` (temporary)
+- XPI archive: `plugin/dist/zotero-rag-{version}.xpi`
 

@@ -13,6 +13,8 @@
     "test:backend:coverage": "uv run pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term",
     "server:start": "uv run uvicorn backend.main:app --reload --host localhost --port 8119",
     "server:start:prod": "uv run uvicorn backend.main:app --host localhost --port 8119",
-    "server:stop": "pkill -f 'uvicorn backend.main:app' || true"
+    "server:stop": "pkill -f 'uvicorn backend.main:app' || true",
+    "plugin:build": "node scripts/build-plugin.js",
+    "plugin:watch": "node scripts/build-plugin.js --watch"
   }
 }

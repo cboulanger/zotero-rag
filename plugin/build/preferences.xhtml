@@ -1,0 +1,44 @@
+<linkset>
+  <html:link rel="stylesheet" href="chrome://global/skin/" xmlns:html="http://www.w3.org/1999/xhtml"/>
+  <html:link rel="stylesheet" href="chrome://zotero/skin/preferences.css" xmlns:html="http://www.w3.org/1999/xhtml"/>
+  <html:link rel="stylesheet" href="preferences.css" xmlns:html="http://www.w3.org/1999/xhtml"/>
+</linkset>
+
+<script src="preferences.js" xmlns="http://www.w3.org/1999/xhtml"/>
+
+<html:div class="preferences-container" xmlns:html="http://www.w3.org/1999/xhtml">
+  <!-- Backend Settings -->
+  <html:fieldset class="settings-group">
+    <html:legend>Backend Server</html:legend>
+
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-backend-url">Server URL:</html:label>
+      <html:input id="zotero-rag-backend-url"
+                  type="text"
+                  placeholder="http://localhost:8119"
+                  class="setting-input"/>
+    </html:div>
+
+    <html:div class="setting-description">
+      Enter the URL of your FastAPI backend server (default: http://localhost:8119)
+    </html:div>
+  </html:fieldset>
+
+  <!-- Performance Settings -->
+  <html:fieldset class="settings-group">
+    <html:legend>Performance</html:legend>
+
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-max-queries">Max Concurrent Queries:</html:label>
+      <html:input id="zotero-rag-max-queries"
+                  type="number"
+                  min="1"
+                  max="10"
+                  class="setting-input-small"/>
+    </html:div>
+
+    <html:div class="setting-description">
+      Maximum number of simultaneous queries allowed (1-10)
+    </html:div>
+  </html:fieldset>
+</html:div>

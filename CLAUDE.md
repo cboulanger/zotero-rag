@@ -65,6 +65,32 @@ plugin/
 └── package.json          # Node.js dependencies
 ```
 
+## Zotero Plugin Development
+
+### UI Development - Pragmatic Approach
+
+**XUL (XML User Interface Language) is deprecated in Firefox but still functional in Zotero 7/8.**
+
+**Recommended Approach:**
+- Use **HTML elements with `html:` namespace** when possible for future-proofing
+- **XUL is acceptable** for dialogs, preferences, and UI components if it simplifies development
+- Prefer HTML for new code, but don't block on XUL if it works
+- Focus on functionality over ideological purity
+
+**Common Patterns:**
+- XUL `<dialog>` with HTML children using `html:` namespace works well
+- Mix XUL layout (`<vbox>`, `<hbox>`) with HTML form elements
+- Use `createXULElement()` for menu items and structural elements
+- Use `html:` prefix for form inputs, labels, buttons when feasible
+
+### Dialog and Window Creation
+
+For creating dialog windows in Zotero plugins:
+1. Use XUL `<dialog>` or `<window>` as root element for `window.openDialog()`
+2. Mix HTML elements (with `html:` namespace) for form controls
+3. Apply styles using standard CSS files
+4. Reference working plugin examples in `zotero-addons/` directory
+
 ## Code Quality
 
 - **Type Hints**: Use Python type hints for all function signatures and class attributes

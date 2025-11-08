@@ -72,9 +72,17 @@ async def query_libraries(request: QueryRequest):
     try:
         # Initialize services
         settings = get_settings()
-        embedding_service = create_embedding_service(settings)
+        preset = settings.get_hardware_preset()
+
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path)
+        )
         llm_service = create_llm_service(settings)
-        vector_store = VectorStore(settings)
+        vector_store = VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        )
 
         # Create RAG engine
         rag_engine = RAGEngine(

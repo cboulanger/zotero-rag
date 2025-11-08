@@ -64,13 +64,29 @@ async def index_library_task(library_id: str, force_reindex: bool = False):
             "status": "running",
             "progress": 0,
             "current_item": 0,
-            "total_items": 0
+            "total_items": 0,
+            "message": "Initializing..."
         }
 
         # Initialize services
         async with ZoteroLocalAPI() as zotero_client:
-            embedding_service = create_embedding_service(settings)
-            vector_store = VectorStore(settings)
+            # Get hardware preset and extract embedding config
+            active_jobs[job_id]["message"] = "Loading configuration..."
+            preset = settings.get_hardware_preset()
+
+            active_jobs[job_id]["message"] = f"Loading embedding model ({preset.embedding.model_name})..."
+            embedding_service = create_embedding_service(
+                preset.embedding,
+                cache_dir=str(settings.model_weights_path)
+            )
+
+            active_jobs[job_id]["message"] = "Initializing vector database..."
+            vector_store = VectorStore(
+                storage_path=settings.vector_db_path,
+                embedding_dim=embedding_service.get_embedding_dim()
+            )
+
+            active_jobs[job_id]["message"] = "Starting document indexing..."
             processor = DocumentProcessor(
                 zotero_client=zotero_client,
                 embedding_service=embedding_service,
@@ -124,14 +140,15 @@ async def start_library_indexing(library_id: str, force_reindex: bool = False):
             detail=f"Library {library_id} is already being indexed"
         )
 
-    # Verify library exists
+    # Verify Zotero is accessible
     try:
         async with ZoteroLocalAPI() as client:
-            libraries = await client.get_libraries()
-            if not any(lib["id"] == library_id for lib in libraries):
+            # Just check connection - we'll use the library_id as passed from plugin
+            # The plugin knows the correct Zotero internal library ID
+            if not await client.check_connection():
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Library {library_id} not found"
+                    status_code=503,
+                    detail="Zotero local API is not accessible"
                 )
     except Exception as e:
         raise HTTPException(
@@ -171,6 +188,7 @@ async def generate_progress_events(library_id: str) -> AsyncGenerator[str, None]
 
     # Poll for progress updates
     last_progress = 0
+    last_message = ""
     while True:
         await asyncio.sleep(0.5)  # Poll every 500ms
 
@@ -180,19 +198,27 @@ async def generate_progress_events(library_id: str) -> AsyncGenerator[str, None]
 
         job = active_jobs[job_id]
         current_progress = job.get("progress", 0)
+        current_message = job.get("message", "")
 
-        # Send progress update if changed
-        if current_progress != last_progress:
+        # Send progress update if changed (progress or message)
+        if current_progress != last_progress or current_message != last_message:
+            # Use the custom message if available, otherwise default message
+            if current_message:
+                message = current_message
+            else:
+                message = f"Indexing progress: {current_progress:.1f}%"
+
             event = IndexingProgressEvent(
                 event="progress",
                 library_id=library_id,
-                message=f"Indexing progress: {current_progress:.1f}%",
+                message=message,
                 progress=current_progress,
                 current_item=job.get("current_item"),
                 total_items=job.get("total_items")
             )
             yield f"data: {event.model_dump_json()}\n\n"
             last_progress = current_progress
+            last_message = current_message
 
         # Check for completion or error
         if job["status"] == "completed":

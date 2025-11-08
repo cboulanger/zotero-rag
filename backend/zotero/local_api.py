@@ -81,19 +81,35 @@ class ZoteroLocalAPI:
             await self._ensure_session()
 
             # Get user library info
+            # Note: userID 0 refers to the current logged-in user's library
             libraries = []
 
-            # User library (ID 1 is typically the user library)
+            # Try to fetch items to verify library exists
             async with self.session.get(
-                f"{self.base_url}/users/1/items",
+                f"{self.base_url}/api/users/0/items",
                 params={"limit": 1}
             ) as response:
                 if response.status == 200:
-                    libraries.append({
-                        "id": "1",
-                        "name": "My Library",
-                        "type": "user"
-                    })
+                    data = await response.json()
+                    # Extract library info from first item if available
+                    if data and len(data) > 0 and "library" in data[0]:
+                        lib_info = data[0]["library"]
+                        libraries.append({
+                            "id": str(lib_info.get("id", "1")),
+                            "name": lib_info.get("name", "My Library"),
+                            "type": lib_info.get("type", "user")
+                        })
+                    else:
+                        # Fallback if no items exist yet
+                        libraries.append({
+                            "id": "1",
+                            "name": "My Library",
+                            "type": "user"
+                        })
+                else:
+                    error_text = await response.text()
+                    logger.error(f"Failed to fetch libraries: {response.status} - {error_text}")
+                    raise ConnectionError(f"Zotero API returned {response.status}: {error_text}")
 
             # TODO: Add support for group libraries
             # This would require querying /groups endpoint
@@ -130,10 +146,11 @@ class ZoteroLocalAPI:
             await self._ensure_session()
 
             # Build URL based on library type
+            # Note: For local API, userID 0 refers to the current user
             if library_type == "user":
-                url = f"{self.base_url}/users/{library_id}/items"
+                url = f"{self.base_url}/api/users/0/items"
             else:
-                url = f"{self.base_url}/groups/{library_id}/items"
+                url = f"{self.base_url}/api/groups/{library_id}/items"
 
             # Build query parameters
             params = {"start": start}
