@@ -77,7 +77,8 @@ async def index_library_task(library_id: str, force_reindex: bool = False):
             active_jobs[job_id]["message"] = f"Loading embedding model ({preset.embedding.model_name})..."
             embedding_service = create_embedding_service(
                 preset.embedding,
-                cache_dir=str(settings.model_weights_path)
+                cache_dir=str(settings.model_weights_path),
+                hf_token=settings.hf_token
             )
 
             active_jobs[job_id]["message"] = "Initializing vector database..."

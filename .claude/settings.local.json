@@ -3,7 +3,10 @@
     "allow": [
       "Bash(uv run pytest:*)",
       "Bash(cat:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(dir:*)",
+      "Bash(taskkill:*)",
+      "Bash(npm run server:start:*)"
     ],
     "deny": [],
     "ask": []

@@ -7,6 +7,7 @@ Includes content-hash based caching to avoid recomputing embeddings.
 
 import hashlib
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Optional
 
@@ -78,6 +79,7 @@ class LocalEmbeddingService(EmbeddingService):
         self,
         config: EmbeddingConfig,
         cache_dir: Optional[str] = None,
+        hf_token: Optional[str] = None,
     ):
         """
         Initialize local embedding service.
@@ -85,9 +87,11 @@ class LocalEmbeddingService(EmbeddingService):
         Args:
             config: Embedding configuration
             cache_dir: Directory to cache model weights
+            hf_token: HuggingFace token for model downloads
         """
         self.config = config
         self.cache_dir = cache_dir
+        self.hf_token = hf_token
         self._model: Optional[SentenceTransformer] = None
         self._embedding_cache: dict[str, list[float]] = {}
 
@@ -101,6 +105,12 @@ class LocalEmbeddingService(EmbeddingService):
             model_kwargs = self.config.model_kwargs.copy()
             if self.cache_dir:
                 model_kwargs["cache_folder"] = self.cache_dir
+
+            # Set HuggingFace token as environment variable if provided
+            # This ensures all HF libraries can access it
+            if self.hf_token:
+                os.environ["HF_TOKEN"] = self.hf_token
+                model_kwargs["token"] = self.hf_token
 
             self._model = SentenceTransformer(
                 self.config.model_name,
@@ -253,6 +263,7 @@ def create_embedding_service(
     config: EmbeddingConfig,
     cache_dir: Optional[str] = None,
     api_key: Optional[str] = None,
+    hf_token: Optional[str] = None,
 ) -> EmbeddingService:
     """
     Factory function to create the appropriate embedding service.
@@ -261,6 +272,7 @@ def create_embedding_service(
         config: Embedding configuration
         cache_dir: Directory to cache model weights (for local models)
         api_key: API key (for remote services)
+        hf_token: HuggingFace token for model downloads (for local models)
 
     Returns:
         Configured embedding service
@@ -269,7 +281,7 @@ def create_embedding_service(
         ValueError: If model type is invalid
     """
     if config.model_type == "local":
-        return LocalEmbeddingService(config, cache_dir=cache_dir)
+        return LocalEmbeddingService(config, cache_dir=cache_dir, hf_token=hf_token)
     elif config.model_type == "remote":
         return RemoteEmbeddingService(config, api_key=api_key)
     else:

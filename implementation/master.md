@@ -126,6 +126,8 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 
 ### Phase 1: Backend Foundation
 
+[Implementation progress](implementation\phase1-progress.md)
+
 1. **Project Setup**
    - Initialize FastAPI project with uv
    - Set up project structure with modules:
@@ -206,6 +208,8 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 
 ### Phase 2: API Endpoints
 
+[Implementation progress](implementation\phase2-progress.md)
+
 9. **REST API Routes**
    - `POST /api/index/library/{library_id}` - Trigger library indexing
    - `GET /api/libraries` - List available libraries
@@ -228,6 +232,8 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
     - Error handling validation
 
 ### Phase 3: Zotero Plugin
+
+[Implementation progress](implementation\phase3-progress.md)
 
 12. **Plugin Scaffold**
     - Create manifest.json (Zotero 7/8 compatible)
@@ -411,14 +417,19 @@ The project provides several npm scripts for development and testing. All comman
 
 | Command | Description |
 |---------|-------------|
-| `npm run server:start` | Start the FastAPI backend server in development mode with auto-reload on code changes (localhost:8119) |
+| `npm run server:start` | Start the FastAPI backend server in development mode with auto-reload (localhost:8119). Logs to `logs/server.log` |
 | `npm run server:start:prod` | Start the FastAPI backend server in production mode without auto-reload (localhost:8119) |
 | `npm run server:stop` | Stop the running FastAPI backend server |
+| `npm run server:restart` | Restart the FastAPI backend server |
+| `npm run server:status` | Check if the server is running |
 
 **Example Usage:**
 ```bash
 # Start the backend server for development
 npm run server:start
+
+# Check server status
+npm run server:status
 
 # In another terminal, test the API
 curl http://localhost:8119/health
@@ -426,6 +437,8 @@ curl http://localhost:8119/health
 # Stop the server when done
 npm run server:stop
 ```
+
+**Cross-Platform Note:** Server management uses a Python script (`scripts/server.py`) that works on Windows, macOS, and Linux.
 
 ### Backend Testing
 

@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     # Model Configuration
     model_preset: str = Field(
-        default="mac-mini-m4-16gb",
+        default="cpu-only",
         description="Hardware preset name"
     )
 
@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
     anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API key")
     cohere_api_key: Optional[str] = Field(default=None, description="Cohere API key")
+    hf_token: Optional[str] = Field(default=None, description="HuggingFace token for model downloads")
 
     # Application version
     version: str = Field(default="0.1.0", description="Backend version")
