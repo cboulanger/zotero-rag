@@ -11,7 +11,7 @@ This document tracks the implementation progress of Phase 1 (Backend Foundation)
 **Files Created:**
 
 - [pyproject.toml](../pyproject.toml) - UV project configuration with all dependencies
-- [backend/.env.example](../backend/.env.example) - Environment variable template
+- [.env.dist](../.env.dist) - Environment variable template
 
 **Directory Structure:**
 

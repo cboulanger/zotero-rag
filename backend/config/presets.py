@@ -123,9 +123,9 @@ PRESETS = {
         memory_budget_gb=3.0,
     ),
 
-    "remote-api": HardwarePreset(
-        name="remote-api",
-        description="Using remote inference endpoints",
+    "remote-openai": HardwarePreset(
+        name="remote-openai",
+        description="Using OpenAI/Anthropic remote inference endpoints",
         embedding=EmbeddingConfig(
             model_type="remote",
             model_name="openai",  # Will use OpenAI embeddings API
@@ -136,6 +136,32 @@ PRESETS = {
             model_name="gpt-4o-mini",  # Or anthropic/claude-3-5-sonnet
             max_context_length=128000,
             temperature=0.7,
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.7,
+            max_chunk_size=1024,
+        ),
+        memory_budget_gb=1.0,  # Minimal local memory needed
+    ),
+
+    "remote-kisski": HardwarePreset(
+        name="remote-kisski",
+        description="Using GWDG KISSKI OpenAI-compatible API (Academic Cloud)",
+        embedding=EmbeddingConfig(
+            model_type="local",  # Use local embeddings for privacy
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            batch_size=32,
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            model_name="meta-llama/Llama-3.3-70B-Instruct",  # Fast, 128k context
+            max_context_length=128000,
+            temperature=0.7,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",  # Uses KISSKI_API_KEY from .env
+            },
         ),
         rag=RAGConfig(
             top_k=10,

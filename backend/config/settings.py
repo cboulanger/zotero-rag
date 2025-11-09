@@ -57,12 +57,6 @@ class Settings(BaseSettings):
         description="Path to log file"
     )
 
-    # API Keys (optional, for remote models)
-    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
-    anthropic_api_key: Optional[str] = Field(default=None, description="Anthropic API key")
-    cohere_api_key: Optional[str] = Field(default=None, description="Cohere API key")
-    hf_token: Optional[str] = Field(default=None, description="HuggingFace token for model downloads")
-
     # Application version
     version: str = Field(default="0.1.0", description="Backend version")
 
@@ -100,22 +94,26 @@ class Settings(BaseSettings):
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    def get_api_key(self, provider: str) -> Optional[str]:
+    def get_api_key(self, env_var_name: str) -> Optional[str]:
         """
-        Get API key for a specific provider.
+        Get API key from environment variable.
+
+        This method dynamically reads API keys from environment variables,
+        allowing for flexible configuration without hardcoding provider-specific fields.
 
         Args:
-            provider: Provider name ("openai", "anthropic", "cohere")
+            env_var_name: Name of the environment variable (e.g., "OPENAI_API_KEY", "KISSKI_API_KEY")
 
         Returns:
             API key if available, None otherwise
+
+        Examples:
+            >>> settings.get_api_key("OPENAI_API_KEY")
+            "sk-..."
+            >>> settings.get_api_key("KISSKI_API_KEY")
+            "your-kisski-key"
         """
-        key_map = {
-            "openai": self.openai_api_key,
-            "anthropic": self.anthropic_api_key,
-            "cohere": self.cohere_api_key,
-        }
-        return key_map.get(provider.lower())
+        return os.getenv(env_var_name)
 
 
 # Global settings instance

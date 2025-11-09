@@ -42,13 +42,24 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(preset.embedding.model_name, "sentence-transformers/all-MiniLM-L6-v2")
         self.assertEqual(preset.llm.model_name, "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
-    def test_get_preset_remote_api(self):
-        """Test getting remote-api preset."""
-        preset = get_preset("remote-api")
+    def test_get_preset_remote_openai(self):
+        """Test getting remote-openai preset."""
+        preset = get_preset("remote-openai")
 
-        self.assertEqual(preset.name, "remote-api")
+        self.assertEqual(preset.name, "remote-openai")
         self.assertEqual(preset.embedding.model_type, "remote")
         self.assertEqual(preset.llm.model_type, "remote")
+
+    def test_get_preset_remote_kisski(self):
+        """Test getting remote-kisski preset."""
+        preset = get_preset("remote-kisski")
+
+        self.assertEqual(preset.name, "remote-kisski")
+        self.assertEqual(preset.embedding.model_type, "local")  # Use local embeddings
+        self.assertEqual(preset.llm.model_type, "remote")
+        self.assertEqual(preset.llm.model_name, "meta-llama/Llama-3.3-70B-Instruct")
+        self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
+        self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
 
     def test_get_preset_invalid(self):
         """Test getting invalid preset raises error."""
@@ -64,7 +75,8 @@ class TestPresets(unittest.TestCase):
         self.assertIn("mac-mini-m4-16gb", presets)
         self.assertIn("gpu-high-memory", presets)
         self.assertIn("cpu-only", presets)
-        self.assertIn("remote-api", presets)
+        self.assertIn("remote-openai", presets)
+        self.assertIn("remote-kisski", presets)
         self.assertEqual(len(presets), len(PRESETS))
 
 
@@ -85,7 +97,7 @@ class TestSettings(unittest.TestCase):
 
         self.assertEqual(settings.api_host, "localhost")
         self.assertEqual(settings.api_port, 8119)
-        self.assertEqual(settings.model_preset, "mac-mini-m4-16gb")
+        self.assertEqual(settings.model_preset, "cpu-only")
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.version, "0.1.0")
 
@@ -132,17 +144,18 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(preset.name, "gpu-high-memory")
 
     def test_get_api_key(self):
-        """Test getting API keys."""
+        """Test getting API keys from environment variables."""
         with patch.dict(os.environ, {
             "OPENAI_API_KEY": "test-openai-key",
             "ANTHROPIC_API_KEY": "test-anthropic-key",
+            "KISSKI_API_KEY": "test-kisski-key",
         }):
             settings = Settings()
 
-            self.assertEqual(settings.get_api_key("openai"), "test-openai-key")
-            self.assertEqual(settings.get_api_key("anthropic"), "test-anthropic-key")
-            self.assertIsNone(settings.get_api_key("cohere"))
-            self.assertIsNone(settings.get_api_key("unknown"))
+            self.assertEqual(settings.get_api_key("OPENAI_API_KEY"), "test-openai-key")
+            self.assertEqual(settings.get_api_key("ANTHROPIC_API_KEY"), "test-anthropic-key")
+            self.assertEqual(settings.get_api_key("KISSKI_API_KEY"), "test-kisski-key")
+            self.assertIsNone(settings.get_api_key("NONEXISTENT_KEY"))
 
     def test_global_settings_singleton(self):
         """Test that get_settings returns singleton."""

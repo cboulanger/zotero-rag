@@ -45,9 +45,10 @@ backend/
 ├── db/               # Database interfaces and repositories
 ├── utils/            # Shared utilities and helpers
 ├── tests/            # Unit and integration tests
-├── pyproject.toml    # UV project configuration
-└── .env.example      # Environment variable template
+└── pyproject.toml    # UV project configuration
 ```
+
+**Note:** Environment configuration template is at project root: `.env.dist`
 
 ### Plugin (Node.js/JavaScript)
 

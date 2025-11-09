@@ -409,6 +409,32 @@ The implementation will be considered complete when:
 
 ---
 
+### Phase 1.5: RAG Implementation - IN PROGRESS 🚧
+
+**Status:** 2 of 6 steps completed (33%)
+
+**Why Phase 1.5?** Phase 1 created stub implementations for document processing, LLM service, and RAG engine. Phase 1.5 completes these components with full implementations before Phase 4 integration testing.
+
+**Completed:**
+
+1. ✅ PDF Text Extraction - Full implementation with page tracking (21 tests)
+2. ✅ Semantic Chunking - spaCy-based chunking with lazy auto-download (26 tests)
+
+**Remaining Work:**
+
+- ⏳ Document Processing Pipeline - Orchestrate PDF → chunks → embeddings → vector store
+- ⏳ LLM Service Implementation - Local (quantized) and remote (API) inference
+- ⏳ RAG Query Engine - Complete retrieval + generation pipeline
+- ⏳ Integration Testing - Test with real Zotero test group (20 PDFs)
+
+**Test Status:** 47/47 passing ✅ (PDF extraction + chunking)
+
+**Key Achievement:** Lazy spaCy model loading with automatic download via `uv` - no manual setup required!
+
+**Details:** See [phase1.5-progress.md](./phase1.5-progress.md) for comprehensive documentation.
+
+---
+
 ## Available NPM Commands
 
 The project provides several npm scripts for development and testing. All commands should be run from the project root directory.

@@ -72,22 +72,64 @@ class TextChunker:
         logger.info(f"Initialized TextChunker (max_size={max_chunk_size}, overlap={overlap_size})")
 
     def _load_model(self):
-        """Lazy load spaCy model."""
+        """Lazy load spaCy model with auto-download if needed."""
         if self._nlp is None:
             try:
                 logger.info(f"Loading spaCy model: {self.model_name}")
                 self._nlp = spacy.load(self.model_name)
-                # Disable unnecessary components for performance
-                self._nlp.select_pipes(enable=["sentencizer"])
-            except OSError as e:
-                logger.error(
-                    f"Failed to load spaCy model '{self.model_name}'. "
-                    f"Run: python -m spacy download {self.model_name}"
-                )
-                raise RuntimeError(
-                    f"spaCy model '{self.model_name}' not found. "
-                    f"Install it with: python -m spacy download {self.model_name}"
-                ) from e
+                # Disable unnecessary components for performance (keep only sentence segmentation)
+                # Most models have 'parser' which does sentence segmentation
+                disabled = []
+                for pipe_name in self._nlp.pipe_names:
+                    if pipe_name not in ["parser", "sentencizer", "senter"]:
+                        disabled.append(pipe_name)
+                if disabled:
+                    self._nlp.disable_pipes(*disabled)
+                    logger.debug(f"Disabled spaCy pipes: {disabled}")
+            except OSError:
+                # Model not found, try to download it using uv
+                logger.warning(f"spaCy model '{self.model_name}' not found. Attempting to download...")
+                try:
+                    import subprocess
+                    import sys
+
+                    # Determine the model URL based on model name
+                    # For en_core_web_sm 3.8.0 (matches spaCy 3.8.x)
+                    model_urls = {
+                        "en_core_web_sm": "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+                    }
+
+                    if self.model_name not in model_urls:
+                        raise ValueError(f"No download URL configured for model: {self.model_name}")
+
+                    model_url = model_urls[self.model_name]
+                    logger.info(f"Downloading {self.model_name} from {model_url}")
+
+                    # Use uv pip install to download the model
+                    result = subprocess.run(
+                        ["uv", "pip", "install", model_url],
+                        check=True,
+                        capture_output=True,
+                        text=True
+                    )
+                    logger.info(f"Successfully downloaded {self.model_name}")
+                    logger.debug(f"Install output: {result.stdout}")
+
+                    # Try loading again
+                    self._nlp = spacy.load(self.model_name)
+                    # Disable unnecessary components
+                    disabled = []
+                    for pipe_name in self._nlp.pipe_names:
+                        if pipe_name not in ["parser", "sentencizer", "senter"]:
+                            disabled.append(pipe_name)
+                    if disabled:
+                        self._nlp.disable_pipes(*disabled)
+                except Exception as e:
+                    logger.error(f"Failed to download spaCy model '{self.model_name}': {e}")
+                    raise RuntimeError(
+                        f"spaCy model '{self.model_name}' not found and could not be downloaded. "
+                        f"Install it manually with: uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+                    ) from e
 
     def chunk_text(
         self,
@@ -153,13 +195,15 @@ class TextChunker:
                 # Start new chunk with overlap
                 # Use last sentence as overlap if it fits
                 if chunk_sentences and len(chunk_sentences[-1]) < self.overlap_size:
-                    current_chunk_text = chunk_sentences[-1] + " " + sent_text
-                    current_chunk_start = current_chunk_start + len(current_chunk_text) - len(current_chunk_text)
+                    overlap_text = chunk_sentences[-1]
+                    current_chunk_text = overlap_text + " " + sent_text
+                    # Keep roughly the same start position for continuity
+                    current_chunk_start = max(0, current_chunk_start + len(current_chunk_text) - len(overlap_text) - len(sent_text) - 1)
+                    chunk_sentences = [overlap_text, sent_text]
                 else:
                     current_chunk_text = sent_text
                     current_chunk_start = sent.start_char
-
-                chunk_sentences = [sent_text]
+                    chunk_sentences = [sent_text]
             else:
                 # Add sentence to current chunk
                 if not current_chunk_text:
