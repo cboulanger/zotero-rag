@@ -99,8 +99,11 @@ class TestSettings(unittest.TestCase):
 
             self.assertFalse(str(settings.model_weights_path).startswith("~"))
             self.assertFalse(str(settings.vector_db_path).startswith("~"))
-            self.assertTrue("custom/models" in str(settings.model_weights_path))
-            self.assertTrue("custom/qdrant" in str(settings.vector_db_path))
+            # Use Path normalization to handle both Windows and Unix paths
+            self.assertTrue("custom" in str(settings.model_weights_path))
+            self.assertTrue("models" in str(settings.model_weights_path))
+            self.assertTrue("custom" in str(settings.vector_db_path))
+            self.assertTrue("qdrant" in str(settings.vector_db_path))
 
     def test_env_override(self):
         """Test that environment variables override defaults."""
