@@ -8,7 +8,10 @@
       "Bash(taskkill:*)",
       "Bash(npm run server:start:*)",
       "Bash(npm run test:backend:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(curl:*)",
+      "Bash(uv run python:*)",
+      "Bash(python -m json.tool)"
     ],
     "deny": [],
     "ask": []

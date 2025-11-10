@@ -42,6 +42,7 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 - **Documentation**:
   - <https://www.zotero.org/support/dev/client_coding>
   - <https://www.zotero.org/support/dev/zotero_8_for_developers>
+  - IMPORTANT: `docs\zotero-plugin-dev.md` and `docs\zotero-local-api.md` contain documentation that is collected during development and cannot be found in official documentation 
 
 ### Backend RAG Stack
 
@@ -325,10 +326,11 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 
 ## Reference Documents
 
-Additional implementation details and API specifications will be documented in:
+Additional implementation details and API specifications are documented in:
 
 - `implementation/zotero-api-reference.md` - Zotero local API endpoints and data structures
 - `implementation/rag-architecture.md` - Detailed RAG pipeline design and model options
+- GWDG/KISSKI available models: https://docs.hpc.gwdg.de/services/chat-ai/models/index.html
 
 ## Success Criteria
 
@@ -438,64 +440,90 @@ The implementation will be considered complete when:
 
 ### Phase 4: Integration & Polish - IN PROGRESS 🚧
 
-**Status:** Setting up integration testing framework
+**Status:** Integration testing framework complete, manual validation pending
 
 **Overview:** Phase 4 validates the complete system with real dependencies and prepares for production use.
 
 **Completed:**
 
-1. ✅ **Integration Testing Framework** - Industry best practices implementation
+1. ✅ **Integration Testing Framework** (Step 20) - Industry best practices implementation
    - Created comprehensive integration test suite ([test_real_integration.py](../backend/tests/test_real_integration.py))
-   - pytest markers for selective test execution (`@pytest.mark.integration`)
+   - Environment validation system ([conftest.py](../backend/tests/conftest.py))
+     - Pre-flight checks: Zotero connectivity, API keys, test library, model presets
+     - Automatic test skipping with helpful error messages
+     - Session-level fixture validation
+   - pytest markers for selective test execution (`@pytest.mark.integration`, `@pytest.mark.slow`)
    - Fixtures for environment setup and resource management
    - Health checks, indexing tests, RAG query tests
    - Test isolation with temporary vector stores
    - Graceful skipping when dependencies unavailable
 
-2. ✅ **Testing Documentation**
+2. ✅ **Testing Documentation** (Step 21)
    - Comprehensive testing guide ([docs/testing.md](../docs/testing.md))
+     - Test structure and categories
+     - Running tests (unit and integration)
+     - Writing new tests
+     - CI/CD strategies
+     - Troubleshooting guide
+     - Best practices
    - Quick start guide ([docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md))
+     - Prerequisites checklist
+     - One-time setup instructions
+     - Running integration tests
+     - Common workflows
    - npm commands for easy test execution
    - Troubleshooting guide
    - CI/CD recommendations
 
 **Configuration:**
 - pytest configuration in `pyproject.toml` with markers
-- npm test commands: `test:integration`, `test:integration:quick`, `test:all`
+- npm test commands:
+  - `test:backend` - Unit tests only (fast, default)
+  - `test:integration:quick` - Health checks (~30 seconds)
+  - `test:integration` - Full integration suite (5-15 minutes)
+  - `test:all` - Everything (unit + integration)
 - Default behavior: skip integration tests (opt-in required)
 - Test library: https://www.zotero.org/groups/6297749/test-rag-plugin
 
 **Remaining:**
 
-- [ ] **End-to-End Testing** (Step 20)
+- [ ] **End-to-End Testing** (Step 20 - Manual validation)
   - Manual validation with real Zotero libraries
   - Plugin → backend → note creation workflow
   - Performance testing with large libraries
   - Multi-library query validation
+  - Plugin installation testing in Zotero 7/8
 
-- [ ] **Configuration & Documentation** (Step 21)
-  - User-facing configuration guide
-  - Plugin installation instructions
-  - API documentation
-  - Deployment guide
+- [ ] **Additional Documentation** (Step 21)
+  - User-facing setup guide (end-user perspective)
+  - API documentation (OpenAPI/Swagger)
+  - Deployment guide (production setup)
+  - Operational troubleshooting guide
 
 - [ ] **Error Handling & Edge Cases** (Step 22)
-  - Network failure scenarios
-  - Backend unavailable handling
-  - Edge case validation
+  - Network timeout handling
+  - Partial indexing failure recovery
+  - Concurrent query limits enforcement
+  - Version mismatch warnings
+  - Corrupted PDF handling
+  - Out-of-memory scenarios
+  - Rate limiting (API calls)
 
 **Next Actions:**
-1. Run integration tests manually with real Zotero: `npm run test:integration`
-2. Test plugin with backend using remote-kisski preset
+1. Run integration tests with real Zotero: `npm run test:integration`
+2. Install and test plugin in Zotero 7/8
 3. Validate end-to-end workflow: question → answer → note creation
-4. Document any issues and create fixes
-5. Complete user-facing documentation
+4. Test error scenarios (backend offline, network issues, etc.)
+5. Complete remaining documentation
 
 **Test Status:**
 - Unit tests: 161/161 passing ✅
-- Integration tests: Framework created, ready for execution
+- Integration tests: Framework created, environment validation working ✅
+- Manual testing: Pending
 
-**Details:** See integration testing documentation in `docs/` folder.
+**Progress:** 60% (3/5 major tasks complete)
+
+**Details:** See [phase4-progress.md](./phase4-progress.md) for comprehensive documentation.
 
 ---
 

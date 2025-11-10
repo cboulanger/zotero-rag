@@ -111,8 +111,26 @@ class ZoteroLocalAPI:
                     logger.error(f"Failed to fetch libraries: {response.status} - {error_text}")
                     raise ConnectionError(f"Zotero API returned {response.status}: {error_text}")
 
-            # TODO: Add support for group libraries
-            # This would require querying /groups endpoint
+            # Fetch group libraries
+            # Note: User ID 0 refers to current user's groups
+            try:
+                async with self.session.get(
+                    f"{self.base_url}/api/users/0/groups"
+                ) as response:
+                    if response.status == 200:
+                        groups_data = await response.json()
+                        for group in groups_data:
+                            libraries.append({
+                                "id": str(group.get("data", {}).get("id", group.get("id"))),
+                                "name": group.get("data", {}).get("name", "Unnamed Group"),
+                                "type": "group"
+                            })
+                    else:
+                        # Groups endpoint may not be available or no groups exist
+                        logger.debug(f"Groups endpoint returned {response.status}")
+            except Exception as e:
+                # Non-fatal: just log and continue with user library only
+                logger.debug(f"Could not fetch groups: {e}")
 
             return libraries
 
@@ -225,16 +243,18 @@ class ZoteroLocalAPI:
         try:
             await self._ensure_session()
 
+            # Build URL with /api/ prefix for local API
             if library_type == "user":
-                url = f"{self.base_url}/users/{library_id}/items/{item_key}/children"
+                url = f"{self.base_url}/api/users/0/items/{item_key}/children"
             else:
-                url = f"{self.base_url}/groups/{library_id}/items/{item_key}/children"
+                url = f"{self.base_url}/api/groups/{library_id}/items/{item_key}/children"
 
             async with self.session.get(url) as response:
                 if response.status == 200:
                     children = await response.json()
                     return children if isinstance(children, list) else []
                 else:
+                    logger.debug(f"No children found for item {item_key}: HTTP {response.status}")
                     return []
 
         except Exception as e:
@@ -261,14 +281,41 @@ class ZoteroLocalAPI:
         try:
             await self._ensure_session()
 
+            # Build URL with /api/ prefix for local API
             if library_type == "user":
-                url = f"{self.base_url}/users/{library_id}/items/{item_key}/file"
+                url = f"{self.base_url}/api/users/0/items/{item_key}/file"
             else:
-                url = f"{self.base_url}/groups/{library_id}/items/{item_key}/file"
+                url = f"{self.base_url}/api/groups/{library_id}/items/{item_key}/file"
 
-            async with self.session.get(url) as response:
+            # Don't follow redirects - we'll handle file:// URLs ourselves
+            async with self.session.get(url, allow_redirects=False) as response:
                 if response.status == 200:
                     return await response.read()
+                elif response.status in (301, 302, 303, 307, 308):
+                    # Local API redirects to file:// URL for local files
+                    file_url = response.headers.get("Location")
+                    if file_url and file_url.startswith("file://"):
+                        # Extract file path from file:// URL
+                        from urllib.parse import unquote, urlparse
+                        from pathlib import Path
+
+                        parsed = urlparse(file_url)
+                        file_path = unquote(parsed.path)
+
+                        # On Windows, remove leading slash from /C:/... paths
+                        if file_path.startswith("/") and len(file_path) > 2 and file_path[2] == ":":
+                            file_path = file_path[1:]
+
+                        # Read file from filesystem
+                        path = Path(file_path)
+                        if path.exists():
+                            return path.read_bytes()
+                        else:
+                            logger.warning(f"File not found on filesystem: {file_path}")
+                            return None
+                    else:
+                        logger.warning(f"Unexpected redirect for {item_key}: {file_url}")
+                        return None
                 else:
                     logger.warning(f"File for {item_key} not available: HTTP {response.status}")
                     return None

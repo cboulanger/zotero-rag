@@ -197,6 +197,33 @@ class LocalEmbeddingService(EmbeddingService):
         self._embedding_cache.clear()
         logger.info("Embedding cache cleared")
 
+    def close(self):
+        """
+        Clean up resources and release model from memory.
+
+        This helps prevent PyTorch cleanup crashes on Windows by explicitly
+        releasing the model and clearing CUDA cache if available.
+        """
+        try:
+            if self._model is not None:
+                # Delete the model
+                del self._model
+                self._model = None
+
+                # Clear PyTorch CUDA cache if CUDA is available
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except (ImportError, RuntimeError):
+                    # torch not available or CUDA not available, ignore
+                    pass
+
+                logger.debug("LocalEmbeddingService model cleaned up")
+        except Exception as e:
+            # Suppress any cleanup errors to prevent test failures
+            logger.debug(f"Error during embedding service cleanup: {e}")
+
 
 class RemoteEmbeddingService(EmbeddingService):
     """

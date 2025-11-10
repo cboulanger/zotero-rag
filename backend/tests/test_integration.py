@@ -78,9 +78,37 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         """Clean up test fixtures."""
+        # Clean up in reverse order of creation to avoid dependencies
+
+        # Close embedding service first to release PyTorch models
+        if hasattr(self, 'embedding_service') and hasattr(self.embedding_service, 'close'):
+            try:
+                self.embedding_service.close()
+            except Exception as e:
+                # Suppress cleanup errors (e.g., PyTorch access violations on Windows)
+                pass
+
+        # Close vector store to release database locks
+        if hasattr(self, 'vector_store'):
+            try:
+                self.vector_store.close()
+            except Exception as e:
+                # Suppress cleanup errors
+                pass
+
         # Remove temporary directory
         if Path(self.temp_dir).exists():
-            shutil.rmtree(self.temp_dir)
+            try:
+                shutil.rmtree(self.temp_dir)
+            except Exception as e:
+                # If files are still locked, try again or give up
+                import time
+                time.sleep(0.1)
+                try:
+                    shutil.rmtree(self.temp_dir)
+                except Exception:
+                    # Give up - temp dir will be cleaned up eventually
+                    pass
 
     async def test_workflow_without_real_zotero(self):
         """
@@ -93,10 +121,12 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         4. The complete integration works
         """
         # Setup: Mock Zotero library items
+        # Note: Zotero API returns items with key in both root and data
         mock_items = [
             {
                 "key": "ITEM1",
                 "data": {
+                    "key": "ITEM1",  # Key must be in data as well
                     "itemType": "journalArticle",
                     "title": "Introduction to Machine Learning",
                     "creators": [{"lastName": "Smith", "firstName": "John"}],
@@ -110,6 +140,7 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             {
                 "key": "ATT1",
                 "data": {
+                    "key": "ATT1",  # Key must be in data as well
                     "itemType": "attachment",
                     "contentType": "application/pdf",
                     "title": "PDF",
@@ -142,20 +173,20 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         )
 
         # Mock PDF extraction to return test content
-        with patch("backend.services.document_processor.PDFExtractor") as mock_extractor:
-            mock_instance = Mock()
-            mock_instance.extract_from_bytes.return_value = [
-                Mock(page_number=1, text="Machine learning is a branch of AI."),
-                Mock(page_number=2, text="It uses algorithms to learn from data."),
-            ]
-            mock_extractor.return_value = mock_instance
+        # Note: We patch the instance, not the class, since it's already created in setUp
+        mock_pdf_extractor = Mock()
+        mock_pdf_extractor.extract_from_bytes.return_value = [
+            Mock(page_number=1, text="Machine learning is a branch of AI."),
+            Mock(page_number=2, text="It uses algorithms to learn from data."),
+        ]
+        self.document_processor.pdf_extractor = mock_pdf_extractor
 
-            # Execute: Index the library
-            result = await self.document_processor.index_library(
-                library_id="test_lib",
-                library_type="user",
-                force_reindex=False,
-            )
+        # Execute: Index the library
+        result = await self.document_processor.index_library(
+            library_id="test_lib",
+            library_type="user",
+            force_reindex=False,
+        )
 
         # Verify: Indexing succeeded
         self.assertEqual(result["status"], "completed")

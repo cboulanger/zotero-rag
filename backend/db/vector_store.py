@@ -390,3 +390,29 @@ class VectorStore:
             "embedding_dim": self.embedding_dim,
             "distance": self.distance.value if hasattr(self.distance, 'value') else str(self.distance),
         }
+
+    def close(self):
+        """
+        Close the vector store and release resources.
+
+        This method closes the Qdrant client connection and releases
+        any locked database files. Call this before deleting the storage
+        directory to avoid permission errors on Windows.
+        """
+        if hasattr(self, 'client') and self.client is not None:
+            try:
+                self.client.close()
+                logger.debug("Closed VectorStore client")
+            except Exception as e:
+                logger.warning(f"Error closing VectorStore client: {e}")
+            finally:
+                self.client = None
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensures cleanup."""
+        self.close()
+        return False

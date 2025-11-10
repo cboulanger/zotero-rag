@@ -110,15 +110,21 @@ Use HTML document with XHTML namespace (not pure XUL):
       );
     });
   </script>
+  <link rel="stylesheet" href="dialog.css"/>
   <style>
-    /* Inline styles work best */
+    /* Inline styles or external CSS via link tag */
   </style>
 </head>
 <body>
   <!-- Standard HTML elements -->
+  <input type="text" id="query-input"/>
+  <button id="submit-btn">Submit</button>
+  <textarea id="results" readonly></textarea>
 </body>
 </html>
 ```
+
+**HTML Form Elements:** Use standard HTML elements (`<input>`, `<button>`, `<textarea>`, `<label>`, `<select>`) instead of XUL equivalents. Style with CSS using flexbox or grid for layout.
 
 ### Loading Scripts
 
@@ -133,6 +139,8 @@ Services.scriptloader.loadSubScript(
 
 ### Opening Dialogs
 
+Method 1: Using chrome:// protocol (requires chrome registration):
+
 ```javascript
 const dialogURL = 'chrome://plugin-name/content/dialog.xhtml';
 const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=500';
@@ -145,9 +153,27 @@ window.openDialog(
 );
 ```
 
-**Important:** Use `chrome://` URL, not `rootURI` + filename.
+Method 2: Using rootURI directly (no chrome registration needed):
+
+```javascript
+openQueryDialog(window) {
+  const dialogURL = this.rootURI + 'dialog.xhtml';
+  const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=500';
+
+  window.openDialog(
+    dialogURL,
+    'zotero-rag-dialog',
+    dialogFeatures,
+    { plugin: this }
+  );
+}
+```
+
+**Important:** Method 1 requires chrome protocol registration in bootstrap.js. Method 2 works without registration but uses file:// URLs internally.
 
 ### Dialog Script Pattern
+
+Basic pattern:
 
 ```javascript
 var MyDialog = {
@@ -174,6 +200,50 @@ if (document.readyState === 'loading') {
 } else {
   MyDialog.init();
 }
+```
+
+With async operations and SSE:
+
+```javascript
+var MyDialog = {
+  plugin: null,
+  eventSource: null,
+
+  init() {
+    if (window.arguments && window.arguments[0]) {
+      this.plugin = window.arguments[0].plugin;
+    }
+
+    document.getElementById('submit').addEventListener('click', async () => {
+      await this.submit();
+    });
+  },
+
+  async submit() {
+    const query = document.getElementById('query-input').value;
+
+    // SSE for streaming responses
+    const url = `http://localhost:8000/stream?query=${encodeURIComponent(query)}`;
+    this.eventSource = new EventSource(url);
+
+    this.eventSource.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      this.updateProgress(data);
+    };
+
+    this.eventSource.onerror = () => {
+      this.eventSource.close();
+      this.eventSource = null;
+    };
+  },
+
+  cleanup() {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
+};
 ```
 
 ## Menu Items

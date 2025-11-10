@@ -99,6 +99,7 @@ For creating dialog windows in Zotero plugins:
 - **Error Handling**: Implement proper error handling with specific exception types
 - **Logging**: Use appropriate logging levels (DEBUG, INFO, WARNING, ERROR) for operational visibility
 - **Code Style**: Follow PEP 8 for Python, Standard JavaScript style for Node.js
+- **Console Output**: Avoid Unicode emoji characters (✅ ❌ ➜ etc.) in print statements as they cause UnicodeEncodeError on Windows. Use ASCII alternatives like `[PASS]`, `[FAIL]`, `->` instead
 
 ## Version Control
 

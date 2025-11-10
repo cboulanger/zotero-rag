@@ -155,7 +155,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="meta-llama/Llama-3.3-70B-Instruct",  # Fast, 128k context
+            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
             max_context_length=128000,
             temperature=0.7,
             model_kwargs={
@@ -169,6 +169,35 @@ PRESETS = {
             max_chunk_size=1024,
         ),
         memory_budget_gb=1.0,  # Minimal local memory needed
+    ),
+
+    "windows-test": HardwarePreset(
+        name="windows-test",
+        description="Windows-compatible testing (OpenAI embeddings + KISSKI LLM)",
+        embedding=EmbeddingConfig(
+            model_type="remote",
+            model_name="openai",  # OpenAI embeddings API (avoids PyTorch on Windows)
+            batch_size=100,
+            model_kwargs={
+                "api_key_env": "OPENAI_API_KEY",
+            },
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
+            max_context_length=128000,
+            temperature=0.7,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.7,
+            max_chunk_size=1024,
+        ),
+        memory_budget_gb=0.5,  # Minimal memory - everything is remote
     ),
 }
 

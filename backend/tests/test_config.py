@@ -57,7 +57,7 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(preset.name, "remote-kisski")
         self.assertEqual(preset.embedding.model_type, "local")  # Use local embeddings
         self.assertEqual(preset.llm.model_type, "remote")
-        self.assertEqual(preset.llm.model_name, "meta-llama/Llama-3.3-70B-Instruct")
+        self.assertEqual(preset.llm.model_name, "mistral-large-instruct")
         self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
         self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
 
@@ -93,13 +93,22 @@ class TestSettings(unittest.TestCase):
 
     def test_default_settings(self):
         """Test default settings values."""
-        settings = Settings()
+        # Clear MODEL_PRESET from environment to test actual defaults
+        with patch.dict(os.environ, {"MODEL_PRESET": ""}, clear=False):
+            # Need to remove the key entirely, not just set to empty string
+            if "MODEL_PRESET" in os.environ:
+                env_copy = os.environ.copy()
+                del env_copy["MODEL_PRESET"]
+                with patch.dict(os.environ, env_copy, clear=True):
+                    settings = Settings()
+            else:
+                settings = Settings()
 
-        self.assertEqual(settings.api_host, "localhost")
-        self.assertEqual(settings.api_port, 8119)
-        self.assertEqual(settings.model_preset, "cpu-only")
-        self.assertEqual(settings.log_level, "INFO")
-        self.assertEqual(settings.version, "0.1.0")
+            self.assertEqual(settings.api_host, "localhost")
+            self.assertEqual(settings.api_port, 8119)
+            self.assertEqual(settings.model_preset, "cpu-only")
+            self.assertEqual(settings.log_level, "INFO")
+            self.assertEqual(settings.version, "0.1.0")
 
     def test_path_expansion(self):
         """Test that paths are expanded correctly."""

@@ -25,7 +25,7 @@ from typing import Optional
 
 from backend.services.document_processor import DocumentProcessor
 from backend.services.rag_engine import RAGEngine
-from backend.services.embeddings import LocalEmbeddingService
+from backend.services.embeddings import create_embedding_service
 from backend.services.llm import create_llm_service
 from backend.db.vector_store import VectorStore
 from backend.zotero.local_api import ZoteroLocalAPI
@@ -89,7 +89,16 @@ async def temp_vector_store(integration_config):
     vector_store_path = Path(temp_dir) / "test_vector_store"
 
     # Create embedding service to get dimension
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    # Extract API key from model_kwargs if present
+    api_key = None
+    if "api_key_env" in integration_config.embedding.model_kwargs:
+        api_key_env = integration_config.embedding.model_kwargs["api_key_env"]
+        api_key = os.getenv(api_key_env)
+
+    embedding_service = create_embedding_service(
+        config=integration_config.embedding,
+        api_key=api_key
+    )
     embedding_dim = embedding_service.get_embedding_dim()
 
     # Create vector store
@@ -100,9 +109,20 @@ async def temp_vector_store(integration_config):
 
     yield vector_store
 
-    # Cleanup
+    # Cleanup: Close Qdrant client first to release file locks
+    try:
+        if hasattr(vector_store, 'client') and vector_store.client:
+            vector_store.client.close()
+    except Exception:
+        pass  # Ignore errors during client close
+
+    # Remove temporary directory (ignore Windows file lock errors)
     if Path(temp_dir).exists():
-        shutil.rmtree(temp_dir)
+        try:
+            shutil.rmtree(temp_dir)
+        except PermissionError:
+            # Windows file locking issue - not critical, ignore
+            pass
 
 
 @pytest.fixture
@@ -116,7 +136,7 @@ async def zotero_client():
 
     # Check if Zotero is running and accessible
     try:
-        libraries = await client.get_libraries()
+        libraries = await client.list_libraries()
         if not libraries:
             pytest.skip("No Zotero libraries found - is Zotero running?")
     except Exception as e:
@@ -133,8 +153,8 @@ async def llm_service(integration_settings):
     Skips tests if API key is not available.
     """
     # Check for required API key
-    if integration_settings.active_preset.llm.model_type == "remote":
-        preset = integration_settings.active_preset
+    preset = integration_settings.get_hardware_preset()
+    if preset.llm.model_type == "remote":
         api_key_env = preset.llm.model_kwargs.get("api_key_env", "KISSKI_API_KEY")
         api_key = integration_settings.get_api_key(api_key_env)
 
@@ -158,7 +178,7 @@ async def test_zotero_connectivity(zotero_client):
     This is a smoke test to validate the test environment.
     """
     # Get all libraries
-    libraries = await zotero_client.get_libraries()
+    libraries = await zotero_client.list_libraries()
 
     assert libraries is not None
     assert len(libraries) > 0
@@ -178,7 +198,16 @@ async def test_zotero_connectivity(zotero_client):
 @pytest.mark.asyncio
 async def test_embedding_service(integration_config):
     """Verify embedding service can generate embeddings."""
-    service = LocalEmbeddingService(config=integration_config.embedding)
+    # Extract API key if present
+    api_key = None
+    if "api_key_env" in integration_config.embedding.model_kwargs:
+        api_key_env = integration_config.embedding.model_kwargs["api_key_env"]
+        api_key = os.getenv(api_key_env)
+
+    service = create_embedding_service(
+        config=integration_config.embedding,
+        api_key=api_key
+    )
 
     test_text = "This is a test document for embedding generation."
     embedding = await service.embed_text(test_text)
@@ -266,8 +295,8 @@ async def test_index_real_library(
     assert len(progress_updates) > 0, "Progress callback was not invoked"
 
     # Validate vector store
-    stats = temp_vector_store.get_collection_stats()
-    assert stats["total_chunks"] >= EXPECTED_MIN_CHUNKS
+    info = temp_vector_store.get_collection_info()
+    assert info["chunks_count"] >= EXPECTED_MIN_CHUNKS
 
     print(f"\n✅ Successfully indexed {result['items_processed']} items, "
           f"created {result['chunks_created']} chunks")
