@@ -1,6 +1,59 @@
 # Zotero RAG Plugin
 
-This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources. 
+This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
+
+## Documentation
+
+- **[Testing Guide](docs/testing.md)** - Comprehensive testing documentation
+- **[Integration Testing Quick Start](docs/integration-testing-quickstart.md)** - Quick reference for running integration tests
+- **[Implementation Plan](implementation/master.md)** - Project roadmap and progress
+- **[Phase 1.5 Progress](implementation/phase1.5-progress.md)** - RAG implementation details
+
+## Quick Start
+
+### Running Unit Tests
+
+```bash
+# Run all unit tests (fast, no setup required)
+npm run test:backend
+
+# With coverage report
+npm run test:backend:coverage
+```
+
+### Running Integration Tests
+
+Integration tests validate the system with real Zotero and live API services.
+
+**Prerequisites:**
+1. Zotero running with test group synced: https://www.zotero.org/groups/6297749/test-rag-plugin
+2. API key configured (e.g., KISSKI_API_KEY)
+
+```bash
+# Quick health check
+npm run test:integration:quick
+
+# Full integration suite
+npm run test:integration
+
+# Everything (unit + integration)
+npm run test:all
+```
+
+See [Integration Testing Quick Start](docs/integration-testing-quickstart.md) for detailed setup instructions.
+
+### Backend Server
+
+```bash
+# Start development server
+npm run server:start
+
+# Check status
+npm run server:status
+
+# Stop server
+npm run server:stop
+```
 
 ## License
 

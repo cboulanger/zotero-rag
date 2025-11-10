@@ -436,6 +436,69 @@ The implementation will be considered complete when:
 
 ---
 
+### Phase 4: Integration & Polish - IN PROGRESS 🚧
+
+**Status:** Setting up integration testing framework
+
+**Overview:** Phase 4 validates the complete system with real dependencies and prepares for production use.
+
+**Completed:**
+
+1. ✅ **Integration Testing Framework** - Industry best practices implementation
+   - Created comprehensive integration test suite ([test_real_integration.py](../backend/tests/test_real_integration.py))
+   - pytest markers for selective test execution (`@pytest.mark.integration`)
+   - Fixtures for environment setup and resource management
+   - Health checks, indexing tests, RAG query tests
+   - Test isolation with temporary vector stores
+   - Graceful skipping when dependencies unavailable
+
+2. ✅ **Testing Documentation**
+   - Comprehensive testing guide ([docs/testing.md](../docs/testing.md))
+   - Quick start guide ([docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md))
+   - npm commands for easy test execution
+   - Troubleshooting guide
+   - CI/CD recommendations
+
+**Configuration:**
+- pytest configuration in `pyproject.toml` with markers
+- npm test commands: `test:integration`, `test:integration:quick`, `test:all`
+- Default behavior: skip integration tests (opt-in required)
+- Test library: https://www.zotero.org/groups/6297749/test-rag-plugin
+
+**Remaining:**
+
+- [ ] **End-to-End Testing** (Step 20)
+  - Manual validation with real Zotero libraries
+  - Plugin → backend → note creation workflow
+  - Performance testing with large libraries
+  - Multi-library query validation
+
+- [ ] **Configuration & Documentation** (Step 21)
+  - User-facing configuration guide
+  - Plugin installation instructions
+  - API documentation
+  - Deployment guide
+
+- [ ] **Error Handling & Edge Cases** (Step 22)
+  - Network failure scenarios
+  - Backend unavailable handling
+  - Edge case validation
+
+**Next Actions:**
+1. Run integration tests manually with real Zotero: `npm run test:integration`
+2. Test plugin with backend using remote-kisski preset
+3. Validate end-to-end workflow: question → answer → note creation
+4. Document any issues and create fixes
+5. Complete user-facing documentation
+
+**Test Status:**
+- Unit tests: 161/161 passing ✅
+- Integration tests: Framework created, ready for execution
+
+**Details:** See integration testing documentation in `docs/` folder.
+
+---
+
 ## Available NPM Commands
 
 The project provides several npm scripts for development and testing. All commands should be run from the project root directory.
@@ -469,15 +532,17 @@ npm run server:stop
 
 ### Backend Testing
 
+#### Unit Tests (Default)
+
 | Command | Description |
 |---------|-------------|
-| `npm run test:backend` | Run all backend tests with verbose output |
+| `npm run test:backend` | Run all backend unit tests with verbose output (fast, no external dependencies) |
 | `npm run test:backend:watch` | Run backend tests in watch mode (reruns on test failures) |
 | `npm run test:backend:coverage` | Run backend tests with code coverage report (HTML + terminal) |
 
 **Example Usage:**
 ```bash
-# Run all tests once
+# Run all unit tests once
 npm run test:backend
 
 # Watch mode for TDD (requires pytest-watch)
@@ -487,6 +552,36 @@ npm run test:backend:watch
 npm run test:backend:coverage
 # Coverage report available at: htmlcov/index.html
 ```
+
+#### Integration Tests (Real Dependencies)
+
+Integration tests validate the system with real Zotero instance and live API services.
+
+| Command | Description |
+|---------|-------------|
+| `npm run test:integration:quick` | Quick health check (30 seconds) - verify Zotero connectivity and API access |
+| `npm run test:integration` | Full integration test suite (5-15 minutes) - indexing and RAG queries |
+| `npm run test:all` | Run all tests: unit + integration (10-20 minutes) |
+
+**Prerequisites:**
+1. Zotero desktop running with test group synced: https://www.zotero.org/groups/6297749/test-rag-plugin
+2. API key configured (e.g., KISSKI_API_KEY in .env or environment)
+
+**Example Usage:**
+```bash
+# Quick environment validation (run this first!)
+npm run test:integration:quick
+
+# Full integration suite
+npm run test:integration
+
+# Everything before release
+npm run test:all
+```
+
+**Documentation:**
+- Comprehensive guide: [docs/testing.md](../docs/testing.md)
+- Quick start: [docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md)
 
 ### Direct Python Commands
 

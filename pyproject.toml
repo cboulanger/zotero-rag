@@ -36,6 +36,12 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that require real external services (Zotero, APIs)",
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+# Default: skip integration tests unless explicitly requested
+addopts = "-m 'not integration'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]
