@@ -78,28 +78,84 @@ class RAGEngine:
         """
         logger.info(f"Processing RAG query: {question}")
 
-        # TODO: Implement actual RAG pipeline:
-        # 1. Generate embedding for question
-        # 2. Search vector database for relevant chunks
-        # 3. Assemble context from retrieved chunks
-        # 4. Generate prompt with context
-        # 5. Get LLM completion
-        # 6. Extract source citations
+        # Step 1: Generate embedding for question
+        logger.debug("Generating query embedding...")
+        query_embedding = await self.embedding_service.embed_text(question)
 
-        # Stub implementation
-        answer = await self.llm_service.generate(
-            f"Question: {question}\n\nPlease answer this question."
+        # Step 2: Search vector database for relevant chunks
+        logger.debug(f"Searching for top {top_k} chunks in libraries: {library_ids}")
+        search_results = self.vector_store.search(
+            query_vector=query_embedding,
+            limit=top_k,
+            score_threshold=min_score,
+            library_ids=library_ids if library_ids else None,
         )
 
-        sources = [
-            SourceInfo(
-                item_id="STUB_ITEM_1",
-                title="Sample Document",
-                page_number=1,
-                text_anchor="Lorem ipsum dolor",
-                score=0.95
+        if not search_results:
+            logger.warning("No relevant chunks found for query")
+            return QueryResult(
+                question=question,
+                answer="I couldn't find any relevant information in the indexed documents to answer this question.",
+                sources=[]
             )
-        ]
+
+        logger.info(f"Retrieved {len(search_results)} relevant chunks")
+
+        # Step 3: Assemble context from retrieved chunks
+        context_parts = []
+        for i, result in enumerate(search_results, 1):
+            chunk = result.chunk
+            metadata = chunk.metadata
+            doc_meta = metadata.document_metadata
+
+            # Format source information
+            source_info = f"[Source {i}: {doc_meta.title or 'Unknown'}"
+            if metadata.page_number:
+                source_info += f", p. {metadata.page_number}"
+            source_info += "]"
+
+            # Add chunk text with source
+            context_parts.append(f"{source_info}\n{chunk.text}")
+
+        context = "\n\n".join(context_parts)
+
+        # Step 4: Generate prompt with context
+        prompt = f"""Based on the following context from academic documents, please answer the question.
+
+Context:
+{context}
+
+Question: {question}
+
+Please provide a comprehensive answer based on the context above. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response. Include references to the sources when relevant."""
+
+        logger.debug(f"Generated prompt with {len(context)} characters of context")
+
+        # Step 5: Get LLM completion
+        logger.debug("Generating answer with LLM...")
+        answer = await self.llm_service.generate(
+            prompt=prompt,
+            max_tokens=512,
+            temperature=0.7
+        )
+
+        logger.info("Answer generated successfully")
+
+        # Step 6: Extract source citations
+        sources = []
+        for result in search_results:
+            chunk = result.chunk
+            metadata = chunk.metadata
+            doc_meta = metadata.document_metadata
+
+            source = SourceInfo(
+                item_id=doc_meta.item_key or "unknown",
+                title=doc_meta.title or "Unknown Document",
+                page_number=metadata.page_number,
+                text_anchor=metadata.text_preview,
+                score=result.score
+            )
+            sources.append(source)
 
         return QueryResult(
             question=question,
