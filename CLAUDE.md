@@ -2,7 +2,7 @@
 
 ## Python Environment
 
-- **Python Version**: 3.13
+- **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
 - **Package Manager**: Always use `uv` for all Python operations
 - **Virtual Environment**: All Python commands must be executed within the uv-managed virtual environment
   - Use `uv run <command>` for one-off commands

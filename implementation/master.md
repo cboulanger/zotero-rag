@@ -46,7 +46,8 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 
 ### Backend RAG Stack
 
-- **Framework**: FastAPI (Python 3.13)
+- **Framework**: FastAPI (Python 3.12)
+  - **Note**: Downgraded from Python 3.13 due to PyTorch compatibility issues on Windows (memory access violations with sentence-transformers)
 - **Embedding Models**:
   - Local: sentence-transformers, nomic-embed-text-v1.5
   - Remote option: OpenAI/Cohere embeddings API
@@ -60,7 +61,7 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 - **Text Processing**: spaCy for semantic chunking at paragraph/sentence level
 - **PDF Processing**: PyPDF2, pdfplumber, or pypdf (with page number extraction)
 - **Zotero Access**: pyzotero library for local API (localhost:23119)
-- **Package Management**: uv (Python 3.13)
+- **Package Management**: uv (Python 3.12)
 
 ### Reusable Implementation from zoterorag
 

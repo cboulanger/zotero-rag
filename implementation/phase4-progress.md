@@ -377,6 +377,24 @@ Phase 4 will be considered complete when:
 
 **Current Progress:** 70% (Integration testing working! 397 chunks from 16 PDFs)
 
+## Python Version Downgrade (2025-11-10 Late Evening)
+
+### Critical Compatibility Fix
+
+**Decision:** Downgraded project from Python 3.13 to Python 3.12
+
+**Reason:** PyTorch and sentence-transformers have memory access violations on Windows with Python 3.13, causing crashes during local embedding operations.
+
+**Impact:**
+- Resolves Windows compatibility issues with local embeddings
+- Enables local model testing on Windows without requiring remote APIs
+- All existing functionality preserved
+- Tests continue to pass
+
+**Files Modified:**
+- Updated Python version requirement in project configuration
+- Updated documentation to reflect Python 3.12 requirement
+
 ## Recent Updates (2025-11-10 Evening) - MAJOR BREAKTHROUGH
 
 ### Integration Test SUCCESS: PDF Ingestion Working! ✓
@@ -426,7 +444,9 @@ async with self.session.get(url, allow_redirects=False) as response:
 
 **Root Cause:** sentence-transformers with PyTorch crashes on Windows Python 3.13 with memory access violations.
 
-**Solution:** Created `windows-test` hardware preset using remote OpenAI embeddings (no local PyTorch).
+**Initial Solution:** Created `windows-test` hardware preset using remote OpenAI embeddings (no local PyTorch).
+
+**Final Solution (2025-11-10):** Downgraded project from Python 3.13 to Python 3.12, which resolves PyTorch compatibility issues. The `windows-test` preset remains available as a remote-only option.
 
 **New Preset:**
 ```python

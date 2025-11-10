@@ -14,7 +14,7 @@ Create a master implementation plan (`implementation/master.md`) which gives a h
 
 Further guidelines:
 
-- you have Python 3.13 using `uv` and Node 23 to work with. Always use `uv` and the virtual environment for python commands at the command line.
+- you have Python 3.12 using `uv` and Node 23 to work with. Always use `uv` and the virtual environment for python commands at the command line.
 - omit information on implementation times and any other information that is not strictly needed for your coding
 - organize the code in reusable modules to keep the main business logic clean and lightweight
 - always add tests for the library methods using the nodejs and python built-in unit test libraries
