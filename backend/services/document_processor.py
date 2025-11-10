@@ -69,7 +69,8 @@ class DocumentProcessor:
         library_id: str,
         library_type: str = "user",
         force_reindex: bool = False,
-        progress_callback: Optional[Callable[[int, int], None]] = None
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        max_items: Optional[int] = None
     ) -> dict:
         """
         Index all documents in a Zotero library.
@@ -79,6 +80,7 @@ class DocumentProcessor:
             library_type: Library type ("user" or "group").
             force_reindex: If True, reindex all items even if already indexed.
             progress_callback: Optional callback for progress updates (current, total).
+            max_items: Optional maximum number of items to process (for testing).
 
         Returns:
             Indexing statistics (items processed, chunks created, errors, etc.).
@@ -136,6 +138,11 @@ class DocumentProcessor:
                     items_with_pdfs.append(item)
 
             logger.info(f"Found {len(items_with_pdfs)} potential items with attachments")
+
+            # Limit items if max_items is specified
+            if max_items is not None and max_items > 0:
+                items_with_pdfs = items_with_pdfs[:max_items]
+                logger.info(f"Limited to {len(items_with_pdfs)} items (max_items={max_items})")
 
             total_items = len(items_with_pdfs)
 

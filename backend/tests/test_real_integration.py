@@ -42,8 +42,8 @@ TEST_LIBRARY_ID = "6297749"
 TEST_LIBRARY_TYPE = "group"
 
 # Expected test data characteristics (update when test data changes)
-EXPECTED_MIN_ITEMS = 5  # Minimum PDFs in test collection
-EXPECTED_MIN_CHUNKS = 50  # Minimum chunks expected from indexing
+EXPECTED_MIN_ITEMS = 3  # Minimum PDFs in test collection (with max_items=5, typically get 4)
+EXPECTED_MIN_CHUNKS = 30  # Minimum chunks expected from limited indexing
 
 
 # ============================================================================
@@ -256,7 +256,7 @@ async def test_index_real_library(
     Expected duration: 1-5 minutes depending on library size and model.
     """
     # Create services
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     document_processor = DocumentProcessor(
         zotero_client=zotero_client,
@@ -278,7 +278,8 @@ async def test_index_real_library(
         library_id=TEST_LIBRARY_ID,
         library_type=TEST_LIBRARY_TYPE,
         force_reindex=True,  # Always reindex for test
-        progress_callback=track_progress
+        progress_callback=track_progress,
+        max_items=5  # Limit to 5 items for faster tests (~60 seconds)
     )
 
     # Validate results
@@ -298,7 +299,7 @@ async def test_index_real_library(
     info = temp_vector_store.get_collection_info()
     assert info["chunks_count"] >= EXPECTED_MIN_CHUNKS
 
-    print(f"\n✅ Successfully indexed {result['items_processed']} items, "
+    print(f"\n[PASS] Successfully indexed {result['items_processed']} items, "
           f"created {result['chunks_created']} chunks")
 
 
@@ -313,7 +314,7 @@ async def test_incremental_indexing(
 
     Validates that re-indexing the same library skips duplicates.
     """
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     document_processor = DocumentProcessor(
         zotero_client=zotero_client,
@@ -323,12 +324,18 @@ async def test_incremental_indexing(
         chunk_overlap=50,
     )
 
+    # Track progress
+    def track_progress(current: int, total: int):
+        print(f"  Progress: {current}/{total} items processed")
+
     # First indexing
     print("\n1st indexing (full)...")
     result1 = await document_processor.index_library(
         library_id=TEST_LIBRARY_ID,
         library_type=TEST_LIBRARY_TYPE,
         force_reindex=True,
+        progress_callback=track_progress,
+        max_items=5  # Limit to 5 items for faster tests
     )
 
     chunks_first = result1["chunks_created"]
@@ -339,6 +346,8 @@ async def test_incremental_indexing(
         library_id=TEST_LIBRARY_ID,
         library_type=TEST_LIBRARY_TYPE,
         force_reindex=False,
+        progress_callback=track_progress,
+        max_items=5  # Same limit for consistency
     )
 
     # Should have skipped duplicates
@@ -347,7 +356,7 @@ async def test_incremental_indexing(
     assert result2["chunks_created"] < chunks_first, \
         "Expected fewer chunks created on incremental indexing"
 
-    print(f"\n✅ Incremental indexing working: "
+    print(f"\n[PASS] Incremental indexing working: "
           f"{result2['duplicates_skipped']} duplicates skipped")
 
 
@@ -375,7 +384,7 @@ async def test_rag_query_end_to_end(
     Expected duration: 2-10 minutes depending on models.
     """
     # Setup: Index the library
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     document_processor = DocumentProcessor(
         zotero_client=zotero_client,
@@ -385,11 +394,17 @@ async def test_rag_query_end_to_end(
         chunk_overlap=50,
     )
 
+    # Track progress
+    def track_progress(current: int, total: int):
+        print(f"  Progress: {current}/{total} items processed")
+
     print(f"\nIndexing library {TEST_LIBRARY_ID} for RAG test...")
     index_result = await document_processor.index_library(
         library_id=TEST_LIBRARY_ID,
         library_type=TEST_LIBRARY_TYPE,
         force_reindex=True,
+        progress_callback=track_progress,
+        max_items=5  # Limit to 5 items for faster tests
     )
 
     print(f"Indexed {index_result['items_processed']} items, "
@@ -435,7 +450,7 @@ async def test_rag_query_end_to_end(
 
         print(f"  - {source.title} (p. {source.page_number}, score: {source.score:.3f})")
 
-    print(f"\n✅ RAG query successful with {len(result.sources)} sources")
+    print(f"\n[PASS] RAG query successful with {len(result.sources)} sources")
 
 
 @pytest.mark.asyncio
@@ -451,7 +466,7 @@ async def test_multi_query_consistency(
     Validates that the system produces reasonable results for different questions.
     """
     # Setup: Index once
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     document_processor = DocumentProcessor(
         zotero_client=zotero_client,
@@ -461,10 +476,17 @@ async def test_multi_query_consistency(
         chunk_overlap=50,
     )
 
+    # Track progress
+    def track_progress(current: int, total: int):
+        print(f"  Progress: {current}/{total} items processed")
+
+    print(f"\nIndexing library {TEST_LIBRARY_ID}...")
     await document_processor.index_library(
         library_id=TEST_LIBRARY_ID,
         library_type=TEST_LIBRARY_TYPE,
         force_reindex=True,
+        progress_callback=track_progress,
+        max_items=5  # Limit to 5 items for faster tests
     )
 
     rag_engine = RAGEngine(
@@ -498,7 +520,7 @@ async def test_multi_query_consistency(
         print(f"A: {result.answer[:100]}...")
         print(f"   {len(result.sources)} sources")
 
-    print("\n✅ All queries returned valid results")
+    print("\n[PASS] All queries returned valid results")
 
 
 # ============================================================================
@@ -534,7 +556,7 @@ async def test_invalid_library_id(
     integration_config
 ):
     """Test handling of invalid library ID."""
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     document_processor = DocumentProcessor(
         zotero_client=zotero_client,
@@ -561,7 +583,7 @@ async def test_query_unindexed_library(
     llm_service
 ):
     """Test querying a library that hasn't been indexed."""
-    embedding_service = LocalEmbeddingService(config=integration_config.embedding)
+    embedding_service = create_embedding_service(integration_config.embedding)
 
     rag_engine = RAGEngine(
         embedding_service=embedding_service,
