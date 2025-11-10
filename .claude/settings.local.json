@@ -6,7 +6,8 @@
       "Bash(git rm:*)",
       "Bash(dir:*)",
       "Bash(taskkill:*)",
-      "Bash(npm run server:start:*)"
+      "Bash(npm run server:start:*)",
+      "Bash(npm run test:backend:*)"
     ],
     "deny": [],
     "ask": []

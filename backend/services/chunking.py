@@ -79,12 +79,13 @@ class TextChunker:
                 self._nlp = spacy.load(self.model_name)
                 # Disable unnecessary components for performance (keep only sentence segmentation)
                 # Most models have 'parser' which does sentence segmentation
-                disabled = []
+                enabled = []
                 for pipe_name in self._nlp.pipe_names:
-                    if pipe_name not in ["parser", "sentencizer", "senter"]:
-                        disabled.append(pipe_name)
-                if disabled:
-                    self._nlp.disable_pipes(*disabled)
+                    if pipe_name in ["parser", "sentencizer", "senter"]:
+                        enabled.append(pipe_name)
+                if enabled:
+                    self._nlp.select_pipes(enable=enabled)
+                    disabled = [p for p in self._nlp.pipe_names if p not in enabled]
                     logger.debug(f"Disabled spaCy pipes: {disabled}")
             except OSError:
                 # Model not found, try to download it using uv
@@ -118,12 +119,12 @@ class TextChunker:
                     # Try loading again
                     self._nlp = spacy.load(self.model_name)
                     # Disable unnecessary components
-                    disabled = []
+                    enabled = []
                     for pipe_name in self._nlp.pipe_names:
-                        if pipe_name not in ["parser", "sentencizer", "senter"]:
-                            disabled.append(pipe_name)
-                    if disabled:
-                        self._nlp.disable_pipes(*disabled)
+                        if pipe_name in ["parser", "sentencizer", "senter"]:
+                            enabled.append(pipe_name)
+                    if enabled:
+                        self._nlp.select_pipes(enable=enabled)
                 except Exception as e:
                     logger.error(f"Failed to download spaCy model '{self.model_name}': {e}")
                     raise RuntimeError(
