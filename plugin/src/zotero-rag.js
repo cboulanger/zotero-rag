@@ -19,6 +19,7 @@
 /**
  * @typedef {Object} SourceCitation
  * @property {string} item_id - Zotero item ID
+ * @property {string} library_id - Zotero library ID
  * @property {string} title - Document title
  * @property {number|null} page_number - Page number (if available)
  * @property {string|null} text_anchor - Text anchor (first 5 words)
@@ -265,10 +266,12 @@ ZoteroRAG = {
 		});
 
 		// Get all group libraries
+		// NOTE: For groups, we need to send the group ID (not library ID) to the backend
+		// The backend needs group ID to access /api/groups/{GROUP_ID}/items
 		const groups = Zotero.Groups.getAll();
 		for (let group of groups) {
 			libraries.push({
-				id: String(group.libraryID),
+				id: String(group.id),  // Use group.id instead of group.libraryID
 				name: group.name,
 				type: /** @type {'group'} */ ('group')
 			});
@@ -286,7 +289,20 @@ ZoteroRAG = {
 		if (!zoteroPane) return null;
 
 		const libraryID = zoteroPane.getSelectedLibraryID();
-		return libraryID ? libraryID.toString() : null;
+		if (!libraryID) return null;
+
+		// For group libraries, return the group ID instead of library ID
+		const library = Zotero.Libraries.get(libraryID);
+		if (library && library.libraryType === 'group') {
+			// Get the group associated with this library
+			const group = Zotero.Groups.getByLibraryID(libraryID);
+			if (group) {
+				return String(group.id);  // Return group ID for backend
+			}
+		}
+
+		// For user library, return the library ID as-is
+		return String(libraryID);
 	},
 
 	/**
@@ -380,10 +396,29 @@ ZoteroRAG = {
 	 */
 	formatNoteHTML(question, result, libraryIDs) {
 		const timestamp = new Date().toLocaleString();
-		const libraries = libraryIDs.map(id => {
-			const lib = Zotero.Libraries.get(parseInt(id));
-			return lib.name || 'My Library';
-		}).join(', ');
+
+		// Build map of library ID to library info for source URI generation
+		/**
+		 * @typedef {Object} LibraryInfo
+		 * @property {string} name - Library name
+		 * @property {'user'|'group'} type - Library type
+		 */
+
+		/** @type {Map<string, LibraryInfo>} */
+		const libraryMap = new Map();
+
+		for (let id of libraryIDs) {
+			const libraries = this.getLibraries();
+			const lib = libraries.find(l => l.id === id);
+			if (lib) {
+				libraryMap.set(id, {
+					name: lib.name,
+					type: lib.type
+				});
+			}
+		}
+
+		const libraryNames = Array.from(libraryMap.values()).map(info => info.name).join(', ');
 
 		let html = `<div>`;
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
@@ -395,7 +430,18 @@ ZoteroRAG = {
 			html += `<p><strong>Sources:</strong></p>`;
 			html += `<ul>`;
 			for (let source of result.sources) {
-				const link = `zotero://select/library/items/${source.item_id}`;
+				// Build Zotero URI based on library type
+				const sourceLibrary = libraryMap.get(source.library_id);
+				let link;
+
+				if (sourceLibrary && sourceLibrary.type === 'group') {
+					// For group items, use: zotero://select/groups/{GROUP_ID}/items/{ITEM_ID}
+					link = `zotero://select/groups/${source.library_id}/items/${source.item_id}`;
+				} else {
+					// For user library items, use: zotero://select/library/items/{ITEM_ID}
+					link = `zotero://select/library/items/${source.item_id}`;
+				}
+
 				let citation = `<a href="${link}">Source</a>`;
 
 				// Add page number if available
@@ -416,7 +462,7 @@ ZoteroRAG = {
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
 		html += `<em>Generated: ${timestamp}<br/>`;
-		html += `Libraries: ${this.escapeHTML(libraries)}</em>`;
+		html += `Libraries: ${this.escapeHTML(libraryNames)}</em>`;
 		html += `</p>`;
 		html += `</div>`;
 

@@ -220,7 +220,7 @@ def test_server():
         print(f"[TEST] Using preset: {test_env['MODEL_PRESET']}, logs: {log_file_path}")
 
     # Disable LOG_FILE so all logs go to stdout/stderr (which we capture in test_server.log)
-    # This prevents duplicate logs in app.log and test_server.log
+    # This prevents duplicate logs in server.log and test_server.log
     test_env["LOG_FILE"] = ""
 
     # Use uvicorn to start the server with test configuration

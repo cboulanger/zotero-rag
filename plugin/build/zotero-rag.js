@@ -1,17 +1,79 @@
+// @ts-check
+/// <reference path="./zotero-types.d.ts" />
+
+/**
+ * @typedef {Object} Library
+ * @property {string} id - Library ID
+ * @property {string} name - Library name
+ * @property {'user'|'group'} type - Library type
+ */
+
+/**
+ * @typedef {Object} QueryResult
+ * @property {string} question - Original question
+ * @property {string} answer - Generated answer
+ * @property {Array<SourceCitation>} sources - Source citations
+ * @property {Array<string>} library_ids - Libraries queried
+ */
+
+/**
+ * @typedef {Object} SourceCitation
+ * @property {string} item_id - Zotero item ID
+ * @property {string} library_id - Zotero library ID
+ * @property {string} title - Document title
+ * @property {number|null} page_number - Page number (if available)
+ * @property {string|null} text_anchor - Text anchor (first 5 words)
+ * @property {number} relevance_score - Relevance score
+ */
+
+/**
+ * @typedef {Object} QueryOptions
+ * @property {number} [topK] - Number of chunks to retrieve (default: 5)
+ * @property {number} [minScore] - Minimum similarity score (default: 0.5)
+ */
+
+/**
+ * @typedef {Object} BackendVersion
+ * @property {string} api_version - Backend API version string
+ * @property {string} service - Service name
+ */
+
+/**
+ * Main plugin object for Zotero RAG integration.
+ */
 ZoteroRAG = {
+	/** @type {string|null} */
 	id: null,
+
+	/** @type {string|null} */
 	version: null,
+
+	/** @type {string|null} */
 	rootURI: null,
+
+	/** @type {boolean} */
 	initialized: false,
+
+	/** @type {Array<string>} */
 	addedElementIDs: [],
 
-	// Backend connection
+	/** @type {string|null} */
 	backendURL: null,
 
-	// Active queries tracking
+	/** @type {Set<string>} */
 	activeQueries: new Set(),
+
+	/** @type {number} */
 	maxConcurrentQueries: 5,
 
+	/**
+	 * Initialize the plugin.
+	 * @param {Object} config - Plugin configuration
+	 * @param {string} config.id - Plugin ID
+	 * @param {string} config.version - Plugin version
+	 * @param {string} config.rootURI - Plugin root URI
+	 * @returns {void}
+	 */
 	init({ id, version, rootURI }) {
 		if (this.initialized) return;
 		this.id = id;
@@ -23,15 +85,26 @@ ZoteroRAG = {
 		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
 	},
 
+	/**
+	 * Log a debug message.
+	 * @param {string} msg - Message to log
+	 * @returns {void}
+	 */
 	log(msg) {
 		Zotero.debug("Zotero RAG: " + msg);
 	},
 
+	/**
+	 * Add plugin UI elements to a window.
+	 * @param {Window} window - Zotero window
+	 * @returns {void}
+	 */
 	addToWindow(window) {
 		let doc = window.document;
 
 		// Add menu item under Tools menu
 		// Note: Menu items still need to use XUL elements as they integrate with Zotero's existing XUL menus
+		// @ts-ignore - createXULElement is available in Zotero/Firefox XUL context
 		let menuitem = doc.createXULElement('menuitem');
 		menuitem.id = 'zotero-rag-ask-question';
 		menuitem.setAttribute('label', 'Zotero RAG: Ask Question...');
@@ -47,6 +120,10 @@ ZoteroRAG = {
 		}
 	},
 
+	/**
+	 * Add plugin UI to all open Zotero windows.
+	 * @returns {void}
+	 */
 	addToAllWindows() {
 		var windows = Zotero.getMainWindows();
 		for (let win of windows) {
@@ -55,6 +132,11 @@ ZoteroRAG = {
 		}
 	},
 
+	/**
+	 * Store reference to added DOM element for cleanup.
+	 * @param {Element} elem - Element with id attribute
+	 * @returns {void}
+	 */
 	storeAddedElement(elem) {
 		if (!elem.id) {
 			throw new Error("Element must have an id");
@@ -62,6 +144,11 @@ ZoteroRAG = {
 		this.addedElementIDs.push(elem.id);
 	},
 
+	/**
+	 * Remove plugin UI from a window.
+	 * @param {Window} window - Zotero window
+	 * @returns {void}
+	 */
 	removeFromWindow(window) {
 		var doc = window.document;
 		// Remove all elements added to DOM
@@ -71,6 +158,10 @@ ZoteroRAG = {
 		doc.querySelector('[href="zotero-rag.ftl"]')?.remove();
 	},
 
+	/**
+	 * Remove plugin UI from all open Zotero windows.
+	 * @returns {void}
+	 */
 	removeFromAllWindows() {
 		var windows = Zotero.getMainWindows();
 		for (let win of windows) {
@@ -79,6 +170,10 @@ ZoteroRAG = {
 		}
 	},
 
+	/**
+	 * Main plugin entry point.
+	 * @returns {Promise<void>}
+	 */
 	async main() {
 		this.log(`Plugin initialized with backend URL: ${this.backendURL}`);
 
@@ -86,31 +181,41 @@ ZoteroRAG = {
 		try {
 			await this.checkBackendVersion();
 		} catch (e) {
-			this.log(`Backend not available: ${e.message}`);
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			this.log(`Backend not available: ${errorMessage}`);
 		}
 	},
 
 	/**
-	 * Check backend version for compatibility
+	 * Check backend version for compatibility.
+	 * @returns {Promise<string>} Backend version string
+	 * @throws {Error} If backend is not reachable or returns error
 	 */
 	async checkBackendVersion() {
+		if (!this.backendURL) {
+			throw new Error('Backend URL not configured');
+		}
+
 		try {
 			const response = await fetch(`${this.backendURL}/api/version`);
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
-			const data = await response.json();
-			this.log(`Backend version: ${data.version}`);
+			const data = /** @type {BackendVersion} */ (await response.json());
+			this.log(`Backend version: ${data.api_version}`);
 
 			// TODO: Add version compatibility checking
-			return data.version;
+			return data.api_version;
 		} catch (e) {
-			throw new Error(`Failed to check backend version: ${e.message}`);
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			throw new Error(`Failed to check backend version: ${errorMessage}`);
 		}
 	},
 
 	/**
-	 * Open the query dialog
+	 * Open the query dialog.
+	 * @param {Window} window - Parent window
+	 * @returns {void}
 	 */
 	openQueryDialog(window) {
 		// Check concurrent query limit
@@ -123,6 +228,7 @@ ZoteroRAG = {
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
 		const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=500';
 
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		window.openDialog(
 			dialogURL,
 			'zotero-rag-dialog',
@@ -132,7 +238,10 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Show error message to user
+	 * Show error message to user.
+	 * @param {Window} window - Parent window
+	 * @param {string} message - Error message
+	 * @returns {void}
 	 */
 	showError(window, message) {
 		const prompts = Components.classes["@mozilla.org/embedcomp/prompt-service;1"]
@@ -141,26 +250,30 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Get all available libraries
+	 * Get all available libraries.
+	 * @returns {Array<Library>} List of libraries
 	 */
 	getLibraries() {
+		/** @type {Array<Library>} */
 		const libraries = [];
 		const userLibraryID = Zotero.Libraries.userLibraryID;
 		const userLibrary = Zotero.Libraries.get(userLibraryID);
 
 		libraries.push({
-			id: userLibraryID.toString(),
+			id: String(userLibraryID),
 			name: userLibrary.name || 'My Library',
-			type: 'user'
+			type: /** @type {'user'} */ ('user')
 		});
 
 		// Get all group libraries
+		// NOTE: For groups, we need to send the group ID (not library ID) to the backend
+		// The backend needs group ID to access /api/groups/{GROUP_ID}/items
 		const groups = Zotero.Groups.getAll();
 		for (let group of groups) {
 			libraries.push({
-				id: group.libraryID.toString(),
+				id: String(group.id),  // Use group.id instead of group.libraryID
 				name: group.name,
-				type: 'group'
+				type: /** @type {'group'} */ ('group')
 			});
 		}
 
@@ -168,20 +281,43 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Get currently selected library/collection
+	 * Get currently selected library/collection.
+	 * @returns {string|null} Library ID or null if none selected
 	 */
 	getCurrentLibrary() {
 		const zoteroPane = Zotero.getActiveZoteroPane();
 		if (!zoteroPane) return null;
 
 		const libraryID = zoteroPane.getSelectedLibraryID();
-		return libraryID ? libraryID.toString() : null;
+		if (!libraryID) return null;
+
+		// For group libraries, return the group ID instead of library ID
+		const library = Zotero.Libraries.get(libraryID);
+		if (library && library.libraryType === 'group') {
+			// Get the group associated with this library
+			const group = Zotero.Groups.getByLibraryID(libraryID);
+			if (group) {
+				return String(group.id);  // Return group ID for backend
+			}
+		}
+
+		// For user library, return the library ID as-is
+		return String(libraryID);
 	},
 
 	/**
-	 * Submit a query to the backend
+	 * Submit a query to the backend.
+	 * @param {string} question - Question to ask
+	 * @param {Array<string>} libraryIDs - Library IDs to query
+	 * @param {QueryOptions} [options] - Query options
+	 * @returns {Promise<QueryResult>} Query result with answer and sources
+	 * @throws {Error} If query fails
 	 */
 	async submitQuery(question, libraryIDs, options = {}) {
+		if (!this.backendURL) {
+			throw new Error('Backend URL not configured');
+		}
+
 		const queryId = Date.now().toString();
 		this.activeQueries.add(queryId);
 
@@ -204,7 +340,7 @@ ZoteroRAG = {
 				throw new Error(errorData.detail || `Query failed with HTTP ${response.status}`);
 			}
 
-			const result = await response.json();
+			const result = /** @type {QueryResult} */ (await response.json());
 			return result;
 		} finally {
 			this.activeQueries.delete(queryId);
@@ -212,7 +348,12 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Create a note in the current collection with the query result
+	 * Create a note in the current collection with the query result.
+	 * @param {string} question - Original question
+	 * @param {QueryResult} result - Query result
+	 * @param {Array<string>} libraryIDs - Libraries that were queried
+	 * @returns {Promise<*>} Created note item
+	 * @throws {Error} If note creation fails
 	 */
 	async createResultNote(question, result, libraryIDs) {
 		const zoteroPane = Zotero.getActiveZoteroPane();
@@ -226,7 +367,9 @@ ZoteroRAG = {
 
 		// Create standalone note
 		const note = new Zotero.Item('note');
-		note.libraryID = libraryID;
+		if (libraryID !== null) {
+			note.libraryID = libraryID;
+		}
 
 		// Format note content as HTML
 		const html = this.formatNoteHTML(question, result, libraryIDs);
@@ -245,14 +388,37 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Format the query result as HTML for the note
+	 * Format the query result as HTML for the note.
+	 * @param {string} question - Original question
+	 * @param {QueryResult} result - Query result
+	 * @param {Array<string>} libraryIDs - Libraries that were queried
+	 * @returns {string} HTML content
 	 */
 	formatNoteHTML(question, result, libraryIDs) {
 		const timestamp = new Date().toLocaleString();
-		const libraries = libraryIDs.map(id => {
-			const lib = Zotero.Libraries.get(parseInt(id));
-			return lib.name || 'My Library';
-		}).join(', ');
+
+		// Build map of library ID to library info for source URI generation
+		/**
+		 * @typedef {Object} LibraryInfo
+		 * @property {string} name - Library name
+		 * @property {'user'|'group'} type - Library type
+		 */
+
+		/** @type {Map<string, LibraryInfo>} */
+		const libraryMap = new Map();
+
+		for (let id of libraryIDs) {
+			const libraries = this.getLibraries();
+			const lib = libraries.find(l => l.id === id);
+			if (lib) {
+				libraryMap.set(id, {
+					name: lib.name,
+					type: lib.type
+				});
+			}
+		}
+
+		const libraryNames = Array.from(libraryMap.values()).map(info => info.name).join(', ');
 
 		let html = `<div>`;
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
@@ -264,7 +430,18 @@ ZoteroRAG = {
 			html += `<p><strong>Sources:</strong></p>`;
 			html += `<ul>`;
 			for (let source of result.sources) {
-				const link = `zotero://select/library/items/${source.item_id}`;
+				// Build Zotero URI based on library type
+				const sourceLibrary = libraryMap.get(source.library_id);
+				let link;
+
+				if (sourceLibrary && sourceLibrary.type === 'group') {
+					// For group items, use: zotero://select/groups/{GROUP_ID}/items/{ITEM_ID}
+					link = `zotero://select/groups/${source.library_id}/items/${source.item_id}`;
+				} else {
+					// For user library items, use: zotero://select/library/items/{ITEM_ID}
+					link = `zotero://select/library/items/${source.item_id}`;
+				}
+
 				let citation = `<a href="${link}">Source</a>`;
 
 				// Add page number if available
@@ -285,7 +462,7 @@ ZoteroRAG = {
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
 		html += `<em>Generated: ${timestamp}<br/>`;
-		html += `Libraries: ${this.escapeHTML(libraries)}</em>`;
+		html += `Libraries: ${this.escapeHTML(libraryNames)}</em>`;
 		html += `</p>`;
 		html += `</div>`;
 
@@ -293,9 +470,12 @@ ZoteroRAG = {
 	},
 
 	/**
-	 * Escape HTML special characters
+	 * Escape HTML special characters.
+	 * @param {string} text - Text to escape
+	 * @returns {string} Escaped text
 	 */
 	escapeHTML(text) {
+		/** @type {Record<string, string>} */
 		const map = {
 			'&': '&amp;',
 			'<': '&lt;',

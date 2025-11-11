@@ -55,3 +55,6 @@ data/
 logs/
 *.pid
 nul
+
+# NodeJS
+node_modules

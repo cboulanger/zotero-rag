@@ -5,11 +5,14 @@ Configuration API endpoints.
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, List, Optional
+import logging
+import os
 
 from backend.config.settings import get_settings
 from backend.config.presets import PRESETS
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ConfigResponse(BaseModel):

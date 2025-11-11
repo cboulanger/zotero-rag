@@ -7,7 +7,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const archiver = require('archiver');
 
 const PLUGIN_DIR = path.join(__dirname, '../plugin');
 const SRC_DIR = path.join(PLUGIN_DIR, 'src');
@@ -74,7 +74,7 @@ function copyFiles() {
 /**
  * Create XPI archive
  */
-function createXPI() {
+async function createXPI() {
 	console.log('Creating XPI archive...');
 
 	const manifest = JSON.parse(
@@ -84,57 +84,58 @@ function createXPI() {
 	const xpiName = `zotero-rag-${version}.xpi`;
 	const xpiPath = path.join(DIST_DIR, xpiName);
 
-	// Change to build directory and create zip
-	const cwd = process.cwd();
-	process.chdir(BUILD_DIR);
+	return new Promise((resolve, reject) => {
+		// Create write stream for XPI file
+		const output = fs.createWriteStream(xpiPath);
+		const archive = archiver('zip', {
+			zlib: { level: 9 } // Maximum compression
+		});
 
-	try {
-		// Get all files recursively
-		const files = [];
-		function getFiles(dir) {
-			const entries = fs.readdirSync(dir, { withFileTypes: true });
-			for (let entry of entries) {
-				const fullPath = path.join(dir, entry.name);
-				if (entry.isDirectory()) {
-					getFiles(fullPath);
-				} else {
-					files.push(path.relative(BUILD_DIR, fullPath));
-				}
-			}
-		}
-		getFiles(BUILD_DIR);
+		// Handle completion
+		output.on('close', () => {
+			console.log(`XPI created: ${xpiPath} (${archive.pointer()} bytes)`);
+			resolve(xpiPath);
+		});
 
-		// Create zip using system zip command
-		const fileList = files.join(' ');
-		execSync(`zip -r "${xpiPath}" ${fileList}`, { stdio: 'inherit' });
+		// Handle errors
+		archive.on('error', (err) => {
+			reject(err);
+		});
 
-		console.log(`XPI created: ${xpiPath}`);
-	} finally {
-		process.chdir(cwd);
-	}
+		output.on('error', (err) => {
+			reject(err);
+		});
 
-	return xpiPath;
+		// Pipe archive to output file
+		archive.pipe(output);
+
+		// Add all files from build directory
+		archive.directory(BUILD_DIR, false);
+
+		// Finalize the archive
+		archive.finalize();
+	});
 }
 
 /**
  * Main build function
  */
-function build() {
+async function build() {
 	console.log('Building Zotero RAG plugin...\n');
 
 	try {
 		clean();
 		copyFiles();
-		const xpiPath = createXPI();
+		const xpiPath = await createXPI();
 
-		console.log('\n✓ Build successful!');
+		console.log('\n[PASS] Build successful!');
 		console.log(`\nTo install the plugin:`);
 		console.log(`1. Open Zotero`);
 		console.log(`2. Go to Tools > Add-ons`);
 		console.log(`3. Click the gear icon > Install Add-on From File`);
 		console.log(`4. Select: ${xpiPath}`);
 	} catch (error) {
-		console.error('\n✗ Build failed:', error.message);
+		console.error('\n[FAIL] Build failed:', error.message);
 		process.exit(1);
 	}
 }

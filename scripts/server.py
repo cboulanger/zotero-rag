@@ -14,7 +14,9 @@ import subprocess
 import signal
 import time
 import psutil
+import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Server configuration
 HOST = "localhost"
@@ -39,6 +41,19 @@ def find_server_process():
 
 def start_server(dev_mode=True):
     """Start the FastAPI server."""
+    # Load environment from .env.local (overrides) then .env
+    env_local = PROJECT_ROOT / ".env.local"
+    env_file = PROJECT_ROOT / ".env"
+
+    if env_local.exists():
+        print(f"Loading .env.local: {env_local}")
+        load_dotenv(env_local, override=True)
+    load_dotenv(env_file, override=False)  # Don't override if already set
+
+    # Debug: Show what MODEL_PRESET is set to
+    model_preset = os.environ.get("MODEL_PRESET", "not set")
+    print(f"MODEL_PRESET: {model_preset}")
+
     # Check if already running
     existing = find_server_process()
     if existing:
@@ -65,13 +80,29 @@ def start_server(dev_mode=True):
         # Ensure log directory exists
         LOG_DIR.mkdir(exist_ok=True)
 
+        # Prepare environment for subprocess
+        # IMPORTANT: Copy current environment which includes .env.local overrides
+        env = os.environ.copy()
+
+        # Explicitly set MODEL_PRESET from current environment (which has .env.local loaded)
+        # This overrides any system/user environment variable
+        if model_preset != "not set":
+            print(f"Setting MODEL_PRESET={model_preset} in subprocess environment")
+            env["MODEL_PRESET"] = model_preset
+        elif "MODEL_PRESET" in env:
+            # If we don't have a value from .env files, remove the system one
+            # so pydantic will use the default
+            print(f"Removing system MODEL_PRESET ({env['MODEL_PRESET']})")
+            del env["MODEL_PRESET"]
+
         # Open log file for output
         with open(LOG_FILE, 'w') as log_file:
-            # Start in background
+            # Start in background with explicit environment
             process = subprocess.Popen(
                 cmd,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
+                env=env,  # Pass environment with .env.local values
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
 
@@ -108,16 +139,50 @@ def stop_server():
     if proc:
         try:
             print(f"Stopping server (PID: {proc.pid})...")
-            proc.terminate()
 
-            # Wait up to 5 seconds for graceful shutdown
-            try:
-                proc.wait(timeout=5)
-                print("[OK] Server stopped successfully")
-            except psutil.TimeoutExpired:
-                print("Server didn't stop gracefully, forcing...")
-                proc.kill()
-                print("[OK] Server killed")
+            # On Windows, we need to kill the entire process tree
+            # because uvicorn --reload creates child processes
+            if sys.platform == 'win32':
+                # Get all child processes
+                try:
+                    parent = psutil.Process(proc.pid)
+                    children = parent.children(recursive=True)
+
+                    # Terminate parent first
+                    parent.terminate()
+
+                    # Terminate all children
+                    for child in children:
+                        try:
+                            child.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    # Wait for graceful shutdown
+                    gone, alive = psutil.wait_procs([parent] + children, timeout=5)
+
+                    # Force kill any remaining
+                    for p in alive:
+                        try:
+                            print(f"Force killing PID {p.pid}...")
+                            p.kill()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    print("[OK] Server stopped successfully")
+
+                except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                    print(f"[ERROR] Error stopping server: {e}")
+            else:
+                # On Unix, terminate should handle the process group
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                    print("[OK] Server stopped successfully")
+                except psutil.TimeoutExpired:
+                    print("Server didn't stop gracefully, forcing...")
+                    proc.kill()
+                    print("[OK] Server killed")
 
         except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
             print(f"[ERROR] Error stopping server: {e}")
@@ -131,12 +196,26 @@ def stop_server():
 
 def check_status():
     """Check if the server is running."""
+    import requests
+
     proc = find_server_process()
 
     if proc:
         print(f"[OK] Server is running (PID: {proc.pid})")
         print(f"  Access at: http://{HOST}:{PORT}")
         print(f"  API docs at: http://{HOST}:{PORT}/docs")
+
+        # Try to get configuration info
+        try:
+            response = requests.get(f"http://{HOST}:{PORT}/api/config", timeout=2)
+            if response.ok:
+                config = response.json()
+                print(f"  Preset: {config.get('preset_name', 'unknown')}")
+                print(f"  LLM: {config.get('llm_model', 'unknown')}")
+        except Exception:
+            # Silently ignore if we can't fetch config (server might still be starting)
+            pass
+
         return True
     else:
         print("[INFO] Server is not running")

@@ -18,6 +18,7 @@
 /**
  * @typedef {Object} SourceCitation
  * @property {string} item_id - Zotero item ID
+ * @property {string} library_id - Zotero library ID
  * @property {string} title - Document title
  * @property {number|null} page_number - Page number (if available)
  * @property {string|null} text_anchor - Text anchor (first 5 words)
@@ -138,6 +139,19 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Get library name by ID.
+	 * @param {string} libraryId - Library ID
+	 * @returns {string} Library name or ID if not found
+	 */
+	getLibraryName(libraryId) {
+		if (!this.plugin) return libraryId;
+
+		const libraries = this.plugin.getLibraries();
+		const library = libraries.find(lib => lib.id === libraryId);
+		return library ? library.name : libraryId;
+	},
+
+	/**
 	 * Submit the query to the backend.
 	 * @returns {Promise<void>}
 	 */
@@ -173,10 +187,17 @@ var ZoteroRAGDialog = {
 			const libraryIds = Array.from(this.selectedLibraries);
 			await this.checkAndMonitorIndexing(libraryIds);
 
+			// Update progress for query phase
+			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
+
 			const result = await this.plugin.submitQuery(question, libraryIds);
+
+			// Update progress for note creation phase
+			this.updateProgress(50, 'Creating note', 'Formatting results...');
+
 			await this.plugin.createResultNote(question, result, libraryIds);
 
-			this.showStatus('Note created successfully!', 'success');
+			this.updateProgress(100, 'Complete', 'Note created successfully!');
 
 			setTimeout(() => {
 				window.close();
@@ -205,7 +226,9 @@ var ZoteroRAGDialog = {
 				const status = await statusResponse.json();
 
 				if (!status.indexed || status.item_count === 0) {
-					this.showStatus(`Indexing library ${libraryId}...`, 'info');
+					// Get library name for user-friendly messages
+					const libraryName = this.getLibraryName(libraryId);
+					this.showStatus(`Indexing library ${libraryName}...`, 'info');
 
 					const indexResponse = await fetch(`${backendURL}/api/index/library/${libraryId}`, {
 						method: 'POST'
@@ -221,8 +244,9 @@ var ZoteroRAGDialog = {
 				}
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
+				const libraryName = this.getLibraryName(libraryId);
 				this.plugin.log(`Error checking library ${libraryId}: ${errorMessage}`);
-				this.showStatus(`Error indexing library ${libraryId}: ${errorMessage}`, 'error');
+				this.showStatus(`Error indexing library ${libraryName}: ${errorMessage}`, 'error');
 				throw error; // Re-throw to stop the query process
 			}
 		}
@@ -262,14 +286,15 @@ var ZoteroRAGDialog = {
 							// Determine label and detailed message
 							let label, detailedMessage;
 
-							if (data.message) {
+							// Priority: document count > custom message > generic progress
+							if (total > 0) {
+								// Show document count
+								label = 'Indexing';
+								detailedMessage = `Indexing document ${current} of ${total}`;
+							} else if (data.message) {
 								// Backend provided a message (like "Loading embedding model...")
 								label = 'Indexing';
 								detailedMessage = data.message;
-							} else if (total > 0) {
-								// Show document count
-								label = 'Indexing';
-								detailedMessage = `Processing ${current} of ${total} documents`;
 							} else {
 								// Generic progress
 								label = 'Processing';

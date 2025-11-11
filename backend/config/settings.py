@@ -18,11 +18,16 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Look for .env in project root (parent of backend/)
+        env_file=str((Path(__file__).parent.parent.parent / ".env").resolve()),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    def __init__(self, **kwargs):
+        """Initialize settings."""
+        super().__init__(**kwargs)
 
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
@@ -53,7 +58,7 @@ class Settings(BaseSettings):
     # Logging Configuration
     log_level: str = Field(default="INFO", description="Logging level")
     log_file: Optional[Path] = Field(
-        default_factory=lambda: Path.home() / ".local" / "share" / "zotero-rag" / "logs" / "app.log",
+        default_factory=lambda: Path.home() / ".local" / "share" / "zotero-rag" / "logs" / "server.log",
         description="Path to log file"
     )
 

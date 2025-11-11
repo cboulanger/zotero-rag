@@ -107,6 +107,10 @@ For creating dialog windows in Zotero plugins:
 - Make atomic commits that represent single logical changes
 - Reference issues/tasks in commit messages when applicable
 
+## Debugging
+
+- if you insert code that is only for debugging, mark it as such so that it can be easily idenitified and removed after the code has been fixed (e.g., by a `# DEBUG` trailing comment or `# BEGIN DEBUG`/`# END DEBUG` header and footer for longer code fragments).
+
 ## Documentation
 
 - Maintain up-to-date README.md files in each major directory

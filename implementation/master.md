@@ -42,7 +42,7 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 - **Documentation**:
   - <https://www.zotero.org/support/dev/client_coding>
   - <https://www.zotero.org/support/dev/zotero_8_for_developers>
-  - IMPORTANT: `docs\zotero-plugin-dev.md` and `docs\zotero-local-api.md` contain documentation that is collected during development and cannot be found in official documentation 
+  - IMPORTANT: `docs\zotero-plugin-dev.md` and `docs\zotero-local-api.md` contain documentation that is collected during development and cannot be found in official documentation
 
 ### Backend RAG Stack
 
@@ -331,7 +331,7 @@ Additional implementation details and API specifications are documented in:
 
 - `implementation/zotero-api-reference.md` - Zotero local API endpoints and data structures
 - `implementation/rag-architecture.md` - Detailed RAG pipeline design and model options
-- GWDG/KISSKI available models: https://docs.hpc.gwdg.de/services/chat-ai/models/index.html
+- GWDG/KISSKI available models: <https://docs.hpc.gwdg.de/services/chat-ai/models/index.html>
 
 ## Success Criteria
 
@@ -380,6 +380,7 @@ The implementation will be considered complete when:
 3. ✅ API Testing - Comprehensive integration tests
 
 **Endpoints:**
+
 - Configuration management (`/api/config`, `/api/version`)
 - Library operations (`/api/libraries`, `/api/libraries/{id}/status`)
 - Indexing with SSE (`/api/index/library/{id}`, `/api/index/library/{id}/progress`)
@@ -430,6 +431,7 @@ The implementation will be considered complete when:
 **Test Status:** 161/161 passing ✅ (All backend tests)
 
 **Key Achievements:**
+
 - Lazy spaCy model loading with automatic download via `uv` - no manual setup required!
 - Complete RAG pipeline: indexing + querying with source citations
 - Support for both local (quantized) and remote (API) LLMs
@@ -477,6 +479,7 @@ The implementation will be considered complete when:
    - CI/CD recommendations
 
 **Configuration:**
+
 - pytest configuration in `pyproject.toml` with markers
 - npm test commands:
   - `test:backend` - Unit tests only (fast, default)
@@ -484,7 +487,7 @@ The implementation will be considered complete when:
   - `test:integration` - Full integration suite (5-15 minutes)
   - `test:all` - Everything (unit + integration)
 - Default behavior: skip integration tests (opt-in required)
-- Test library: https://www.zotero.org/groups/6297749/test-rag-plugin
+- Test library: <https://www.zotero.org/groups/6297749/test-rag-plugin>
 
 **Remaining:**
 
@@ -511,6 +514,7 @@ The implementation will be considered complete when:
   - Rate limiting (API calls)
 
 **Next Actions:**
+
 1. Run integration tests with real Zotero: `npm run test:integration`
 2. Install and test plugin in Zotero 7/8
 3. Validate end-to-end workflow: question → answer → note creation
@@ -518,6 +522,7 @@ The implementation will be considered complete when:
 5. Complete remaining documentation
 
 **Test Status:**
+
 - Unit tests: 161/161 passing ✅
 - Integration tests: Framework created, environment validation working ✅
 - Manual testing: Pending
@@ -576,6 +581,7 @@ The project provides several npm scripts for development and testing. All comman
 | `npm run server:status` | Check if the server is running |
 
 **Example Usage:**
+
 ```bash
 # Start the backend server for development
 npm run server:start
@@ -603,6 +609,7 @@ npm run server:stop
 | `npm run test:backend:coverage` | Run backend tests with code coverage report (HTML + terminal) |
 
 **Example Usage:**
+
 ```bash
 # Run all unit tests once
 npm run test:backend
@@ -626,10 +633,12 @@ Integration tests validate the system with real Zotero instance and live API ser
 | `npm run test:all` | Run all tests: unit + integration (10-20 minutes) |
 
 **Prerequisites:**
-1. Zotero desktop running with test group synced: https://www.zotero.org/groups/6297749/test-rag-plugin
+
+1. Zotero desktop running with test group synced: <https://www.zotero.org/groups/6297749/test-rag-plugin>
 2. API key configured (e.g., KISSKI_API_KEY in .env or environment)
 
 **Example Usage:**
+
 ```bash
 # Quick environment validation (run this first!)
 npm run test:integration:quick
@@ -642,6 +651,7 @@ npm run test:all
 ```
 
 **Documentation:**
+
 - Comprehensive guide: [docs/testing.md](../docs/testing.md)
 - Quick start: [docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md)
 
@@ -667,6 +677,7 @@ uv run pytest backend/tests/ --cov=backend --cov-report=html
 | `npm run plugin:build` | Build the Zotero plugin and create XPI archive (output: plugin/dist/zotero-rag-{version}.xpi) |
 
 **Example Usage:**
+
 ```bash
 # Build the plugin
 npm run plugin:build
@@ -679,7 +690,7 @@ npm run plugin:build
 ```
 
 **Plugin Files:**
+
 - Source: `plugin/src/`
 - Build output: `plugin/build/` (temporary)
 - XPI archive: `plugin/dist/zotero-rag-{version}.xpi`
-

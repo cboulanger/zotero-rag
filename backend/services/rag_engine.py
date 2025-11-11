@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 class SourceInfo(BaseModel):
     """Source citation information."""
     item_id: str
+    library_id: str
     title: str
     page_number: int | None = None
     text_anchor: str | None = None
@@ -150,6 +151,7 @@ Please provide a comprehensive answer based on the context above. If the context
 
             source = SourceInfo(
                 item_id=doc_meta.item_key or "unknown",
+                library_id=doc_meta.library_id,
                 title=doc_meta.title or "Unknown Document",
                 page_number=metadata.page_number,
                 text_anchor=metadata.text_preview,

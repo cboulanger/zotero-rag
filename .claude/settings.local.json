@@ -11,7 +11,11 @@
       "Bash(mkdir:*)",
       "Bash(curl:*)",
       "Bash(uv run python:*)",
-      "Bash(python -m json.tool)"
+      "Bash(python -m json.tool)",
+      "Bash(npm run plugin:build:*)",
+      "Bash(npm run server:status:*)",
+      "Bash(npm run server:restart:*)",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "ask": []

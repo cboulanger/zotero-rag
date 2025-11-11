@@ -16,7 +16,6 @@ Industry best practices implemented:
 """
 
 import os
-import asyncio
 import tempfile
 import shutil
 from pathlib import Path

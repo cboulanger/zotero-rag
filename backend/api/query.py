@@ -18,6 +18,7 @@ router = APIRouter()
 class SourceCitation(BaseModel):
     """Source citation with location information."""
     item_id: str
+    library_id: str
     title: str
     page_number: Optional[int] = None
     text_anchor: Optional[str] = None  # First 5 words of chunk
@@ -130,6 +131,7 @@ async def query_libraries(request: QueryRequest):
             sources = [
                 SourceCitation(
                     item_id=source.item_id,
+                    library_id=source.library_id,
                     title=source.title,
                     page_number=source.page_number,
                     text_anchor=source.text_anchor,
