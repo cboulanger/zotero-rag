@@ -5,6 +5,7 @@ Query API endpoints for RAG queries.
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
+from markdown_it import MarkdownIt
 
 from backend.services.rag_engine import RAGEngine
 from backend.services.embeddings import create_embedding_service
@@ -37,6 +38,7 @@ class QueryResponse(BaseModel):
     """RAG query response."""
     question: str
     answer: str
+    answer_format: str  # Format of answer: "text", "html", or "markdown"
     sources: List[SourceCitation]
     library_ids: List[str]
 
@@ -140,9 +142,14 @@ async def query_libraries(request: QueryRequest):
                 for source in result.sources
             ]
 
+            # Convert markdown answer to HTML
+            md = MarkdownIt()
+            answer_html = md.render(result.answer)
+
             return QueryResponse(
                 question=request.question,
-                answer=result.answer,
+                answer=answer_html,
+                answer_format="html",
                 sources=sources,
                 library_ids=request.library_ids
             )

@@ -2,6 +2,8 @@
 
 // @ts-check
 
+// Type definitions (duplicated from zotero-rag.js for dialog context)
+
 /**
  * @typedef {Object} Library
  * @property {string} id - Library ID
@@ -12,6 +14,7 @@
 /**
  * @typedef {Object} QueryResult
  * @property {string} answer - Generated answer
+ * @property {string} answer_format - Format of answer: "text", "html", or "markdown"
  * @property {Array<SourceCitation>} sources - Source citations
  */
 

@@ -12,6 +12,7 @@
  * @typedef {Object} QueryResult
  * @property {string} question - Original question
  * @property {string} answer - Generated answer
+ * @property {string} answer_format - Format of answer: "text", "html", or "markdown"
  * @property {Array<SourceCitation>} sources - Source citations
  * @property {Array<string>} library_ids - Libraries queried
  */
@@ -423,7 +424,12 @@ ZoteroRAG = {
 		let html = `<div>`;
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
 		html += `<p><strong>Answer:</strong></p>`;
-		html += `<p>${this.escapeHTML(result.answer)}</p>`;
+		// Use answer directly if it's HTML, otherwise escape it
+		if (result.answer_format === 'html') {
+			html += result.answer;
+		} else {
+			html += `<p>${this.escapeHTML(result.answer)}</p>`;
+		}
 
 		// Add sources/citations
 		if (result.sources && result.sources.length > 0) {
