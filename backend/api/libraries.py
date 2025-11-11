@@ -41,7 +41,7 @@ async def list_libraries():
     """
     try:
         async with ZoteroLocalAPI() as client:
-            libraries = await client.get_libraries()
+            libraries = await client.list_libraries()
 
             return [
                 LibraryInfo(
@@ -73,12 +73,85 @@ async def get_library_status(library_id: str):
     Raises:
         HTTPException: If library not found or status unavailable.
     """
-    # TODO: Implement actual status checking from vector database
-    # For now, return placeholder response
-    return LibraryStatusResponse(
-        library_id=library_id,
-        indexed=False,
-        total_items=None,
-        indexed_items=None,
-        last_indexed=None
-    )
+    from backend.config.settings import get_settings
+    from backend.db.vector_store import VectorStore
+    from backend.services.embeddings import create_embedding_service
+
+    try:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+
+        # Initialize embedding service to get dimension
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            hf_token=settings.get_api_key("HF_TOKEN")
+        )
+
+        # Check vector store for library data - use context manager to ensure cleanup
+        with VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        ) as vector_store:
+
+            # Count total chunks and unique items for this library using scroll
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            query_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id)
+                    )
+                ]
+            )
+
+            # Scroll through all chunks for this library
+            total_chunks = 0
+            unique_items: set[str] = set()
+            offset = None
+
+            # Get client reference
+            client = vector_store.client
+            if not client:
+                raise RuntimeError("Vector store client not initialized")
+
+            while True:
+                batch, offset = client.scroll(
+                    collection_name=vector_store.CHUNKS_COLLECTION,
+                    scroll_filter=query_filter,
+                    limit=100,
+                    offset=offset,
+                    with_payload=["item_id"],
+                    with_vectors=False
+                )
+
+                total_chunks += len(batch)
+
+                # Collect unique item_ids
+                for point in batch:
+                    if point.payload and "item_id" in point.payload:
+                        unique_items.add(point.payload["item_id"])
+
+                if offset is None:
+                    break
+
+            indexed = total_chunks > 0
+            indexed_items = len(unique_items) if indexed else None
+
+            return LibraryStatusResponse(
+                library_id=library_id,
+                indexed=indexed,
+                total_items=indexed_items,  # Same as indexed_items for now
+                indexed_items=indexed_items,
+                last_indexed=None  # TODO: Track last indexed timestamp
+            )
+    except Exception as e:
+        # If vector store doesn't exist or other error, return not indexed
+        return LibraryStatusResponse(
+            library_id=library_id,
+            indexed=False,
+            total_items=None,
+            indexed_items=None,
+            last_indexed=None
+        )

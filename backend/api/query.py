@@ -79,44 +79,71 @@ async def query_libraries(request: QueryRequest):
             cache_dir=str(settings.model_weights_path)
         )
         llm_service = create_llm_service(settings)
-        vector_store = VectorStore(
+
+        # Use context manager to ensure VectorStore is closed after query
+        with VectorStore(
             storage_path=settings.vector_db_path,
             embedding_dim=embedding_service.get_embedding_dim()
-        )
+        ) as vector_store:
 
-        # Create RAG engine
-        rag_engine = RAGEngine(
-            embedding_service=embedding_service,
-            llm_service=llm_service,
-            vector_store=vector_store
-        )
+            # Validate that at least one library is indexed
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-        # Execute query
-        result = await rag_engine.query(
-            question=request.question,
-            library_ids=request.library_ids,
-            top_k=request.top_k,
-            min_score=request.min_score
-        )
+            indexed_count = 0
+            for library_id in request.library_ids:
+                count = vector_store.client.count(
+                    collection_name=vector_store.CHUNKS_COLLECTION,
+                    count_filter=Filter(
+                        must=[
+                            FieldCondition(
+                                key="library_id",
+                                match=MatchValue(value=library_id)
+                            )
+                        ]
+                    )
+                ).count
+                if count > 0:
+                    indexed_count += 1
 
-        # Format citations
-        sources = [
-            SourceCitation(
-                item_id=source.item_id,
-                title=source.title,
-                page_number=source.page_number,
-                text_anchor=source.text_anchor,
-                relevance_score=source.score
+            if indexed_count == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"None of the specified libraries have been indexed. Please index the libraries before querying."
+                )
+
+            # Create RAG engine
+            rag_engine = RAGEngine(
+                embedding_service=embedding_service,
+                llm_service=llm_service,
+                vector_store=vector_store
             )
-            for source in result.sources
-        ]
 
-        return QueryResponse(
-            question=request.question,
-            answer=result.answer,
-            sources=sources,
-            library_ids=request.library_ids
-        )
+            # Execute query
+            result = await rag_engine.query(
+                question=request.question,
+                library_ids=request.library_ids,
+                top_k=request.top_k,
+                min_score=request.min_score
+            )
+
+            # Format citations
+            sources = [
+                SourceCitation(
+                    item_id=source.item_id,
+                    title=source.title,
+                    page_number=source.page_number,
+                    text_anchor=source.text_anchor,
+                    relevance_score=source.score
+                )
+                for source in result.sources
+            ]
+
+            return QueryResponse(
+                question=request.question,
+                answer=result.answer,
+                sources=sources,
+                library_ids=request.library_ids
+            )
 
     except Exception as e:
         raise HTTPException(

@@ -1,13 +1,70 @@
 // Dialog script for Zotero RAG query interface
 
+// @ts-check
+
+/**
+ * @typedef {Object} Library
+ * @property {string} id - Library ID
+ * @property {string} name - Library name
+ * @property {string} type - Library type (user/group)
+ */
+
+/**
+ * @typedef {Object} QueryResult
+ * @property {string} answer - Generated answer
+ * @property {Array<SourceCitation>} sources - Source citations
+ */
+
+/**
+ * @typedef {Object} SourceCitation
+ * @property {string} item_id - Zotero item ID
+ * @property {string} title - Document title
+ * @property {number|null} page_number - Page number (if available)
+ * @property {string|null} text_anchor - Text anchor (first 5 words)
+ * @property {number} relevance_score - Relevance score
+ */
+
+/**
+ * @typedef {Object} ZoteroRAGPlugin
+ * @property {string} backendURL - Backend server URL
+ * @property {function(): Array<Library>} getLibraries - Get available libraries
+ * @property {function(): string} getCurrentLibrary - Get current library ID
+ * @property {function(string, Array<string>): Promise<QueryResult>} submitQuery - Submit RAG query
+ * @property {function(string, QueryResult, Array<string>): Promise<void>} createResultNote - Create note with results
+ * @property {function(string): void} log - Log message
+ */
+
+/**
+ * @typedef {Object} SSEData
+ * @property {string} event - Event type (started, progress, completed, error)
+ * @property {string} [message] - Optional message
+ * @property {number} [progress] - Progress percentage
+ * @property {number} [current_item] - Current item number
+ * @property {number} [total_items] - Total items
+ */
+
+/**
+ * Dialog controller for Zotero RAG query interface.
+ */
 var ZoteroRAGDialog = {
+	/** @type {ZoteroRAGPlugin|null} */
 	plugin: null,
+
+	/** @type {Set<string>} */
 	selectedLibraries: new Set(),
+
+	/** @type {Map<string, EventSource>} */
 	indexingStreams: new Map(),
 
+	/**
+	 * Initialize the dialog.
+	 * @returns {void}
+	 */
 	init() {
 		// Get plugin reference passed from main window
+		// @ts-ignore - window.arguments is available in XUL/Firefox extension context
 		if (window.arguments && window.arguments[0]) {
+			// @ts-ignore
 			this.plugin = window.arguments[0].plugin;
 		} else {
 			console.error('No plugin reference passed to dialog');
@@ -15,22 +72,35 @@ var ZoteroRAGDialog = {
 		}
 
 		// Set up event listeners
-		document.getElementById('submit-button').addEventListener('click', () => {
-			this.submit();
-		});
+		const submitButton = document.getElementById('submit-button');
+		if (submitButton) {
+			submitButton.addEventListener('click', () => {
+				this.submit();
+			});
+		}
 
-		document.getElementById('cancel-button').addEventListener('click', () => {
-			window.close();
-		});
+		const cancelButton = document.getElementById('cancel-button');
+		if (cancelButton) {
+			cancelButton.addEventListener('click', () => {
+				window.close();
+			});
+		}
 
 		// Populate library list
 		this.populateLibraries();
 	},
 
+	/**
+	 * Populate the library selection list.
+	 * @returns {void}
+	 */
 	populateLibraries() {
+		if (!this.plugin) return;
+
 		const libraries = this.plugin.getLibraries();
 		const currentLibrary = this.plugin.getCurrentLibrary();
 		const listContainer = document.getElementById('library-list');
+		if (!listContainer) return;
 
 		for (let library of libraries) {
 			const checkboxLabel = document.createElement('label');
@@ -48,11 +118,14 @@ var ZoteroRAGDialog = {
 			}
 
 			checkbox.addEventListener('change', (e) => {
-				const libraryId = e.target.getAttribute('data-library-id');
-				if (e.target.checked) {
-					this.selectedLibraries.add(libraryId);
-				} else {
-					this.selectedLibraries.delete(libraryId);
+				const target = /** @type {HTMLInputElement} */ (e.target);
+				const libraryId = target.getAttribute('data-library-id');
+				if (libraryId) {
+					if (target.checked) {
+						this.selectedLibraries.add(libraryId);
+					} else {
+						this.selectedLibraries.delete(libraryId);
+					}
 				}
 			});
 
@@ -64,8 +137,19 @@ var ZoteroRAGDialog = {
 		}
 	},
 
+	/**
+	 * Submit the query to the backend.
+	 * @returns {Promise<void>}
+	 */
 	async submit() {
-		const question = document.getElementById('question-input').value.trim();
+		if (!this.plugin) return;
+
+		const questionInput = /** @type {HTMLInputElement|null} */ (
+			document.getElementById('question-input')
+		);
+		if (!questionInput) return;
+
+		const question = questionInput.value.trim();
 
 		// Validate input
 		if (!question) {
@@ -98,13 +182,21 @@ var ZoteroRAGDialog = {
 				window.close();
 			}, 1000);
 		} catch (error) {
-			this.showStatus(`Error: ${error.message}`, 'error');
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error: ${errorMessage}`, 'error');
 			this.setSubmitEnabled(true);
 			this.hideProgress();
 		}
 	},
 
+	/**
+	 * Check if libraries need indexing and monitor progress.
+	 * @param {Array<string>} libraryIds - Library IDs to check
+	 * @returns {Promise<void>}
+	 */
 	async checkAndMonitorIndexing(libraryIds) {
+		if (!this.plugin) return;
+
 		const backendURL = this.plugin.backendURL;
 
 		for (let libraryId of libraryIds) {
@@ -128,15 +220,26 @@ var ZoteroRAGDialog = {
 					await this.monitorIndexingProgress(libraryId);
 				}
 			} catch (error) {
-				this.plugin.log(`Error checking library ${libraryId}: ${error.message}`);
-				this.showStatus(`Error indexing library ${libraryId}: ${error.message}`, 'error');
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				this.plugin.log(`Error checking library ${libraryId}: ${errorMessage}`);
+				this.showStatus(`Error indexing library ${libraryId}: ${errorMessage}`, 'error');
 				throw error; // Re-throw to stop the query process
 			}
 		}
 	},
 
+	/**
+	 * Monitor indexing progress via SSE.
+	 * @param {string} libraryId - Library ID to monitor
+	 * @returns {Promise<void>}
+	 */
 	monitorIndexingProgress(libraryId) {
 		return new Promise((resolve, reject) => {
+			if (!this.plugin) {
+				reject(new Error('Plugin not initialized'));
+				return;
+			}
+
 			const backendURL = this.plugin.backendURL;
 			const eventSource = new EventSource(`${backendURL}/api/index/library/${libraryId}/progress`);
 
@@ -144,11 +247,11 @@ var ZoteroRAGDialog = {
 
 			eventSource.onmessage = (event) => {
 				try {
-					const data = JSON.parse(event.data);
+					const data = /** @type {SSEData} */ (JSON.parse(event.data));
 
 					switch (data.event) {
 						case 'started':
-							this.updateProgress(0, 'Starting indexing...', data.message);
+							this.updateProgress(0, 'Starting indexing...', data.message || '');
 							break;
 
 						case 'progress':
@@ -177,27 +280,32 @@ var ZoteroRAGDialog = {
 							break;
 
 						case 'completed':
-							this.updateProgress(100, 'Completed', data.message);
+							this.updateProgress(100, 'Completed', data.message || '');
 							eventSource.close();
 							this.indexingStreams.delete(libraryId);
 							resolve();
 							break;
 
 						case 'error':
-							this.updateProgress(0, 'Error');
-							this.showStatus(`Error: ${data.message}`, 'error');
+							this.updateProgress(0, 'Error', '');
+							this.showStatus(`Error: ${data.message || 'Unknown error'}`, 'error');
 							eventSource.close();
 							this.indexingStreams.delete(libraryId);
-							reject(new Error(data.message));
+							reject(new Error(data.message || 'Indexing failed'));
 							break;
 					}
 				} catch (error) {
-					this.plugin.log(`Error parsing SSE data: ${error.message}`);
+					const errorMessage = error instanceof Error ? error.message : String(error);
+					if (this.plugin) {
+						this.plugin.log(`Error parsing SSE data: ${errorMessage}`);
+					}
 				}
 			};
 
 			eventSource.onerror = () => {
-				this.plugin.log(`SSE connection error for library ${libraryId}`);
+				if (this.plugin) {
+					this.plugin.log(`SSE connection error for library ${libraryId}`);
+				}
 				eventSource.close();
 				this.indexingStreams.delete(libraryId);
 				resolve();
@@ -213,12 +321,29 @@ var ZoteroRAGDialog = {
 		});
 	},
 
+	/**
+	 * Update progress bar with percentage and message.
+	 * @param {number} percentage - Progress percentage (0-100)
+	 * @param {string} label - Progress label
+	 * @param {string|null} [message] - Optional detailed message
+	 * @returns {void}
+	 */
 	updateProgress(percentage, label, message = null) {
 		this.showProgress(label, message);
-		const progressBar = document.getElementById('progress-bar');
-		progressBar.value = percentage;
+		const progressBar = /** @type {HTMLProgressElement|null} */ (
+			document.getElementById('progress-bar')
+		);
+		if (progressBar) {
+			progressBar.value = percentage;
+		}
 	},
 
+	/**
+	 * Show progress section with label and message.
+	 * @param {string} label - Progress label
+	 * @param {string|null} [message] - Optional detailed message
+	 * @returns {void}
+	 */
 	showProgress(label, message = null) {
 		const progressSection = document.getElementById('progress-section');
 		const statusSection = document.getElementById('status-section');
@@ -226,33 +351,48 @@ var ZoteroRAGDialog = {
 		const messageElement = document.getElementById('progress-message');
 
 		// Show progress, hide status
-		progressSection.style.display = '';
-		statusSection.style.display = 'none';
+		if (progressSection) progressSection.style.display = '';
+		if (statusSection) statusSection.style.display = 'none';
 
-		labelElement.textContent = label;
-		messageElement.textContent = message || '';
+		if (labelElement) labelElement.textContent = label;
+		if (messageElement) messageElement.textContent = message || '';
 	},
 
+	/**
+	 * Hide progress section and reset to ready state.
+	 * @returns {void}
+	 */
 	hideProgress() {
 		const labelElement = document.getElementById('progress-label');
 		const messageElement = document.getElementById('progress-message');
+		const progressBar = /** @type {HTMLProgressElement|null} */ (
+			document.getElementById('progress-bar')
+		);
 
 		// Reset to ready state
-		labelElement.textContent = 'Ready';
-		messageElement.textContent = '';
-		document.getElementById('progress-bar').value = 0;
+		if (labelElement) labelElement.textContent = 'Ready';
+		if (messageElement) messageElement.textContent = '';
+		if (progressBar) progressBar.value = 0;
 	},
 
+	/**
+	 * Show status message.
+	 * @param {string} message - Status message
+	 * @param {'info'|'success'|'error'} [type] - Message type
+	 * @returns {void}
+	 */
 	showStatus(message, type = 'info') {
 		// Show status section (for errors), hide progress
 		if (type === 'error') {
 			const progressSection = document.getElementById('progress-section');
 			const statusSection = document.getElementById('status-section');
-			progressSection.style.display = 'none';
-			statusSection.style.display = '';
+			if (progressSection) progressSection.style.display = 'none';
+			if (statusSection) statusSection.style.display = '';
 		}
 
 		const container = document.getElementById('status-messages');
+		if (!container) return;
+
 		const messageDiv = document.createElement('div');
 
 		messageDiv.className = `status-message ${type}`;
@@ -262,19 +402,32 @@ var ZoteroRAGDialog = {
 		container.scrollTop = container.scrollHeight;
 	},
 
+	/**
+	 * Clear all status messages.
+	 * @returns {void}
+	 */
 	clearStatusMessages() {
 		const container = document.getElementById('status-messages');
 		const statusSection = document.getElementById('status-section');
 		const progressSection = document.getElementById('progress-section');
 
-		container.innerHTML = '';
-		statusSection.style.display = 'none';
-		progressSection.style.display = '';
+		if (container) container.innerHTML = '';
+		if (statusSection) statusSection.style.display = 'none';
+		if (progressSection) progressSection.style.display = '';
 	},
 
+	/**
+	 * Enable or disable the submit button.
+	 * @param {boolean} enabled - Whether button should be enabled
+	 * @returns {void}
+	 */
 	setSubmitEnabled(enabled) {
-		const submitButton = document.getElementById('submit-button');
-		submitButton.disabled = !enabled;
+		const submitButton = /** @type {HTMLButtonElement|null} */ (
+			document.getElementById('submit-button')
+		);
+		if (submitButton) {
+			submitButton.disabled = !enabled;
+		}
 	}
 };
 

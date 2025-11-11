@@ -11,8 +11,6 @@ This module provides:
 import os
 import sys
 import pytest
-import asyncio
-from typing import Optional
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -41,153 +39,50 @@ if _env_path.exists():
         if key not in os.environ:
             os.environ[key] = value
 
+# Import shared environment validation
+from backend.tests.test_environment import validate_test_environment
+
 
 # ============================================================================
-# Pre-flight Environment Validation
+# Helper Functions
 # ============================================================================
 
-def check_zotero_available() -> tuple[bool, Optional[str]]:
+def _kill_process_tree(process):
     """
-    Check if Zotero is running and accessible.
+    Kill a process and all its child processes.
 
-    Returns:
-        (available, error_message): True if Zotero is running, False otherwise
+    This is important on Windows where uv run creates multiple processes
+    (uv -> python -> uvicorn -> python workers).
     """
-    try:
-        import httpx
-
-        # Try to connect to Zotero local API
-        response = httpx.get("http://localhost:23119/connector/ping", timeout=2.0)
-
-        if response.status_code == 200:
-            return True, None
-        else:
-            return False, f"Zotero API responded with status {response.status_code}"
-    except httpx.ConnectError:
-        return False, "Cannot connect to Zotero on localhost:23119. Is Zotero running?"
-    except Exception as e:
-        return False, f"Error checking Zotero: {e}"
-
-
-def check_api_key_available(env_var: str = "KISSKI_API_KEY") -> tuple[bool, Optional[str]]:
-    """
-    Check if required API key is available.
-
-    Args:
-        env_var: Environment variable name for API key
-
-    Returns:
-        (available, error_message): True if key is set, False otherwise
-    """
-    api_key = os.getenv(env_var)
-
-    if api_key:
-        return True, None
-    else:
-        return False, f"API key not found: {env_var} environment variable not set"
-
-
-def check_model_preset_valid() -> tuple[bool, Optional[str]]:
-    """
-    Check if MODEL_PRESET environment variable is valid.
-
-    Returns:
-        (valid, error_message): True if preset is valid, False otherwise
-    """
-    from backend.config.presets import get_preset
-
-    preset_name = os.getenv("MODEL_PRESET", "remote-kisski")
-    preset = get_preset(preset_name)
-
-    if preset is None:
-        return False, f"Invalid MODEL_PRESET: '{preset_name}' not found"
-
-    return True, None
-
-
-def check_test_library_synced() -> tuple[bool, Optional[str]]:
-    """
-    Check if the test library is synced in Zotero.
-
-    Returns:
-        (synced, error_message): True if test library is accessible, False otherwise
-    """
-    from backend.zotero.local_api import ZoteroLocalAPI
+    import subprocess
 
     try:
-        client = ZoteroLocalAPI()
-
-        # Run async check in sync context
-        async def _check():
-            libraries = await client.list_libraries()
-
-            if not libraries:
-                return False, "No libraries found in Zotero"
-
-            # Look for test library
-            test_lib_id = get_test_library_id()
-            library_ids = [lib["id"] for lib in libraries]
-
-            if test_lib_id not in library_ids:
-                test_url = get_test_library_url()
-                return False, (
-                    f"Test library {test_lib_id} not found. "
-                    f"Please sync test group: {test_url}"
-                )
-
-            return True, None
-
-        # Run the async function
-        return asyncio.run(_check())
-
-    except Exception as e:
-        return False, f"Error checking test library: {e}"
-
-
-def validate_integration_environment(verbose: bool = True) -> dict[str, tuple[bool, Optional[str]]]:
-    """
-    Validate all integration test requirements.
-
-    Returns:
-        Dictionary of check results: {check_name: (passed, error_message)}
-    """
-    checks = {
-        "zotero_running": check_zotero_available(),
-        "model_preset": check_model_preset_valid(),
-        "api_key": check_api_key_available(),
-        "test_library": check_test_library_synced(),
-    }
-
-    if verbose:
-        print("\n" + "=" * 70)
-        print("Integration Test Environment Validation")
-        print("=" * 70)
-
-        for check_name, (passed, error_msg) in checks.items():
-            status = "[PASS]" if passed else "[FAIL]"
-            print(f"{check_name:20s}: {status}")
-
-            if not passed and error_msg:
-                print(f"  -> {error_msg}")
-
-        print("=" * 70)
-
-        # Overall status
-        all_passed = all(passed for passed, _ in checks.values())
-
-        if all_passed:
-            print("[PASS] All checks passed - integration tests ready to run")
+        if sys.platform == 'win32':
+            # On Windows, use taskkill to kill the process tree
+            subprocess.run(
+                ['taskkill', '/F', '/T', '/PID', str(process.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            )
         else:
-            print("[FAIL] Some checks failed - integration tests will be skipped")
-            print("\nTo fix:")
-            print("  1. Start Zotero desktop application")
-            print("  2. Sync test group: https://www.zotero.org/groups/6297749/test-rag-plugin")
-            print("  3. Set KISSKI_API_KEY environment variable")
-            print("  4. Verify MODEL_PRESET (default: remote-kisski)")
+            # On Unix, terminate the process group
+            import signal
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass  # Process already dead
 
-        print("=" * 70 + "\n")
-
-    return checks
+        # Wait for process to fully terminate
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Force kill if still alive
+            process.kill()
+            process.wait()
+    except Exception as e:
+        # Best effort - log but don't fail
+        print(f"[TEST] Warning: Error killing process tree: {e}")
 
 
 # ============================================================================
@@ -207,6 +102,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
+        "api: marks tests that require running backend server (API integration tests)"
+    )
+    config.addinivalue_line(
+        "markers",
         "slow: marks tests as slow (deselect with '-m \"not slow\"')"
     )
 
@@ -216,29 +115,36 @@ def pytest_collection_modifyitems(config, items):
     Pytest hook to modify collected test items.
 
     This runs after test collection, before test execution.
-    If integration tests are selected, validate environment first.
+    If integration or API tests are selected, validate environment first.
     """
-    # Check if any integration tests are selected
+    # Check if any integration or API tests are selected
     has_integration = any(
         item.get_closest_marker("integration") for item in items
     )
+    has_api = any(
+        item.get_closest_marker("api") for item in items
+    )
 
-    if not has_integration:
+    if not (has_integration or has_api):
         return
 
     # Validate environment for integration tests
-    checks = validate_integration_environment(verbose=True)
+    # Note: API tests don't check backend here because test_server fixture will start one
+    checks = validate_test_environment(
+        verbose=True,
+        check_backend=False  # Don't check backend - test_server fixture handles it for API tests
+    )
 
-    # If any check failed, skip all integration tests
+    # If any check failed, skip all integration/API tests
     all_passed = all(passed for passed, _ in checks.values())
 
     if not all_passed:
         skip_marker = pytest.mark.skip(
-            reason="Integration test environment not ready (see validation output above)"
+            reason="Test environment not ready (see validation output above)"
         )
 
         for item in items:
-            if item.get_closest_marker("integration"):
+            if item.get_closest_marker("integration") or item.get_closest_marker("api"):
                 item.add_marker(skip_marker)
 
 
@@ -254,7 +160,7 @@ def integration_environment_validated():
     This can be used as a dependency for other fixtures to ensure
     environment is checked before creating resources.
     """
-    checks = validate_integration_environment(verbose=False)
+    checks = validate_test_environment(verbose=False, check_backend=False)
 
     # Raise if any check failed
     failed_checks = {
@@ -273,34 +179,152 @@ def integration_environment_validated():
     return True
 
 
+@pytest.fixture(scope="session")
+def test_server():
+    """
+    Session-level fixture that starts/stops a test backend server.
+
+    The test server runs on port 8219 (instead of the default 8119)
+    to avoid conflicts with any development servers.
+    """
+    import subprocess
+    import time
+    import httpx
+
+    # Get test server configuration
+    test_port = 8219
+    base_url = get_backend_base_url()
+
+    # Start the test server
+    print(f"\n[TEST] Starting test server on port {test_port}...")
+
+    # Use hardcoded test log file for easy debugging
+    # (Cannot rely on LOG_FILE env var since .env may override .env.test)
+    log_file_path = _project_root / "logs" / "test_server.log"
+    log_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Clear previous test logs
+    if log_file_path.exists():
+        log_file_path.unlink()
+
+    log_file = open(log_file_path, 'w', encoding='utf-8')
+
+    # Create test environment - ensure .env.test settings take precedence
+    test_env = {**os.environ}
+
+    # Override MODEL_PRESET for tests (avoid cpu-only which uses local models)
+    if "MODEL_PRESET" not in test_env or test_env["MODEL_PRESET"] == "cpu-only":
+        test_env["MODEL_PRESET"] = "remote-kisski"
+        print(f"[TEST] Using preset: remote-kisski, logs: {log_file_path}")
+    else:
+        print(f"[TEST] Using preset: {test_env['MODEL_PRESET']}, logs: {log_file_path}")
+
+    # Disable LOG_FILE so all logs go to stdout/stderr (which we capture in test_server.log)
+    # This prevents duplicate logs in app.log and test_server.log
+    test_env["LOG_FILE"] = ""
+
+    # Use uvicorn to start the server with test configuration
+    server_process = subprocess.Popen(
+        [
+            "uv", "run", "uvicorn",
+            "backend.main:app",
+            "--host", "localhost",
+            "--port", str(test_port),
+            "--log-level", "info",  # Changed to info to see more details
+            "--log-config", str(_project_root / "backend" / "logging_config.json")
+        ],
+        stdout=log_file,
+        stderr=subprocess.STDOUT,  # Merge stderr into stdout
+        env=test_env,  # Use test environment with overrides
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+    )
+
+    # Wait for server to be ready (max 60 seconds with longer timeout per check)
+    # Give server initial time to start before first check
+    time.sleep(2)
+
+    server_ready = False
+    for i in range(30):
+        try:
+            response = httpx.get(f"{base_url}/health", timeout=5.0)  # Increased timeout
+            if response.status_code == 200:
+                server_ready = True
+                print(f"[TEST] Test server ready at {base_url}")
+                break
+        except (httpx.ConnectError, httpx.TimeoutException):
+            time.sleep(2)  # Wait 2 seconds between attempts
+
+    if not server_ready:
+        log_file.close()
+        _kill_process_tree(server_process)
+        pytest.fail("Test server failed to start within 60 seconds")
+
+    try:
+        # Yield control to tests
+        yield base_url
+    finally:
+        # Cleanup: Stop the server (always runs, even on test failure)
+        print("\n[TEST] Stopping test server...")
+        log_file.close()
+        _kill_process_tree(server_process)
+        print("[TEST] Test server stopped")
+
+        # Print server logs if there were any errors
+        try:
+            with open(log_file_path, 'r', encoding='utf-8') as f:
+                log_contents = f.read()
+                if "error" in log_contents.lower() or "traceback" in log_contents.lower():
+                    print("\n[TEST] Server log excerpt (errors/tracebacks):")
+                    print("=" * 70)
+                    for line in log_contents.splitlines():
+                        if any(keyword in line.lower() for keyword in ["error", "traceback", "exception"]):
+                            print(line)
+                    print("=" * 70)
+                else:
+                    print(f"\n[TEST] No errors in server logs. Full log at: {log_file_path}")
+        except Exception as e:
+            print(f"[TEST] Could not read server logs: {e}")
+
+
+@pytest.fixture(scope="session")
+def api_environment_validated(test_server):
+    """
+    Session-level fixture for API tests that validates environment and ensures test server is running.
+
+    This fixture depends on test_server, which automatically starts/stops the test server.
+    """
+    # Validate environment without checking backend (test_server fixture handles that)
+    checks = validate_test_environment(verbose=False, check_backend=False)
+
+    # Raise if any check failed
+    failed_checks = {
+        name: error_msg
+        for name, (passed, error_msg) in checks.items()
+        if not passed
+    }
+
+    if failed_checks:
+        error_messages = "\n".join(
+            f"  - {name}: {msg}"
+            for name, msg in failed_checks.items()
+        )
+        pytest.skip(f"Environment validation failed:\n{error_messages}")
+
+    return test_server  # Return the server URL
+
+
 # ============================================================================
-# Helper Functions for Tests
+# Helper Functions for Tests (re-exported from test_environment)
 # ============================================================================
 
-def get_test_library_id() -> str:
-    """Get the test library ID from configuration."""
-    return os.getenv("TEST_LIBRARY_ID", "6297749")
-
-
-def get_test_library_type() -> str:
-    """Get the test library type from configuration."""
-    return os.getenv("TEST_LIBRARY_TYPE", "group")
-
-
-def get_test_library_url() -> str:
-    """Get the test library URL."""
-    lib_id = get_test_library_id()
-    return f"https://www.zotero.org/groups/{lib_id}/test-rag-plugin"
-
-
-def get_expected_min_items() -> int:
-    """Get expected minimum items from configuration."""
-    return int(os.getenv("EXPECTED_MIN_ITEMS", "5"))
-
-
-def get_expected_min_chunks() -> int:
-    """Get expected minimum chunks from configuration."""
-    return int(os.getenv("EXPECTED_MIN_CHUNKS", "50"))
+from backend.tests.test_environment import (
+    get_test_library_id,
+    get_test_library_type,
+    get_test_library_url,
+    get_expected_min_items,
+    get_expected_min_chunks,
+    get_backend_base_url,
+)
 
 
 def pytest_sessionfinish(session, exitstatus):

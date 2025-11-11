@@ -47,10 +47,12 @@ def start_server(dev_mode=True):
         return
 
     # Start the server
+    log_config_path = PROJECT_ROOT / "backend" / "logging_config.json"
     cmd = [
         "uv", "run", "uvicorn", "backend.main:app",
         "--host", HOST,
-        "--port", str(PORT)
+        "--port", str(PORT),
+        "--log-config", str(log_config_path)
     ]
 
     if dev_mode:

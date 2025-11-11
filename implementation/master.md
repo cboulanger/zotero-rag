@@ -528,6 +528,39 @@ The implementation will be considered complete when:
 
 ---
 
+### Phase 4.1: API Integration Testing & Plugin Type Safety - IN PROGRESS 🚧
+
+**Status:** Preparing to implement
+
+**Overview:** Enhanced testing coverage with API-level integration tests and improved plugin code quality with TypeScript JSDoc types.
+
+**Goals:**
+
+1. **API Integration Tests**
+   - Create pytest-based API integration tests with real backend
+   - Test all API endpoints with actual Zotero data and inference
+   - Reuse environment validation from backend tests
+   - Add `api` marker for selective test execution
+   - Add `test:api` npm command
+
+2. **Plugin Type Safety**
+   - Add TypeScript JSDoc annotations to [plugin/src/dialog.js](../plugin/src/dialog.js)
+   - Eliminate all type validation errors
+   - Improve IDE support and code maintainability
+
+**Tasks:**
+
+- [ ] Create shared environment validation module (Step 23a)
+- [ ] Update backend conftest.py to use shared validation (Step 23b)
+- [ ] Create API integration test suite (Step 23c)
+- [ ] Add pytest `api` marker and `test:api` npm command (Step 23d)
+- [ ] Add TypeScript JSDoc types to dialog.js (Step 24)
+- [ ] Document Phase 4.1 progress (Step 25)
+
+**Details:** See [phase4-progress.md](./phase4-progress.md) for comprehensive documentation.
+
+---
+
 ## Available NPM Commands
 
 The project provides several npm scripts for development and testing. All commands should be run from the project root directory.

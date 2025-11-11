@@ -114,6 +114,7 @@ For creating dialog windows in Zotero plugins:
 - Include setup and installation instructions
 - Document configuration options and environment variables
 - Keep inline comments focused on "why" rather than "what"
+- In Javascript files, use TypeScript-compatible JSDOC annotations throughout for typing variables and documenting function parameters. Use the full power or typescript embedded in JSDoc, don't use generic types. Remember this is plain javascript, don't use Typescript directly. 
 
 ## Implementation progress documentation
 
@@ -135,3 +136,9 @@ For creating dialog windows in Zotero plugins:
 - Consider caching for frequently accessed data
 - Profile code to identify bottlenecks before optimizing
 - Document performance considerations for resource-intensive operations
+
+## Calling command line utilities
+
+- Remember or check what platform you are running on to generate the right CLI commands (e.g. Windows PowerShell vs. Mac ZSH or Linux bash)
+- When using python on the command line, always use `uv run python`
+- For more complex tasks, create a python script in the `scripts` dir and run it. 

@@ -10,20 +10,70 @@ import logging
 from backend.config.settings import get_settings
 from backend.api import config, libraries, indexing, query
 
-# Configure logging
+# Get settings to access log configuration
+settings = get_settings()
+
+# Configure logging with both console and file output
+# Use UTF-8 encoding to handle Unicode characters in document titles/metadata
+import sys
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(logging.Formatter(
+    "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+))
+# Ensure UTF-8 encoding for console output on Windows
+if hasattr(console_handler.stream, 'reconfigure'):
+    try:
+        console_handler.stream.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass  # Ignore if reconfigure fails
+
+handlers = [console_handler]
+
+# Only add file handler if log_file is set and not empty
+# Note: Path("") becomes Path(".") so we need to check for that too
+log_file_str = str(settings.log_file).strip() if settings.log_file else ""
+if log_file_str and log_file_str != ".":
+    file_handler = logging.FileHandler(settings.log_file, encoding='utf-8')
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    ))
+    handlers.append(file_handler)
+
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, settings.log_level),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=handlers,
+    force=True  # Override any existing configuration
 )
+
+# Suppress overly verbose third-party loggers
+# Set them to INFO level even if our log level is DEBUG
+logging.getLogger("httpcore").setLevel(logging.INFO)
+logging.getLogger("httpx").setLevel(logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.INFO)
+logging.getLogger("bitsandbytes").setLevel(logging.INFO)
+
+# Configure Uvicorn's access logger to use the same format as application logs
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.handlers = []  # Remove default handlers
+uvicorn_access_logger.propagate = True  # Use root logger's handlers and format
+
+# Also configure uvicorn.error logger for consistency
+uvicorn_error_logger = logging.getLogger("uvicorn.error")
+uvicorn_error_logger.handlers = []
+uvicorn_error_logger.propagate = True
+
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
-    settings = get_settings()
     logger.info(f"Starting Zotero RAG backend v{settings.version}")
     logger.info(f"Using preset: {settings.model_preset}")
+    if settings.log_file:
+        logger.info(f"Logging to file: {settings.log_file}")
     yield
     logger.info("Shutting down Zotero RAG backend")
 

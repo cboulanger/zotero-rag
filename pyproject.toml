@@ -38,10 +38,11 @@ python_functions = "test_*"
 asyncio_mode = "auto"
 markers = [
     "integration: marks tests that require real external services (Zotero, APIs)",
+    "api: marks tests that require running backend server (API integration tests)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
-# Default: skip integration tests unless explicitly requested
-addopts = "-m 'not integration'"
+# Default: skip integration and API tests unless explicitly requested
+addopts = "-m 'not integration and not api'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]

@@ -13,6 +13,7 @@
     "test:backend:coverage": "uv run pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term",
     "test:integration": "uv run pytest -m integration -v -s",
     "test:integration:quick": "uv run pytest -m integration backend/tests/test_real_integration.py::test_zotero_connectivity backend/tests/test_real_integration.py::test_embedding_service backend/tests/test_real_integration.py::test_llm_service_connectivity -v -s",
+    "test:api": "uv run pytest -m api -v -s",
     "test:all": "uv run pytest -v -s",
     "server:start": "uv run python scripts/server.py start",
     "server:start:prod": "uv run python scripts/server.py start --prod",

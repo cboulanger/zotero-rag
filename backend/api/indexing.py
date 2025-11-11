@@ -48,13 +48,14 @@ class IndexingProgressEvent(BaseModel):
 active_jobs = {}
 
 
-async def index_library_task(library_id: str, force_reindex: bool = False):
+async def index_library_task(library_id: str, force_reindex: bool = False, max_items: Optional[int] = None):
     """
     Background task to index a library.
 
     Args:
         library_id: Zotero library ID to index.
         force_reindex: If True, reindex all items even if already indexed.
+        max_items: Optional maximum number of items to process (for testing).
     """
     settings = get_settings()
     job_id = f"index_{library_id}"
@@ -74,36 +75,49 @@ async def index_library_task(library_id: str, force_reindex: bool = False):
             active_jobs[job_id]["message"] = "Loading configuration..."
             preset = settings.get_hardware_preset()
 
+            # Determine library type by checking available libraries
+            active_jobs[job_id]["message"] = "Detecting library type..."
+            libraries = await zotero_client.list_libraries()
+            library_type = "user"  # Default
+            for lib in libraries:
+                if lib["id"] == library_id:
+                    library_type = lib["type"]
+                    logger.info(f"Detected library {library_id} as type '{library_type}'")
+                    break
+
             active_jobs[job_id]["message"] = f"Loading embedding model ({preset.embedding.model_name})..."
             embedding_service = create_embedding_service(
                 preset.embedding,
                 cache_dir=str(settings.model_weights_path),
-                hf_token=settings.hf_token
+                hf_token=settings.get_api_key("HF_TOKEN")
             )
 
             active_jobs[job_id]["message"] = "Initializing vector database..."
-            vector_store = VectorStore(
+            # Use context manager to ensure VectorStore is closed after indexing
+            with VectorStore(
                 storage_path=settings.vector_db_path,
                 embedding_dim=embedding_service.get_embedding_dim()
-            )
+            ) as vector_store:
 
-            active_jobs[job_id]["message"] = "Starting document indexing..."
-            processor = DocumentProcessor(
-                zotero_client=zotero_client,
-                embedding_service=embedding_service,
-                vector_store=vector_store
-            )
+                active_jobs[job_id]["message"] = "Starting document indexing..."
+                processor = DocumentProcessor(
+                    zotero_client=zotero_client,
+                    embedding_service=embedding_service,
+                    vector_store=vector_store
+                )
 
-            # Index the library
-            await processor.index_library(
-                library_id=library_id,
-                force_reindex=force_reindex,
-                progress_callback=lambda current, total: active_jobs[job_id].update({
-                    "progress": (current / total * 100) if total > 0 else 0,
-                    "current_item": current,
-                    "total_items": total
-                })
-            )
+                # Index the library
+                await processor.index_library(
+                    library_id=library_id,
+                    library_type=library_type,
+                    force_reindex=force_reindex,
+                    progress_callback=lambda current, total: active_jobs[job_id].update({
+                        "progress": (current / total * 100) if total > 0 else 0,
+                        "current_item": current,
+                        "total_items": total
+                    }),
+                    max_items=max_items
+                )
 
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["progress"] = 100
@@ -115,7 +129,11 @@ async def index_library_task(library_id: str, force_reindex: bool = False):
 
 
 @router.post("/index/library/{library_id}", response_model=IndexingResponse)
-async def start_library_indexing(library_id: str, force_reindex: bool = False):
+async def start_library_indexing(
+    library_id: str,
+    force_reindex: bool = False,
+    max_items: Optional[int] = None
+):
     """
     Start indexing a Zotero library.
 
@@ -125,6 +143,7 @@ async def start_library_indexing(library_id: str, force_reindex: bool = False):
     Args:
         library_id: Zotero library ID to index.
         force_reindex: If True, reindex all items even if already indexed.
+        max_items: Optional maximum number of items to process (for testing).
 
     Returns:
         Status message indicating indexing has started.
@@ -158,7 +177,7 @@ async def start_library_indexing(library_id: str, force_reindex: bool = False):
         )
 
     # Start background task
-    asyncio.create_task(index_library_task(library_id, force_reindex))
+    asyncio.create_task(index_library_task(library_id, force_reindex, max_items))
 
     return IndexingResponse(
         library_id=library_id,
