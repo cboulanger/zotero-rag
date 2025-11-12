@@ -64,7 +64,7 @@ class TestLibrariesAPI(unittest.TestCase):
         """Test GET /api/libraries endpoint."""
         # Mock Zotero client
         mock_client = AsyncMock()
-        mock_client.get_libraries.return_value = [
+        mock_client.list_libraries.return_value = [
             {"id": "1", "name": "My Library", "type": "user", "version": 100},
             {"id": "2", "name": "Group Library", "type": "group", "version": 50}
         ]
@@ -84,7 +84,7 @@ class TestLibrariesAPI(unittest.TestCase):
         """Test GET /api/libraries with connection error."""
         # Mock connection error
         mock_client = AsyncMock()
-        mock_client.get_libraries.side_effect = Exception("Connection refused")
+        mock_client.list_libraries.side_effect = Exception("Connection refused")
         mock_zotero_class.return_value.__aenter__.return_value = mock_client
 
         response = self.client.get("/api/libraries")

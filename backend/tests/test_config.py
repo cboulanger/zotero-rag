@@ -94,15 +94,23 @@ class TestSettings(unittest.TestCase):
     def test_default_settings(self):
         """Test default settings values."""
         # Clear MODEL_PRESET from environment to test actual defaults
-        with patch.dict(os.environ, {"MODEL_PRESET": ""}, clear=False):
-            # Need to remove the key entirely, not just set to empty string
-            if "MODEL_PRESET" in os.environ:
-                env_copy = os.environ.copy()
-                del env_copy["MODEL_PRESET"]
-                with patch.dict(os.environ, env_copy, clear=True):
-                    settings = Settings()
-            else:
-                settings = Settings()
+        # Remove both MODEL_PRESET and LOG_LEVEL to test true defaults
+        env_vars_to_remove = ["MODEL_PRESET", "LOG_LEVEL"]
+        env_copy = {k: v for k, v in os.environ.items() if k not in env_vars_to_remove}
+
+        with patch.dict(os.environ, env_copy, clear=True):
+            # Also need to prevent pydantic from loading .env file
+            # by temporarily patching the model_config
+            from backend.config.settings import Settings as OrigSettings
+
+            # Create a Settings class without env_file for this test
+            class TestSettings(OrigSettings):
+                model_config = OrigSettings.model_config.copy()
+
+            # Remove env_file from config to prevent .env loading
+            TestSettings.model_config['env_file'] = None
+
+            settings = TestSettings()
 
             self.assertEqual(settings.api_host, "localhost")
             self.assertEqual(settings.api_port, 8119)

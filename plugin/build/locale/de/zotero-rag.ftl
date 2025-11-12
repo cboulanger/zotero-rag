@@ -1,3 +1,0 @@
-# Zotero RAG Plugin Localization (German)
-
-zotero-rag-ask-question = Frage stellen...

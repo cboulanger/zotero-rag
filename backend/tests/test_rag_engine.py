@@ -372,6 +372,7 @@ class TestSourceInfo(unittest.TestCase):
         """Test creating SourceInfo with all fields."""
         source = SourceInfo(
             item_id="ABC123",
+            library_id="12345",
             title="Test Document",
             page_number=42,
             text_anchor="This is the beginning",
@@ -379,6 +380,7 @@ class TestSourceInfo(unittest.TestCase):
         )
 
         self.assertEqual(source.item_id, "ABC123")
+        self.assertEqual(source.library_id, "12345")
         self.assertEqual(source.title, "Test Document")
         self.assertEqual(source.page_number, 42)
         self.assertEqual(source.text_anchor, "This is the beginning")
@@ -388,11 +390,13 @@ class TestSourceInfo(unittest.TestCase):
         """Test creating SourceInfo with only required fields."""
         source = SourceInfo(
             item_id="ABC123",
+            library_id="12345",
             title="Test Document",
             score=0.85,
         )
 
         self.assertEqual(source.item_id, "ABC123")
+        self.assertEqual(source.library_id, "12345")
         self.assertEqual(source.title, "Test Document")
         self.assertIsNone(source.page_number)
         self.assertIsNone(source.text_anchor)
@@ -407,6 +411,7 @@ class TestQueryResult(unittest.TestCase):
         sources = [
             SourceInfo(
                 item_id="ABC123",
+                library_id="12345",
                 title="Doc 1",
                 page_number=5,
                 text_anchor="Preview text",
@@ -414,6 +419,7 @@ class TestQueryResult(unittest.TestCase):
             ),
             SourceInfo(
                 item_id="DEF456",
+                library_id="12345",
                 title="Doc 2",
                 score=0.88,
             ),
