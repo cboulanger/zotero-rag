@@ -87,14 +87,17 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-          # Get the most recent version tag
-          LATEST_TAG=$(git describe --tags --abbrev=0)
+          # Get the most recent version tag (exit gracefully if no tags exist)
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 
-          # Only update if it's not a pre-release (no hyphen)
-          if [[ ! "$LATEST_TAG" =~ - ]]; then
+          # Only update if a tag exists and it's not a pre-release (no hyphen)
+          if [[ -n "$LATEST_TAG" && ! "$LATEST_TAG" =~ - ]]; then
+            echo "Updating latest and stable tags to $LATEST_TAG"
             git tag -f latest
             git tag -f stable
             git push origin latest --force
             git push origin stable --force
+          else
+            echo "No version tags found or latest tag is a pre-release. Skipping tag update."
           fi
 
