@@ -1,3 +1,10 @@
+## [1.0.1](https://github.com/cboulanger/zotero-rag/compare/v1.0.0...v1.0.1) (2025-11-12)
+
+
+### Bug Fixes
+
+* **ci:** Fix release script ([2e603d0](https://github.com/cboulanger/zotero-rag/commit/2e603d0c8825715e0ce2059f91c3a9c1604d309a))
+
 # 1.0.0 (2025-11-12)
 
 
