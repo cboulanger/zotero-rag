@@ -1,143 +1,144 @@
 # Zotero RAG Plugin
 
-A Zotero plugin that enables question-answering over your Zotero library using Retrieval-Augmented Generation (RAG).
+A Zotero plugin that enables semantic search and question-answering over your research library using Retrieval-Augmented Generation (RAG).
 
-## Features
+## Quick Start
 
-- **Ask Questions**: Query your Zotero library using natural language
-- **Multi-Library Search**: Search across multiple libraries simultaneously
-- **Automatic Indexing**: Automatically indexes new libraries in the background
-- **Progress Tracking**: Real-time progress updates during library indexing
-- **Smart Citations**: Generated answers include links to source PDFs with page numbers
-- **Note Integration**: Creates formatted notes in your current collection
+### 1. Install Plugin
 
-## Installation
+```bash
+# Build the plugin XPI
+npm run plugin:build
 
-### Prerequisites
+# In Zotero:
+# Tools → Add-ons → Gear icon → Install Add-on From File
+# Select: plugin/dist/zotero-rag-0.1.0.xpi
+# Restart Zotero
+```
 
-1. Zotero 7 or later
-2. FastAPI backend server running (see [backend documentation](../backend/README.md))
+### 2. Start Backend Server
 
-### Installing the Plugin
+```bash
+# From project root
+npm run server:start
 
-1. Build the plugin:
-   ```bash
-   npm run plugin:build
-   ```
+# Server starts at http://localhost:8119
+```
 
-2. In Zotero:
-   - Go to **Tools > Add-ons**
-   - Click the gear icon and select **Install Add-on From File**
-   - Select `plugin/dist/zotero-rag-x.x.x.xpi`
+### 3. Configure Plugin (Optional)
 
-3. Restart Zotero
+In Zotero: **Edit → Preferences → Zotero RAG**
+- Backend URL: `http://localhost:8119` (default)
+- Max Concurrent Queries: `5` (default)
 
-## Configuration
+### 4. Ask a Question
 
-### Backend URL
-
-Configure the backend server URL in Zotero preferences:
-
-1. Go to **Edit > Preferences** (or **Zotero > Preferences** on macOS)
-2. Select the **Zotero RAG** tab
-3. Enter your backend URL (default: `http://localhost:8119`)
-
-### Performance Settings
-
-- **Max Concurrent Queries**: Limit simultaneous queries (default: 5)
-
-## Usage
-
-### Asking Questions
-
-1. Go to **Tools > Ask Question...**
-2. Enter your question in the text area
-3. Select the libraries you want to search
+1. **Tools → Ask Question...**
+2. Enter your question
+3. Select libraries to search
 4. Click **Submit**
 
 The plugin will:
-- Check if selected libraries are indexed (and index them if needed)
-- Show progress for any indexing operations
-- Submit your query to the backend
-- Create a note with the answer and source citations
+- Index selected libraries (if needed) with real-time progress
+- Query the indexed content using RAG
+- Create a note in your collection with:
+  - The generated answer
+  - Citations linking to source PDFs (with page numbers)
+  - Metadata (timestamp, libraries searched)
 
-### Note Format
+## Features
 
-Generated notes include:
-- **Question**: Your original question
-- **Answer**: The generated response
-- **Sources**: Links to source PDFs with page numbers (when available)
-- **Metadata**: Timestamp and libraries searched
+- **Natural Language Queries**: Ask questions about your research in plain English
+- **Multi-Library Search**: Query across multiple Zotero libraries simultaneously
+- **Automatic Indexing**: Background indexing with real-time progress tracking
+- **Smart Citations**: Answers include clickable Zotero links to source PDFs with page numbers
+- **Note Integration**: Results saved as formatted notes in your current collection
 
-### Citations
+## How It Works
 
-Citations are formatted as Zotero links:
-- Click on a source link to jump to the source document in your library
-- Page numbers are included when available (e.g., "Source, p. 42")
-- Text anchors are shown when page numbers are unavailable
+1. **Indexing**: PDFs are extracted, chunked semantically, embedded, and stored in a vector database
+2. **Querying**: Your question is embedded and used to retrieve relevant text chunks
+3. **Generation**: An LLM generates an answer based on retrieved context and cites sources
+4. **Note Creation**: The answer and citations are formatted as an HTML note in Zotero
 
-## Development
+## Requirements
 
-### Building from Source
+- **Zotero**: Version 7 or later
+- **Backend Server**: FastAPI server must be running (see [docs/cli.md](../docs/cli.md))
+- **PDFs**: Items in your library must have PDF attachments with extractable text
+
+## Configuration
+
+### Hardware Presets
+
+Configure in `.env` file (project root):
 
 ```bash
-# Build the plugin
-npm run plugin:build
-
-# The XPI file will be created in plugin/dist/
+MODEL_PRESET=mac-mini-m4-16gb  # Or: cpu-only, gpu-high-memory, remote-openai, remote-kisski
 ```
+
+See [docs/architecture.md](../docs/architecture.md#configuration-system) for preset details.
+
+### API Keys (for remote presets)
+
+```bash
+# In .env file
+KISSKI_API_KEY=your_key_here      # For remote-kisski preset
+OPENAI_API_KEY=sk-...             # For remote-openai preset
+```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| "Backend server is not available" | Start server: `npm run server:start` |
+| "No results found" | Verify libraries are indexed and contain PDFs with text |
+| Indexing fails | Check Zotero is running, PDFs are attached to items |
+| Plugin doesn't appear | Restart Zotero after installation |
+
+**Check server status:**
+```bash
+npm run server:status
+curl http://localhost:8119/health
+```
+
+## Development
 
 ### Project Structure
 
 ```
 plugin/
 ├── src/
-│   ├── bootstrap.js      # Plugin lifecycle hooks
-│   ├── zotero-rag.js     # Main plugin logic
-│   ├── dialog.xhtml      # Query dialog UI
-│   ├── dialog.js         # Dialog logic
-│   ├── preferences.xhtml # Preferences UI
-│   └── preferences.js    # Preferences logic
-├── locale/
-│   └── en-US/
-│       └── zotero-rag.ftl # Localization strings
-├── manifest.json         # Plugin manifest
-└── README.md
+│   ├── bootstrap.js         # Plugin lifecycle
+│   ├── zotero-rag.js        # Main logic (HTTP, SSE, note creation)
+│   ├── dialog.xhtml/js      # Query dialog UI
+│   ├── preferences.xhtml/js # Settings UI
+│   └── *.css                # Styling
+├── locale/en-US/            # Localization
+├── manifest.json            # Plugin metadata
+└── dist/                    # Build output (XPI)
 ```
 
-## Troubleshooting
+### Build
 
-### Backend Not Available
+```bash
+npm run plugin:build  # Creates plugin/dist/zotero-rag-{version}.xpi
+```
 
-If you see "Backend server is not available" errors:
-1. Ensure the FastAPI backend is running (`npm run server:start`)
-2. Check that the backend URL in preferences is correct
-3. Verify the backend is accessible at the configured URL
+### Plugin Architecture
 
-### Indexing Errors
+- **HTML5 UI**: Modern HTML/CSS (no XUL dependency)
+- **REST API**: Query submission, library status
+- **SSE Streaming**: Real-time indexing progress
+- **Note Formatting**: HTML with Zotero item links
 
-If library indexing fails:
-1. Check that Zotero's local API is enabled (it should be by default)
-2. Ensure PDFs are attached to items in your library
-3. Check backend logs for detailed error messages
+## Documentation
 
-### No Results
-
-If queries return no results:
-- Verify that your libraries have been indexed successfully
-- Try searching with different keywords
-- Check that items in your library have PDF attachments with extractable text
-
-## Architecture
-
-The plugin communicates with the FastAPI backend via:
-- **REST API**: For submitting queries and managing configuration
-- **Server-Sent Events (SSE)**: For real-time indexing progress updates
+- [Architecture Documentation](../docs/architecture.md) - System design and components
+- [CLI Commands](../docs/cli.md) - Server management and testing
+- [Testing Guide](../docs/testing.md) - Unit and integration tests
+- [Implementation Progress](../implementation/master.md) - Development status
 
 ## License
 
 ISC
-
-## Support
-
-For issues and feature requests, please visit: https://github.com/yourusername/zotero-rag/issues

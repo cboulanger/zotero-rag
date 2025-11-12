@@ -21,9 +21,7 @@
     "server:stop": "uv run python scripts/server.py stop",
     "server:restart": "uv run python scripts/server.py restart",
     "server:status": "uv run python scripts/server.py status",
-    "plugin:build": "uv run python scripts/build_plugin.py"
-  },
-  "devDependencies": {
-    "archiver": "^7.0.1"
+    "plugin:build": "uv run python scripts/build_plugin.py",
+    "plugin:watch": "uv run python scripts/build_plugin.py --watch"
   }
 }

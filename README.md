@@ -2,58 +2,55 @@
 
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
 
-## Documentation
-
-- **[Testing Guide](docs/testing.md)** - Comprehensive testing documentation
-- **[Integration Testing Quick Start](docs/integration-testing-quickstart.md)** - Quick reference for running integration tests
-- **[Implementation Plan](implementation/master.md)** - Project roadmap and progress
-- **[Phase 1.5 Progress](implementation/phase1.5-progress.md)** - RAG implementation details
-
 ## Quick Start
 
-### Running Unit Tests
+### 1. Start the Backend Server
+
+The plugin requires a local server to process your questions. Start it with:
 
 ```bash
-# Run all unit tests (fast, no setup required)
-npm run test:backend
-
-# With coverage report
-npm run test:backend:coverage
-```
-
-### Running Integration Tests
-
-Integration tests validate the system with real Zotero and live API services.
-
-**Prerequisites:**
-1. Zotero running with test group synced: https://www.zotero.org/groups/6297749/test-rag-plugin
-2. API key configured (e.g., KISSKI_API_KEY)
-
-```bash
-# Quick health check
-npm run test:integration:quick
-
-# Full integration suite
-npm run test:integration
-
-# Everything (unit + integration)
-npm run test:all
-```
-
-See [Integration Testing Quick Start](docs/integration-testing-quickstart.md) for detailed setup instructions.
-
-### Backend Server
-
-```bash
-# Start development server
 npm run server:start
+```
 
-# Check status
+The server will run at http://localhost:8119. You can check if it's running:
+
+```bash
 npm run server:status
+```
 
-# Stop server
+To stop the server later:
+
+```bash
 npm run server:stop
 ```
+
+### 2. Install the Plugin in Zotero
+
+1. Download the plugin file: `plugin/dist/zotero-rag-0.1.0.xpi`
+2. Open Zotero
+3. Go to **Tools → Add-ons**
+4. Click the gear icon and select **Install Add-on From File**
+5. Select the `zotero-rag-0.1.0.xpi` file
+6. Restart Zotero when prompted
+
+### 3. Using the Plugin
+
+Once installed:
+
+1. Open your Zotero library
+2. Select a library (user or group)
+3. Open the "Tools" menu and then click on the "Zotero RAG" menu item
+4. In the dialog, the current library will be pre-selected, but you can add additional ones to search.
+4. Ask questions that can be answered by the PDF documents contained in the selected libraries
+5. The plugin will search through your documents and provide answers with source citations. The initial indexing of the library might take some time depending on the server hardware, subsequent queries will be much faster. 
+
+The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
+
+## Developer Documentation
+
+- **[Application architecture](docs/architecture.md)** - CLI commands
+- **[Testing Guide](docs/testing.md)** - Comprehensive testing documentation
+- **[CLI](docs/cli.md)** - CLI commands
 
 ## License
 
