@@ -357,3 +357,4 @@ Build script copies src → build, then creates XPI from build directory.
 - Zotero 8 docs: <https://www.zotero.org/support/dev/zotero_8_for_developers>
   - note, in particular: "A new API allows plugins to create custom menu items in Zotero's menu popups. Plugins should use this official API if possible rather than manually injecting content."
 - Key insight: Pragmatic approach - prefer HTML but accept XUL where necessary (menus, dialogs)
+- Zotero's synchronization technical documentation: https://www.zotero.org/support/dev/web_api/v3/syncing

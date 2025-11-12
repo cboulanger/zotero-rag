@@ -21,6 +21,7 @@ from qdrant_client.models import (
 )
 
 from backend.models.document import DocumentChunk, ChunkMetadata, SearchResult, DeduplicationRecord
+from backend.models.library import LibraryIndexMetadata
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ class VectorStore:
 
     CHUNKS_COLLECTION = "document_chunks"
     DEDUP_COLLECTION = "deduplication"
+    METADATA_COLLECTION = "library_metadata"
 
     def __init__(
         self,
@@ -93,6 +95,22 @@ class VectorStore:
                 ),
             )
 
+        if self.METADATA_COLLECTION not in collection_names:
+            logger.info(f"Creating collection: {self.METADATA_COLLECTION}")
+            self.client.create_collection(
+                collection_name=self.METADATA_COLLECTION,
+                vectors_config=VectorParams(
+                    size=1,  # Dummy vector
+                    distance=Distance.COSINE,
+                ),
+            )
+            # Create index on library_id for fast lookups
+            self.client.create_payload_index(
+                collection_name=self.METADATA_COLLECTION,
+                field_name="library_id",
+                field_schema="keyword"
+            )
+
     def add_chunk(self, chunk: DocumentChunk) -> str:
         """
         Add a document chunk to the vector store.
@@ -129,6 +147,12 @@ class VectorStore:
                 "text_preview": chunk.metadata.text_preview,
                 "chunk_index": chunk.metadata.chunk_index,
                 "content_hash": chunk.metadata.content_hash,
+                # Version tracking fields (schema v2)
+                "item_version": chunk.metadata.item_version,
+                "attachment_version": chunk.metadata.attachment_version,
+                "indexed_at": chunk.metadata.indexed_at,
+                "zotero_modified": chunk.metadata.zotero_modified,
+                "schema_version": chunk.metadata.schema_version,
             },
         )
 
@@ -180,6 +204,12 @@ class VectorStore:
                     "text_preview": chunk.metadata.text_preview,
                     "chunk_index": chunk.metadata.chunk_index,
                     "content_hash": chunk.metadata.content_hash,
+                    # Version tracking fields (schema v2)
+                    "item_version": chunk.metadata.item_version,
+                    "attachment_version": chunk.metadata.attachment_version,
+                    "indexed_at": chunk.metadata.indexed_at,
+                    "zotero_modified": chunk.metadata.zotero_modified,
+                    "schema_version": chunk.metadata.schema_version,
                 },
             )
             points.append(point)
@@ -383,13 +413,176 @@ class VectorStore:
         """
         chunks_info = self.client.get_collection(self.CHUNKS_COLLECTION)
         dedup_info = self.client.get_collection(self.DEDUP_COLLECTION)
+        metadata_info = self.client.get_collection(self.METADATA_COLLECTION)
 
         return {
             "chunks_count": chunks_info.points_count,
             "dedup_count": dedup_info.points_count,
+            "metadata_count": metadata_info.points_count,
             "embedding_dim": self.embedding_dim,
             "distance": self.distance.value if hasattr(self.distance, 'value') else str(self.distance),
         }
+
+    # Library Metadata Methods
+
+    def get_library_metadata(self, library_id: str) -> Optional[LibraryIndexMetadata]:
+        """
+        Get indexing metadata for a library.
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            Library metadata if found, None otherwise
+        """
+        try:
+            points = self.client.retrieve(
+                collection_name=self.METADATA_COLLECTION,
+                ids=[library_id]
+            )
+            if points:
+                return LibraryIndexMetadata(**points[0].payload)
+            return None
+        except Exception as e:
+            logger.error(f"Error retrieving library metadata: {e}")
+            return None
+
+    def update_library_metadata(self, metadata: LibraryIndexMetadata):
+        """
+        Update or create library metadata.
+
+        Args:
+            metadata: Library metadata to store
+        """
+        point = PointStruct(
+            id=metadata.library_id,
+            vector=[0.0],  # Dummy vector
+            payload=metadata.model_dump()
+        )
+        self.client.upsert(
+            collection_name=self.METADATA_COLLECTION,
+            points=[point]
+        )
+        logger.info(f"Updated metadata for library {metadata.library_id}")
+
+    def mark_library_for_reset(self, library_id: str):
+        """
+        Mark library for full reindex (hard reset).
+
+        Args:
+            library_id: Library ID
+        """
+        metadata = self.get_library_metadata(library_id)
+        if metadata:
+            metadata.force_reindex = True
+            self.update_library_metadata(metadata)
+            logger.info(f"Library {library_id} marked for hard reset")
+        else:
+            # Create new metadata with reset flag
+            metadata = LibraryIndexMetadata(
+                library_id=library_id,
+                library_type="user",  # Will be updated during next index
+                library_name="Unknown",
+                force_reindex=True
+            )
+            self.update_library_metadata(metadata)
+
+    def get_all_library_metadata(self) -> list[LibraryIndexMetadata]:
+        """
+        Get metadata for all indexed libraries.
+
+        Returns:
+            List of library metadata objects
+        """
+        try:
+            results, _ = self.client.scroll(
+                collection_name=self.METADATA_COLLECTION,
+                limit=100  # Reasonable limit for number of libraries
+            )
+            return [LibraryIndexMetadata(**p.payload) for p in results]
+        except Exception as e:
+            logger.error(f"Error retrieving all library metadata: {e}")
+            return []
+
+    # Version-Aware Chunk Methods
+
+    def get_item_chunks(self, library_id: str, item_key: str) -> list[dict]:
+        """
+        Get all chunks for a specific item.
+
+        Args:
+            library_id: Library ID
+            item_key: Item key
+
+        Returns:
+            List of chunk dictionaries with id and payload
+        """
+        results = self.client.scroll(
+            collection_name=self.CHUNKS_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                FieldCondition(key="item_key", match=MatchValue(value=item_key))
+            ]),
+            limit=1000  # Max chunks per item
+        )
+        return [{"id": p.id, "payload": p.payload} for p in results[0]]
+
+    def get_item_version(self, library_id: str, item_key: str) -> Optional[int]:
+        """
+        Get the indexed version of an item (from any of its chunks).
+
+        Args:
+            library_id: Library ID
+            item_key: Item key
+
+        Returns:
+            Item version if found, None if not indexed or legacy chunk without version
+        """
+        chunks = self.get_item_chunks(library_id, item_key)
+        if chunks and "item_version" in chunks[0]["payload"]:
+            return chunks[0]["payload"]["item_version"]
+        return None  # Not indexed or legacy chunk without version
+
+    def delete_item_chunks(self, library_id: str, item_key: str) -> int:
+        """
+        Delete all chunks for a specific item.
+
+        Args:
+            library_id: Library ID
+            item_key: Item key
+
+        Returns:
+            Number of chunks deleted
+        """
+        chunks = self.get_item_chunks(library_id, item_key)
+        if not chunks:
+            return 0
+
+        chunk_ids = [c["id"] for c in chunks]
+        self.client.delete(
+            collection_name=self.CHUNKS_COLLECTION,
+            points_selector=chunk_ids
+        )
+        logger.info(f"Deleted {len(chunk_ids)} chunks for item {item_key}")
+        return len(chunk_ids)
+
+    def count_library_chunks(self, library_id: str) -> int:
+        """
+        Count total chunks for a library.
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            Number of chunks
+        """
+        result = self.client.count(
+            collection_name=self.CHUNKS_COLLECTION,
+            count_filter=Filter(must=[
+                FieldCondition(key="library_id", match=MatchValue(value=library_id))
+            ])
+        )
+        return result.count
 
     def close(self):
         """
