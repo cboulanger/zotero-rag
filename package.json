@@ -6,6 +6,26 @@
   "author": "",
   "type": "commonjs",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/zotero-rag.git"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^18.4.0",
+    "@commitlint/config-conventional": "^18.4.0",
+    "commitizen": "^4.3.0",
+    "cz-conventional-changelog": "^3.3.0",
+    "husky": "^8.0.3",
+    "semantic-release": "^22.0.0",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/exec": "^6.0.3"
+  },
+  "config": {
+    "commitizen": {
+      "path": "./node_modules/cz-conventional-changelog"
+    }
+  },
   "scripts": {
     "start": "uv run python scripts/server.py start --prod",
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -22,6 +42,8 @@
     "server:restart": "uv run python scripts/server.py restart",
     "server:status": "uv run python scripts/server.py status",
     "plugin:build": "uv run python scripts/build_plugin.py",
-    "plugin:watch": "uv run python scripts/build_plugin.py --watch"
+    "plugin:watch": "uv run python scripts/build_plugin.py --watch",
+    "semantic-release": "semantic-release",
+    "commit": "cz"
   }
 }
