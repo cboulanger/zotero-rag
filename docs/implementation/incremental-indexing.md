@@ -2057,11 +2057,22 @@ def test_backward_compatibility():
 
 ### In Progress
 
-- [ ] **Step 2: Enhance Zotero Local API Client**
 - [ ] **Step 3: Update Document Processor**
 - [ ] **Step 4: Add API Endpoints**
 - [ ] **Step 5: Plugin UI Updates**
 - [ ] **Step 6: Testing**
+
+### Completed Steps (Continued)
+
+- [x] **Step 2: Enhance Zotero Local API Client** (COMPLETED)
+  - [x] Added `get_library_items_since()` method with `?since=<version>` parameter support
+  - [x] Added automatic pagination for large result sets
+  - [x] Added `get_library_version_range()` method to get min/max versions
+  - [x] Added `get_item_with_version()` method to fetch single items with version info
+  - [x] Added `get_attachment_with_version()` method (wrapper for item fetching)
+  - [x] Deprecated old `get_library_items()` method (now calls new method for backward compatibility)
+  - [x] Created comprehensive unit tests (9 tests, all passing)
+  - [x] Verified backward compatibility with existing code
 
 ### Files Modified
 
@@ -2069,3 +2080,5 @@ def test_backward_compatibility():
 - `backend/models/document.py` (updated)
 - `backend/models/__init__.py` (updated)
 - `backend/db/vector_store.py` (updated)
+- `backend/zotero/local_api.py` (updated)
+- `backend/tests/test_zotero_client_versions.py` (created)
