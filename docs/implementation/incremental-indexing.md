@@ -2057,7 +2057,6 @@ def test_backward_compatibility():
 
 ### In Progress
 
-- [ ] **Step 3: Update Document Processor**
 - [ ] **Step 4: Add API Endpoints**
 - [ ] **Step 5: Plugin UI Updates**
 - [ ] **Step 6: Testing**
@@ -2074,6 +2073,21 @@ def test_backward_compatibility():
   - [x] Created comprehensive unit tests (9 tests, all passing)
   - [x] Verified backward compatibility with existing code
 
+- [x] **Step 3: Update Document Processor** (COMPLETED)
+  - [x] Updated `index_library()` method signature to accept `mode` and `library_name` parameters
+  - [x] Added logic to determine effective indexing mode (auto/incremental/full)
+  - [x] Implemented `_index_library_incremental()` method for incremental indexing
+  - [x] Implemented `_index_library_full()` method for full reindexing
+  - [x] Implemented `_index_item()` helper method for single item indexing
+  - [x] Implemented `_filter_items_with_pdfs()` helper method for PDF filtering
+  - [x] Updated chunk metadata creation to include version fields (item_version, attachment_version, indexed_at, zotero_modified)
+  - [x] Added logic to update library metadata after indexing completion
+  - [x] Added version comparison logic to detect new vs. updated items
+  - [x] Implemented automatic mode selection based on library state
+  - [x] Added support for hard reset flag to force full reindexing
+  - [x] Created comprehensive unit tests (6 tests, all passing)
+  - [x] Verified incremental and full indexing modes work correctly
+
 ### Files Modified
 
 - `backend/models/library.py` (created)
@@ -2081,4 +2095,6 @@ def test_backward_compatibility():
 - `backend/models/__init__.py` (updated)
 - `backend/db/vector_store.py` (updated)
 - `backend/zotero/local_api.py` (updated)
+- `backend/services/document_processor.py` (updated)
 - `backend/tests/test_zotero_client_versions.py` (created)
+- `backend/tests/test_incremental_indexing.py` (created)
