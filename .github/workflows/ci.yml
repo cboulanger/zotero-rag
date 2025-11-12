@@ -7,9 +7,31 @@ on:
     branches: [main, develop]
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for backend changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+
   test:
     name: Run Tests
     runs-on: ubuntu-latest
+    needs: changes
+    # Only run if backend files changed
+    if: needs.changes.outputs.backend == 'true'
 
     steps:
       - name: Checkout code
@@ -32,7 +54,11 @@ jobs:
   build-plugin:
     name: Build Plugin
     runs-on: ubuntu-latest
-    needs: test
+    needs: [changes, test]
+    # Run if test passed OR if test was skipped (no backend changes)
+    if: |
+      always() &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
 
     steps:
       - name: Checkout code
