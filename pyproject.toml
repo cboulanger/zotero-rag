@@ -1,6 +1,6 @@
 [project]
 name = "zotero-rag"
-version = "0.1.0"
+version = "1.0.0"
 description = "Zotero-integrated RAG system with FastAPI backend and Zotero plugin"
 readme = "README.md"
 requires-python = ">=3.12"
