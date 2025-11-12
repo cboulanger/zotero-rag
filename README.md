@@ -12,7 +12,7 @@ The plugin requires a local server to process your questions. Start it with:
 npm run server:start
 ```
 
-The server will run at http://localhost:8119. You can check if it's running:
+The server will run at <http://localhost:8119>. You can check if it's running:
 
 ```bash
 npm run server:status
@@ -41,16 +41,17 @@ Once installed:
 2. Select a library (user or group)
 3. Open the "Tools" menu and then click on the "Zotero RAG" menu item
 4. In the dialog, the current library will be pre-selected, but you can add additional ones to search.
-4. Ask questions that can be answered by the PDF documents contained in the selected libraries
-5. The plugin will search through your documents and provide answers with source citations. The initial indexing of the library might take some time depending on the server hardware, subsequent queries will be much faster. 
+5. Ask questions that can be answered by the PDF documents contained in the selected libraries
+6. The plugin will search through your documents and provide answers with source citations. The initial indexing of the library might take some time depending on the server hardware, subsequent queries will be much faster.
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
 
 ## Developer Documentation
 
-- **[Application architecture](docs/architecture.md)** - CLI commands
-- **[Testing Guide](docs/testing.md)** - Comprehensive testing documentation
-- **[CLI](docs/cli.md)** - CLI commands
+- **[Application architecture](docs/architecture.md)**
+- **[Testing Guide](docs/testing.md)**
+- **[CLI commands](docs/cli.md)**
+- **[Setup CI/CD](docs/setup-ci-cd.md)** - CLI commands
 
 ## License
 

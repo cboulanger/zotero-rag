@@ -46,6 +46,7 @@ Phase 4 focuses on end-to-end validation, comprehensive testing, and production 
    - Async test support
 
 4. **NPM Test Commands** ([package.json](../package.json))
+
    ```bash
    npm run test:backend              # Unit tests only (fast)
    npm run test:integration          # Full integration suite
@@ -57,6 +58,7 @@ Phase 4 focuses on end-to-end validation, comprehensive testing, and production 
 ### Test Coverage
 
 **Unit Tests:** 161/161 passing ✅
+
 - Configuration: 14 tests
 - Zotero API: 15 tests
 - Embeddings: 15 tests
@@ -69,6 +71,7 @@ Phase 4 focuses on end-to-end validation, comprehensive testing, and production 
 - API Endpoints: 13 tests
 
 **Integration Tests:** Framework created ✅
+
 - Environment validation: Automated
 - Health checks: 3 tests
 - Indexing tests: 2 tests
@@ -78,7 +81,8 @@ Phase 4 focuses on end-to-end validation, comprehensive testing, and production 
 ### Test Data
 
 **Test Library:**
-- URL: https://www.zotero.org/groups/6297749/test-rag-plugin
+
+- URL: <https://www.zotero.org/groups/6297749/test-rag-plugin>
 - Library ID: 6297749
 - Type: Public group
 - Expected Items: ≥5 PDFs
@@ -150,6 +154,7 @@ The following scenarios require manual validation:
 | All tests (unit + integration) | 10-20 min | Complete validation |
 
 **Hardware Used:**
+
 - Testing performed on various configurations
 - Default preset: `remote-kisski` (fastest for integration tests)
 - Local model testing: `mac-mini-m4-16gb` preset
@@ -185,6 +190,7 @@ The following scenarios require manual validation:
 ### Configuration Guides
 
 **Backend Configuration:**
+
 - Hardware preset selection
 - Model weight storage configuration
 - Vector database location setup
@@ -192,6 +198,7 @@ The following scenarios require manual validation:
 - Environment variables
 
 **Plugin Configuration:**
+
 - Backend URL configuration
 - Installation instructions
 - XPI building process
@@ -241,13 +248,14 @@ The following scenarios require manual validation:
 
 1. **Zotero Desktop**
    - Running with local API enabled (default)
-   - Test group synced: https://www.zotero.org/groups/6297749/test-rag-plugin
+   - Test group synced: <https://www.zotero.org/groups/6297749/test-rag-plugin>
 
 2. **API Keys**
    - KISSKI_API_KEY for remote-kisski preset
    - Or other API keys for different presets
 
 3. **Environment Variables**
+
    ```bash
    MODEL_PRESET=remote-kisski
    KISSKI_API_KEY=your_key_here
@@ -271,16 +279,19 @@ npm run test:integration
 ### Strategy
 
 1. **Every Commit (Fast CI):**
+
    ```bash
    npm run test:backend  # Unit tests only
    ```
 
 2. **Pull Requests:**
+
    ```bash
    npm run test:integration:quick  # Health checks
    ```
 
 3. **Nightly/Release:**
+
    ```bash
    npm run test:all  # Everything
    ```
@@ -386,12 +397,14 @@ Phase 4 will be considered complete when:
 **Reason:** PyTorch and sentence-transformers have memory access violations on Windows with Python 3.13, causing crashes during local embedding operations.
 
 **Impact:**
+
 - Resolves Windows compatibility issues with local embeddings
 - Enables local model testing on Windows without requiring remote APIs
 - All existing functionality preserved
 - Tests continue to pass
 
 **Files Modified:**
+
 - Updated Python version requirement in project configuration
 - Updated documentation to reflect Python 3.12 requirement
 
@@ -400,6 +413,7 @@ Phase 4 will be considered complete when:
 ### Integration Test SUCCESS: PDF Ingestion Working! ✓
 
 **Test Result:** `test_index_real_library` **PASSED**
+
 - **16 PDFs processed** from test library (ID: 6297749)
 - **397 chunks created** and stored in vector database
 - **Duration:** ~2 minutes
@@ -412,6 +426,7 @@ Phase 4 will be considered complete when:
 **Root Cause:** Zotero local API endpoints require `/api/` prefix, but our implementation was missing it in two critical methods.
 
 **Fixed Endpoints:**
+
 - `get_item_children()`: `/api/groups/{id}/items/{key}/children`
 - `get_attachment_file()`: `/api/groups/{id}/items/{key}/file`
 
@@ -426,6 +441,7 @@ Phase 4 will be considered complete when:
 **Solution:** Detect redirects, extract filesystem path from `file://` URL, read directly from disk.
 
 **Key Implementation:**
+
 ```python
 async with self.session.get(url, allow_redirects=False) as response:
     if response.status in (301, 302, 303, 307, 308):
@@ -449,6 +465,7 @@ async with self.session.get(url, allow_redirects=False) as response:
 **Final Solution (2025-11-10):** Downgraded project from Python 3.13 to Python 3.12, which resolves PyTorch compatibility issues. The `windows-test` preset remains available as a remote-only option.
 
 **New Preset:**
+
 ```python
 "windows-test": HardwarePreset(
     embedding=EmbeddingConfig(
@@ -468,17 +485,20 @@ async with self.session.get(url, allow_redirects=False) as response:
 ```
 
 **Files Modified:**
+
 - [backend/config/presets.py](../backend/config/presets.py) lines 174-201
 - [.env.test](../.env.test) line 31
 
 #### Bug #4: Test Fixture Cleanup Errors
 
 **Issues:**
+
 1. Wrong method name: `get_collection_stats()` → should be `get_collection_info()`
 2. Wrong field name: `vectors_count` → should be `chunks_count`
 3. Windows file locking on Qdrant SQLite database during teardown
 
 **Solutions:**
+
 - Fixed API method/field names
 - Added proper Qdrant client cleanup before directory removal
 - Catch and ignore Windows `PermissionError` (not critical)
@@ -488,12 +508,14 @@ async with self.session.get(url, allow_redirects=False) as response:
 ### Diagnostic Tools Created
 
 **[scripts/diagnose_library.py](../scripts/diagnose_library.py)** - Library structure analyzer
+
 - Lists all items with types and parent relationships
 - Identifies PDF attachments with parent links
 - Shows which items have children
 - Safe Unicode handling for Windows console
 
 **Usage:**
+
 ```bash
 uv run python scripts/diagnose_library.py
 ```
@@ -503,12 +525,14 @@ uv run python scripts/diagnose_library.py
 ### Configuration System Enhancement
 
 **Implemented proper configuration priority:**
+
 - Created `.env.test` for committed test defaults (no secrets)
 - Enhanced `conftest.py` to load both `.env.test` and `.env`
 - Priority: Environment variables > `.env` > `.env.test`
 - `.env` file (gitignored) used for API keys and local overrides
 
 **Key Achievement:** All environment validation checks now passing:
+
 ```
 zotero_running      : [PASS]
 model_preset        : [PASS]
@@ -519,6 +543,7 @@ test_library        : [PASS]
 ### Zotero Local API Enhancement
 
 **Fixed group library support:**
+
 - Discovered correct endpoint: `/api/users/0/groups`
 - Updated `list_libraries()` method in `backend/zotero/local_api.py`
 - Now successfully lists all 45 libraries (1 user + 44 groups)
@@ -527,12 +552,14 @@ test_library        : [PASS]
 ### Helper Scripts Created
 
 **Diagnostic tools:**
+
 - `scripts/check_zotero.py` - Connectivity checker with library listing
 - `scripts/debug_libraries.py` - Debug library data structures
 
 ### Windows Compatibility
 
 **Fixed Unicode encoding issues:**
+
 - Updated `CLAUDE.md` with guideline to avoid Unicode emoji
 - Replaced emoji in console output with ASCII: `[PASS]`, `[FAIL]`, `->`
 - All tests now run without UnicodeEncodeError on Windows
@@ -619,11 +646,13 @@ test_library        : [PASS]
 ### Test Categories
 
 **Integration Tests (Existing):**
+
 - Test services directly with real dependencies
 - No backend server required
 - Run with: `npm run test:integration`
 
 **API Tests (New):**
+
 - Test HTTP endpoints with automatic test server
 - Full request-response validation
 - Run with: `npm run test:api`
@@ -639,6 +668,7 @@ test_library        : [PASS]
 ### Step 24: Plugin Type Safety Enhancements
 
 **Enhanced Files:**
+
 1. [plugin/src/dialog.js](../plugin/src/dialog.js) - Dialog UI controller
 2. [plugin/src/zotero-rag.js](../plugin/src/zotero-rag.js) - Main plugin logic
 3. [plugin/src/zotero-types.d.ts](../plugin/src/zotero-types.d.ts) - TypeScript declarations (new)
@@ -712,6 +742,7 @@ npm run test:all
 ### Test Execution Flow
 
 **API Tests:**
+
 1. Environment validation checks:
    - Zotero running
    - Test library synced
@@ -748,18 +779,21 @@ npm run test:all
 ### Benefits
 
 **For Testing:**
+
 - Complete API coverage with real backend
 - Validates full HTTP request/response cycle
 - Tests authentication, validation, and error handling
 - Easier to debug than service-level tests
 
 **For Development:**
+
 - Better IDE support with autocomplete
 - Catch type errors before runtime
 - Self-documenting code with type annotations
 - Safer refactoring with type checking
 
 **For CI/CD:**
+
 - Separate test categories for different scenarios
 - Fast unit tests for every commit
 - Comprehensive API tests for releases
@@ -840,6 +874,7 @@ npm run test:all
    - **Note**: Test passes when Zotero desktop is running with test library synced
 
 **Test Results After Fixes:**
+
 - 8 of 12 tests passing ✅
 - 4 tests require runtime environment (Zotero + indexing infrastructure)
 - SSE monitoring working correctly
@@ -867,6 +902,7 @@ npm run test:all
    - Exception handling for non-existent vector stores
 
 3. **API Response:**
+
    ```python
    {
        "library_id": "6297749",
@@ -878,6 +914,7 @@ npm run test:all
    ```
 
 **Impact:**
+
 - Tests can now verify actual indexing completion
 - Plugin can display real indexing progress
 - Status endpoint no longer placeholder

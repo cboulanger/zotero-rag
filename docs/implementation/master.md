@@ -441,70 +441,77 @@ The implementation will be considered complete when:
 
 ---
 
-### Phase 4: Integration & Polish - IN PROGRESS 🚧
+### Phase 4: Integration & Polish - NEARLY COMPLETE 🚧
 
-**Status:** Integration testing framework complete, manual validation pending
+**Status:** All automated testing complete, manual validation and CI/CD remain
 
 **Overview:** Phase 4 validates the complete system with real dependencies and prepares for production use.
 
 **Completed:**
 
-1. ✅ **Integration Testing Framework** (Step 20) - Industry best practices implementation
-   - Created comprehensive integration test suite ([test_real_integration.py](../backend/tests/test_real_integration.py))
+1. ✅ **Integration Testing Framework** (Step 20)
+   - Comprehensive integration test suite ([test_real_integration.py](../backend/tests/test_real_integration.py))
    - Environment validation system ([conftest.py](../backend/tests/conftest.py))
-     - Pre-flight checks: Zotero connectivity, API keys, test library, model presets
-     - Automatic test skipping with helpful error messages
-     - Session-level fixture validation
-   - pytest markers for selective test execution (`@pytest.mark.integration`, `@pytest.mark.slow`)
-   - Fixtures for environment setup and resource management
+   - Shared validation module ([test_environment.py](../backend/tests/test_environment.py))
+   - pytest markers for selective test execution (`@pytest.mark.integration`, `@pytest.mark.api`, `@pytest.mark.slow`)
    - Health checks, indexing tests, RAG query tests
    - Test isolation with temporary vector stores
-   - Graceful skipping when dependencies unavailable
 
-2. ✅ **Testing Documentation** (Step 21)
+2. ✅ **API Integration Tests** (Step 20 - Phase 4.1)
+   - Complete API test suite ([test_api_integration.py](../backend/tests/test_api_integration.py)) with 12 tests
+   - Automatic test server management (port 8219)
+   - SSE progress monitoring for real-time feedback
+   - Full HTTP request/response validation
+   - Functional library status endpoint (queries vector DB)
+
+3. ✅ **Testing Documentation** (Step 21)
    - Comprehensive testing guide ([docs/testing.md](../docs/testing.md))
-     - Test structure and categories
-     - Running tests (unit and integration)
-     - Writing new tests
-     - CI/CD strategies
-     - Troubleshooting guide
-     - Best practices
-   - Quick start guide ([docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md))
-     - Prerequisites checklist
-     - One-time setup instructions
-     - Running integration tests
-     - Common workflows
-   - npm commands for easy test execution
-   - Troubleshooting guide
-   - CI/CD recommendations
+   - Integration testing quick start ([docs/integration-testing-quickstart.md](../docs/integration-testing-quickstart.md))
+   - npm commands: `test:backend`, `test:integration`, `test:api`, `test:all`
+   - CI/CD recommendations documented
 
-**Configuration:**
+4. ✅ **Plugin Type Safety** (Step 21 - Phase 4.1)
+   - TypeScript JSDoc annotations in all plugin files
+   - Zero type validation errors in IDE
+   - Full autocomplete and type checking support
+   - Zotero API type declarations ([zotero-types.d.ts](../plugin/src/zotero-types.d.ts))
 
-- pytest configuration in `pyproject.toml` with markers
-- npm test commands:
-  - `test:backend` - Unit tests only (fast, default)
-  - `test:integration:quick` - Health checks (~30 seconds)
-  - `test:integration` - Full integration suite (5-15 minutes)
-  - `test:all` - Everything (unit + integration)
-- Default behavior: skip integration tests (opt-in required)
-- Test library: <https://www.zotero.org/groups/6297749/test-rag-plugin>
+5. ⚠️ **Error Handling & Edge Cases** (Step 22 - Partially Complete)
+   - ✅ Integration test error scenarios (invalid library ID, unindexed queries)
+   - ✅ API error responses with proper HTTP codes
+   - ✅ Graceful degradation with clear error messages
+   - ⚠️ Remaining: Network timeouts, partial indexing failures, concurrent query limits, version mismatches, corrupted PDFs, OOM scenarios, rate limiting
 
-**Remaining:**
+**Test Status:**
 
-- [ ] **End-to-End Testing** (Step 20 - Manual validation)
-  - Manual validation with real Zotero libraries
-  - Plugin → backend → note creation workflow
-  - Performance testing with large libraries
+- Unit tests: 161/161 passing ✅
+- Integration tests: All passing ✅ (9 tests)
+- API tests: All passing ✅ (12 tests)
+- Total automated tests: 182 passing ✅
+
+**Remaining Work:**
+
+- [ ] **Manual End-to-End Testing** (Step 20)
+  - Plugin installation in Zotero 7/8
+  - Complete workflow: question → answer → note creation
   - Multi-library query validation
-  - Plugin installation testing in Zotero 7/8
+  - Performance testing with large libraries
+  - Concurrent query limits testing
 
-- [ ] **Additional Documentation** (Step 21)
+- [ ] **Production Documentation** (Step 21)
   - User-facing setup guide (end-user perspective)
   - API documentation (OpenAPI/Swagger)
   - Deployment guide (production setup)
   - Operational troubleshooting guide
 
-- [ ] **Error Handling & Edge Cases** (Step 22)
+- [ ] **CI/CD Pipeline** (Step 22)
+  - GitHub Actions workflow
+  - Automated unit tests on every commit
+  - Integration tests on PR/main branch
+  - Code coverage reporting
+  - Automated plugin XPI builds
+
+- [ ] **Additional Error Handling** (Step 22)
   - Network timeout handling
   - Partial indexing failure recovery
   - Concurrent query limits enforcement
@@ -513,54 +520,46 @@ The implementation will be considered complete when:
   - Out-of-memory scenarios
   - Rate limiting (API calls)
 
-**Next Actions:**
-
-1. Run integration tests with real Zotero: `npm run test:integration`
-2. Install and test plugin in Zotero 7/8
-3. Validate end-to-end workflow: question → answer → note creation
-4. Test error scenarios (backend offline, network issues, etc.)
-5. Complete remaining documentation
-
-**Test Status:**
-
-- Unit tests: 161/161 passing ✅
-- Integration tests: Framework created, environment validation working ✅
-- Manual testing: Pending
-
-**Progress:** 60% (3/5 major tasks complete)
+**Progress:** 80% (5/6 major tasks complete)
 
 **Details:** See [phase4-progress.md](./phase4-progress.md) for comprehensive documentation.
 
 ---
 
-### Phase 4.1: API Integration Testing & Plugin Type Safety - IN PROGRESS 🚧
+### Phase 4.1: API Integration Testing & Plugin Type Safety - COMPLETE ✅
 
-**Status:** Preparing to implement
+**Status:** All tasks completed (100%)
 
 **Overview:** Enhanced testing coverage with API-level integration tests and improved plugin code quality with TypeScript JSDoc types.
 
-**Goals:**
+**Completed:**
 
-1. **API Integration Tests**
-   - Create pytest-based API integration tests with real backend
+1. ✅ **API Integration Tests**
+   - Created pytest-based API integration tests with real backend (12 tests)
    - Test all API endpoints with actual Zotero data and inference
-   - Reuse environment validation from backend tests
-   - Add `api` marker for selective test execution
-   - Add `test:api` npm command
+   - Shared environment validation module between integration and API tests
+   - Added `api` marker for selective test execution
+   - Added `test:api` npm command
+   - Automatic test server management (starts/stops automatically)
+   - SSE progress monitoring for real-time indexing feedback
+   - Implemented functional library status endpoint (was placeholder)
 
-2. **Plugin Type Safety**
-   - Add TypeScript JSDoc annotations to [plugin/src/dialog.js](../plugin/src/dialog.js)
-   - Eliminate all type validation errors
-   - Improve IDE support and code maintainability
+2. ✅ **Plugin Type Safety**
+   - Added TypeScript JSDoc annotations to [plugin/src/dialog.js](../plugin/src/dialog.js)
+   - Added TypeScript JSDoc annotations to [plugin/src/zotero-rag.js](../plugin/src/zotero-rag.js)
+   - Created [plugin/src/zotero-types.d.ts](../plugin/src/zotero-types.d.ts) for Zotero API declarations
+   - Zero type validation errors in IDE
+   - Improved IDE support with autocomplete and type checking
+   - Self-documenting code with inline type annotations
 
-**Tasks:**
+**Test Status:** All unit + API tests passing ✅
 
-- [ ] Create shared environment validation module (Step 23a)
-- [ ] Update backend conftest.py to use shared validation (Step 23b)
-- [ ] Create API integration test suite (Step 23c)
-- [ ] Add pytest `api` marker and `test:api` npm command (Step 23d)
-- [ ] Add TypeScript JSDoc types to dialog.js (Step 24)
-- [ ] Document Phase 4.1 progress (Step 25)
+**Key Achievements:**
+- Comprehensive API test coverage with automatic server management
+- Full plugin type safety without TypeScript compilation
+- Response structure alignment across API, tests, and plugin
+- Real-time progress monitoring via SSE in tests
+- Functional library status endpoint querying vector database
 
 **Details:** See [phase4-progress.md](./phase4-progress.md) for comprehensive documentation.
 
