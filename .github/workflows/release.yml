@@ -31,7 +31,7 @@ jobs:
         run: uv sync
 
       - name: Run unit tests
-        run: npm run test:backend
+        run: uv run pytest backend/tests/ -v
 
   release:
     name: Semantic Release
@@ -55,14 +55,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        run: pip install uv
-
       - name: Install Node dependencies
         run: npm ci
 
       - name: Build plugin XPI
-        run: npm run plugin:build
+        run: python scripts/build_plugin.py
 
       - name: Run semantic-release
         env:

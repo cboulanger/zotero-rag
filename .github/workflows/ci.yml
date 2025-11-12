@@ -27,32 +27,7 @@ jobs:
         run: uv sync
 
       - name: Run unit tests
-        run: npm run test:backend
-
-  lint:
-    name: Code Quality
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        run: pip install uv
-
-      - name: Install dependencies
-        run: uv sync
-
-      - name: Check code formatting with ruff (optional)
-        run: |
-          uv pip install ruff
-          ruff check backend/ --exit-zero
-        continue-on-error: true
+        run: uv run pytest backend/tests/ -v
 
   build-plugin:
     name: Build Plugin
@@ -68,11 +43,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        run: pip install uv
-
       - name: Build plugin XPI
-        run: npm run plugin:build
+        run: python scripts/build_plugin.py
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
