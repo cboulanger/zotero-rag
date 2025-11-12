@@ -23,7 +23,7 @@
     }
   },
   "scripts": {
-    "start": "uv run python scripts/server.py start --prod",
+    "start": "uv run python scripts/server.py start",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:backend": "uv run pytest backend/tests/ -v",
     "test:backend:watch": "uv run pytest backend/tests/ -v --looponfail",

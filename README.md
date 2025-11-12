@@ -4,27 +4,42 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 ## Quick Start
 
-### 1. Start the Backend Server
+### Install the dependencies
+
+- [Install `uv`](https://docs.astral.sh/uv/getting-started/installation/) if you don't have it already.
+- Install the python dependencies: `uv sync`
+- Install a recent version of NodeJS (It's strictly only necessary for development)
+
+### 2. Start the Backend Server
 
 The plugin requires a local server to process your questions. Start it with:
 
 ```bash
+# with NodeJS:
 npm run server:start
+# without NodeJS:
+uv run python scripts/server.py start 
 ```
 
 The server will run at <http://localhost:8119>. You can check if it's running:
 
 ```bash
+# with NodeJS:
 npm run server:status
+# without NodeJS:
+uv run python scripts/server.py status
 ```
 
 To stop the server later:
 
 ```bash
+# with NodeJS:
 npm run server:stop
+# without NodeJS:
+uv run python scripts/server.py stop
 ```
 
-### 2. Install the Plugin in Zotero
+### 3. Install the Plugin in Zotero
 
 1. Download the `zotero-rag-X.Y.Z.xpi` file from https://github.com/cboulanger/zotero-rag/releases/latest
 2. Open Zotero
@@ -33,7 +48,7 @@ npm run server:stop
 5. Select the downloaded `.xpi` file
 6. Restart Zotero when prompted
 
-### 3. Using the Plugin
+### 4. Using the Plugin
 
 Once installed:
 

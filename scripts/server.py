@@ -3,10 +3,12 @@
 Cross-platform server management script for Zotero RAG backend.
 
 Usage:
-    python scripts/server.py start      # Start the server
-    python scripts/server.py stop       # Stop the server
-    python scripts/server.py restart    # Restart the server
-    python scripts/server.py status     # Check server status
+    python scripts/server.py start             # Start the server in production mode
+    python scripts/server.py start --dev       # Start the server in development mode (with auto-reload)
+    python scripts/server.py stop              # Stop the server
+    python scripts/server.py restart           # Restart the server in production mode
+    python scripts/server.py restart --dev     # Restart the server in development mode
+    python scripts/server.py status            # Check server status
 """
 
 import sys
@@ -238,12 +240,12 @@ def main():
     command = sys.argv[1].lower()
 
     if command == "start":
-        dev_mode = "--prod" not in sys.argv
+        dev_mode = "--dev" in sys.argv
         start_server(dev_mode)
     elif command == "stop":
         stop_server()
     elif command == "restart":
-        dev_mode = "--prod" not in sys.argv
+        dev_mode = "--dev" in sys.argv
         restart_server(dev_mode)
     elif command == "status":
         check_status()
