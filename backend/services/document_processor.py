@@ -73,6 +73,7 @@ class DocumentProcessor:
         library_name: str = "Unknown",
         mode: Literal["auto", "incremental", "full"] = "auto",
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
         """
@@ -87,10 +88,14 @@ class DocumentProcessor:
                 - "incremental": Only index new/modified items
                 - "full": Reindex entire library
             progress_callback: Optional callback for progress updates (current, total).
+            cancellation_check: Optional callback that returns True if cancellation requested.
             max_items: Optional maximum number of items to process (for testing).
 
         Returns:
             Indexing statistics with counts, timing, and mode used.
+
+        Raises:
+            RuntimeError: If cancellation is requested during indexing.
         """
         logger.info(f"Starting indexing for library {library_id} (mode={mode})")
         start_time = datetime.utcnow()
@@ -124,11 +129,11 @@ class DocumentProcessor:
         # Execute indexing
         if effective_mode == "full":
             stats = await self._index_library_full(
-                library_id, library_type, metadata, progress_callback, max_items
+                library_id, library_type, metadata, progress_callback, cancellation_check, max_items
             )
         else:
             stats = await self._index_library_incremental(
-                library_id, library_type, metadata, progress_callback, max_items
+                library_id, library_type, metadata, progress_callback, cancellation_check, max_items
             )
 
         # Update library metadata
@@ -150,6 +155,7 @@ class DocumentProcessor:
         library_type: str,
         metadata: LibraryIndexMetadata,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
         """Incremental indexing: only process new/modified items."""
@@ -194,6 +200,11 @@ class DocumentProcessor:
             progress_callback(0, total_items)
 
         for idx, item in enumerate(items_with_pdfs):
+            # Check for cancellation
+            if cancellation_check and cancellation_check():
+                logger.info(f"Cancellation requested during incremental indexing of library {library_id}")
+                raise RuntimeError("Indexing cancelled by user")
+
             try:
                 item_key = item["data"]["key"]
                 item_version = item["version"]
@@ -246,6 +257,7 @@ class DocumentProcessor:
         library_type: str,
         metadata: LibraryIndexMetadata,
         progress_callback: Optional[Callable[[int, int], None]] = None,
+        cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
         """Full indexing: delete all chunks and reindex entire library."""
@@ -285,6 +297,11 @@ class DocumentProcessor:
             progress_callback(0, total_items)
 
         for idx, item in enumerate(items_with_pdfs):
+            # Check for cancellation
+            if cancellation_check and cancellation_check():
+                logger.info(f"Cancellation requested during full indexing of library {library_id}")
+                raise RuntimeError("Indexing cancelled by user")
+
             try:
                 item_key = item["data"]["key"]
                 item_version = item["version"]

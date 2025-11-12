@@ -39,8 +39,13 @@
     .form-group label { display: block; margin-bottom: 5px; font-weight: 500; }
     .question-input { width: 100%; padding: 8px; font-family: inherit; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; resize: vertical; }
     .library-list { border: 1px solid #ccc; padding: 10px; height: 120px; overflow-y: auto; box-sizing: border-box; }
-    .library-checkbox { display: flex; align-items: center; padding: 5px 0; }
-    .library-checkbox input { margin-right: 8px; }
+    .library-checkbox { display: flex; align-items: flex-start; padding: 5px 0; }
+    .library-checkbox input { margin-right: 8px; margin-top: 3px; flex-shrink: 0; }
+    .library-info { flex: 1; }
+    .library-name { font-weight: 500; }
+    .library-status { display: block; margin-top: 2px; }
+    .indexing-mode-select { width: 100%; padding: 6px; font-family: inherit; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    .mode-description { margin-top: 5px; font-size: 12px; color: #666; min-height: 18px; }
     .feedback-container { height: 120px; margin-bottom: 15px; flex-shrink: 0; }
     .progress-section { height: 100%; padding: 10px; background-color: #f5f5f5; border-radius: 4px; box-sizing: border-box; display: flex; flex-direction: column; }
     .progress-label { font-weight: 500; margin-bottom: 5px; }
@@ -80,6 +85,21 @@
         </div>
       </div>
 
+      <!-- Indexing mode selection -->
+      <div class="form-group">
+        <label for="indexing-mode">Indexing mode:</label>
+        <select id="indexing-mode" class="indexing-mode-select">
+          <option value="auto" selected="selected">Auto (Recommended)</option>
+          <option value="incremental">Quick Update (Incremental)</option>
+          <option value="full">Full Reindex</option>
+        </select>
+        <div class="mode-description">
+          <span id="mode-auto-desc" class="mode-desc-text">Automatically chooses the best indexing method</span>
+          <span id="mode-incremental-desc" class="mode-desc-text" style="display: none;">Only indexes new or modified items</span>
+          <span id="mode-full-desc" class="mode-desc-text" style="display: none;">Reindexes entire library (slower)</span>
+        </div>
+      </div>
+
       <!-- Feedback container (fixed height) -->
       <div class="feedback-container">
         <!-- Progress section (always visible) -->
@@ -101,7 +121,7 @@
 
     <!-- Dialog buttons -->
     <div class="dialog-buttons">
-      <button id="cancel-button" type="button" class="dialog-button">Cancel</button>
+      <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>
       <button id="submit-button" type="button" class="dialog-button primary">Submit</button>
     </div>
   </div>

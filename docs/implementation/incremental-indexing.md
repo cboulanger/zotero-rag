@@ -2101,14 +2101,24 @@ def test_backward_compatibility():
 - `backend/models/__init__.py` (updated)
 - `backend/db/vector_store.py` (updated)
 - `backend/zotero/local_api.py` (updated)
-- `backend/services/document_processor.py` (updated)
+- `backend/services/document_processor.py` (updated with cancellation support)
 - `backend/api/libraries.py` (updated - added 3 new endpoints)
-- `backend/api/indexing.py` (updated - enhanced with mode parameter)
+- `backend/api/indexing.py` (updated - enhanced with mode parameter and cancel endpoint)
 - `backend/tests/test_zotero_client_versions.py` (created)
 - `backend/tests/test_incremental_indexing.py` (created)
 - `backend/tests/test_api_endpoints.py` (created)
+- `plugin/src/dialog.js` (updated - added incremental indexing UI and cancel functionality)
+- `plugin/src/dialog.xhtml` (updated - added mode selection and enhanced library status display)
 
 ### Next Steps
 
-- [ ] **Step 5: Plugin UI Updates** - Update Zotero plugin UI to show indexing status and support incremental indexing modes
+- [x] **Step 5: Plugin UI Updates** - COMPLETED
+  - [x] Enhanced dialog.js with library metadata fetching
+  - [x] Added UI to display last indexed time, item counts, and chunk counts
+  - [x] Added indexing mode selection dropdown (auto/incremental/full)
+  - [x] Updated styles for new UI elements
+  - [x] Implemented cancel functionality with abort button
+  - [x] Added backend endpoint `POST /api/index/library/{library_id}/cancel` to cancel ongoing indexing
+  - [x] Submit button stays disabled throughout entire operation
+  - [x] Document processor checks for cancellation during item processing loops
 - [ ] **Step 6: Integration Testing** - Test complete workflow with running backend server and Zotero client

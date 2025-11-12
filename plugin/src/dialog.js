@@ -48,6 +48,19 @@
  */
 
 /**
+ * @typedef {Object} LibraryIndexMetadata
+ * @property {string} library_id - Library ID
+ * @property {string} library_type - Library type (user/group)
+ * @property {string} library_name - Library name
+ * @property {number} last_indexed_version - Last indexed Zotero version
+ * @property {string} last_indexed_at - ISO timestamp of last indexing
+ * @property {number} total_items_indexed - Total items indexed
+ * @property {number} total_chunks - Total chunks in vector store
+ * @property {string} indexing_mode - Last indexing mode (full/incremental)
+ * @property {boolean} force_reindex - Whether hard reset is pending
+ */
+
+/**
  * Dialog controller for Zotero RAG query interface.
  */
 var ZoteroRAGDialog = {
@@ -59,6 +72,15 @@ var ZoteroRAGDialog = {
 
 	/** @type {Map<string, EventSource>} */
 	indexingStreams: new Map(),
+
+	/** @type {Map<string, LibraryIndexMetadata|null>} */
+	libraryMetadata: new Map(),
+
+	/** @type {boolean} */
+	isOperationInProgress: false,
+
+	/** @type {AbortController|null} */
+	abortController: null,
 
 	/**
 	 * Initialize the dialog.
@@ -86,7 +108,15 @@ var ZoteroRAGDialog = {
 		const cancelButton = document.getElementById('cancel-button');
 		if (cancelButton) {
 			cancelButton.addEventListener('click', () => {
-				window.close();
+				this.handleCancel();
+			});
+		}
+
+		// Set up mode selection dropdown
+		const modeSelect = document.getElementById('indexing-mode');
+		if (modeSelect) {
+			modeSelect.addEventListener('change', (e) => {
+				this.updateModeDescription(/** @type {HTMLSelectElement} */ (e.target).value);
 			});
 		}
 
@@ -95,10 +125,35 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Populate the library selection list.
-	 * @returns {void}
+	 * Fetch indexing metadata for a library.
+	 * @param {string} libraryId - Library ID
+	 * @returns {Promise<LibraryIndexMetadata|null>}
 	 */
-	populateLibraries() {
+	async fetchLibraryMetadata(libraryId) {
+		if (!this.plugin) return null;
+
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/libraries/${libraryId}/index-status`);
+			if (response.status === 404) {
+				// Library not indexed yet
+				return null;
+			}
+			if (!response.ok) {
+				throw new Error(`HTTP ${response.status}`);
+			}
+			return await response.json();
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.plugin.log(`Error fetching metadata for library ${libraryId}: ${errorMessage}`);
+			return null;
+		}
+	},
+
+	/**
+	 * Populate the library selection list.
+	 * @returns {Promise<void>}
+	 */
+	async populateLibraries() {
 		if (!this.plugin) return;
 
 		const libraries = this.plugin.getLibraries();
@@ -106,7 +161,16 @@ var ZoteroRAGDialog = {
 		const listContainer = document.getElementById('library-list');
 		if (!listContainer) return;
 
+		// Fetch metadata for all libraries
 		for (let library of libraries) {
+			const metadata = await this.fetchLibraryMetadata(library.id);
+			this.libraryMetadata.set(library.id, metadata);
+		}
+
+		// Build UI
+		for (let library of libraries) {
+			const metadata = this.libraryMetadata.get(library.id);
+
 			const checkboxLabel = document.createElement('label');
 			checkboxLabel.className = 'library-checkbox';
 
@@ -133,10 +197,38 @@ var ZoteroRAGDialog = {
 				}
 			});
 
-			const labelText = document.createTextNode(library.name);
+			// Create library info container
+			const infoContainer = document.createElement('div');
+			infoContainer.className = 'library-info';
+
+			// Library name
+			const nameSpan = document.createElement('span');
+			nameSpan.className = 'library-name';
+			nameSpan.textContent = library.name;
+
+			// Status info
+			const statusSpan = document.createElement('span');
+			statusSpan.className = 'library-status';
+
+			if (metadata) {
+				const lastIndexed = new Date(metadata.last_indexed_at);
+				const timeAgo = this.formatTimeAgo(lastIndexed);
+				statusSpan.textContent = `Last indexed: ${timeAgo} | ${metadata.total_items_indexed} items | ${metadata.total_chunks} chunks`;
+				statusSpan.style.color = '#666';
+				statusSpan.style.fontSize = '12px';
+			} else {
+				statusSpan.textContent = 'Not indexed yet';
+				statusSpan.style.color = '#999';
+				statusSpan.style.fontSize = '12px';
+				statusSpan.style.fontStyle = 'italic';
+			}
+
+			infoContainer.appendChild(nameSpan);
+			infoContainer.appendChild(document.createElement('br'));
+			infoContainer.appendChild(statusSpan);
 
 			checkboxLabel.appendChild(checkbox);
-			checkboxLabel.appendChild(labelText);
+			checkboxLabel.appendChild(infoContainer);
 			listContainer.appendChild(checkboxLabel);
 		}
 	},
@@ -168,6 +260,12 @@ var ZoteroRAGDialog = {
 
 		const question = questionInput.value.trim();
 
+		// Get selected indexing mode
+		const modeSelect = /** @type {HTMLSelectElement|null} */ (
+			document.getElementById('indexing-mode')
+		);
+		const indexingMode = modeSelect ? modeSelect.value : 'auto';
+
 		// Validate input
 		if (!question) {
 			this.showStatus('Please enter a question.', 'error');
@@ -182,13 +280,14 @@ var ZoteroRAGDialog = {
 		// Clear previous status messages
 		this.clearStatusMessages();
 
-		// Disable submit button
+		// Disable submit button and cancel button during operation
 		this.setSubmitEnabled(false);
+		this.setCancelMode('abort'); // Change cancel button to abort mode
 		this.showProgress('Processing request...', 'Submitting query...');
 
 		try {
 			const libraryIds = Array.from(this.selectedLibraries);
-			await this.checkAndMonitorIndexing(libraryIds);
+			await this.checkAndMonitorIndexing(libraryIds, indexingMode);
 
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
@@ -202,6 +301,7 @@ var ZoteroRAGDialog = {
 
 			this.updateProgress(100, 'Complete', 'Note created successfully!');
 
+			// Close dialog after successful completion
 			setTimeout(() => {
 				window.close();
 			}, 1000);
@@ -209,6 +309,7 @@ var ZoteroRAGDialog = {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.showStatus(`Error: ${errorMessage}`, 'error');
 			this.setSubmitEnabled(true);
+			this.setCancelMode('close'); // Restore cancel button to close mode
 			this.hideProgress();
 		}
 	},
@@ -216,9 +317,10 @@ var ZoteroRAGDialog = {
 	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
+	 * @param {string} [mode='auto'] - Indexing mode (auto/incremental/full)
 	 * @returns {Promise<void>}
 	 */
-	async checkAndMonitorIndexing(libraryIds) {
+	async checkAndMonitorIndexing(libraryIds, mode = 'auto') {
 		if (!this.plugin) return;
 
 		const backendURL = this.plugin.backendURL;
@@ -228,12 +330,24 @@ var ZoteroRAGDialog = {
 				const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`);
 				const status = await statusResponse.json();
 
-				if (!status.indexed || status.item_count === 0) {
-					// Get library name for user-friendly messages
-					const libraryName = this.getLibraryName(libraryId);
+				// For incremental mode, always trigger indexing to catch updates
+				// For full mode, force reindexing
+				// For auto mode, let backend decide
+				const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
+
+				if (shouldIndex) {
+					// Get library name and type for user-friendly messages
+					const libraries = this.plugin.getLibraries();
+					const library = libraries.find(lib => lib.id === libraryId);
+					const libraryName = library ? library.name : libraryId;
+					const libraryType = library ? library.type : 'user';
+
 					this.showStatus(`Indexing library ${libraryName}...`, 'info');
 
-					const indexResponse = await fetch(`${backendURL}/api/index/library/${libraryId}`, {
+					// Build URL with mode parameter
+					const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
+
+					const indexResponse = await fetch(indexURL, {
 						method: 'POST'
 					});
 
@@ -455,6 +569,119 @@ var ZoteroRAGDialog = {
 		);
 		if (submitButton) {
 			submitButton.disabled = !enabled;
+		}
+	},
+
+	/**
+	 * Format timestamp as relative time.
+	 * @param {Date} date - Date to format
+	 * @returns {string} Relative time string
+	 */
+	formatTimeAgo(date) {
+		const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
+
+		if (seconds < 60) return 'just now';
+		if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`;
+		if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
+		return `${Math.floor(seconds / 86400)} days ago`;
+	},
+
+	/**
+	 * Update the mode description text based on selected mode.
+	 * @param {string} mode - Selected mode (auto/incremental/full)
+	 * @returns {void}
+	 */
+	updateModeDescription(mode) {
+		// Hide all descriptions
+		const autoDesc = document.getElementById('mode-auto-desc');
+		const incrementalDesc = document.getElementById('mode-incremental-desc');
+		const fullDesc = document.getElementById('mode-full-desc');
+
+		if (autoDesc) autoDesc.style.display = 'none';
+		if (incrementalDesc) incrementalDesc.style.display = 'none';
+		if (fullDesc) fullDesc.style.display = 'none';
+
+		// Show selected mode description
+		const descId = `mode-${mode}-desc`;
+		const selectedDesc = document.getElementById(descId);
+		if (selectedDesc) {
+			selectedDesc.style.display = 'inline';
+		}
+	},
+
+	/**
+	 * Handle cancel button click.
+	 * @returns {Promise<void>}
+	 */
+	async handleCancel() {
+		if (this.isOperationInProgress) {
+			// Abort operation in progress
+			await this.abortOperation();
+		} else {
+			// Just close the dialog
+			window.close();
+		}
+	},
+
+	/**
+	 * Abort the current operation.
+	 * @returns {Promise<void>}
+	 */
+	async abortOperation() {
+		if (!this.plugin) return;
+
+		this.showStatus('Cancelling operation...', 'info');
+
+		// Abort any ongoing fetch requests
+		if (this.abortController) {
+			this.abortController.abort();
+			this.abortController = null;
+		}
+
+		// Close all active SSE streams
+		for (const [libraryId, eventSource] of this.indexingStreams.entries()) {
+			eventSource.close();
+
+			// Send abort signal to backend
+			try {
+				await fetch(`${this.plugin.backendURL}/api/index/library/${libraryId}/cancel`, {
+					method: 'POST'
+				});
+			} catch (error) {
+				// Log but don't throw - cancellation should always succeed
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				this.plugin.log(`Error cancelling indexing for library ${libraryId}: ${errorMessage}`);
+			}
+		}
+		this.indexingStreams.clear();
+
+		// Reset UI state
+		this.isOperationInProgress = false;
+		this.setSubmitEnabled(true);
+		this.setCancelMode('close');
+		this.showStatus('Operation cancelled by user.', 'info');
+		this.hideProgress();
+	},
+
+	/**
+	 * Set cancel button mode.
+	 * @param {'close'|'abort'} mode - Button mode
+	 * @returns {void}
+	 */
+	setCancelMode(mode) {
+		const cancelButton = /** @type {HTMLButtonElement|null} */ (
+			document.getElementById('cancel-button')
+		);
+		if (!cancelButton) return;
+
+		if (mode === 'abort') {
+			cancelButton.textContent = 'Cancel';
+			cancelButton.title = 'Cancel the current operation';
+			this.isOperationInProgress = true;
+		} else {
+			cancelButton.textContent = 'Close';
+			cancelButton.title = 'Close this dialog';
+			this.isOperationInProgress = false;
 		}
 	}
 };

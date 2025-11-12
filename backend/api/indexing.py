@@ -132,6 +132,7 @@ async def index_library_task(
                         "current_item": current,
                         "total_items": total
                     }),
+                    cancellation_check=lambda: active_jobs.get(job_id, {}).get("status") == "cancelled",
                     max_items=max_items
                 )
 
@@ -141,6 +142,16 @@ async def index_library_task(
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["progress"] = 100
 
+    except RuntimeError as e:
+        # Check if this is a cancellation
+        if "cancelled by user" in str(e).lower():
+            logger.info(f"Indexing cancelled for library {library_id}")
+            active_jobs[job_id]["status"] = "cancelled"
+            active_jobs[job_id]["message"] = "Cancelled by user"
+        else:
+            logger.error(f"Runtime error indexing library {library_id}: {e}", exc_info=True)
+            active_jobs[job_id]["status"] = "error"
+            active_jobs[job_id]["error"] = str(e)
     except Exception as e:
         logger.error(f"Error indexing library {library_id}: {e}", exc_info=True)
         active_jobs[job_id]["status"] = "error"
@@ -282,7 +293,7 @@ async def generate_progress_events(library_id: str) -> AsyncGenerator[str, None]
             last_progress = current_progress
             last_message = current_message
 
-        # Check for completion or error
+        # Check for completion, error, or cancellation
         if job["status"] == "completed":
             stats = job.get("stats", {})
             mode = stats.get("mode", "unknown")
@@ -303,6 +314,18 @@ async def generate_progress_events(library_id: str) -> AsyncGenerator[str, None]
                 stats=stats
             )
             yield f"data: {event.model_dump_json()}\n\n"
+            break
+
+        elif job["status"] == "cancelled":
+            event = IndexingProgressEvent(
+                event="error",
+                library_id=library_id,
+                message="Indexing cancelled by user",
+                progress=last_progress
+            )
+            yield f"data: {event.model_dump_json()}\n\n"
+            # Clean up the cancelled job
+            del active_jobs[job_id]
             break
 
         elif job["status"] == "error":
@@ -336,3 +359,55 @@ async def stream_indexing_progress(library_id: str):
             "X-Accel-Buffering": "no"  # Disable buffering in nginx
         }
     )
+
+
+@router.post("/index/library/{library_id}/cancel")
+async def cancel_library_indexing(library_id: str):
+    """
+    Cancel an ongoing library indexing operation.
+
+    This endpoint marks the indexing job for cancellation. The actual
+    cancellation happens in the background task when it checks the status.
+
+    Args:
+        library_id: Zotero library ID being indexed.
+
+    Returns:
+        Status message indicating cancellation request was received.
+
+    Raises:
+        HTTPException: If no active indexing job is found.
+    """
+    job_id = f"index_{library_id}"
+
+    # Check if job exists and is running
+    if job_id not in active_jobs:
+        logger.warning(f"No active job found for library {library_id}")
+        return {
+            "library_id": library_id,
+            "status": "not_found",
+            "message": f"No active indexing job found for library {library_id}"
+        }
+
+    job = active_jobs[job_id]
+
+    if job["status"] != "running":
+        logger.info(f"Job for library {library_id} is not running (status: {job['status']})")
+        return {
+            "library_id": library_id,
+            "status": job["status"],
+            "message": f"Indexing job is not running (status: {job['status']})"
+        }
+
+    # Mark job for cancellation
+    job["status"] = "cancelled"
+    job["message"] = "Cancellation requested by user"
+    logger.info(f"Marked indexing job for library {library_id} for cancellation")
+
+    # Clean up the job from active_jobs
+    # The background task will detect the status change and exit gracefully
+    return {
+        "library_id": library_id,
+        "status": "cancelled",
+        "message": f"Cancellation requested for library {library_id}"
+    }
