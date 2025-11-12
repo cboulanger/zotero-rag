@@ -12,7 +12,7 @@
     [
       "@semantic-release/exec",
       {
-        "prepareCmd": "uv run python scripts/version.py ${nextRelease.version}"
+        "prepareCmd": "python scripts/version.py ${nextRelease.version}"
       }
     ],
     [
