@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 
 from backend.zotero.local_api import ZoteroLocalAPI
+from backend.models.library import LibraryIndexMetadata
 
 router = APIRouter()
 
@@ -154,4 +155,160 @@ async def get_library_status(library_id: str):
             total_items=None,
             indexed_items=None,
             last_indexed=None
+        )
+
+
+@router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
+async def get_library_index_status(library_id: str):
+    """
+    Get detailed indexing status and metadata for a library.
+
+    This endpoint returns comprehensive indexing metadata including:
+    - Last indexed version
+    - Last indexed timestamp
+    - Total items and chunks indexed
+    - Current indexing mode
+    - Force reindex flag
+
+    Args:
+        library_id: Zotero library ID.
+
+    Returns:
+        Detailed library indexing metadata.
+
+    Raises:
+        HTTPException: 404 if library has never been indexed.
+    """
+    from backend.config.settings import get_settings
+    from backend.db.vector_store import VectorStore
+    from backend.services.embeddings import create_embedding_service
+
+    try:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+
+        # Initialize embedding service to get dimension
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            hf_token=settings.get_api_key("HF_TOKEN")
+        )
+
+        # Check vector store for library metadata
+        with VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        ) as vector_store:
+            metadata = vector_store.get_library_metadata(library_id)
+
+            if metadata is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Library {library_id} has not been indexed yet"
+                )
+
+            return metadata
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve library index status: {str(e)}"
+        )
+
+
+@router.post("/libraries/{library_id}/reset-index")
+async def reset_library_index(library_id: str):
+    """
+    Mark a library for full reindex (hard reset).
+
+    This sets the force_reindex flag to True. The next indexing
+    operation will perform a full reindex regardless of mode parameter.
+
+    Args:
+        library_id: Zotero library ID.
+
+    Returns:
+        Success message with new status.
+
+    Raises:
+        HTTPException: If operation fails.
+    """
+    from backend.config.settings import get_settings
+    from backend.db.vector_store import VectorStore
+    from backend.services.embeddings import create_embedding_service
+
+    try:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+
+        # Initialize embedding service to get dimension
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            hf_token=settings.get_api_key("HF_TOKEN")
+        )
+
+        # Mark library for reset
+        with VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        ) as vector_store:
+            vector_store.mark_library_for_reset(library_id)
+
+            # Get updated metadata
+            metadata = vector_store.get_library_metadata(library_id)
+
+            return {
+                "message": f"Library {library_id} marked for hard reset",
+                "force_reindex": metadata.force_reindex if metadata else True,
+                "next_index_mode": "full"
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reset library index: {str(e)}"
+        )
+
+
+@router.get("/libraries/indexed", response_model=List[LibraryIndexMetadata])
+async def list_indexed_libraries():
+    """
+    List all libraries that have been indexed.
+
+    Returns:
+        Array of library metadata objects for all indexed libraries.
+
+    Raises:
+        HTTPException: If operation fails.
+    """
+    from backend.config.settings import get_settings
+    from backend.db.vector_store import VectorStore
+    from backend.services.embeddings import create_embedding_service
+
+    try:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+
+        # Initialize embedding service to get dimension
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            hf_token=settings.get_api_key("HF_TOKEN")
+        )
+
+        # Get all indexed libraries
+        with VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        ) as vector_store:
+            libraries = vector_store.get_all_library_metadata()
+            return libraries
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list indexed libraries: {str(e)}"
         )

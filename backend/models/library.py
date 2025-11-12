@@ -4,11 +4,25 @@ Data models for library metadata and indexing state.
 
 from typing import Literal
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class LibraryIndexMetadata(BaseModel):
     """Metadata tracking indexing state for a library."""
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "library_id": "1",
+            "library_type": "user",
+            "library_name": "My Library",
+            "last_indexed_version": 12345,
+            "last_indexed_at": "2025-01-12T10:30:00Z",
+            "total_items_indexed": 250,
+            "total_chunks": 12500,
+            "indexing_mode": "incremental",
+            "force_reindex": False
+        }
+    })
 
     library_id: str = Field(description="Library ID (e.g., '1' for user library)")
     library_type: Literal["user", "group"] = Field(description="Library type")
@@ -43,18 +57,3 @@ class LibraryIndexMetadata(BaseModel):
     )
 
     schema_version: int = Field(default=1)
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "library_id": "1",
-                "library_type": "user",
-                "library_name": "My Library",
-                "last_indexed_version": 12345,
-                "last_indexed_at": "2025-01-12T10:30:00Z",
-                "total_items_indexed": 250,
-                "total_chunks": 12500,
-                "indexing_mode": "incremental",
-                "force_reindex": False
-            }
-        }

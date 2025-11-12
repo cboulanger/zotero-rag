@@ -2055,12 +2055,6 @@ def test_backward_compatibility():
   - [x] Added version-aware chunk methods (get item chunks, get item version, delete item chunks, count chunks)
   - [x] Updated models `__init__.py` to export new models
 
-### In Progress
-
-- [ ] **Step 4: Add API Endpoints**
-- [ ] **Step 5: Plugin UI Updates**
-- [ ] **Step 6: Testing**
-
 ### Completed Steps (Continued)
 
 - [x] **Step 2: Enhance Zotero Local API Client** (COMPLETED)
@@ -2088,13 +2082,33 @@ def test_backward_compatibility():
   - [x] Created comprehensive unit tests (6 tests, all passing)
   - [x] Verified incremental and full indexing modes work correctly
 
+- [x] **Step 4: Add API Endpoints** (COMPLETED)
+  - [x] Added `GET /api/libraries/{library_id}/index-status` endpoint to retrieve library indexing metadata
+  - [x] Added `POST /api/libraries/{library_id}/reset-index` endpoint to mark library for hard reset
+  - [x] Added `GET /api/libraries/indexed` endpoint to list all indexed libraries
+  - [x] Enhanced `POST /api/index/library/{library_id}` endpoint with `mode` parameter (auto/incremental/full)
+  - [x] Enhanced `POST /api/index/library/{library_id}` endpoint with `library_name` parameter
+  - [x] Added statistics in completion events for SSE progress stream
+  - [x] Deprecated `force_reindex` parameter in favor of `mode` parameter
+  - [x] Fixed Pydantic v2 deprecation warning in `LibraryIndexMetadata` model
+  - [x] Created comprehensive API endpoint tests in `backend/tests/test_api_endpoints.py`
+  - [x] All endpoints return proper HTTP status codes (200, 404, 409, 503)
+
 ### Files Modified
 
-- `backend/models/library.py` (created)
+- `backend/models/library.py` (created, updated for Pydantic v2)
 - `backend/models/document.py` (updated)
 - `backend/models/__init__.py` (updated)
 - `backend/db/vector_store.py` (updated)
 - `backend/zotero/local_api.py` (updated)
 - `backend/services/document_processor.py` (updated)
+- `backend/api/libraries.py` (updated - added 3 new endpoints)
+- `backend/api/indexing.py` (updated - enhanced with mode parameter)
 - `backend/tests/test_zotero_client_versions.py` (created)
 - `backend/tests/test_incremental_indexing.py` (created)
+- `backend/tests/test_api_endpoints.py` (created)
+
+### Next Steps
+
+- [ ] **Step 5: Plugin UI Updates** - Update Zotero plugin UI to show indexing status and support incremental indexing modes
+- [ ] **Step 6: Integration Testing** - Test complete workflow with running backend server and Zotero client
