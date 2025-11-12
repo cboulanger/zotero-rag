@@ -26,11 +26,11 @@ npm run server:stop
 
 ### 2. Install the Plugin in Zotero
 
-1. Download the plugin file: `plugin/dist/zotero-rag-0.1.0.xpi`
+1. Download the `zotero-rag-X.Y.Z.xpi` file from https://github.com/cboulanger/zotero-rag/releases/latest
 2. Open Zotero
 3. Go to **Tools → Add-ons**
 4. Click the gear icon and select **Install Add-on From File**
-5. Select the `zotero-rag-0.1.0.xpi` file
+5. Select the downloaded `.xpi` file
 6. Restart Zotero when prompted
 
 ### 3. Using the Plugin
