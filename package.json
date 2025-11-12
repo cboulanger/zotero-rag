@@ -6,10 +6,6 @@
   "author": "",
   "type": "commonjs",
   "main": "index.js",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/yourusername/zotero-rag.git"
-  },
   "devDependencies": {
     "@commitlint/cli": "^18.4.0",
     "@commitlint/config-conventional": "^18.4.0",
