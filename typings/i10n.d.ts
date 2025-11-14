@@ -3,4 +3,5 @@
 /* eslint-disable */
 // @ts-nocheck
 export type FluentMessageId =
-  | 'zotero-rag-ask-question';
+  | 'zotero-rag-ask-question'
+  | 'zotero_rag-zotero-rag-ask-question';

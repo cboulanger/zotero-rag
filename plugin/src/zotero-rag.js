@@ -68,7 +68,8 @@ ZoteroRAG = {
 	/** @type {number} */
 	maxConcurrentQueries: 5,
 
-	/** @type {import('./toolkit.d.ts').Toolkit|null} */
+	/** @type {import('./toolkit.d.ts').Toolkit} */
+	// @ts-ignore - Initialized in init() method
 	toolkit: null,
 
 	/**
@@ -88,7 +89,9 @@ ZoteroRAG = {
 
 		// Initialize Zotero Plugin Toolkit
 		// The bundle creates a global var ZoteroPluginToolkit
+		// @ts-ignore - ZoteroPluginToolkit is a global variable created by the bundled toolkit
 		if (typeof ZoteroPluginToolkit !== 'undefined') {
+			// @ts-ignore - ZoteroPluginToolkit is a global variable
 			this.toolkit = ZoteroPluginToolkit.createToolkit({ id, version, rootURI });
 			this.log('Toolkit initialized successfully');
 		} else {
@@ -251,7 +254,7 @@ ZoteroRAG = {
 
 		// Open dialog window using chrome:// URL
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
-		const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=500';
+		const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=800';
 
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		window.openDialog(
@@ -315,8 +318,10 @@ ZoteroRAG = {
 
 		// For group libraries, return the group ID instead of library ID
 		const library = Zotero.Libraries.get(libraryID);
+		// @ts-ignore - libraryType exists on ZoteroLibrary at runtime
 		if (library && library.libraryType === 'group') {
 			// Get the group associated with this library
+			// @ts-ignore - getByLibraryID exists on Zotero.Groups at runtime
 			const group = Zotero.Groups.getByLibraryID(libraryID);
 			if (group) {
 				return String(group.id);  // Return group ID for backend
@@ -346,6 +351,7 @@ ZoteroRAG = {
 		try {
 			// Submit query directly - the backend should be available if indexing succeeded
 			// Build payload - only include optional params if explicitly set (let backend use preset defaults)
+			/** @type {Record<string, any>} */
 			const payload = {
 				question,
 				library_ids: libraryIDs
@@ -367,7 +373,7 @@ ZoteroRAG = {
 			});
 
 			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({}));
+				const errorData = /** @type {any} */ (await response.json().catch(() => ({})));
 				throw new Error(errorData.detail || `Query failed with HTTP ${response.status}`);
 			}
 
@@ -440,7 +446,7 @@ ZoteroRAG = {
 
 		for (let id of libraryIDs) {
 			const libraries = this.getLibraries();
-			const lib = libraries.find(l => l.id === id);
+			const lib = libraries.find((/** @type {Library} */ l) => l.id === id);
 			if (lib) {
 				libraryMap.set(id, {
 					name: lib.name,
