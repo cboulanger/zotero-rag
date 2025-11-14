@@ -350,6 +350,40 @@ plugin/
 
 Build script copies src → build, then creates XPI from build directory.
 
+## Development Server
+
+This project uses [`zotero-plugin-scaffold`(https://zotero-plugin-dev.github.io/zotero-plugin-scaffold)] which provides a [development server with hot-reloading(https://deepwiki.com/zotero-plugin-dev/zotero-plugin-scaffold/11-zotero-integration)]. We integrate this functionality to provide the following CLI:
+
+```bash
+# Start both backend and plugin development servers together
+npm run server:start:dev
+
+# Stop all servers
+npm run server:stop
+```
+
+**Hot-Reload Workflow:**
+
+1. Start development servers: `npm run server:start:dev`
+2. Plugin is automatically installed as a temporary add-on in Zotero
+3. Make changes to source files in `plugin/src/`
+4. Changes are automatically rebuilt and reloaded in Zotero
+5. No manual rebuild or reinstallation needed during development
+
+**Logs:**
+
+- Backend server: `logs/server.log`
+- Plugin development server: `logs/plugin.log`
+
+**Production Build:**
+
+For final distribution, build the XPI file:
+
+```bash
+npm run plugin:build
+# Output: plugin/dist/zotero-rag-{version}.xpi
+```
+
 ## References
 
 - Working example: `zotero-addons/addon/` directory shows HTML-based dialog with chrome protocol

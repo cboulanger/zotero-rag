@@ -6,13 +6,18 @@ Quick reference for all CLI commands. Run from project root directory.
 
 | Command | Description |
 |---------|-------------|
-| `npm run server:start` | Start backend server (dev mode with auto-reload) |
+| `npm run server:start` | Start backend server only |
+| `npm run server:start:dev` | Start backend + plugin development server |
 | `npm run server:start:prod` | Start backend server (production mode) |
-| `npm run server:stop` | Stop the backend server |
-| `npm run server:restart` | Restart the backend server |
+| `npm run server:stop` | Stop both backend and plugin servers |
+| `npm run server:restart` | Restart backend server only |
+| `npm run server:restart:dev` | Restart backend + plugin development server |
 | `npm run server:status` | Check if server is running |
 
 **Server URL:** http://localhost:8119
+
+**Development Mode with Plugin Server:**
+The `:dev` commands start both the backend server and the plugin development server together. Both servers are automatically stopped when you run the stop command. This is useful for full-stack development where changes to plugin code are hot-reloaded in Zotero.
 
 ## Testing
 
@@ -38,9 +43,20 @@ Quick reference for all CLI commands. Run from project root directory.
 
 | Command | Description |
 |---------|-------------|
+| `npm run plugin:dev` | Start plugin development server (hot-reload in Zotero) |
 | `npm run plugin:build` | Build plugin XPI (output: `plugin/dist/zotero-rag-{version}.xpi`) |
+| `npm run server:start:dev` | Start backend + plugin dev server together |
+
+**Development Workflow:**
+
+1. Start development servers: `npm run server:start:dev`
+2. Make changes to plugin source files in `plugin/src/`
+3. Changes are automatically hot-reloaded in Zotero
+4. Stop servers: `npm run server:stop`
 
 **Installation:** In Zotero: Tools → Add-ons → Install Add-on From File → Select XPI
+
+**Note:** The plugin development server uses the `zotero-plugin` scaffold which provides automatic hot-reloading. You don't need to rebuild the plugin after each change during development.
 
 ## Direct Python Commands
 
@@ -89,7 +105,7 @@ KISSKI_API_KEY=...             # Optional: for KISSKI preset
 ## Quick Start
 
 ```bash
-# 1. Start server
+# 1. Start backend server only
 npm run server:start
 
 # 2. Verify it's running
@@ -102,6 +118,20 @@ npm run test:backend
 npm run plugin:build
 
 # 5. Install plugin/dist/zotero-rag-0.1.0.xpi in Zotero
+```
+
+**For Plugin Development:**
+
+```bash
+# 1. Start both backend and plugin development servers
+npm run server:start:dev
+
+# 2. Make changes to plugin source in plugin/src/
+
+# 3. Changes auto-reload in Zotero
+
+# 4. Stop both servers
+npm run server:stop
 ```
 
 ## Troubleshooting
