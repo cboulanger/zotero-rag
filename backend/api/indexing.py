@@ -219,14 +219,20 @@ async def start_library_indexing(
             # Just check connection - we'll use the library_id as passed from plugin
             # The plugin knows the correct Zotero internal library ID
             if not await client.check_connection():
+                from backend.config.settings import get_settings
+                settings = get_settings()
                 raise HTTPException(
                     status_code=503,
-                    detail="Zotero local API is not accessible"
+                    detail=f"Zotero local API is not accessible at {settings.zotero_api_url}"
                 )
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except Exception as e:
+        from backend.config.settings import get_settings
+        settings = get_settings()
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to Zotero: {str(e)}"
+            detail=f"Failed to connect to Zotero at {settings.zotero_api_url}: {str(e)}"
         )
 
     # Start background task

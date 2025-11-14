@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+import asyncio
 
 from backend.config.settings import get_settings
 from backend.api import config, libraries, indexing, query
@@ -67,6 +68,51 @@ uvicorn_error_logger.propagate = True
 logger = logging.getLogger(__name__)
 
 
+async def check_zotero_connectivity():
+    """
+    Check connectivity to Zotero local API at startup.
+    Logs a clear warning if connection fails.
+    """
+    import aiohttp
+
+    zotero_url = settings.zotero_api_url
+    logger.info(f"Checking Zotero API connectivity at {zotero_url}")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Try to connect to Zotero's ping endpoint
+            async with session.get(f"{zotero_url}/connector/ping", timeout=aiohttp.ClientTimeout(total=3)) as response:
+                if response.status == 200:
+                    logger.info(f"✓ Successfully connected to Zotero API at {zotero_url}")
+                    return True
+                else:
+                    logger.warning(f"✗ Zotero API responded with status {response.status}")
+    except aiohttp.ClientConnectorError as e:
+        logger.warning("=" * 80)
+        logger.warning("⚠ WARNING: Cannot connect to Zotero API!")
+        logger.warning(f"⚠ Configured URL: {zotero_url}")
+        logger.warning("⚠ ")
+        logger.warning("⚠ Please ensure:")
+        logger.warning("⚠ 1. Zotero is running")
+        logger.warning("⚠ 2. HTTP server is enabled in Zotero preferences")
+        logger.warning("⚠    (Zotero → Settings → Advanced → General → Enable HTTP server)")
+        logger.warning("⚠ 3. The port in ZOTERO_API_URL (.env) matches Zotero's HTTP server port")
+        logger.warning("⚠ ")
+        logger.warning(f"⚠ Connection error: {e}")
+        logger.warning("=" * 80)
+        return False
+    except asyncio.TimeoutError:
+        logger.warning("=" * 80)
+        logger.warning("⚠ WARNING: Zotero API connection timeout!")
+        logger.warning(f"⚠ Configured URL: {zotero_url}")
+        logger.warning("⚠ Zotero may be running but not responding.")
+        logger.warning("=" * 80)
+        return False
+    except Exception as e:
+        logger.warning(f"⚠ Unexpected error checking Zotero connectivity: {e}")
+        return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
@@ -74,6 +120,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Using preset: {settings.model_preset}")
     if settings.log_file:
         logger.info(f"Logging to file: {settings.log_file}")
+
+    # Check Zotero API connectivity
+    await check_zotero_connectivity()
+
     yield
     logger.info("Shutting down Zotero RAG backend")
 

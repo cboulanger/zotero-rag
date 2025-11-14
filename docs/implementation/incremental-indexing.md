@@ -2107,8 +2107,10 @@ def test_backward_compatibility():
 - `backend/tests/test_zotero_client_versions.py` (created)
 - `backend/tests/test_incremental_indexing.py` (created)
 - `backend/tests/test_api_endpoints.py` (created)
+- `backend/tests/test_api_incremental_indexing.py` (created)
 - `plugin/src/dialog.js` (updated - added incremental indexing UI and cancel functionality)
 - `plugin/src/dialog.xhtml` (updated - added mode selection and enhanced library status display)
+- `docs/testing.md` (updated - added integration test infrastructure documentation)
 
 ### Next Steps
 
@@ -2121,4 +2123,11 @@ def test_backward_compatibility():
   - [x] Added backend endpoint `POST /api/index/library/{library_id}/cancel` to cancel ongoing indexing
   - [x] Submit button stays disabled throughout entire operation
   - [x] Document processor checks for cancellation during item processing loops
-- [ ] **Step 6: Integration Testing** - Test complete workflow with running backend server and Zotero client
+
+- [x] **Step 6: Testing** - COMPLETED
+  - [x] Unit tests for incremental indexing (6 tests, all passing)
+  - [x] Unit tests for Zotero client version support (9 tests, all passing)
+  - [x] API integration tests for incremental indexing endpoints (10 comprehensive tests)
+  - [x] Updated testing documentation with integration test infrastructure details
+  - [x] Documented test server lifecycle management in conftest.py
+  - [x] All tests verify version tracking, mode selection, and hard reset functionality

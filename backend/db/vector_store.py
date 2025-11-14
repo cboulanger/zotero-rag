@@ -365,6 +365,45 @@ class VectorStore:
 
         logger.debug(f"Added deduplication record for {record.item_key}")
 
+    def delete_library_deduplication_records(self, library_id: str) -> int:
+        """
+        Delete all deduplication records for a specific library.
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            Number of deduplication records deleted
+        """
+        # Get count before deletion
+        count_before = self.client.count(
+            collection_name=self.DEDUP_COLLECTION,
+            count_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        ).count
+
+        # Delete points
+        self.client.delete(
+            collection_name=self.DEDUP_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        )
+
+        logger.info(f"Deleted {count_before} deduplication records for library {library_id}")
+        return count_before
+
     def delete_library_chunks(self, library_id: str) -> int:
         """
         Delete all chunks for a specific library.
@@ -425,6 +464,23 @@ class VectorStore:
 
     # Library Metadata Methods
 
+    def _library_id_to_uuid(self, library_id: str) -> str:
+        """
+        Convert library ID to a consistent UUID.
+
+        Uses UUID5 with a namespace to ensure the same library_id
+        always produces the same UUID.
+
+        Args:
+            library_id: Library ID (e.g., "6297749")
+
+        Returns:
+            UUID string
+        """
+        # Use a custom namespace for library metadata
+        namespace = uuid.UUID('12345678-1234-5678-1234-567812345678')
+        return str(uuid.uuid5(namespace, library_id))
+
     def get_library_metadata(self, library_id: str) -> Optional[LibraryIndexMetadata]:
         """
         Get indexing metadata for a library.
@@ -436,9 +492,10 @@ class VectorStore:
             Library metadata if found, None otherwise
         """
         try:
+            point_id = self._library_id_to_uuid(library_id)
             points = self.client.retrieve(
                 collection_name=self.METADATA_COLLECTION,
-                ids=[library_id]
+                ids=[point_id]
             )
             if points:
                 return LibraryIndexMetadata(**points[0].payload)
@@ -454,8 +511,9 @@ class VectorStore:
         Args:
             metadata: Library metadata to store
         """
+        point_id = self._library_id_to_uuid(metadata.library_id)
         point = PointStruct(
-            id=metadata.library_id,
+            id=point_id,
             vector=[0.0],  # Dummy vector
             payload=metadata.model_dump()
         )

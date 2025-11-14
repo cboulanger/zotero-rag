@@ -41,6 +41,52 @@ def find_server_process():
     return None
 
 
+def check_zotero_connectivity_from_log():
+    """Read the log file to check Zotero connectivity status and display it.
+
+    Returns:
+        True if connectivity check result found, None otherwise
+    """
+    if not LOG_FILE.exists():
+        return None
+
+    try:
+        # Read the last 50 lines of the log
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            recent_lines = lines[-50:] if len(lines) > 50 else lines
+
+        # Look for connectivity check messages
+        for line in recent_lines:
+            if "Successfully connected to Zotero API" in line:
+                # Extract the URL from the log line
+                if "at http" in line:
+                    url_part = line.split("at http")[1].strip()
+                    print(f"[OK] Zotero API connected: http{url_part}")
+                else:
+                    print("[OK] Zotero API connected")
+                return True
+            elif "WARNING: Cannot connect to Zotero API" in line:
+                print("[WARN] Cannot connect to Zotero API!")
+                # Print the warning details
+                in_warning = True
+                for warn_line in recent_lines[recent_lines.index(line):]:
+                    if "⚠" in warn_line:
+                        # Extract just the warning message part
+                        msg = warn_line.split("⚠")[-1].strip()
+                        if msg and not msg.startswith("="):
+                            print(f"       {msg}")
+                    elif "=" * 80 in warn_line:
+                        break
+                return True
+
+    except Exception:
+        # Silently ignore errors reading log
+        pass
+
+    return None
+
+
 def start_server(dev_mode=True):
     """Start the FastAPI server."""
     # Load environment from .env.local (overrides) then .env
@@ -50,7 +96,7 @@ def start_server(dev_mode=True):
     if env_local.exists():
         print(f"Loading .env.local: {env_local}")
         load_dotenv(env_local, override=True)
-    load_dotenv(env_file, override=False)  # Don't override if already set
+    load_dotenv(env_file, override=True)  # Always reload from .env file
 
     # Debug: Show what MODEL_PRESET is set to
     model_preset = os.environ.get("MODEL_PRESET", "not set")
@@ -97,7 +143,7 @@ def start_server(dev_mode=True):
             print(f"Removing system MODEL_PRESET ({env['MODEL_PRESET']})")
             del env["MODEL_PRESET"]
 
-        # Open log file for output
+        # Open log file for output (truncate to start fresh)
         with open(LOG_FILE, 'w') as log_file:
             # Start in background with explicit environment
             process = subprocess.Popen(
@@ -111,8 +157,8 @@ def start_server(dev_mode=True):
             # Save PID
             PID_FILE.write_text(str(process.pid))
 
-            # Wait a moment for server to start
-            time.sleep(3)
+            # Wait a moment for server to start and run connectivity check
+            time.sleep(4)
 
             # Check if process is still running
             if process.poll() is None:
@@ -120,6 +166,7 @@ def start_server(dev_mode=True):
                 print(f"[OK] Access at: http://{HOST}:{PORT}")
                 print(f"[OK] API docs at: http://{HOST}:{PORT}/docs")
                 print(f"[OK] Logs: {LOG_FILE}")
+                print(f"[INFO] Check logs for Zotero API connectivity status")
                 print(f"\nTo stop: python scripts/server.py stop")
             else:
                 print("[ERROR] Server failed to start")

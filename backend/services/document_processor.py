@@ -268,6 +268,11 @@ class DocumentProcessor:
         chunks_deleted = self.vector_store.delete_library_chunks(library_id)
         logger.info(f"Deleted {chunks_deleted} existing chunks")
 
+        # Also delete deduplication records to allow reprocessing of PDFs
+        logger.info("Deleting deduplication records...")
+        dedup_deleted = self.vector_store.delete_library_deduplication_records(library_id)
+        logger.info(f"Deleted {dedup_deleted} deduplication records")
+
         # Fetch all items
         items = await self.zotero_client.get_library_items_since(
             library_id=library_id,

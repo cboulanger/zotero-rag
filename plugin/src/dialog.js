@@ -29,11 +29,17 @@
  */
 
 /**
+ * @typedef {Object} QueryOptions
+ * @property {number} [topK] - Number of chunks to retrieve
+ * @property {number} [minScore] - Minimum similarity score
+ */
+
+/**
  * @typedef {Object} ZoteroRAGPlugin
  * @property {string} backendURL - Backend server URL
  * @property {function(): Array<Library>} getLibraries - Get available libraries
  * @property {function(): string} getCurrentLibrary - Get current library ID
- * @property {function(string, Array<string>): Promise<QueryResult>} submitQuery - Submit RAG query
+ * @property {function(string, Array<string>, QueryOptions=): Promise<QueryResult>} submitQuery - Submit RAG query
  * @property {function(string, QueryResult, Array<string>): Promise<void>} createResultNote - Create note with results
  * @property {function(string): void} log - Log message
  */
@@ -120,8 +126,54 @@ var ZoteroRAGDialog = {
 			});
 		}
 
+		// Set up similarity threshold slider
+		const similaritySlider = document.getElementById('similarity-threshold');
+		const similarityValue = document.getElementById('similarity-value');
+		if (similaritySlider && similarityValue) {
+			similaritySlider.addEventListener('input', (e) => {
+				const value = /** @type {HTMLInputElement} */ (e.target).value;
+				similarityValue.textContent = parseFloat(value).toFixed(1);
+			});
+		}
+
+		// Load preset configuration and set default min_score
+		this.loadPresetConfig();
+
 		// Populate library list
 		this.populateLibraries();
+	},
+
+	/**
+	 * Load preset configuration from backend and set default similarity threshold.
+	 * @returns {Promise<void>}
+	 */
+	async loadPresetConfig() {
+		if (!this.plugin) return;
+
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config`);
+			if (response.ok) {
+				const config = await response.json();
+				const defaultMinScore = config.default_min_score || 0.3;
+
+				// Update slider and display
+				const similaritySlider = /** @type {HTMLInputElement|null} */ (
+					document.getElementById('similarity-threshold')
+				);
+				const similarityValue = document.getElementById('similarity-value');
+
+				if (similaritySlider && similarityValue) {
+					similaritySlider.value = defaultMinScore.toString();
+					similarityValue.textContent = defaultMinScore.toFixed(1);
+				}
+
+				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}`);
+			}
+		} catch (error) {
+			// Silently fail and use hardcoded default (0.3)
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.plugin.log(`Could not load preset config: ${errorMessage}`);
+		}
 	},
 
 	/**
@@ -154,22 +206,20 @@ var ZoteroRAGDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async populateLibraries() {
-		if (!this.plugin) return;
+		if (!this.plugin) {
+			return;
+		}
 
 		const libraries = this.plugin.getLibraries();
 		const currentLibrary = this.plugin.getCurrentLibrary();
 		const listContainer = document.getElementById('library-list');
-		if (!listContainer) return;
 
-		// Fetch metadata for all libraries
-		for (let library of libraries) {
-			const metadata = await this.fetchLibraryMetadata(library.id);
-			this.libraryMetadata.set(library.id, metadata);
+		if (!listContainer) {
+			return;
 		}
 
-		// Build UI
+		// Build UI without metadata - metadata will be loaded on selection
 		for (let library of libraries) {
-			const metadata = this.libraryMetadata.get(library.id);
 
 			const checkboxLabel = document.createElement('label');
 			checkboxLabel.className = 'library-checkbox';
@@ -185,51 +235,117 @@ var ZoteroRAGDialog = {
 				this.selectedLibraries.add(library.id);
 			}
 
-			checkbox.addEventListener('change', (e) => {
+			// Load metadata when library is selected
+			checkbox.addEventListener('change', async (e) => {
 				const target = /** @type {HTMLInputElement} */ (e.target);
 				const libraryId = target.getAttribute('data-library-id');
 				if (libraryId) {
 					if (target.checked) {
 						this.selectedLibraries.add(libraryId);
+						// Fetch metadata if not already loaded
+						if (!this.libraryMetadata.has(libraryId)) {
+							await this.fetchAndUpdateLibraryMetadata(libraryId);
+						}
 					} else {
 						this.selectedLibraries.delete(libraryId);
 					}
 				}
 			});
 
-			// Create library info container
-			const infoContainer = document.createElement('div');
-			infoContainer.className = 'library-info';
+			// Status icon (hidden by CSS for now)
+			const statusIcon = document.createElement('span');
+			statusIcon.className = 'library-status-icon';
+			statusIcon.id = `status-icon-${library.id}`;
+			statusIcon.textContent = '\u2205'; // Empty set symbol for not indexed
+			statusIcon.style.color = '#999';
 
 			// Library name
 			const nameSpan = document.createElement('span');
 			nameSpan.className = 'library-name';
 			nameSpan.textContent = library.name;
 
-			// Status info
-			const statusSpan = document.createElement('span');
-			statusSpan.className = 'library-status';
+			// Metadata info (initially empty, will be populated on selection)
+			const metaSpan = document.createElement('span');
+			metaSpan.className = 'library-meta';
+			metaSpan.id = `meta-${library.id}`;
+			metaSpan.textContent = '';
+			metaSpan.style.display = 'none'; // Hide until metadata is loaded
 
+			checkboxLabel.appendChild(checkbox);
+			checkboxLabel.appendChild(statusIcon);
+			checkboxLabel.appendChild(nameSpan);
+			checkboxLabel.appendChild(metaSpan);
+			listContainer.appendChild(checkboxLabel);
+		}
+
+		// Load metadata for the currently selected library (if any)
+		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
+			await this.fetchAndUpdateLibraryMetadata(currentLibrary);
+		}
+	},
+
+	/**
+	 * Fetch metadata for a single library and update UI.
+	 * @param {string} libraryId - Library ID
+	 * @returns {Promise<void>}
+	 */
+	async fetchAndUpdateLibraryMetadata(libraryId) {
+		try {
+			const metaSpan = document.getElementById(`meta-${libraryId}`);
+			if (metaSpan) {
+				metaSpan.textContent = 'loading...';
+				metaSpan.style.display = 'inline';
+				metaSpan.style.fontStyle = 'italic';
+				metaSpan.style.color = '#999';
+			}
+
+			const metadata = await this.fetchLibraryMetadata(libraryId);
+			this.libraryMetadata.set(libraryId, metadata);
+
+			// Update the UI
+			this.updateLibraryStatusIcon(libraryId, metadata);
+		} catch (error) {
+			const metaSpan = document.getElementById(`meta-${libraryId}`);
+			if (metaSpan) {
+				metaSpan.textContent = 'error loading';
+				metaSpan.style.color = '#cc0000';
+			}
+		}
+	},
+
+	/**
+	 * Update the status icon for a library after metadata is fetched.
+	 * @param {string} libraryId - Library ID
+	 * @param {LibraryIndexMetadata|null} metadata - Library metadata
+	 * @returns {void}
+	 */
+	updateLibraryStatusIcon(libraryId, metadata) {
+		const statusIcon = document.getElementById(`status-icon-${libraryId}`);
+		const metaSpan = document.getElementById(`meta-${libraryId}`);
+
+		if (statusIcon) {
+			if (metadata) {
+				statusIcon.textContent = '\u2713'; // Checkmark for indexed
+				statusIcon.style.color = '#008000';
+			} else {
+				statusIcon.textContent = '\u2205'; // Empty set symbol for not indexed
+				statusIcon.style.color = '#999';
+			}
+		}
+
+		if (metaSpan) {
+			metaSpan.style.display = 'inline'; // Show the metadata span
 			if (metadata) {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
-				statusSpan.textContent = `Last indexed: ${timeAgo} | ${metadata.total_items_indexed} items | ${metadata.total_chunks} chunks`;
-				statusSpan.style.color = '#666';
-				statusSpan.style.fontSize = '12px';
+				metaSpan.textContent = `${timeAgo} · ${metadata.total_items_indexed} items`;
+				metaSpan.style.fontStyle = 'normal';
+				metaSpan.style.color = '#666';
 			} else {
-				statusSpan.textContent = 'Not indexed yet';
-				statusSpan.style.color = '#999';
-				statusSpan.style.fontSize = '12px';
-				statusSpan.style.fontStyle = 'italic';
+				metaSpan.textContent = 'not indexed';
+				metaSpan.style.fontStyle = 'italic';
+				metaSpan.style.color = '#999';
 			}
-
-			infoContainer.appendChild(nameSpan);
-			infoContainer.appendChild(document.createElement('br'));
-			infoContainer.appendChild(statusSpan);
-
-			checkboxLabel.appendChild(checkbox);
-			checkboxLabel.appendChild(infoContainer);
-			listContainer.appendChild(checkboxLabel);
 		}
 	},
 
@@ -266,6 +382,12 @@ var ZoteroRAGDialog = {
 		);
 		const indexingMode = modeSelect ? modeSelect.value : 'auto';
 
+		// Get similarity threshold
+		const similaritySlider = /** @type {HTMLInputElement|null} */ (
+			document.getElementById('similarity-threshold')
+		);
+		const minScore = similaritySlider ? parseFloat(similaritySlider.value) : 0.3;
+
 		// Validate input
 		if (!question) {
 			this.showStatus('Please enter a question.', 'error');
@@ -292,7 +414,9 @@ var ZoteroRAGDialog = {
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
-			const result = await this.plugin.submitQuery(question, libraryIds);
+			const result = await this.plugin.submitQuery(question, libraryIds, {
+				minScore: minScore
+			});
 
 			// Update progress for note creation phase
 			this.updateProgress(50, 'Creating note', 'Formatting results...');

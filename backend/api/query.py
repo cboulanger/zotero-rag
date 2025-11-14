@@ -30,8 +30,8 @@ class QueryRequest(BaseModel):
     """RAG query request."""
     question: str
     library_ids: List[str]
-    top_k: int = 5  # Number of chunks to retrieve
-    min_score: float = 0.5  # Minimum similarity score
+    top_k: Optional[int] = None  # Number of chunks to retrieve (uses preset default if not specified)
+    min_score: Optional[float] = None  # Minimum similarity score (uses preset default if not specified)
 
 
 class QueryResponse(BaseModel):
@@ -83,6 +83,10 @@ async def query_libraries(request: QueryRequest):
         )
         llm_service = create_llm_service(settings)
 
+        # Use preset defaults if not specified in request
+        top_k = request.top_k if request.top_k is not None else preset.rag.top_k
+        min_score = request.min_score if request.min_score is not None else preset.rag.score_threshold
+
         # Use context manager to ensure VectorStore is closed after query
         with VectorStore(
             storage_path=settings.vector_db_path,
@@ -121,12 +125,12 @@ async def query_libraries(request: QueryRequest):
                 vector_store=vector_store
             )
 
-            # Execute query
+            # Execute query with preset defaults
             result = await rag_engine.query(
                 question=request.question,
                 library_ids=request.library_ids,
-                top_k=request.top_k,
-                min_score=request.min_score
+                top_k=top_k,
+                min_score=min_score
             )
 
             # Format citations

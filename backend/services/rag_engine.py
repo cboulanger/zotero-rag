@@ -63,7 +63,7 @@ class RAGEngine:
         question: str,
         library_ids: List[str],
         top_k: int = 5,
-        min_score: float = 0.5
+        min_score: float = 0.3  # Fallback default, should use preset value from API layer
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -72,7 +72,7 @@ class RAGEngine:
             question: User's question.
             library_ids: List of library IDs to search.
             top_k: Number of chunks to retrieve.
-            min_score: Minimum similarity score threshold.
+            min_score: Minimum similarity score threshold (default: from preset, fallback 0.3).
 
         Returns:
             Query result with answer and source citations.

@@ -22,13 +22,18 @@ class ZoteroLocalAPI:
     access to all libraries, items, and attachments without authentication.
     """
 
-    def __init__(self, base_url: str = "http://localhost:23119"):
+    def __init__(self, base_url: Optional[str] = None):
         """
         Initialize local API client.
 
         Args:
-            base_url: Base URL for Zotero local API
+            base_url: Base URL for Zotero local API. If None, uses ZOTERO_API_URL from settings.
         """
+        if base_url is None:
+            from backend.config.settings import get_settings
+            settings = get_settings()
+            base_url = settings.zotero_api_url
+
         self.base_url = base_url.rstrip("/")
         self.session: Optional[aiohttp.ClientSession] = None
         logger.info(f"Initialized ZoteroLocalAPI with base URL: {base_url}")

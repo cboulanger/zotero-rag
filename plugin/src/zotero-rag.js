@@ -324,16 +324,25 @@ ZoteroRAG = {
 
 		try {
 			// Submit query directly - the backend should be available if indexing succeeded
+			// Build payload - only include optional params if explicitly set (let backend use preset defaults)
+			const payload = {
+				question,
+				library_ids: libraryIDs
+			};
+
+			if (options.topK !== undefined) {
+				payload.top_k = options.topK;
+			}
+			if (options.minScore !== undefined) {
+				payload.min_score = options.minScore;
+			}
+
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					question,
-					library_ids: libraryIDs,
-					top_k: options.topK || 5
-				})
+				body: JSON.stringify(payload)
 			});
 
 			if (!response.ok) {

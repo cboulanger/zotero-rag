@@ -53,6 +53,9 @@ data/
 logs/
 *.pid
 nul
+plugin/build/*
+plugin/dist/*
+.scaffold
 
 # NodeJS
 node_modules
