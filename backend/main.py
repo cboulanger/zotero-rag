@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 async def check_zotero_connectivity():
     """
     Check connectivity to Zotero local API at startup.
-    Logs a clear warning if connection fails.
+    Raises RuntimeError if connection fails (hard requirement).
     """
     import aiohttp
 
@@ -83,34 +83,67 @@ async def check_zotero_connectivity():
             # Try to connect to Zotero's ping endpoint
             async with session.get(f"{zotero_url}/connector/ping", timeout=aiohttp.ClientTimeout(total=3)) as response:
                 if response.status == 200:
-                    logger.info(f"✓ Successfully connected to Zotero API at {zotero_url}")
+                    logger.info(f"[OK] Successfully connected to Zotero API at {zotero_url}")
                     return True
                 else:
-                    logger.warning(f"✗ Zotero API responded with status {response.status}")
+                    error_msg = (
+                        f"\n{'=' * 80}\n"
+                        f"ERROR: Cannot connect to Zotero API!\n"
+                        f"Zotero API responded with status {response.status}\n"
+                        f"Configured URL: {zotero_url}\n"
+                        f"\n"
+                        f"Please ensure:\n"
+                        f"1. Zotero is running\n"
+                        f"2. HTTP server is enabled in Zotero preferences:\n"
+                        f"   Settings -> Advanced -> Miscellaneous\n"
+                        f"   [x] Allow other applications on this computer to communicate with Zotero\n"
+                        f"3. The port in ZOTERO_API_URL (.env) matches Zotero's HTTP server port\n"
+                        f"   (Default: http://localhost:23119)\n"
+                        f"{'=' * 80}\n"
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
     except aiohttp.ClientConnectorError as e:
-        logger.warning("=" * 80)
-        logger.warning("⚠ WARNING: Cannot connect to Zotero API!")
-        logger.warning(f"⚠ Configured URL: {zotero_url}")
-        logger.warning("⚠ ")
-        logger.warning("⚠ Please ensure:")
-        logger.warning("⚠ 1. Zotero is running")
-        logger.warning("⚠ 2. HTTP server is enabled in Zotero preferences")
-        logger.warning("⚠    (Zotero → Settings → Advanced → General → Enable HTTP server)")
-        logger.warning("⚠ 3. The port in ZOTERO_API_URL (.env) matches Zotero's HTTP server port")
-        logger.warning("⚠ ")
-        logger.warning(f"⚠ Connection error: {e}")
-        logger.warning("=" * 80)
-        return False
-    except asyncio.TimeoutError:
-        logger.warning("=" * 80)
-        logger.warning("⚠ WARNING: Zotero API connection timeout!")
-        logger.warning(f"⚠ Configured URL: {zotero_url}")
-        logger.warning("⚠ Zotero may be running but not responding.")
-        logger.warning("=" * 80)
-        return False
+        error_msg = (
+            f"\n{'=' * 80}\n"
+            f"ERROR: Cannot connect to Zotero API!\n"
+            f"Configured URL: {zotero_url}\n"
+            f"\n"
+            f"Please ensure:\n"
+            f"1. Zotero is running\n"
+            f"2. HTTP server is enabled in Zotero preferences:\n"
+            f"   Settings -> Advanced -> Miscellaneous\n"
+            f"   [x] Allow other applications on this computer to communicate with Zotero\n"
+            f"3. The port in ZOTERO_API_URL (.env) matches Zotero's HTTP server port\n"
+            f"   (Default: http://localhost:23119)\n"
+            f"\n"
+            f"Connection error: {e}\n"
+            f"{'=' * 80}\n"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
+    except asyncio.TimeoutError as e:
+        error_msg = (
+            f"\n{'=' * 80}\n"
+            f"ERROR: Zotero API connection timeout!\n"
+            f"Configured URL: {zotero_url}\n"
+            f"\n"
+            f"Zotero may be running but not responding.\n"
+            f"Please check:\n"
+            f"1. Zotero is not frozen or busy\n"
+            f"2. HTTP server is enabled in Zotero preferences:\n"
+            f"   Settings -> Advanced -> Miscellaneous\n"
+            f"   [x] Allow other applications on this computer to communicate with Zotero\n"
+            f"{'=' * 80}\n"
+        )
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
     except Exception as e:
-        logger.warning(f"⚠ Unexpected error checking Zotero connectivity: {e}")
-        return False
+        if isinstance(e, RuntimeError):
+            raise
+        error_msg = f"Unexpected error checking Zotero connectivity: {e}"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg) from e
 
 
 @asynccontextmanager

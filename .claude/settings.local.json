@@ -15,7 +15,8 @@
       "Bash(npm run plugin:build:*)",
       "Bash(npm run server:status:*)",
       "Bash(npm run server:restart:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(npm run plugin:build:toolkit:*)"
     ],
     "deny": [],
     "ask": []

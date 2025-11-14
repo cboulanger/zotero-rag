@@ -1,5 +1,6 @@
 // @ts-check
 /// <reference path="./zotero-types.d.ts" />
+/// <reference path="./toolkit.d.ts" />
 
 /**
  * @typedef {Object} Library
@@ -67,6 +68,9 @@ ZoteroRAG = {
 	/** @type {number} */
 	maxConcurrentQueries: 5,
 
+	/** @type {import('./toolkit.d.ts').Toolkit|null} */
+	toolkit: null,
+
 	/**
 	 * Initialize the plugin.
 	 * @param {Object} config - Plugin configuration
@@ -81,6 +85,15 @@ ZoteroRAG = {
 		this.version = version;
 		this.rootURI = rootURI;
 		this.initialized = true;
+
+		// Initialize Zotero Plugin Toolkit
+		// The bundle creates a global var ZoteroPluginToolkit
+		if (typeof ZoteroPluginToolkit !== 'undefined') {
+			this.toolkit = ZoteroPluginToolkit.createToolkit({ id, version, rootURI });
+			this.log('Toolkit initialized successfully');
+		} else {
+			this.log('WARNING: Toolkit bundle not loaded');
+		}
 
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
@@ -109,8 +122,8 @@ ZoteroRAG = {
 		let menuitem = doc.createXULElement('menuitem');
 		menuitem.id = 'zotero-rag-ask-question';
 		menuitem.setAttribute('label', 'Zotero RAG: Ask Question...');
-		menuitem.addEventListener('command', () => {
-			this.openQueryDialog(window);
+		menuitem.addEventListener('command', async () => {
+			await this.openQueryDialog(window);
 		});
 
 		// Add to Tools menu
@@ -216,12 +229,23 @@ ZoteroRAG = {
 	/**
 	 * Open the query dialog.
 	 * @param {Window} window - Parent window
-	 * @returns {void}
+	 * @returns {Promise<void>}
 	 */
-	openQueryDialog(window) {
+	async openQueryDialog(window) {
 		// Check concurrent query limit
 		if (this.activeQueries.size >= this.maxConcurrentQueries) {
-			this.showError(window, `Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
+			this.showError(`Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
+			return;
+		}
+
+		// Check backend connectivity before opening dialog
+		try {
+			await this.checkBackendVersion();
+		} catch (e) {
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			this.showError(
+				`Cannot connect to backend server!\n\n${errorMessage}\n\nPlease start the server:\n  npm run server:start\n\nDefault URL: ${this.backendURL || 'http://localhost:8119'}`
+			);
 			return;
 		}
 
@@ -240,14 +264,11 @@ ZoteroRAG = {
 
 	/**
 	 * Show error message to user.
-	 * @param {Window} window - Parent window
 	 * @param {string} message - Error message
 	 * @returns {void}
 	 */
-	showError(window, message) {
-		const prompts = Components.classes["@mozilla.org/embedcomp/prompt-service;1"]
-			.getService(Components.interfaces.nsIPromptService);
-		prompts.alert(window, "Zotero RAG Error", message);
+	showError(message) {
+		this.toolkit.showError(message);
 	},
 
 	/**
