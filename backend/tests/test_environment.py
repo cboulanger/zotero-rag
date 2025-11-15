@@ -35,15 +35,19 @@ def check_zotero_available() -> tuple[bool, Optional[str]]:
     try:
         import httpx
 
+        # Get Zotero API URL from environment/settings
+        zotero_url = os.getenv("ZOTERO_API_URL", "http://localhost:23119")
+        ping_url = f"{zotero_url}/connector/ping"
+
         # Try to connect to Zotero local API
-        response = httpx.get("http://localhost:23119/connector/ping", timeout=2.0)
+        response = httpx.get(ping_url, timeout=2.0)
 
         if response.status_code == 200:
             return True, None
         else:
             return False, f"Zotero API responded with status {response.status_code}"
     except httpx.ConnectError:
-        return False, "Cannot connect to Zotero on localhost:23119. Is Zotero running?"
+        return False, f"Cannot connect to Zotero at {zotero_url}. Is Zotero running?"
     except Exception as e:
         return False, f"Error checking Zotero: {e}"
 

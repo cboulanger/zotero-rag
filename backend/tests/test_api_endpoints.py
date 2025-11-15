@@ -20,14 +20,14 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         from backend.main import app
         self.client = TestClient(app)
 
-    @patch('backend.api.libraries.get_settings')
-    @patch('backend.api.libraries.create_embedding_service')
-    @patch('backend.api.libraries.VectorStore')
+    @patch('backend.db.vector_store.VectorStore')
+    @patch('backend.services.embeddings.create_embedding_service')
+    @patch('backend.config.settings.get_settings')
     def test_get_index_status_success(
         self,
-        mock_vector_store_class,
+        mock_get_settings,
         mock_create_embedding,
-        mock_get_settings
+        mock_vector_store_class
     ):
         """Test getting index status for an indexed library."""
         # Mock settings
@@ -60,7 +60,7 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         mock_vector_store_class.return_value = mock_vector_store
 
         # Make request
-        response = self.client.get("/libraries/1/index-status")
+        response = self.client.get("/api/libraries/1/index-status")
 
         # Assert response
         self.assertEqual(response.status_code, 200)
@@ -71,14 +71,14 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         self.assertEqual(data["indexing_mode"], "incremental")
         self.assertFalse(data["force_reindex"])
 
-    @patch('backend.api.libraries.get_settings')
-    @patch('backend.api.libraries.create_embedding_service')
-    @patch('backend.api.libraries.VectorStore')
+    @patch('backend.db.vector_store.VectorStore')
+    @patch('backend.services.embeddings.create_embedding_service')
+    @patch('backend.config.settings.get_settings')
     def test_get_index_status_not_found(
         self,
-        mock_vector_store_class,
+        mock_get_settings,
         mock_create_embedding,
-        mock_get_settings
+        mock_vector_store_class
     ):
         """Test getting index status for a library that hasn't been indexed."""
         # Mock settings
@@ -100,20 +100,20 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         mock_vector_store_class.return_value = mock_vector_store
 
         # Make request
-        response = self.client.get("/libraries/999/index-status")
+        response = self.client.get("/api/libraries/999/index-status")
 
         # Assert 404
         self.assertEqual(response.status_code, 404)
         self.assertIn("not been indexed", response.json()["detail"])
 
-    @patch('backend.api.libraries.get_settings')
-    @patch('backend.api.libraries.create_embedding_service')
-    @patch('backend.api.libraries.VectorStore')
+    @patch('backend.db.vector_store.VectorStore')
+    @patch('backend.services.embeddings.create_embedding_service')
+    @patch('backend.config.settings.get_settings')
     def test_reset_library_index(
         self,
-        mock_vector_store_class,
+        mock_get_settings,
         mock_create_embedding,
-        mock_get_settings
+        mock_vector_store_class
     ):
         """Test marking a library for hard reset."""
         # Mock settings
@@ -142,7 +142,7 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         mock_vector_store_class.return_value = mock_vector_store
 
         # Make request
-        response = self.client.post("/libraries/1/reset-index")
+        response = self.client.post("/api/libraries/1/reset-index")
 
         # Assert response
         self.assertEqual(response.status_code, 200)
@@ -154,14 +154,14 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         # Verify mark_library_for_reset was called
         mock_vector_store.__enter__.return_value.mark_library_for_reset.assert_called_once_with("1")
 
-    @patch('backend.api.libraries.get_settings')
-    @patch('backend.api.libraries.create_embedding_service')
-    @patch('backend.api.libraries.VectorStore')
+    @patch('backend.db.vector_store.VectorStore')
+    @patch('backend.services.embeddings.create_embedding_service')
+    @patch('backend.config.settings.get_settings')
     def test_list_indexed_libraries(
         self,
-        mock_vector_store_class,
+        mock_get_settings,
         mock_create_embedding,
-        mock_get_settings
+        mock_vector_store_class
     ):
         """Test listing all indexed libraries."""
         # Mock settings
@@ -197,7 +197,7 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         mock_vector_store_class.return_value = mock_vector_store
 
         # Make request
-        response = self.client.get("/libraries/indexed")
+        response = self.client.get("/api/libraries/indexed")
 
         # Assert response
         self.assertEqual(response.status_code, 200)
@@ -216,7 +216,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         self.client = TestClient(app)
 
     @patch('backend.api.indexing.ZoteroLocalAPI')
-    @patch('backend.api.indexing.asyncio.create_task')
+    @patch('asyncio.create_task')
     def test_start_indexing_with_auto_mode(
         self,
         mock_create_task,
@@ -230,7 +230,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
 
         # Make request with auto mode
         response = self.client.post(
-            "/index/library/1",
+            "/api/index/library/1",
             params={
                 "library_name": "Test Library",
                 "mode": "auto"
@@ -248,7 +248,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         mock_create_task.assert_called_once()
 
     @patch('backend.api.indexing.ZoteroLocalAPI')
-    @patch('backend.api.indexing.asyncio.create_task')
+    @patch('asyncio.create_task')
     def test_start_indexing_with_incremental_mode(
         self,
         mock_create_task,
@@ -262,7 +262,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
 
         # Make request with incremental mode
         response = self.client.post(
-            "/index/library/1",
+            "/api/index/library/1",
             params={
                 "library_name": "Test Library",
                 "mode": "incremental"
@@ -275,7 +275,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         self.assertIn("mode: incremental", data["message"])
 
     @patch('backend.api.indexing.ZoteroLocalAPI')
-    @patch('backend.api.indexing.asyncio.create_task')
+    @patch('asyncio.create_task')
     def test_start_indexing_with_full_mode(
         self,
         mock_create_task,
@@ -289,7 +289,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
 
         # Make request with full mode
         response = self.client.post(
-            "/index/library/1",
+            "/api/index/library/1",
             params={
                 "library_name": "Test Library",
                 "mode": "full"
@@ -316,7 +316,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
 
         try:
             # Make request
-            response = self.client.post("/index/library/1")
+            response = self.client.post("/api/index/library/1")
 
             # Assert 409 Conflict
             self.assertEqual(response.status_code, 409)
@@ -328,15 +328,17 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
     @patch('backend.api.indexing.ZoteroLocalAPI')
     def test_start_indexing_zotero_unavailable(self, mock_zotero_api):
         """Test error when Zotero is not accessible."""
-        # Mock Zotero API connection failure
-        mock_zotero_api.return_value.__aenter__.side_effect = Exception("Connection refused")
+        # Mock Zotero API - make check_connection return False
+        mock_client = AsyncMock()
+        mock_client.check_connection.return_value = False
+        mock_zotero_api.return_value.__aenter__.return_value = mock_client
 
         # Make request
-        response = self.client.post("/index/library/1")
+        response = self.client.post("/api/index/library/1")
 
         # Assert 503 Service Unavailable
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Failed to connect", response.json()["detail"])
+        self.assertIn("not accessible", response.json()["detail"])
 
 
 if __name__ == "__main__":

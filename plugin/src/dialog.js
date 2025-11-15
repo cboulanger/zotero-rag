@@ -477,10 +477,19 @@ var ZoteroRAGDialog = {
 
 					if (!indexResponse.ok) {
 						const errorData = await indexResponse.json().catch(() => ({}));
-						const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
-						throw new Error(`Failed to start indexing: ${errorMsg}`);
+
+						// If indexing is already in progress (409 conflict), reconnect to it
+						if (indexResponse.status === 409) {
+							this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
+							this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
+						} else {
+							// For other errors, throw
+							const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
+							throw new Error(`Failed to start indexing: ${errorMsg}`);
+						}
 					}
 
+					// Monitor progress (whether we just started it or reconnected to existing)
 					await this.monitorIndexingProgress(libraryId);
 				}
 			} catch (error) {
@@ -576,14 +585,6 @@ var ZoteroRAGDialog = {
 				this.indexingStreams.delete(libraryId);
 				resolve();
 			};
-
-			setTimeout(() => {
-				if (this.indexingStreams.has(libraryId)) {
-					eventSource.close();
-					this.indexingStreams.delete(libraryId);
-					reject(new Error('Indexing timeout'));
-				}
-			}, 300000);
 		});
 	},
 

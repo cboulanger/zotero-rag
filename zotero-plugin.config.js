@@ -11,5 +11,8 @@ export default defineConfig({
     assets: [
         "plugin/src/**/*.*"
     ]
+  },
+  fluent: {
+    dts: "plugin/typings/i10n.d.ts"
   }
 });

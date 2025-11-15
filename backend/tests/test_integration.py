@@ -125,6 +125,7 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         mock_items = [
             {
                 "key": "ITEM1",
+                "version": 1,
                 "data": {
                     "key": "ITEM1",  # Key must be in data as well
                     "itemType": "journalArticle",
@@ -149,7 +150,7 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Configure mocks
-        self.mock_zotero_client.get_library_items = AsyncMock(return_value=mock_items)
+        self.mock_zotero_client.get_library_items_since = AsyncMock(return_value=mock_items)
         self.mock_zotero_client.get_item_children = AsyncMock(
             return_value=mock_attachments
         )
@@ -185,13 +186,13 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         result = await self.document_processor.index_library(
             library_id="test_lib",
             library_type="user",
-            force_reindex=False,
+            mode="auto",
         )
 
         # Verify: Indexing succeeded
-        self.assertEqual(result["status"], "completed")
+        self.assertIn("mode", result)  # Should have mode field
         self.assertEqual(result["items_processed"], 1)
-        self.assertGreater(result["chunks_created"], 0)
+        self.assertGreater(result["chunks_added"], 0)
 
         # Verify: Chunks are in vector store
         # Test vector search with a query about machine learning

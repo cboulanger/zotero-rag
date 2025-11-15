@@ -254,7 +254,7 @@ ZoteroRAG = {
 
 		// Open dialog window using chrome:// URL
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
-		const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=800';
+		const dialogFeatures = 'chrome,centerscreen,resizable=yes,width=600,height=600';
 
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		window.openDialog(

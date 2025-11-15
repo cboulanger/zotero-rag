@@ -291,7 +291,10 @@ def start_plugin_server():
         return existing
 
     # Start the plugin server using the zotero_plugin.py script
-    cmd = ["uv", "run", "python", "scripts/zotero_plugin.py", "dev"]
+    plugin_cmd = ["uv", "run", "python", "scripts/zotero_plugin.py", "dev"]
+
+    # Command to strip ANSI codes
+    strip_cmd = ["uv", "run", "python", "scripts/strip_ansi.py"]
 
     try:
         # Ensure log directory exists
@@ -301,26 +304,43 @@ def start_plugin_server():
 
         # Open log file for output (truncate to start fresh)
         with open(PLUGIN_LOG_FILE, 'w') as log_file:
-            # Start in background
-            process = subprocess.Popen(
-                cmd,
-                stdout=log_file,
+            # Start the plugin server process with stdout piped
+            plugin_process = subprocess.Popen(
+                plugin_cmd,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 cwd=PROJECT_ROOT,
+                text=True,
+                bufsize=1,  # Line buffered
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
 
-            # Save PID
-            PLUGIN_PID_FILE.write_text(str(process.pid))
+            # Start the ANSI stripper process
+            strip_process = subprocess.Popen(
+                strip_cmd,
+                stdin=plugin_process.stdout,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                cwd=PROJECT_ROOT,
+                text=True,
+                bufsize=1,  # Line buffered
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+            )
+
+            # Allow plugin_process to receive SIGPIPE if strip_process exits
+            plugin_process.stdout.close()
+
+            # Save PID of the plugin process (not the stripper)
+            PLUGIN_PID_FILE.write_text(str(plugin_process.pid))
 
             # Wait a moment for plugin server to start
             time.sleep(2)
 
             # Check if process is still running
-            if process.poll() is None:
-                print(f"[OK] Plugin server started successfully (PID: {process.pid})")
+            if plugin_process.poll() is None:
+                print(f"[OK] Plugin server started successfully (PID: {plugin_process.pid})")
                 print(f"[OK] Plugin logs: {PLUGIN_LOG_FILE}")
-                return process
+                return plugin_process
             else:
                 print("[ERROR] Plugin server failed to start")
                 print(f"Check logs at: {PLUGIN_LOG_FILE}")
