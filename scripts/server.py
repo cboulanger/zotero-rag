@@ -27,8 +27,6 @@ from dotenv import load_dotenv
 HOST = "localhost"
 PORT = 8119
 PROJECT_ROOT = Path(__file__).parent.parent
-PID_FILE = PROJECT_ROOT / ".server.pid"
-PLUGIN_PID_FILE = PROJECT_ROOT / ".plugin.pid"
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
@@ -61,44 +59,56 @@ def find_plugin_process():
     return None
 
 
-def check_zotero_connectivity_from_log():
-    """Read the log file to check Zotero connectivity status and display it.
+def extract_error_from_log():
+    """Extract user-friendly error message from log file.
 
     Returns:
-        True if connectivity check result found, None otherwise
+        Error message string if found, None otherwise
     """
     if not LOG_FILE.exists():
         return None
 
     try:
-        # Read the last 50 lines of the log
+        # Read the last 100 lines of the log
         with open(LOG_FILE, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            recent_lines = lines[-50:] if len(lines) > 50 else lines
+            recent_lines = lines[-100:] if len(lines) > 100 else lines
 
-        # Look for connectivity check messages
-        for line in recent_lines:
-            if "Successfully connected to Zotero API" in line:
-                # Extract the URL from the log line
-                if "at http" in line:
-                    url_part = line.split("at http")[1].strip()
-                    print(f"[OK] Zotero API connected: http{url_part}")
-                else:
-                    print("[OK] Zotero API connected")
-                return True
-            elif "WARNING: Cannot connect to Zotero API" in line:
-                print("[WARN] Cannot connect to Zotero API!")
-                # Print the warning details
-                in_warning = True
-                for warn_line in recent_lines[recent_lines.index(line):]:
-                    if "⚠" in warn_line:
-                        # Extract just the warning message part
-                        msg = warn_line.split("⚠")[-1].strip()
-                        if msg and not msg.startswith("="):
-                            print(f"       {msg}")
-                    elif "=" * 80 in warn_line:
-                        break
-                return True
+        # Join all lines to search for RuntimeError message
+        log_text = "".join(recent_lines)
+
+        # Look for RuntimeError with embedded error block
+        if "RuntimeError:" in log_text:
+            # Find the start of the error block after RuntimeError:
+            runtime_error_pos = log_text.rfind("RuntimeError:")
+            after_runtime = log_text[runtime_error_pos:]
+
+            # Look for error block between separator lines
+            separator_start = after_runtime.find("=" * 70)
+            if separator_start == -1:
+                separator_start = after_runtime.find("=" * 80)
+
+            if separator_start != -1:
+                # Find the end separator
+                separator_end = after_runtime.find("=" * 70, separator_start + 70)
+                if separator_end == -1:
+                    separator_end = after_runtime.find("=" * 80, separator_start + 80)
+
+                if separator_end != -1:
+                    # Extract the error message between separators
+                    error_block = after_runtime[separator_start:separator_end].strip()
+                    # Remove the separator line at start
+                    lines_in_block = error_block.split('\n')
+                    if lines_in_block and '=' in lines_in_block[0]:
+                        lines_in_block = lines_in_block[1:]
+                    return '\n'.join(lines_in_block).strip()
+
+        # Fallback: look for ERROR: messages in recent lines
+        for line in reversed(recent_lines):
+            if " - ERROR - " in line and ("Cannot connect" in line or "ERROR:" in line):
+                # Extract just the error message
+                error_msg = line.split(" - ERROR - ", 1)[1].strip()
+                return error_msg
 
     except Exception:
         # Silently ignore errors reading log
@@ -183,30 +193,64 @@ def start_server(dev_mode=True, with_plugin=False):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
 
-            # Save PID
-            PID_FILE.write_text(str(process.pid))
-
             # Wait a moment for server to start and run connectivity check
             time.sleep(4)
 
             # Check if process is still running
             if process.poll() is None:
-                print(f"[OK] Server started successfully (PID: {process.pid})")
-                print(f"[OK] Access at: http://{HOST}:{PORT}")
-                print(f"[OK] API docs at: http://{HOST}:{PORT}/docs")
-                print(f"[OK] Logs: {LOG_FILE}")
-                print(f"[INFO] Check logs for Zotero API connectivity status")
+                # Verify that the server is actually responding to requests
+                import requests
+                try:
+                    response = requests.get(f"http://{HOST}:{PORT}/health", timeout=2)
+                    if response.ok:
+                        zotero_url = env.get("ZOTERO_API_URL", "http://localhost:23119")
+                        print(f"[OK] Server started successfully (PID: {process.pid})")
+                        print(f"[OK] Access at: http://{HOST}:{PORT}")
+                        print(f"[OK] API docs at: http://{HOST}:{PORT}/docs")
+                        print(f"[OK] Logs: {LOG_FILE}")
+                        print(f"[INFO] Check logs for Zotero API connectivity status ({zotero_url})")
 
-                # Start plugin server if requested
-                if with_plugin:
-                    start_plugin_server()
+                        # Start plugin server if requested
+                        if with_plugin:
+                            start_plugin_server()
 
-                print(f"\nTo stop: python scripts/server.py stop")
+                        print(f"\nTo stop: python scripts/server.py stop")
+                    else:
+                        print("[ERROR] Server process is running but not responding to requests")
+                        print(f"[ERROR] Health check failed with status: {response.status_code}")
+
+                        # Try to extract helpful error message from logs
+                        error_msg = extract_error_from_log()
+                        if error_msg:
+                            print("\n" + error_msg)
+                        else:
+                            print(f"\nCheck logs at: {LOG_FILE}")
+
+                        # Kill the non-functional process
+                        process.terminate()
+                        sys.exit(1)
+                except requests.exceptions.RequestException:
+                    print("[ERROR] Server process is running but application failed to start")
+
+                    # Poll the log file waiting for error to be written
+                    error_msg = None
+                    for i in range(10):  # Try for up to 5 seconds
+                        time.sleep(0.5)
+                        error_msg = extract_error_from_log()
+                        if error_msg:
+                            break
+
+                    if error_msg:
+                        print("\n" + error_msg)
+                    else:
+                        print(f"\nCheck logs at: {LOG_FILE}")
+
+                    # Kill the non-functional process
+                    process.terminate()
+                    sys.exit(1)
             else:
                 print("[ERROR] Server failed to start")
                 print(f"Check logs at: {LOG_FILE}")
-                if PID_FILE.exists():
-                    PID_FILE.unlink()
                 sys.exit(1)
 
     except Exception as e:
@@ -277,10 +321,6 @@ def stop_server():
     else:
         print("Server is not running")
 
-    # Clean up PID file
-    if PID_FILE.exists():
-        PID_FILE.unlink()
-
 
 def start_plugin_server():
     """Start the plugin development server."""
@@ -330,9 +370,6 @@ def start_plugin_server():
             # Allow plugin_process to receive SIGPIPE if strip_process exits
             plugin_process.stdout.close()
 
-            # Save PID of the plugin process (not the stripper)
-            PLUGIN_PID_FILE.write_text(str(plugin_process.pid))
-
             # Wait a moment for plugin server to start
             time.sleep(2)
 
@@ -344,8 +381,6 @@ def start_plugin_server():
             else:
                 print("[ERROR] Plugin server failed to start")
                 print(f"Check logs at: {PLUGIN_LOG_FILE}")
-                if PLUGIN_PID_FILE.exists():
-                    PLUGIN_PID_FILE.unlink()
                 return None
 
     except Exception as e:
@@ -409,10 +444,6 @@ def stop_plugin_server():
     else:
         print("Plugin server is not running")
 
-    # Clean up PID file
-    if PLUGIN_PID_FILE.exists():
-        PLUGIN_PID_FILE.unlink()
-
 
 def check_status():
     """Check if the server is running."""
@@ -421,22 +452,36 @@ def check_status():
     proc = find_server_process()
 
     if proc:
-        print(f"[OK] Server is running (PID: {proc.pid})")
-        print(f"  Access at: http://{HOST}:{PORT}")
-        print(f"  API docs at: http://{HOST}:{PORT}/docs")
-
-        # Try to get configuration info
+        # Verify the server is actually responding
         try:
-            response = requests.get(f"http://{HOST}:{PORT}/api/config", timeout=2)
-            if response.ok:
-                config = response.json()
-                print(f"  Preset: {config.get('preset_name', 'unknown')}")
-                print(f"  LLM: {config.get('llm_model', 'unknown')}")
-        except Exception:
-            # Silently ignore if we can't fetch config (server might still be starting)
-            pass
+            health_response = requests.get(f"http://{HOST}:{PORT}/health", timeout=2)
+            if health_response.ok:
+                print(f"[OK] Server is running (PID: {proc.pid})")
+                print(f"  Access at: http://{HOST}:{PORT}")
+                print(f"  API docs at: http://{HOST}:{PORT}/docs")
 
-        return True
+                # Try to get configuration info
+                try:
+                    response = requests.get(f"http://{HOST}:{PORT}/api/config", timeout=2)
+                    if response.ok:
+                        config = response.json()
+                        print(f"  Preset: {config.get('preset_name', 'unknown')}")
+                        print(f"  LLM: {config.get('llm_model', 'unknown')}")
+                except Exception:
+                    # Silently ignore if we can't fetch config
+                    pass
+
+                return True
+            else:
+                print(f"[WARN] Server process exists (PID: {proc.pid}) but is not responding properly")
+                print(f"  Health check returned status: {health_response.status_code}")
+                print(f"  Check logs at: {LOG_FILE}")
+                return False
+        except requests.exceptions.RequestException as e:
+            print(f"[WARN] Server process exists (PID: {proc.pid}) but application is not responding")
+            print(f"  Cannot connect to health endpoint: {e}")
+            print(f"  Check logs at: {LOG_FILE}")
+            return False
     else:
         print("[INFO] Server is not running")
         return False
