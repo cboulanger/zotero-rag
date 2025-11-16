@@ -5,7 +5,7 @@ Version management script for zotero-rag project.
 Updates version numbers across all project files:
 - package.json
 - pyproject.toml
-- plugin/manifest.json
+- plugin/src/manifest.json
 - backend/__version__.py
 
 Usage:
@@ -97,8 +97,8 @@ def update_pyproject_toml(new_version: str) -> None:
 
 
 def update_manifest_json(new_version: str) -> None:
-    """Update version in plugin/manifest.json."""
-    manifest = PROJECT_ROOT / "plugin" / "manifest.json"
+    """Update version in plugin/src/manifest.json."""
+    manifest = PROJECT_ROOT / "plugin" / "src" / "manifest.json"
     with open(manifest) as f:
         data = json.load(f)
 
@@ -108,7 +108,7 @@ def update_manifest_json(new_version: str) -> None:
         json.dump(data, f, indent="\t")
         f.write("\n")  # Ensure newline at end
 
-    print(f"[UPDATED] plugin/manifest.json -> {new_version}")
+    print(f"[UPDATED] plugin/src/manifest.json -> {new_version}")
 
 
 def create_version_file(new_version: str) -> None:
