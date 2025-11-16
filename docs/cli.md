@@ -4,20 +4,35 @@ Quick reference for all CLI commands. Run from project root directory.
 
 ## Server Management
 
+### Production (Backend Only)
+
 | Command | Description |
 |---------|-------------|
-| `npm run server:start` | Start backend server only |
-| `npm run server:start:dev` | Start backend + plugin development server |
-| `npm run server:start:prod` | Start backend server (production mode) |
-| `npm run server:stop` | Stop both backend and plugin servers |
-| `npm run server:restart` | Restart backend server only |
-| `npm run server:restart:dev` | Restart backend + plugin development server |
-| `npm run server:status` | Check if server is running |
+| `npm start` or `npm run server:start` | Start backend server (production mode, no auto-reload) |
+| `npm run server:stop` | Stop backend server |
+| `npm run server:restart` | Restart backend server (production mode) |
+| `npm run server:status` | Check backend server status |
+
+### Development (Backend + Plugin)
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev:start` | Start backend (dev mode with auto-reload) + plugin server |
+| `npm run dev:stop` | Stop both backend and plugin servers |
+| `npm run dev:restart` | Restart both servers (dev mode) |
+| `npm run dev:status` | Check status of both servers |
+
+### Plugin Only
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev:plugin:start` | Start plugin development server only |
+| `npm run dev:plugin:stop` | Stop plugin development server and Zotero |
 
 **Server URL:** http://localhost:8119
 
-**Development Mode with Plugin Server:**
-The `:dev` commands start both the backend server and the plugin development server together. Both servers are automatically stopped when you run the stop command. This is useful for full-stack development where changes to plugin code are hot-reloaded in Zotero.
+**Development Mode:**
+The `dev:*` commands manage both the backend server and the plugin development server. The plugin dev server automatically starts its own Zotero instance via RDP (Remote Debugging Protocol) for hot-reloading. When you stop the dev environment, both the plugin server and Zotero are properly terminated.
 
 ## Testing
 
@@ -41,22 +56,41 @@ The `:dev` commands start both the backend server and the plugin development ser
 
 ## Plugin Development
 
+### Commands
+
 | Command | Description |
 |---------|-------------|
-| `npm run plugin:dev` | Start plugin development server (hot-reload in Zotero) |
+| `npm run dev:start` | Start backend + plugin dev server together |
+| `npm run dev:stop` | Stop both servers |
+| `npm run dev:plugin:start` | Start plugin dev server only (starts Zotero) |
+| `npm run dev:plugin:stop` | Stop plugin dev server (stops Zotero) |
 | `npm run plugin:build` | Build plugin XPI (output: `plugin/dist/zotero-rag-{version}.xpi`) |
-| `npm run server:start:dev` | Start backend + plugin dev server together |
 
-**Development Workflow:**
+### Development Workflow
 
-1. Start development servers: `npm run server:start:dev`
+**Full Stack Development (Recommended):**
+
+1. Start both servers: `npm run dev:start`
 2. Make changes to plugin source files in `plugin/src/`
 3. Changes are automatically hot-reloaded in Zotero
-4. Stop servers: `npm run server:stop`
+4. Backend API is available at <http://localhost:8119>
+5. Stop both servers: `npm run dev:stop`
+
+**Plugin Only Development:**
+
+1. Start plugin server: `npm run dev:plugin:start` (launches Zotero)
+2. Make changes to plugin source files
+3. Changes are automatically hot-reloaded in Zotero
+4. Stop plugin server: `npm run dev:plugin:stop` (closes Zotero)
 
 **Installation:** In Zotero: Tools → Add-ons → Install Add-on From File → Select XPI
 
-**Note:** The plugin development server uses the `zotero-plugin` scaffold which provides automatic hot-reloading. You don't need to rebuild the plugin after each change during development.
+**Important Notes:**
+
+- The plugin development server uses `zotero-plugin-scaffold` which provides automatic hot-reloading
+- You don't need to rebuild the plugin after each change during development
+- The dev server starts its own Zotero instance via RDP - **close any running Zotero instances first**
+- Stopping the dev server automatically closes the Zotero instance and cleans up orphaned processes
 
 ## Direct Python Commands
 
@@ -123,15 +157,16 @@ npm run plugin:build
 **For Plugin Development:**
 
 ```bash
-# 1. Start both backend and plugin development servers
-npm run server:start:dev
+# 1. Make sure Zotero is not running
+# 2. Start both backend and plugin development servers
+npm run dev:start
 
-# 2. Make changes to plugin source in plugin/src/
+# 3. Make changes to plugin source in plugin/src/
 
-# 3. Changes auto-reload in Zotero
+# 4. Changes auto-reload in Zotero
 
-# 4. Stop both servers
-npm run server:stop
+# 5. Stop both servers (also stops Zotero)
+npm run dev:stop
 ```
 
 ## Troubleshooting

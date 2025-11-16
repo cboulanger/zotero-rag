@@ -118,13 +118,8 @@ var ZoteroRAGDialog = {
 			});
 		}
 
-		// Set up mode selection dropdown
-		const modeSelect = document.getElementById('indexing-mode');
-		if (modeSelect) {
-			modeSelect.addEventListener('change', (e) => {
-				this.updateModeDescription(/** @type {HTMLSelectElement} */ (e.target).value);
-			});
-		}
+		// Check if dev-mode is enabled and show force reindex checkbox if so
+		this.initDevModeFeatures();
 
 		// Set up similarity threshold slider
 		const similaritySlider = document.getElementById('similarity-threshold');
@@ -141,6 +136,27 @@ var ZoteroRAGDialog = {
 
 		// Populate library list
 		this.populateLibraries();
+	},
+
+	/**
+	 * Initialize dev-mode features (force full reindex checkbox).
+	 * @returns {void}
+	 */
+	initDevModeFeatures() {
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			const isDevMode = Zotero.Prefs.get('extensions.zotero-plugin.dev-mode', false);
+
+			if (isDevMode) {
+				const forceReindexContainer = document.getElementById('force-reindex-container');
+				if (forceReindexContainer) {
+					forceReindexContainer.style.display = 'flex';
+				}
+			}
+		} catch (error) {
+			// Silently fail if pref is not available
+			console.warn('Could not check dev-mode pref:', error);
+		}
 	},
 
 	/**
@@ -376,11 +392,11 @@ var ZoteroRAGDialog = {
 
 		const question = questionInput.value.trim();
 
-		// Get selected indexing mode
-		const modeSelect = /** @type {HTMLSelectElement|null} */ (
-			document.getElementById('indexing-mode')
+		// Get indexing mode from force reindex checkbox (dev mode only)
+		const forceReindexCheckbox = /** @type {HTMLInputElement|null} */ (
+			document.getElementById('force-full-reindex')
 		);
-		const indexingMode = modeSelect ? modeSelect.value : 'auto';
+		const indexingMode = (forceReindexCheckbox && forceReindexCheckbox.checked) ? 'full' : 'incremental';
 
 		// Get similarity threshold
 		const similaritySlider = /** @type {HTMLInputElement|null} */ (
@@ -709,29 +725,6 @@ var ZoteroRAGDialog = {
 		if (seconds < 3600) return `${Math.floor(seconds / 60)} minutes ago`;
 		if (seconds < 86400) return `${Math.floor(seconds / 3600)} hours ago`;
 		return `${Math.floor(seconds / 86400)} days ago`;
-	},
-
-	/**
-	 * Update the mode description text based on selected mode.
-	 * @param {string} mode - Selected mode (auto/incremental/full)
-	 * @returns {void}
-	 */
-	updateModeDescription(mode) {
-		// Hide all descriptions
-		const autoDesc = document.getElementById('mode-auto-desc');
-		const incrementalDesc = document.getElementById('mode-incremental-desc');
-		const fullDesc = document.getElementById('mode-full-desc');
-
-		if (autoDesc) autoDesc.style.display = 'none';
-		if (incrementalDesc) incrementalDesc.style.display = 'none';
-		if (fullDesc) fullDesc.style.display = 'none';
-
-		// Show selected mode description
-		const descId = `mode-${mode}-desc`;
-		const selectedDesc = document.getElementById(descId);
-		if (selectedDesc) {
-			selectedDesc.style.display = 'inline';
-		}
 	},
 
 	/**

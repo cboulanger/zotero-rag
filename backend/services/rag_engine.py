@@ -121,14 +121,16 @@ class RAGEngine:
         context = "\n\n".join(context_parts)
 
         # Step 4: Generate prompt with context
-        prompt = f"""Based on the following context from academic documents, please answer the question.
+        prompt = f"""
+Based on the following context from academic documents, please answer the question.
 
 Context:
 {context}
 
 Question: {question}
 
-Please provide a comprehensive answer based on the context above. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response. Include references to the sources when relevant."""
+Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response. Include references to the sources when relevant, in the Form "[X:Y]", X being the number of the source, Y the page in the source as given in the context. 
+"""
 
         logger.debug(f"Generated prompt with {len(context)} characters of context")
 

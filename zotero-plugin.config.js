@@ -15,10 +15,10 @@ export default defineConfig({
   fluent: {
     dts: "plugin/typings/i10n.d.ts"
   },
-  test: {
+  server: {
     prefs: {
-      // Note: Port override doesn't work due to scaffold bug
-      // Backend uses port 23124 (scaffold default) instead
+      "extensions.zotero.httpServer.port": 23119,
+      "extensions.zotero-plugin.dev-mode": true
     }
   }
 });
