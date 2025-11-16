@@ -137,20 +137,25 @@ def start_server(dev_mode=True, with_plugin=False):
     model_preset = os.environ.get("MODEL_PRESET", "not set")
     print(f"MODEL_PRESET: {model_preset}")
 
-    # Check if already running
+    # If plugin mode is requested, start plugin server first (which launches Zotero)
+    # This ensures Zotero is running before the backend tries to connect to it
+    if with_plugin:
+        plugin_proc = find_plugin_process()
+        if not plugin_proc:
+            print("Starting plugin development server (this will launch Zotero)...")
+            start_plugin_server()
+            # Give Zotero time to fully start up
+            print("Waiting for Zotero to start up...")
+            time.sleep(5)
+
+    # Check if backend server already running
     existing = find_server_process()
     if existing:
         print(f"Server is already running (PID: {existing.pid})")
         print(f"Access at: http://{HOST}:{PORT}")
-
-        # Start plugin server if requested and not running
-        if with_plugin:
-            plugin_proc = find_plugin_process()
-            if not plugin_proc:
-                start_plugin_server()
         return
 
-    # Start the server
+    # Start the backend server
     log_config_path = PROJECT_ROOT / "backend" / "logging_config.json"
     cmd = [
         "uv", "run", "uvicorn", "backend.main:app",
@@ -193,53 +198,52 @@ def start_server(dev_mode=True, with_plugin=False):
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
             )
 
-            # Wait a moment for server to start and run connectivity check
-            time.sleep(4)
+            # Wait for server to start and run connectivity check
+            # Poll for up to 30 seconds for the server to become ready
+            import requests
+            max_wait = 30
+            poll_interval = 0.5
+            server_ready = False
+
+            for i in range(int(max_wait / poll_interval)):
+                time.sleep(poll_interval)
+
+                # Check if process is still running
+                if process.poll() is not None:
+                    break
+
+                # Try to connect to the server
+                try:
+                    response = requests.get(f"http://{HOST}:{PORT}/health", timeout=1)
+                    if response.ok:
+                        server_ready = True
+                        break
+                except requests.exceptions.RequestException:
+                    # Server not ready yet, continue waiting
+                    continue
 
             # Check if process is still running
             if process.poll() is None:
                 # Verify that the server is actually responding to requests
-                import requests
-                try:
-                    response = requests.get(f"http://{HOST}:{PORT}/health", timeout=2)
-                    if response.ok:
-                        zotero_url = env.get("ZOTERO_API_URL", "http://localhost:23119")
-                        print(f"[OK] Server started successfully (PID: {process.pid})")
-                        print(f"[OK] Access at: http://{HOST}:{PORT}")
-                        print(f"[OK] API docs at: http://{HOST}:{PORT}/docs")
-                        print(f"[OK] Logs: {LOG_FILE}")
-                        print(f"[INFO] Check logs for Zotero API connectivity status ({zotero_url})")
+                if server_ready:
+                    zotero_url = env.get("ZOTERO_API_URL", "http://localhost:23119")
+                    print(f"[OK] Server started successfully (PID: {process.pid})")
+                    print(f"[OK] Access at: http://{HOST}:{PORT}")
+                    print(f"[OK] API docs at: http://{HOST}:{PORT}/docs")
+                    print(f"[OK] Logs: {LOG_FILE}")
+                    print(f"[INFO] Check logs for Zotero API connectivity status ({zotero_url})")
 
-                        # Start plugin server if requested
-                        if with_plugin:
-                            start_plugin_server()
+                    if with_plugin:
+                        print(f"[INFO] Plugin development server is running")
+                        print(f"[INFO] Plugin logs: {PLUGIN_LOG_FILE}")
 
-                        print(f"\nTo stop: python scripts/server.py stop")
-                    else:
-                        print("[ERROR] Server process is running but not responding to requests")
-                        print(f"[ERROR] Health check failed with status: {response.status_code}")
-
-                        # Try to extract helpful error message from logs
-                        error_msg = extract_error_from_log()
-                        if error_msg:
-                            print("\n" + error_msg)
-                        else:
-                            print(f"\nCheck logs at: {LOG_FILE}")
-
-                        # Kill the non-functional process
-                        process.terminate()
-                        sys.exit(1)
-                except requests.exceptions.RequestException:
+                    print(f"\nTo stop: python scripts/server.py stop")
+                else:
                     print("[ERROR] Server process is running but application failed to start")
+                    print(f"[ERROR] Server did not become ready within {max_wait} seconds")
 
-                    # Poll the log file waiting for error to be written
-                    error_msg = None
-                    for i in range(10):  # Try for up to 5 seconds
-                        time.sleep(0.5)
-                        error_msg = extract_error_from_log()
-                        if error_msg:
-                            break
-
+                    # Try to extract helpful error message from logs
+                    error_msg = extract_error_from_log()
                     if error_msg:
                         print("\n" + error_msg)
                     else:
