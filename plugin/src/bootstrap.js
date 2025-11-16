@@ -28,6 +28,9 @@ async function startup({ id, version, rootURI }) {
 		scripts: [rootURI + 'preferences.js']
 	});
 
+	// Load Zotero Plugin Toolkit bundle
+	Services.scriptloader.loadSubScript(rootURI + 'toolkit.bundle.js');
+
 	// Load main plugin script
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	ZoteroRAG.init({ id, version, rootURI });

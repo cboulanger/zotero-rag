@@ -24,6 +24,10 @@ class ConfigResponse(BaseModel):
     vector_db_path: str
     model_cache_dir: str
     available_presets: List[str]
+    # RAG configuration
+    default_top_k: int
+    default_min_score: float
+    max_chunk_size: int
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -53,7 +57,11 @@ async def get_config():
         llm_model=preset.llm.model_name,
         vector_db_path=str(settings.vector_db_path),
         model_cache_dir=str(settings.model_weights_path),
-        available_presets=list(PRESETS.keys())
+        available_presets=list(PRESETS.keys()),
+        # RAG configuration from preset
+        default_top_k=preset.rag.top_k,
+        default_min_score=preset.rag.score_threshold,
+        max_chunk_size=preset.rag.max_chunk_size
     )
 
 

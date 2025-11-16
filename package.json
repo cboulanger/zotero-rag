@@ -6,16 +6,22 @@
   "author": "",
   "type": "commonjs",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cboulanger/zotero-rag.git"
+  },
   "devDependencies": {
     "@commitlint/cli": "^18.4.0",
     "@commitlint/config-conventional": "^18.4.0",
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
     "commitizen": "^4.3.0",
     "cz-conventional-changelog": "^3.3.0",
+    "esbuild": "^0.27.0",
     "husky": "^8.0.3",
     "semantic-release": "^22.0.0",
-    "@semantic-release/changelog": "^6.0.3",
-    "@semantic-release/git": "^10.0.1",
-    "@semantic-release/exec": "^6.0.3"
+    "zotero-plugin-scaffold": "^0.8.1"
   },
   "config": {
     "commitizen": {
@@ -33,13 +39,21 @@
     "test:api": "uv run pytest -m api -v -s",
     "test:all": "uv run pytest -v -s",
     "server:start": "uv run python scripts/server.py start",
-    "server:start:prod": "uv run python scripts/server.py start --prod",
     "server:stop": "uv run python scripts/server.py stop",
     "server:restart": "uv run python scripts/server.py restart",
     "server:status": "uv run python scripts/server.py status",
+    "dev:start": "uv run python scripts/server.py start --dev",
+    "dev:stop": "uv run python scripts/server.py stop",
+    "dev:restart": "uv run python scripts/server.py restart --dev",
+    "dev:status": "uv run python scripts/server.py status --dev",
+    "dev:plugin:start": "uv run python scripts/zotero_plugin.py start",
+    "dev:plugin:stop": "uv run python scripts/zotero_plugin.py stop",
     "plugin:build": "uv run python scripts/build_plugin.py",
-    "plugin:watch": "uv run python scripts/build_plugin.py --watch",
+    "plugin:build:toolkit": "node scripts/build_toolkit.js",
     "semantic-release": "semantic-release",
     "commit": "cz"
+  },
+  "dependencies": {
+    "zotero-plugin-toolkit": "^5.1.0-beta.12"
   }
 }

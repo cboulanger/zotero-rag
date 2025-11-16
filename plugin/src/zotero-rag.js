@@ -1,5 +1,6 @@
 // @ts-check
 /// <reference path="./zotero-types.d.ts" />
+/// <reference path="./toolkit.d.ts" />
 
 /**
  * @typedef {Object} Library
@@ -67,6 +68,10 @@ ZoteroRAG = {
 	/** @type {number} */
 	maxConcurrentQueries: 5,
 
+	/** @type {import('./toolkit.d.ts').Toolkit} */
+	// @ts-ignore - Initialized in init() method
+	toolkit: null,
+
 	/**
 	 * Initialize the plugin.
 	 * @param {Object} config - Plugin configuration
@@ -81,6 +86,17 @@ ZoteroRAG = {
 		this.version = version;
 		this.rootURI = rootURI;
 		this.initialized = true;
+
+		// Initialize Zotero Plugin Toolkit
+		// The bundle creates a global var ZoteroPluginToolkit
+		// @ts-ignore - ZoteroPluginToolkit is a global variable created by the bundled toolkit
+		if (typeof ZoteroPluginToolkit !== 'undefined') {
+			// @ts-ignore - ZoteroPluginToolkit is a global variable
+			this.toolkit = ZoteroPluginToolkit.createToolkit({ id, version, rootURI });
+			this.log('Toolkit initialized successfully');
+		} else {
+			this.log('WARNING: Toolkit bundle not loaded');
+		}
 
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
@@ -109,8 +125,8 @@ ZoteroRAG = {
 		let menuitem = doc.createXULElement('menuitem');
 		menuitem.id = 'zotero-rag-ask-question';
 		menuitem.setAttribute('label', 'Zotero RAG: Ask Question...');
-		menuitem.addEventListener('command', () => {
-			this.openQueryDialog(window);
+		menuitem.addEventListener('command', async () => {
+			await this.openQueryDialog(window);
 		});
 
 		// Add to Tools menu
@@ -216,18 +232,29 @@ ZoteroRAG = {
 	/**
 	 * Open the query dialog.
 	 * @param {Window} window - Parent window
-	 * @returns {void}
+	 * @returns {Promise<void>}
 	 */
-	openQueryDialog(window) {
+	async openQueryDialog(window) {
 		// Check concurrent query limit
 		if (this.activeQueries.size >= this.maxConcurrentQueries) {
-			this.showError(window, `Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
+			this.showError(`Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
+			return;
+		}
+
+		// Check backend connectivity before opening dialog
+		try {
+			await this.checkBackendVersion();
+		} catch (e) {
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			this.showError(
+				`Cannot connect to backend server!\n\n${errorMessage}\n\nPlease start the server:\n  npm run server:start\n\nDefault URL: ${this.backendURL || 'http://localhost:8119'}`
+			);
 			return;
 		}
 
 		// Open dialog window using chrome:// URL
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
-		const dialogFeatures = 'chrome,centerscreen,modal,resizable=yes,width=600,height=500';
+		const dialogFeatures = 'chrome,centerscreen,resizable=yes,width=600,height=600';
 
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		window.openDialog(
@@ -240,14 +267,11 @@ ZoteroRAG = {
 
 	/**
 	 * Show error message to user.
-	 * @param {Window} window - Parent window
 	 * @param {string} message - Error message
 	 * @returns {void}
 	 */
-	showError(window, message) {
-		const prompts = Components.classes["@mozilla.org/embedcomp/prompt-service;1"]
-			.getService(Components.interfaces.nsIPromptService);
-		prompts.alert(window, "Zotero RAG Error", message);
+	showError(message) {
+		this.toolkit.showError(message);
 	},
 
 	/**
@@ -294,8 +318,10 @@ ZoteroRAG = {
 
 		// For group libraries, return the group ID instead of library ID
 		const library = Zotero.Libraries.get(libraryID);
+		// @ts-ignore - libraryType exists on ZoteroLibrary at runtime
 		if (library && library.libraryType === 'group') {
 			// Get the group associated with this library
+			// @ts-ignore - getByLibraryID exists on Zotero.Groups at runtime
 			const group = Zotero.Groups.getByLibraryID(libraryID);
 			if (group) {
 				return String(group.id);  // Return group ID for backend
@@ -324,20 +350,30 @@ ZoteroRAG = {
 
 		try {
 			// Submit query directly - the backend should be available if indexing succeeded
+			// Build payload - only include optional params if explicitly set (let backend use preset defaults)
+			/** @type {Record<string, any>} */
+			const payload = {
+				question,
+				library_ids: libraryIDs
+			};
+
+			if (options.topK !== undefined) {
+				payload.top_k = options.topK;
+			}
+			if (options.minScore !== undefined) {
+				payload.min_score = options.minScore;
+			}
+
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json'
 				},
-				body: JSON.stringify({
-					question,
-					library_ids: libraryIDs,
-					top_k: options.topK || 5
-				})
+				body: JSON.stringify(payload)
 			});
 
 			if (!response.ok) {
-				const errorData = await response.json().catch(() => ({}));
+				const errorData = /** @type {any} */ (await response.json().catch(() => ({})));
 				throw new Error(errorData.detail || `Query failed with HTTP ${response.status}`);
 			}
 
@@ -410,7 +446,7 @@ ZoteroRAG = {
 
 		for (let id of libraryIDs) {
 			const libraries = this.getLibraries();
-			const lib = libraries.find(l => l.id === id);
+			const lib = libraries.find((/** @type {Library} */ l) => l.id === id);
 			if (lib) {
 				libraryMap.set(id, {
 					name: lib.name,

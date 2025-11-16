@@ -21,10 +21,10 @@ def get_plugin_paths():
     return {
         'plugin': plugin_dir,
         'src': plugin_dir / 'src',
-        'locale': plugin_dir / 'locale',
+        'locale': plugin_dir / 'src' / 'locale',
         'build': plugin_dir / 'build',
         'dist': plugin_dir / 'dist',
-        'manifest': plugin_dir / 'manifest.json'
+        'manifest': plugin_dir / 'src' / 'manifest.json'
     }
 
 

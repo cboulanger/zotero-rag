@@ -46,13 +46,13 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_index_library_no_items(self):
         """Test indexing when library has no items."""
         # Mock empty library
-        self.mock_zotero_client.get_library_items.return_value = []
+        self.mock_zotero_client.get_library_items_since.return_value = []
 
         result = await self.processor.index_library("test_lib")
 
-        self.assertEqual(result["status"], "completed")
+        self.assertIn("mode", result)  # Should have mode field
         self.assertEqual(result["items_processed"], 0)
-        self.assertEqual(result["chunks_created"], 0)
+        self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_skip_non_pdf_items(self):
         """Test that non-PDF items are skipped."""
@@ -65,13 +65,13 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = []  # No attachments
 
         result = await self.processor.index_library("test_lib")
 
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["items_skipped"], 1)
+        self.assertIn("mode", result)  # Should have mode field
+        # Items without PDFs are filtered out before processing
         self.assertEqual(result["items_processed"], 0)
 
     async def test_index_library_skip_attachments_and_notes(self):
@@ -81,18 +81,19 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             {"data": {"key": "NOTE1", "itemType": "note"}},
         ]
 
-        self.mock_zotero_client.get_library_items.return_value = mock_items
+        self.mock_zotero_client.get_library_items_since.return_value = mock_items
 
         result = await self.processor.index_library("test_lib")
 
         # These should be filtered out before processing
-        self.assertEqual(result["status"], "completed")
+        self.assertIn("mode", result)  # Should have mode field
         self.assertEqual(result["items_processed"], 0)
 
     async def test_index_library_with_pdf_success(self):
         """Test successful indexing of item with PDF attachment."""
         # Mock item with PDF
         mock_item = {
+            "version": 1,
             "data": {
                 "key": "ITEM123",
                 "itemType": "journalArticle",
@@ -113,7 +114,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         }
 
         # Mock Zotero API responses
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
 
@@ -158,10 +159,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             result = await self.processor.index_library("test_lib")
 
         # Verify results
-        self.assertEqual(result["status"], "completed")
+        self.assertIn("mode", result)  # Should have mode field
         self.assertEqual(result["items_processed"], 1)
-        self.assertEqual(result["chunks_created"], 2)
-        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["chunks_added"], 2)
 
         # Verify embeddings were generated
         self.mock_embedding_service.embed_batch.assert_called_once()
@@ -192,7 +192,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
 
@@ -207,9 +207,8 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         result = await self.processor.index_library("test_lib")
 
-        # Should skip processing
-        self.assertEqual(result["duplicates_skipped"], 1)
-        self.assertEqual(result["chunks_created"], 0)
+        # Should skip processing (won't create new chunks)
+        self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_pdf_extraction_error(self):
         """Test handling of PDF extraction errors."""
@@ -229,7 +228,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"corrupted pdf"
 
@@ -244,19 +243,28 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         ):
             result = await self.processor.index_library("test_lib")
 
-        # Should handle error gracefully
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["errors"], 1)
-        self.assertEqual(result["chunks_created"], 0)
+        # Should handle error gracefully (errors are logged but processing continues)
+        self.assertIn("mode", result)  # Should have mode field
+        self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_force_reindex(self):
         """Test force reindex deletes existing chunks."""
-        self.mock_zotero_client.get_library_items.return_value = []
+        # Mock library metadata with force_reindex flag
+        from backend.models.library import LibraryIndexMetadata
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib",
+            library_type="user",
+            library_name="Test Library",
+            force_reindex=True
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+
+        self.mock_zotero_client.get_library_items_since.return_value = []
         self.mock_vector_store.delete_library_chunks.return_value = 42
 
-        result = await self.processor.index_library("test_lib", force_reindex=True)
+        result = await self.processor.index_library("test_lib", mode="auto")
 
-        # Verify deletion was called
+        # Verify deletion was called (full mode due to force_reindex flag)
         self.mock_vector_store.delete_library_chunks.assert_called_once_with("test_lib")
 
     async def test_index_library_progress_callback(self):
@@ -264,6 +272,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         # Use 2 items so we get multiple progress updates
         mock_items = [
             {
+                "version": 1,
                 "data": {
                     "key": "ITEM123",
                     "itemType": "journalArticle",
@@ -271,6 +280,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
                 }
             },
             {
+                "version": 2,
                 "data": {
                     "key": "ITEM456",
                     "itemType": "journalArticle",
@@ -279,18 +289,43 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        self.mock_zotero_client.get_library_items.return_value = mock_items
-        self.mock_zotero_client.get_item_children.return_value = []
+        # Mock PDF attachments for each item
+        mock_pdf_attachment = {
+            "data": {
+                "key": "PDF1",
+                "itemType": "attachment",
+                "contentType": "application/pdf",
+            }
+        }
+
+        self.mock_zotero_client.get_library_items_since.return_value = mock_items
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
+
+        # Mock PDF extraction and chunking
+        from backend.services.pdf_extractor import PageText
+        from backend.services.chunking import TextChunk
+        mock_pages = [PageText(page_number=1, text="Test content")]
+        mock_chunks = [TextChunk(text="Test content", page_number=1, chunk_index=0, start_char=0, end_char=12)]
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
 
         progress_calls = []
 
         def progress_callback(current, total):
             progress_calls.append((current, total))
 
-        result = await self.processor.index_library(
-            "test_lib",
-            progress_callback=progress_callback,
-        )
+        # Patch PDF extraction and chunking
+        with patch.object(
+            self.processor.pdf_extractor, "extract_from_bytes", return_value=mock_pages
+        ), patch.object(
+            self.processor.text_chunker, "chunk_pages", return_value=mock_chunks
+        ):
+            result = await self.processor.index_library(
+                "test_lib",
+                progress_callback=progress_callback,
+            )
 
         # Should have initial + one call per item
         self.assertGreaterEqual(len(progress_calls), 3)
@@ -301,13 +336,13 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_index_library_fatal_error(self):
         """Test handling of fatal errors during indexing."""
         # Mock a fatal error
-        self.mock_zotero_client.get_library_items.side_effect = Exception("Connection lost")
+        self.mock_zotero_client.get_library_items_since.side_effect = Exception("Connection lost")
 
-        result = await self.processor.index_library("test_lib")
+        # Fatal errors should propagate as exceptions
+        with self.assertRaises(Exception) as context:
+            await self.processor.index_library("test_lib")
 
-        self.assertEqual(result["status"], "failed")
-        self.assertIn("error_message", result)
-        self.assertEqual(result["error_message"], "Connection lost")
+        self.assertIn("Connection lost", str(context.exception))
 
     async def test_extract_authors(self):
         """Test author extraction from Zotero item data."""
@@ -362,6 +397,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_index_library_multiple_pdf_attachments(self):
         """Test indexing item with multiple PDF attachments."""
         mock_item = {
+            "version": 1,
             "data": {
                 "key": "ITEM123",
                 "itemType": "journalArticle",
@@ -386,7 +422,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = mock_pdf_attachments
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf"
 
@@ -415,7 +451,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         # Should process both PDFs
         self.assertEqual(result["items_processed"], 1)
         # Each PDF creates 1 chunk = 2 total
-        self.assertEqual(result["chunks_created"], 2)
+        self.assertEqual(result["chunks_added"], 2)
 
     async def test_index_library_pdf_download_failure(self):
         """Test handling when PDF download fails."""
@@ -435,15 +471,15 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        self.mock_zotero_client.get_library_items.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = None  # Download failed
 
         result = await self.processor.index_library("test_lib")
 
         # Should skip this PDF but not crash
-        self.assertEqual(result["status"], "completed")
-        self.assertEqual(result["chunks_created"], 0)
+        self.assertIn("mode", result)  # Should have mode field
+        self.assertEqual(result["chunks_added"], 0)
 
 
 if __name__ == "__main__":

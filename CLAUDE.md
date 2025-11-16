@@ -9,6 +9,15 @@
   - Use `uv pip install <package>` for installing dependencies
   - Never use global Python or pip directly
 
+## Live Server
+
+`npm start`
+
+[OK] Server started successfully (PID: 55430)
+[OK] Access at: http://localhost:8119
+[OK] API docs at: http://localhost:8119/docs
+[OK] Logs: /Volumes/Data-SSD/Code/zotero-rag/logs/server.log
+
 ## Testing
 
 ### Python Tests
@@ -67,6 +76,15 @@ plugin/
 ```
 
 ## Zotero Plugin Development
+
+### Development Workflow
+
+**Hot Reload Plugin Development Server:**
+- This project uses the `zotero-plugin` development scaffold (https://zotero-plugin-dev.github.io/zotero-plugin-scaffold/quick-start.html)
+- **DO NOT rebuild the plugin** after making changes to plugin source files
+- The development server automatically reloads changes in Zotero
+- To start development mode: `npm run start` (or appropriate command from package.json)
+- Only use `scripts/build_plugin.py` for creating final distribution builds
 
 ### UI Development - Pragmatic Approach
 

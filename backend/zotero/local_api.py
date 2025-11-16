@@ -6,7 +6,7 @@ which doesn't require API keys and provides access to all local libraries.
 """
 
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 from pathlib import Path
 import aiohttp
 import asyncio
@@ -22,13 +22,18 @@ class ZoteroLocalAPI:
     access to all libraries, items, and attachments without authentication.
     """
 
-    def __init__(self, base_url: str = "http://localhost:23119"):
+    def __init__(self, base_url: Optional[str] = None):
         """
         Initialize local API client.
 
         Args:
-            base_url: Base URL for Zotero local API
+            base_url: Base URL for Zotero local API. If None, uses ZOTERO_API_URL from settings.
         """
+        if base_url is None:
+            from backend.config.settings import get_settings
+            settings = get_settings()
+            base_url = settings.zotero_api_url
+
         self.base_url = base_url.rstrip("/")
         self.session: Optional[aiohttp.ClientSession] = None
         logger.info(f"Initialized ZoteroLocalAPI with base URL: {base_url}")
@@ -148,6 +153,8 @@ class ZoteroLocalAPI:
         """
         Get items from a library.
 
+        DEPRECATED: Use get_library_items_since() for version-aware fetching.
+
         Args:
             library_id: Library ID
             library_type: "user" or "group"
@@ -156,6 +163,38 @@ class ZoteroLocalAPI:
 
         Returns:
             List of item dictionaries
+
+        Raises:
+            ConnectionError: If unable to connect to Zotero
+        """
+        return await self.get_library_items_since(
+            library_id=library_id,
+            library_type=library_type,
+            since_version=None,
+            limit=limit,
+            start=start
+        )
+
+    async def get_library_items_since(
+        self,
+        library_id: str,
+        library_type: str = "user",
+        since_version: Optional[int] = None,
+        limit: Optional[int] = None,
+        start: int = 0,
+    ) -> list[dict[str, Any]]:
+        """
+        Get items from a library, optionally filtering by version.
+
+        Args:
+            library_id: Library ID
+            library_type: "user" or "group"
+            since_version: If provided, only return items modified since this version
+            limit: Maximum number of items to return per request (pagination handled internally if None)
+            start: Starting index for pagination
+
+        Returns:
+            List of item dictionaries with full metadata including 'version' field
 
         Raises:
             ConnectionError: If unable to connect to Zotero
@@ -174,18 +213,165 @@ class ZoteroLocalAPI:
             params = {"start": start}
             if limit:
                 params["limit"] = limit
+            else:
+                params["limit"] = 100  # Default batch size for pagination
 
-            async with self.session.get(url, params=params) as response:
-                if response.status == 200:
-                    items = await response.json()
-                    return items if isinstance(items, list) else []
-                else:
-                    logger.error(f"Failed to get items: HTTP {response.status}")
-                    return []
+            if since_version is not None:
+                params["since"] = since_version
+                logger.info(f"Fetching items since version {since_version}")
+
+            # Handle pagination if no limit specified
+            all_items = []
+            current_start = start
+
+            while True:
+                params["start"] = current_start
+
+                async with self.session.get(url, params=params) as response:
+                    if response.status == 200:
+                        items = await response.json()
+                        if not isinstance(items, list):
+                            break
+
+                        all_items.extend(items)
+
+                        # If we got fewer items than the limit, we've reached the end
+                        if len(items) < params["limit"]:
+                            break
+
+                        # If original limit was specified, don't paginate beyond it
+                        if limit and len(all_items) >= limit:
+                            all_items = all_items[:limit]
+                            break
+
+                        current_start += len(items)
+
+                    else:
+                        logger.error(f"Failed to get items: HTTP {response.status}")
+                        if current_start == start:
+                            # First request failed
+                            return []
+                        else:
+                            # Subsequent request failed, return what we have
+                            break
+
+            logger.info(f"Retrieved {len(all_items)} items from library {library_id}")
+            return all_items
 
         except Exception as e:
             logger.error(f"Failed to get library items: {e}")
             raise ConnectionError(f"Unable to get items from library {library_id}") from e
+
+    async def get_library_version_range(
+        self,
+        library_id: str,
+        library_type: str = "user",
+    ) -> Tuple[int, int]:
+        """
+        Get the min and max version numbers in a library.
+
+        Args:
+            library_id: Library ID
+            library_type: "user" or "group"
+
+        Returns:
+            (min_version, max_version) tuple
+
+        Raises:
+            ConnectionError: If unable to connect to Zotero
+        """
+        try:
+            # Fetch items to get version range
+            items = await self.get_library_items_since(
+                library_id=library_id,
+                library_type=library_type,
+                since_version=None,
+                limit=1000  # Should be enough to get accurate version range
+            )
+
+            if not items:
+                return (0, 0)
+
+            # Extract version numbers
+            versions = []
+            for item in items:
+                version = item.get("version")
+                if version is not None:
+                    versions.append(version)
+
+            if not versions:
+                return (0, 0)
+
+            return (min(versions), max(versions))
+
+        except Exception as e:
+            logger.error(f"Failed to get library version range: {e}")
+            raise ConnectionError(f"Unable to get version range for library {library_id}") from e
+
+    async def get_item_with_version(
+        self,
+        library_id: str,
+        item_key: str,
+        library_type: str = "user",
+    ) -> Optional[dict[str, Any]]:
+        """
+        Get a single item with full version information.
+
+        Args:
+            library_id: Library ID
+            item_key: Item key
+            library_type: "user" or "group"
+
+        Returns:
+            Item dict with 'version', 'data', etc., or None if not found
+        """
+        try:
+            await self._ensure_session()
+
+            # Build URL based on library type
+            if library_type == "user":
+                url = f"{self.base_url}/api/users/0/items/{item_key}"
+            else:
+                url = f"{self.base_url}/api/groups/{library_id}/items/{item_key}"
+
+            async with self.session.get(url) as response:
+                if response.status == 200:
+                    return await response.json()
+                elif response.status == 404:
+                    logger.warning(f"Item {item_key} not found")
+                    return None
+                else:
+                    logger.error(f"Failed to get item {item_key}: HTTP {response.status}")
+                    return None
+
+        except Exception as e:
+            logger.error(f"Failed to get item with version: {e}")
+            return None
+
+    async def get_attachment_with_version(
+        self,
+        library_id: str,
+        attachment_key: str,
+        library_type: str = "user",
+    ) -> Optional[dict[str, Any]]:
+        """
+        Get attachment metadata including version.
+
+        Note: Attachments are items too, so we use the same endpoint.
+
+        Args:
+            library_id: Library ID
+            attachment_key: Attachment item key
+            library_type: "user" or "group"
+
+        Returns:
+            Attachment item dict with 'version', 'data', etc., or None if not found
+        """
+        return await self.get_item_with_version(
+            library_id=library_id,
+            item_key=attachment_key,
+            library_type=library_type
+        )
 
     async def get_item(
         self,

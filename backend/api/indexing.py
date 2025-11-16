@@ -2,10 +2,10 @@
 Indexing API endpoints.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Literal
 import asyncio
 import json
 import logging
@@ -41,6 +41,7 @@ class IndexingProgressEvent(BaseModel):
     progress: Optional[float] = None  # Percentage (0-100)
     current_item: Optional[int] = None
     total_items: Optional[int] = None
+    stats: Optional[dict] = None  # Statistics when completed
 
 
 # Store for tracking active indexing jobs
@@ -48,13 +49,21 @@ class IndexingProgressEvent(BaseModel):
 active_jobs = {}
 
 
-async def index_library_task(library_id: str, force_reindex: bool = False, max_items: Optional[int] = None):
+async def index_library_task(
+    library_id: str,
+    library_name: str = "Unknown",
+    mode: Literal["auto", "incremental", "full"] = "auto",
+    force_reindex: bool = False,
+    max_items: Optional[int] = None
+):
     """
     Background task to index a library.
 
     Args:
         library_id: Zotero library ID to index.
-        force_reindex: If True, reindex all items even if already indexed.
+        library_name: Human-readable library name.
+        mode: Indexing mode (auto, incremental, or full).
+        force_reindex: DEPRECATED - use mode="full" instead.
         max_items: Optional maximum number of items to process (for testing).
     """
     settings = get_settings()
@@ -106,22 +115,43 @@ async def index_library_task(library_id: str, force_reindex: bool = False, max_i
                     vector_store=vector_store
                 )
 
+                # Handle deprecated force_reindex parameter
+                effective_mode = mode
+                if force_reindex and mode == "auto":
+                    logger.warning("force_reindex parameter is deprecated, use mode='full' instead")
+                    effective_mode = "full"
+
                 # Index the library
-                await processor.index_library(
+                stats = await processor.index_library(
                     library_id=library_id,
                     library_type=library_type,
-                    force_reindex=force_reindex,
+                    library_name=library_name,
+                    mode=effective_mode,
                     progress_callback=lambda current, total: active_jobs[job_id].update({
                         "progress": (current / total * 100) if total > 0 else 0,
                         "current_item": current,
                         "total_items": total
                     }),
+                    cancellation_check=lambda: active_jobs.get(job_id, {}).get("status") == "cancelled",
                     max_items=max_items
                 )
+
+                # Store stats in job for later retrieval
+                active_jobs[job_id]["stats"] = stats
 
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["progress"] = 100
 
+    except RuntimeError as e:
+        # Check if this is a cancellation
+        if "cancelled by user" in str(e).lower():
+            logger.info(f"Indexing cancelled for library {library_id}")
+            active_jobs[job_id]["status"] = "cancelled"
+            active_jobs[job_id]["message"] = "Cancelled by user"
+        else:
+            logger.error(f"Runtime error indexing library {library_id}: {e}", exc_info=True)
+            active_jobs[job_id]["status"] = "error"
+            active_jobs[job_id]["error"] = str(e)
     except Exception as e:
         logger.error(f"Error indexing library {library_id}: {e}", exc_info=True)
         active_jobs[job_id]["status"] = "error"
@@ -131,25 +161,48 @@ async def index_library_task(library_id: str, force_reindex: bool = False, max_i
 @router.post("/index/library/{library_id}", response_model=IndexingResponse)
 async def start_library_indexing(
     library_id: str,
-    force_reindex: bool = False,
-    max_items: Optional[int] = None
+    library_name: str = Query(default="Unknown", description="Human-readable library name"),
+    mode: Literal["auto", "incremental", "full"] = Query(
+        default="auto",
+        description=(
+            "Indexing mode:\n"
+            "- auto: Automatically choose best mode (recommended)\n"
+            "- incremental: Only index new/modified items\n"
+            "- full: Reindex entire library"
+        )
+    ),
+    force_reindex: bool = Query(
+        default=False,
+        description="DEPRECATED: Use mode='full' instead"
+    ),
+    max_items: Optional[int] = Query(
+        default=None,
+        description="Maximum number of items to process (for testing)"
+    )
 ):
     """
-    Start indexing a Zotero library.
+    Start indexing a Zotero library with intelligent mode selection.
 
     This endpoint starts the indexing process in the background.
     Use the SSE endpoint to monitor progress.
 
-    Args:
-        library_id: Zotero library ID to index.
-        force_reindex: If True, reindex all items even if already indexed.
-        max_items: Optional maximum number of items to process (for testing).
+    Query Parameters:
+        - library_id: Zotero library ID (from URL path)
+        - library_name: Human-readable name (default: "Unknown")
+        - mode: Indexing mode - "auto", "incremental", or "full" (default: "auto")
+        - force_reindex: DEPRECATED - use mode="full" instead
+        - max_items: Optional maximum number of items to process (for testing)
 
     Returns:
         Status message indicating indexing has started.
 
     Raises:
         HTTPException: If library not found or indexing already in progress.
+
+    Examples:
+        POST /index/library/1?mode=auto&library_name=My%20Library
+        POST /index/library/1?mode=incremental
+        POST /index/library/1?mode=full
     """
     job_id = f"index_{library_id}"
 
@@ -166,23 +219,29 @@ async def start_library_indexing(
             # Just check connection - we'll use the library_id as passed from plugin
             # The plugin knows the correct Zotero internal library ID
             if not await client.check_connection():
+                from backend.config.settings import get_settings
+                settings = get_settings()
                 raise HTTPException(
                     status_code=503,
-                    detail="Zotero local API is not accessible"
+                    detail=f"Zotero local API is not accessible at {settings.zotero_api_url}"
                 )
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is
     except Exception as e:
+        from backend.config.settings import get_settings
+        settings = get_settings()
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to Zotero: {str(e)}"
+            detail=f"Failed to connect to Zotero at {settings.zotero_api_url}: {str(e)}"
         )
 
     # Start background task
-    asyncio.create_task(index_library_task(library_id, force_reindex, max_items))
+    asyncio.create_task(index_library_task(library_id, library_name, mode, force_reindex, max_items))
 
     return IndexingResponse(
         library_id=library_id,
         status="started",
-        message=f"Indexing started for library {library_id}"
+        message=f"Indexing started for library {library_id} (mode: {mode})"
     )
 
 
@@ -240,17 +299,39 @@ async def generate_progress_events(library_id: str) -> AsyncGenerator[str, None]
             last_progress = current_progress
             last_message = current_message
 
-        # Check for completion or error
+        # Check for completion, error, or cancellation
         if job["status"] == "completed":
+            stats = job.get("stats", {})
+            mode = stats.get("mode", "unknown")
+            items_processed = stats.get("items_processed", 0)
+            items_added = stats.get("items_added", 0)
+            items_updated = stats.get("items_updated", 0)
+
             event = IndexingProgressEvent(
                 event="completed",
                 library_id=library_id,
-                message=f"Indexing completed for library {library_id}",
+                message=(
+                    f"Indexing completed (mode: {mode}). "
+                    f"Processed: {items_processed}, Added: {items_added}, Updated: {items_updated}"
+                ),
                 progress=100,
                 current_item=job.get("total_items"),
-                total_items=job.get("total_items")
+                total_items=job.get("total_items"),
+                stats=stats
             )
             yield f"data: {event.model_dump_json()}\n\n"
+            break
+
+        elif job["status"] == "cancelled":
+            event = IndexingProgressEvent(
+                event="error",
+                library_id=library_id,
+                message="Indexing cancelled by user",
+                progress=last_progress
+            )
+            yield f"data: {event.model_dump_json()}\n\n"
+            # Clean up the cancelled job
+            del active_jobs[job_id]
             break
 
         elif job["status"] == "error":
@@ -284,3 +365,55 @@ async def stream_indexing_progress(library_id: str):
             "X-Accel-Buffering": "no"  # Disable buffering in nginx
         }
     )
+
+
+@router.post("/index/library/{library_id}/cancel")
+async def cancel_library_indexing(library_id: str):
+    """
+    Cancel an ongoing library indexing operation.
+
+    This endpoint marks the indexing job for cancellation. The actual
+    cancellation happens in the background task when it checks the status.
+
+    Args:
+        library_id: Zotero library ID being indexed.
+
+    Returns:
+        Status message indicating cancellation request was received.
+
+    Raises:
+        HTTPException: If no active indexing job is found.
+    """
+    job_id = f"index_{library_id}"
+
+    # Check if job exists and is running
+    if job_id not in active_jobs:
+        logger.warning(f"No active job found for library {library_id}")
+        return {
+            "library_id": library_id,
+            "status": "not_found",
+            "message": f"No active indexing job found for library {library_id}"
+        }
+
+    job = active_jobs[job_id]
+
+    if job["status"] != "running":
+        logger.info(f"Job for library {library_id} is not running (status: {job['status']})")
+        return {
+            "library_id": library_id,
+            "status": job["status"],
+            "message": f"Indexing job is not running (status: {job['status']})"
+        }
+
+    # Mark job for cancellation
+    job["status"] = "cancelled"
+    job["message"] = "Cancellation requested by user"
+    logger.info(f"Marked indexing job for library {library_id} for cancellation")
+
+    # Clean up the job from active_jobs
+    # The background task will detect the status change and exit gracefully
+    return {
+        "library_id": library_id,
+        "status": "cancelled",
+        "message": f"Cancellation requested for library {library_id}"
+    }

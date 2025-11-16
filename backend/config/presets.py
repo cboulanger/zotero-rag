@@ -33,7 +33,7 @@ class RAGConfig(BaseModel):
     """Configuration for RAG retrieval."""
 
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
-    score_threshold: float = Field(default=0.7, description="Minimum similarity score")
+    score_threshold: float = Field(default=0.3, description="Minimum similarity score (0.0-1.0)")
     max_chunk_size: int = Field(default=512, description="Maximum tokens per chunk")
 
 
@@ -69,7 +69,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=5,
-            score_threshold=0.7,
+            score_threshold=0.35,  # nomic-embed-text-v1.5 tends to have moderate scores
             max_chunk_size=512,
         ),
         memory_budget_gb=6.0,
@@ -93,7 +93,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.65,
+            score_threshold=0.4,  # all-mpnet-base-v2 produces higher quality scores
             max_chunk_size=768,
         ),
         memory_budget_gb=16.0,
@@ -117,7 +117,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=5,
-            score_threshold=0.7,
+            score_threshold=0.3,  # all-MiniLM-L6-v2 tends to have lower absolute scores
             max_chunk_size=384,
         ),
         memory_budget_gb=3.0,
@@ -139,7 +139,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.7,
+            score_threshold=0.5,  # OpenAI embeddings are well-calibrated, can use higher threshold
             max_chunk_size=1024,
         ),
         memory_budget_gb=1.0,  # Minimal local memory needed
@@ -165,7 +165,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.7,
+            score_threshold=0.3,  # all-MiniLM-L6-v2 with large context window
             max_chunk_size=1024,
         ),
         memory_budget_gb=1.0,  # Minimal local memory needed
@@ -194,7 +194,7 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.7,
+            score_threshold=0.5,  # OpenAI embeddings with large LLM context
             max_chunk_size=1024,
         ),
         memory_budget_gb=0.5,  # Minimal memory - everything is remote

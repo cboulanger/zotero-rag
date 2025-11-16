@@ -112,40 +112,44 @@ class TestLocalLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.cache_dir, "/tmp/cache")
         self.assertEqual(service.hf_token, "test-token")
 
-    @patch("transformers.AutoModelForCausalLM")
-    @patch("transformers.AutoTokenizer")
-    async def test_generate_with_mocked_model(self, mock_tokenizer_class, mock_model_class):
+    async def test_generate_with_mocked_model(self):
         """Test generation with mocked transformers."""
-        # Mock input tensor with shape
-        mock_input_ids = Mock()
-        mock_input_ids.shape = (1, 5)  # 5 input tokens
-        mock_input_ids.to = Mock(return_value=mock_input_ids)
+        # We need to patch the imports that happen inside _load_model
+        with patch("transformers.AutoModelForCausalLM") as mock_model_class, \
+             patch("transformers.AutoTokenizer") as mock_tokenizer_class, \
+             patch("transformers.BitsAndBytesConfig") as mock_bnb_config, \
+             patch("torch.float16", "float16"):
 
-        # Mock tokenizer
-        mock_tokenizer = Mock()
-        mock_tokenizer.return_value = {"input_ids": mock_input_ids}
-        mock_tokenizer.eos_token_id = 2
-        mock_tokenizer.decode.return_value = "This is the generated answer."
-        mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
+            # Mock input tensor with shape
+            mock_input_ids = Mock()
+            mock_input_ids.shape = (1, 5)  # 5 input tokens
+            mock_input_ids.to = Mock(return_value=mock_input_ids)
 
-        # Mock output tensor (output has 10 total tokens, first 5 are input)
-        mock_output_tensor = Mock()
-        mock_output_tensor.__getitem__ = Mock(return_value=Mock())  # For slicing [5:]
+            # Mock tokenizer
+            mock_tokenizer = Mock()
+            mock_tokenizer.return_value = {"input_ids": mock_input_ids}
+            mock_tokenizer.eos_token_id = 2
+            mock_tokenizer.decode.return_value = "This is the generated answer."
+            mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
 
-        # Mock model
-        mock_model = Mock()
-        mock_model.device = "cpu"
-        mock_model.generate.return_value = [mock_output_tensor]
-        mock_model_class.from_pretrained.return_value = mock_model
+            # Mock output tensor (output has 10 total tokens, first 5 are input)
+            mock_output_tensor = Mock()
+            mock_output_tensor.__getitem__ = Mock(return_value=Mock())  # For slicing [5:]
 
-        service = LocalLLMService(self.mock_settings)
+            # Mock model
+            mock_model = Mock()
+            mock_model.device = "cpu"
+            mock_model.generate.return_value = [mock_output_tensor]
+            mock_model_class.from_pretrained.return_value = mock_model
 
-        # Test generation
-        result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+            service = LocalLLMService(self.mock_settings)
 
-        self.assertEqual(result, "This is the generated answer.")
-        mock_model.generate.assert_called_once()
-        mock_tokenizer.decode.assert_called_once()
+            # Test generation
+            result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+            self.assertEqual(result, "This is the generated answer.")
+            mock_model.generate.assert_called_once()
+            mock_tokenizer.decode.assert_called_once()
 
     async def test_generate_missing_dependencies(self):
         """Test error handling when dependencies are missing."""
