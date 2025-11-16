@@ -1,3 +1,15 @@
+# [1.1.0](https://github.com/cboulanger/zotero-rag/compare/v1.0.1...v1.1.0) (2025-11-16)
+
+
+### Bug Fixes
+
+* correct manifest.json path in version script ([df1e943](https://github.com/cboulanger/zotero-rag/commit/df1e94313634a75e598b1703c2f9d059ff1274f6))
+
+
+### Features
+
+* optimize indexing and server scripts ([#1](https://github.com/cboulanger/zotero-rag/issues/1)) ([c3087b1](https://github.com/cboulanger/zotero-rag/commit/c3087b1cda7a7eae180ae2ab6778503b6ed51352))
+
 ## [1.0.1](https://github.com/cboulanger/zotero-rag/compare/v1.0.0...v1.0.1) (2025-11-12)
 
 
