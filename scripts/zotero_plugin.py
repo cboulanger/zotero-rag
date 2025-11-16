@@ -5,9 +5,6 @@ Cross-platform proxy script for zotero-plugin command.
 This script detects the platform and calls the appropriate zotero-plugin
 executable (.cmd on Windows, shell script on Unix-like systems).
 
-TEMPORARY WORKAROUND: This script also patches a bug in zotero-plugin-scaffold
-where user preferences are not properly merged. See docs/bug-report.md for details.
-
 Usage:
     python scripts/zotero_plugin.py <command> [args...]
 
@@ -21,67 +18,12 @@ import subprocess
 import platform
 from pathlib import Path
 
-def apply_scaffold_patch(project_root):
-    """
-    TEMPORARY WORKAROUND: Patch the zotero-plugin-scaffold preference merging bug.
-
-    This fixes a bug where user preferences in test.prefs are ignored because
-    Object.assign(defaultPref, userPrefs) mutates defaultPref instead of creating
-    a new object with proper override behavior.
-
-    See docs/bug-report.md for details.
-    Once upstream bug is fixed, this function can be removed.
-    """
-    # Use glob to find the scaffold file (hash in filename may change between builds)
-    scaffold_dir = project_root / "node_modules" / "zotero-plugin-scaffold" / "dist" / "shared"
-
-    if not scaffold_dir.exists():
-        # Directory doesn't exist, skip patching
-        return
-
-    # Find all matching files (should only be one)
-    scaffold_files = list(scaffold_dir.glob("zotero-plugin-scaffold.*.mjs"))
-
-    if not scaffold_files:
-        # No matching files found, skip patching
-        return
-
-    # Patch all matching files (though there should only be one)
-    for scaffold_file in scaffold_files:
-        try:
-            content = scaffold_file.read_text(encoding='utf-8')
-
-            # Check if already patched
-            buggy_line = "return Object.assign(defaultPref, this.ctx.test.prefs || {});"
-            fixed_line = "return Object.assign({}, defaultPref, this.ctx.test.prefs || {});"
-
-            if buggy_line in content:
-                # Apply the patch
-                content = content.replace(buggy_line, fixed_line)
-                scaffold_file.write_text(content, encoding='utf-8')
-                print(f"[PATCH] Applied zotero-plugin-scaffold preference merging fix to {scaffold_file.name}")
-                print("[PATCH] This workaround can be removed once upstream bug is fixed")
-                print("[PATCH] See: docs/bug-report.md")
-            elif fixed_line in content:
-                # Already patched, no action needed
-                pass
-            else:
-                # Pattern not found - scaffold may have been updated
-                print("[WARN] Could not find expected code pattern in zotero-plugin-scaffold")
-                print("[WARN] The upstream bug may have been fixed. You can remove the patch code.")
-        except Exception as e:
-            print(f"[WARN] Failed to apply scaffold patch: {e}", file=sys.stderr)
-            # Continue anyway - the patch is a workaround, not critical
-
 
 def main():
     """Execute the appropriate zotero-plugin script based on platform."""
     # Get project root and node_modules bin directory
     project_root = Path(__file__).parent.parent
     bin_dir = project_root / "node_modules" / ".bin"
-
-    # Apply the scaffold patch before running
-    apply_scaffold_patch(project_root)
 
     # Determine which script to use based on platform
     system = platform.system()

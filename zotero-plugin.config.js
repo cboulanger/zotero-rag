@@ -17,9 +17,8 @@ export default defineConfig({
   },
   test: {
     prefs: {
-      // Override scaffold's default port (23124) to use standard Zotero port (23119)
-      // This ensures compatibility with Zotero browser add-ons
-      "extensions.zotero.httpServer.port": 23119
+      // Note: Port override doesn't work due to scaffold bug
+      // Backend uses port 23124 (scaffold default) instead
     }
   }
 });
