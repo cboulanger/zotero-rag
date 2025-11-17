@@ -1,3 +1,10 @@
+# [1.2.0](https://github.com/cboulanger/zotero-rag/compare/v1.1.0...v1.2.0) (2025-11-17)
+
+
+### Features
+
+* use zotero-citation fields for sources ([#2](https://github.com/cboulanger/zotero-rag/issues/2)) ([d4f99b9](https://github.com/cboulanger/zotero-rag/commit/d4f99b93d8fedae96e8ef00d709db394f3c2e804))
+
 # [1.1.0](https://github.com/cboulanger/zotero-rag/compare/v1.0.1...v1.1.0) (2025-11-16)
 
 
