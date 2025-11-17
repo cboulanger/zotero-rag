@@ -21,6 +21,8 @@ declare const Zotero: {
 
 	Groups: {
 		getAll(): ZoteroGroup[];
+		get(id: number): ZoteroGroup | null;
+		getByLibraryID(libraryID: number): ZoteroGroup | null;
 	};
 
 	Collections: {
@@ -28,6 +30,24 @@ declare const Zotero: {
 	};
 
 	Item: new (type: string) => ZoteroItem;
+
+	Items: {
+		get(ids: number[]): ZoteroItem[];
+		getAsync(ids: number[]): Promise<ZoteroItem[]>;
+	};
+
+	Search: new () => ZoteroSearch;
+
+	Sync: {
+		Storage: {
+			Local: {
+				getEnabledForLibrary(libraryID: number): boolean;
+			};
+		};
+		Runner: {
+			downloadFile(attachment: ZoteroItem): Promise<void>;
+		};
+	};
 };
 
 interface ZoteroPane {
@@ -57,6 +77,15 @@ interface ZoteroItem {
 	libraryID: number | null;
 	setNote(html: string): void;
 	saveTx(): Promise<void>;
+	isAttachment(): boolean;
+	isRegularItem(): boolean;
+	getAttachments(): number[];
+	getFilePathAsync(): Promise<string | null>;
+}
+
+interface ZoteroSearch {
+	libraryID: number;
+	search(): Promise<number[]>;
 }
 
 // Plugin global

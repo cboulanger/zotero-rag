@@ -455,6 +455,100 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Download missing attachments for items in a library.
+	 * @param {string} libraryId - Library ID
+	 * @param {string} libraryType - Library type ('user' or 'group')
+	 * @returns {Promise<void>}
+	 */
+	async downloadMissingAttachments(libraryId, libraryType) {
+		if (!this.plugin) return;
+
+		const zoteroLibraryID = libraryType === 'group'
+			? Zotero.Groups.get(parseInt(libraryId, 10))?.libraryID
+			: parseInt(libraryId, 10);
+
+		if (!zoteroLibraryID) {
+			throw new Error(`Library ${libraryId} not found`);
+		}
+
+		// Check if sync storage is enabled for this library
+		if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroLibraryID)) {
+			this.plugin.log(`Sync storage not enabled for library ${libraryId}, skipping attachment download`);
+			return;
+		}
+
+		// Get all items in the library
+		const search = new Zotero.Search();
+		search.libraryID = zoteroLibraryID;
+		const itemIDs = await search.search();
+
+		if (itemIDs.length === 0) {
+			return;
+		}
+
+		const items = await Zotero.Items.getAsync(itemIDs);
+
+		// Collect all attachments that need downloading
+		/** @type {Array<ZoteroItem>} */
+		const attachmentsToDownload = [];
+
+		for (let item of items) {
+			/** @type {Array<ZoteroItem>} */
+			let attachments = [];
+			if (item.isAttachment()) {
+				attachments.push(item);
+			} else if (item.isRegularItem()) {
+				attachments = Zotero.Items.get(item.getAttachments());
+			} else {
+				continue;
+			}
+
+			for (let attachment of attachments) {
+				const path = await attachment.getFilePathAsync();
+				if (!path) {
+					attachmentsToDownload.push(attachment);
+				}
+			}
+		}
+
+		if (attachmentsToDownload.length === 0) {
+			this.plugin.log(`No missing attachments found for library ${libraryId}`);
+			return;
+		}
+
+		this.plugin.log(`Found ${attachmentsToDownload.length} missing attachments for library ${libraryId}`);
+
+		// Download attachments with progress updates
+		let current = 0;
+		const total = attachmentsToDownload.length;
+
+		for (let attachment of attachmentsToDownload) {
+			// Check if operation was cancelled
+			if (!this.isOperationInProgress) {
+				throw new Error('Download cancelled by user');
+			}
+
+			current++;
+			const percentage = (current / total) * 100;
+			this.updateProgress(
+				percentage,
+				'Downloading attachments',
+				`Downloading attachment ${current} of ${total}`
+			);
+
+			try {
+				await Zotero.Sync.Runner.downloadFile(attachment);
+			} catch (error) {
+				// Log error but continue with other attachments
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				this.plugin.log(`Error downloading attachment ${attachment.id}: ${errorMessage}`);
+			}
+		}
+
+		this.plugin.log(`Completed downloading ${total} attachments for library ${libraryId}`);
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode (auto/incremental/full)
@@ -481,6 +575,10 @@ var ZoteroRAGDialog = {
 					const library = libraries.find(lib => lib.id === libraryId);
 					const libraryName = library ? library.name : libraryId;
 					const libraryType = library ? library.type : 'user';
+
+					// Download missing attachments before indexing
+					this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
+					await this.downloadMissingAttachments(libraryId, libraryType);
 
 					this.showStatus(`Indexing library ${libraryName}...`, 'info');
 
