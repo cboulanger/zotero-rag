@@ -20,6 +20,7 @@ import sys
 import subprocess
 import platform
 import time
+import os
 from pathlib import Path
 
 try:
@@ -198,6 +199,27 @@ def start_plugin_server():
     Returns:
         int: Exit code from the zotero-plugin command
     """
+    # Check if required environment variable is set
+    zotero_bin_path = os.environ.get('ZOTERO_PLUGIN_ZOTERO_BIN_PATH')
+    if not zotero_bin_path:
+        print("[ERROR] ZOTERO_PLUGIN_ZOTERO_BIN_PATH environment variable is not set", file=sys.stderr)
+        print("[INFO] Please set ZOTERO_PLUGIN_ZOTERO_BIN_PATH in your .env file", file=sys.stderr)
+        print("[INFO] This should point to your Zotero binary:", file=sys.stderr)
+        if platform.system() == "Windows":
+            print("[INFO]   Example: ZOTERO_PLUGIN_ZOTERO_BIN_PATH=C:/Program Files/Zotero/zotero.exe", file=sys.stderr)
+        elif platform.system() == "Darwin":
+            print("[INFO]   Example: ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/Applications/Zotero.app/Contents/MacOS/zotero", file=sys.stderr)
+        else:
+            print("[INFO]   Example: ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/usr/bin/zotero", file=sys.stderr)
+        print("[INFO] See .env.dist for configuration template", file=sys.stderr)
+        return 1
+
+    # Verify the Zotero binary exists
+    if not Path(zotero_bin_path).exists():
+        print(f"[ERROR] Zotero binary not found at: {zotero_bin_path}", file=sys.stderr)
+        print("[INFO] Please check that ZOTERO_PLUGIN_ZOTERO_BIN_PATH points to a valid Zotero installation", file=sys.stderr)
+        return 1
+
     # Check if Zotero is already running (from a previous session or user instance)
     if is_zotero_running():
         print("[ERROR] Zotero is already running", file=sys.stderr)

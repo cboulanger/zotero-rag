@@ -14,6 +14,7 @@ from backend.models.document import (
     ChunkMetadata,
     DocumentMetadata,
 )
+from backend.config.settings import Settings
 
 
 class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
@@ -25,12 +26,19 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_embedding_service = Mock(spec=EmbeddingService)
         self.mock_llm_service = Mock(spec=LLMService)
         self.mock_vector_store = Mock(spec=VectorStore)
+        self.mock_settings = Mock(spec=Settings)
+
+        # Mock preset configuration
+        mock_preset = Mock()
+        mock_preset.llm.max_answer_tokens = 2048
+        self.mock_settings.get_hardware_preset.return_value = mock_preset
 
         # Create RAG engine
         self.rag_engine = RAGEngine(
             embedding_service=self.mock_embedding_service,
             llm_service=self.mock_llm_service,
             vector_store=self.mock_vector_store,
+            settings=self.mock_settings,
         )
 
     async def test_query_with_results(self):
@@ -361,7 +369,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         call_kwargs = self.mock_llm_service.generate.call_args.kwargs
 
         self.assertIn("prompt", call_kwargs)
-        self.assertEqual(call_kwargs["max_tokens"], 512)
+        self.assertEqual(call_kwargs["max_tokens"], 2048)  # Uses mock preset value
         self.assertEqual(call_kwargs["temperature"], 0.7)
 
 

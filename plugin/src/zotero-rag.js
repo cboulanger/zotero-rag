@@ -425,6 +425,228 @@ ZoteroRAG = {
 	},
 
 	/**
+	 * Get Zotero library ID from library/group ID used by backend.
+	 * @param {string} backendLibraryId - Library or group ID used by backend
+	 * @param {string} libraryType - Library type ('user' or 'group')
+	 * @returns {number|null} Zotero library ID or null if not found
+	 */
+	getZoteroLibraryID(backendLibraryId, libraryType) {
+		if (libraryType === 'group') {
+			// For groups, convert group ID back to library ID
+			// @ts-ignore - getByLibraryID exists on Zotero.Groups at runtime
+			const group = Zotero.Groups.get(parseInt(backendLibraryId, 10));
+			return group ? group.libraryID : null;
+		} else {
+			// For user library, it's already the library ID
+			return parseInt(backendLibraryId, 10);
+		}
+	},
+
+	/**
+	 * Get Zotero item by key from specified library.
+	 * @param {string} itemKey - Item key (e.g., "6YDQPV8I")
+	 * @param {number} libraryID - Zotero library ID
+	 * @returns {*|null} Zotero item or null if not found
+	 */
+	getZoteroItem(itemKey, libraryID) {
+		try {
+			// @ts-ignore - Zotero.Items.getByLibraryAndKey exists at runtime
+			return Zotero.Items.getByLibraryAndKey(libraryID, itemKey);
+		} catch (e) {
+			this.log(`Failed to get item ${itemKey} from library ${libraryID}: ${e}`);
+			return null;
+		}
+	},
+
+	/**
+	 * Format citation display text from Zotero item (Author, Year format).
+	 * @param {*} item - Zotero item
+	 * @returns {string} Formatted citation text (e.g., "Smith, 2020" or "Title")
+	 */
+	formatCitationDisplayText(item) {
+		if (!item) {
+			return 'Unknown';
+		}
+
+		try {
+			// Get first creator (author/editor)
+			const creators = item.getCreators();
+			let authorName = '';
+
+			if (creators && creators.length > 0) {
+				const firstCreator = creators[0];
+				// Use lastName if available, otherwise full name
+				authorName = firstCreator.lastName || firstCreator.name || firstCreator.firstName || '';
+
+				// If multiple authors, add "et al."
+				if (creators.length > 1) {
+					authorName += ' et al.';
+				}
+			}
+
+			// Get year from date field
+			const date = item.getField('date');
+			let year = '';
+			if (date) {
+				// Extract year from date string (handles formats like "2020", "2020-01-01", "January 2020")
+				const yearMatch = date.match(/\b(\d{4})\b/);
+				if (yearMatch) {
+					year = yearMatch[1];
+				}
+			}
+
+			// Format as "Author, Year" or fallback to title
+			if (authorName && year) {
+				return `${authorName}, ${year}`;
+			} else if (authorName) {
+				return authorName;
+			} else if (year) {
+				return year;
+			} else {
+				// Fallback to title
+				return item.getField('title') || 'Unknown';
+			}
+		} catch (e) {
+			this.log(`Error formatting citation display: ${e}`);
+			return item.getField('title') || 'Unknown';
+		}
+	},
+
+	/**
+	 * Build a citation data object for inline citation.
+	 * @param {SourceCitation} source - Source citation metadata
+	 * @param {string} libraryType - Library type ('user' or 'group')
+	 * @param {number|null} [pageOverride] - Optional page number override from citation reference
+	 * @returns {Object} Citation data object
+	 */
+	buildCitationData(source, libraryType, pageOverride = null) {
+		// Build Zotero URI based on library type
+		let uri;
+		if (libraryType === 'group') {
+			uri = `http://zotero.org/groups/${source.library_id}/items/${source.item_id}`;
+		} else {
+			// For user library, use local user ID
+			// @ts-ignore - Zotero.Users exists at runtime
+			const userID = Zotero.Users ? Zotero.Users.getCurrentUserID() : 'local';
+			uri = `http://zotero.org/users/${userID}/items/${source.item_id}`;
+		}
+
+		/** @type {{uris: string[], locator?: string, label?: string}} */
+		const citationItem = {
+			uris: [uri]
+		};
+
+		// Add page locator if available (prefer override from inline citation)
+		const page = pageOverride !== null ? pageOverride : source.page_number;
+		if (page !== null) {
+			citationItem.locator = String(page);
+			citationItem.label = 'page';
+		}
+
+		return {
+			citationItems: [citationItem],
+			properties: {}
+		};
+	},
+
+	/**
+	 * Format a citation as HTML span with data-citation attribute.
+	 * @param {Object} citationData - Citation data object
+	 * @param {string} displayText - Display text for citation (e.g., "Author, Year")
+	 * @returns {string} HTML citation span
+	 */
+	formatCitationHTML(citationData, displayText) {
+		const encodedData = encodeURIComponent(JSON.stringify(citationData));
+		return `<span class="citation" data-citation="${encodedData}">(<span class="citation-item">${this.escapeHTML(displayText)}</span>)</span>`;
+	},
+
+	/**
+	 * Look up source metadata by source number (1-indexed).
+	 * @param {number} sourceNum - Source number (1-indexed)
+	 * @param {Array<SourceCitation>} sources - Array of source citations
+	 * @returns {SourceCitation|null} Source citation or null if not found
+	 */
+	lookupSource(sourceNum, sources) {
+		const index = sourceNum - 1;
+		if (index >= 0 && index < sources.length) {
+			return sources[index];
+		}
+		return null;
+	},
+
+	/**
+	 * Get library type for a given library/group ID.
+	 * @param {string} libraryId - Library or group ID
+	 * @param {Map<string, {name: string, type: 'user'|'group'}>} libraryMap - Map of library info
+	 * @returns {'user'|'group'} Library type
+	 */
+	getLibraryType(libraryId, libraryMap) {
+		const libInfo = libraryMap.get(libraryId);
+		return libInfo ? libInfo.type : 'user';
+	},
+
+	/**
+	 * Replace inline citation references with proper Zotero citation format.
+	 * Pattern: [<source number>] or [<source number>:<page>] or [1,2,3] or [1:10,2:20]
+	 * @param {string} text - Text with inline citation references
+	 * @param {Array<SourceCitation>} sources - Array of source citations
+	 * @param {Map<string, {name: string, type: 'user'|'group'}>} libraryMap - Map of library info
+	 * @returns {string} Text with citations replaced by HTML citation spans
+	 */
+	replaceCitationsInText(text, sources, libraryMap) {
+		// Pattern: [1], [1:10], [1,2,3], [1:10,2:20,3]
+		const citationPattern = /\[(\d+(?::\d+)?(?:,\s*\d+(?::\d+)?)*)\]/g;
+
+		return text.replace(citationPattern, (_match, citationList) => {
+			// Parse comma-separated citations
+			const citations = citationList.split(/,\s*/);
+			const citationSpans = [];
+
+			for (let citation of citations) {
+				// Parse source number and optional page
+				const parts = citation.split(':');
+				const sourceNum = parseInt(parts[0], 10);
+				const page = parts.length > 1 ? parseInt(parts[1], 10) : null;
+
+				// Look up source metadata
+				const source = this.lookupSource(sourceNum, sources);
+				if (!source) {
+					// If source not found, keep original citation
+					citationSpans.push(`[${citation}]`);
+					continue;
+				}
+
+				// Get library type
+				const libraryType = this.getLibraryType(source.library_id, libraryMap);
+
+				// Get Zotero library ID
+				const zoteroLibraryID = this.getZoteroLibraryID(source.library_id, libraryType);
+				if (zoteroLibraryID === null) {
+					// If library not found, fallback to title
+					const citationData = this.buildCitationData(source, libraryType, page);
+					const citationHTML = this.formatCitationHTML(citationData, source.title);
+					citationSpans.push(citationHTML);
+					continue;
+				}
+
+				// Fetch the actual Zotero item to get author and year
+				const item = this.getZoteroItem(source.item_id, zoteroLibraryID);
+				const displayText = this.formatCitationDisplayText(item);
+
+				// Build citation data
+				const citationData = this.buildCitationData(source, libraryType, page);
+
+				// Generate citation HTML
+				const citationHTML = this.formatCitationHTML(citationData, displayText);
+				citationSpans.push(citationHTML);
+			}
+
+			// Join multiple citations with space
+			return citationSpans.join(' ');
+		});
+	},
+
+	/**
 	 * Format the query result as HTML for the note.
 	 * @param {string} question - Original question
 	 * @param {QueryResult} result - Query result
@@ -460,45 +682,16 @@ ZoteroRAG = {
 		let html = `<div>`;
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
 		html += `<p><strong>Answer:</strong></p>`;
-		// Use answer directly if it's HTML, otherwise escape it
+
+		// Process answer text to replace inline citations
+		let answerHTML = '';
 		if (result.answer_format === 'html') {
-			html += result.answer;
+			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap);
 		} else {
-			html += `<p>${this.escapeHTML(result.answer)}</p>`;
+			const escapedAnswer = this.escapeHTML(result.answer);
+			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap)}</p>`;
 		}
-
-		// Add sources/citations
-		if (result.sources && result.sources.length > 0) {
-			html += `<p><strong>Sources:</strong></p>`;
-			html += `<ul>`;
-			for (let source of result.sources) {
-				// Build Zotero URI based on library type
-				const sourceLibrary = libraryMap.get(source.library_id);
-				let link;
-
-				if (sourceLibrary && sourceLibrary.type === 'group') {
-					// For group items, use: zotero://select/groups/{GROUP_ID}/items/{ITEM_ID}
-					link = `zotero://select/groups/${source.library_id}/items/${source.item_id}`;
-				} else {
-					// For user library items, use: zotero://select/library/items/{ITEM_ID}
-					link = `zotero://select/library/items/${source.item_id}`;
-				}
-
-				let citation = `<a href="${link}">Source</a>`;
-
-				// Add page number if available
-				if (source.page_number) {
-					citation += `, p. ${source.page_number}`;
-				}
-				// Add text anchor if available
-				else if (source.text_anchor) {
-					citation += ` (${this.escapeHTML(source.text_anchor)})`;
-				}
-
-				html += `<li>${citation}</li>`;
-			}
-			html += `</ul>`;
-		}
+		html += answerHTML;
 
 		// Add metadata
 		html += `<hr/>`;

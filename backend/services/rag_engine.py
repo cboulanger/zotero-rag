@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore
+from backend.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,8 @@ class RAGEngine:
         self,
         embedding_service: EmbeddingService,
         llm_service: LLMService,
-        vector_store: VectorStore
+        vector_store: VectorStore,
+        settings: Settings
     ):
         """
         Initialize RAG engine.
@@ -53,10 +55,12 @@ class RAGEngine:
             embedding_service: Service for generating query embeddings.
             llm_service: Service for text generation.
             vector_store: Vector database for retrieval.
+            settings: Application settings (for accessing preset configuration).
         """
         self.embedding_service = embedding_service
         self.llm_service = llm_service
         self.vector_store = vector_store
+        self.settings = settings
 
     async def query(
         self,
@@ -135,10 +139,14 @@ Provide a comprehensive answer based on the context above. Only use information 
         logger.debug(f"Generated prompt with {len(context)} characters of context")
 
         # Step 5: Get LLM completion
-        logger.debug("Generating answer with LLM...")
+        # Use max_answer_tokens from preset configuration (calibrated for each model)
+        preset = self.settings.get_hardware_preset()
+        max_tokens = preset.llm.max_answer_tokens
+
+        logger.debug(f"Generating answer with LLM (max_tokens={max_tokens})...")
         answer = await self.llm_service.generate(
             prompt=prompt,
-            max_tokens=512,
+            max_tokens=max_tokens,
             temperature=0.7
         )
 

@@ -222,11 +222,18 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             return_value="Machine learning is a subset of artificial intelligence that enables computers to learn from data."
         )
 
+        # Mock settings with preset
+        mock_settings = Mock()
+        mock_preset = Mock()
+        mock_preset.llm.max_answer_tokens = 2048
+        mock_settings.get_hardware_preset.return_value = mock_preset
+
         # Create RAG engine
         rag_engine = RAGEngine(
             embedding_service=self.embedding_service,
             llm_service=mock_llm,
             vector_store=self.vector_store,
+            settings=mock_settings,
         )
 
         # Setup: Add a test chunk to vector store
