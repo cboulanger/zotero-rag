@@ -21,6 +21,7 @@ import signal
 import time
 import psutil
 import os
+import atexit
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -31,6 +32,21 @@ PROJECT_ROOT = Path(__file__).parent.parent
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
+
+# Track subprocess references to prevent handle cleanup errors on Windows
+# These need to be module-level to prevent premature garbage collection
+_plugin_process = None
+_strip_process = None
+_log_file_handle = None
+
+
+def _cleanup_on_exit():
+    """Cleanup function to be called on script exit.
+
+    Ensures all subprocess handles are properly closed to prevent
+    'invalid handle' errors during Python shutdown on Windows.
+    """
+    cleanup_plugin_processes()
 
 
 def find_server_process():
@@ -426,12 +442,21 @@ def stop_server():
 
 
 def start_plugin_server():
-    """Start the plugin development server."""
+    """Start the plugin development server.
+
+    Returns:
+        Popen object if successful, None otherwise
+    """
+    global _plugin_process, _strip_process, _log_file_handle
+
     # Check if already running
     existing = find_plugin_process()
     if existing:
         print(f"Plugin server is already running (PID: {existing.pid})")
         return existing
+
+    # Clean up any previous references
+    cleanup_plugin_processes()
 
     # Start the plugin server using the zotero_plugin.py script
     # Use "start" command which internally calls "dev" on the underlying tool
@@ -445,49 +470,96 @@ def start_plugin_server():
         LOG_DIR.mkdir(exist_ok=True)
 
         # Open log file for output (truncate to start fresh)
-        with open(PLUGIN_LOG_FILE, 'w') as log_file:
-            # Start the plugin server process with stdout piped
-            plugin_process = subprocess.Popen(
-                plugin_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=PROJECT_ROOT,
-                text=True,
-                bufsize=1,  # Line buffered
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
-            )
+        # Keep reference to prevent premature closure
+        _log_file_handle = open(PLUGIN_LOG_FILE, 'w', encoding='utf-8')
 
-            # Start the ANSI stripper process
-            strip_process = subprocess.Popen(
-                strip_cmd,
-                stdin=plugin_process.stdout,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                cwd=PROJECT_ROOT,
-                text=True,
-                bufsize=1,  # Line buffered
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
-            )
+        # Start the plugin server process with stdout piped
+        _plugin_process = subprocess.Popen(
+            plugin_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=PROJECT_ROOT,
+            text=True,
+            bufsize=1,  # Line buffered
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+        )
 
-            # Allow plugin_process to receive SIGPIPE if strip_process exits
-            plugin_process.stdout.close()
+        # Start the ANSI stripper process
+        _strip_process = subprocess.Popen(
+            strip_cmd,
+            stdin=_plugin_process.stdout,
+            stdout=_log_file_handle,
+            stderr=subprocess.STDOUT,
+            cwd=PROJECT_ROOT,
+            text=True,
+            bufsize=1,  # Line buffered
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
+        )
 
-            # Wait a moment for plugin server to start
-            time.sleep(2)
+        # Allow plugin_process to receive SIGPIPE if strip_process exits
+        _plugin_process.stdout.close()
 
-            # Check if process is still running
-            if plugin_process.poll() is None:
-                print(f"[OK] Plugin server started successfully (PID: {plugin_process.pid})")
-                print(f"[OK] Plugin logs: {PLUGIN_LOG_FILE}")
-                return plugin_process
-            else:
-                print("[ERROR] Plugin server failed to start")
-                print(f"Check logs at: {PLUGIN_LOG_FILE}")
-                return None
+        # Wait a moment for plugin server to start
+        time.sleep(2)
+
+        # Check if process is still running
+        if _plugin_process.poll() is None:
+            print(f"[OK] Plugin server started successfully (PID: {_plugin_process.pid})")
+            print(f"[OK] Plugin logs: {PLUGIN_LOG_FILE}")
+            return _plugin_process
+        else:
+            print("[ERROR] Plugin server failed to start")
+            print(f"Check logs at: {PLUGIN_LOG_FILE}")
+            cleanup_plugin_processes()
+            return None
 
     except Exception as e:
         print(f"[ERROR] Error starting plugin server: {e}")
+        cleanup_plugin_processes()
         return None
+
+
+def cleanup_plugin_processes():
+    """Clean up plugin subprocess references and handles to prevent resource leaks.
+
+    This properly closes all handles and resets module-level process references
+    to prevent 'invalid handle' errors on Windows during garbage collection.
+    """
+    global _plugin_process, _strip_process, _log_file_handle
+
+    # Close the strip process first (end of the pipeline)
+    if _strip_process is not None:
+        try:
+            if _strip_process.poll() is None:
+                _strip_process.terminate()
+                try:
+                    _strip_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _strip_process.kill()
+        except Exception:
+            pass
+        _strip_process = None
+
+    # Close the plugin process
+    if _plugin_process is not None:
+        try:
+            if _plugin_process.poll() is None:
+                _plugin_process.terminate()
+                try:
+                    _plugin_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    _plugin_process.kill()
+        except Exception:
+            pass
+        _plugin_process = None
+
+    # Close the log file handle
+    if _log_file_handle is not None:
+        try:
+            _log_file_handle.close()
+        except Exception:
+            pass
+        _log_file_handle = None
 
 
 def stop_plugin_server():
@@ -501,9 +573,12 @@ def stop_plugin_server():
             ["uv", "run", "python", "scripts/zotero_plugin.py", "stop"],
             cwd=PROJECT_ROOT
         )
+        # Clean up our tracked references
+        cleanup_plugin_processes()
         return result.returncode == 0
     except Exception as e:
         print(f"[ERROR] Error stopping plugin server: {e}")
+        cleanup_plugin_processes()
         return False
 
 
@@ -584,6 +659,9 @@ def restart_server(dev_mode=True, with_plugin=False):
 
 
 def main():
+    # Register cleanup handler to ensure proper resource cleanup on exit
+    atexit.register(_cleanup_on_exit)
+
     if len(sys.argv) < 2:
         print(__doc__)
         sys.exit(1)

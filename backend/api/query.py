@@ -122,7 +122,8 @@ async def query_libraries(request: QueryRequest):
             rag_engine = RAGEngine(
                 embedding_service=embedding_service,
                 llm_service=llm_service,
-                vector_store=vector_store
+                vector_store=vector_store,
+                settings=settings
             )
 
             # Execute query with preset defaults

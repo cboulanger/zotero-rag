@@ -25,6 +25,7 @@ class LLMConfig(BaseModel):
     model_name: str = Field(..., description="Model identifier or API endpoint")
     quantization: Optional[Literal["4bit", "8bit", "none"]] = None
     max_context_length: int = Field(default=4096, description="Maximum context window size")
+    max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
 
@@ -64,6 +65,7 @@ PRESETS = {
             model_name="Qwen/Qwen2.5-3B-Instruct",
             quantization="4bit",
             max_context_length=4096,
+            max_answer_tokens=1024,  # Conservative for 3B model
             temperature=0.7,
             model_kwargs={"device_map": "auto", "trust_remote_code": True},
         ),
@@ -88,6 +90,7 @@ PRESETS = {
             model_name="mistralai/Mistral-7B-Instruct-v0.3",
             quantization="8bit",
             max_context_length=8192,
+            max_answer_tokens=2048,  # Larger model can handle more
             temperature=0.7,
             model_kwargs={"device_map": "auto"},
         ),
@@ -112,6 +115,7 @@ PRESETS = {
             model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
             quantization="4bit",
             max_context_length=2048,
+            max_answer_tokens=512,  # Small model, limited capacity
             temperature=0.7,
             model_kwargs={"device_map": "cpu"},
         ),
@@ -135,6 +139,7 @@ PRESETS = {
             model_type="remote",
             model_name="gpt-4o-mini",  # Or anthropic/claude-3-5-sonnet
             max_context_length=128000,
+            max_answer_tokens=4096,  # Large context window allows comprehensive answers
             temperature=0.7,
         ),
         rag=RAGConfig(
@@ -157,6 +162,7 @@ PRESETS = {
             model_type="remote",
             model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
             max_context_length=128000,
+            max_answer_tokens=4096,  # Large context window allows comprehensive answers
             temperature=0.7,
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
@@ -186,6 +192,7 @@ PRESETS = {
             model_type="remote",
             model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
             max_context_length=128000,
+            max_answer_tokens=4096,  # Large context window allows comprehensive answers
             temperature=0.7,
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
