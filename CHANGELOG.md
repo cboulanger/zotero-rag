@@ -1,3 +1,10 @@
+# [1.3.0](https://github.com/cboulanger/zotero-rag/compare/v1.2.0...v1.3.0) (2025-11-17)
+
+
+### Features
+
+* Download attachments before indexing ([abb8cfb](https://github.com/cboulanger/zotero-rag/commit/abb8cfb57460a1031ca656a2efd77095de54e054))
+
 # [1.2.0](https://github.com/cboulanger/zotero-rag/compare/v1.1.0...v1.2.0) (2025-11-17)
 
 
