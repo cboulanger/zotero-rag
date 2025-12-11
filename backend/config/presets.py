@@ -51,35 +51,35 @@ class HardwarePreset(BaseModel):
 
 # Define available presets
 PRESETS = {
-    "mac-mini-m4-16gb": HardwarePreset(
-        name="mac-mini-m4-16gb",
-        description="Optimized for Mac Mini M4 with 16GB RAM",
+    "apple-silicon-32gb": HardwarePreset(
+        name="apple-silicon-32gb",
+        description="Optimized for Apple Silicon Macs with 32GB RAM",
         embedding=EmbeddingConfig(
             model_type="local",
             model_name="nomic-ai/nomic-embed-text-v1.5",
             model_kwargs={"trust_remote_code": True},
-            batch_size=32,
+            batch_size=64,  # Higher batch size for more memory
         ),
         llm=LLMConfig(
             model_type="local",
-            model_name="Qwen/Qwen2.5-3B-Instruct",
-            quantization="4bit",
-            max_context_length=4096,
-            max_answer_tokens=1024,  # Conservative for 3B model
+            model_name="mistralai/Mistral-7B-Instruct-v0.3",
+            quantization="4bit",  # 4bit quantization for Apple Silicon efficiency
+            max_context_length=8192,
+            max_answer_tokens=2048,
             temperature=0.7,
             model_kwargs={"device_map": "auto", "trust_remote_code": True},
         ),
         rag=RAGConfig(
-            top_k=5,
-            score_threshold=0.35,  # nomic-embed-text-v1.5 tends to have moderate scores
-            max_chunk_size=512,
+            top_k=10,
+            score_threshold=0.35,  # nomic-embed-text-v1.5 with quality retrieval
+            max_chunk_size=768,
         ),
-        memory_budget_gb=6.0,
+        memory_budget_gb=10.0,  # Can use more memory with 32GB available
     ),
 
-    "gpu-high-memory": HardwarePreset(
-        name="gpu-high-memory",
-        description="For systems with dedicated GPU and >24GB RAM",
+    "high-memory": HardwarePreset(
+        name="high-memory",
+        description="For systems with >24GB RAM (GPU or Apple Silicon)",
         embedding=EmbeddingConfig(
             model_type="local",
             model_name="sentence-transformers/all-mpnet-base-v2",
@@ -150,6 +150,34 @@ PRESETS = {
         memory_budget_gb=1.0,  # Minimal local memory needed
     ),
 
+    "apple-silicon-kisski": HardwarePreset(
+        name="apple-silicon-kisski",
+        description="Apple Silicon (16-32GB) with fast local embeddings + GWDG KISSKI remote LLM",
+        embedding=EmbeddingConfig(
+            model_type="local",  # Fast local embeddings using Neural Engine
+            model_name="nomic-ai/nomic-embed-text-v1.5",
+            model_kwargs={"trust_remote_code": True},
+            batch_size=64,  # Leverage available RAM for faster indexing
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
+            max_context_length=128000,
+            max_answer_tokens=4096,
+            temperature=0.7,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.35,  # nomic-embed-text-v1.5 with large LLM context
+            max_chunk_size=1024,
+        ),
+        memory_budget_gb=2.0,  # Local embeddings + minimal overhead
+    ),
+
     "remote-kisski": HardwarePreset(
         name="remote-kisski",
         description="Using GWDG KISSKI OpenAI-compatible API (Academic Cloud)",
@@ -214,7 +242,7 @@ def get_preset(name: str) -> HardwarePreset:
     Get a hardware preset by name.
 
     Args:
-        name: Preset name (e.g., "mac-mini-m4-16gb")
+        name: Preset name (e.g., "apple-silicon-32gb")
 
     Returns:
         HardwarePreset configuration
