@@ -119,21 +119,32 @@ ZoteroRAG = {
 	addToWindow(window) {
 		let doc = window.document;
 
-		// Add menu item under Tools menu
+		// Add "Ask Question" menu item under Tools menu
 		// Note: Menu items still need to use XUL elements as they integrate with Zotero's existing XUL menus
 		// @ts-ignore - createXULElement is available in Zotero/Firefox XUL context
-		let menuitem = doc.createXULElement('menuitem');
-		menuitem.id = 'zotero-rag-ask-question';
-		menuitem.setAttribute('label', 'Zotero RAG: Ask Question...');
-		menuitem.addEventListener('command', async () => {
+		let askMenuItem = doc.createXULElement('menuitem');
+		askMenuItem.id = 'zotero-rag-ask-question';
+		askMenuItem.setAttribute('label', 'Zotero RAG: Ask Question...');
+		askMenuItem.addEventListener('command', async () => {
 			await this.openQueryDialog(window);
+		});
+
+		// Add "Sync Vectors" menu item under Tools menu
+		// @ts-ignore - createXULElement is available in Zotero/Firefox XUL context
+		let syncMenuItem = doc.createXULElement('menuitem');
+		syncMenuItem.id = 'zotero-rag-sync-vectors';
+		syncMenuItem.setAttribute('label', 'Zotero RAG: Sync Vectors...');
+		syncMenuItem.addEventListener('command', async () => {
+			await this.openSyncDialog(window);
 		});
 
 		// Add to Tools menu
 		let toolsMenu = doc.getElementById('menu_ToolsPopup');
 		if (toolsMenu) {
-			toolsMenu.appendChild(menuitem);
-			this.storeAddedElement(menuitem);
+			toolsMenu.appendChild(askMenuItem);
+			toolsMenu.appendChild(syncMenuItem);
+			this.storeAddedElement(askMenuItem);
+			this.storeAddedElement(syncMenuItem);
 		}
 	},
 
@@ -260,6 +271,36 @@ ZoteroRAG = {
 		window.openDialog(
 			dialogURL,
 			'zotero-rag-dialog',
+			dialogFeatures,
+			{ plugin: this }
+		);
+	},
+
+	/**
+	 * Open the sync dialog.
+	 * @param {Window} window - Parent window
+	 * @returns {Promise<void>}
+	 */
+	async openSyncDialog(window) {
+		// Check backend connectivity before opening dialog
+		try {
+			await this.checkBackendVersion();
+		} catch (e) {
+			const errorMessage = e instanceof Error ? e.message : String(e);
+			this.showError(
+				`Cannot connect to backend server!\n\n${errorMessage}\n\nPlease start the server:\n  npm run server:start\n\nDefault URL: ${this.backendURL || 'http://localhost:8119'}`
+			);
+			return;
+		}
+
+		// Open sync dialog window using chrome:// URL
+		const dialogURL = 'chrome://zotero-rag/content/sync-dialog.xhtml';
+		const dialogFeatures = 'chrome,centerscreen,resizable=yes,width=700,height=500';
+
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		window.openDialog(
+			dialogURL,
+			'zotero-rag-sync-dialog',
 			dialogFeatures,
 			{ plugin: this }
 		);

@@ -71,3 +71,22 @@ body {
   margin-top: 5px;
   line-height: 1.4;
 }
+
+.setting-button {
+  padding: 8px 16px;
+  font-size: 13px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: #f5f5f5;
+  color: #333;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.setting-button:hover {
+  background-color: #e5e5e5;
+}
+
+.setting-button:active {
+  background-color: #d5d5d5;
+}

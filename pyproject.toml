@@ -31,6 +31,11 @@ dependencies = [
     "markdown-it-py>=4.0.0",
 ]
 
+[project.optional-dependencies]
+sync = [
+    "aioboto3>=13.0.0",  # S3 storage backend
+]
+
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 python_files = "test_*.py"

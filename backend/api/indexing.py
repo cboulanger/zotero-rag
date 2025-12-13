@@ -139,6 +139,36 @@ async def index_library_task(
                 # Store stats in job for later retrieval
                 active_jobs[job_id]["stats"] = stats
 
+                # Auto-push to remote storage if enabled
+                if settings.sync_enabled and settings.sync_auto_push:
+                    logger.info(f"Auto-push enabled, pushing library {library_id} to remote storage")
+                    active_jobs[job_id]["message"] = "Syncing to remote storage..."
+                    try:
+                        from backend.api.sync import get_sync_service
+                        sync_service = get_sync_service()
+
+                        if sync_service:
+                            push_result = await sync_service.push_library(library_id)
+                            if push_result["success"]:
+                                logger.info(
+                                    f"Successfully pushed library {library_id}: "
+                                    f"{push_result['chunks_pushed']} chunks, "
+                                    f"{push_result['uploaded_bytes']} bytes"
+                                )
+                                active_jobs[job_id]["push_stats"] = {
+                                    "chunks_pushed": push_result["chunks_pushed"],
+                                    "uploaded_bytes": push_result["uploaded_bytes"],
+                                    "snapshot_time": push_result["snapshot_time"],
+                                }
+                            else:
+                                logger.warning(f"Failed to push library {library_id}: {push_result['message']}")
+                        else:
+                            logger.warning("Sync service could not be initialized for auto-push")
+                    except Exception as e:
+                        logger.error(f"Error during auto-push for library {library_id}: {e}")
+                        # Don't fail indexing if push fails
+                        active_jobs[job_id]["push_error"] = str(e)
+
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["progress"] = 100
 

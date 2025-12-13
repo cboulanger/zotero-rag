@@ -9,7 +9,7 @@ import logging
 import asyncio
 
 from backend.config.settings import get_settings
-from backend.api import config, libraries, indexing, query
+from backend.api import config, libraries, indexing, query, sync
 
 # Get settings to access log configuration
 settings = get_settings()
@@ -153,6 +153,47 @@ async def lifespan(app: FastAPI):
     # Check Zotero API connectivity
     await check_zotero_connectivity()
 
+    # Auto-pull vector databases if enabled
+    if settings.sync_enabled and settings.sync_auto_pull:
+        logger.info("Auto-pull enabled, checking for remote library updates...")
+        try:
+            from backend.api.sync import get_sync_service
+            sync_service = get_sync_service()
+
+            if sync_service:
+                # List remote libraries
+                remote_libraries = await sync_service.list_remote_libraries()
+                logger.info(f"Found {len(remote_libraries)} remote libraries")
+
+                # Pull each library if remote is newer
+                for lib in remote_libraries:
+                    library_id = lib["library_id"]
+                    try:
+                        should_pull, reason = await sync_service.should_pull(library_id)
+                        if should_pull:
+                            logger.info(f"Pulling library {library_id}: {reason}")
+                            result = await sync_service.pull_library(library_id)
+                            if result["success"]:
+                                logger.info(
+                                    f"Successfully pulled library {library_id}: "
+                                    f"{result['chunks_restored']} chunks restored"
+                                )
+                            else:
+                                logger.warning(
+                                    f"Failed to pull library {library_id}: "
+                                    f"{result['message']}"
+                                )
+                        else:
+                            logger.debug(f"Skipping library {library_id}: {reason}")
+                    except Exception as e:
+                        logger.error(f"Error pulling library {library_id}: {e}")
+                        # Continue with other libraries
+            else:
+                logger.warning("Sync service could not be initialized")
+        except Exception as e:
+            logger.error(f"Error during auto-pull: {e}")
+            # Don't fail startup if auto-pull fails
+
     yield
     logger.info("Shutting down Zotero RAG backend")
 
@@ -179,6 +220,7 @@ app.include_router(config.router, prefix="/api", tags=["config"])
 app.include_router(libraries.router, prefix="/api", tags=["libraries"])
 app.include_router(indexing.router, prefix="/api", tags=["indexing"])
 app.include_router(query.router, prefix="/api", tags=["query"])
+app.include_router(sync.router, prefix="/api", tags=["sync"])
 
 
 @app.get("/")

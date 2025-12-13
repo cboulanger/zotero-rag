@@ -1,0 +1,346 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+
+<head>
+  <title>Vector Sync - Zotero RAG</title>
+  <meta charset="utf-8"/>
+  <script>
+    document.addEventListener("DOMContentLoaded", (ev) => {
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero/content/include.js",
+          this
+        );
+      } catch (e) {
+        console.error("Failed to load include.js:", e);
+      }
+
+      // Load sync client
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/sync-client.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load sync-client.js:", e);
+      }
+
+      // Load sync dialog script
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/sync-dialog.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load sync-dialog.js:", e);
+      }
+    });
+  </script>
+  <style>
+    /* Inline styles for sync dialog */
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      height: 100vh;
+      overflow: hidden;
+      box-sizing: border-box;
+    }
+    .dialog-container {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    .dialog-header {
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #ddd;
+      flex-shrink: 0;
+    }
+    .dialog-header h2 {
+      margin: 0 0 5px 0;
+      font-size: 18px;
+    }
+    .sync-config-info {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
+    }
+    .sync-config-info .enabled {
+      color: #008000;
+      font-weight: 500;
+    }
+    .sync-config-info .disabled {
+      color: #cc0000;
+      font-weight: 500;
+    }
+    .dialog-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .library-list-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      margin-bottom: 15px;
+    }
+    .library-list-header {
+      font-weight: 500;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .refresh-button {
+      padding: 4px 12px;
+      font-size: 12px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background-color: #f5f5f5;
+      cursor: pointer;
+    }
+    .refresh-button:hover {
+      background-color: #e5e5e5;
+    }
+    .library-list {
+      border: 1px solid #ccc;
+      padding: 8px;
+      flex: 1;
+      overflow-y: auto;
+      box-sizing: border-box;
+      background-color: #fafafa;
+    }
+    .library-item {
+      padding: 8px;
+      margin-bottom: 6px;
+      background-color: #fff;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .library-info {
+      flex: 1;
+    }
+    .library-name {
+      font-weight: 500;
+      font-size: 13px;
+      margin-bottom: 3px;
+    }
+    .library-status {
+      font-size: 11px;
+      color: #666;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sync-status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .sync-status-badge.in-sync {
+      background-color: #e6f4ea;
+      color: #008000;
+    }
+    .sync-status-badge.needs-pull {
+      background-color: #e8f0fe;
+      color: #0066cc;
+    }
+    .sync-status-badge.needs-push {
+      background-color: #e8f0fe;
+      color: #0066cc;
+    }
+    .sync-status-badge.conflict {
+      background-color: #fff4e5;
+      color: #cc6600;
+    }
+    .sync-status-badge.not-synced {
+      background-color: #f0f0f0;
+      color: #999;
+    }
+    .library-actions {
+      display: flex;
+      gap: 6px;
+    }
+    .action-button {
+      padding: 4px 10px;
+      font-size: 11px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      background-color: #fff;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .action-button:hover {
+      background-color: #f5f5f5;
+    }
+    .action-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .action-button.primary {
+      background-color: #0066cc;
+      color: #fff;
+      border-color: #0066cc;
+    }
+    .action-button.primary:hover {
+      background-color: #0052a3;
+    }
+    .action-button.primary:disabled {
+      background-color: #0066cc;
+    }
+    .status-section {
+      padding: 10px;
+      background-color: #f5f5f5;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      flex-shrink: 0;
+      min-height: 60px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .status-message {
+      font-size: 12px;
+      margin: 3px 0;
+    }
+    .status-message.info {
+      color: #0066cc;
+    }
+    .status-message.success {
+      color: #008000;
+    }
+    .status-message.error {
+      color: #cc0000;
+    }
+    .progress-section {
+      padding: 10px;
+      background-color: #f5f5f5;
+      border-radius: 4px;
+      margin-bottom: 15px;
+      flex-shrink: 0;
+      display: none;
+    }
+    .progress-section.active {
+      display: block;
+    }
+    .progress-label {
+      font-weight: 500;
+      font-size: 13px;
+      margin-bottom: 8px;
+    }
+    #progress-bar {
+      width: 100%;
+      height: 16px;
+      margin-bottom: 6px;
+    }
+    .progress-message {
+      font-size: 11px;
+      color: #666;
+    }
+    .dialog-buttons {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      padding-top: 15px;
+      border-top: 1px solid #ddd;
+      flex-shrink: 0;
+    }
+    .button-group {
+      display: flex;
+      gap: 10px;
+    }
+    .dialog-button {
+      padding: 8px 20px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      background-color: #f5f5f5;
+      color: #333;
+      cursor: pointer;
+    }
+    .dialog-button:hover {
+      background-color: #e5e5e5;
+    }
+    .dialog-button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .dialog-button.primary {
+      background-color: #0066cc;
+      color: #fff;
+      border-color: #0066cc;
+    }
+    .dialog-button.primary:hover {
+      background-color: #0052a3;
+    }
+    .loading {
+      text-align: center;
+      padding: 20px;
+      color: #666;
+      font-style: italic;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="dialog-container">
+    <!-- Dialog header -->
+    <div class="dialog-header">
+      <h2>Vector Database Synchronization</h2>
+      <div id="sync-config-info" class="sync-config-info">
+        <!-- Sync configuration status will be shown here -->
+      </div>
+    </div>
+
+    <div class="dialog-content">
+      <!-- Library list -->
+      <div class="library-list-container">
+        <div class="library-list-header">
+          <span>Indexed Libraries:</span>
+          <button id="refresh-button" class="refresh-button" title="Refresh library status">Refresh</button>
+        </div>
+        <div id="library-list" class="library-list">
+          <div class="loading">Loading libraries...</div>
+        </div>
+      </div>
+
+      <!-- Status messages -->
+      <div id="status-section" class="status-section" style="display: none;">
+        <!-- Status messages will be added here -->
+      </div>
+
+      <!-- Progress section -->
+      <div id="progress-section" class="progress-section">
+        <div id="progress-label" class="progress-label">Syncing...</div>
+        <progress id="progress-bar" max="100" value="0"></progress>
+        <div id="progress-message" class="progress-message"></div>
+      </div>
+    </div>
+
+    <!-- Dialog buttons -->
+    <div class="dialog-buttons">
+      <div class="button-group">
+        <button id="sync-all-button" class="dialog-button primary" title="Sync all libraries">
+          Sync All
+        </button>
+      </div>
+      <div class="button-group">
+        <button id="close-button" type="button" class="dialog-button">Close</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

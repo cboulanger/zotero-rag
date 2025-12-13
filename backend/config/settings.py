@@ -7,7 +7,7 @@ hardware presets and storage paths.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -64,6 +64,28 @@ class Settings(BaseSettings):
 
     # Application version
     version: str = Field(default="0.1.0", description="Backend version")
+
+    # Vector Database Sync Configuration
+    sync_enabled: bool = Field(default=False, description="Enable vector database synchronization")
+    sync_backend: Literal["webdav", "s3"] = Field(default="webdav", description="Storage backend type")
+    sync_auto_pull: bool = Field(default=True, description="Auto-pull on startup if remote is newer")
+    sync_auto_push: bool = Field(default=False, description="Auto-push after indexing completes")
+    sync_strategy: Literal["full", "delta", "hybrid"] = Field(default="full", description="Sync strategy")
+    sync_hybrid_full_threshold_weeks: int = Field(default=4, description="Weeks before forcing full sync in hybrid mode")
+
+    # WebDAV Configuration
+    sync_webdav_url: Optional[str] = Field(default=None, description="WebDAV server URL")
+    sync_webdav_username: Optional[str] = Field(default=None, description="WebDAV username")
+    sync_webdav_password: Optional[str] = Field(default=None, description="WebDAV password")
+    sync_webdav_base_path: str = Field(default="/zotero-rag/vectors/", description="WebDAV base path")
+
+    # S3 Configuration
+    sync_s3_bucket: Optional[str] = Field(default=None, description="S3 bucket name")
+    sync_s3_region: str = Field(default="us-east-1", description="AWS region")
+    sync_s3_prefix: str = Field(default="zotero-rag/vectors/", description="S3 key prefix")
+    sync_s3_endpoint_url: Optional[str] = Field(default=None, description="S3-compatible endpoint URL")
+    sync_s3_access_key: Optional[str] = Field(default=None, description="AWS access key")
+    sync_s3_secret_key: Optional[str] = Field(default=None, description="AWS secret key")
 
     @field_validator("model_weights_path", "vector_db_path", "log_file", mode="before")
     @classmethod

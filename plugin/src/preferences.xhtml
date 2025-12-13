@@ -41,4 +41,30 @@
       Maximum number of simultaneous queries allowed (1-10)
     </html:div>
   </html:fieldset>
+
+  <!-- Vector Sync Settings -->
+  <html:fieldset class="settings-group">
+    <html:legend>Vector Database Synchronization</html:legend>
+
+    <html:div class="setting-description" style="margin-bottom: 10px;">
+      Sync your vector databases across devices using WebDAV or S3 storage.
+      Sync settings are configured in the backend .env file.
+    </html:div>
+
+    <html:div class="setting-row">
+      <html:button id="zotero-rag-open-sync" type="button" class="setting-button">
+        Open Sync Dialog...
+      </html:button>
+    </html:div>
+
+    <html:div class="setting-description" style="margin-top: 8px; font-size: 11px;">
+      <html:strong>Backend Configuration (in .env file):</html:strong><html:br/>
+      • SYNC_ENABLED: Enable/disable sync<html:br/>
+      • SYNC_BACKEND: Choose 'webdav' or 's3'<html:br/>
+      • SYNC_AUTO_PULL: Auto-pull on startup<html:br/>
+      • SYNC_AUTO_PUSH: Auto-push after indexing<html:br/>
+      <html:br/>
+      See backend documentation for full configuration options.
+    </html:div>
+  </html:fieldset>
 </html:div>

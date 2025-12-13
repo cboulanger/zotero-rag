@@ -13,6 +13,10 @@ var ZoteroRAGPreferences = {
 		document.getElementById('zotero-rag-max-queries').addEventListener('change', (e) => {
 			this.saveMaxQueries(parseInt(e.target.value));
 		});
+
+		document.getElementById('zotero-rag-open-sync').addEventListener('click', () => {
+			this.openSyncDialog();
+		});
 	},
 
 	loadPreferences() {
@@ -46,6 +50,22 @@ var ZoteroRAGPreferences = {
 			if (typeof ZoteroRAG !== 'undefined') {
 				ZoteroRAG.maxConcurrentQueries = value;
 			}
+		}
+	},
+
+	openSyncDialog() {
+		// Get the main Zotero window
+		const mainWindow = Zotero.getMainWindow();
+		if (!mainWindow) {
+			Zotero.debug('Zotero RAG: No main window available');
+			return;
+		}
+
+		// Call the plugin's openSyncDialog method
+		if (typeof ZoteroRAG !== 'undefined' && ZoteroRAG.openSyncDialog) {
+			ZoteroRAG.openSyncDialog(mainWindow);
+		} else {
+			Zotero.debug('Zotero RAG: Plugin not initialized or sync dialog not available');
 		}
 	}
 };
