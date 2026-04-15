@@ -39,6 +39,12 @@ class Settings(BaseSettings):
         description="Hardware preset name"
     )
 
+    # Extraction backend
+    extractor_backend: str = Field(
+        default="kreuzberg",
+        description="Document extraction backend: 'kreuzberg' (default) or 'legacy' (pypdf+spaCy)"
+    )
+
     model_weights_path: Path = Field(
         default_factory=lambda: Path.home() / ".cache" / "zotero-rag" / "models",
         description="Path to store model weights"

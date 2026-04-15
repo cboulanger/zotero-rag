@@ -9,7 +9,7 @@ This document describes the testing strategy for the Zotero RAG system.
 - **No external dependencies** (mocked)
 - **Fast execution** (<10 seconds total)
 - **Run by default** with `npm run test:backend`
-- **Coverage:** Configuration, Zotero API, embeddings, vector store, PDF extraction, chunking, document processor, LLM service, RAG engine, API endpoints
+- **Coverage:** Configuration, Zotero API, embeddings, vector store, document extraction (Kreuzberg + legacy), document processor, LLM service, RAG engine, API endpoints
 
 ### Integration Tests (Real Dependencies)
 

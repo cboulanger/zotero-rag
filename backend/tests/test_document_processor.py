@@ -3,18 +3,24 @@ Unit tests for document processor.
 """
 
 import unittest
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 from backend.services.document_processor import DocumentProcessor
-from backend.services.pdf_extractor import PageText
-from backend.services.chunking import TextChunk
+from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 from backend.models.document import (
     DocumentMetadata,
     ChunkMetadata,
     DocumentChunk,
     DeduplicationRecord,
 )
+
+
+def _make_extraction_chunks(*texts_and_pages) -> list[ExtractionChunk]:
+    """Helper: build ExtractionChunk list from (text, page) tuples."""
+    return [
+        ExtractionChunk(text=text, page_number=page, chunk_index=i)
+        for i, (text, page) in enumerate(texts_and_pages)
+    ]
 
 
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
@@ -27,36 +33,33 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_embedding_service = AsyncMock()
         self.mock_vector_store = Mock()
 
-        # Create processor
+        # Mock document extractor (replaces pdf_extractor + text_chunker)
+        self.mock_extractor = AsyncMock(spec=DocumentExtractor)
+
+        # Create processor with explicit mock extractor
         self.processor = DocumentProcessor(
             zotero_client=self.mock_zotero_client,
             embedding_service=self.mock_embedding_service,
             vector_store=self.mock_vector_store,
-            max_chunk_size=512,
-            chunk_overlap=50,
+            document_extractor=self.mock_extractor,
         )
 
     async def test_init(self):
         """Test initialization."""
-        self.assertIsNotNone(self.processor.pdf_extractor)
-        self.assertIsNotNone(self.processor.text_chunker)
-        self.assertEqual(self.processor.text_chunker.max_chunk_size, 512)
-        self.assertEqual(self.processor.text_chunker.overlap_size, 50)
+        self.assertIsNotNone(self.processor.document_extractor)
 
     async def test_index_library_no_items(self):
         """Test indexing when library has no items."""
-        # Mock empty library
         self.mock_zotero_client.get_library_items_since.return_value = []
 
         result = await self.processor.index_library("test_lib")
 
-        self.assertIn("mode", result)  # Should have mode field
+        self.assertIn("mode", result)
         self.assertEqual(result["items_processed"], 0)
         self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_skip_non_pdf_items(self):
-        """Test that non-PDF items are skipped."""
-        # Mock library with non-PDF item
+        """Test that items without indexable attachments are skipped."""
         mock_item = {
             "data": {
                 "key": "ITEM123",
@@ -70,8 +73,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         result = await self.processor.index_library("test_lib")
 
-        self.assertIn("mode", result)  # Should have mode field
-        # Items without PDFs are filtered out before processing
+        self.assertIn("mode", result)
         self.assertEqual(result["items_processed"], 0)
 
     async def test_index_library_skip_attachments_and_notes(self):
@@ -85,13 +87,11 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         result = await self.processor.index_library("test_lib")
 
-        # These should be filtered out before processing
-        self.assertIn("mode", result)  # Should have mode field
+        self.assertIn("mode", result)
         self.assertEqual(result["items_processed"], 0)
 
     async def test_index_library_with_pdf_success(self):
         """Test successful indexing of item with PDF attachment."""
-        # Mock item with PDF
         mock_item = {
             "version": 1,
             "data": {
@@ -122,46 +122,26 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.check_duplicate.return_value = None
         self.mock_vector_store.add_chunks_batch.return_value = ["id1", "id2"]
 
-        # Mock PDF extraction
-        mock_pages = [
-            PageText(page_number=1, text="This is page one with some content."),
-            PageText(page_number=2, text="This is page two with more content."),
-        ]
-
-        # Mock chunking
-        mock_chunks = [
-            TextChunk(
-                text="This is page one with some content.",
-                page_number=1,
-                chunk_index=0,
-                start_char=0,
-                end_char=37,
-            ),
-            TextChunk(
-                text="This is page two with more content.",
-                page_number=2,
-                chunk_index=1,
-                start_char=0,
-                end_char=36,
-            ),
-        ]
+        # Mock extractor returning two chunks
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("This is page one with some content.", 1),
+            ("This is page two with more content.", 2),
+        )
 
         # Mock embeddings
-        mock_embeddings = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
-        self.mock_embedding_service.embed_batch.return_value = mock_embeddings
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
 
-        # Patch PDF extractor and chunker
-        with patch.object(
-            self.processor.pdf_extractor, "extract_from_bytes", return_value=mock_pages
-        ), patch.object(
-            self.processor.text_chunker, "chunk_pages", return_value=mock_chunks
-        ):
-            result = await self.processor.index_library("test_lib")
+        result = await self.processor.index_library("test_lib")
 
         # Verify results
-        self.assertIn("mode", result)  # Should have mode field
+        self.assertIn("mode", result)
         self.assertEqual(result["items_processed"], 1)
         self.assertEqual(result["chunks_added"], 2)
+
+        # Verify extractor was called with correct args
+        self.mock_extractor.extract_and_chunk.assert_called_once_with(
+            b"fake pdf bytes", "application/pdf"
+        )
 
         # Verify embeddings were generated
         self.mock_embedding_service.embed_batch.assert_called_once()
@@ -175,7 +155,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.add_deduplication_record.assert_called_once()
 
     async def test_index_library_skip_duplicate(self):
-        """Test that duplicate PDFs are skipped."""
+        """Test that duplicate attachments are skipped."""
         mock_item = {
             "data": {
                 "key": "ITEM123",
@@ -207,11 +187,12 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         result = await self.processor.index_library("test_lib")
 
-        # Should skip processing (won't create new chunks)
         self.assertEqual(result["chunks_added"], 0)
+        # Extractor should not be called for duplicates
+        self.mock_extractor.extract_and_chunk.assert_not_called()
 
-    async def test_index_library_pdf_extraction_error(self):
-        """Test handling of PDF extraction errors."""
+    async def test_index_library_extraction_error(self):
+        """Test handling of extraction errors."""
         mock_item = {
             "data": {
                 "key": "ITEM123",
@@ -232,24 +213,19 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"corrupted pdf"
 
-        # Mock vector store - no duplicate
         self.mock_vector_store.check_duplicate.return_value = None
 
-        # Mock PDF extraction failure
-        with patch.object(
-            self.processor.pdf_extractor,
-            "extract_from_bytes",
-            side_effect=ValueError("Invalid PDF"),
-        ):
-            result = await self.processor.index_library("test_lib")
+        # Mock extraction failure
+        self.mock_extractor.extract_and_chunk.side_effect = ValueError("Extraction failed")
 
-        # Should handle error gracefully (errors are logged but processing continues)
-        self.assertIn("mode", result)  # Should have mode field
+        result = await self.processor.index_library("test_lib")
+
+        # Should handle error gracefully
+        self.assertIn("mode", result)
         self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_force_reindex(self):
         """Test force reindex deletes existing chunks."""
-        # Mock library metadata with force_reindex flag
         from backend.models.library import LibraryIndexMetadata
         metadata = LibraryIndexMetadata(
             library_id="test_lib",
@@ -269,7 +245,6 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
     async def test_index_library_progress_callback(self):
         """Test that progress callback is invoked."""
-        # Use 2 items so we get multiple progress updates
         mock_items = [
             {
                 "version": 1,
@@ -289,7 +264,6 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        # Mock PDF attachments for each item
         mock_pdf_attachment = {
             "data": {
                 "key": "PDF1",
@@ -304,11 +278,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.check_duplicate.return_value = None
         self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
 
-        # Mock PDF extraction and chunking
-        from backend.services.pdf_extractor import PageText
-        from backend.services.chunking import TextChunk
-        mock_pages = [PageText(page_number=1, text="Test content")]
-        mock_chunks = [TextChunk(text="Test content", page_number=1, chunk_index=0, start_char=0, end_char=12)]
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Test content", 1)
+        )
         self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
 
         progress_calls = []
@@ -316,16 +288,10 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         def progress_callback(current, total):
             progress_calls.append((current, total))
 
-        # Patch PDF extraction and chunking
-        with patch.object(
-            self.processor.pdf_extractor, "extract_from_bytes", return_value=mock_pages
-        ), patch.object(
-            self.processor.text_chunker, "chunk_pages", return_value=mock_chunks
-        ):
-            result = await self.processor.index_library(
-                "test_lib",
-                progress_callback=progress_callback,
-            )
+        result = await self.processor.index_library(
+            "test_lib",
+            progress_callback=progress_callback,
+        )
 
         # Should have initial + one call per item
         self.assertGreaterEqual(len(progress_calls), 3)
@@ -335,10 +301,8 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
     async def test_index_library_fatal_error(self):
         """Test handling of fatal errors during indexing."""
-        # Mock a fatal error
         self.mock_zotero_client.get_library_items_since.side_effect = Exception("Connection lost")
 
-        # Fatal errors should propagate as exceptions
         with self.assertRaises(Exception) as context:
             await self.processor.index_library("test_lib")
 
@@ -424,29 +388,17 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
         self.mock_zotero_client.get_item_children.return_value = mock_pdf_attachments
-        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf"
+        # Return different bytes so dedup doesn't kick in
+        self.mock_zotero_client.get_attachment_file.side_effect = [b"fake pdf 1", b"fake pdf 2"]
 
         self.mock_vector_store.check_duplicate.return_value = None
 
-        mock_pages = [PageText(page_number=1, text="Test content")]
-        mock_chunks = [
-            TextChunk(
-                text="Test content",
-                page_number=1,
-                chunk_index=0,
-                start_char=0,
-                end_char=12,
-            )
-        ]
-
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Test content", 1)
+        )
         self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
 
-        with patch.object(
-            self.processor.pdf_extractor, "extract_from_bytes", return_value=mock_pages
-        ), patch.object(
-            self.processor.text_chunker, "chunk_pages", return_value=mock_chunks
-        ):
-            result = await self.processor.index_library("test_lib")
+        result = await self.processor.index_library("test_lib")
 
         # Should process both PDFs
         self.assertEqual(result["items_processed"], 1)
@@ -454,7 +406,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["chunks_added"], 2)
 
     async def test_index_library_pdf_download_failure(self):
-        """Test handling when PDF download fails."""
+        """Test handling when attachment download fails."""
         mock_item = {
             "data": {
                 "key": "ITEM123",
@@ -478,8 +430,47 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         result = await self.processor.index_library("test_lib")
 
         # Should skip this PDF but not crash
-        self.assertIn("mode", result)  # Should have mode field
+        self.assertIn("mode", result)
         self.assertEqual(result["chunks_added"], 0)
+
+    async def test_index_library_html_attachment(self):
+        """Test that HTML snapshot attachments are indexed."""
+        mock_item = {
+            "version": 1,
+            "data": {
+                "key": "ITEM123",
+                "itemType": "webpage",
+                "title": "A Web Article",
+            }
+        }
+
+        mock_html_attachment = {
+            "data": {
+                "key": "HTML1",
+                "itemType": "attachment",
+                "contentType": "text/html",
+            }
+        }
+
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_item_children.return_value = [mock_html_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"<html><body>Hello</body></html>"
+
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Hello", None)
+        )
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib")
+
+        self.assertEqual(result["items_processed"], 1)
+        self.assertEqual(result["chunks_added"], 1)
+
+        # Verify extractor was called with correct mime type
+        self.mock_extractor.extract_and_chunk.assert_called_once_with(
+            b"<html><body>Hello</body></html>", "text/html"
+        )
 
 
 if __name__ == "__main__":

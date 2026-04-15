@@ -41,6 +41,7 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 - sentence-transformers for embeddings
 - transformers + bitsandbytes for local LLM inference
 - PyZotero + direct local API for Zotero integration
+- Kreuzberg for document extraction (PDF, HTML, DOCX, EPUB; Rust-based, native async)
 
 **Plugin:**
 
@@ -54,28 +55,28 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 ## System Architecture
 
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                      Zotero Plugin (Frontend)                    │
+┌────────────────────────────────────────────────────────────────┐
+│                      Zotero Plugin (Frontend)                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │   Dialog UI  │  │ Menu Item    │  │  Backend Client      │  │
 │  │  - Question  │  │ - Tools Menu │  │  - HTTP/REST         │  │
 │  │  - Libraries │  │              │  │  - SSE Streaming     │  │
 │  │  - Progress  │  │              │  │  - Error Handling    │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────┘
                               │
                               │ HTTP/SSE (localhost:8119)
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend (Python)                      │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                      API Layer (REST/SSE)                   │ │
-│  │  /api/config  /api/libraries  /api/index  /api/query       │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                              │                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                     Service Layer                           │ │
+┌────────────────────────────────────────────────────────────────┐
+│                    FastAPI Backend (Python)                    │
+│                                                                │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                      API Layer (REST/SSE)                 │ │
+│  │  /api/config  /api/libraries  /api/index  /api/query      │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     Service Layer                         │ │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
 │  │  │ Document     │ │ RAG Engine   │ │ Embedding        │   │ │
 │  │  │ Processor    │ │              │ │ Service          │   │ │
@@ -84,7 +85,7 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 │  │  │ - Chunking   │ │ - Citations  │ │ - Caching        │   │ │
 │  │  │ - Indexing   │ │              │ │                  │   │ │
 │  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  │                                                              │ │
+│  │                                                           │ │
 │  │  ┌──────────────┐                  ┌──────────────────┐   │ │
 │  │  │ LLM Service  │                  │ Zotero Client    │   │ │
 │  │  │              │                  │                  │   │ │
@@ -92,10 +93,10 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 │  │  │ - Remote     │                  │ - HTTP Client    │   │ │
 │  │  │ - Quantized  │                  │ - Library Access │   │ │
 │  │  └──────────────┘                  └──────────────────┘   │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                              │                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                     Data Layer                              │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     Data Layer                            │ │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
 │  │  │ Vector Store │ │ Model Cache  │ │ Config Manager   │   │ │
 │  │  │  (Qdrant)    │ │              │ │                  │   │ │
@@ -103,15 +104,15 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 │  │  │ - Chunks     │ │ - LLM Weights│ │ - Settings       │   │ │
 │  │  │ - Dedup      │ │              │ │                  │   │ │
 │  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+│  └───────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────┘
                               │
                               │ HTTP (localhost:23119)
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Zotero Desktop Application                  │
-│                    (Local API on port 23119)                     │
-│                                                                  │
+│                      Zotero Desktop Application                 │
+│                    (Local API on port 23119)                    │
+│                                                                 │
 │  - Libraries, Collections, Items                                │
 │  - PDF Attachments                                              │
 │  - Full-text Content                                            │
@@ -169,27 +170,19 @@ The backend is organized into a layered architecture with clear separation of co
 - Supports incremental indexing (version-based change detection)
 - Three indexing modes: auto, incremental, and full
 - Fetches items from Zotero libraries with version tracking
-- Extracts text from PDFs with page tracking
-- Chunks text semantically
-- Generates embeddings
-- Stores chunks in vector database with version metadata
+- Delegates extraction and chunking to a `DocumentExtractor` implementation
+- Generates embeddings and stores chunks in vector database with version metadata
 - Handles deduplication via content hashing
 - Provides progress callbacks and cancellation support
 
-**PDF Extractor:** [backend/services/pdf_extractor.py](../backend/services/pdf_extractor.py)
+**Document Extraction:** [backend/services/extraction/](../backend/services/extraction/)
 
-- Extracts text from PDF files using pypdf
-- Tracks page numbers for each text segment
-- Handles corrupted/invalid PDFs gracefully
-- Supports byte streams and file paths
+Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `text/html`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/epub+zip`.
 
-**Text Chunker:** [backend/services/chunking.py](../backend/services/chunking.py)
-
-- Semantic chunking using spaCy (lazy model loading)
-- Sentence-boundary aware chunking
-- Configurable chunk size and overlap
-- Generates text previews (first 5 words) for citation anchors
-- Content hash generation for deduplication
+- **`DocumentExtractor`** (ABC) — `extract_and_chunk(content: bytes, mime_type: str) → list[ExtractionChunk]`
+- **`KreuzbergExtractor`** (default) — Rust-based, native async, 91+ formats via [Kreuzberg](https://kreuzberg.dev/). Chunking and page tracking built-in.
+- **`LegacyExtractor`** — Wraps the original `PDFExtractor` (pypdf) + `TextChunker` (spaCy) pipeline. PDF-only; kept for fallback.
+- **`create_document_extractor(backend, max_chunk_size, chunk_overlap, ocr_enabled)`** — factory function; backend selectable via `extractor_backend` setting.
 
 **Embedding Service:** [backend/services/embeddings.py](../backend/services/embeddings.py)
 
@@ -363,19 +356,18 @@ The plugin provides a user-friendly interface within Zotero for asking questions
    - Incremental mode: Use ?since=<last_version> to get only new/modified items
    - Full mode: Fetch all items
    ↓
-5. Filter items with PDF attachments
+5. Filter items with indexable attachments (PDF, HTML, DOCX, EPUB)
    ↓
 6. For each item:
    a. Check for cancellation (abort if requested)
    b. Compare versions (incremental mode: skip if version unchanged)
    c. Delete old chunks if item updated (incremental mode)
-   d. Download PDF file
-   e. Extract text with page numbers (PDFExtractor)
-   f. Check for duplicates (content hash)
-   g. Chunk text semantically (TextChunker)
-   h. Generate embeddings (EmbeddingService)
-   i. Store chunks with version metadata in vector database
-   j. Call progress callback
+   d. Download attachment file bytes
+   e. Check for duplicates (content hash)
+   f. Extract text and chunks (DocumentExtractor — Kreuzberg by default)
+   g. Generate embeddings (EmbeddingService)
+   h. Store chunks with version metadata in vector database
+   i. Call progress callback
    ↓
 7. Update library metadata (last_indexed_version, timestamp, counts, mode)
    ↓
@@ -522,16 +514,24 @@ extensions.zotero-rag.maxQueries = 5
 - SHA256 hash ensures uniqueness
 - Stored in vector database for persistence
 
-### 4. Chunking Approach
+### 4. Document Extraction Adapter Pattern
 
-**Decision:** Semantic chunking with spaCy at sentence boundaries
+**Decision:** Pluggable `DocumentExtractor` ABC with Kreuzberg as the default backend
 
 **Rationale:**
 
-- Preserves semantic coherence
-- Better than fixed-size chunking for academic papers
-- Maintains document structure (paragraphs)
-- Page number tracking for precise citations
+- Decouples the indexing pipeline from any specific extraction library
+- Kreuzberg: Rust-based, native async, 91+ formats, 9-50× faster than pypdf+spaCy
+- Legacy pypdf+spaCy fallback preserved for comparison and compatibility
+- Supports HTML, DOCX, EPUB attachments in addition to PDF
+- Backend selectable at runtime via `extractor_backend` setting without code changes
+
+**Implementation:**
+
+- `DocumentExtractor` ABC mirrors existing `EmbeddingService`/`LLMService` pattern
+- `ExtractionChunk` carries `text`, `page_number`, and `chunk_index`
+- `create_document_extractor()` factory mirrors `create_embedding_service()`
+- `KreuzbergExtractor` uses `ExtractionConfig(chunking=ChunkingConfig(...), disable_ocr=...)`
 
 ### 5. LLM Flexibility
 
@@ -721,8 +721,14 @@ extensions.zotero-rag.maxQueries = 5
 - Enhanced API with new endpoints for index status and cancellation
 - Improved plugin UI with mode selection and status display
 
+**Version 1.3 - April 2025:**
+- Replaced monolithic PDF extraction pipeline with pluggable `DocumentExtractor` adapter pattern
+- Introduced Kreuzberg as the default extraction backend (Rust-based, native async, 91+ formats)
+- Extended indexable MIME types: PDF, HTML, DOCX, EPUB
+- Added `extractor_backend` setting (`kreuzberg` or `legacy`)
+- Legacy pypdf + spaCy pipeline retained as `LegacyExtractor` fallback
+
 ---
 
-**Document Version:** 1.1
-**Last Updated:** January 2025
-**Project Status:** Phase 4 (Integration & Polish) - Step 5 Complete (Incremental Indexing)
+**Document Version:** 1.3
+**Last Updated:** April 2025

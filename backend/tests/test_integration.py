@@ -173,14 +173,15 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             return_value=pdf_buffer.read()
         )
 
-        # Mock PDF extraction to return test content
-        # Note: We patch the instance, not the class, since it's already created in setUp
-        mock_pdf_extractor = Mock()
-        mock_pdf_extractor.extract_from_bytes.return_value = [
-            Mock(page_number=1, text="Machine learning is a branch of AI."),
-            Mock(page_number=2, text="It uses algorithms to learn from data."),
-        ]
-        self.document_processor.pdf_extractor = mock_pdf_extractor
+        # Mock extraction to return test content via the document_extractor interface
+        from unittest.mock import AsyncMock as _AsyncMock
+        from backend.services.extraction.base import ExtractionChunk as _ExtractionChunk
+        self.document_processor.document_extractor.extract_and_chunk = _AsyncMock(
+            return_value=[
+                _ExtractionChunk(text="Machine learning is a branch of AI.", page_number=1, chunk_index=0),
+                _ExtractionChunk(text="It uses algorithms to learn from data.", page_number=2, chunk_index=1),
+            ]
+        )
 
         # Execute: Index the library
         result = await self.document_processor.index_library(

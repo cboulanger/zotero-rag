@@ -18,7 +18,7 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 ### 2. Start the Backend Server
 
-The plugin requires a local server to process your questions. Start it with:
+The plugin requires a locally or remotely deployed server to process your questions. Start it with:
 
 ```bash
 # with NodeJS:
@@ -27,7 +27,7 @@ npm run server:start
 uv run python scripts/server.py start 
 ```
 
-The server will run at <http://localhost:8119>. You can check if it's running:
+Locally, the server will run at <http://localhost:8119>. You can check if it's running:
 
 ```bash
 # with NodeJS:
