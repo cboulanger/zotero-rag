@@ -100,6 +100,36 @@ ZoteroRAG = {
 
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
+
+		// Load optional API key (required when backend is on a remote host)
+		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+	},
+
+	/**
+	 * Return HTTP headers to include in all backend requests.
+	 * Adds X-API-Key when an API key is configured.
+	 * @param {Record<string, string>} [extra] - Additional headers to merge
+	 * @returns {Record<string, string>}
+	 */
+	getAuthHeaders(extra = {}) {
+		/** @type {Record<string, string>} */
+		const headers = { ...extra };
+		if (this.apiKey) {
+			headers['X-API-Key'] = this.apiKey;
+		}
+		return headers;
+	},
+
+	/**
+	 * Append the API key as a query parameter to a URL.
+	 * Used for SSE (EventSource) endpoints that cannot set request headers.
+	 * @param {string} url - Base URL
+	 * @returns {string} URL with api_key appended when configured
+	 */
+	addApiKeyParam(url) {
+		if (!this.apiKey) return url;
+		const sep = url.includes('?') ? '&' : '?';
+		return `${url}${sep}api_key=${encodeURIComponent(this.apiKey)}`;
 	},
 
 	/**
@@ -214,7 +244,9 @@ ZoteroRAG = {
 		}
 
 		try {
-			const response = await fetch(`${this.backendURL}/api/version`);
+			const response = await fetch(`${this.backendURL}/api/version`, {
+				headers: this.getAuthHeaders()
+			});
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
@@ -366,9 +398,7 @@ ZoteroRAG = {
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 				body: JSON.stringify(payload)
 			});
 

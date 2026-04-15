@@ -410,69 +410,109 @@ class DocumentProcessor:
                 logger.warning(f"Could not download attachment {attachment_key}")
                 continue
 
-            # Check deduplication (content hash of raw file bytes)
-            content_hash = hashlib.sha256(file_bytes).hexdigest()
-            if self.vector_store.check_duplicate(content_hash):
-                logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
-                continue
-
-            # Extract text and chunk
-            try:
-                chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
-            except Exception as e:
-                logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
-                continue
-
-            if not chunks:
-                logger.warning(f"No text extracted from attachment {attachment_key}")
-                continue
-
-            # Generate embeddings
-            chunk_texts = [chunk.text for chunk in chunks]
-            embeddings = await self.embedding_service.embed_batch(chunk_texts)
-
-            # Build DocumentChunk objects with full metadata
-            doc_chunks = []
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                chunk_id = f"{library_id}:{item_key}:{attachment_key}:{i}"
-
-                chunk_metadata = ChunkMetadata(
-                    chunk_id=chunk_id,
-                    document_metadata=doc_metadata,
-                    page_number=chunk.page_number,
-                    text_preview=chunk.text_preview,
-                    chunk_index=i,
-                    content_hash=content_hash,
-                    # Version fields
-                    item_version=item_version,
-                    attachment_version=attachment_version,
-                    indexed_at=datetime.utcnow().isoformat(),
-                    zotero_modified=item_modified
-                )
-
-                doc_chunk = DocumentChunk(
-                    text=chunk.text,
-                    metadata=chunk_metadata,
-                    embedding=embedding
-                )
-                doc_chunks.append(doc_chunk)
-
-            # Store in vector database
-            self.vector_store.add_chunks_batch(doc_chunks)
-
-            # Record in deduplication table
-            dedup_record = DeduplicationRecord(
-                content_hash=content_hash,
-                library_id=library_id,
-                item_key=item_key,
-                relation_uri=None
+            chunks_added = await self._process_attachment_bytes(
+                file_bytes=file_bytes,
+                mime_type=mime_type,
+                doc_metadata=doc_metadata,
+                item_version=item_version,
+                attachment_version=attachment_version,
+                item_modified=item_modified,
             )
-            self.vector_store.add_deduplication_record(dedup_record)
-
-            total_chunks += len(doc_chunks)
-            logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
+            total_chunks += chunks_added
 
         return total_chunks
+
+    async def _process_attachment_bytes(
+        self,
+        file_bytes: bytes,
+        mime_type: str,
+        doc_metadata: "DocumentMetadata",
+        item_version: int,
+        attachment_version: int,
+        item_modified: str,
+    ) -> int:
+        """
+        Extract, embed, and store chunks for a single attachment.
+
+        This is the shared processing core used by both the Zotero-API-based
+        local indexing path and the remote document-upload endpoint.
+
+        Args:
+            file_bytes: Raw bytes of the attachment file.
+            mime_type: MIME type of the file.
+            doc_metadata: Document metadata (must have attachment_key set).
+            item_version: Zotero item version number.
+            attachment_version: Zotero attachment version number.
+            item_modified: ISO 8601 modification timestamp from Zotero.
+
+        Returns:
+            Number of chunks created and stored (0 if skipped/failed).
+        """
+        library_id = doc_metadata.library_id
+        item_key = doc_metadata.item_key
+        attachment_key = doc_metadata.attachment_key
+
+        # Check deduplication (content hash of raw file bytes)
+        content_hash = hashlib.sha256(file_bytes).hexdigest()
+        if self.vector_store.check_duplicate(content_hash):
+            logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
+            return 0
+
+        # Extract text and chunk
+        try:
+            chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
+        except Exception as e:
+            logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
+            return 0
+
+        if not chunks:
+            logger.warning(f"No text extracted from attachment {attachment_key}")
+            return 0
+
+        # Generate embeddings
+        chunk_texts = [chunk.text for chunk in chunks]
+        embeddings = await self.embedding_service.embed_batch(chunk_texts)
+
+        # Build DocumentChunk objects with full metadata
+        doc_chunks = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            chunk_id = f"{library_id}:{item_key}:{attachment_key}:{i}"
+
+            chunk_metadata = ChunkMetadata(
+                chunk_id=chunk_id,
+                document_metadata=doc_metadata,
+                page_number=chunk.page_number,
+                text_preview=chunk.text_preview,
+                chunk_index=i,
+                content_hash=content_hash,
+                # Version fields
+                item_version=item_version,
+                attachment_version=attachment_version,
+                indexed_at=datetime.utcnow().isoformat(),
+                zotero_modified=item_modified
+            )
+
+            doc_chunk = DocumentChunk(
+                text=chunk.text,
+                metadata=chunk_metadata,
+                embedding=embedding
+            )
+            doc_chunks.append(doc_chunk)
+
+        # Store in vector database
+        self.vector_store.add_chunks_batch(doc_chunks)
+
+        # Record in deduplication table
+        dedup_record = DeduplicationRecord(
+            content_hash=content_hash,
+            library_id=library_id,
+            item_key=item_key,
+            relation_uri=None
+        )
+        self.vector_store.add_deduplication_record(dedup_record)
+
+        logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
+        return len(doc_chunks)
 
     async def _filter_indexed_attachments(
         self,

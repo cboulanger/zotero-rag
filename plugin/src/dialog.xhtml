@@ -19,6 +19,16 @@
         console.error("Failed to load include.js:", e);
       }
 
+      // Load remote indexer (must load before dialog.js)
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/remote_indexer.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load remote_indexer.js:", e);
+      }
+
       // Load dialog script
       try {
         Services.scriptloader.loadSubScript(

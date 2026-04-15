@@ -37,6 +37,9 @@
 /**
  * @typedef {Object} ZoteroRAGPlugin
  * @property {string} backendURL - Backend server URL
+ * @property {string} apiKey - API key for remote backend (empty string if not set)
+ * @property {function(Record<string,string>=): Record<string,string>} getAuthHeaders - Build auth headers
+ * @property {function(string): string} addApiKeyParam - Append api_key query param for SSE URLs
  * @property {function(): Array<Library>} getLibraries - Get available libraries
  * @property {function(): string} getCurrentLibrary - Get current library ID
  * @property {function(string, Array<string>, QueryOptions=): Promise<QueryResult>} submitQuery - Submit RAG query
@@ -167,7 +170,9 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return;
 
 		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/config`);
+			const response = await fetch(`${this.plugin.backendURL}/api/config`, {
+				headers: this.plugin.getAuthHeaders()
+			});
 			if (response.ok) {
 				const config = await response.json();
 				const defaultMinScore = config.default_min_score || 0.3;
@@ -201,7 +206,9 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return null;
 
 		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/libraries/${libraryId}/index-status`);
+			const response = await fetch(`${this.plugin.backendURL}/api/libraries/${libraryId}/index-status`, {
+				headers: this.plugin.getAuthHeaders()
+			});
 			if (response.status === 404) {
 				// Library not indexed yet
 				return null;
@@ -559,52 +566,89 @@ var ZoteroRAGDialog = {
 
 		const backendURL = this.plugin.backendURL;
 
+		// Detect remote mode: backend URL does not point to the local machine.
+		// In remote mode the backend cannot access local Zotero files, so the
+		// plugin reads attachment bytes and uploads them directly.
+		const isRemote = !backendURL.includes('localhost') && !backendURL.includes('127.0.0.1');
+
 		for (let libraryId of libraryIds) {
 			try {
-				const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`);
-				const status = await statusResponse.json();
+				const libraries = this.plugin.getLibraries();
+				const library = libraries.find(lib => lib.id === libraryId);
+				const libraryName = library ? library.name : libraryId;
+				const libraryType = library ? library.type : 'user';
 
-				// For incremental mode, always trigger indexing to catch updates
-				// For full mode, force reindexing
-				// For auto mode, let backend decide
-				const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
+				if (isRemote) {
+					// ---------------------------------------------------------------
+					// Remote mode: plugin uploads attachment bytes to the backend
+					// ---------------------------------------------------------------
+					this.plugin.log(`Library ${libraryId}: remote mode — uploading attachments directly`);
 
-				if (shouldIndex) {
-					// Get library name and type for user-friendly messages
-					const libraries = this.plugin.getLibraries();
-					const library = libraries.find(lib => lib.id === libraryId);
-					const libraryName = library ? library.name : libraryId;
-					const libraryType = library ? library.type : 'user';
-
-					// Download missing attachments before indexing
+					// Ensure all attachments are synced locally before uploading
 					this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
 					await this.downloadMissingAttachments(libraryId, libraryType);
 
-					this.showStatus(`Indexing library ${libraryName}...`, 'info');
+					this.showStatus(`Uploading documents for ${libraryName}...`, 'info');
 
-					// Build URL with mode parameter
-					const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
-
-					const indexResponse = await fetch(indexURL, {
-						method: 'POST'
+					await RemoteIndexer.indexLibrary({
+						libraryId,
+						libraryType,
+						libraryName,
+						backendURL,
+						getAuthHeaders: (extra) => this.plugin.getAuthHeaders(extra),
+						log: (msg) => this.plugin.log(msg),
+						onProgress: ({ percentage, message, current, total }) => {
+							this.updateProgress(percentage, 'Uploading documents', message, current, total);
+						},
+						isCancelled: () => !this.isOperationInProgress,
 					});
 
-					if (!indexResponse.ok) {
-						const errorData = await indexResponse.json().catch(() => ({}));
+				} else {
+					// ---------------------------------------------------------------
+					// Local mode (unchanged): backend fetches files via Zotero local API
+					// ---------------------------------------------------------------
+					const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`, {
+						headers: this.plugin.getAuthHeaders()
+					});
+					const status = await statusResponse.json();
 
-						// If indexing is already in progress (409 conflict), reconnect to it
-						if (indexResponse.status === 409) {
-							this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
-							this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
-						} else {
-							// For other errors, throw
-							const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
-							throw new Error(`Failed to start indexing: ${errorMsg}`);
+					// For incremental mode, always trigger indexing to catch updates
+					// For full mode, force reindexing
+					// For auto mode, let backend decide
+					const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
+
+					if (shouldIndex) {
+						// Download missing attachments before indexing
+						this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
+						await this.downloadMissingAttachments(libraryId, libraryType);
+
+						this.showStatus(`Indexing library ${libraryName}...`, 'info');
+
+						// Build URL with mode parameter
+						const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
+
+						const indexResponse = await fetch(indexURL, {
+							method: 'POST',
+							headers: this.plugin.getAuthHeaders()
+						});
+
+						if (!indexResponse.ok) {
+							const errorData = await indexResponse.json().catch(() => ({}));
+
+							// If indexing is already in progress (409 conflict), reconnect to it
+							if (indexResponse.status === 409) {
+								this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
+								this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
+							} else {
+								// For other errors, throw
+								const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
+								throw new Error(`Failed to start indexing: ${errorMsg}`);
+							}
 						}
-					}
 
-					// Monitor progress (whether we just started it or reconnected to existing)
-					await this.monitorIndexingProgress(libraryId);
+						// Monitor progress (whether we just started it or reconnected to existing)
+						await this.monitorIndexingProgress(libraryId);
+					}
 				}
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
@@ -629,7 +673,10 @@ var ZoteroRAGDialog = {
 			}
 
 			const backendURL = this.plugin.backendURL;
-			const eventSource = new EventSource(`${backendURL}/api/index/library/${libraryId}/progress`);
+			const sseURL = this.plugin.addApiKeyParam(
+				`${backendURL}/api/index/library/${libraryId}/progress`
+			);
+			const eventSource = new EventSource(sseURL);
 
 			this.indexingStreams.set(libraryId, eventSource);
 
@@ -861,7 +908,8 @@ var ZoteroRAGDialog = {
 			// Send abort signal to backend
 			try {
 				await fetch(`${this.plugin.backendURL}/api/index/library/${libraryId}/cancel`, {
-					method: 'POST'
+					method: 'POST',
+					headers: this.plugin.getAuthHeaders()
 				});
 			} catch (error) {
 				// Log but don't throw - cancellation should always succeed
