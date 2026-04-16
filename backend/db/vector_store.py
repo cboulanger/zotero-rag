@@ -68,10 +68,29 @@ class VectorStore:
         self._ensure_collections()
 
     def _ensure_collections(self):
-        """Create collections if they don't exist."""
+        """Create collections if they don't exist, or recreate if vector size changed."""
         # Check if chunks collection exists
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
+
+        if self.CHUNKS_COLLECTION in collection_names:
+            # Verify the vector dimension matches the current embedding model
+            info = self.client.get_collection(self.CHUNKS_COLLECTION)
+            vectors_config = info.config.params.vectors
+            # vectors_config is either a VectorParams (unnamed) or a dict (named vectors)
+            existing_dim = (
+                vectors_config.size
+                if hasattr(vectors_config, "size")
+                else next(iter(vectors_config.values())).size
+            )
+            if existing_dim != self.embedding_dim:
+                logger.warning(
+                    f"Collection '{self.CHUNKS_COLLECTION}' has vector size {existing_dim} "
+                    f"but current embedding model produces {self.embedding_dim}-dim vectors. "
+                    f"Recreating collection (all previously indexed data will be lost)."
+                )
+                self.client.delete_collection(self.CHUNKS_COLLECTION)
+                collection_names.remove(self.CHUNKS_COLLECTION)
 
         if self.CHUNKS_COLLECTION not in collection_names:
             logger.info(f"Creating collection: {self.CHUNKS_COLLECTION}")
@@ -634,13 +653,18 @@ class VectorStore:
         Returns:
             Number of chunks
         """
-        result = self.client.count(
-            collection_name=self.CHUNKS_COLLECTION,
-            count_filter=Filter(must=[
-                FieldCondition(key="library_id", match=MatchValue(value=library_id))
-            ])
-        )
-        return result.count
+        try:
+            result = self.client.count(
+                collection_name=self.CHUNKS_COLLECTION,
+                count_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id))
+                ])
+            )
+            return result.count
+        except (IndexError, Exception) as e:
+            # qdrant_client local storage raises IndexError on empty collections with filters
+            logger.warning(f"Error counting chunks for library {library_id}, returning 0: {e}")
+            return 0
 
     def close(self):
         """

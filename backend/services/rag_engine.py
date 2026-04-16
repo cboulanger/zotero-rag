@@ -133,7 +133,16 @@ Context:
 
 Question: {question}
 
-Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response. Include references to the sources when relevant, in the Form "[X:Y]", X being the number of the source, Y the page in the source as given in the context. 
+Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response.
+
+CRITICAL CITATION RULE: You MUST cite sources using ONLY bracket notation. The ONLY acceptable citation formats are:
+  - [N]        — reference to source N (e.g. [1], [3])
+  - [N:P]      — source N, page P (e.g. [2:7])
+  - [N,M]      — multiple sources (e.g. [1,2,3])
+  - [N:P,M:Q]  — multiple sources with pages (e.g. [1:10,2:20])
+
+NEVER write "Source 1", "Source 2", "*Source 3*", "(Source 4)", or any other textual form.
+Every reference to a source must use bracket notation such as [1] or [2:15].
 """
 
         logger.debug(f"Generated prompt with {len(context)} characters of context")

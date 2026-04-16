@@ -350,32 +350,47 @@ plugin/
 
 Build script copies src → build, then creates XPI from build directory.
 
-## Development Server
+## Hot-Reload Development
 
-This project uses [`zotero-plugin-scaffold`(https://zotero-plugin-dev.github.io/zotero-plugin-scaffold)] which provides a [development server with hot-reloading(https://deepwiki.com/zotero-plugin-dev/zotero-plugin-scaffold/11-zotero-integration)]. We integrate this functionality to provide the following CLI:
+This project uses [`zotero-plugin-scaffold`](https://zotero-plugin-dev.github.io/zotero-plugin-scaffold/) which provides a [development server with hot-reloading](https://zotero-plugin-dev.github.io/zotero-plugin-scaffold/guide/features). When active, any change to files in `plugin/src/` is automatically rebuilt and reloaded in Zotero — no manual rebuild or reinstallation needed.
+
+### One-Time Setup
+
+Add the following to your `.env` file (see `.env.dist` for a template):
 
 ```bash
-# Start both backend and plugin development servers together
-npm run server:start:dev
+# Path to the Zotero binary
+# macOS: /Applications/Zotero.app/Contents/MacOS/zotero
+# Windows: C:/Program Files/Zotero/zotero.exe
+ZOTERO_PLUGIN_ZOTERO_BIN_PATH=/Applications/Zotero.app/Contents/MacOS/zotero
 
-# Stop all servers
-npm run server:stop
+# Path to a dedicated Zotero profile for development
+# Create one via: /path/to/zotero -p
+ZOTERO_PLUGIN_PROFILE_PATH=/path/to/dev-profile
 ```
 
-**Hot-Reload Workflow:**
+Using a separate development profile keeps your personal Zotero library untouched during development.
 
-1. Start development servers: `npm run server:start:dev`
-2. Plugin is automatically installed as a temporary add-on in Zotero
-3. Make changes to source files in `plugin/src/`
-4. Changes are automatically rebuilt and reloaded in Zotero
-5. No manual rebuild or reinstallation needed during development
+### Usage
 
-**Logs:**
+```bash
+# Start plugin development server (opens Zotero with hot-reload)
+npm run dev:plugin:start
 
-- Backend server: `logs/server.log`
-- Plugin development server: `logs/plugin.log`
+# Stop plugin development server and Zotero
+npm run dev:plugin:stop
+```
 
-**Production Build:**
+**Workflow:**
+
+1. Close any running Zotero instances.
+2. Run `npm run dev:plugin:start` — this starts Zotero with the plugin automatically installed.
+3. Edit files in `plugin/src/`.
+4. Changes are detected, rebuilt, and reloaded in Zotero automatically.
+
+**Note:** The backend server must be running separately for the plugin to function. Start it with `npm run server:start`.
+
+### Production Build
 
 For final distribution, build the XPI file:
 

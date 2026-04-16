@@ -686,7 +686,7 @@ var ZoteroRAGDialog = {
 
 					switch (data.event) {
 						case 'started':
-							this.updateProgress(0, 'Starting indexing...', data.message || '');
+							// Do not show a message yet — wait for actual progress or completion
 							break;
 
 						case 'progress':

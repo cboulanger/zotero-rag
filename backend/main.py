@@ -55,6 +55,8 @@ logging.getLogger("httpcore").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
 logging.getLogger("bitsandbytes").setLevel(logging.INFO)
+logging.getLogger("markdown_it").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)  # suppress verbose request/response dumps
 
 # Configure Uvicorn's access logger to use the same format as application logs
 uvicorn_access_logger = logging.getLogger("uvicorn.access")

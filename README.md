@@ -70,9 +70,10 @@ The plugin uses AI to understand your questions and retrieve relevant informatio
 ## Developer Documentation
 
 - **[Application architecture](docs/architecture.md)**
+- **[Plugin development & hot reload](docs/zotero-plugin-dev.md)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**
-- **[Setup CI/CD](docs/setup-ci-cd.md)** - CLI commands
+- **[Setup CI/CD](docs/setup-ci-cd.md)**
 
 ## License
 
