@@ -1,3 +1,10 @@
+# [1.4.0](https://github.com/cboulanger/zotero-rag/compare/v1.3.0...v1.4.0) (2026-04-16)
+
+
+### Features
+
+* force new version ([3401f5e](https://github.com/cboulanger/zotero-rag/commit/3401f5e18bfb87ffd0afb55fadb199ad60e84646))
+
 # [1.3.0](https://github.com/cboulanger/zotero-rag/compare/v1.2.0...v1.3.0) (2025-11-17)
 
 
