@@ -9,7 +9,7 @@ ARG INSTALL_LOCAL_MODELS=false
 # source on all Linux targets — requires a C toolchain, cmake, and OpenSSL headers.
 # These are builder-only; they are NOT copied into the runtime image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential pkg-config libssl-dev cmake \
+      build-essential pkg-config libssl-dev cmake curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
