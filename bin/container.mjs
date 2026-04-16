@@ -156,16 +156,18 @@ function confirm(question) {
  * @param {boolean} noCache
  * @param {boolean} installOcr
  * @param {boolean} installLocalModels
+ * @param {string|undefined} platform  e.g. 'linux/amd64', 'linux/arm64'
  * @returns {Promise<boolean>}
  */
-async function buildImage(tag, noCache, installOcr = true, installLocalModels = false) {
+async function buildImage(tag, noCache, installOcr = true, installLocalModels = false, platform = undefined) {
   const fullTag = `${APP_NAME}:${tag}`;
-  console.log(`[INFO] Building ${fullTag} (OCR: ${installOcr ? 'included' : 'skipped'}, local-models: ${installLocalModels ? 'included' : 'skipped'})...`);
+  console.log(`[INFO] Building ${fullTag} (OCR: ${installOcr ? 'included' : 'skipped'}, local-models: ${installLocalModels ? 'included' : 'skipped'}${platform ? `, platform: ${platform}` : ''})...`);
   if (installLocalModels) {
     console.log('[INFO] --local-models: sentence-transformers/torch will be installed (~1-2 GB extra)');
   }
   const args = ['build'];
   if (noCache) args.push('--no-cache');
+  if (platform) args.push('--platform', platform);
   args.push('--build-arg', `INSTALL_OCR=${installOcr}`);
   args.push('--build-arg', `INSTALL_LOCAL_MODELS=${installLocalModels}`);
   args.push('-t', fullTag);
@@ -182,7 +184,7 @@ async function buildImage(tag, noCache, installOcr = true, installLocalModels = 
 }
 
 /**
- * @param {{tag?: string, cache?: boolean, ocr?: boolean, localModels?: boolean, yes?: boolean}} options
+ * @param {{tag?: string, cache?: boolean, ocr?: boolean, localModels?: boolean, platform?: string, yes?: boolean}} options
  */
 async function handleBuild(options) {
   console.log('Zotero RAG - Container Build');
@@ -192,7 +194,7 @@ async function handleBuild(options) {
   const installLocalModels = options.localModels === true;
   console.log(`[INFO] Tag: ${tag}  OCR: ${installOcr}  local-models: ${installLocalModels}`);
   if (!options.yes && !(await confirm('Continue with build? (y/N): '))) process.exit(0);
-  if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels))) process.exit(1);
+  if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels, options.platform))) process.exit(1);
   console.log(`[INFO] To push: node bin/container.mjs push --tag ${tag}`);
 }
 
@@ -255,7 +257,7 @@ async function pushImage(tag) {
 }
 
 /**
- * @param {{tag?: string, build?: boolean, cache?: boolean, ocr?: boolean, localModels?: boolean, yes?: boolean}} options
+ * @param {{tag?: string, build?: boolean, cache?: boolean, ocr?: boolean, localModels?: boolean, platform?: string, yes?: boolean}} options
  */
 async function handlePush(options) {
   console.log('Zotero RAG - Container Push');
@@ -271,7 +273,7 @@ async function handlePush(options) {
   process.on('exit', () => { try { execSync(`${containerCmd} logout docker.io`, { stdio: 'ignore' }); } catch {} });
 
   if (doBuild) {
-    if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels))) process.exit(1);
+    if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels, options.platform))) process.exit(1);
   }
   tagForRegistry(tag);
   if (!(await registryLogin())) process.exit(1);
@@ -645,7 +647,7 @@ async function handleDeploy(options) {
       process.exit(1);
     }
   } else if (options.rebuild) {
-    if (!(await buildImage(tag, options.cache === false, options.ocr !== false, options.localModels === true))) process.exit(1);
+    if (!(await buildImage(tag, options.cache === false, options.ocr !== false, options.localModels === true, options.platform))) process.exit(1);
   }
 
   // Verify image exists
@@ -721,7 +723,7 @@ program
   .option('--no-cache', 'Force rebuild all layers')
   .option('--no-ocr', 'Exclude Tesseract OCR (smaller image; set OCR_ENABLED=false at runtime)')
   .option('--local-models', 'Install sentence-transformers/torch for local presets (~1-2 GB extra; off by default)')
-
+  .option('--platform <platform>', 'Target platform, e.g. linux/amd64 or linux/arm64 (default: host arch)')
   .option('--yes', 'Skip confirmation')
   .action(handleBuild);
 
@@ -733,7 +735,7 @@ program
   .option('--no-cache', 'Force rebuild all layers')
   .option('--no-ocr', 'Exclude Tesseract OCR (smaller image)')
   .option('--local-models', 'Install sentence-transformers/torch (~1-2 GB extra; off by default)')
-
+  .option('--platform <platform>', 'Target platform, e.g. linux/amd64 (default: host arch)')
   .option('--yes', 'Skip confirmation')
   .action(handlePush);
 
@@ -794,7 +796,7 @@ program
   .option('--no-cache', 'Disable layer cache (with --rebuild)')
   .option('--no-ocr', 'Exclude Tesseract when rebuilding (smaller image; also set OCR_ENABLED=false)')
   .option('--local-models', 'Install sentence-transformers/torch when rebuilding (~1-2 GB extra; off by default)')
-
+  .option('--platform <platform>', 'Target platform when rebuilding, e.g. linux/amd64')
   .option('--no-nginx', 'Skip nginx configuration')
   .option('--no-ssl', 'Skip SSL certificate setup')
   .option('--email <email>', 'Email for certbot (default: admin@<fqdn>)')

@@ -77,8 +77,8 @@ PORT      = 8119
 
 | Command | Description |
 | ------- | ----------- |
-| `build [--tag] [--no-cache] [--yes]` | Build Docker image locally |
-| `push [--tag] [--no-build] [--no-cache] [--yes]` | Tag + push to registry (reads `DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN` from `.env`) |
+| `build [--tag] [--no-cache] [--platform] [--yes]` | Build Docker image locally |
+| `push [--tag] [--no-build] [--no-cache] [--platform] [--yes]` | Tag + push to registry (reads `DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN` from `.env`) |
 | `start [options]` | Run container; auto-detects local → registry image; pulls if needed |
 | `stop [--name] [--all] [--remove]` | Stop and optionally remove container |
 | `restart [options]` | Stop + start |
@@ -101,8 +101,38 @@ PORT      = 8119
 
 ### Platform handling
 
-- Detects `docker` or `podman` (prefers docker)
+- Detects `docker` or `podman` (prefers docker); verifies daemon connectivity (not just binary presence)
 - On **Linux**: automatically adds `--add-host=host.docker.internal:host-gateway`
+
+### Cross-building for a different architecture
+
+Use `--platform` on `build`, `push`, and `deploy --rebuild` to target a different CPU architecture. Docker/Podman use QEMU emulation, so you can build a `linux/amd64` image on an Apple Silicon Mac:
+
+```bash
+# Build an amd64 image on Apple Silicon (M1/M2/M3/M4)
+node bin/container.mjs build --tag latest --platform linux/amd64
+
+# Build and push in one step
+node bin/container.mjs push --tag latest --platform linux/amd64
+```
+
+**Why cross-build from macOS to amd64?**
+`kreuzberg` (a Rust/maturin dependency) has no pre-built manylinux wheel for `aarch64-linux`, so building an arm64 image requires compiling from source (~5–10 min). The `linux/amd64` manylinux wheel is usually available on PyPI, so a cross-build is often *faster* than a native arm64 build.
+
+**Docker Desktop** supports cross-platform builds out of the box via QEMU (no extra setup).
+
+**Podman** requires QEMU user-static support in the Podman machine VM:
+
+```bash
+# Fix SSH key permissions if needed
+chmod 600 ~/.local/share/containers/podman/machine/machine
+
+podman machine ssh
+sudo rpm-ostree install qemu-user-static
+sudo systemctl reboot
+```
+
+After the machine restarts, cross-platform builds work the same way.
 
 ### `deploy` options
 
