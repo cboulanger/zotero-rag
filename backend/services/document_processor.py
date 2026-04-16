@@ -14,6 +14,7 @@ from typing import Callable, Optional, Literal
 from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
 from backend.services.extraction import DocumentExtractor, create_document_extractor
+from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
     DocumentMetadata,
@@ -70,10 +71,12 @@ class DocumentProcessor:
         self.vector_store = vector_store
 
         if document_extractor is None:
+            settings = get_settings()
             document_extractor = create_document_extractor(
-                backend="kreuzberg",
+                backend=settings.extractor_backend,
                 max_chunk_size=max_chunk_size,
                 chunk_overlap=chunk_overlap,
+                ocr_enabled=settings.ocr_enabled,
             )
         self.document_extractor = document_extractor
 

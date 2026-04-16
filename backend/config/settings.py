@@ -55,6 +55,11 @@ class Settings(BaseSettings):
         default="kreuzberg",
         description="Document extraction backend: 'kreuzberg' (default) or 'legacy' (pypdf+spaCy)"
     )
+    ocr_enabled: bool = Field(
+        default=True,
+        description="Enable OCR for image-only pages (requires Tesseract). "
+                    "Set to False when Tesseract is not installed or OCR is not needed."
+    )
 
     model_weights_path: Path = Field(
         default_factory=lambda: Path.home() / ".cache" / "zotero-rag" / "models",

@@ -59,3 +59,6 @@ plugin/dist/*
 
 # NodeJS
 node_modules
+
+# Local configuration files (e.g. for development)
+./local/

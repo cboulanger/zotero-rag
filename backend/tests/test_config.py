@@ -35,9 +35,11 @@ class TestPresets(unittest.TestCase):
         preset = get_preset("remote-kisski")
 
         self.assertEqual(preset.name, "remote-kisski")
-        self.assertEqual(preset.embedding.model_type, "local")  # Use local embeddings
+        self.assertEqual(preset.embedding.model_type, "remote")  # Fully remote — no local torch
+        self.assertEqual(preset.embedding.model_name, "multilingual-e5-large-instruct")
+        self.assertEqual(preset.embedding.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
+        self.assertEqual(preset.embedding.model_kwargs["api_key_env"], "KISSKI_API_KEY")
         self.assertEqual(preset.llm.model_type, "remote")
-        self.assertEqual(preset.llm.model_name, "mistral-large-instruct")
         self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
         self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
 

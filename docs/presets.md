@@ -1,87 +1,61 @@
 # Hardware Presets
 
-Configuration presets optimized for different hardware scenarios. Each preset defines the optimal models and settings for embeddings, LLM, and RAG retrieval.
+Configuration presets optimized for different hardware scenarios. Each preset defines the models and settings for embeddings, LLM inference, and RAG retrieval.
+
+## Dependency overview
+
+| Preset | `sentence-transformers` / `torch` required? | API keys |
+| ------ | ------------------------------------------- | -------- |
+| `apple-silicon-32gb` | Yes (~1-2 GB) | — |
+| `high-memory` | Yes (~1-2 GB) | — |
+| `cpu-only` | Yes (~1-2 GB) | — |
+| `apple-silicon-kisski` | **No** | `KISSKI_API_KEY` |
+| `remote-kisski` | **No** | `KISSKI_API_KEY` |
+| `remote-openai` | **No** | `OPENAI_API_KEY` |
+| `windows-test` | **No** | `KISSKI_API_KEY` |
+
+Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [docker-deployment.md](docker-deployment.md)).
+
+---
 
 ## Available Presets
 
-### `apple-silicon-kisski` (Recommended for Apple Silicon + KISSKI)
+### `remote-kisski` (Recommended — fully remote, no GPU needed)
 
-**Best for:** Apple Silicon Macs (16-32GB RAM) with GWDG KISSKI API access
+**Best for:** Any machine with internet access and a KISSKI/SAIA Academic Cloud account
 
 **Configuration:**
-- Embedding: `nomic-ai/nomic-embed-text-v1.5` (local, fast on Neural Engine)
-- LLM: `mistral-large-instruct` (KISSKI remote, 128k context)
-- Memory: ~2GB
-- Top-k: 10 chunks
-- Max chunk: 1024 tokens
+
+- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim, multilingual)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- Memory: ~0.5 GB (no local models)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
 
 **Advantages:**
-- Fast local embeddings leveraging M-series Neural Engine
-- Highest quality answers from KISSKI's large model (120B+ parameters)
-- Optimal hybrid: fast indexing + excellent inference
-- Privacy-friendly (embeddings stay local)
+
+- Zero local GPU or large Python dependencies — `torch` / `sentence-transformers` are not loaded
+- Excellent multilingual embedding quality, ideal for academic content
+- High-quality 70B LLM answers with 128k context window
+- Single API key for both embedding and LLM
 
 **Requires:** `KISSKI_API_KEY` environment variable
 
 ---
 
-### `apple-silicon-32gb` (Best for Offline/Privacy)
+### `apple-silicon-kisski` (Recommended for Apple Silicon + KISSKI)
 
-**Best for:** Apple Silicon Macs with 32GB RAM, fully local operation
-
-**Configuration:**
-- Embedding: `nomic-ai/nomic-embed-text-v1.5` (local)
-- LLM: `mistralai/Mistral-7B-Instruct-v0.3` (local, 4-bit quantized)
-- Memory: ~10GB
-- Top-k: 10 chunks
-- Max chunk: 768 tokens
-
-**Advantages:**
-- Fully offline, no internet required
-- Complete privacy (all data stays local)
-- Good quality answers from 7B model
-- Fast inference on Apple Silicon
-
-**Trade-offs:**
-- Lower answer quality than large remote models
-- Limited 8k context window vs 128k for remote
-
----
-
-### `high-memory` (Generic High-Memory Systems)
-
-**Best for:** Systems with >24GB RAM (GPU or Apple Silicon)
+**Best for:** Apple Silicon Macs (16-32 GB RAM) with KISSKI API access
 
 **Configuration:**
-- Embedding: `sentence-transformers/all-mpnet-base-v2` (local)
-- LLM: `mistralai/Mistral-7B-Instruct-v0.3` (local, 8-bit quantized)
-- Memory: ~16GB
-- Top-k: 10 chunks
-- Max chunk: 768 tokens
 
-**Use case:** Generic high-memory preset for non-Apple Silicon systems with dedicated GPU
+- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- Memory: ~0.5 GB (fully remote)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
 
----
+**Note:** This preset is now fully remote (no local torch/sentence-transformers). It differs from `remote-kisski` only in its intended context; both presets are identical in configuration.
 
-### `cpu-only` (Minimal Hardware)
-
-**Best for:** CPU-only systems, low-memory environments
-
-**Configuration:**
-- Embedding: `sentence-transformers/all-MiniLM-L6-v2` (local, lightweight)
-- LLM: `TinyLlama/TinyLlama-1.1B-Chat-v1.0` (local, 4-bit quantized)
-- Memory: ~3GB
-- Top-k: 5 chunks
-- Max chunk: 384 tokens
-
-**Advantages:**
-- Runs on minimal hardware
-- Fully local
-
-**Trade-offs:**
-- Lower quality embeddings and answers
-- Limited context (2k tokens)
-- Best for testing or resource-constrained environments
+**Requires:** `KISSKI_API_KEY` environment variable
 
 ---
 
@@ -90,108 +64,163 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 **Best for:** Users with OpenAI API access
 
 **Configuration:**
-- Embedding: OpenAI embeddings API (remote)
-- LLM: `gpt-4o-mini` (remote)
-- Memory: ~1GB (minimal local)
-- Top-k: 10 chunks
-- Max chunk: 1024 tokens
+
+- Embedding: `text-embedding-3-small` (OpenAI remote, 1536-dim)
+- LLM: `gpt-4o-mini` (OpenAI remote, 128k context)
+- Memory: ~0.5 GB (no local models)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
 
 **Advantages:**
-- Excellent quality embeddings and answers
+
+- Excellent embedding and answer quality
 - Large 128k context window
-- Minimal local resource usage
+- No local GPU or `torch` required
 
 **Requires:** `OPENAI_API_KEY` environment variable
 
 ---
 
-### `remote-kisski` (Legacy KISSKI)
+### `apple-silicon-32gb` (Fully local / privacy)
 
-**Best for:** Systems without good local compute, using KISSKI API
+**Best for:** Apple Silicon Macs with 32 GB RAM, offline or privacy-sensitive use
 
 **Configuration:**
-- Embedding: `sentence-transformers/all-MiniLM-L6-v2` (local, basic)
-- LLM: `mistral-large-instruct` (KISSKI remote)
-- Memory: ~1GB
-- Top-k: 10 chunks
-- Max chunk: 1024 tokens
 
-**Note:** For Apple Silicon systems, use `apple-silicon-kisski` instead for much faster indexing.
+- Embedding: `nomic-ai/nomic-embed-text-v1.5` (local)
+- LLM: `mistralai/Mistral-7B-Instruct-v0.3` (local, 4-bit quantized)
+- Memory: ~10 GB
+- Top-k: 10 chunks / Max chunk: 768 tokens
 
-**Requires:** `KISSKI_API_KEY` environment variable
+**Requires:** `sentence-transformers`, `torch` (~1-2 GB extra dependencies — see [Optional local dependencies](#optional-local-dependencies))
 
 ---
 
-### `windows-test` (Windows Development)
+### `high-memory` (Generic high-memory systems)
 
-**Best for:** Windows development/testing
+**Best for:** Systems with >24 GB RAM, dedicated GPU
 
 **Configuration:**
-- Embedding: OpenAI embeddings API (remote, avoids PyTorch issues)
-- LLM: `mistral-large-instruct` (KISSKI remote)
-- Memory: ~0.5GB (fully remote)
-- Top-k: 10 chunks
-- Max chunk: 1024 tokens
 
-**Requires:** `OPENAI_API_KEY` and `KISSKI_API_KEY` environment variables
+- Embedding: `sentence-transformers/all-mpnet-base-v2` (local)
+- LLM: `mistralai/Mistral-7B-Instruct-v0.3` (local, 8-bit quantized)
+- Memory: ~16 GB
+- Top-k: 10 chunks / Max chunk: 768 tokens
+
+**Requires:** `sentence-transformers`, `torch`
+
+---
+
+### `cpu-only` (Minimal hardware)
+
+**Best for:** CPU-only machines, low-memory environments, quick testing
+
+**Configuration:**
+
+- Embedding: `sentence-transformers/all-MiniLM-L6-v2` (local, lightweight)
+- LLM: `TinyLlama/TinyLlama-1.1B-Chat-v1.0` (local, 4-bit quantized)
+- Memory: ~3 GB
+- Top-k: 5 chunks / Max chunk: 384 tokens
+
+**Trade-offs:** Lower quality; limited 2k context window.
+
+**Requires:** `sentence-transformers`, `torch`
+
+---
+
+### `windows-test` (Windows development)
+
+**Best for:** Windows machines — avoids PyTorch/CUDA setup entirely
+
+**Configuration:**
+
+- Embedding: `multilingual-e5-large-instruct` (KISSKI remote)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote)
+- Memory: ~0.5 GB (fully remote)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
+
+**Requires:** `KISSKI_API_KEY` environment variable
 
 ---
 
 ## Quick Selection Guide
 
 | Your Setup | Recommended Preset |
-|------------|-------------------|
-| Apple Silicon Mac (16-32GB) + KISSKI access | `apple-silicon-kisski` |
-| Apple Silicon Mac (32GB), offline/privacy priority | `apple-silicon-32gb` |
-| High-memory GPU system (>24GB) | `high-memory` |
-| CPU-only or low memory (<8GB) | `cpu-only` |
+| ---------- | ----------------- |
+| Any machine + KISSKI access (recommended) | `remote-kisski` |
+| Apple Silicon Mac + KISSKI access | `apple-silicon-kisski` |
 | OpenAI API access | `remote-openai` |
-| Generic system + KISSKI access | `remote-kisski` |
-| Windows development | `windows-test` |
+| Windows (no GPU setup) | `windows-test` |
+| Apple Silicon Mac (32 GB), offline/privacy | `apple-silicon-32gb` |
+| High-memory GPU system (>24 GB), offline | `high-memory` |
+| CPU-only or low memory, offline | `cpu-only` |
+
+---
 
 ## Performance Comparison
 
-### Indexing Speed (Most Time-Intensive)
-1. `apple-silicon-kisski` / `apple-silicon-32gb` - Fast (optimized for M-series)
-2. `high-memory` - Good (GPU acceleration)
-3. `remote-openai` / `windows-test` - Moderate (API limits)
-4. `remote-kisski` - Slower (basic local model)
-5. `cpu-only` - Slowest (CPU-bound)
+### Indexing Speed
+
+1. `remote-openai` / `remote-kisski` / `apple-silicon-kisski` / `windows-test` — fast (parallel API calls, no local model load)
+2. `apple-silicon-32gb` — fast (M-series Neural Engine)
+3. `high-memory` — good (GPU acceleration)
+4. `cpu-only` — slowest (CPU-bound)
 
 ### Answer Quality
-1. `remote-openai` / `apple-silicon-kisski` / `remote-kisski` - Excellent (large models, 128k context)
-2. `apple-silicon-32gb` / `high-memory` - Good (7B models, 8k context)
-3. `cpu-only` - Basic (1.1B model, 2k context)
+
+1. `remote-openai` / `remote-kisski` / `apple-silicon-kisski` / `windows-test` — excellent (large models, 128k context)
+2. `apple-silicon-32gb` / `high-memory` — good (7B models, 8k context)
+3. `cpu-only` — basic (1.1B model, 2k context)
 
 ### Privacy Level
-1. `apple-silicon-32gb` / `cpu-only` / `high-memory` - Fully local
-2. `apple-silicon-kisski` / `remote-kisski` - Embeddings local, LLM remote
-3. `remote-openai` / `windows-test` - Fully remote
+
+1. `apple-silicon-32gb` / `cpu-only` / `high-memory` — fully local
+2. `remote-kisski` / `apple-silicon-kisski` / `windows-test` — fully remote (KISSKI is an academic service hosted by GWDG)
+3. `remote-openai` — fully remote (commercial)
+
+---
+
+## Optional local dependencies
+
+The presets `cpu-only`, `high-memory`, and `apple-silicon-32gb` run embedding models locally and require `sentence-transformers` and `torch`, which add ~1-2 GB to the installation.
+
+These are listed as optional in `pyproject.toml`. Install them when needed:
+
+```bash
+uv sync --extra local-models
+```
+
+Or manually:
+
+```bash
+uv add sentence-transformers torch
+```
+
+If you switch from a local preset to a fully-remote one, you can remove these packages to save disk space:
+
+```bash
+uv remove sentence-transformers torch transformers accelerate bitsandbytes
+```
+
+For Docker deployments, the image can be built without these packages using the `INSTALL_OCR=false` build argument (see [docker-deployment.md](docker-deployment.md)). The `sentence-transformers`/`torch` packages are never included in the Docker image — remote presets work without them by design.
+
+---
 
 ## Usage
 
-Set the `MODEL_PRESET` environment variable in your `.env` file:
+Set `MODEL_PRESET` in your `.env` file:
 
 ```bash
-# Example: Use optimized Apple Silicon + KISSKI preset
-MODEL_PRESET=apple-silicon-kisski
+MODEL_PRESET=remote-kisski
 ```
 
-For remote presets, also configure required API keys:
+For remote presets, also set the required API key:
 
 ```bash
-# For KISSKI presets
+# KISSKI (remote-kisski, apple-silicon-kisski, windows-test)
 KISSKI_API_KEY=your_kisski_key_here
 
-# For OpenAI presets
-OPENAI_API_KEY=your_openai_key_here
+# OpenAI (remote-openai)
+OPENAI_API_KEY=sk-...
 ```
 
-## Technical Details
-
-See [backend/config/presets.py](../backend/config/presets.py) for complete configuration details including:
-- Exact model names and versions
-- Quantization settings
-- Batch sizes
-- RAG retrieval parameters
-- Memory budgets
+See [backend/config/presets.py](../backend/config/presets.py) for complete configuration details.

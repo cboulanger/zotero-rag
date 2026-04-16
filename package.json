@@ -51,9 +51,13 @@
     "plugin:build": "uv run python scripts/build_plugin.py",
     "plugin:build:toolkit": "node scripts/build_toolkit.js",
     "semantic-release": "semantic-release",
-    "commit": "cz"
+    "commit": "cz",
+    "container": "node bin/container.mjs",
+    "deploy": "node bin/deploy.mjs"
   },
   "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.6.1",
     "zotero-plugin-toolkit": "^5.1.0-beta.12"
   }
 }
