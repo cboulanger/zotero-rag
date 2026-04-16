@@ -121,7 +121,17 @@ node bin/container.mjs push --tag latest --platform linux/amd64
 
 **Docker Desktop** supports cross-platform builds out of the box via QEMU (no extra setup).
 
-**Podman** requires QEMU user-static support in the Podman machine VM:
+**Podman** requires QEMU user-static support and sufficient memory in the Podman machine VM.
+
+**Memory:** The default Podman machine has 2 GB RAM. Compiling kreuzberg from source (Rust + Tesseract + Leptonica) requires more — the OOM killer will `SIGKILL` the Rust compiler mid-build. Increase it before building:
+
+```bash
+podman machine stop
+podman machine set --memory 4096
+podman machine start
+```
+
+**QEMU (for cross-platform builds only):**
 
 ```bash
 # Fix SSH key permissions if needed
@@ -133,6 +143,8 @@ sudo systemctl reboot
 ```
 
 After the machine restarts, cross-platform builds work the same way.
+
+> **Tip:** Cross-building for `linux/amd64` on Apple Silicon is often the fastest option — it avoids the Rust source compilation entirely because a pre-built `manylinux_x86_64` wheel for kreuzberg is available on PyPI, whereas the `aarch64` wheel is not.
 
 ### `deploy` options
 
@@ -224,6 +236,42 @@ Add to `scripts`:
 
 - `"container": "node bin/container.mjs"`
 - `"deploy": "node bin/deploy.mjs"`
+
+---
+
+## CI/CD: GitHub Actions Build
+
+The workflow at [`.github/workflows/docker-build.yml`](../.github/workflows/docker-build.yml) builds and pushes the image on real `linux/amd64` hardware, avoiding all QEMU/cross-compilation issues.
+
+### Triggers
+
+| Event | Tag produced |
+| ----- | ------------ |
+| Push to `main` (backend/Dockerfile changes) | `latest` |
+| Manual (`workflow_dispatch`) from any branch | `<branch>-<sha>` (or custom tag) |
+
+### Manual trigger (any branch)
+
+Go to **Actions → Docker Build & Push → Run workflow**, select your branch, and optionally:
+
+- Set a custom tag
+- Enable `local_models` (adds sentence-transformers/torch)
+- Enable `no_ocr` (excludes Tesseract)
+
+### Required repository secrets
+
+Add these under **Settings → Secrets and variables → Actions**:
+
+| Secret | Value |
+| ------ | ----- |
+| `DOCKER_HUB_USERNAME` | Your Docker Hub username |
+| `DOCKER_HUB_TOKEN` | Docker Hub Personal Access Token (read/write) |
+
+Create a token at [hub.docker.com/settings/security](https://hub.docker.com/settings/security).
+
+### Layer caching
+
+The workflow uses Docker's registry-based build cache (`buildcache` tag on Docker Hub). Subsequent builds reuse unchanged layers and complete in seconds for incremental changes.
 
 ---
 
