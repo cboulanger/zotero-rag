@@ -1,7 +1,9 @@
 # Zotero RAG Plugin
 
-![Dialog screenshot](docs/images/dialog.png)
-![Note screenshot](docs/images/note.png)
+<div style="diplay:grid">
+    <img style="height:300px" src="docs/images/dialog.png">
+    <img style="height:300px" src="docs/images/note.png">
+</div>
 
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
 
