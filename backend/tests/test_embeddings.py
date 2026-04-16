@@ -14,6 +14,12 @@ from backend.services.embeddings import (
     create_embedding_service,
 )
 
+try:
+    import sentence_transformers  # noqa: F401
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
+
 
 class TestEmbeddingService(unittest.TestCase):
     """Test base embedding service functionality."""
@@ -35,6 +41,7 @@ class TestEmbeddingService(unittest.TestCase):
         self.assertNotEqual(hash1, hash2)
 
 
+@unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
 class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
     """Test local embedding service."""
 

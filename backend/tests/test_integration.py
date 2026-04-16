@@ -20,7 +20,14 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, EmbeddingConfig, LLMConfig, RAGConfig
 
+try:
+    import sentence_transformers  # noqa: F401
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
 
+
+@unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
 class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
     """
     Test complete workflow from indexing to querying.
