@@ -268,9 +268,12 @@ var ZoteroRAGDialog = {
 						// Fetch metadata if not already loaded
 						if (!this.libraryMetadata.has(libraryId)) {
 							await this.fetchAndUpdateLibraryMetadata(libraryId);
+						} else {
+							this.updateSubmitButtonState();
 						}
 					} else {
 						this.selectedLibraries.delete(libraryId);
+						this.updateSubmitButtonState();
 					}
 				}
 			});
@@ -304,6 +307,9 @@ var ZoteroRAGDialog = {
 		// Load metadata for the currently selected library (if any)
 		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
 			await this.fetchAndUpdateLibraryMetadata(currentLibrary);
+			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata
+		} else {
+			this.updateSubmitButtonState();
 		}
 	},
 
@@ -333,6 +339,61 @@ var ZoteroRAGDialog = {
 				metaSpan.textContent = 'error loading';
 				metaSpan.style.color = '#cc0000';
 			}
+		}
+
+		// Re-evaluate button state after metadata arrives
+		this.updateSubmitButtonState();
+	},
+
+	/**
+	 * Return true when every selected library has never been indexed.
+	 * In this mode the question box is hidden and the button says "Index".
+	 * @returns {boolean}
+	 */
+	isIndexOnlyMode() {
+		if (this.selectedLibraries.size === 0) return false;
+		for (const id of this.selectedLibraries) {
+			// If metadata hasn't loaded yet, assume indexed (optimistic — avoids flicker)
+			if (!this.libraryMetadata.has(id)) return false;
+			// If any selected library IS indexed, stay in normal Submit mode
+			if (this.libraryMetadata.get(id) !== null) return false;
+		}
+		return true;
+	},
+
+	/**
+	 * Sync submit button label and question input state to current selection.
+	 * - All selected libraries unindexed → button = "Index", question disabled
+	 * - Otherwise                         → button = "Submit", question enabled
+	 * @returns {void}
+	 */
+	updateSubmitButtonState() {
+		const submitButton = /** @type {HTMLButtonElement|null} */ (
+			document.getElementById('submit-button')
+		);
+		const questionInput = /** @type {HTMLTextAreaElement|null} */ (
+			document.getElementById('question-input')
+		);
+		const questionLabel = document.querySelector('label[for="question-input"]');
+
+		if (!submitButton) return;
+
+		if (this.isIndexOnlyMode()) {
+			submitButton.textContent = 'Index';
+			if (questionInput) {
+				questionInput.disabled = true;
+				questionInput.style.opacity = '0.4';
+				questionInput.placeholder = 'Index the library first, then ask a question.';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '0.4';
+		} else {
+			submitButton.textContent = 'Submit';
+			if (questionInput) {
+				questionInput.disabled = false;
+				questionInput.style.opacity = '';
+				questionInput.placeholder = 'Enter your question here...';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
 		}
 	},
 
@@ -386,13 +447,24 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Submit the query to the backend.
+	 * Submit the query (or trigger indexing when all selected libraries are unindexed).
 	 * @returns {Promise<void>}
 	 */
 	async submit() {
 		if (!this.plugin) return;
 
-		const questionInput = /** @type {HTMLInputElement|null} */ (
+		if (this.selectedLibraries.size === 0) {
+			this.showStatus('Please select at least one library.', 'error');
+			return;
+		}
+
+		// Index-only mode: all selected libraries have never been indexed
+		if (this.isIndexOnlyMode()) {
+			await this.submitIndexOnly();
+			return;
+		}
+
+		const questionInput = /** @type {HTMLTextAreaElement|null} */ (
 			document.getElementById('question-input')
 		);
 		if (!questionInput) return;
@@ -417,17 +489,12 @@ var ZoteroRAGDialog = {
 			return;
 		}
 
-		if (this.selectedLibraries.size === 0) {
-			this.showStatus('Please select at least one library.', 'error');
-			return;
-		}
-
 		// Clear previous status messages
 		this.clearStatusMessages();
 
 		// Disable submit button and cancel button during operation
 		this.setSubmitEnabled(false);
-		this.setCancelMode('abort'); // Change cancel button to abort mode
+		this.setCancelMode('abort');
 		this.showProgress('Processing request...', 'Submitting query...');
 
 		try {
@@ -456,9 +523,48 @@ var ZoteroRAGDialog = {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.showStatus(`Error: ${errorMessage}`, 'error');
 			this.setSubmitEnabled(true);
-			this.setCancelMode('close'); // Restore cancel button to close mode
+			this.setCancelMode('close');
 			this.hideProgress();
 		}
+	},
+
+	/**
+	 * Index-only submit: triggered when all selected libraries are unindexed.
+	 * Runs a full index, then refreshes metadata and switches to normal Submit mode.
+	 * @returns {Promise<void>}
+	 */
+	async submitIndexOnly() {
+		if (!this.plugin) return;
+
+		this.clearStatusMessages();
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Indexing...', 'Starting full index...');
+
+		const libraryIds = Array.from(this.selectedLibraries);
+
+		try {
+			await this.checkAndMonitorIndexing(libraryIds, 'full');
+
+			this.updateProgress(100, 'Indexing complete', 'Libraries are ready to query.');
+
+			// Refresh metadata for all indexed libraries so the button state updates
+			for (const id of libraryIds) {
+				this.libraryMetadata.delete(id);
+				await this.fetchAndUpdateLibraryMetadata(id);
+			}
+
+			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata,
+			// so by now the button will read "Submit" and the question box is re-enabled.
+			this.setCancelMode('close');
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error: ${errorMessage}`, 'error');
+			this.setCancelMode('close');
+			this.hideProgress();
+		}
+
+		this.setSubmitEnabled(true);
 	},
 
 	/**
