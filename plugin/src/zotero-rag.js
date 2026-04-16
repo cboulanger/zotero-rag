@@ -568,9 +568,12 @@ class ZoteroRAGPlugin {
 	 * @param {SourceCitation} source - Source citation metadata
 	 * @param {'user'|'group'} libraryType - Library type
 	 * @param {*} item - Zotero item (may be null)
+	 * @param {number|null} [pageOverride] - Page number from the inline citation (e.g. from [N:P]),
+	 *   takes precedence over source.page_number so the link opens the exact cited page.
 	 * @returns {string} zotero://open-pdf/ or zotero://select/ URI
 	 */
-	buildZoteroPDFURI(source, libraryType, item) {
+	buildZoteroPDFURI(source, libraryType, item, pageOverride = null) {
+		const page = pageOverride !== null ? pageOverride : (source.page_number || '1');
 		if (item) {
 			try {
 				const attachmentIDs = item.getAttachments();
@@ -580,9 +583,9 @@ class ZoteroRAGPlugin {
 					if (attachment && attachment.attachmentContentType === 'application/pdf') {
 						const key = attachment.key;
 						if (libraryType === 'group') {
-							return `zotero://open-pdf/groups/${source.library_id}/items/${key}?page=${source.page_number || ''}`;
+							return `zotero://open-pdf/groups/${source.library_id}/items/${key}?page=${page}`;
 						} else {
-							return `zotero://open-pdf/library/items/${key}?page=${source.page_number || ''}`;
+							return `zotero://open-pdf/library/items/${key}?page=${page}`;
 						}
 					}
 				}
@@ -692,8 +695,9 @@ class ZoteroRAGPlugin {
 					displayText = this.formatCitationDisplayText(item);
 				}
 
-				// Build zotero://open-pdf/ URI (falls back to zotero://select/)
-				const uri = this.buildZoteroPDFURI(source, libraryType, item);
+				// Build zotero://open-pdf/ URI using the LLM-cited page when available,
+				// falling back to the chunk's stored page_number.
+				const uri = this.buildZoteroPDFURI(source, libraryType, item, page);
 
 				// Generate citation HTML (page unquoted; text_anchor quoted only when no page)
 				const citationHTML = this.formatCitationHTML(uri, displayText, page, source.text_anchor);

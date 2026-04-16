@@ -106,36 +106,50 @@ class RAGEngine:
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
-        # Deduplicate search results: keep only the best-scoring chunk per attachment
-        # so each source number maps to a unique document in the LLM context.
-        # Without this, multiple chunks from the same PDF all get distinct [N] labels,
-        # causing the LLM to cite the same paper as [1], [2], [3], etc.
-        seen_attachments: dict[str, object] = {}
+        # Group chunks by document (attachment_key), preserving all relevant passages.
+        # This gives the LLM real content (not just the highest-scoring chunk, which is
+        # often a bibliography/reference section) while still assigning one source number
+        # per document so citations are not repetitively labelled [1], [2], [3] for the
+        # same paper.
+        doc_chunks: dict[str, list] = {}
+        doc_best_score: dict[str, float] = {}
         for result in search_results:
             key = (
                 result.chunk.metadata.document_metadata.attachment_key
                 or result.chunk.metadata.document_metadata.item_key
             )
-            if key not in seen_attachments or result.score > seen_attachments[key].score:  # type: ignore[attr-defined]
-                seen_attachments[key] = result
-        unique_results = sorted(seen_attachments.values(), key=lambda r: r.score, reverse=True)  # type: ignore[attr-defined]
-        logger.info(f"Deduplicated to {len(unique_results)} unique documents for context")
+            if key not in doc_chunks:
+                doc_chunks[key] = []
+                doc_best_score[key] = result.score
+            doc_chunks[key].append(result)
+            if result.score > doc_best_score[key]:
+                doc_best_score[key] = result.score
 
-        # Step 3: Assemble context from retrieved chunks
+        # Sort documents by their best chunk score (most relevant document first)
+        sorted_doc_keys = sorted(doc_chunks.keys(), key=lambda k: doc_best_score[k], reverse=True)
+        logger.info(f"Grouped into {len(sorted_doc_keys)} unique documents for context")
+
+        # Step 3: Assemble context — one numbered source per document, all its chunks listed
         context_parts = []
-        for i, result in enumerate(unique_results, 1):
-            chunk = result.chunk  # type: ignore[attr-defined]
-            metadata = chunk.metadata
-            doc_meta = metadata.document_metadata
+        doc_representatives: list = []  # best-scoring chunk per doc for SourceInfo
+        for i, doc_key in enumerate(sorted_doc_keys, 1):
+            results_for_doc = doc_chunks[doc_key]
+            # Sort chunks within document by page number, then chunk index
+            results_for_doc.sort(key=lambda r: (
+                r.chunk.metadata.page_number or 0,
+                r.chunk.metadata.chunk_index or 0,
+            ))
+            best_result = max(results_for_doc, key=lambda r: r.score)
+            doc_representatives.append(best_result)
 
-            # Format source information
-            source_info = f"[Source {i}: {doc_meta.title or 'Unknown'}"
-            if metadata.page_number:
-                source_info += f", p. {metadata.page_number}"
-            source_info += "]"
-
-            # Add chunk text with source
-            context_parts.append(f"{source_info}\n{chunk.text}")
+            doc_meta = results_for_doc[0].chunk.metadata.document_metadata
+            header = f"[Source {i}: {doc_meta.title or 'Unknown'}]"
+            passages = []
+            for result in results_for_doc:
+                metadata = result.chunk.metadata
+                page_label = f"[p. {metadata.page_number}] " if metadata.page_number else ""
+                passages.append(f"{page_label}{result.chunk.text}")
+            context_parts.append(f"{header}\n" + "\n\n".join(passages))
 
         context = "\n\n".join(context_parts)
 
@@ -158,6 +172,8 @@ CRITICAL CITATION RULE: You MUST cite sources using ONLY bracket notation. The O
 
 NEVER write "Source 1", "Source 2", "*Source 3*", "(Source 4)", or any other textual form.
 Every reference to a source must use bracket notation such as [1] or [2:15].
+
+PAGE SELECTION RULE: When citing a specific page, only cite pages that contain substantive content (arguments, analysis, findings). Do NOT cite pages that consist primarily of bibliographies, reference lists, or footnote-only content — use a different page from the same source instead, or omit the page number.
 """
 
         logger.debug(f"Generated prompt with {len(context)} characters of context")
@@ -178,7 +194,7 @@ Every reference to a source must use bracket notation such as [1] or [2:15].
 
         # Step 6: Extract source citations (one per unique document, matching LLM context order)
         sources = []
-        for result in unique_results:
+        for result in doc_representatives:
             chunk = result.chunk
             metadata = chunk.metadata
             doc_meta = metadata.document_metadata
@@ -187,7 +203,12 @@ Every reference to a source must use bracket notation such as [1] or [2:15].
                 item_id=doc_meta.item_key or "unknown",
                 library_id=doc_meta.library_id,
                 title=doc_meta.title or "Unknown Document",
-                page_number=metadata.page_number,
+                # Don't set page_number here: the representative chunk for a deduplicated
+                # document may come from any page (e.g. a bibliography section).  Inline
+                # citations get the correct page via the LLM's explicit [N:P] notation
+                # (passed as pageOverride in buildZoteroPDFURI); bibliography links open
+                # the PDF at its natural start when page is absent.
+                page_number=None,
                 text_anchor=metadata.text_preview,
                 score=result.score
             )
