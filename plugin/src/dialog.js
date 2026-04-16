@@ -378,7 +378,17 @@ var ZoteroRAGDialog = {
 
 		if (!submitButton) return;
 
-		if (this.isIndexOnlyMode()) {
+		if (this.selectedLibraries.size === 0) {
+			submitButton.disabled = true;
+			submitButton.textContent = 'Submit';
+			if (questionInput) {
+				questionInput.disabled = false;
+				questionInput.style.opacity = '';
+				questionInput.placeholder = 'Enter your question here...';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
+		} else if (this.isIndexOnlyMode()) {
+			submitButton.disabled = false;
 			submitButton.textContent = 'Index';
 			if (questionInput) {
 				questionInput.disabled = true;
@@ -387,6 +397,7 @@ var ZoteroRAGDialog = {
 			}
 			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '0.4';
 		} else {
+			submitButton.disabled = false;
 			submitButton.textContent = 'Submit';
 			if (questionInput) {
 				questionInput.disabled = false;
@@ -451,6 +462,7 @@ var ZoteroRAGDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async submit() {
+		this.showStatus(`[DEBUG] submit() called, plugin=${!!this.plugin}, libs=${this.selectedLibraries.size}`, 'info'); // DEBUG
 		if (!this.plugin) return;
 
 		if (this.selectedLibraries.size === 0) {
@@ -459,7 +471,9 @@ var ZoteroRAGDialog = {
 		}
 
 		// Index-only mode: all selected libraries have never been indexed
-		if (this.isIndexOnlyMode()) {
+		const indexOnly = this.isIndexOnlyMode();
+		this.showStatus(`[DEBUG] isIndexOnlyMode=${indexOnly}`, 'info'); // DEBUG
+		if (indexOnly) {
 			await this.submitIndexOnly();
 			return;
 		}
@@ -475,7 +489,7 @@ var ZoteroRAGDialog = {
 		const forceReindexCheckbox = /** @type {HTMLInputElement|null} */ (
 			document.getElementById('force-full-reindex')
 		);
-		const indexingMode = (forceReindexCheckbox && forceReindexCheckbox.checked) ? 'full' : 'incremental';
+		const indexingMode = (forceReindexCheckbox && forceReindexCheckbox.checked) ? 'full' : 'auto';
 
 		// Get similarity threshold
 		const similaritySlider = /** @type {HTMLInputElement|null} */ (
@@ -521,10 +535,54 @@ var ZoteroRAGDialog = {
 			}, 1000);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${errorMessage}`, 'error');
+			// DEBUG
+			this.plugin.log(`[DEBUG] submit() caught error: ${errorMessage}`);
+			this.showStatus(`Error: ${errorMessage}`, 'error'); // DEBUG - show all errors directly
+
+			// If the backend reports that a library has no indexed data, the vector
+			// store is out of sync (e.g. indexing ran but extracted 0 chunks).
+			// Clear the stale metadata so the UI reverts to "Index" mode.
+			if (errorMessage.includes('None of the specified libraries have been indexed')) {
+				this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
+				await this.clearLibraryIndexState(Array.from(this.selectedLibraries));
+				this.setSubmitEnabled(true);
+				this.setCancelMode('close');
+				this.hideProgress();
+				return;
+			}
 			this.setSubmitEnabled(true);
 			this.setCancelMode('close');
 			this.hideProgress();
+		}
+	},
+
+	/**
+	 * Clear index state for a list of libraries in the vector store and refresh
+	 * the UI so they show as unindexed.
+	 * @param {string[]} libraryIds
+	 * @returns {Promise<void>}
+	 */
+	async clearLibraryIndexState(libraryIds) {
+		if (!this.plugin) return;
+		const { backendURL } = this.plugin;
+		this.showStatus(`[DEBUG] clearLibraryIndexState: ids=${libraryIds.join(',')} url=${backendURL}`, 'info'); // DEBUG
+
+		for (const id of libraryIds) {
+			try {
+				const url = `${backendURL}/api/libraries/${encodeURIComponent(id)}/index`;
+				this.showStatus(`[DEBUG] DELETE ${url}`, 'info'); // DEBUG
+				const resp = await fetch(url, {
+					method: 'DELETE',
+					headers: this.plugin.getAuthHeaders(),
+				});
+				const body = await resp.text();
+				this.showStatus(`[DEBUG] DELETE → ${resp.status}: ${body}`, 'info'); // DEBUG
+			} catch (e) {
+				this.showStatus(`[DEBUG] DELETE threw: ${e}`, 'error'); // DEBUG
+			}
+			// Remove from local cache so fetchAndUpdateLibraryMetadata re-fetches
+			this.libraryMetadata.delete(id);
+			await this.fetchAndUpdateLibraryMetadata(id);
 		}
 	},
 
@@ -611,6 +669,7 @@ var ZoteroRAGDialog = {
 			if (item.isAttachment()) {
 				attachments.push(item);
 			} else if (item.isRegularItem()) {
+				await item.loadDataType('childItems');
 				attachments = Zotero.Items.get(item.getAttachments());
 			} else {
 				continue;

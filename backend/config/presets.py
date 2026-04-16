@@ -187,7 +187,7 @@ PRESETS = {
         embedding=EmbeddingConfig(
             model_type="remote",
             model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
-            batch_size=64,
+            batch_size=256,  # Send more texts per API call to reduce round-trips
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
@@ -207,7 +207,7 @@ PRESETS = {
         rag=RAGConfig(
             top_k=10,
             score_threshold=0.35,  # multilingual-e5-large-instruct scores
-            max_chunk_size=1024,
+            max_chunk_size=2000,   # Larger chunks → fewer embeddings → fewer API calls
         ),
         memory_budget_gb=0.5,  # Fully remote — no local model weights
     ),

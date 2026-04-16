@@ -36,13 +36,17 @@ PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
 # Kreuzberg sidecar configuration
 KREUZBERG_IMAGE = "ghcr.io/kreuzberg-dev/kreuzberg:latest"
 KREUZBERG_CONTAINER = "zotero-rag-kreuzberg"
-KREUZBERG_PORT = 8100
+KREUZBERG_PORT = 8100          # host-side port for kreuzberg sidecar
+KREUZBERG_CONTAINER_PORT = 8000  # kreuzberg listens on 8000 inside the container
 
 # Track subprocess references to prevent handle cleanup errors on Windows
 # These need to be module-level to prevent premature garbage collection
 _plugin_process = None
 _strip_process = None
 _log_file_handle = None
+# Set to True once the plugin server and backend are fully started; atexit
+# must NOT kill the plugin server in that case – the user stops it explicitly.
+_startup_succeeded = False
 
 
 def _cleanup_on_exit():
@@ -50,12 +54,26 @@ def _cleanup_on_exit():
 
     Ensures all subprocess handles are properly closed to prevent
     'invalid handle' errors during Python shutdown on Windows.
+
+    When startup succeeded the plugin server must keep running – the user
+    stops it via `server.py stop`.  Only clean up on error paths.
     """
+    if _startup_succeeded:
+        # Release our handle references without terminating the processes.
+        # The plugin dev server (zotero-plugin dev) keeps running in the
+        # background so hot-reload continues to work.
+        return
     cleanup_plugin_processes()
 
 
 def find_server_process():
-    """Find the running server process by checking for uvicorn on our port."""
+    """Find the running server process by checking for uvicorn on our port.
+
+    Uvicorn with --reload spawns multiprocessing children whose cmdline does
+    not contain 'uvicorn'.  Fall back to finding any process that has our
+    port open so we always find the actual listener.
+    """
+    # Primary: look for the uvicorn parent/main process by cmdline
     for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
         try:
             cmdline = proc.info['cmdline']
@@ -63,6 +81,21 @@ def find_server_process():
                 return proc
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             pass
+
+    # Fallback: find any process listening on PORT (catches spawn children)
+    try:
+        import socket
+        for proc in psutil.process_iter(['pid', 'name']):
+            try:
+                conns = proc.net_connections(kind='inet')
+                for c in conns:
+                    if c.laddr.port == PORT and c.status == 'LISTEN':
+                        return proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+    except Exception:
+        pass
+
     return None
 
 
@@ -290,7 +323,7 @@ def start_kreuzberg():
             [
                 runtime, 'run', '-d',
                 '--name', KREUZBERG_CONTAINER,
-                '-p', f'127.0.0.1:{KREUZBERG_PORT}:{KREUZBERG_PORT}',
+                '-p', f'127.0.0.1:{KREUZBERG_PORT}:{KREUZBERG_CONTAINER_PORT}',
                 KREUZBERG_IMAGE,
             ],
             check=True,
@@ -470,6 +503,8 @@ def start_server(dev_mode=True, with_plugin=False):
             if process.poll() is None:
                 # Verify that the server is actually responding to requests
                 if server_ready:
+                    global _startup_succeeded
+                    _startup_succeeded = True
                     zotero_url = env.get("ZOTERO_API_URL", "http://localhost:23119")
                     print(f"[OK] Server started successfully (PID: {process.pid})")
                     print(f"[OK] Access at: http://{HOST}:{PORT}")

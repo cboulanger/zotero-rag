@@ -273,6 +273,57 @@ async def reset_library_index(library_id: str):
         )
 
 
+@router.delete("/libraries/{library_id}/index")
+async def clear_library_index(library_id: str):
+    """
+    Remove all indexed data for a library (chunks, dedup records, metadata).
+
+    After this call the library appears as never indexed.  Useful when the
+    vector store is out of sync with reality (e.g. indexing completed but
+    produced 0 chunks due to extraction errors).
+
+    Args:
+        library_id: Zotero library ID.
+
+    Returns:
+        Counts of deleted records.
+    """
+    from backend.config.settings import get_settings
+    from backend.db.vector_store import VectorStore
+    from backend.services.embeddings import create_embedding_service
+
+    try:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            hf_token=settings.get_api_key("HF_TOKEN")
+        )
+
+        with VectorStore(
+            storage_path=settings.vector_db_path,
+            embedding_dim=embedding_service.get_embedding_dim()
+        ) as vector_store:
+            chunks_deleted = vector_store.delete_library_chunks(library_id)
+            dedup_deleted = vector_store.delete_library_deduplication_records(library_id)
+            metadata_deleted = vector_store.delete_library_metadata(library_id)
+
+            return {
+                "library_id": library_id,
+                "chunks_deleted": chunks_deleted,
+                "dedup_deleted": dedup_deleted,
+                "metadata_deleted": metadata_deleted,
+            }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear library index: {str(e)}"
+        )
+
+
 @router.get("/libraries/indexed", response_model=List[LibraryIndexMetadata])
 async def list_indexed_libraries():
     """

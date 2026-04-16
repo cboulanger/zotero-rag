@@ -129,6 +129,10 @@ body {
   color: #cc0000;
 }
 
+.status-message.warning {
+  color: #996600;
+}
+
 /* Dialog Buttons */
 .dialog-buttons {
   display: flex;

@@ -564,6 +564,31 @@ class VectorStore:
             )
             self.update_library_metadata(metadata)
 
+    def delete_library_metadata(self, library_id: str) -> bool:
+        """
+        Delete the metadata record for a library (marks it as never indexed).
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            True if the record existed and was deleted, False otherwise
+        """
+        try:
+            point_id = self._library_id_to_uuid(library_id)
+            points = self.client.retrieve(collection_name=self.METADATA_COLLECTION, ids=[point_id])
+            if not points:
+                return False
+            self.client.delete(
+                collection_name=self.METADATA_COLLECTION,
+                points_selector=[point_id],
+            )
+            logger.info(f"Deleted metadata record for library {library_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting library metadata: {e}")
+            return False
+
     def get_all_library_metadata(self) -> list[LibraryIndexMetadata]:
         """
         Get metadata for all indexed libraries.

@@ -50,10 +50,9 @@ class KreuzbergExtractor(DocumentExtractor):
         self._ocr_enabled = ocr_enabled
         self._config: dict[str, Any] = {
             "chunking": {
-                "max_chars": max_chunk_size,
-                "max_overlap": chunk_overlap,
+                "max_characters": max_chunk_size,
+                "overlap": chunk_overlap,
             },
-            "disable_ocr": not ocr_enabled,
         }
         logger.info(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
@@ -80,7 +79,7 @@ class KreuzbergExtractor(DocumentExtractor):
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.post(
                     url,
-                    files={"file": ("document", content, mime_type)},
+                    files={"files": ("document", content, mime_type)},
                     data={"config": json.dumps(self._config)},
                 )
                 response.raise_for_status()
@@ -101,19 +100,27 @@ class KreuzbergExtractor(DocumentExtractor):
             return []
 
         try:
-            payload = response.json()
+            results = response.json()
         except Exception as exc:
             logger.error(f"Failed to parse kreuzberg response as JSON: {exc}")
             return []
 
-        raw_chunks = payload.get("chunks") or []
+        # Response is a list of ExtractionResult objects (one per file sent)
+        if not results or not isinstance(results, list):
+            logger.debug(f"kreuzberg returned empty result list for mime={mime_type}")
+            return []
+
+        # We send one file, so take the first result
+        first_result = results[0]
+        raw_chunks = first_result.get("chunks") or []
+
         if not raw_chunks:
             logger.debug(f"kreuzberg returned no chunks for mime={mime_type}")
             return []
 
         extraction_chunks: list[ExtractionChunk] = []
         for chunk in raw_chunks:
-            text = chunk.get("content") or chunk.get("text") or ""
+            text = chunk.get("content") or ""
             if not text.strip():
                 continue
             meta = chunk.get("metadata") or {}

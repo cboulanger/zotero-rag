@@ -18,6 +18,7 @@
  * @property {Array<string>} library_ids - Libraries queried
  */
 
+
 /**
  * @typedef {Object} SourceCitation
  * @property {string} item_id - Zotero item ID
@@ -277,7 +278,7 @@ class ZoteroRAGPlugin {
 			this.showError(`Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
 			return;
 		}
-
+		// test
 		// Check backend connectivity before opening dialog
 		try {
 			await this.checkBackendVersion();

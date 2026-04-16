@@ -112,7 +112,8 @@ async def index_library_task(
                 processor = DocumentProcessor(
                     zotero_client=zotero_client,
                     embedding_service=embedding_service,
-                    vector_store=vector_store
+                    vector_store=vector_store,
+                    max_chunk_size=preset.rag.max_chunk_size,
                 )
 
                 # Handle deprecated force_reindex parameter
