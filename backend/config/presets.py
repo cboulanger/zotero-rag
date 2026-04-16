@@ -35,7 +35,7 @@ class RAGConfig(BaseModel):
 
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
     score_threshold: float = Field(default=0.3, description="Minimum similarity score (0.0-1.0)")
-    max_chunk_size: int = Field(default=512, description="Maximum tokens per chunk")
+    max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
 
 
 class HardwarePreset(BaseModel):
@@ -152,16 +152,19 @@ PRESETS = {
 
     "apple-silicon-kisski": HardwarePreset(
         name="apple-silicon-kisski",
-        description="Apple Silicon (16-32GB) with fast local embeddings + GWDG KISSKI remote LLM",
+        description="Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote, no torch)",
         embedding=EmbeddingConfig(
-            model_type="local",  # Fast local embeddings using Neural Engine
-            model_name="nomic-ai/nomic-embed-text-v1.5",
-            model_kwargs={"trust_remote_code": True},
-            batch_size=64,  # Leverage available RAM for faster indexing
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",  # KISSKI: good for multilingual academic content
+            batch_size=64,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
+            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
             max_context_length=128000,
             max_answer_tokens=4096,
             temperature=0.7,
@@ -172,55 +175,29 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.35,  # nomic-embed-text-v1.5 with large LLM context
-            max_chunk_size=1024,
+            score_threshold=0.35,
+            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
-        memory_budget_gb=2.0,  # Local embeddings + minimal overhead
+        memory_budget_gb=0.5,  # Fully remote — minimal local footprint
     ),
 
     "remote-kisski": HardwarePreset(
         name="remote-kisski",
-        description="Using GWDG KISSKI OpenAI-compatible API (Academic Cloud)",
+        description="Fully remote via GWDG KISSKI/SAIA Academic Cloud (no local GPU or torch required)",
         embedding=EmbeddingConfig(
-            model_type="local",  # Use local embeddings for privacy
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            batch_size=32,
-        ),
-        llm=LLMConfig(
             model_type="remote",
-            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
-            max_context_length=128000,
-            max_answer_tokens=4096,  # Large context window allows comprehensive answers
-            temperature=0.7,
+            model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
+            batch_size=256,  # Send more texts per API call to reduce round-trips
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",  # Uses KISSKI_API_KEY from .env
-            },
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.3,  # all-MiniLM-L6-v2 with large context window
-            max_chunk_size=1024,
-        ),
-        memory_budget_gb=1.0,  # Minimal local memory needed
-    ),
-
-    "windows-test": HardwarePreset(
-        name="windows-test",
-        description="Windows-compatible testing (OpenAI embeddings + KISSKI LLM)",
-        embedding=EmbeddingConfig(
-            model_type="remote",
-            model_name="openai",  # OpenAI embeddings API (avoids PyTorch on Windows)
-            batch_size=100,
-            model_kwargs={
-                "api_key_env": "OPENAI_API_KEY",
+                "api_key_env": "KISSKI_API_KEY",
             },
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="mistral-large-instruct",  # KISSKI: 128k context, high quality
+            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
             max_context_length=128000,
-            max_answer_tokens=4096,  # Large context window allows comprehensive answers
+            max_answer_tokens=4096,
             temperature=0.7,
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
@@ -229,10 +206,41 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.5,  # OpenAI embeddings with large LLM context
-            max_chunk_size=1024,
+            score_threshold=0.35,  # multilingual-e5-large-instruct scores
+            max_chunk_size=800,    # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
-        memory_budget_gb=0.5,  # Minimal memory - everything is remote
+        memory_budget_gb=0.5,  # Fully remote — no local model weights
+    ),
+
+    "windows-test": HardwarePreset(
+        name="windows-test",
+        description="Windows-compatible: fully remote via KISSKI (avoids PyTorch/CUDA setup)",
+        embedding=EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",  # KISSKI embeddings
+            batch_size=64,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            model_name="llama-3.3-70b-instruct",  # KISSKI LLM
+            max_context_length=128000,
+            max_answer_tokens=4096,
+            temperature=0.7,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.35,
+            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
+        ),
+        memory_budget_gb=0.5,  # Fully remote
     ),
 }
 

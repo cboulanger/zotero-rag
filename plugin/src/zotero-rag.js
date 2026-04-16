@@ -18,6 +18,7 @@
  * @property {Array<string>} library_ids - Libraries queried
  */
 
+
 /**
  * @typedef {Object} SourceCitation
  * @property {string} item_id - Zotero item ID
@@ -41,36 +42,41 @@
  */
 
 /**
- * Main plugin object for Zotero RAG integration.
+ * Main plugin class for Zotero RAG integration.
  */
-ZoteroRAG = {
-	/** @type {string|null} */
-	id: null,
+class ZoteroRAGPlugin {
+	constructor() {
+		/** @type {string|null} */
+		this.id = null;
 
-	/** @type {string|null} */
-	version: null,
+		/** @type {string|null} */
+		this.version = null;
 
-	/** @type {string|null} */
-	rootURI: null,
+		/** @type {string|null} */
+		this.rootURI = null;
 
-	/** @type {boolean} */
-	initialized: false,
+		/** @type {boolean} */
+		this.initialized = false;
 
-	/** @type {Array<string>} */
-	addedElementIDs: [],
+		/** @type {Array<string>} */
+		this.addedElementIDs = [];
 
-	/** @type {string|null} */
-	backendURL: null,
+		/** @type {string|null} */
+		this.backendURL = null;
 
-	/** @type {Set<string>} */
-	activeQueries: new Set(),
+		/** @type {string} */
+		this.apiKey = '';
 
-	/** @type {number} */
-	maxConcurrentQueries: 5,
+		/** @type {Set<string>} */
+		this.activeQueries = new Set();
 
-	/** @type {import('./toolkit.d.ts').Toolkit} */
-	// @ts-ignore - Initialized in init() method
-	toolkit: null,
+		/** @type {number} */
+		this.maxConcurrentQueries = 5;
+
+		/** @type {import('./toolkit.d.ts').Toolkit} */
+		// @ts-ignore - Initialized in init() method
+		this.toolkit = null;
+	}
 
 	/**
 	 * Initialize the plugin.
@@ -100,7 +106,37 @@ ZoteroRAG = {
 
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
-	},
+
+		// Load optional API key (required when backend is on a remote host)
+		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+	}
+
+	/**
+	 * Return HTTP headers to include in all backend requests.
+	 * Adds X-API-Key when an API key is configured.
+	 * @param {Record<string, string>} [extra] - Additional headers to merge
+	 * @returns {Record<string, string>}
+	 */
+	getAuthHeaders(extra = {}) {
+		/** @type {Record<string, string>} */
+		const headers = { ...extra };
+		if (this.apiKey) {
+			headers['X-API-Key'] = this.apiKey;
+		}
+		return headers;
+	}
+
+	/**
+	 * Append the API key as a query parameter to a URL.
+	 * Used for SSE (EventSource) endpoints that cannot set request headers.
+	 * @param {string} url - Base URL
+	 * @returns {string} URL with api_key appended when configured
+	 */
+	addApiKeyParam(url) {
+		if (!this.apiKey) return url;
+		const sep = url.includes('?') ? '&' : '?';
+		return `${url}${sep}api_key=${encodeURIComponent(this.apiKey)}`;
+	}
 
 	/**
 	 * Log a debug message.
@@ -109,7 +145,7 @@ ZoteroRAG = {
 	 */
 	log(msg) {
 		Zotero.debug("Zotero RAG: " + msg);
-	},
+	}
 
 	/**
 	 * Add plugin UI elements to a window.
@@ -135,7 +171,7 @@ ZoteroRAG = {
 			toolsMenu.appendChild(menuitem);
 			this.storeAddedElement(menuitem);
 		}
-	},
+	}
 
 	/**
 	 * Add plugin UI to all open Zotero windows.
@@ -147,7 +183,7 @@ ZoteroRAG = {
 			if (!win.ZoteroPane) continue;
 			this.addToWindow(win);
 		}
-	},
+	}
 
 	/**
 	 * Store reference to added DOM element for cleanup.
@@ -159,7 +195,7 @@ ZoteroRAG = {
 			throw new Error("Element must have an id");
 		}
 		this.addedElementIDs.push(elem.id);
-	},
+	}
 
 	/**
 	 * Remove plugin UI from a window.
@@ -173,7 +209,7 @@ ZoteroRAG = {
 			doc.getElementById(id)?.remove();
 		}
 		doc.querySelector('[href="zotero-rag.ftl"]')?.remove();
-	},
+	}
 
 	/**
 	 * Remove plugin UI from all open Zotero windows.
@@ -185,7 +221,7 @@ ZoteroRAG = {
 			if (!win.ZoteroPane) continue;
 			this.removeFromWindow(win);
 		}
-	},
+	}
 
 	/**
 	 * Main plugin entry point.
@@ -201,7 +237,7 @@ ZoteroRAG = {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			this.log(`Backend not available: ${errorMessage}`);
 		}
-	},
+	}
 
 	/**
 	 * Check backend version for compatibility.
@@ -214,7 +250,9 @@ ZoteroRAG = {
 		}
 
 		try {
-			const response = await fetch(`${this.backendURL}/api/version`);
+			const response = await fetch(`${this.backendURL}/api/version`, {
+				headers: this.getAuthHeaders()
+			});
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
@@ -227,7 +265,7 @@ ZoteroRAG = {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to check backend version: ${errorMessage}`);
 		}
-	},
+	}
 
 	/**
 	 * Open the query dialog.
@@ -240,7 +278,7 @@ ZoteroRAG = {
 			this.showError(`Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
 			return;
 		}
-
+		// test
 		// Check backend connectivity before opening dialog
 		try {
 			await this.checkBackendVersion();
@@ -263,7 +301,7 @@ ZoteroRAG = {
 			dialogFeatures,
 			{ plugin: this }
 		);
-	},
+	}
 
 	/**
 	 * Show error message to user.
@@ -272,7 +310,7 @@ ZoteroRAG = {
 	 */
 	showError(message) {
 		this.toolkit.showError(message);
-	},
+	}
 
 	/**
 	 * Get all available libraries.
@@ -303,7 +341,7 @@ ZoteroRAG = {
 		}
 
 		return libraries;
-	},
+	}
 
 	/**
 	 * Get currently selected library/collection.
@@ -330,7 +368,7 @@ ZoteroRAG = {
 
 		// For user library, return the library ID as-is
 		return String(libraryID);
-	},
+	}
 
 	/**
 	 * Submit a query to the backend.
@@ -366,9 +404,7 @@ ZoteroRAG = {
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 				body: JSON.stringify(payload)
 			});
 
@@ -382,7 +418,7 @@ ZoteroRAG = {
 		} finally {
 			this.activeQueries.delete(queryId);
 		}
-	},
+	}
 
 	/**
 	 * Create a note in the current collection with the query result.
@@ -422,7 +458,7 @@ ZoteroRAG = {
 		}
 
 		return note;
-	},
+	}
 
 	/**
 	 * Get Zotero library ID from library/group ID used by backend.
@@ -440,7 +476,7 @@ ZoteroRAG = {
 			// For user library, it's already the library ID
 			return parseInt(backendLibraryId, 10);
 		}
-	},
+	}
 
 	/**
 	 * Get Zotero item by key from specified library.
@@ -456,7 +492,7 @@ ZoteroRAG = {
 			this.log(`Failed to get item ${itemKey} from library ${libraryID}: ${e}`);
 			return null;
 		}
-	},
+	}
 
 	/**
 	 * Format citation display text from Zotero item (Author, Year format).
@@ -510,55 +546,81 @@ ZoteroRAG = {
 			this.log(`Error formatting citation display: ${e}`);
 			return item.getField('title') || 'Unknown';
 		}
-	},
+	}
 
 	/**
-	 * Build a citation data object for inline citation.
+	 * Build a zotero://select/ URI for a source citation.
 	 * @param {SourceCitation} source - Source citation metadata
-	 * @param {string} libraryType - Library type ('user' or 'group')
-	 * @param {number|null} [pageOverride] - Optional page number override from citation reference
-	 * @returns {Object} Citation data object
+	 * @param {'user'|'group'} libraryType - Library type
+	 * @returns {string} zotero://select/ URI
 	 */
-	buildCitationData(source, libraryType, pageOverride = null) {
-		// Build Zotero URI based on library type
-		let uri;
+	buildZoteroSelectURI(source, libraryType) {
 		if (libraryType === 'group') {
-			uri = `http://zotero.org/groups/${source.library_id}/items/${source.item_id}`;
+			return `zotero://select/groups/${source.library_id}/items/${source.item_id}`;
 		} else {
-			// For user library, use local user ID
-			// @ts-ignore - Zotero.Users exists at runtime
-			const userID = Zotero.Users ? Zotero.Users.getCurrentUserID() : 'local';
-			uri = `http://zotero.org/users/${userID}/items/${source.item_id}`;
+			return `zotero://select/library/items/${source.item_id}`;
 		}
-
-		/** @type {{uris: string[], locator?: string, label?: string}} */
-		const citationItem = {
-			uris: [uri]
-		};
-
-		// Add page locator if available (prefer override from inline citation)
-		const page = pageOverride !== null ? pageOverride : source.page_number;
-		if (page !== null) {
-			citationItem.locator = String(page);
-			citationItem.label = 'page';
-		}
-
-		return {
-			citationItems: [citationItem],
-			properties: {}
-		};
-	},
+	}
 
 	/**
-	 * Format a citation as HTML span with data-citation attribute.
-	 * @param {Object} citationData - Citation data object
-	 * @param {string} displayText - Display text for citation (e.g., "Author, Year")
-	 * @returns {string} HTML citation span
+	 * Build a zotero://open-pdf/ URI pointing at the best PDF attachment of an item.
+	 * Falls back to zotero://select/ if no PDF attachment is found.
+	 * @param {SourceCitation} source - Source citation metadata
+	 * @param {'user'|'group'} libraryType - Library type
+	 * @param {*} item - Zotero item (may be null)
+	 * @param {number|null} [pageOverride] - Page number from the inline citation (e.g. from [N:P]),
+	 *   takes precedence over source.page_number so the link opens the exact cited page.
+	 * @returns {string} zotero://open-pdf/ or zotero://select/ URI
 	 */
-	formatCitationHTML(citationData, displayText) {
-		const encodedData = encodeURIComponent(JSON.stringify(citationData));
-		return `<span class="citation" data-citation="${encodedData}">(<span class="citation-item">${this.escapeHTML(displayText)}</span>)</span>`;
-	},
+	buildZoteroPDFURI(source, libraryType, item, pageOverride = null) {
+		const page = pageOverride !== null ? pageOverride : (source.page_number || '1');
+		if (item) {
+			try {
+				const attachmentIDs = item.getAttachments();
+				for (const attachmentID of attachmentIDs) {
+					// @ts-ignore - Zotero.Items exists at runtime
+					const attachment = Zotero.Items.get(attachmentID);
+					if (attachment && attachment.attachmentContentType === 'application/pdf') {
+						const key = attachment.key;
+						if (libraryType === 'group') {
+							return `zotero://open-pdf/groups/${source.library_id}/items/${key}?page=${page}`;
+						} else {
+							return `zotero://open-pdf/library/items/${key}?page=${page}`;
+						}
+					}
+				}
+			} catch (e) {
+				this.log(`Error getting PDF attachment for ${source.item_id}: ${e}`);
+			}
+		}
+		// Fallback: open the item in the Zotero library view
+		return this.buildZoteroSelectURI(source, libraryType);
+	}
+
+	/**
+	 * Format an inline citation as a zotero://open-pdf/ hyperlink.
+	 * Page number is shown without quotes; text anchor (quote context) is shown in quotes
+	 * only when no page number is available.
+	 * @param {string} uri - zotero://open-pdf/ or zotero://select/ URI
+	 * @param {string} displayText - Display text (e.g., "Smith et al., 2020")
+	 * @param {number|null} [page] - Optional page number
+	 * @param {string|null} [textAnchor] - Optional quote context (used only when page is absent)
+	 * @returns {string} HTML anchor element
+	 */
+	formatCitationHTML(uri, displayText, page = null, textAnchor = null) {
+		let label = this.escapeHTML(displayText);
+		let title = "";
+
+		// this is the page index which is uninformative without the page offset in the PDF, which don't have
+		// if (page !== null && page !== undefined) {
+		// 	label += `, p. ${page}`;
+		// }  
+			
+		if (textAnchor) {
+			title = this.escapeHTML(textAnchor);
+		}
+		return `<a href="${uri}" title="${title}">(${label})</a>`;
+	}
 
 	/**
 	 * Look up source metadata by source number (1-indexed).
@@ -572,7 +634,7 @@ ZoteroRAG = {
 			return sources[index];
 		}
 		return null;
-	},
+	}
 
 	/**
 	 * Get library type for a given library/group ID.
@@ -583,7 +645,7 @@ ZoteroRAG = {
 	getLibraryType(libraryId, libraryMap) {
 		const libInfo = libraryMap.get(libraryId);
 		return libInfo ? libInfo.type : 'user';
-	},
+	}
 
 	/**
 	 * Replace inline citation references with proper Zotero citation format.
@@ -594,6 +656,11 @@ ZoteroRAG = {
 	 * @returns {string} Text with citations replaced by HTML citation spans
 	 */
 	replaceCitationsInText(text, sources, libraryMap) {
+		// Fallback: normalise "Source N", "*Source N*", "**Source N**" → [N]
+		// so that LLM responses that ignored the bracket-notation instruction are still handled.
+		const sourceWordPattern = /\*{0,2}Source\s+(\d+)\*{0,2}/g;
+		text = text.replace(sourceWordPattern, (_m, n) => `[${n}]`);
+
 		// Pattern: [1], [1:10], [1,2,3], [1:10,2:20,3]
 		const citationPattern = /\[(\d+(?::\d+)?(?:,\s*\d+(?::\d+)?)*)\]/g;
 
@@ -619,32 +686,126 @@ ZoteroRAG = {
 				// Get library type
 				const libraryType = this.getLibraryType(source.library_id, libraryMap);
 
-				// Get Zotero library ID
+				// Get Zotero library ID to fetch item metadata
 				const zoteroLibraryID = this.getZoteroLibraryID(source.library_id, libraryType);
-				if (zoteroLibraryID === null) {
-					// If library not found, fallback to title
-					const citationData = this.buildCitationData(source, libraryType, page);
-					const citationHTML = this.formatCitationHTML(citationData, source.title);
-					citationSpans.push(citationHTML);
-					continue;
+				let displayText = source.title || 'Unknown';
+				let item = null;
+				if (zoteroLibraryID !== null) {
+					item = this.getZoteroItem(source.item_id, zoteroLibraryID);
+					displayText = this.formatCitationDisplayText(item);
 				}
 
-				// Fetch the actual Zotero item to get author and year
-				const item = this.getZoteroItem(source.item_id, zoteroLibraryID);
-				const displayText = this.formatCitationDisplayText(item);
+				// Build zotero://open-pdf/ URI using the LLM-cited page when available,
+				// falling back to the chunk's stored page_number.
+				const uri = this.buildZoteroPDFURI(source, libraryType, item, page);
 
-				// Build citation data
-				const citationData = this.buildCitationData(source, libraryType, page);
-
-				// Generate citation HTML
-				const citationHTML = this.formatCitationHTML(citationData, displayText);
+				// Generate citation HTML (page unquoted; text_anchor quoted only when no page)
+				const citationHTML = this.formatCitationHTML(uri, displayText, page, source.text_anchor);
 				citationSpans.push(citationHTML);
 			}
 
 			// Join multiple citations with space
 			return citationSpans.join(' ');
 		});
-	},
+	}
+
+	/**
+	 * Format a bibliography entry label for a Zotero item.
+	 * Returns "LastName [et al.] (Year) \"Title\"" or a fallback.
+	 * @param {*} item - Zotero item (may be null)
+	 * @param {SourceCitation} source - Source citation fallback data
+	 * @returns {string} Formatted bibliography label (plain text, not HTML-escaped)
+	 */
+	formatBibliographyLabel(item, source) {
+		if (!item) {
+			return source.title || 'Unknown';
+		}
+		try {
+			const creators = item.getCreators();
+			let authorPart = '';
+			if (creators && creators.length > 0) {
+				const first = creators[0];
+				authorPart = first.lastName || first.name || first.firstName || '';
+				if (creators.length > 1) {
+					authorPart += ' et al.';
+				}
+			}
+			const date = item.getField('date');
+			let year = '';
+			if (date) {
+				const m = date.match(/\b(\d{4})\b/);
+				if (m) year = m[1];
+			}
+			const title = item.getField('title') || source.title || '';
+			const authorYear = [authorPart, year ? `(${year})` : ''].filter(Boolean).join(' ');
+			return title ? `${authorYear} "${title}"` : authorYear || title;
+		} catch (e) {
+			this.log(`Error formatting bibliography label: ${e}`);
+			return source.title || 'Unknown';
+		}
+	}
+
+	/**
+	 * Return the sort key (lowercase last name of first author) for a Zotero item.
+	 * @param {*} item - Zotero item (may be null)
+	 * @param {SourceCitation} source - Fallback source
+	 * @returns {string}
+	 */
+	bibliographySortKey(item, source) {
+		if (!item) return (source.title || '').toLowerCase();
+		try {
+			const creators = item.getCreators();
+			if (creators && creators.length > 0) {
+				const first = creators[0];
+				return (first.lastName || first.name || first.firstName || '').toLowerCase();
+			}
+		} catch (_) { /* ignore */ }
+		return (source.title || '').toLowerCase();
+	}
+
+	/**
+	 * Build an HTML bibliography section for all sources in the result.
+	 * Entries are sorted by first-author last name and linked via zotero://select/.
+	 * @param {Array<SourceCitation>} sources - Source citations
+	 * @param {Map<string, {name: string, type: 'user'|'group'}>} libraryMap - Library info map
+	 * @returns {string} HTML string for the bibliography section
+	 */
+	formatBibliographyHTML(sources, libraryMap) {
+		if (!sources || sources.length === 0) return '';
+
+		// Deduplicate by item_id
+		/** @type {Map<string, SourceCitation>} */
+		const seen = new Map();
+		for (const source of sources) {
+			if (!seen.has(source.item_id)) {
+				seen.set(source.item_id, source);
+			}
+		}
+		const unique = Array.from(seen.values());
+
+		// Enrich with Zotero item data
+		const entries = unique.map(source => {
+			const libraryType = this.getLibraryType(source.library_id, libraryMap);
+			const zoteroLibraryID = this.getZoteroLibraryID(source.library_id, libraryType);
+			const item = zoteroLibraryID !== null
+				? this.getZoteroItem(source.item_id, zoteroLibraryID)
+				: null;
+			const uri = this.buildZoteroPDFURI(source, libraryType, item);
+			const label = this.formatBibliographyLabel(item, source);
+			const sortKey = this.bibliographySortKey(item, source);
+			return { uri, label, sortKey };
+		});
+
+		// Sort by first-author last name
+		entries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+		let html = `<hr/><p><strong>Sources</strong></p><ul>`;
+		for (const entry of entries) {
+			html += `<li><a href="${entry.uri}">${this.escapeHTML(entry.label)}</a></li>`;
+		}
+		html += `</ul>`;
+		return html;
+	}
 
 	/**
 	 * Format the query result as HTML for the note.
@@ -693,6 +854,9 @@ ZoteroRAG = {
 		}
 		html += answerHTML;
 
+		// Add bibliography
+		html += this.formatBibliographyHTML(result.sources || [], libraryMap);
+
 		// Add metadata
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
@@ -702,7 +866,7 @@ ZoteroRAG = {
 		html += `</div>`;
 
 		return html;
-	},
+	}
 
 	/**
 	 * Escape HTML special characters.
@@ -720,4 +884,8 @@ ZoteroRAG = {
 		};
 		return text.replace(/[&<>"']/g, m => map[m]);
 	}
-};
+}
+
+// Assign singleton instance to the global variable declared in bootstrap.js.
+// Consumers (bootstrap.js, dialog.js) continue to use ZoteroRAG unchanged.
+ZoteroRAG = new ZoteroRAGPlugin();

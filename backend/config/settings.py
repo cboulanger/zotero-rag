@@ -32,11 +32,38 @@ class Settings(BaseSettings):
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
     api_port: int = Field(default=8119, description="API server port")
+    api_key: Optional[str] = Field(
+        default=None,
+        description="API key for remote access (X-API-Key header). "
+                    "When set, all requests must include this key. "
+                    "Leave unset for local-only deployments."
+    )
+    allowed_origins: list[str] = Field(
+        default=["*"],
+        description="CORS allowed origins. Use ['*'] for local deployments. "
+                    "Set to specific origins for remote deployments."
+    )
 
     # Model Configuration
     model_preset: str = Field(
         default="cpu-only",
         description="Hardware preset name"
+    )
+
+    # Extraction backend
+    extractor_backend: str = Field(
+        default="kreuzberg",
+        description="Document extraction backend: 'kreuzberg' (default) or 'legacy' (pypdf+spaCy)"
+    )
+    ocr_enabled: bool = Field(
+        default=True,
+        description="Enable OCR for image-only pages (requires Tesseract). "
+                    "Set to False when Tesseract is not installed or OCR is not needed."
+    )
+    kreuzberg_url: str = Field(
+        default="http://localhost:8100",
+        description="URL of the kreuzberg sidecar HTTP API. "
+                    "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
     )
 
     model_weights_path: Path = Field(
@@ -53,6 +80,12 @@ class Settings(BaseSettings):
     zotero_api_url: str = Field(
         default="http://localhost:23119",
         description="Zotero local API URL"
+    )
+    require_zotero: bool = Field(
+        default=True,
+        description="Require Zotero local API connectivity at startup. "
+                    "Set to False for remote deployments where the plugin "
+                    "uploads documents directly (no local Zotero access needed)."
     )
 
     # Logging Configuration

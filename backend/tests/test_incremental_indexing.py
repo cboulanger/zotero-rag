@@ -11,8 +11,7 @@ from backend.db.vector_store import VectorStore
 from backend.models.library import LibraryIndexMetadata
 from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
-from backend.services.pdf_extractor import PDFExtractor, PageText
-from backend.services.chunking import TextChunker, TextChunk
+from backend.services.extraction.base import ExtractionChunk
 
 
 class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
@@ -181,19 +180,10 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.check_duplicate.return_value = None
         self.mock_vector_store.delete_item_chunks.return_value = 10
 
-        # Mock PDF extractor
-        mock_pages = [PageText(page_number=1, text="Test content")]
-        self.processor.pdf_extractor.extract_from_bytes = Mock(return_value=mock_pages)
-
-        # Mock chunker
-        mock_chunks = [TextChunk(
-            text="Test content",
-            page_number=1,
-            chunk_index=0,
-            start_char=0,
-            end_char=12
-        )]
-        self.processor.text_chunker.chunk_pages = Mock(return_value=mock_chunks)
+        # Mock extractor
+        self.processor.document_extractor.extract_and_chunk = AsyncMock(
+            return_value=[ExtractionChunk(text="Test content", page_number=1, chunk_index=0)]
+        )
 
         # Mock embeddings
         self.mock_embedding_service.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
@@ -286,19 +276,10 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_vector_store.check_duplicate.return_value = None
 
-        # Mock PDF extractor
-        mock_pages = [PageText(page_number=1, text="Test content")]
-        self.processor.pdf_extractor.extract_from_bytes = Mock(return_value=mock_pages)
-
-        # Mock chunker
-        mock_chunks = [TextChunk(
-            text="Test content",
-            page_number=1,
-            chunk_index=0,
-            start_char=0,
-            end_char=12
-        )]
-        self.processor.text_chunker.chunk_pages = Mock(return_value=mock_chunks)
+        # Mock extractor
+        self.processor.document_extractor.extract_and_chunk = AsyncMock(
+            return_value=[ExtractionChunk(text="Test content", page_number=1, chunk_index=0)]
+        )
 
         # Mock embeddings
         self.mock_embedding_service.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3]])

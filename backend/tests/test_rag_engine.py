@@ -148,14 +148,17 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         source1 = result.sources[0]
         self.assertEqual(source1.item_id, "ABC123")
         self.assertEqual(source1.title, "Introduction to ML")
-        self.assertEqual(source1.page_number, 5)
+        # page_number is intentionally None on SourceInfo: page citations are
+        # embedded inline in the LLM answer via [N:P] notation rather than on
+        # the deduplicated document source record.
+        self.assertIsNone(source1.page_number)
         self.assertEqual(source1.text_anchor, "Machine learning is a")
         self.assertEqual(source1.score, 0.95)
 
         source2 = result.sources[1]
         self.assertEqual(source2.item_id, "DEF456")
         self.assertEqual(source2.title, "ML Algorithms")
-        self.assertEqual(source2.page_number, 12)
+        self.assertIsNone(source2.page_number)
 
     async def test_query_no_results(self):
         """Test query with no matching chunks."""

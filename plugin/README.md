@@ -74,23 +74,54 @@ The plugin will:
 Configure in `.env` file (project root):
 
 ```bash
-MODEL_PRESET=mac-mini-m4-16gb  # Or: cpu-only, gpu-high-memory, remote-openai, remote-kisski
+# Fully remote (recommended — no local GPU or heavy Python dependencies)
+MODEL_PRESET=remote-kisski     # KISSKI/SAIA Academic Cloud (requires KISSKI_API_KEY)
+MODEL_PRESET=remote-openai     # OpenAI API (requires OPENAI_API_KEY)
+
+# Local inference (requires sentence-transformers and torch — see below)
+MODEL_PRESET=apple-silicon-32gb  # Apple Silicon Mac, 32 GB RAM
+MODEL_PRESET=high-memory         # GPU system, >24 GB RAM
+MODEL_PRESET=cpu-only            # CPU only / low memory
 ```
 
-See [docs/architecture.md](../docs/architecture.md#configuration-system) for preset details.
+See [docs/presets.md](../docs/presets.md) for a full comparison of all presets.
 
 ### API Keys (for remote presets)
 
 ```bash
 # In .env file
-KISSKI_API_KEY=your_key_here      # For remote-kisski preset
-OPENAI_API_KEY=sk-...             # For remote-openai preset
+KISSKI_API_KEY=your_key_here      # For remote-kisski / apple-silicon-kisski / windows-test
+OPENAI_API_KEY=sk-...             # For remote-openai
 ```
+
+### Optional: Local model dependencies
+
+The presets `apple-silicon-32gb`, `high-memory`, and `cpu-only` run embedding models locally and require `sentence-transformers` and `torch` (~1–2 GB of extra packages). These are not installed by default.
+
+To install them:
+
+```bash
+uv sync --extra local-models
+```
+
+Or manually:
+
+```bash
+uv add sentence-transformers torch
+```
+
+If you later switch to a fully-remote preset you can reclaim the disk space:
+
+```bash
+uv remove sentence-transformers torch transformers accelerate bitsandbytes
+```
+
+Remote presets (`remote-kisski`, `remote-openai`, `windows-test`, `apple-silicon-kisski`) never load these packages — the import is lazy and skipped entirely when a remote configuration is active.
 
 ## Troubleshooting
 
 | Problem | Solution |
-|---------|----------|
+| ------- | -------- |
 | "Backend server is not available" | Start server: `npm run server:start` |
 | "No results found" | Verify libraries are indexed and contain PDFs with text |
 | Indexing fails | Check Zotero is running, PDFs are attached to items |

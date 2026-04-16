@@ -1,10 +1,7 @@
 # Zotero RAG Plugin
 
-<div style="diplay:grid">
-<img style="height:300px" src="docs/images/dialog.png">
-<img style="height:300px"   src="docs/images/note.png">
-</div>
-
+![Dialog screenshot](docs/images/dialog.png)
+![Note screenshot](docs/images/note.png)
 
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
 
@@ -16,45 +13,78 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 - Install the python dependencies: `uv sync`
 - Install a recent version of NodeJS (It's strictly only necessary for development)
 
-### 2. Start the Backend Server
+For presets that run embedding models locally (`apple-silicon-32gb`, `high-memory`, `cpu-only`) you also need:
 
-The plugin requires a local server to process your questions. Start it with:
+```bash
+uv sync --extra local-models
+```
+
+Remote presets (`remote-kisski`, `remote-openai`, etc.) do **not** require these packages — see [docs/presets.md](docs/presets.md) for the full comparison.
+
+### 2. Configure a Preset
+
+Copy `.env.dist` to `.env` and set `MODEL_PRESET`:
+
+```bash
+# Recommended — fully remote, no local GPU or heavy dependencies
+MODEL_PRESET=remote-kisski       # requires KISSKI_API_KEY
+MODEL_PRESET=remote-openai       # requires OPENAI_API_KEY
+
+# Local inference (requires uv sync --extra local-models)
+MODEL_PRESET=apple-silicon-32gb  # Apple Silicon Mac, 32 GB RAM
+MODEL_PRESET=cpu-only            # CPU only / low memory
+```
+
+See [docs/presets.md](docs/presets.md) for all presets and a dependency overview.
+
+### 3. Start the Backend Server
+
+The plugin requires a locally or remotely deployed server to process your questions. The server URL is configured in the plugin's Preferences pane (`http://localhost:8119` by default). When using a remote server, set an API key there and enter it in the plugin preferences.
+
+**Option A — direct (development):**
 
 ```bash
 # with NodeJS:
 npm run server:start
 # without NodeJS:
-uv run python scripts/server.py start 
+uv run python scripts/server.py start
 ```
 
-The server will run at <http://localhost:8119>. You can check if it's running:
+Locally, the server will run at <http://localhost:8119>. You can check if it's running:
 
 ```bash
-# with NodeJS:
 npm run server:status
-# without NodeJS:
-uv run python scripts/server.py status
+curl http://localhost:8119/health
 ```
 
-To stop the server later:
+To stop the server:
 
 ```bash
-# with NodeJS:
 npm run server:stop
-# without NodeJS:
-uv run python scripts/server.py stop
 ```
 
-### 3. Install the Plugin in Zotero
+**Option B — Docker container:**
 
-1. Download the `zotero-rag-X.Y.Z.xpi` file from https://github.com/cboulanger/zotero-rag/releases/latest
+```bash
+# Build image and start container (requires Docker or Podman)
+node bin/container.mjs start --data-dir ./data
+
+# Or with a deployment env file (for servers):
+node bin/deploy.mjs .env.deploy.myserver
+```
+
+See [docs/docker-deployment.md](docs/docker-deployment.md) for full Docker setup, including remote server deployment with nginx and SSL.
+
+### 4. Install the Plugin in Zotero
+
+1. Download the `zotero-rag-X.Y.Z.xpi` file from <https://github.com/cboulanger/zotero-rag/releases/latest>
 2. Open Zotero
 3. Go to **Tools → Add-ons**
 4. Click the gear icon and select **Install Add-on From File**
 5. Select the downloaded `.xpi` file
 6. Restart Zotero when prompted
 
-### 4. Using the Plugin
+### 5. Using the Plugin
 
 Once installed:
 
@@ -70,9 +100,10 @@ The plugin uses AI to understand your questions and retrieve relevant informatio
 ## Developer Documentation
 
 - **[Application architecture](docs/architecture.md)**
+- **[Plugin development & hot reload](docs/zotero-plugin-dev.md)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**
-- **[Setup CI/CD](docs/setup-ci-cd.md)** - CLI commands
+- **[Setup CI/CD](docs/setup-ci-cd.md)**
 
 ## License
 

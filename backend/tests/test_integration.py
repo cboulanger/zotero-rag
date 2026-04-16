@@ -20,7 +20,14 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, EmbeddingConfig, LLMConfig, RAGConfig
 
+try:
+    import sentence_transformers  # noqa: F401
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
 
+
+@unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
 class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
     """
     Test complete workflow from indexing to querying.
@@ -173,14 +180,15 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             return_value=pdf_buffer.read()
         )
 
-        # Mock PDF extraction to return test content
-        # Note: We patch the instance, not the class, since it's already created in setUp
-        mock_pdf_extractor = Mock()
-        mock_pdf_extractor.extract_from_bytes.return_value = [
-            Mock(page_number=1, text="Machine learning is a branch of AI."),
-            Mock(page_number=2, text="It uses algorithms to learn from data."),
-        ]
-        self.document_processor.pdf_extractor = mock_pdf_extractor
+        # Mock extraction to return test content via the document_extractor interface
+        from unittest.mock import AsyncMock as _AsyncMock
+        from backend.services.extraction.base import ExtractionChunk as _ExtractionChunk
+        self.document_processor.document_extractor.extract_and_chunk = _AsyncMock(
+            return_value=[
+                _ExtractionChunk(text="Machine learning is a branch of AI.", page_number=1, chunk_index=0),
+                _ExtractionChunk(text="It uses algorithms to learn from data.", page_number=2, chunk_index=1),
+            ]
+        )
 
         # Execute: Index the library
         result = await self.document_processor.index_library(
@@ -280,7 +288,9 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(result.sources), 0)
         self.assertEqual(result.sources[0].item_id, "ITEM1")
         self.assertEqual(result.sources[0].title, "ML Introduction")
-        self.assertEqual(result.sources[0].page_number, 1)
+        # page_number is intentionally None: page citations appear inline in
+        # the LLM answer via [N:P] notation, not on the source record.
+        self.assertIsNone(result.sources[0].page_number)
 
         # Verify: LLM was called with context
         mock_llm.generate.assert_called_once()

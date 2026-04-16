@@ -14,26 +14,6 @@ from backend.config.settings import Settings, get_settings, reset_settings
 class TestPresets(unittest.TestCase):
     """Test hardware presets."""
 
-    def test_get_preset_mac_mini(self):
-        """Test getting mac-mini-m4-16gb preset."""
-        preset = get_preset("mac-mini-m4-16gb")
-
-        self.assertEqual(preset.name, "mac-mini-m4-16gb")
-        self.assertEqual(preset.embedding.model_type, "local")
-        self.assertEqual(preset.embedding.model_name, "nomic-ai/nomic-embed-text-v1.5")
-        self.assertEqual(preset.llm.model_type, "local")
-        self.assertEqual(preset.llm.model_name, "Qwen/Qwen2.5-3B-Instruct")
-        self.assertEqual(preset.llm.quantization, "4bit")
-        self.assertLessEqual(preset.memory_budget_gb, 8.0)
-
-    def test_get_preset_gpu_high_memory(self):
-        """Test getting gpu-high-memory preset."""
-        preset = get_preset("gpu-high-memory")
-
-        self.assertEqual(preset.name, "gpu-high-memory")
-        self.assertEqual(preset.llm.model_name, "mistralai/Mistral-7B-Instruct-v0.3")
-        self.assertEqual(preset.llm.quantization, "8bit")
-
     def test_get_preset_cpu_only(self):
         """Test getting cpu-only preset."""
         preset = get_preset("cpu-only")
@@ -55,9 +35,11 @@ class TestPresets(unittest.TestCase):
         preset = get_preset("remote-kisski")
 
         self.assertEqual(preset.name, "remote-kisski")
-        self.assertEqual(preset.embedding.model_type, "local")  # Use local embeddings
+        self.assertEqual(preset.embedding.model_type, "remote")  # Fully remote — no local torch
+        self.assertEqual(preset.embedding.model_name, "multilingual-e5-large-instruct")
+        self.assertEqual(preset.embedding.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
+        self.assertEqual(preset.embedding.model_kwargs["api_key_env"], "KISSKI_API_KEY")
         self.assertEqual(preset.llm.model_type, "remote")
-        self.assertEqual(preset.llm.model_name, "mistral-large-instruct")
         self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
         self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
 
@@ -72,8 +54,6 @@ class TestPresets(unittest.TestCase):
         """Test listing all presets."""
         presets = list_presets()
 
-        self.assertIn("mac-mini-m4-16gb", presets)
-        self.assertIn("gpu-high-memory", presets)
         self.assertIn("cpu-only", presets)
         self.assertIn("remote-openai", presets)
         self.assertIn("remote-kisski", presets)
@@ -155,10 +135,10 @@ class TestSettings(unittest.TestCase):
 
     def test_get_hardware_preset(self):
         """Test getting hardware preset from settings."""
-        settings = Settings(model_preset="gpu-high-memory")
+        settings = Settings(model_preset="cpu-only")
         preset = settings.get_hardware_preset()
 
-        self.assertEqual(preset.name, "gpu-high-memory")
+        self.assertEqual(preset.name, "cpu-only")
 
     def test_get_api_key(self):
         """Test getting API keys from environment variables."""

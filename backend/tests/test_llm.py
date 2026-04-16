@@ -15,6 +15,12 @@ from backend.services.llm import (
 from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, RAGConfig
 
+try:
+    import transformers  # noqa: F401
+    HAS_TRANSFORMERS = True
+except ImportError:
+    HAS_TRANSFORMERS = False
+
 
 class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
     """Test LLM service factory function."""
@@ -74,6 +80,7 @@ class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.llm_config.model_type, "remote")
 
 
+@unittest.skipUnless(HAS_TRANSFORMERS, "transformers not installed")
 class TestLocalLLMService(unittest.IsolatedAsyncioTestCase):
     """Test LocalLLMService class."""
 

@@ -9,7 +9,7 @@ This document describes the testing strategy for the Zotero RAG system.
 - **No external dependencies** (mocked)
 - **Fast execution** (<10 seconds total)
 - **Run by default** with `npm run test:backend`
-- **Coverage:** Configuration, Zotero API, embeddings, vector store, PDF extraction, chunking, document processor, LLM service, RAG engine, API endpoints
+- **Coverage:** Configuration, Zotero API, embeddings, vector store, document extraction (Kreuzberg + legacy), document processor, LLM service, RAG engine, API endpoints
 
 ### Integration Tests (Real Dependencies)
 
@@ -106,6 +106,7 @@ npm run test:integration:quick
 ```
 
 If tests are **skipped** with an error message, check:
+
 - Zotero is running
 - Test group is synced
 - API key is set correctly
@@ -155,12 +156,14 @@ async def test_my_integration(zotero_client, integration_config):
 ## Test Organization
 
 **File:** [backend/tests/conftest.py](../backend/tests/conftest.py)
+
 - Session-level fixtures for integration tests
 - Environment validation with pre-flight checks
 - Automatic test skipping with helpful error messages
 - Test server management for API tests
 
 **Files:** `backend/tests/test_*.py`
+
 - Unit tests: Mock all external dependencies
 - Integration tests: Use `@pytest.mark.integration` marker
 - API tests: Use `@pytest.mark.api` marker
@@ -231,6 +234,7 @@ If any validation fails, all integration/API tests are **automatically skipped**
 ### Test Configuration Files
 
 **`.env.test`** (optional, for test-specific overrides):
+
 ```bash
 # Test configuration (lowest priority)
 MODEL_PRESET=remote-kisski
@@ -239,6 +243,7 @@ QDRANT_COLLECTION=test_documents
 ```
 
 **`.env`** (normal configuration):
+
 ```bash
 # Development/production config (medium priority)
 MODEL_PRESET=cpu-only
@@ -246,6 +251,7 @@ KISSKI_API_KEY=your_key_here
 ```
 
 **Environment variables** (highest priority):
+
 ```bash
 # Override everything
 export MODEL_PRESET=remote-kisski
@@ -284,6 +290,7 @@ Test server logs are written to `logs/test_server.log` and include:
 After tests complete, if errors occurred, relevant log excerpts are printed to console.
 
 **View full logs:**
+
 ```bash
 cat logs/test_server.log
 ```
@@ -291,22 +298,26 @@ cat logs/test_server.log
 ### Debugging Integration Tests
 
 **Run with verbose output and live logs:**
+
 ```bash
 uv run pytest -m api -v -s
 ```
 
 **Check test server logs:**
+
 ```bash
 # Tail logs while tests run (separate terminal)
 tail -f logs/test_server.log
 ```
 
 **Debug specific test:**
+
 ```bash
 uv run pytest backend/tests/test_api_incremental_indexing.py::test_incremental_mode_api -vv -s
 ```
 
 **Skip environment validation (for debugging fixtures):**
+
 ```python
 # In your test file
 pytestmark = pytest.mark.skipif(
@@ -379,18 +390,21 @@ uv run pytest -x
 ## Best Practices
 
 **Unit Tests:**
+
 - Mock all external dependencies (Zotero, LLMs, file system)
 - Keep tests fast (<1 second per test)
 - Test edge cases and error paths
 - Use descriptive test names
 
 **Integration Tests:**
+
 - Use temporary vector store (auto-cleaned)
 - Make tests idempotent (can run multiple times)
 - Clean up resources in `finally` blocks
 - Skip gracefully if dependencies unavailable
 
 **General:**
+
 - Run unit tests before committing
 - Run integration tests before releasing
 - Keep test code clean and documented
@@ -401,11 +415,13 @@ uv run pytest -x
 ## Test Data
 
 **Test Library:** <https://www.zotero.org/groups/6297749/test-rag-plugin>
+
 - Small, curated collection (~20 PDFs)
 - Public group for reproducible testing
 - Update test constants if library content changes
 
 **Test Fixtures:** [backend/tests/fixtures/](../backend/tests/fixtures/)
+
 - Sample PDFs for unit tests
 - Deterministic test data
 

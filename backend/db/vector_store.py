@@ -5,6 +5,7 @@ Handles storage and retrieval of document chunk embeddings with metadata.
 """
 
 import logging
+import warnings
 from typing import Optional
 from pathlib import Path
 import uuid
@@ -68,10 +69,29 @@ class VectorStore:
         self._ensure_collections()
 
     def _ensure_collections(self):
-        """Create collections if they don't exist."""
+        """Create collections if they don't exist, or recreate if vector size changed."""
         # Check if chunks collection exists
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
+
+        if self.CHUNKS_COLLECTION in collection_names:
+            # Verify the vector dimension matches the current embedding model
+            info = self.client.get_collection(self.CHUNKS_COLLECTION)
+            vectors_config = info.config.params.vectors
+            # vectors_config is either a VectorParams (unnamed) or a dict (named vectors)
+            existing_dim = (
+                vectors_config.size
+                if hasattr(vectors_config, "size")
+                else next(iter(vectors_config.values())).size
+            )
+            if existing_dim != self.embedding_dim:
+                logger.warning(
+                    f"Collection '{self.CHUNKS_COLLECTION}' has vector size {existing_dim} "
+                    f"but current embedding model produces {self.embedding_dim}-dim vectors. "
+                    f"Recreating collection (all previously indexed data will be lost)."
+                )
+                self.client.delete_collection(self.CHUNKS_COLLECTION)
+                collection_names.remove(self.CHUNKS_COLLECTION)
 
         if self.CHUNKS_COLLECTION not in collection_names:
             logger.info(f"Creating collection: {self.CHUNKS_COLLECTION}")
@@ -104,12 +124,16 @@ class VectorStore:
                     distance=Distance.COSINE,
                 ),
             )
-            # Create index on library_id for fast lookups
-            self.client.create_payload_index(
-                collection_name=self.METADATA_COLLECTION,
-                field_name="library_id",
-                field_schema="keyword"
-            )
+            # Create index on library_id for fast lookups.
+            # In-memory/local Qdrant ignores payload indexes; suppress the
+            # expected UserWarning so it doesn't surface in test output.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.client.create_payload_index(
+                    collection_name=self.METADATA_COLLECTION,
+                    field_name="library_id",
+                    field_schema="keyword"
+                )
 
     def add_chunk(self, chunk: DocumentChunk) -> str:
         """
@@ -545,6 +569,31 @@ class VectorStore:
             )
             self.update_library_metadata(metadata)
 
+    def delete_library_metadata(self, library_id: str) -> bool:
+        """
+        Delete the metadata record for a library (marks it as never indexed).
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            True if the record existed and was deleted, False otherwise
+        """
+        try:
+            point_id = self._library_id_to_uuid(library_id)
+            points = self.client.retrieve(collection_name=self.METADATA_COLLECTION, ids=[point_id])
+            if not points:
+                return False
+            self.client.delete(
+                collection_name=self.METADATA_COLLECTION,
+                points_selector=[point_id],
+            )
+            logger.info(f"Deleted metadata record for library {library_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting library metadata: {e}")
+            return False
+
     def get_all_library_metadata(self) -> list[LibraryIndexMetadata]:
         """
         Get metadata for all indexed libraries.
@@ -634,13 +683,18 @@ class VectorStore:
         Returns:
             Number of chunks
         """
-        result = self.client.count(
-            collection_name=self.CHUNKS_COLLECTION,
-            count_filter=Filter(must=[
-                FieldCondition(key="library_id", match=MatchValue(value=library_id))
-            ])
-        )
-        return result.count
+        try:
+            result = self.client.count(
+                collection_name=self.CHUNKS_COLLECTION,
+                count_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id))
+                ])
+            )
+            return result.count
+        except (IndexError, Exception) as e:
+            # qdrant_client local storage raises IndexError on empty collections with filters
+            logger.warning(f"Error counting chunks for library {library_id}, returning 0: {e}")
+            return 0
 
     def close(self):
         """

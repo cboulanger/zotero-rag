@@ -14,6 +14,12 @@ from backend.services.embeddings import (
     create_embedding_service,
 )
 
+try:
+    import sentence_transformers  # noqa: F401
+    HAS_SENTENCE_TRANSFORMERS = True
+except ImportError:
+    HAS_SENTENCE_TRANSFORMERS = False
+
 
 class TestEmbeddingService(unittest.TestCase):
     """Test base embedding service functionality."""
@@ -35,6 +41,7 @@ class TestEmbeddingService(unittest.TestCase):
         self.assertNotEqual(hash1, hash2)
 
 
+@unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
 class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
     """Test local embedding service."""
 
@@ -47,7 +54,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
             cache_enabled=True,
         )
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_init(self, mock_st):
         """Test service initialization."""
         service = LocalEmbeddingService(self.config, cache_dir="/tmp/cache")
@@ -56,7 +63,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.cache_dir, "/tmp/cache")
         self.assertIsNone(service._model)  # Lazy loading
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_embed_text(self, mock_st):
         """Test single text embedding."""
         # Mock the model
@@ -72,7 +79,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embedding, [0.1, 0.2, 0.3, 0.4])
         mock_model.encode.assert_called_once()
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_embed_text_caching(self, mock_st):
         """Test that embeddings are cached."""
         mock_model = MagicMock()
@@ -93,7 +100,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embedding1, embedding2)
         self.assertEqual(mock_model.encode.call_count, 1)
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_embed_batch(self, mock_st):
         """Test batch embedding."""
         mock_model = MagicMock()
@@ -113,7 +120,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embeddings[0], [0.1, 0.2, 0.3, 0.4])
         self.assertEqual(embeddings[1], [0.5, 0.6, 0.7, 0.8])
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_embed_batch_with_cache(self, mock_st):
         """Test batch embedding with partial cache hits."""
         mock_model = MagicMock()
@@ -143,7 +150,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embeddings[0], [0.1, 0.2, 0.3, 0.4])  # From cache
         self.assertEqual(embeddings[1], [0.9, 0.8, 0.7, 0.6])  # Newly computed
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_get_embedding_dim(self, mock_st):
         """Test getting embedding dimension."""
         mock_model = MagicMock()
@@ -155,7 +162,7 @@ class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(dim, 384)
 
-    @patch("backend.services.embeddings.SentenceTransformer")
+    @patch("sentence_transformers.SentenceTransformer")
     async def test_clear_cache(self, mock_st):
         """Test clearing the cache."""
         mock_model = MagicMock()
@@ -191,15 +198,34 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         service = RemoteEmbeddingService(self.config, api_key="test-key")
 
         self.assertEqual(service.config, self.config)
-        self.assertEqual(service.api_key, "test-key")
+        self.assertEqual(service._api_key, "test-key")
 
-    async def test_embed_text_returns_correct_dimension(self):
-        """Test that remote service returns correct dimension."""
-        service = RemoteEmbeddingService(self.config)
+    @patch("openai.AsyncOpenAI")
+    async def test_embed_text_returns_correct_dimension(self, mock_openai_cls):
+        """Test that remote service calls the API and returns the right dimension."""
+        # Build a fake response matching openai's EmbeddingObject structure
+        fake_embedding = [0.1] * 1536
+        mock_item = MagicMock()
+        mock_item.embedding = fake_embedding
+        mock_response = MagicMock()
+        mock_response.data = [mock_item]
+
+        mock_client = MagicMock()
+        mock_client.embeddings.create = MagicMock(
+            return_value=mock_response.__class__()  # placeholder
+        )
+        # Make embeddings.create an awaitable
+        async def fake_create(**kwargs):
+            return mock_response
+        mock_client.embeddings.create = fake_create
+        mock_openai_cls.return_value = mock_client
+
+        service = RemoteEmbeddingService(self.config, api_key="test-key")
         embedding = await service.embed_text("test")
 
-        # OpenAI embeddings are 1536-dimensional
+        # Should return what the API returned
         self.assertEqual(len(embedding), 1536)
+        self.assertEqual(embedding, fake_embedding)
 
     async def test_get_embedding_dim(self):
         """Test getting embedding dimension."""

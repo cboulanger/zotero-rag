@@ -32,7 +32,9 @@ declare const Zotero: {
 	Item: new (type: string) => ZoteroItem;
 
 	Items: {
+		get(id: number): ZoteroItem;
 		get(ids: number[]): ZoteroItem[];
+		getAsync(id: number): Promise<ZoteroItem>;
 		getAsync(ids: number[]): Promise<ZoteroItem[]>;
 	};
 
@@ -74,7 +76,9 @@ interface ZoteroCollection {
 
 interface ZoteroItem {
 	id: number;
+	key: string;
 	libraryID: number | null;
+	attachmentContentType: string | null;
 	setNote(html: string): void;
 	saveTx(): Promise<void>;
 	isAttachment(): boolean;

@@ -24,6 +24,16 @@ import os
 from pathlib import Path
 
 try:
+    from dotenv import load_dotenv
+    _PROJECT_ROOT = Path(__file__).parent.parent
+    _env_local = _PROJECT_ROOT / ".env.local"
+    if _env_local.exists():
+        load_dotenv(_env_local, override=True)
+    load_dotenv(_PROJECT_ROOT / ".env", override=True)
+except ImportError:
+    pass
+
+try:
     import psutil
 except ImportError:
     psutil = None

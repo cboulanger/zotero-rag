@@ -22,6 +22,8 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 1. **FastAPI Backend**: Python-based service handling document indexing, vector search, and LLM inference
 2. **Zotero Plugin**: JavaScript plugin providing a user interface within Zotero
 
+The backend can run locally (on the same machine as Zotero) or on a remote server. In local mode the backend reads documents directly from the filesystem. In remote mode the plugin uploads document bytes over the network.
+
 ### Key Features
 
 - **Semantic Search**: Ask natural language questions about your research library
@@ -30,6 +32,7 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 - **Smart Citations**: Answers include source citations with page numbers and text anchors
 - **Real-Time Progress**: Live progress updates during library indexing
 - **Flexible Configuration**: Hardware presets for different deployment scenarios
+- **Remote Server Support**: Backend can run on a separate machine with optional API key authentication
 
 ### Technology Stack
 
@@ -40,7 +43,9 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 - Qdrant for vector database
 - sentence-transformers for embeddings
 - transformers + bitsandbytes for local LLM inference
-- PyZotero + direct local API for Zotero integration
+- PyZotero + direct local API for Zotero integration (local mode only)
+- Kreuzberg for document extraction (PDF, HTML, DOCX, EPUB; Rust-based, native async)
+- python-multipart for document upload (remote mode)
 
 **Plugin:**
 
@@ -48,54 +53,58 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 - Zotero 7/8 plugin architecture
 - HTML5 + CSS3 for UI (no XUL dependency)
 - EventSource API for SSE streaming
+- IOUtils API for local file reading (remote mode upload)
 
 ---
 
 ## System Architecture
 
+### Local Mode (default)
+
 ```text
-┌─────────────────────────────────────────────────────────────────┐
-│                      Zotero Plugin (Frontend)                    │
+┌────────────────────────────────────────────────────────────────┐
+│                      Zotero Plugin (Frontend)                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │   Dialog UI  │  │ Menu Item    │  │  Backend Client      │  │
 │  │  - Question  │  │ - Tools Menu │  │  - HTTP/REST         │  │
 │  │  - Libraries │  │              │  │  - SSE Streaming     │  │
 │  │  - Progress  │  │              │  │  - Error Handling    │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+└────────────────────────────────────────────────────────────────┘
                               │
-                              │ HTTP/SSE (localhost:8119)
+                   HTTP/SSE (configurable URL,
+                   default: localhost:8119)
                               ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend (Python)                      │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                      API Layer (REST/SSE)                   │ │
-│  │  /api/config  /api/libraries  /api/index  /api/query       │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                              │                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                     Service Layer                           │ │
+┌────────────────────────────────────────────────────────────────┐
+│                    FastAPI Backend (Python)                    │
+│                                                                │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                      API Layer (REST/SSE)                 │ │
+│  │  /api/config  /api/libraries  /api/index  /api/query      │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     Service Layer                         │ │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
 │  │  │ Document     │ │ RAG Engine   │ │ Embedding        │   │ │
 │  │  │ Processor    │ │              │ │ Service          │   │ │
 │  │  │              │ │ - Retrieval  │ │ - Local Models   │   │ │
-│  │  │ - PDF Extract│ │ - Generation │ │ - Remote APIs    │   │ │
+│  │  │ - Extraction │ │ - Generation │ │ - Remote APIs    │   │ │
 │  │  │ - Chunking   │ │ - Citations  │ │ - Caching        │   │ │
 │  │  │ - Indexing   │ │              │ │                  │   │ │
 │  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  │                                                              │ │
+│  │                                                           │ │
 │  │  ┌──────────────┐                  ┌──────────────────┐   │ │
 │  │  │ LLM Service  │                  │ Zotero Client    │   │ │
-│  │  │              │                  │                  │   │ │
+│  │  │              │                  │ (local mode only)│   │ │
 │  │  │ - Local      │                  │ - Local API      │   │ │
 │  │  │ - Remote     │                  │ - HTTP Client    │   │ │
 │  │  │ - Quantized  │                  │ - Library Access │   │ │
 │  │  └──────────────┘                  └──────────────────┘   │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                              │                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                     Data Layer                              │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                     Data Layer                            │ │
 │  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
 │  │  │ Vector Store │ │ Model Cache  │ │ Config Manager   │   │ │
 │  │  │  (Qdrant)    │ │              │ │                  │   │ │
@@ -103,21 +112,56 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 │  │  │ - Chunks     │ │ - LLM Weights│ │ - Settings       │   │ │
 │  │  │ - Dedup      │ │              │ │                  │   │ │
 │  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+│  └───────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────┘
                               │
-                              │ HTTP (localhost:23119)
+                     HTTP (localhost:23119)
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                      Zotero Desktop Application                  │
-│                    (Local API on port 23119)                     │
-│                                                                  │
+│                      Zotero Desktop Application                 │
+│                    (Local API on port 23119)                    │
+│                                                                 │
 │  - Libraries, Collections, Items                                │
 │  - PDF Attachments                                              │
 │  - Full-text Content                                            │
 │  - Metadata (Authors, Titles, Years)                            │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Remote Mode
+
+When the plugin's `backendURL` does not contain `localhost` or `127.0.0.1`, remote mode is activated. The plugin reads attachment bytes locally and uploads them to the backend; the backend needs no access to Zotero or the local filesystem.
+
+```text
+┌────────────────────────────────────────────────────────────────┐
+│             Zotero Plugin + Zotero Desktop (local machine)     │
+│                                                                │
+│  Dialog UI → checkAndMonitorIndexing (remote branch)          │
+│     ↓                                                          │
+│  RemoteIndexer.indexLibrary()                                  │
+│     1. GET /api/libraries/{id}/check-indexed                   │
+│        (find which attachments need uploading)                 │
+│     2. IOUtils.read(localPath) → bytes                         │
+│     3. POST /api/index/document  (multipart: bytes + metadata) │
+│     4. Show progress per document                              │
+└────────────────────────────────────────────────────────────────┘
+              │  HTTPS (configurable, X-API-Key auth)
+              ▼
+┌────────────────────────────────────────────────────────────────┐
+│           FastAPI Backend (remote server / container)          │
+│                                                                │
+│  POST /api/index/document                                      │
+│     → validate API key                                         │
+│     → DocumentProcessor._process_attachment_bytes()           │
+│        (dedup check → extract → embed → store)                 │
+│                                                                │
+│  POST /api/libraries/{id}/check-indexed                        │
+│     → VectorStore.get_item_version() per attachment            │
+│     → return needs_indexing + reason per attachment            │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Mode detection:** `backendURL` is stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the plugin's Preferences pane, default `http://localhost:8119`). If the URL does not contain `localhost` or `127.0.0.1`, remote mode is used automatically.
 
 ---
 
@@ -132,15 +176,16 @@ The backend is organized into a layered architecture with clear separation of co
 **Entry Point:** [backend/main.py](../backend/main.py)
 
 - FastAPI application setup
-- CORS configuration for local development
+- Optional API key middleware (all endpoints except `/`, `/health`, `/api/version`)
+- Configurable CORS (`ALLOWED_ORIGINS` env var)
+- Conditional Zotero connectivity check at startup (`REQUIRE_ZOTERO` env var)
 - Lifespan context management
-- Health check endpoint
 
 **Configuration API:** [backend/api/config.py](../backend/api/config.py)
 
 - `GET /api/config` - Get available presets and current configuration
 - `POST /api/config` - Update configuration settings
-- `GET /api/version` - Version compatibility checking
+- `GET /api/version` - Version compatibility checking (exempt from API key auth)
 
 **Libraries API:** [backend/api/libraries.py](../backend/api/libraries.py)
 
@@ -152,10 +197,17 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Indexing API:** [backend/api/indexing.py](../backend/api/indexing.py)
 
-- `POST /api/index/library/{library_id}` - Start library indexing with mode selection (auto/incremental/full)
+- `POST /api/index/library/{library_id}` - Start library indexing with mode selection (auto/incremental/full) — **local mode only**
   - Query parameters: `mode` (auto/incremental/full), `library_type`, `library_name`
-- `GET /api/index/library/{library_id}/progress` - Stream indexing progress via SSE
+- `GET /api/index/library/{library_id}/progress` - Stream indexing progress via SSE (supports `?api_key=` for EventSource compatibility)
 - `POST /api/index/library/{library_id}/cancel` - Cancel ongoing indexing operation
+
+**Document Upload API:** [backend/api/document_upload.py](../backend/api/document_upload.py)
+
+New endpoints for remote mode:
+
+- `POST /api/libraries/{library_id}/check-indexed` — accepts `CheckIndexedRequest` (list of attachment keys + versions); returns `CheckIndexedResponse` with `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment
+- `POST /api/index/document` — accepts multipart form data (`file`: raw bytes, `metadata`: JSON string); validates API key, runs `DocumentProcessor._process_attachment_bytes()`, returns `DocumentUploadResult`
 
 **Query API:** [backend/api/query.py](../backend/api/query.py)
 
@@ -168,28 +220,21 @@ The backend is organized into a layered architecture with clear separation of co
 - Orchestrates the complete indexing pipeline
 - Supports incremental indexing (version-based change detection)
 - Three indexing modes: auto, incremental, and full
-- Fetches items from Zotero libraries with version tracking
-- Extracts text from PDFs with page tracking
-- Chunks text semantically
-- Generates embeddings
-- Stores chunks in vector database with version metadata
+- Fetches items from Zotero libraries with version tracking (local mode)
+- Delegates extraction and chunking to a `DocumentExtractor` implementation
+- Generates embeddings and stores chunks in vector database with version metadata
 - Handles deduplication via content hashing
+- `_process_attachment_bytes(file_bytes, mime_type, doc_metadata, ...)` — shared processing core used by both the local Zotero-API path and the remote upload endpoint
 - Provides progress callbacks and cancellation support
 
-**PDF Extractor:** [backend/services/pdf_extractor.py](../backend/services/pdf_extractor.py)
+**Document Extraction:** [backend/services/extraction/](../backend/services/extraction/)
 
-- Extracts text from PDF files using pypdf
-- Tracks page numbers for each text segment
-- Handles corrupted/invalid PDFs gracefully
-- Supports byte streams and file paths
+Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `text/html`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/epub+zip`.
 
-**Text Chunker:** [backend/services/chunking.py](../backend/services/chunking.py)
-
-- Semantic chunking using spaCy (lazy model loading)
-- Sentence-boundary aware chunking
-- Configurable chunk size and overlap
-- Generates text previews (first 5 words) for citation anchors
-- Content hash generation for deduplication
+- **`DocumentExtractor`** (ABC) — `extract_and_chunk(content: bytes, mime_type: str) → list[ExtractionChunk]`
+- **`KreuzbergExtractor`** (default) — Rust-based, native async, 91+ formats via [Kreuzberg](https://kreuzberg.dev/). Chunking and page tracking built-in.
+- **`LegacyExtractor`** — Wraps the original `PDFExtractor` (pypdf) + `TextChunker` (spaCy) pipeline. PDF-only; kept for fallback.
+- **`create_document_extractor(backend, max_chunk_size, chunk_overlap, ocr_enabled)`** — factory function; backend selectable via `extractor_backend` setting.
 
 **Embedding Service:** [backend/services/embeddings.py](../backend/services/embeddings.py)
 
@@ -227,7 +272,7 @@ The backend is organized into a layered architecture with clear separation of co
 - Three collections:
   - `document_chunks` - Document chunks with embeddings and version metadata
   - `deduplication` - Content-hash based deduplication tracking
-  - `library_metadata` - Library-level indexing state (NEW)
+  - `library_metadata` - Library-level indexing state
 - CRUD operations for chunks and library metadata
 - Version-aware chunk operations (get, delete by item)
 - Similarity search with filtering
@@ -254,15 +299,16 @@ The backend is organized into a layered architecture with clear separation of co
 **Configuration System:**
 
 - **Presets:** [backend/config/presets.py](../backend/config/presets.py)
-  - Hardware presets: `mac-mini-m4-16gb`, `cpu-only`, `gpu-high-memory`, `remote-openai`, `remote-kisski`
+  - Hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `apple-silicon-kisski`, `remote-kisski`, `windows-test`
   - Model configurations for embeddings and LLMs
   - Memory budgets and quantization settings
 - **Settings:** [backend/config/settings.py](../backend/config/settings.py)
   - Environment variable configuration
   - Path expansion for model weights and vector DB
   - Dynamic API key handling
+  - Remote deployment settings (`api_key`, `allowed_origins`, `require_zotero`)
 
-**Zotero Integration:**
+**Zotero Integration (local mode only):**
 
 - **Local API Client:** [backend/zotero/local_api.py](../backend/zotero/local_api.py)
   - Direct HTTP interface to Zotero local server (localhost:23119)
@@ -289,6 +335,10 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 - Global `ZoteroRAG` object
 - Menu integration (Tools → "Ask Question")
 - Backend communication (HTTP + SSE)
+- `backendURL` loaded from `extensions.zotero-rag.backendURL` preference
+- `apiKey` loaded from `extensions.zotero-rag.apiKey` preference
+- `getAuthHeaders(extra)` — builds `{"X-API-Key": ...}` header map when key is set
+- `addApiKeyParam(url)` — appends `?api_key=` to SSE URLs (EventSource can't set headers)
 - Library selection logic
 - Note creation with HTML formatting
 - Version compatibility checking
@@ -300,14 +350,29 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 - Question input, library selection, progress display
 - Indexing mode selection (auto/incremental/full)
 - Library metadata display (last indexed, item counts, chunk counts)
-- SSE streaming for indexing progress
+- SSE streaming for indexing progress (API key appended as query param)
 - Operation cancellation support (abort button)
+- All `fetch()` calls include `X-API-Key` header via `plugin.getAuthHeaders()`
+- Remote vs local mode branching in `checkAndMonitorIndexing()`
 - Status messages and error handling
-- Inline CSS styling
+
+**Remote Indexer:** [plugin/src/remote_indexer.js](../plugin/src/remote_indexer.js)
+
+Coordinates document upload when `backendURL` is remote. Loaded as a subscript in `dialog.xhtml`.
+
+- `RemoteIndexer.indexLibrary({libraryId, libraryType, backendURL, getAuthHeaders, onProgress, isCancelled})`
+  1. Collect all locally-stored attachments with indexable MIME types
+  2. POST `/api/libraries/{id}/check-indexed` to find which need uploading
+  3. For each attachment needing upload: `IOUtils.read(path)` → multipart `FormData` → POST `/api/index/document`
+  4. Calls `onProgress` callback after each document
+- `_collectAttachments()` — queries Zotero JS API, filters by storage type and MIME type
+- `_checkIndexed()` — batch version check; falls back to "upload all" on error
+- `_uploadAttachment()` — reads bytes and posts multipart form data with full item metadata
 
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
-- Backend URL configuration
+- Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
+- API key configuration (`extensions.zotero-rag.apiKey`) — shown only when URL is not localhost/127.0.0.1
 - Max concurrent queries setting
 - HTML-based preferences pane
 - Custom CSS styling: [plugin/src/preferences.css](../plugin/src/preferences.css)
@@ -327,7 +392,7 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 
 ## Data Flow
 
-### Indexing Workflow
+### Indexing Workflow — Local Mode
 
 ```text
 1. User selects "Ask Question" from Tools menu
@@ -350,7 +415,7 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 7. When all libraries indexed, plugin submits query
 ```
 
-**Backend Indexing Pipeline:**
+**Backend Indexing Pipeline (local mode):**
 
 ```text
 1. DocumentProcessor.index_library(library_id, mode)
@@ -363,23 +428,37 @@ The plugin provides a user-friendly interface within Zotero for asking questions
    - Incremental mode: Use ?since=<last_version> to get only new/modified items
    - Full mode: Fetch all items
    ↓
-5. Filter items with PDF attachments
+5. Filter items with indexable attachments (PDF, HTML, DOCX, EPUB)
    ↓
 6. For each item:
    a. Check for cancellation (abort if requested)
    b. Compare versions (incremental mode: skip if version unchanged)
    c. Delete old chunks if item updated (incremental mode)
-   d. Download PDF file
-   e. Extract text with page numbers (PDFExtractor)
-   f. Check for duplicates (content hash)
-   g. Chunk text semantically (TextChunker)
-   h. Generate embeddings (EmbeddingService)
-   i. Store chunks with version metadata in vector database
-   j. Call progress callback
+   d. Download attachment file bytes
+   e. Call _process_attachment_bytes() → extract → embed → store
    ↓
 7. Update library metadata (last_indexed_version, timestamp, counts, mode)
    ↓
 8. Return statistics (mode, items processed/added/updated, chunks added/deleted, timing)
+```
+
+### Indexing Workflow — Remote Mode
+
+```text
+1. Plugin detects remote backend (URL not localhost/127.0.0.1)
+   ↓
+2. RemoteIndexer.indexLibrary() runs:
+   a. Collect all locally-stored attachments (Zotero JS API)
+   b. POST /api/libraries/{id}/check-indexed → get list of which need uploading
+   ↓
+3. For each attachment needing upload:
+   a. IOUtils.read(localFilePath) → bytes
+   b. Build FormData: file bytes + JSON metadata (title, authors, year, DOI, etc.)
+   c. POST /api/index/document with X-API-Key header
+   d. Backend: validate → dedup check → _process_attachment_bytes() → store
+   e. Plugin updates progress display
+   ↓
+4. When all attachments processed, plugin submits query
 ```
 
 ### Query Workflow
@@ -415,48 +494,64 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 
 ### Hardware Presets
 
-The system includes five hardware presets optimized for different deployment scenarios:
+The system includes hardware presets optimized for different deployment scenarios:
 
-#### 1. `mac-mini-m4-16gb` (Default)
+#### 1. `apple-silicon-32gb`
 
-- **Target:** Mac Mini M4 with 16GB RAM
-- **Embedding:** nomic-embed-text-v1.5 (~550MB)
-- **LLM:** Qwen2.5-3B-Instruct (4-bit quantized, ~2GB)
-- **Total Memory:** ~6-7GB (leaves headroom for system and Qdrant)
+- **Target:** Apple Silicon Macs with 32GB RAM
+- **Embedding:** nomic-ai/nomic-embed-text-v1.5 (Neural Engine, ~550MB)
+- **LLM:** Mistral-7B-Instruct-v0.3 (4-bit quantized, ~4GB)
+- **Total Memory:** ~10GB
 - **Device:** MPS (Apple Silicon GPU)
 
-#### 2. `cpu-only`
+#### 2. `high-memory`
+
+- **Target:** Systems with >24GB RAM (GPU or Apple Silicon)
+- **Embedding:** sentence-transformers/all-mpnet-base-v2
+- **LLM:** Mistral-7B-Instruct-v0.3 (8-bit quantized)
+- **Total Memory:** ~16GB
+- **Device:** CUDA / auto
+
+#### 3. `cpu-only`
 
 - **Target:** Systems without GPU
 - **Embedding:** all-MiniLM-L6-v2 (~80MB)
 - **LLM:** TinyLlama-1.1B (4-bit quantized)
-- **Total Memory:** ~2-3GB
+- **Total Memory:** ~3GB
 - **Device:** CPU
-
-#### 3. `gpu-high-memory`
-
-- **Target:** Systems with dedicated GPU and >24GB RAM
-- **Embedding:** sentence-transformers/all-mpnet-base-v2
-- **LLM:** Mistral-7B-Instruct (8-bit quantized)
-- **Total Memory:** ~10-12GB
-- **Device:** CUDA
 
 #### 4. `remote-openai`
 
 - **Target:** Using OpenAI or Anthropic APIs
-- **Embedding:** all-MiniLM-L6-v2 (local, for privacy)
-- **LLM:** GPT-4, GPT-3.5, or Claude (remote)
+- **Embedding:** OpenAI Embeddings API (remote)
+- **LLM:** gpt-4o-mini or equivalent (remote)
 - **Total Memory:** ~1GB (minimal local requirements)
-- **API Key:** `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
+- **API Key:** `OPENAI_API_KEY`
 
-#### 5. `remote-kisski`
+#### 5. `apple-silicon-kisski`
 
-- **Target:** GWDG KISSKI Academic Cloud
-- **Embedding:** all-MiniLM-L6-v2 (local, for privacy)
-- **LLM:** meta-llama/Llama-3.3-70B-Instruct (128k context)
-- **Total Memory:** ~1GB
-- **Base URL:** `https://chat-ai.academiccloud.de/v1`
+- **Target:** Apple Silicon (16–32GB) with GWDG KISSKI remote LLM
+- **Embedding:** nomic-ai/nomic-embed-text-v1.5 (local, Neural Engine)
+- **LLM:** mistral-large-instruct via KISSKI (remote, 128k context)
+- **Total Memory:** ~2GB
 - **API Key:** `KISSKI_API_KEY`
+
+#### 6. `remote-kisski`
+
+- **Target:** Any machine with GWDG KISSKI Academic Cloud
+- **Embedding:** all-MiniLM-L6-v2 (local, for privacy)
+- **LLM:** mistral-large-instruct via KISSKI (remote, 128k context)
+- **Total Memory:** ~1GB
+- **API Key:** `KISSKI_API_KEY`
+- **Base URL:** `https://chat-ai.academiccloud.de/v1`
+
+#### 7. `windows-test`
+
+- **Target:** Windows (avoids PyTorch local models)
+- **Embedding:** OpenAI Embeddings API (remote)
+- **LLM:** mistral-large-instruct via KISSKI (remote)
+- **Total Memory:** ~0.5GB (everything remote)
+- **API Keys:** `OPENAI_API_KEY`, `KISSKI_API_KEY`
 
 ### Configuration Files
 
@@ -464,7 +559,7 @@ The system includes five hardware presets optimized for different deployment sce
 
 ```bash
 # Hardware preset selection
-MODEL_PRESET=mac-mini-m4-16gb
+MODEL_PRESET=cpu-only
 
 # Storage paths
 MODEL_CACHE_DIR=~/.cache/zotero-rag/models
@@ -474,14 +569,22 @@ VECTOR_DB_PATH=~/.local/share/zotero-rag/qdrant
 OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 KISSKI_API_KEY=your-kisski-key
+
+# Remote server deployment (optional)
+API_KEY=your-secret-key          # Required X-API-Key header when set
+ALLOWED_ORIGINS=https://myhost   # CORS allowed origins (default: *)
+REQUIRE_ZOTERO=false             # Skip Zotero connectivity check (remote deployments)
 ```
 
 **Plugin Preferences:**
 
 ```
 extensions.zotero-rag.backendURL = http://localhost:8119
+extensions.zotero-rag.apiKey     = (empty for local, set for remote)
 extensions.zotero-rag.maxQueries = 5
 ```
+
+The `backendURL` preference is the single configuration point for server location. Changing it to a remote URL automatically switches the plugin to remote mode.
 
 ---
 
@@ -489,7 +592,7 @@ extensions.zotero-rag.maxQueries = 5
 
 ### 1. Zotero Local API vs PyZotero
 
-**Decision:** Use Zotero Local API (localhost:23119) as primary interface
+**Decision:** Use Zotero Local API (localhost:23119) as primary interface for local mode
 
 **Rationale:**
 
@@ -522,16 +625,24 @@ extensions.zotero-rag.maxQueries = 5
 - SHA256 hash ensures uniqueness
 - Stored in vector database for persistence
 
-### 4. Chunking Approach
+### 4. Document Extraction Adapter Pattern
 
-**Decision:** Semantic chunking with spaCy at sentence boundaries
+**Decision:** Pluggable `DocumentExtractor` ABC with Kreuzberg as the default backend
 
 **Rationale:**
 
-- Preserves semantic coherence
-- Better than fixed-size chunking for academic papers
-- Maintains document structure (paragraphs)
-- Page number tracking for precise citations
+- Decouples the indexing pipeline from any specific extraction library
+- Kreuzberg: Rust-based, native async, 91+ formats, 9-50× faster than pypdf+spaCy
+- Legacy pypdf+spaCy fallback preserved for comparison and compatibility
+- Supports HTML, DOCX, EPUB attachments in addition to PDF
+- Backend selectable at runtime via `extractor_backend` setting without code changes
+
+**Implementation:**
+
+- `DocumentExtractor` ABC mirrors existing `EmbeddingService`/`LLMService` pattern
+- `ExtractionChunk` carries `text`, `page_number`, and `chunk_index`
+- `create_document_extractor()` factory mirrors `create_embedding_service()`
+- `KreuzbergExtractor` uses `ExtractionConfig(chunking=ChunkingConfig(...), disable_ocr=...)`
 
 ### 5. LLM Flexibility
 
@@ -566,6 +677,8 @@ extensions.zotero-rag.maxQueries = 5
 - No WebSocket complexity
 - Perfect for progress updates
 
+EventSource limitation: cannot set custom headers. Worked around by supporting `?api_key=` query parameter in the SSE endpoint alongside the `X-API-Key` header.
+
 ### 8. Incremental Indexing
 
 **Decision:** Version-based incremental indexing with metadata tracking
@@ -586,7 +699,26 @@ extensions.zotero-rag.maxQueries = 5
 - Automatic detection of metadata updates (title, author changes)
 - Hard reset API for manual full reindexing
 
-### 9. Operation Cancellation
+### 9. Remote Server Support
+
+**Decision:** Plugin-side file upload with optional API key authentication
+
+**Rationale:**
+
+- Backend on a remote/more-powerful machine requires a different document delivery mechanism
+- Document extraction and embedding are bytes-based throughout — no filesystem assumptions
+- Shared `_process_attachment_bytes()` core avoids code duplication between local and remote paths
+- API key is optional: local mode works without any authentication, remote mode enforces it when `API_KEY` is set
+
+**Implementation:**
+
+- Mode detection: `backendURL` not containing `localhost`/`127.0.0.1`
+- Plugin reads files via Firefox `IOUtils.read()` — available in Zotero's JS environment
+- `check-indexed` batch endpoint minimises unnecessary uploads (only changed/new attachments)
+- `X-API-Key` header for all endpoints; `?api_key=` query param for SSE (EventSource limitation)
+- `REQUIRE_ZOTERO=false` skips Zotero local API connectivity check for remote deployments
+
+### 10. Operation Cancellation
 
 **Decision:** Cooperative cancellation with backend cleanup
 
@@ -604,7 +736,7 @@ extensions.zotero-rag.maxQueries = 5
 - Document processor raises `RuntimeError` on cancellation
 - SSE stream sends cancellation event to frontend
 
-### 10. Testing Strategy
+### 11. Testing Strategy
 
 **Decision:** Mock-based unit tests + real integration tests
 
@@ -658,10 +790,10 @@ extensions.zotero-rag.maxQueries = 5
 
 **Hardware Presets:**
 
-- `mac-mini-m4-16gb`: ~6-7GB
-- `cpu-only`: ~2-3GB
-- `gpu-high-memory`: ~10-12GB
-- `remote-*`: ~1GB (minimal)
+- `apple-silicon-32gb`: ~10GB
+- `high-memory`: ~16GB
+- `cpu-only`: ~3GB
+- `remote-*` / `windows-test`: ~0.5–2GB (minimal local)
 
 **Strategies:**
 
@@ -674,28 +806,40 @@ extensions.zotero-rag.maxQueries = 5
 
 ## Security & Privacy
 
-### Local-First Architecture
+### Data Privacy
 
-- All data stays local (PDFs, embeddings, vector DB)
-- No cloud storage of research documents
-- Local API requires no authentication
+- Document bytes and embeddings stay on the backend server (local or chosen remote)
+- No cloud storage of research documents unless a remote backend is explicitly configured
 - Optional remote LLM APIs use HTTPS
+
+### API Authentication
+
+- **Local mode (default):** No authentication required; backend only reachable on localhost
+- **Remote mode:** Set `API_KEY` env var on the backend to require `X-API-Key: <key>` on all requests
+  - Health check (`/`, `/health`, `/api/version`) is exempt from API key check
+  - SSE endpoint accepts key as `?api_key=` query param (EventSource API limitation)
+  - Plugin stores key in `extensions.zotero-rag.apiKey` preference; UI shows it only when URL is remote
+
+### CORS Configuration
+
+- Default `ALLOWED_ORIGINS=["*"]` works for local development
+- For remote deployments set `ALLOWED_ORIGINS=https://your-domain` to restrict origins
 
 ### Plugin Security
 
 - HTML escaping prevents XSS in note content
 - Backend URL validation in preferences
-- CORS configured for localhost only
 - No external script loading
 
-### API Security
+### Deployment Recommendation
 
-- CORS middleware for local development
-- No authentication (local-only deployment)
-- Future: Add token-based auth for remote access
+For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or nginx) with TLS termination. Set `API_KEY`, restrict `ALLOWED_ORIGINS`, and set `REQUIRE_ZOTERO=false`.
 
-### Implementation Documentation
+---
 
+## Implementation Documentation
+
+- [Remote Server Support Implementation](implementation/remote-server-support.md)
 - [Incremental Indexing Implementation](implementation/incremental-indexing.md)
 
 ### CLI Documentation
@@ -721,8 +865,27 @@ extensions.zotero-rag.maxQueries = 5
 - Enhanced API with new endpoints for index status and cancellation
 - Improved plugin UI with mode selection and status display
 
+**Version 1.3 - April 2025:**
+- Replaced monolithic PDF extraction pipeline with pluggable `DocumentExtractor` adapter pattern
+- Introduced Kreuzberg as the default extraction backend (Rust-based, native async, 91+ formats)
+- Extended indexable MIME types: PDF, HTML, DOCX, EPUB
+- Added `extractor_backend` setting (`kreuzberg` or `legacy`)
+- Legacy pypdf + spaCy pipeline retained as `LegacyExtractor` fallback
+
+**Version 1.4 - April 2026:**
+
+- **Remote server support**: backend can now run on a separate machine
+- New document upload API: `POST /api/index/document` (multipart bytes + metadata) and `POST /api/libraries/{id}/check-indexed` (batch version check)
+- Extracted `DocumentProcessor._process_attachment_bytes()` as shared processing core for both local and remote paths
+- Plugin-side `RemoteIndexer` (`plugin/src/remote_indexer.js`): reads attachment bytes via `IOUtils.read()`, uploads via multipart form data
+- Automatic local/remote mode detection based on `backendURL` (configurable via plugin preferences)
+- Optional API key authentication (`API_KEY` env var, `X-API-Key` header; `?api_key=` param for SSE)
+- Configurable CORS origins (`ALLOWED_ORIGINS` env var)
+- `REQUIRE_ZOTERO=false` setting to skip Zotero local API check in remote deployments
+- Plugin preferences: API key field shown/hidden based on whether URL is local or remote
+- Updated hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `apple-silicon-kisski`, `remote-kisski`, `windows-test`
+
 ---
 
-**Document Version:** 1.1
-**Last Updated:** January 2025
-**Project Status:** Phase 4 (Integration & Polish) - Step 5 Complete (Incremental Indexing)
+**Document Version:** 1.4
+**Last Updated:** April 2026

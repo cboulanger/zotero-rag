@@ -2,7 +2,7 @@
 
 ## Overview
 
-The indexing system processes Zotero library items with PDF attachments, extracting text, generating embeddings, and storing them in a vector database for semantic search. The system supports incremental indexing based on Zotero's native version tracking.
+The indexing system processes Zotero library items with supported attachments (PDF, HTML, DOCX, EPUB), extracting text, generating embeddings, and storing them in a vector database for semantic search. The system supports incremental indexing based on Zotero's native version tracking.
 
 ## Architecture Components
 
@@ -14,10 +14,26 @@ The indexing system processes Zotero library items with PDF attachments, extract
 
 Orchestrates the indexing pipeline:
 
-- PDF extraction → text chunking → embedding generation → vector storage
+- Document extraction + chunking → embedding generation → vector storage
 - Manages indexing modes: auto, incremental, full
 - Handles progress tracking and cancellation
 - Implements version-aware incremental updates
+- Delegates extraction/chunking to a `DocumentExtractor` implementation (Kreuzberg by default)
+
+#### DocumentExtractor (Adapter)
+
+`backend/services/extraction/`
+
+Pluggable extraction layer supporting multiple backends and MIME types.
+
+**Supported MIME types:** `application/pdf`, `text/html`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/epub+zip`
+
+| Class | Backend | Notes |
+|-------|---------|-------|
+| `KreuzbergExtractor` | Kreuzberg (Rust) | Default; native async; 91+ formats; PDFium-based |
+| `LegacyExtractor` | pypdf + spaCy | PDF-only fallback |
+
+Select backend via `extractor_backend` setting (`kreuzberg` or `legacy`).
 
 #### VectorStore
 
@@ -29,11 +45,11 @@ Qdrant-based storage with three collections:
 - **deduplication**: Content hash → (library_id, item_key) mapping
 - **library_metadata**: Per-library indexing state
 
-#### ZoteroLocalAPI
+#### ZoteroLocalAPI (local mode only)
 
 `backend/zotero/local_api.py`
 
-HTTP client for Zotero's local API (localhost:23119):
+HTTP client for Zotero's local API (localhost:23119). Used only when the backend runs on the same machine as Zotero:
 
 - Fetch items with version filtering (?since parameter)
 - Get item children (attachments)
@@ -137,12 +153,11 @@ await processor.index_library(library_id, mode="full")
 1. Delete all library chunks (vector store)
 2. Delete all deduplication records
 3. Fetch all items from Zotero API
-4. Filter items with PDF attachments
+4. Filter items with indexable attachments (PDF, HTML, DOCX, EPUB)
 5. For each item:
-   - Download PDFs
+   - Download attachment bytes
    - Check content hash (skip if duplicate)
-   - Extract text with page numbers
-   - Chunk semantically (spaCy boundaries)
+   - Extract text + chunks (DocumentExtractor)
    - Generate embeddings (batch)
    - Store chunks with version metadata
    - Record deduplication entry
@@ -154,7 +169,7 @@ await processor.index_library(library_id, mode="full")
 ```
 1. Get library metadata (last_indexed_version)
 2. Fetch items modified since version via ?since parameter
-3. Filter items with PDF attachments
+3. Filter items with indexable attachments
 4. For each modified item:
    - Check existing chunk version
    - If new: Index normally
@@ -165,16 +180,15 @@ await processor.index_library(library_id, mode="full")
 ### Item Processing
 
 ```
-For each item with PDFs:
+For each item with indexable attachments:
 1. Extract authors, title, year from item data
 2. Get item children (attachments)
-3. Filter to PDF attachments
-4. For each PDF:
+3. Filter to supported MIME types
+4. For each attachment:
    - Download file bytes
    - Compute SHA256 hash
    - Check deduplication table
-   - Extract text pages (PDFExtractor)
-   - Chunk text (TextChunker: max_chunk_size=512, overlap=50)
+   - Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
    - Generate embeddings (EmbeddingService: batch processing)
    - Create ChunkMetadata with version info
    - Store in vector database
@@ -235,7 +249,7 @@ Deduplication record:
 
 ## API Endpoints
 
-### Index Library
+### Index Library (local mode)
 
 ```
 POST /api/index/library/{library_id}?mode=auto|incremental|full
@@ -298,25 +312,114 @@ POST /api/index/library/{library_id}/cancel
 
 Signals cancellation for ongoing indexing operation.
 
+### Check Indexed Status (remote mode)
+
+```
+POST /api/libraries/{library_id}/check-indexed
+```
+
+Batch endpoint used by the plugin in remote mode to determine which attachments need uploading.
+
+Request body:
+
+```json
+{
+    "library_id": "1",
+    "library_type": "user",
+    "attachments": [
+        {
+            "attachment_key": "DEF456",
+            "item_version": 42,
+            "attachment_version": 7
+        }
+    ]
+}
+```
+
+Response:
+
+```json
+{
+    "library_id": "1",
+    "statuses": [
+        {
+            "attachment_key": "DEF456",
+            "needs_indexing": true,
+            "reason": "version_changed"
+        }
+    ]
+}
+```
+
+`reason` values: `"not_indexed"`, `"version_changed"`, `"up_to_date"`
+
+### Upload Document (remote mode)
+
+```
+POST /api/index/document
+```
+
+Accepts multipart form data. Used by the plugin in remote mode to upload attachment bytes directly.
+
+Form fields:
+
+- `file`: raw file bytes
+- `metadata`: JSON string with item metadata
+
+```json
+{
+    "library_id": "1",
+    "library_type": "user",
+    "item_key": "ABC123",
+    "attachment_key": "DEF456",
+    "mime_type": "application/pdf",
+    "item_version": 42,
+    "attachment_version": 7,
+    "title": "...",
+    "authors": ["..."],
+    "year": 2023,
+    "abstract": "...",
+    "doi": "...",
+    "url": "...",
+    "zotero_uri": "zotero://..."
+}
+```
+
+Response:
+
+```json
+{
+    "success": true,
+    "attachment_key": "DEF456",
+    "chunks_added": 12
+}
+```
+
+Requires `X-API-Key` header when `API_KEY` is set on the backend.
+
 ## Text Processing
 
-### PDF Extraction
+### Document Extraction and Chunking
 
-`backend/services/pdf_extractor.py`
+`backend/services/extraction/`
 
-- Extracts text with page numbers
-- Returns list of (page_number, text) tuples
-- Handles extraction errors gracefully
+Extraction and chunking are handled together by a `DocumentExtractor` implementation:
 
-### Text Chunking
+```python
+chunks: list[ExtractionChunk] = await extractor.extract_and_chunk(file_bytes, mime_type)
+# ExtractionChunk(text: str, page_number: int | None, chunk_index: int)
+```
 
-`backend/services/chunking.py`
+**KreuzbergExtractor** (default):
+- Rust-based library, native async, handles 91+ formats
+- Chunking config: `max_chars=512`, `max_overlap=50` (default)
+- Page numbers tracked via `chunk.metadata['first_page']` (1-based)
+- OCR support (Tesseract); disable via `ocr_enabled=False`
+- Graceful fallback to no-OCR if Tesseract not installed
 
-- Semantic chunking using spaCy sentence boundaries
-- max_chunk_size: 512 characters (default)
-- chunk_overlap: 50 characters (default)
-- Preserves page number metadata
-- Generates text_preview (first 5 words) for citations
+**LegacyExtractor** (fallback, PDF-only):
+- pypdf for extraction, spaCy for sentence-boundary chunking
+- Equivalent defaults: `max_chunk_size=512`, `chunk_overlap=50`
 
 ### Embedding Generation
 
@@ -422,6 +525,7 @@ QDRANT_STORAGE_PATH = Path("~/.local/share/zotero-rag/qdrant")
 EMBEDDING_DIM = 768  # Model-specific
 MAX_CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
+EXTRACTOR_BACKEND = "kreuzberg"  # or "legacy" for pypdf+spaCy
 ```
 
 ### Storage Paths
@@ -477,7 +581,8 @@ CHUNK_OVERLAP = 50
 
 ### Unit Tests
 
-- `backend/tests/test_incremental_indexing.py`: DocumentProcessor logic
+- `backend/tests/test_document_processor.py`: DocumentProcessor core logic (uses mock extractor)
+- `backend/tests/test_incremental_indexing.py`: Incremental mode and version comparison
 - `backend/tests/test_zotero_client_versions.py`: Version API methods
 
 ### Integration Tests
@@ -499,7 +604,7 @@ CHUNK_OVERLAP = 50
 
 ## References
 
-- Implementation: [dev/done/implementation/incremental-indexing-summary.md](../dev/done/implementation/incremental-indexing-summary.md)
-- Strategy analysis: [dev/done/implementation/indexing-and-embedding-strategies.md](../dev/done/implementation/indexing-and-embedding-strategies.md)
+- Implementation: [docs/history/implementation/incremental-indexing-summary.md](history/implementation/incremental-indexing-summary.md)
+- Strategy analysis: [docs/history/implementation/indexing-and-embedding-strategies.md](history/implementation/indexing-and-embedding-strategies.md)
 - Zotero Web API: <https://www.zotero.org/support/dev/web_api/v3/syncing>
 - Qdrant documentation: <https://qdrant.tech/documentation/>

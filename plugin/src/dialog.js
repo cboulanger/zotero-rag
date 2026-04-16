@@ -37,6 +37,9 @@
 /**
  * @typedef {Object} ZoteroRAGPlugin
  * @property {string} backendURL - Backend server URL
+ * @property {string} apiKey - API key for remote backend (empty string if not set)
+ * @property {function(Record<string,string>=): Record<string,string>} getAuthHeaders - Build auth headers
+ * @property {function(string): string} addApiKeyParam - Append api_key query param for SSE URLs
  * @property {function(): Array<Library>} getLibraries - Get available libraries
  * @property {function(): string} getCurrentLibrary - Get current library ID
  * @property {function(string, Array<string>, QueryOptions=): Promise<QueryResult>} submitQuery - Submit RAG query
@@ -167,7 +170,9 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return;
 
 		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/config`);
+			const response = await fetch(`${this.plugin.backendURL}/api/config`, {
+				headers: this.plugin.getAuthHeaders()
+			});
 			if (response.ok) {
 				const config = await response.json();
 				const defaultMinScore = config.default_min_score || 0.3;
@@ -201,7 +206,9 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return null;
 
 		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/libraries/${libraryId}/index-status`);
+			const response = await fetch(`${this.plugin.backendURL}/api/libraries/${libraryId}/index-status`, {
+				headers: this.plugin.getAuthHeaders()
+			});
 			if (response.status === 404) {
 				// Library not indexed yet
 				return null;
@@ -261,9 +268,12 @@ var ZoteroRAGDialog = {
 						// Fetch metadata if not already loaded
 						if (!this.libraryMetadata.has(libraryId)) {
 							await this.fetchAndUpdateLibraryMetadata(libraryId);
+						} else {
+							this.updateSubmitButtonState();
 						}
 					} else {
 						this.selectedLibraries.delete(libraryId);
+						this.updateSubmitButtonState();
 					}
 				}
 			});
@@ -297,6 +307,9 @@ var ZoteroRAGDialog = {
 		// Load metadata for the currently selected library (if any)
 		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
 			await this.fetchAndUpdateLibraryMetadata(currentLibrary);
+			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata
+		} else {
+			this.updateSubmitButtonState();
 		}
 	},
 
@@ -326,6 +339,72 @@ var ZoteroRAGDialog = {
 				metaSpan.textContent = 'error loading';
 				metaSpan.style.color = '#cc0000';
 			}
+		}
+
+		// Re-evaluate button state after metadata arrives
+		this.updateSubmitButtonState();
+	},
+
+	/**
+	 * Return true when every selected library has never been indexed.
+	 * In this mode the question box is hidden and the button says "Index".
+	 * @returns {boolean}
+	 */
+	isIndexOnlyMode() {
+		if (this.selectedLibraries.size === 0) return false;
+		for (const id of this.selectedLibraries) {
+			// If metadata hasn't loaded yet, assume indexed (optimistic — avoids flicker)
+			if (!this.libraryMetadata.has(id)) return false;
+			// If any selected library IS indexed, stay in normal Submit mode
+			if (this.libraryMetadata.get(id) !== null) return false;
+		}
+		return true;
+	},
+
+	/**
+	 * Sync submit button label and question input state to current selection.
+	 * - All selected libraries unindexed → button = "Index", question disabled
+	 * - Otherwise                         → button = "Submit", question enabled
+	 * @returns {void}
+	 */
+	updateSubmitButtonState() {
+		const submitButton = /** @type {HTMLButtonElement|null} */ (
+			document.getElementById('submit-button')
+		);
+		const questionInput = /** @type {HTMLTextAreaElement|null} */ (
+			document.getElementById('question-input')
+		);
+		const questionLabel = document.querySelector('label[for="question-input"]');
+
+		if (!submitButton) return;
+
+		if (this.selectedLibraries.size === 0) {
+			submitButton.disabled = true;
+			submitButton.textContent = 'Submit';
+			if (questionInput) {
+				questionInput.disabled = false;
+				questionInput.style.opacity = '';
+				questionInput.placeholder = 'Enter your question here...';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
+		} else if (this.isIndexOnlyMode()) {
+			submitButton.disabled = false;
+			submitButton.textContent = 'Index';
+			if (questionInput) {
+				questionInput.disabled = true;
+				questionInput.style.opacity = '0.4';
+				questionInput.placeholder = 'Index the library first, then ask a question.';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '0.4';
+		} else {
+			submitButton.disabled = false;
+			submitButton.textContent = 'Submit';
+			if (questionInput) {
+				questionInput.disabled = false;
+				questionInput.style.opacity = '';
+				questionInput.placeholder = 'Enter your question here...';
+			}
+			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
 		}
 	},
 
@@ -379,13 +458,27 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Submit the query to the backend.
+	 * Submit the query (or trigger indexing when all selected libraries are unindexed).
 	 * @returns {Promise<void>}
 	 */
 	async submit() {
+		this.showStatus(`[DEBUG] submit() called, plugin=${!!this.plugin}, libs=${this.selectedLibraries.size}`, 'info'); // DEBUG
 		if (!this.plugin) return;
 
-		const questionInput = /** @type {HTMLInputElement|null} */ (
+		if (this.selectedLibraries.size === 0) {
+			this.showStatus('Please select at least one library.', 'error');
+			return;
+		}
+
+		// Index-only mode: all selected libraries have never been indexed
+		const indexOnly = this.isIndexOnlyMode();
+		this.showStatus(`[DEBUG] isIndexOnlyMode=${indexOnly}`, 'info'); // DEBUG
+		if (indexOnly) {
+			await this.submitIndexOnly();
+			return;
+		}
+
+		const questionInput = /** @type {HTMLTextAreaElement|null} */ (
 			document.getElementById('question-input')
 		);
 		if (!questionInput) return;
@@ -396,7 +489,7 @@ var ZoteroRAGDialog = {
 		const forceReindexCheckbox = /** @type {HTMLInputElement|null} */ (
 			document.getElementById('force-full-reindex')
 		);
-		const indexingMode = (forceReindexCheckbox && forceReindexCheckbox.checked) ? 'full' : 'incremental';
+		const indexingMode = (forceReindexCheckbox && forceReindexCheckbox.checked) ? 'full' : 'auto';
 
 		// Get similarity threshold
 		const similaritySlider = /** @type {HTMLInputElement|null} */ (
@@ -410,17 +503,12 @@ var ZoteroRAGDialog = {
 			return;
 		}
 
-		if (this.selectedLibraries.size === 0) {
-			this.showStatus('Please select at least one library.', 'error');
-			return;
-		}
-
 		// Clear previous status messages
 		this.clearStatusMessages();
 
 		// Disable submit button and cancel button during operation
 		this.setSubmitEnabled(false);
-		this.setCancelMode('abort'); // Change cancel button to abort mode
+		this.setCancelMode('abort');
 		this.showProgress('Processing request...', 'Submitting query...');
 
 		try {
@@ -447,11 +535,94 @@ var ZoteroRAGDialog = {
 			}, 1000);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${errorMessage}`, 'error');
+			// DEBUG
+			this.plugin.log(`[DEBUG] submit() caught error: ${errorMessage}`);
+			this.showStatus(`Error: ${errorMessage}`, 'error'); // DEBUG - show all errors directly
+
+			// If the backend reports that a library has no indexed data, the vector
+			// store is out of sync (e.g. indexing ran but extracted 0 chunks).
+			// Clear the stale metadata so the UI reverts to "Index" mode.
+			if (errorMessage.includes('None of the specified libraries have been indexed')) {
+				this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
+				await this.clearLibraryIndexState(Array.from(this.selectedLibraries));
+				this.setSubmitEnabled(true);
+				this.setCancelMode('close');
+				this.hideProgress();
+				return;
+			}
 			this.setSubmitEnabled(true);
-			this.setCancelMode('close'); // Restore cancel button to close mode
+			this.setCancelMode('close');
 			this.hideProgress();
 		}
+	},
+
+	/**
+	 * Clear index state for a list of libraries in the vector store and refresh
+	 * the UI so they show as unindexed.
+	 * @param {string[]} libraryIds
+	 * @returns {Promise<void>}
+	 */
+	async clearLibraryIndexState(libraryIds) {
+		if (!this.plugin) return;
+		const { backendURL } = this.plugin;
+		this.showStatus(`[DEBUG] clearLibraryIndexState: ids=${libraryIds.join(',')} url=${backendURL}`, 'info'); // DEBUG
+
+		for (const id of libraryIds) {
+			try {
+				const url = `${backendURL}/api/libraries/${encodeURIComponent(id)}/index`;
+				this.showStatus(`[DEBUG] DELETE ${url}`, 'info'); // DEBUG
+				const resp = await fetch(url, {
+					method: 'DELETE',
+					headers: this.plugin.getAuthHeaders(),
+				});
+				const body = await resp.text();
+				this.showStatus(`[DEBUG] DELETE → ${resp.status}: ${body}`, 'info'); // DEBUG
+			} catch (e) {
+				this.showStatus(`[DEBUG] DELETE threw: ${e}`, 'error'); // DEBUG
+			}
+			// Remove from local cache so fetchAndUpdateLibraryMetadata re-fetches
+			this.libraryMetadata.delete(id);
+			await this.fetchAndUpdateLibraryMetadata(id);
+		}
+	},
+
+	/**
+	 * Index-only submit: triggered when all selected libraries are unindexed.
+	 * Runs a full index, then refreshes metadata and switches to normal Submit mode.
+	 * @returns {Promise<void>}
+	 */
+	async submitIndexOnly() {
+		if (!this.plugin) return;
+
+		this.clearStatusMessages();
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Indexing...', 'Starting full index...');
+
+		const libraryIds = Array.from(this.selectedLibraries);
+
+		try {
+			await this.checkAndMonitorIndexing(libraryIds, 'full');
+
+			this.updateProgress(100, 'Indexing complete', 'Libraries are ready to query.');
+
+			// Refresh metadata for all indexed libraries so the button state updates
+			for (const id of libraryIds) {
+				this.libraryMetadata.delete(id);
+				await this.fetchAndUpdateLibraryMetadata(id);
+			}
+
+			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata,
+			// so by now the button will read "Submit" and the question box is re-enabled.
+			this.setCancelMode('close');
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error: ${errorMessage}`, 'error');
+			this.setCancelMode('close');
+			this.hideProgress();
+		}
+
+		this.setSubmitEnabled(true);
 	},
 
 	/**
@@ -498,6 +669,7 @@ var ZoteroRAGDialog = {
 			if (item.isAttachment()) {
 				attachments.push(item);
 			} else if (item.isRegularItem()) {
+				await item.loadDataType('childItems');
 				attachments = Zotero.Items.get(item.getAttachments());
 			} else {
 				continue;
@@ -559,52 +731,89 @@ var ZoteroRAGDialog = {
 
 		const backendURL = this.plugin.backendURL;
 
+		// Detect remote mode: backend URL does not point to the local machine.
+		// In remote mode the backend cannot access local Zotero files, so the
+		// plugin reads attachment bytes and uploads them directly.
+		const isRemote = !backendURL.includes('localhost') && !backendURL.includes('127.0.0.1');
+
 		for (let libraryId of libraryIds) {
 			try {
-				const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`);
-				const status = await statusResponse.json();
+				const libraries = this.plugin.getLibraries();
+				const library = libraries.find(lib => lib.id === libraryId);
+				const libraryName = library ? library.name : libraryId;
+				const libraryType = library ? library.type : 'user';
 
-				// For incremental mode, always trigger indexing to catch updates
-				// For full mode, force reindexing
-				// For auto mode, let backend decide
-				const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
+				if (isRemote) {
+					// ---------------------------------------------------------------
+					// Remote mode: plugin uploads attachment bytes to the backend
+					// ---------------------------------------------------------------
+					this.plugin.log(`Library ${libraryId}: remote mode — uploading attachments directly`);
 
-				if (shouldIndex) {
-					// Get library name and type for user-friendly messages
-					const libraries = this.plugin.getLibraries();
-					const library = libraries.find(lib => lib.id === libraryId);
-					const libraryName = library ? library.name : libraryId;
-					const libraryType = library ? library.type : 'user';
-
-					// Download missing attachments before indexing
+					// Ensure all attachments are synced locally before uploading
 					this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
 					await this.downloadMissingAttachments(libraryId, libraryType);
 
-					this.showStatus(`Indexing library ${libraryName}...`, 'info');
+					this.showStatus(`Uploading documents for ${libraryName}...`, 'info');
 
-					// Build URL with mode parameter
-					const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
-
-					const indexResponse = await fetch(indexURL, {
-						method: 'POST'
+					await RemoteIndexer.indexLibrary({
+						libraryId,
+						libraryType,
+						libraryName,
+						backendURL,
+						getAuthHeaders: (extra) => this.plugin.getAuthHeaders(extra),
+						log: (msg) => this.plugin.log(msg),
+						onProgress: ({ percentage, message, current, total }) => {
+							this.updateProgress(percentage, 'Uploading documents', message, current, total);
+						},
+						isCancelled: () => !this.isOperationInProgress,
 					});
 
-					if (!indexResponse.ok) {
-						const errorData = await indexResponse.json().catch(() => ({}));
+				} else {
+					// ---------------------------------------------------------------
+					// Local mode (unchanged): backend fetches files via Zotero local API
+					// ---------------------------------------------------------------
+					const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`, {
+						headers: this.plugin.getAuthHeaders()
+					});
+					const status = await statusResponse.json();
 
-						// If indexing is already in progress (409 conflict), reconnect to it
-						if (indexResponse.status === 409) {
-							this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
-							this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
-						} else {
-							// For other errors, throw
-							const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
-							throw new Error(`Failed to start indexing: ${errorMsg}`);
+					// For incremental mode, always trigger indexing to catch updates
+					// For full mode, force reindexing
+					// For auto mode, let backend decide
+					const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
+
+					if (shouldIndex) {
+						// Download missing attachments before indexing
+						this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
+						await this.downloadMissingAttachments(libraryId, libraryType);
+
+						this.showStatus(`Indexing library ${libraryName}...`, 'info');
+
+						// Build URL with mode parameter
+						const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
+
+						const indexResponse = await fetch(indexURL, {
+							method: 'POST',
+							headers: this.plugin.getAuthHeaders()
+						});
+
+						if (!indexResponse.ok) {
+							const errorData = await indexResponse.json().catch(() => ({}));
+
+							// If indexing is already in progress (409 conflict), reconnect to it
+							if (indexResponse.status === 409) {
+								this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
+								this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
+							} else {
+								// For other errors, throw
+								const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
+								throw new Error(`Failed to start indexing: ${errorMsg}`);
+							}
 						}
-					}
 
-					// Monitor progress (whether we just started it or reconnected to existing)
-					await this.monitorIndexingProgress(libraryId);
+						// Monitor progress (whether we just started it or reconnected to existing)
+						await this.monitorIndexingProgress(libraryId);
+					}
 				}
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
@@ -629,7 +838,10 @@ var ZoteroRAGDialog = {
 			}
 
 			const backendURL = this.plugin.backendURL;
-			const eventSource = new EventSource(`${backendURL}/api/index/library/${libraryId}/progress`);
+			const sseURL = this.plugin.addApiKeyParam(
+				`${backendURL}/api/index/library/${libraryId}/progress`
+			);
+			const eventSource = new EventSource(sseURL);
 
 			this.indexingStreams.set(libraryId, eventSource);
 
@@ -639,7 +851,7 @@ var ZoteroRAGDialog = {
 
 					switch (data.event) {
 						case 'started':
-							this.updateProgress(0, 'Starting indexing...', data.message || '');
+							// Do not show a message yet — wait for actual progress or completion
 							break;
 
 						case 'progress':
@@ -861,7 +1073,8 @@ var ZoteroRAGDialog = {
 			// Send abort signal to backend
 			try {
 				await fetch(`${this.plugin.backendURL}/api/index/library/${libraryId}/cancel`, {
-					method: 'POST'
+					method: 'POST',
+					headers: this.plugin.getAuthHeaders()
 				});
 			} catch (error) {
 				// Log but don't throw - cancellation should always succeed

@@ -223,6 +223,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         mock_zotero_api
     ):
         """Test starting indexing with auto mode."""
+        mock_create_task.side_effect = lambda coro: coro.close()
         # Mock Zotero API
         mock_client = AsyncMock()
         mock_client.check_connection.return_value = True
@@ -255,6 +256,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         mock_zotero_api
     ):
         """Test starting indexing with incremental mode."""
+        mock_create_task.side_effect = lambda coro: coro.close()
         # Mock Zotero API
         mock_client = AsyncMock()
         mock_client.check_connection.return_value = True
@@ -282,6 +284,7 @@ class TestIndexingAPIEndpoints(unittest.TestCase):
         mock_zotero_api
     ):
         """Test starting indexing with full mode."""
+        mock_create_task.side_effect = lambda coro: coro.close()
         # Mock Zotero API
         mock_client = AsyncMock()
         mock_client.check_connection.return_value = True

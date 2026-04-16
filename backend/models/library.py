@@ -3,7 +3,7 @@ Data models for library metadata and indexing state.
 """
 
 from typing import Literal
-from datetime import datetime
+from datetime import datetime, UTC
 from pydantic import BaseModel, Field, ConfigDict
 
 
@@ -33,7 +33,7 @@ class LibraryIndexMetadata(BaseModel):
         description="Highest Zotero version number processed"
     )
     last_indexed_at: str = Field(
-        default_factory=lambda: datetime.utcnow().isoformat(),
+        default_factory=lambda: datetime.now(UTC).isoformat(),
         description="ISO timestamp of last indexing operation"
     )
 

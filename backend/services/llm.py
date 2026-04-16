@@ -4,10 +4,11 @@ LLM service for text generation.
 Supports both local models (via transformers) and remote APIs (OpenAI, Anthropic).
 """
 
+import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
 
@@ -212,6 +213,30 @@ class RemoteLLMService(LLMService):
 
         logger.info(f"Initialized RemoteLLMService with model: {self.llm_config.model_name}")
 
+    def _dump_inference_request(self, payload: Dict[str, Any]) -> None:
+        """Write the inference request payload to logs/last-inference-request.json (overwrite)."""
+        try:
+            log_dir = self.settings.log_file.parent if self.settings.log_file else None
+            if log_dir is None:
+                return
+            log_dir.mkdir(parents=True, exist_ok=True)
+            dest = log_dir / "last-inference-request.json"
+            dest.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Could not write last-inference-request.json: {e}")
+
+    def _dump_inference_response(self, response_text: str) -> None:
+        """Write the raw LLM response to logs/last-inference-response.json (overwrite)."""
+        try:
+            log_dir = self.settings.log_file.parent if self.settings.log_file else None
+            if log_dir is None:
+                return
+            log_dir.mkdir(parents=True, exist_ok=True)
+            dest = log_dir / "last-inference-response.json"
+            dest.write_text(json.dumps({"response": response_text}, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Could not write last-inference-response.json: {e}")
+
     def _get_openai_client(self):
         """Lazy initialize OpenAI client."""
         if self._openai_client is None:
@@ -298,17 +323,20 @@ class RemoteLLMService(LLMService):
         """Generate using OpenAI API."""
         client = self._get_openai_client()
 
-        logger.info(f"Generating with OpenAI ({self.llm_config.model_name})")
+        logger.info(f"Generating with OpenAI ({self.llm_config.model_name}), prompt={len(prompt)} chars")
+        payload = {
+            "model": self.llm_config.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        self._dump_inference_request(payload)
 
-        response = await client.chat.completions.create(
-            model=self.llm_config.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        response = await client.chat.completions.create(**payload)
 
         generated_text = response.choices[0].message.content
         logger.info(f"Generated {len(generated_text)} characters")
+        self._dump_inference_response(generated_text)
         return generated_text.strip()
 
     async def _generate_anthropic(
@@ -320,17 +348,20 @@ class RemoteLLMService(LLMService):
         """Generate using Anthropic API."""
         client = self._get_anthropic_client()
 
-        logger.info(f"Generating with Anthropic ({self.llm_config.model_name})")
+        logger.info(f"Generating with Anthropic ({self.llm_config.model_name}), prompt={len(prompt)} chars")
+        payload = {
+            "model": self.llm_config.model_name,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        self._dump_inference_request(payload)
 
-        response = await client.messages.create(
-            model=self.llm_config.model_name,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[{"role": "user", "content": prompt}]
-        )
+        response = await client.messages.create(**payload)
 
         generated_text = response.content[0].text
         logger.info(f"Generated {len(generated_text)} characters")
+        self._dump_inference_response(generated_text)
         return generated_text.strip()
 
 
