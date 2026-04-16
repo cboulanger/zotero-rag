@@ -12,7 +12,7 @@ ARG INSTALL_BUILD_TOOLS
 RUN arch="${TARGETARCH:-$(uname -m)}"; \
     if [ "${INSTALL_BUILD_TOOLS}" = "true" ] \
     || { [ "${INSTALL_BUILD_TOOLS}" != "false" ] && { [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; }; }; then \
-      apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*; \
+      apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev cmake && rm -rf /var/lib/apt/lists/*; \
     fi
 
 WORKDIR /app
