@@ -156,13 +156,11 @@ function confirm(question) {
  * @param {boolean} noCache
  * @param {boolean} installOcr
  * @param {boolean} installLocalModels
- * @param {boolean|undefined} installBuildTools  undefined = auto (arm64 only)
  * @returns {Promise<boolean>}
  */
-async function buildImage(tag, noCache, installOcr = true, installLocalModels = false, installBuildTools = undefined) {
+async function buildImage(tag, noCache, installOcr = true, installLocalModels = false) {
   const fullTag = `${APP_NAME}:${tag}`;
-  const buildToolsLabel = installBuildTools === true ? 'forced' : installBuildTools === false ? 'skipped' : 'auto (arm64)';
-  console.log(`[INFO] Building ${fullTag} (OCR: ${installOcr ? 'included' : 'skipped'}, local-models: ${installLocalModels ? 'included' : 'skipped'}, build-tools: ${buildToolsLabel})...`);
+  console.log(`[INFO] Building ${fullTag} (OCR: ${installOcr ? 'included' : 'skipped'}, local-models: ${installLocalModels ? 'included' : 'skipped'})...`);
   if (installLocalModels) {
     console.log('[INFO] --local-models: sentence-transformers/torch will be installed (~1-2 GB extra)');
   }
@@ -170,9 +168,6 @@ async function buildImage(tag, noCache, installOcr = true, installLocalModels = 
   if (noCache) args.push('--no-cache');
   args.push('--build-arg', `INSTALL_OCR=${installOcr}`);
   args.push('--build-arg', `INSTALL_LOCAL_MODELS=${installLocalModels}`);
-  if (installBuildTools !== undefined) {
-    args.push('--build-arg', `INSTALL_BUILD_TOOLS=${installBuildTools}`);
-  }
   args.push('-t', fullTag);
   if (tag !== 'latest') args.push('-t', `${APP_NAME}:latest`);
   args.push('.');
@@ -187,7 +182,7 @@ async function buildImage(tag, noCache, installOcr = true, installLocalModels = 
 }
 
 /**
- * @param {{tag?: string, cache?: boolean, ocr?: boolean, localModels?: boolean, buildTools?: boolean, yes?: boolean}} options
+ * @param {{tag?: string, cache?: boolean, ocr?: boolean, localModels?: boolean, yes?: boolean}} options
  */
 async function handleBuild(options) {
   console.log('Zotero RAG - Container Build');
@@ -195,10 +190,9 @@ async function handleBuild(options) {
   const tag = resolveTag(options.tag);
   const installOcr = options.ocr !== false;
   const installLocalModels = options.localModels === true;
-  const installBuildTools = options.buildTools;  // undefined = auto
   console.log(`[INFO] Tag: ${tag}  OCR: ${installOcr}  local-models: ${installLocalModels}`);
   if (!options.yes && !(await confirm('Continue with build? (y/N): '))) process.exit(0);
-  if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels, installBuildTools))) process.exit(1);
+  if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels))) process.exit(1);
   console.log(`[INFO] To push: node bin/container.mjs push --tag ${tag}`);
 }
 
@@ -261,7 +255,7 @@ async function pushImage(tag) {
 }
 
 /**
- * @param {{tag?: string, build?: boolean, cache?: boolean, ocr?: boolean, localModels?: boolean, buildTools?: boolean, yes?: boolean}} options
+ * @param {{tag?: string, build?: boolean, cache?: boolean, ocr?: boolean, localModels?: boolean, yes?: boolean}} options
  */
 async function handlePush(options) {
   console.log('Zotero RAG - Container Push');
@@ -271,14 +265,13 @@ async function handlePush(options) {
   const doBuild = options.build !== false;
   const installOcr = options.ocr !== false;
   const installLocalModels = options.localModels === true;
-  const installBuildTools = options.buildTools;
   console.log(`[INFO] Tag: ${tag}  Registry: ${credentials.username}/${APP_NAME}  Build: ${doBuild}  OCR: ${installOcr}  local-models: ${installLocalModels}`);
   if (!options.yes && !(await confirm(`Continue with ${doBuild ? 'build + ' : ''}push? (y/N): `))) process.exit(0);
 
   process.on('exit', () => { try { execSync(`${containerCmd} logout docker.io`, { stdio: 'ignore' }); } catch {} });
 
   if (doBuild) {
-    if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels, installBuildTools))) process.exit(1);
+    if (!(await buildImage(tag, options.cache === false, installOcr, installLocalModels))) process.exit(1);
   }
   tagForRegistry(tag);
   if (!(await registryLogin())) process.exit(1);
@@ -652,7 +645,7 @@ async function handleDeploy(options) {
       process.exit(1);
     }
   } else if (options.rebuild) {
-    if (!(await buildImage(tag, options.cache === false, options.ocr !== false, options.localModels === true, options.buildTools))) process.exit(1);
+    if (!(await buildImage(tag, options.cache === false, options.ocr !== false, options.localModels === true))) process.exit(1);
   }
 
   // Verify image exists
@@ -728,8 +721,7 @@ program
   .option('--no-cache', 'Force rebuild all layers')
   .option('--no-ocr', 'Exclude Tesseract OCR (smaller image; set OCR_ENABLED=false at runtime)')
   .option('--local-models', 'Install sentence-transformers/torch for local presets (~1-2 GB extra; off by default)')
-  .option('--build-tools', 'Force-install gcc build tools (default: auto-detected on arm64)')
-  .option('--no-build-tools', 'Skip gcc install even on arm64')
+
   .option('--yes', 'Skip confirmation')
   .action(handleBuild);
 
@@ -741,8 +733,7 @@ program
   .option('--no-cache', 'Force rebuild all layers')
   .option('--no-ocr', 'Exclude Tesseract OCR (smaller image)')
   .option('--local-models', 'Install sentence-transformers/torch (~1-2 GB extra; off by default)')
-  .option('--build-tools', 'Force-install gcc build tools (default: auto-detected on arm64)')
-  .option('--no-build-tools', 'Skip gcc install even on arm64')
+
   .option('--yes', 'Skip confirmation')
   .action(handlePush);
 
@@ -803,8 +794,7 @@ program
   .option('--no-cache', 'Disable layer cache (with --rebuild)')
   .option('--no-ocr', 'Exclude Tesseract when rebuilding (smaller image; also set OCR_ENABLED=false)')
   .option('--local-models', 'Install sentence-transformers/torch when rebuilding (~1-2 GB extra; off by default)')
-  .option('--build-tools', 'Force-install gcc when rebuilding (default: auto-detected on arm64)')
-  .option('--no-build-tools', 'Skip gcc install even on arm64 when rebuilding')
+
   .option('--no-nginx', 'Skip nginx configuration')
   .option('--no-ssl', 'Skip SSL certificate setup')
   .option('--email <email>', 'Email for certbot (default: admin@<fqdn>)')

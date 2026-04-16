@@ -5,15 +5,12 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 # INSTALL_LOCAL_MODELS=true  → also installs sentence-transformers/torch for local presets
 ARG INSTALL_LOCAL_MODELS=false
 
-# kreuzberg (Rust/maturin) has no pre-built wheel for arm64 and must compile from source.
-# BuildKit sets TARGETARCH automatically; pass --build-arg INSTALL_BUILD_TOOLS=true/false to override.
-ARG TARGETARCH
-ARG INSTALL_BUILD_TOOLS
-RUN arch="${TARGETARCH:-$(uname -m)}"; \
-    if [ "${INSTALL_BUILD_TOOLS}" = "true" ] \
-    || { [ "${INSTALL_BUILD_TOOLS}" != "false" ] && { [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; }; }; then \
-      apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev cmake && rm -rf /var/lib/apt/lists/*; \
-    fi
+# kreuzberg (Rust/maturin) has no pre-built manylinux wheel and compiles from
+# source on all Linux targets — requires a C toolchain, cmake, and OpenSSL headers.
+# These are builder-only; they are NOT copied into the runtime image.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential pkg-config libssl-dev cmake \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
