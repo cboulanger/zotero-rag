@@ -119,20 +119,27 @@ npm install          # Install Node.js dependencies
 cp .env.dist .env    # Create environment config
 
 # Configure .env
-MODEL_PRESET=mac-mini-m4-16gb  # Or: cpu-only, gpu-high-memory, remote-openai, remote-kisski
-OPENAI_API_KEY=sk-...          # Optional: for remote presets
-KISSKI_API_KEY=...             # Optional: for KISSKI preset
+MODEL_PRESET=apple-silicon-kisski  # Or: see presets below
+OPENAI_API_KEY=sk-...              # Optional: for remote-openai / windows-test
+KISSKI_API_KEY=...                 # Optional: for KISSKI presets
+
+# Remote server deployments (optional)
+API_KEY=your-secret-key            # Require X-API-Key header from plugin
+ALLOWED_ORIGINS=https://myhost     # Restrict CORS (default: *)
+REQUIRE_ZOTERO=false               # Skip Zotero connectivity check
 ```
 
 ### Hardware Presets
 
 | Preset | Target Hardware | Memory |
 |--------|----------------|--------|
-| `mac-mini-m4-16gb` | Mac Mini M4, 16GB RAM (default) | ~6-7GB |
-| `cpu-only` | No GPU, low memory | ~2-3GB |
-| `gpu-high-memory` | GPU + >24GB RAM | ~10-12GB |
-| `remote-openai` | OpenAI/Anthropic API | ~1GB |
-| `remote-kisski` | GWDG KISSKI Academic Cloud | ~1GB |
+| `apple-silicon-kisski` | Apple Silicon (16-32GB) + KISSKI API | ~2GB |
+| `apple-silicon-32gb` | Apple Silicon 32GB, fully offline | ~10GB |
+| `high-memory` | GPU system >24GB RAM | ~16GB |
+| `cpu-only` | No GPU, low memory | ~3GB |
+| `remote-openai` | OpenAI API | ~1GB |
+| `remote-kisski` | Any system + KISSKI API | ~1GB |
+| `windows-test` | Windows development | ~0.5GB |
 
 **See [architecture.md](architecture.md#configuration-system) for detailed preset specifications.**
 

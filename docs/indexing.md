@@ -45,11 +45,11 @@ Qdrant-based storage with three collections:
 - **deduplication**: Content hash → (library_id, item_key) mapping
 - **library_metadata**: Per-library indexing state
 
-#### ZoteroLocalAPI
+#### ZoteroLocalAPI (local mode only)
 
 `backend/zotero/local_api.py`
 
-HTTP client for Zotero's local API (localhost:23119):
+HTTP client for Zotero's local API (localhost:23119). Used only when the backend runs on the same machine as Zotero:
 
 - Fetch items with version filtering (?since parameter)
 - Get item children (attachments)
@@ -249,7 +249,7 @@ Deduplication record:
 
 ## API Endpoints
 
-### Index Library
+### Index Library (local mode)
 
 ```
 POST /api/index/library/{library_id}?mode=auto|incremental|full
@@ -311,6 +311,91 @@ POST /api/index/library/{library_id}/cancel
 ```
 
 Signals cancellation for ongoing indexing operation.
+
+### Check Indexed Status (remote mode)
+
+```
+POST /api/libraries/{library_id}/check-indexed
+```
+
+Batch endpoint used by the plugin in remote mode to determine which attachments need uploading.
+
+Request body:
+
+```json
+{
+    "library_id": "1",
+    "library_type": "user",
+    "attachments": [
+        {
+            "attachment_key": "DEF456",
+            "item_version": 42,
+            "attachment_version": 7
+        }
+    ]
+}
+```
+
+Response:
+
+```json
+{
+    "library_id": "1",
+    "statuses": [
+        {
+            "attachment_key": "DEF456",
+            "needs_indexing": true,
+            "reason": "version_changed"
+        }
+    ]
+}
+```
+
+`reason` values: `"not_indexed"`, `"version_changed"`, `"up_to_date"`
+
+### Upload Document (remote mode)
+
+```
+POST /api/index/document
+```
+
+Accepts multipart form data. Used by the plugin in remote mode to upload attachment bytes directly.
+
+Form fields:
+
+- `file`: raw file bytes
+- `metadata`: JSON string with item metadata
+
+```json
+{
+    "library_id": "1",
+    "library_type": "user",
+    "item_key": "ABC123",
+    "attachment_key": "DEF456",
+    "mime_type": "application/pdf",
+    "item_version": 42,
+    "attachment_version": 7,
+    "title": "...",
+    "authors": ["..."],
+    "year": 2023,
+    "abstract": "...",
+    "doi": "...",
+    "url": "...",
+    "zotero_uri": "zotero://..."
+}
+```
+
+Response:
+
+```json
+{
+    "success": true,
+    "attachment_key": "DEF456",
+    "chunks_added": 12
+}
+```
+
+Requires `X-API-Key` header when `API_KEY` is set on the backend.
 
 ## Text Processing
 
@@ -519,7 +604,7 @@ EXTRACTOR_BACKEND = "kreuzberg"  # or "legacy" for pypdf+spaCy
 
 ## References
 
-- Implementation: [dev/done/implementation/incremental-indexing-summary.md](../dev/done/implementation/incremental-indexing-summary.md)
-- Strategy analysis: [dev/done/implementation/indexing-and-embedding-strategies.md](../dev/done/implementation/indexing-and-embedding-strategies.md)
+- Implementation: [docs/history/implementation/incremental-indexing-summary.md](history/implementation/incremental-indexing-summary.md)
+- Strategy analysis: [docs/history/implementation/indexing-and-embedding-strategies.md](history/implementation/indexing-and-embedding-strategies.md)
 - Zotero Web API: <https://www.zotero.org/support/dev/web_api/v3/syncing>
 - Qdrant documentation: <https://qdrant.tech/documentation/>

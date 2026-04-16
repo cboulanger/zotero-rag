@@ -170,11 +170,11 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 
 ## Usage
 
-Set the `PRESET` environment variable in your `.env` file:
+Set the `MODEL_PRESET` environment variable in your `.env` file:
 
 ```bash
 # Example: Use optimized Apple Silicon + KISSKI preset
-PRESET=apple-silicon-kisski
+MODEL_PRESET=apple-silicon-kisski
 ```
 
 For remote presets, also configure required API keys:

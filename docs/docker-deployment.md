@@ -50,12 +50,14 @@ CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8119"]
 
 ### Zotero Connectivity
 
-The container needs to reach Zotero running on the host. This requires:
+**Local mode** (Zotero on the host machine): The container needs to reach Zotero running on the host.
 
 - **Linux:** `--add-host=host.docker.internal:host-gateway` (passed by CLI)
 - **macOS/Windows:** `host.docker.internal` resolves automatically
 
 Default `ZOTERO_API_URL=http://host.docker.internal:23119` (set by CLI `--start`).
+
+**Remote mode** (plugin uploads documents): Set `REQUIRE_ZOTERO=false` to skip the Zotero connectivity check at startup. The plugin will upload document bytes directly to `/api/index/document`.
 
 ---
 
@@ -138,6 +140,11 @@ OPENAI_API_KEY=sk-...
 # ANTHROPIC_API_KEY=sk-ant-...
 # KISSKI_API_KEY=...
 LOG_LEVEL=INFO
+
+# Remote server mode (plugin uploads documents; no local Zotero needed)
+# API_KEY=your-secret-key       # Required X-API-Key header when set
+# ALLOWED_ORIGINS=https://myhost # Restrict CORS origins (default: *)
+# REQUIRE_ZOTERO=false           # Skip Zotero connectivity check
 ```
 
 ---

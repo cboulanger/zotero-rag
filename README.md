@@ -18,7 +18,7 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 ### 2. Start the Backend Server
 
-The plugin requires a locally or remotely deployed server to process your questions. Start it with:
+The plugin requires a locally or remotely deployed server to process your questions. The server URL is configured in the plugin's Preferences pane (`http://localhost:8119` by default). When using a remote server, set an API key there and enter it in the plugin preferences. Start it locally with:
 
 ```bash
 # with NodeJS:
