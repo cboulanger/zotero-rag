@@ -8,7 +8,7 @@ and vector database indexing with support for incremental indexing.
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, UTC
 from typing import Callable, Optional, Literal
 
 from backend.zotero.local_api import ZoteroLocalAPI
@@ -115,7 +115,7 @@ class DocumentProcessor:
             RuntimeError: If cancellation is requested during indexing.
         """
         logger.info(f"Starting indexing for library {library_id} (mode={mode})")
-        start_time = datetime.utcnow()
+        start_time = datetime.now(UTC)
 
         # Get or create library metadata
         metadata = self.vector_store.get_library_metadata(library_id)
@@ -155,11 +155,11 @@ class DocumentProcessor:
 
         # Update library metadata
         metadata.indexing_mode = effective_mode
-        metadata.last_indexed_at = datetime.utcnow().isoformat()
+        metadata.last_indexed_at = datetime.now(UTC).isoformat()
         metadata.total_chunks = self.vector_store.count_library_chunks(library_id)
         self.vector_store.update_library_metadata(metadata)
 
-        elapsed = (datetime.utcnow() - start_time).total_seconds()
+        elapsed = (datetime.now(UTC) - start_time).total_seconds()
         stats["elapsed_seconds"] = elapsed
         stats["mode"] = effective_mode
 
@@ -367,7 +367,7 @@ class DocumentProcessor:
         """
         item_key = item["data"]["key"]
         item_version = item["version"]
-        item_modified = item["data"].get("dateModified", datetime.utcnow().isoformat())
+        item_modified = item["data"].get("dateModified", datetime.now(UTC).isoformat())
 
         # Extract document metadata
         doc_metadata = DocumentMetadata(
@@ -492,7 +492,7 @@ class DocumentProcessor:
                 # Version fields
                 item_version=item_version,
                 attachment_version=attachment_version,
-                indexed_at=datetime.utcnow().isoformat(),
+                indexed_at=datetime.now(UTC).isoformat(),
                 zotero_modified=item_modified
             )
 

@@ -3,7 +3,7 @@ Data models for documents and chunks.
 """
 
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
@@ -39,7 +39,7 @@ class ChunkMetadata(BaseModel):
         description="Zotero attachment version at time of indexing"
     )
     indexed_at: str = Field(
-        default_factory=lambda: datetime.utcnow().isoformat(),
+        default_factory=lambda: datetime.now(UTC).isoformat(),
         description="ISO 8601 timestamp when chunk was indexed"
     )
     zotero_modified: str = Field(

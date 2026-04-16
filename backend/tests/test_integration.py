@@ -281,7 +281,9 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(result.sources), 0)
         self.assertEqual(result.sources[0].item_id, "ITEM1")
         self.assertEqual(result.sources[0].title, "ML Introduction")
-        self.assertEqual(result.sources[0].page_number, 1)
+        # page_number is intentionally None: page citations appear inline in
+        # the LLM answer via [N:P] notation, not on the source record.
+        self.assertIsNone(result.sources[0].page_number)
 
         # Verify: LLM was called with context
         mock_llm.generate.assert_called_once()

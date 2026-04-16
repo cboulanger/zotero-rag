@@ -5,6 +5,7 @@ Handles storage and retrieval of document chunk embeddings with metadata.
 """
 
 import logging
+import warnings
 from typing import Optional
 from pathlib import Path
 import uuid
@@ -123,12 +124,16 @@ class VectorStore:
                     distance=Distance.COSINE,
                 ),
             )
-            # Create index on library_id for fast lookups
-            self.client.create_payload_index(
-                collection_name=self.METADATA_COLLECTION,
-                field_name="library_id",
-                field_schema="keyword"
-            )
+            # Create index on library_id for fast lookups.
+            # In-memory/local Qdrant ignores payload indexes; suppress the
+            # expected UserWarning so it doesn't surface in test output.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.client.create_payload_index(
+                    collection_name=self.METADATA_COLLECTION,
+                    field_name="library_id",
+                    field_schema="keyword"
+                )
 
     def add_chunk(self, chunk: DocumentChunk) -> str:
         """
