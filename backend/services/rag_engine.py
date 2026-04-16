@@ -106,10 +106,25 @@ class RAGEngine:
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
+        # Deduplicate search results: keep only the best-scoring chunk per attachment
+        # so each source number maps to a unique document in the LLM context.
+        # Without this, multiple chunks from the same PDF all get distinct [N] labels,
+        # causing the LLM to cite the same paper as [1], [2], [3], etc.
+        seen_attachments: dict[str, object] = {}
+        for result in search_results:
+            key = (
+                result.chunk.metadata.document_metadata.attachment_key
+                or result.chunk.metadata.document_metadata.item_key
+            )
+            if key not in seen_attachments or result.score > seen_attachments[key].score:  # type: ignore[attr-defined]
+                seen_attachments[key] = result
+        unique_results = sorted(seen_attachments.values(), key=lambda r: r.score, reverse=True)  # type: ignore[attr-defined]
+        logger.info(f"Deduplicated to {len(unique_results)} unique documents for context")
+
         # Step 3: Assemble context from retrieved chunks
         context_parts = []
-        for i, result in enumerate(search_results, 1):
-            chunk = result.chunk
+        for i, result in enumerate(unique_results, 1):
+            chunk = result.chunk  # type: ignore[attr-defined]
             metadata = chunk.metadata
             doc_meta = metadata.document_metadata
 
@@ -161,9 +176,9 @@ Every reference to a source must use bracket notation such as [1] or [2:15].
 
         logger.info("Answer generated successfully")
 
-        # Step 6: Extract source citations
+        # Step 6: Extract source citations (one per unique document, matching LLM context order)
         sources = []
-        for result in search_results:
+        for result in unique_results:
             chunk = result.chunk
             metadata = chunk.metadata
             doc_meta = metadata.document_metadata

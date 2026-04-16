@@ -225,6 +225,18 @@ class RemoteLLMService(LLMService):
         except Exception as e:
             logger.debug(f"Could not write last-inference-request.json: {e}")
 
+    def _dump_inference_response(self, response_text: str) -> None:
+        """Write the raw LLM response to logs/last-inference-response.json (overwrite)."""
+        try:
+            log_dir = self.settings.log_file.parent if self.settings.log_file else None
+            if log_dir is None:
+                return
+            log_dir.mkdir(parents=True, exist_ok=True)
+            dest = log_dir / "last-inference-response.json"
+            dest.write_text(json.dumps({"response": response_text}, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"Could not write last-inference-response.json: {e}")
+
     def _get_openai_client(self):
         """Lazy initialize OpenAI client."""
         if self._openai_client is None:
@@ -324,6 +336,7 @@ class RemoteLLMService(LLMService):
 
         generated_text = response.choices[0].message.content
         logger.info(f"Generated {len(generated_text)} characters")
+        self._dump_inference_response(generated_text)
         return generated_text.strip()
 
     async def _generate_anthropic(
@@ -348,6 +361,7 @@ class RemoteLLMService(LLMService):
 
         generated_text = response.content[0].text
         logger.info(f"Generated {len(generated_text)} characters")
+        self._dump_inference_response(generated_text)
         return generated_text.strip()
 
 

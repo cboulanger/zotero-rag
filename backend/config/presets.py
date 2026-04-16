@@ -35,7 +35,7 @@ class RAGConfig(BaseModel):
 
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
     score_threshold: float = Field(default=0.3, description="Minimum similarity score (0.0-1.0)")
-    max_chunk_size: int = Field(default=512, description="Maximum tokens per chunk")
+    max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
 
 
 class HardwarePreset(BaseModel):
@@ -176,7 +176,7 @@ PRESETS = {
         rag=RAGConfig(
             top_k=10,
             score_threshold=0.35,
-            max_chunk_size=1024,
+            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
         memory_budget_gb=0.5,  # Fully remote — minimal local footprint
     ),
@@ -207,7 +207,7 @@ PRESETS = {
         rag=RAGConfig(
             top_k=10,
             score_threshold=0.35,  # multilingual-e5-large-instruct scores
-            max_chunk_size=2000,   # Larger chunks → fewer embeddings → fewer API calls
+            max_chunk_size=800,    # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
         memory_budget_gb=0.5,  # Fully remote — no local model weights
     ),
@@ -238,7 +238,7 @@ PRESETS = {
         rag=RAGConfig(
             top_k=10,
             score_threshold=0.35,
-            max_chunk_size=1024,
+            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
         memory_budget_gb=0.5,  # Fully remote
     ),
