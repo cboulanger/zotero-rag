@@ -28,6 +28,7 @@ def create_document_extractor(
     max_chunk_size: int = 512,
     chunk_overlap: int = 50,
     ocr_enabled: bool = True,
+    kreuzberg_url: str = "http://localhost:8100",
 ) -> DocumentExtractor:
     """
     Factory: create a DocumentExtractor for the named backend.
@@ -37,6 +38,7 @@ def create_document_extractor(
         max_chunk_size: Maximum characters per chunk.
         chunk_overlap: Overlap between consecutive chunks.
         ocr_enabled: Whether to enable OCR (Kreuzberg only).
+        kreuzberg_url: Base URL of the kreuzberg sidecar (kreuzberg backend only).
 
     Returns:
         Configured DocumentExtractor instance.
@@ -47,6 +49,7 @@ def create_document_extractor(
     match backend:
         case "kreuzberg":
             return KreuzbergExtractor(
+                kreuzberg_url=kreuzberg_url,
                 max_chunk_size=max_chunk_size,
                 chunk_overlap=chunk_overlap,
                 ocr_enabled=ocr_enabled,

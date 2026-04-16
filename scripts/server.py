@@ -33,6 +33,11 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
 
+# Kreuzberg sidecar configuration
+KREUZBERG_IMAGE = "ghcr.io/kreuzberg-dev/kreuzberg:latest"
+KREUZBERG_CONTAINER = "zotero-rag-kreuzberg"
+KREUZBERG_PORT = 8100
+
 # Track subprocess references to prevent handle cleanup errors on Windows
 # These need to be module-level to prevent premature garbage collection
 _plugin_process = None
@@ -213,6 +218,127 @@ def wait_for_plugin_startup(timeout=60):
     return False
 
 
+def get_extractor_backend():
+    """Read EXTRACTOR_BACKEND from the current environment (loaded from .env by load_dotenv).
+
+    Returns:
+        str: 'kreuzberg' (default) or 'legacy'
+    """
+    return os.environ.get('EXTRACTOR_BACKEND', 'kreuzberg').lower()
+
+
+def find_container_runtime():
+    """Detect an available container runtime (docker or podman).
+
+    Returns:
+        str: 'docker' or 'podman' if available and daemon is running, None otherwise.
+    """
+    for cmd in ['docker', 'podman']:
+        try:
+            subprocess.run([cmd, '--version'], capture_output=True, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+        try:
+            subprocess.run([cmd, 'info'], capture_output=True, check=True)
+            return cmd
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            continue
+    return None
+
+
+def start_kreuzberg():
+    """Start the kreuzberg extraction sidecar container.
+
+    Skipped when EXTRACTOR_BACKEND=legacy (no container needed).
+    Pulls the image if needed, then starts the container on localhost:8100.
+    Warns but does not abort if no container runtime is available.
+
+    Returns:
+        bool: True if the sidecar is running (or was already running), False otherwise.
+    """
+    if get_extractor_backend() != 'kreuzberg':
+        print("[INFO] EXTRACTOR_BACKEND=legacy — skipping kreuzberg sidecar")
+        return True
+
+    runtime = find_container_runtime()
+    if runtime is None:
+        print("[WARN] No container runtime found (docker/podman) — kreuzberg sidecar will not be started")
+        print(f"[WARN] Document extraction will fail; set EXTRACTOR_BACKEND=legacy to use the built-in pypdf extractor")
+        return False
+
+    # Check if already running
+    try:
+        result = subprocess.run(
+            [runtime, 'ps', '--filter', f'name=^{KREUZBERG_CONTAINER}$', '--format', '{{.ID}}'],
+            capture_output=True, text=True, check=True
+        )
+        if result.stdout.strip():
+            print(f"[OK] kreuzberg sidecar already running ({KREUZBERG_CONTAINER})")
+            return True
+    except subprocess.CalledProcessError:
+        pass
+
+    # Remove stopped container with the same name, if any
+    subprocess.run([runtime, 'rm', '-f', KREUZBERG_CONTAINER], capture_output=True)
+
+    print(f"[INFO] Pulling kreuzberg image ({KREUZBERG_IMAGE})...")
+    subprocess.run([runtime, 'pull', KREUZBERG_IMAGE], capture_output=True)
+
+    print(f"[INFO] Starting kreuzberg sidecar on port {KREUZBERG_PORT}...")
+    try:
+        subprocess.run(
+            [
+                runtime, 'run', '-d',
+                '--name', KREUZBERG_CONTAINER,
+                '-p', f'127.0.0.1:{KREUZBERG_PORT}:{KREUZBERG_PORT}',
+                KREUZBERG_IMAGE,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"[OK] kreuzberg sidecar started ({KREUZBERG_CONTAINER})")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to start kreuzberg sidecar: {e.stderr.decode().strip()}")
+        return False
+
+
+def stop_kreuzberg():
+    """Stop and remove the kreuzberg extraction sidecar container.
+
+    Skipped when EXTRACTOR_BACKEND=legacy.
+    Loads .env/.env.local so the backend setting is respected even when
+    called from stop_server (which does not call load_dotenv itself).
+    """
+    # Load env so EXTRACTOR_BACKEND is visible (idempotent if already loaded)
+    env_local = PROJECT_ROOT / ".env.local"
+    env_file = PROJECT_ROOT / ".env"
+    if env_local.exists():
+        load_dotenv(env_local, override=True)
+    if env_file.exists():
+        load_dotenv(env_file, override=True)
+
+    if get_extractor_backend() != 'kreuzberg':
+        return
+
+    runtime = find_container_runtime()
+    if runtime is None:
+        return
+
+    try:
+        result = subprocess.run(
+            [runtime, 'ps', '-a', '--filter', f'name=^{KREUZBERG_CONTAINER}$', '--format', '{{.ID}}'],
+            capture_output=True, text=True, check=True
+        )
+        if not result.stdout.strip():
+            return  # not running
+        subprocess.run([runtime, 'stop', KREUZBERG_CONTAINER], capture_output=True)
+        subprocess.run([runtime, 'rm', KREUZBERG_CONTAINER], capture_output=True)
+        print(f"[OK] kreuzberg sidecar stopped ({KREUZBERG_CONTAINER})")
+    except subprocess.CalledProcessError:
+        pass
+
+
 def start_server(dev_mode=True, with_plugin=False):
     """Start the FastAPI server and optionally the plugin development server.
 
@@ -269,6 +395,9 @@ def start_server(dev_mode=True, with_plugin=False):
         print(f"Server is already running (PID: {existing.pid})")
         print(f"Access at: http://{HOST}:{PORT}")
         return
+
+    # Start kreuzberg extraction sidecar
+    start_kreuzberg()
 
     # Start the backend server
     log_config_path = PROJECT_ROOT / "backend" / "logging_config.json"
@@ -378,11 +507,14 @@ def start_server(dev_mode=True, with_plugin=False):
 
 
 def stop_server():
-    """Stop the running backend server and plugin server if running."""
+    """Stop the running backend server, kreuzberg sidecar, and plugin server if running."""
     # First stop the plugin server if running
     plugin_proc = find_plugin_process()
     if plugin_proc:
         stop_plugin_server()
+
+    # Stop kreuzberg extraction sidecar
+    stop_kreuzberg()
 
     # Try to find backend server by process
     proc = find_server_process()
@@ -684,6 +816,10 @@ def main():
         # Check for --dev flag to include plugin status
         include_plugin = "--dev" in sys.argv
         check_status(include_plugin=include_plugin)
+    elif command == "kreuzberg:start":
+        start_kreuzberg()
+    elif command == "kreuzberg:stop":
+        stop_kreuzberg()
     else:
         print(f"Unknown command: {command}")
         print(__doc__)

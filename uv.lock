@@ -840,18 +840,6 @@ wheels = [
 ]
 
 [[package]]
-name = "kreuzberg"
-version = "4.8.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/99/bb/d7b16fe737929e27f3cb65ca55fd47a1d952db0d2d1d4fced4bfaa3f626c/kreuzberg-4.8.5.tar.gz", hash = "sha256:59154e8afca4be834f67fa326b3fe6f841d849bc524953dbc978d1afaa19bcd9", size = 2395546, upload-time = "2026-04-14T14:22:26.236Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f1/30/f9d56277f673ee6939b52229f5612a98d5fc71e4a2b78af37a9fe2411e4d/kreuzberg-4.8.5-cp310-abi3-macosx_14_0_arm64.whl", hash = "sha256:a756a994e70c00f112bb4e5ab7049cfec57bbe925b26b5d4c08695550bcb8228", size = 58650863, upload-time = "2026-04-14T14:22:13.333Z" },
-    { url = "https://files.pythonhosted.org/packages/bd/9d/e591a4872860bfdb1297f78c889ab0f2f0bf3e4cd4f8b64939b6fe7aca7f/kreuzberg-4.8.5-cp310-abi3-manylinux_2_39_aarch64.whl", hash = "sha256:fe7573f0100714780a3210bdd8450ccc3294df83088a68a8623beec5b9942feb", size = 59170334, upload-time = "2026-04-14T14:22:16.95Z" },
-    { url = "https://files.pythonhosted.org/packages/6d/85/19d3fbe2069f4eadf15b0d6567ea3273c8a8dda6e82026e4afe552e7f2c0/kreuzberg-4.8.5-cp310-abi3-manylinux_2_39_x86_64.whl", hash = "sha256:be18709c4a936f04aae377f382757e9be9a1a19e05e081023bd707412535fd7d", size = 60595622, upload-time = "2026-04-14T14:22:20.279Z" },
-    { url = "https://files.pythonhosted.org/packages/0a/60/20285aefc7240f0c8c3cbe5672bf8c72a585f1a4903d888ed541b9a2ddca/kreuzberg-4.8.5-cp310-abi3-win_amd64.whl", hash = "sha256:6be7c255a6ad37889d4b714cd067d190c3104964331b9e38c76d816866dd7dda", size = 67163857, upload-time = "2026-04-14T14:22:23.533Z" },
-]
-
-[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2843,7 +2831,6 @@ dependencies = [
     { name = "anthropic" },
     { name = "fastapi" },
     { name = "httpx" },
-    { name = "kreuzberg" },
     { name = "markdown-it-py" },
     { name = "openai" },
     { name = "psutil" },
@@ -2880,7 +2867,6 @@ requires-dist = [
     { name = "einops", marker = "extra == 'local-models'", specifier = ">=0.8.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "kreuzberg", specifier = ">=4.8.0" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },
     { name = "openai", specifier = ">=2.7.1" },
     { name = "psutil", specifier = ">=7.1.3" },

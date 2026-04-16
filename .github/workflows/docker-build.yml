@@ -15,12 +15,7 @@ on:
         required: false
         default: ''
       local_models:
-        description: 'Include sentence-transformers/torch (~1-2 GB extra)'
-        type: boolean
-        required: false
-        default: false
-      no_ocr:
-        description: 'Exclude Tesseract OCR (smaller image)'
+        description: 'Include sentence-transformers/torch (~1-2 GB extra; only needed for local-inference presets)'
         type: boolean
         required: false
         default: false
@@ -62,13 +57,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: |
             ${{ secrets.DOCKER_HUB_USERNAME }}/zotero-rag:${{ steps.tag.outputs.tag }}
           build-args: |
             INSTALL_LOCAL_MODELS=${{ inputs.local_models || 'false' }}
-            INSTALL_OCR=${{ inputs.no_ocr == 'true' && 'false' || 'true' }}
           cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/zotero-rag:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/zotero-rag:buildcache,mode=max
 

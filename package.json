@@ -53,7 +53,9 @@
     "semantic-release": "semantic-release",
     "commit": "cz",
     "container": "node bin/container.mjs",
-    "deploy": "node bin/deploy.mjs"
+    "deploy": "node bin/deploy.mjs",
+    "kreuzberg:start": "uv run python scripts/server.py kreuzberg:start",
+    "kreuzberg:stop": "uv run python scripts/server.py kreuzberg:stop"
   },
   "dependencies": {
     "commander": "^12.1.0",

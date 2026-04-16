@@ -60,6 +60,11 @@ class Settings(BaseSettings):
         description="Enable OCR for image-only pages (requires Tesseract). "
                     "Set to False when Tesseract is not installed or OCR is not needed."
     )
+    kreuzberg_url: str = Field(
+        default="http://localhost:8100",
+        description="URL of the kreuzberg sidecar HTTP API. "
+                    "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
+    )
 
     model_weights_path: Path = Field(
         default_factory=lambda: Path.home() / ".cache" / "zotero-rag" / "models",

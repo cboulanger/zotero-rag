@@ -77,6 +77,7 @@ class DocumentProcessor:
                 max_chunk_size=max_chunk_size,
                 chunk_overlap=chunk_overlap,
                 ocr_enabled=settings.ocr_enabled,
+                kreuzberg_url=settings.kreuzberg_url,
             )
         self.document_extractor = document_extractor
 

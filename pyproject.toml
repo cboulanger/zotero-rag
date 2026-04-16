@@ -15,7 +15,6 @@ dependencies = [
     "qdrant-client>=1.12.0",
     "spacy>=3.8.0",
     "pypdf>=5.1.0",
-    "kreuzberg>=4.8.0",
     "aiohttp>=3.11.0",
     "httpx>=0.27.0",
     "sse-starlette>=2.2.0",

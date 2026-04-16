@@ -1,71 +1,99 @@
-# Docker Deployment Plan
+# Docker Deployment
 
-## Goal
+## Architecture
 
-Package the FastAPI backend as a Docker image and provide a Node.js CLI for building, pushing, and running the container — following the same pattern as `pdf-tei-editor`.
+The Zotero RAG backend runs as two containers:
+
+| Container | Image | Purpose |
+| --------- | ----- | ------- |
+| `zotero-rag` | `cboulanger/zotero-rag` | FastAPI backend (port 8119) |
+| `kreuzberg` | `ghcr.io/kreuzberg-dev/kreuzberg` | Document extraction sidecar (internal) |
+
+The two containers communicate over a shared Docker bridge network.  The
+kreuzberg sidecar bundles Tesseract, Pandoc, and PDFium — no build-time
+compilation is required in the main image.
 
 ---
 
-## Files to Create
+## Quick Start (docker compose)
+
+The simplest way to run both containers locally:
+
+```bash
+# Copy and edit the environment file
+cp .env.dist .env
+# Set MODEL_PRESET and the required API key
+
+# Start both containers
+docker compose up -d
+
+# Follow logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+The `docker-compose.yml` at the repo root wires up the network, the kreuzberg
+sidecar, and all environment variables automatically.
+
+---
+
+## Files
 
 | File | Purpose |
-| ------ | --------- |
-| `Dockerfile` | Multi-stage image build |
+| ---- | ------- |
+| `Dockerfile` | Multi-stage build for the main backend image |
+| `docker-compose.yml` | Local multi-container setup |
 | `bin/container.mjs` | CLI: `build`, `push`, `start`, `stop`, `restart`, `logs`, `deploy` |
 | `bin/deploy.mjs` | Reads a `.env.deploy.*` file and delegates to `container.mjs deploy` |
 | `.env.deploy.example` | Example deployment environment file |
 
-Update `package.json` to add `commander`, `dotenv` dependencies and `container`/`deploy` scripts.
-
-> **Note on module format:** Both `bin/` files use ESM (`import`/`export`). Because `package.json` sets `"type": "commonjs"`, the `.mjs` extension is used to opt into ESM without changing the root module type (which would break `zotero-plugin.config.js`).
-
 ---
 
-## Dockerfile Design
+## Dockerfile
 
-Multi-stage build using the official `uv` Docker image:
+Multi-stage build — no Rust/C compilation required:
 
 ```dockerfile
-# Stage 1: dependency installer
+# Stage 1: dependency installer (uv)
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
+ARG INSTALL_LOCAL_MODELS=false
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \
+      uv sync --frozen --no-dev --no-install-project --extra local-models; \
+    else \
+      uv sync --frozen --no-dev --no-install-project; \
+    fi
 
-# Stage 2: runtime
+# Stage 2: runtime (slim, no build tools)
 FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY backend/ ./backend/
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH=/app
-
-# Data directory for persistent storage
 VOLUME /data
 ENV VECTOR_DB_PATH=/data/qdrant
 ENV MODEL_WEIGHTS_PATH=/data/models
 ENV LOG_FILE=/data/logs/server.log
-
+ENV KREUZBERG_URL=http://kreuzberg:8100
 EXPOSE 8119
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8119"]
 ```
 
-### Zotero Connectivity
+OCR (Tesseract) lives in the kreuzberg sidecar — the main image stays slim.
 
-**Local mode** (Zotero on the host machine): The container needs to reach Zotero running on the host.
+### Build arguments
 
-- **Linux:** `--add-host=host.docker.internal:host-gateway` (added automatically by CLI on Linux)
-- **macOS/Windows:** `host.docker.internal` resolves automatically
-
-Default `ZOTERO_API_URL=http://host.docker.internal:23119` (passed automatically by `start`).
-
-**Remote mode** (plugin uploads documents): Set `REQUIRE_ZOTERO=false` to skip the Zotero connectivity check at startup.
+| Argument | Default | Description |
+| -------- | ------- | ----------- |
+| `INSTALL_LOCAL_MODELS` | `false` | Install `sentence-transformers`/`torch` for local-inference presets (~1–2 GB extra) |
 
 ---
 
-## CLI Design (`bin/container.mjs`)
-
-ESM Node.js CLI using `commander`. Pattern adapted from `pdf-tei-editor/bin/container.js`.
+## CLI (`bin/container.mjs`)
 
 ```js
 APP_NAME  = 'zotero-rag'
@@ -77,13 +105,24 @@ PORT      = 8119
 
 | Command | Description |
 | ------- | ----------- |
-| `build [--tag] [--no-cache] [--platform] [--yes]` | Build Docker image locally |
-| `push [--tag] [--no-build] [--no-cache] [--platform] [--yes]` | Tag + push to registry (reads `DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN` from `.env`) |
-| `start [options]` | Run container; auto-detects local → registry image; pulls if needed |
-| `stop [--name] [--all] [--remove]` | Stop and optionally remove container |
-| `restart [options]` | Stop + start |
-| `logs [--name] [-f] [--tail N]` | Stream container logs |
-| `deploy [options]` | Pull/rebuild → start → nginx config → SSL cert (Linux only for nginx/SSL) |
+| `build [options]` | Build main image locally |
+| `push [options]` | Tag + push to registry (reads `DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN` from `.env`) |
+| `start [options]` | Start kreuzberg sidecar + app container; auto-detects local → registry image |
+| `stop [options]` | Stop app container and its kreuzberg sidecar |
+| `restart [options]` | Stop + start both containers |
+| `logs [options]` | Stream app or sidecar logs |
+| `deploy [options]` | Pull/rebuild → start both containers → nginx config → SSL cert (Linux only for nginx/SSL) |
+
+### `build` / `push` options
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--tag TAG` | auto from git | Image tag |
+| `--local-models` | off | Install sentence-transformers/torch (~1–2 GB extra; local-inference presets only) |
+| `--platform PLATFORM` | host arch | Target platform, e.g. `linux/amd64` |
+| `--no-cache` | — | Disable layer cache |
+| `--yes` | — | Skip confirmation prompt |
+| `--no-build` *(push only)* | — | Push existing image without rebuilding |
 
 ### `start` options
 
@@ -98,53 +137,7 @@ PORT      = 8119
 | `--volume HOST:CTR` | — | Extra volume mounts (repeatable) |
 | `--restart POLICY` | — | Docker restart policy |
 | `--no-detach` | — | Run in foreground |
-
-### Platform handling
-
-- Detects `docker` or `podman` (prefers docker); verifies daemon connectivity (not just binary presence)
-- On **Linux**: automatically adds `--add-host=host.docker.internal:host-gateway`
-
-### Cross-building for a different architecture
-
-Use `--platform` on `build`, `push`, and `deploy --rebuild` to target a different CPU architecture. Docker/Podman use QEMU emulation, so you can build a `linux/amd64` image on an Apple Silicon Mac:
-
-```bash
-# Build an amd64 image on Apple Silicon (M1/M2/M3/M4)
-node bin/container.mjs build --tag latest --platform linux/amd64
-
-# Build and push in one step
-node bin/container.mjs push --tag latest --platform linux/amd64
-```
-
-**Why cross-build from macOS to amd64?**
-`kreuzberg` (a Rust/maturin dependency) has no pre-built manylinux wheel for `aarch64-linux`, so building an arm64 image requires compiling from source (~5–10 min). The `linux/amd64` manylinux wheel is usually available on PyPI, so a cross-build is often *faster* than a native arm64 build.
-
-**Docker Desktop** supports cross-platform builds out of the box via QEMU (no extra setup).
-
-**Podman** requires QEMU user-static support and sufficient memory in the Podman machine VM.
-
-**Memory:** The default Podman machine has 2 GB RAM. Compiling kreuzberg from source (Rust + Tesseract + Leptonica) requires more — the OOM killer will `SIGKILL` the Rust compiler mid-build. Increase it before building:
-
-```bash
-podman machine stop
-podman machine set --memory 4096
-podman machine start
-```
-
-**QEMU (for cross-platform builds only):**
-
-```bash
-# Fix SSH key permissions if needed
-chmod 600 ~/.local/share/containers/podman/machine/machine
-
-podman machine ssh
-sudo rpm-ostree install qemu-user-static
-sudo systemctl reboot
-```
-
-After the machine restarts, cross-platform builds work the same way.
-
-> **Tip:** Cross-building for `linux/amd64` on Apple Silicon is often the fastest option — it avoids the Rust source compilation entirely because a pre-built `manylinux_x86_64` wheel for kreuzberg is available on PyPI, whereas the `aarch64` wheel is not.
+| `--no-kreuzberg` | — | Skip kreuzberg sidecar (use if running kreuzberg separately) |
 
 ### `deploy` options
 
@@ -158,26 +151,25 @@ After the machine restarts, cross-platform builds work the same way.
 | `--pull` | false | Pull image from registry before deploying |
 | `--rebuild` | false | Rebuild image locally before deploying |
 | `--no-cache` | — | Disable layer cache (use with `--rebuild`) |
+| `--local-models` | — | Install local-inference deps when rebuilding |
+| `--platform PLATFORM` | — | Target platform when rebuilding |
 | `--no-nginx` | — | Skip nginx configuration |
 | `--no-ssl` | — | Skip SSL certificate setup |
 | `--email EMAIL` | `admin@<fqdn>` | Email for certbot |
 | `--yes` | — | Skip confirmation prompt |
 
-`deploy` requires `sudo` when nginx/SSL setup is requested (same constraint as pdf-tei-editor).
+### Platform handling
 
-### nginx template
-
-Proxies to `http://127.0.0.1:8119` with:
-
-- `client_max_body_size 100M`
-- 300 s proxy timeouts
-- `proxy_buffering off` for SSE endpoints
+- Detects `docker` or `podman` (prefers docker); verifies daemon connectivity
+- On **Linux**: automatically adds `--add-host=host.docker.internal:host-gateway`
+- `--platform linux/amd64` cross-build via QEMU is supported but unreliable for Rust packages — prefer the GitHub Actions CI workflow instead
 
 ---
 
 ## Deploy Wrapper (`bin/deploy.mjs`)
 
-Reads a `.env.deploy.*` file (**required** positional argument) and delegates to `container.mjs deploy`.
+Reads a `.env.deploy.*` file (**required** positional argument) and delegates
+to `container.mjs deploy`:
 
 ```bash
 node bin/deploy.mjs .env.deploy.myserver
@@ -191,51 +183,24 @@ node bin/deploy.mjs .env.deploy.myserver
 | `DEPLOY_TAG` | `--tag` |
 | `DEPLOY_DATA_DIR` | `--data-dir` |
 | `DEPLOY_PORT` | `--port` |
-| `DEPLOY_PULL` | `--pull` (boolean: `1/true/on` → present, `0/false/off` → omitted) |
+| `DEPLOY_PULL=true` | `--pull` |
 | `DEPLOY_SSL=false` | `--no-ssl` |
 | `DEPLOY_NGINX=false` | `--no-nginx` |
+| `DEPLOY_LOCAL_MODELS=true` | `--local-models` |
 | Everything else | `--env KEY` (value loaded from env via `dotenv.config`) |
 
-If no `DEPLOY_FQDN` is set, or it is `localhost`/`127.0.0.1`, the script automatically appends `--no-nginx --no-ssl`.
+If `DEPLOY_FQDN` is unset or equals `localhost`/`127.0.0.1`, the script
+automatically appends `--no-nginx --no-ssl`.
 
 ---
 
-## Example Deployment Env File (`.env.deploy.example`)
+## nginx template
 
-```bash
-# Deployment target
-DEPLOY_FQDN=rag.example.com
-DEPLOY_TAG=latest
-DEPLOY_DATA_DIR=/srv/zotero-rag/data
-DEPLOY_PORT=8119
-DEPLOY_PULL=true
-# DEPLOY_SSL=false    # uncomment to skip SSL
+Proxies to `http://127.0.0.1:8119` with:
 
-# Container environment variables
-MODEL_PRESET=remote-openai
-OPENAI_API_KEY=sk-...
-# ANTHROPIC_API_KEY=sk-ant-...
-LOG_LEVEL=INFO
-
-# Remote server mode (plugin uploads documents; no local Zotero needed)
-# REQUIRE_ZOTERO=false
-# API_KEY=your-secret-key          # Require X-API-Key header when set
-# ALLOWED_ORIGINS=https://myhost   # Restrict CORS origins (default: *)
-```
-
----
-
-## `package.json` changes
-
-Add to `dependencies`:
-
-- `commander`: `^12.0.0`
-- `dotenv`: `^16.0.0`
-
-Add to `scripts`:
-
-- `"container": "node bin/container.mjs"`
-- `"deploy": "node bin/deploy.mjs"`
+- `client_max_body_size 100M`
+- 300 s proxy timeouts
+- `proxy_buffering off` for SSE endpoints (`/api/query/stream`)
 
 ---
 
@@ -250,17 +215,14 @@ The workflow at [`.github/workflows/docker-build.yml`](../.github/workflows/dock
 | Push to `main` (backend/Dockerfile changes) | `latest` |
 | Manual (`workflow_dispatch`) from any branch | `<branch>-<sha>` (or custom tag) |
 
-### Manual trigger (any branch)
+### Manual trigger
 
 Go to **Actions → Docker Build & Push → Run workflow**, select your branch, and optionally:
 
 - Set a custom tag
 - Enable `local_models` (adds sentence-transformers/torch)
-- Enable `no_ocr` (excludes Tesseract)
 
 ### Required repository secrets
-
-Add these under **Settings → Secrets and variables → Actions**:
 
 | Secret | Value |
 | ------ | ----- |
@@ -275,10 +237,23 @@ The workflow uses Docker's registry-based build cache (`buildcache` tag on Docke
 
 ---
 
+## Zotero Connectivity
+
+**Local mode** (Zotero on the host machine):
+
+- **Linux:** `--add-host=host.docker.internal:host-gateway` (added automatically)
+- **macOS/Windows:** `host.docker.internal` resolves automatically
+
+Default `ZOTERO_API_URL=http://host.docker.internal:23119`.
+
+**Remote mode** (plugin uploads documents): Set `REQUIRE_ZOTERO=false` to
+skip the Zotero connectivity check at startup.
+
+---
+
 ## Implementation Notes
 
 - `pyproject.toml` is at the **repo root** (not in `backend/`), so `uv sync` works from `/app`
-- Kreuzberg requires `pandoc`, `tesseract` for full functionality — install in the image for OCR/DOCX support
-- The image should **not** bundle model weights; they are downloaded to `/data/models` on first use
-- For GPU support a separate `Dockerfile.gpu` extending the base image with CUDA is a future option
-- The `push` command reads `DOCKER_HUB_USERNAME` and `DOCKER_HUB_TOKEN` from `.env` (same pattern as pdf-tei-editor)
+- kreuzberg (document extraction) runs as a sidecar — Tesseract, Pandoc, and PDFium are bundled there; the main image needs no build tools
+- The image does **not** bundle model weights; they are downloaded to `/data/models` on first use
+- For GPU support, a separate `Dockerfile.gpu` extending the base image with CUDA is a future option
