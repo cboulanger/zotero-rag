@@ -226,9 +226,11 @@ async function startKreuzberg(kreuzbergName, networkName) {
   return new Promise((resolve, reject) => {
     const child = spawn(containerCmd, args, { stdio: 'pipe' });
     let out = '';
+    let err = '';
     if (child.stdout) child.stdout.on('data', d => { out += d.toString(); });
+    if (child.stderr) child.stderr.on('data', d => { err += d.toString(); process.stderr.write(d); });
     child.on('close', code => {
-      if (code !== 0) return reject(new Error(`kreuzberg sidecar start failed (exit ${code})`));
+      if (code !== 0) return reject(new Error(`kreuzberg sidecar start failed (exit ${code}):\n${err}`));
       console.log(`[SUCCESS] kreuzberg sidecar started (${out.trim().slice(0, 12)})`);
       resolve();
     });
@@ -429,7 +431,18 @@ async function startContainer(cfg) {
   const args = ['run', detach ? '-d' : '', '--name', name, '-p', `${port}:${CONTAINER_PORT}`].filter(Boolean);
 
   if (restart) args.push('--restart', restart);
-  if (addHost) args.push('--add-host=host.docker.internal:host-gateway');
+  if (addHost) {
+    // host-gateway is only supported in podman 4.0+ and docker 20.10+; fall back to resolving the host IP
+    let hostGateway = 'host-gateway';
+    try {
+      const ver = execSync(`${containerCmd} --version`, { encoding: 'utf8', stdio: 'pipe' });
+      const m = ver.match(/(\d+)\./);
+      if (containerCmd === 'podman' && m && parseInt(m[1]) < 4) {
+        hostGateway = execSync("hostname -I | awk '{print $1}'", { encoding: 'utf8' }).trim();
+      }
+    } catch {}
+    args.push(`--add-host=host.docker.internal:${hostGateway}`);
+  }
   if (network) args.push('--network', network);
 
   for (const { key, value } of extraEnv) args.push('-e', `${key}=${value}`);
