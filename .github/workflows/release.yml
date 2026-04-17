@@ -40,9 +40,6 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build plugin XPI
-        run: python scripts/build_plugin.py
-
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

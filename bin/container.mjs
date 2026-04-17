@@ -25,7 +25,7 @@ import { Command } from 'commander';
 const APP_NAME = 'zotero-rag';
 const REGISTRY = 'docker.io/cboulanger/zotero-rag';
 const KREUZBERG_IMAGE = 'ghcr.io/kreuzberg-dev/kreuzberg:latest';
-const KREUZBERG_PORT = 8100;
+const KREUZBERG_PORT = 8000;
 const DEFAULT_PORT = 8119;
 const CONTAINER_PORT = 8119;
 const DEFAULT_ZOTERO_HOST = 'http://host.docker.internal:23119';
