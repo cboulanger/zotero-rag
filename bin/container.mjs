@@ -432,16 +432,10 @@ async function startContainer(cfg) {
 
   if (restart) args.push('--restart', restart);
   if (addHost) {
-    // host-gateway is only supported in podman 4.0+ and docker 20.10+; fall back to resolving the host IP
-    let hostGateway = 'host-gateway';
-    try {
-      const ver = execSync(`${containerCmd} --version`, { encoding: 'utf8', stdio: 'pipe' });
-      const m = ver.match(/(\d+)\./);
-      if (containerCmd === 'podman' && m && parseInt(m[1]) < 4) {
-        hostGateway = execSync("hostname -I | awk '{print $1}'", { encoding: 'utf8' }).trim();
-      }
-    } catch {}
-    args.push(`--add-host=host.docker.internal:${hostGateway}`);
+    // host-gateway requires podman 4.0+ / docker 20.10+; resolve the host IP directly for compatibility
+    let hostIp = 'host-gateway';
+    try { hostIp = execSync("hostname -I | awk '{print $1}'", { encoding: 'utf8' }).trim(); } catch {}
+    args.push(`--add-host=host.docker.internal:${hostIp}`);
   }
   if (network) args.push('--network', network);
 
@@ -543,7 +537,6 @@ async function handleStart(options) {
   }
 
   const zoteroHost = options.zoteroHost || DEFAULT_ZOTERO_HOST;
-  extraEnv.push({ key: 'ZOTERO_API_URL', value: zoteroHost });
   extraEnv.push({ key: 'KREUZBERG_URL', value: `http://kreuzberg:${KREUZBERG_PORT}` });
 
   const addHost = process.platform === 'linux';
@@ -820,7 +813,6 @@ async function handleDeploy(options) {
     extraEnv.push({ key: 'VECTOR_DB_PATH', value: '/data/qdrant' });
     extraEnv.push({ key: 'MODEL_WEIGHTS_PATH', value: '/data/models' });
   }
-  extraEnv.push({ key: 'ZOTERO_API_URL', value: DEFAULT_ZOTERO_HOST });
   extraEnv.push({ key: 'KREUZBERG_URL', value: `http://kreuzberg:${KREUZBERG_PORT}` });
 
   try {
