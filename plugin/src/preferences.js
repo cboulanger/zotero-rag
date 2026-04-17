@@ -8,21 +8,29 @@
 ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const doc = _window.document;
 
-	const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
+	const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || '';
 	const apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
 	const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
 
+	// Show stored value; leave blank so the placeholder shows when nothing is saved
 	doc.getElementById('zotero-rag-backend-url').value = backendURL;
 	doc.getElementById('zotero-rag-api-key').value = apiKey;
 	doc.getElementById('zotero-rag-max-queries').value = maxQueries;
 
 	doc.getElementById('zotero-rag-backend-url').addEventListener('change', (e) => {
-		try {
-			new URL(/** @type {HTMLInputElement} */ (e.target).value);
-			Zotero.Prefs.set('extensions.zotero-rag.backendURL', /** @type {HTMLInputElement} */ (e.target).value, true);
-			this.backendURL = /** @type {HTMLInputElement} */ (e.target).value;
-		} catch (_) {
-			Zotero.debug('Zotero RAG: Invalid URL: ' + /** @type {HTMLInputElement} */ (e.target).value);
+		const value = /** @type {HTMLInputElement} */ (e.target).value.trim();
+		if (value === '') {
+			// Clearing the field resets to the default — remove the stored pref
+			Zotero.Prefs.clear('extensions.zotero-rag.backendURL', true);
+			this.backendURL = 'http://localhost:8119';
+		} else {
+			try {
+				new URL(value);
+				Zotero.Prefs.set('extensions.zotero-rag.backendURL', value, true);
+				this.backendURL = value;
+			} catch (_) {
+				Zotero.debug('Zotero RAG: Invalid URL: ' + value);
+			}
 		}
 	});
 

@@ -56,12 +56,16 @@ var RemoteIndexer = {
 	 * @param {function(): boolean} opts.isCancelled - Return true to abort
 	 * @param {AbortSignal} [opts.signal] - AbortSignal to cancel in-flight fetch requests immediately
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
+	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @returns {Promise<{uploaded: number, skipped: number, errors: number, firstError: string|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
 
-		// 1. Collect all indexable attachments from the local Zotero database
+		// 1. Collect all indexable attachments from the local Zotero database.
+		//    Items without a local file are included (filePath: null) so check-indexed
+		//    can decide whether they actually need indexing before we download them.
+		onProgress({ percentage: 0, message: 'Scanning library', current: 0, total: 0 });
 		const attachments = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths);
 		log(`[RemoteIndexer] Found ${attachments.length} indexable attachments`);
 
@@ -71,19 +75,57 @@ var RemoteIndexer = {
 		}
 
 		// 2. Ask the backend which attachments actually need indexing
+		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: 0 });
 		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal);
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
-		// 3. Upload each attachment that needs indexing
+		// 3. Download local files for toUpload items that have no cached path.
+		//    Skips attachments already indexed — avoids downloading files we won't use.
+		if (downloadAttachment) {
+			const needsDownload = toUpload.filter(s => {
+				const att = attachments.find(a => a.attachment_key === s.attachment_key);
+				return att && !att.filePath;
+			});
+			if (needsDownload.length > 0) {
+				log(`[RemoteIndexer] Downloading ${needsDownload.length} attachment(s) before indexing`);
+				let dlCurrent = 0;
+				for (const status of needsDownload) {
+					if (isCancelled()) break;
+					dlCurrent++;
+					const att = attachments.find(a => a.attachment_key === status.attachment_key);
+					if (!att) continue;
+					onProgress({
+						percentage: (dlCurrent / needsDownload.length) * 100,
+						message: 'Downloading',
+						current: dlCurrent,
+						total: needsDownload.length,
+					});
+					const path = await downloadAttachment(att.zoteroItem);
+					att.filePath = path;
+				}
+			}
+		}
+
+		// 4. Upload each attachment that needs indexing and has a local file
 		let uploaded = 0;
 		let skipped = attachments.length - toUpload.length;
 		let errors = 0;
 		/** @type {string|null} */
 		let firstError = null;
-		const total = toUpload.length;
+		const uploadable = toUpload.filter(s => {
+			const att = attachments.find(a => a.attachment_key === s.attachment_key);
+			return att && att.filePath;
+		});
+		// Count attachments we couldn't download as errors
+		const noFile = toUpload.length - uploadable.length;
+		if (noFile > 0) {
+			log(`[RemoteIndexer] Skipping ${noFile} attachment(s) with no local file`);
+			errors += noFile;
+		}
+		const total = uploadable.length;
 
-		for (let i = 0; i < toUpload.length; i++) {
+		for (let i = 0; i < uploadable.length; i++) {
 			if (isCancelled()) {
 				log('[RemoteIndexer] Indexing cancelled');
 				break;
@@ -97,7 +139,7 @@ var RemoteIndexer = {
 
 			onProgress({
 				percentage: (i / total) * 100,
-				message: `Uploading attachment ${i + 1} of ${total}`,
+				message: 'Uploading attachment',
 				current: i + 1,
 				total,
 			});
@@ -129,7 +171,7 @@ var RemoteIndexer = {
 	 * @param {string} libraryType
 	 * @param {function(string): void} log
 	 * @param {Map<string, string>} [downloadedFilePaths] - Cache of attachment key → local path
-	 * @returns {Promise<Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}>>}
+	 * @returns {Promise<Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>>}
 	 */
 	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths) {
 		const INDEXABLE_TYPES = new Set([
@@ -160,7 +202,7 @@ var RemoteIndexer = {
 
 		const items = await Zotero.Items.getAsync(itemIDs);
 
-		/** @type {Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}>} */
+		/** @type {Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>} */
 		const result = [];
 
 		for (const item of items) {
@@ -169,11 +211,12 @@ var RemoteIndexer = {
 			const mimeType = item.attachmentContentType || '';
 			if (!INDEXABLE_TYPES.has(mimeType)) continue;
 
-			// Prefer live path; fall back to cached path from a prior download in this session
+			// Prefer live path; fall back to cached path from a prior download in this session.
+			// Keep items with no local file (filePath: null) so check-indexed can decide
+			// whether they need indexing before we attempt to download them.
 			const filePath = await item.getFilePathAsync()
 				|| (downloadedFilePaths && downloadedFilePaths.get(item.key))
 				|| null;
-			if (!filePath) continue;
 
 			// Get parent item for metadata
 			const parentItem = item.parentItemID
@@ -258,28 +301,16 @@ var RemoteIndexer = {
 				})),
 			};
 
-			const response = await fetch(`${backendURL}/api/libraries/${libraryId}/check-indexed`, {
-				method: 'POST',
-				headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-				body: JSON.stringify(body),
-				signal,
-			});
-
-			if (!response.ok) {
-				log(`[RemoteIndexer] check-indexed returned HTTP ${response.status}, uploading all`);
-				// Fallback: assume all need indexing
-				return attachments.map(a => ({
-					item_key: a.item_key,
-					attachment_key: a.attachment_key,
-					needs_indexing: true,
-					reason: 'check_failed',
-				}));
-			}
+			const response = await this._apiFetch(
+				'POST',
+				`${backendURL}/api/libraries/${libraryId}/check-indexed`,
+				{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
+			);
 
 			const data = await response.json();
 			return data.statuses || [];
 		} catch (err) {
-			log(`[RemoteIndexer] check-indexed error: ${err}, uploading all`);
+			log(`[RemoteIndexer] check-indexed error: ${err} — uploading all as fallback`);
 			return attachments.map(a => ({
 				item_key: a.item_key,
 				attachment_key: a.attachment_key,
@@ -293,7 +324,7 @@ var RemoteIndexer = {
 	 * Upload a single attachment to the backend.
 	 *
 	 * @param {Object} opts
-	 * @param {AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}} opts.att
+	 * @param {AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}} opts.att
 	 * @param {string} opts.libraryId
 	 * @param {string} opts.libraryType
 	 * @param {string} opts.libraryName
@@ -335,17 +366,11 @@ var RemoteIndexer = {
 		formData.append('file', new Blob([bytes], { type: att.mime_type }), att.attachment_key);
 		formData.append('metadata', JSON.stringify(metadata));
 
-		const response = await fetch(`${backendURL}/api/index/document`, {
-			method: 'POST',
+		const response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
 			headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 			body: formData,
 			signal,
 		});
-
-		if (!response.ok) {
-			const errBody = await response.json().catch(() => ({}));
-			throw new Error(errBody.detail || `HTTP ${response.status}`);
-		}
 
 		const result = await response.json();
 		const rateLimitNote = result.rate_limit_retries > 0
@@ -355,6 +380,35 @@ var RemoteIndexer = {
 		if (result.status === 'error') {
 			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
 		}
+	},
+
+	/**
+	 * Fetch a URL and throw a descriptive error on non-2xx responses.
+	 * The error message includes the method, path, HTTP status, and response body
+	 * so callers can tell exactly which endpoint failed and why.
+	 *
+	 * @param {string} method
+	 * @param {string} url
+	 * @param {RequestInit} [init]
+	 * @returns {Promise<Response>}
+	 */
+	async _apiFetch(method, url, init) {
+		const response = await fetch(url, { method, ...init });
+		if (!response.ok) {
+			let detail = '';
+			const ct = response.headers.get('content-type') || '';
+			if (ct.includes('application/json')) {
+				const body = await response.json().catch(() => ({}));
+				detail = body.detail || JSON.stringify(body);
+			} else {
+				const text = await response.text().catch(() => '');
+				// Strip HTML tags (e.g. nginx error pages) and normalise whitespace
+				detail = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+			}
+			const path = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+			throw new Error(`${method} ${path}: HTTP ${response.status}${detail ? ` — ${detail}` : ''}`);
+		}
+		return response;
 	},
 
 	/**

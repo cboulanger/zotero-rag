@@ -318,6 +318,23 @@ async def upload_and_index_document(
                 attachment_version=attachment_version,
                 item_modified=item_modified,
             )
+
+            # Update library metadata so index-status reflects this upload
+            lib_meta = vector_store.get_library_metadata(library_id)
+            if lib_meta is None:
+                lib_meta = LibraryIndexMetadata(
+                    library_id=library_id,
+                    library_type=library_type,
+                    library_name=meta_dict.get("library_name", ""),
+                    indexing_mode="incremental",
+                )
+            lib_meta.last_indexed_version = max(
+                lib_meta.last_indexed_version, item_version
+            )
+            lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
+            lib_meta.total_chunks = vector_store.count_library_chunks(library_id)
+            lib_meta.total_items_indexed += 1
+            vector_store.update_library_metadata(lib_meta)
         except Exception as e:
             logger.error(
                 f"Error processing upload for {attachment_key}: {e}", exc_info=True
@@ -330,23 +347,6 @@ async def upload_and_index_document(
                 status="error",
                 message=str(e),
             )
-
-        # Update library metadata so index-status reflects this upload
-        lib_meta = vector_store.get_library_metadata(library_id)
-        if lib_meta is None:
-            lib_meta = LibraryIndexMetadata(
-                library_id=library_id,
-                library_type=library_type,
-                library_name=meta_dict.get("library_name", ""),
-                indexing_mode="incremental",
-            )
-        lib_meta.last_indexed_version = max(
-            lib_meta.last_indexed_version, item_version
-        )
-        lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
-        lib_meta.total_chunks = vector_store.count_library_chunks(library_id)
-        lib_meta.total_items_indexed += 1
-        vector_store.update_library_metadata(lib_meta)
 
     return DocumentUploadResult(
         library_id=library_id,

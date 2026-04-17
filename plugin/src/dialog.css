@@ -105,8 +105,9 @@ body {
 /* Status Messages */
 .status-messages {
   flex: 1;
-  max-height: 100px;
+  max-height: 160px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 5px;
   border-radius: 4px;
   background-color: #fafafa;
@@ -115,6 +116,7 @@ body {
 .status-message {
   padding: 4px 0;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .status-message.info {

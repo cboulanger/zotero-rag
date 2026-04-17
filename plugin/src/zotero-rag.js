@@ -256,7 +256,8 @@ class ZoteroRAGPlugin {
 				headers: this.getAuthHeaders()
 			});
 			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}`);
+				const body = await response.json().catch(() => ({}));
+				throw new Error(`GET /api/version: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`);
 			}
 			const data = /** @type {BackendVersion} */ (await response.json());
 			this.log(`Backend version: ${data.api_version}`);
@@ -411,8 +412,11 @@ class ZoteroRAGPlugin {
 			});
 
 			if (!response.ok) {
-				const errorData = /** @type {any} */ (await response.json().catch(() => ({})));
-				throw new Error(errorData.detail || `Query failed with HTTP ${response.status}`);
+				const ct = response.headers.get('content-type') || '';
+				const errorData = ct.includes('application/json')
+					? /** @type {any} */ (await response.json().catch(() => ({})))
+					: { detail: (await response.text().catch(() => '')).slice(0, 300) };
+				throw new Error(`POST /api/query: HTTP ${response.status}${errorData.detail ? ` — ${errorData.detail}` : ''}`);
 			}
 
 			const result = /** @type {QueryResult} */ (await response.json());

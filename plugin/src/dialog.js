@@ -266,7 +266,11 @@ var ZoteroRAGDialog = {
 				throw new Error('Authentication required: please set the API key in Zotero RAG preferences (Tools → Zotero RAG → Preferences).');
 			}
 			if (!response.ok) {
-				throw new Error(`HTTP ${response.status}`);
+				const ct = response.headers.get('content-type') || '';
+				const body = ct.includes('application/json')
+					? await response.json().catch(() => ({}))
+					: { detail: (await response.text().catch(() => '')).slice(0, 300) };
+				throw new Error(`GET /api/libraries/${libraryId}/index-status: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`);
 			}
 			return await response.json();
 		} catch (error) {
@@ -904,9 +908,6 @@ var ZoteroRAGDialog = {
 				const libraryName = library ? library.name : libraryId;
 				const libraryType = library ? library.type : 'user';
 
-				this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
-				await this.downloadMissingAttachments(libraryId, libraryType, libraryName);
-
 				this.showStatus(`Indexing library ${libraryName}...`, 'info');
 
 				// Fresh AbortController for this library so cancel kills in-flight requests
@@ -921,7 +922,8 @@ var ZoteroRAGDialog = {
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {
 						const detail = total > 0 ? `${libraryName}: ${message} ${current}/${total}` : `${libraryName}: ${message}`;
-						this.updateProgress(percentage, 'Indexing', detail);
+						const phase = message.startsWith('Downloading') ? 'Downloading' : 'Indexing';
+						this.updateProgress(total === 0 ? null : percentage, phase, detail);
 						this.updateLibraryProgressText(
 							libraryId,
 							total > 0 ? `${message} ${current}/${total}` : message
@@ -930,6 +932,22 @@ var ZoteroRAGDialog = {
 					isCancelled: () => !this.isOperationInProgress,
 					signal: this.abortController.signal,
 					downloadedFilePaths: this.downloadedAttachmentPaths,
+					downloadAttachment: async (zoteroItem) => {
+						const key = zoteroItem.key;
+						if (this._getFailedDownloadKeys().has(key)) return null;
+						if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroItem.libraryID)) return null;
+						try {
+							await Zotero.Sync.Runner.downloadFile(zoteroItem);
+							const path = await zoteroItem.getFilePathAsync();
+							if (path) this.downloadedAttachmentPaths.set(key, path);
+							return path || null;
+						} catch (error) {
+							const msg = error instanceof Error ? error.message : String(error);
+							plugin.log(`Error downloading attachment ${key}: ${msg}`);
+							this._markDownloadFailed(key);
+							return null;
+						}
+					},
 				});
 				this.abortController = null;
 				this.updateLibraryProgressText(libraryId, null); // restore normal display
@@ -955,9 +973,7 @@ var ZoteroRAGDialog = {
 
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
-				const libraryName = this.getLibraryName(libraryId);
 				this.plugin.log(`Error indexing library ${libraryId}: ${errorMessage}`);
-				this.showStatus(`Error indexing library ${libraryName}: ${errorMessage}`, 'error');
 				throw error;
 			}
 		}
@@ -970,7 +986,7 @@ var ZoteroRAGDialog = {
 	 */
 	/**
 	 * Update progress bar with percentage and message.
-	 * @param {number} percentage - Progress percentage (0-100)
+	 * @param {number|null} percentage - Progress percentage (0-100), or null for indeterminate
 	 * @param {string} label - Progress label
 	 * @param {string|null} [message] - Optional detailed message
 	 * @returns {void}
@@ -981,7 +997,11 @@ var ZoteroRAGDialog = {
 			document.getElementById('progress-bar')
 		);
 		if (progressBar) {
-			progressBar.value = percentage;
+			if (percentage === null) {
+				progressBar.removeAttribute('value'); // indeterminate
+			} else {
+				progressBar.value = percentage;
+			}
 		}
 	},
 
