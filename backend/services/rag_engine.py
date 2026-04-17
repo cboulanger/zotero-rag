@@ -166,11 +166,11 @@ Provide a comprehensive answer based on the context above. Only use information 
 
 CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. The ONLY acceptable citation formats are:
   - [SN]        — reference to source N (e.g. [S1], [S3])
-  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7] NOT [S2:p. 7]
+  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7]
   - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
   - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
 
-IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3] or [S1:p. 3].
+IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3].
 NEVER use plain numbers like [1] or [4] — those are bibliography references inside the documents, not source labels.
 NEVER write "Source 1", "S1", or any form other than the bracket notation above.
 

@@ -3,6 +3,7 @@ Integration tests for API endpoints.
 """
 
 import unittest
+from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 import sys
 import os
@@ -10,6 +11,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from backend.main import app
+from backend.dependencies import get_vector_store
 
 
 class TestConfigAPI(unittest.TestCase):
@@ -53,7 +55,13 @@ class TestLibrariesAPI(unittest.TestCase):
     """Test libraries API endpoints."""
 
     def setUp(self):
+        mock_vs = MagicMock()
+        mock_vs.client.scroll.return_value = ([], None)
+        app.dependency_overrides[get_vector_store] = lambda: mock_vs
         self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
 
     def test_get_library_status(self):
         """Test GET /api/libraries/{library_id}/status endpoint."""
@@ -91,7 +99,11 @@ class TestQueryAPI(unittest.TestCase):
     """Test query API endpoints."""
 
     def setUp(self):
+        app.dependency_overrides[get_vector_store] = lambda: MagicMock()
         self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
 
     def test_query_empty_question(self):
         """Test POST /api/query with empty question."""
