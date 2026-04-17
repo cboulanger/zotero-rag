@@ -14,50 +14,11 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 | `remote-openai` | **No** | `OPENAI_API_KEY` |
 | `windows-test` | **No** | `KISSKI_API_KEY` |
 
-Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [docker-deployment.md](docker-deployment.md)).
+Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
 ---
 
 ## Available Presets
-
-### `remote-kisski` (Recommended — fully remote, no GPU needed)
-
-**Best for:** Any machine with internet access and a KISSKI/SAIA Academic Cloud account
-
-**Configuration:**
-
-- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim, multilingual)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
-- Memory: ~0.5 GB (no local models)
-- Top-k: 10 chunks / Max chunk: 1024 tokens
-
-**Advantages:**
-
-- Zero local GPU or large Python dependencies — `torch` / `sentence-transformers` are not loaded
-- Excellent multilingual embedding quality, ideal for academic content
-- High-quality 70B LLM answers with 128k context window
-- Single API key for both embedding and LLM
-
-**Requires:** `KISSKI_API_KEY` environment variable
-
----
-
-### `apple-silicon-kisski` (Recommended for Apple Silicon + KISSKI)
-
-**Best for:** Apple Silicon Macs (16-32 GB RAM) with KISSKI API access
-
-**Configuration:**
-
-- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
-- Memory: ~0.5 GB (fully remote)
-- Top-k: 10 chunks / Max chunk: 1024 tokens
-
-**Note:** This preset is now fully remote (no local torch/sentence-transformers). It differs from `remote-kisski` only in its intended context; both presets are identical in configuration.
-
-**Requires:** `KISSKI_API_KEY` environment variable
-
----
 
 ### `remote-openai` (OpenAI API)
 
@@ -142,6 +103,46 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 
 ---
 
+### `remote-kisski` (fully remote, no GPU needed, requires KISSKI/SAIA access)
+
+**Best for:** Any machine with internet access and a KISSKI/SAIA Academic Cloud account
+
+**Configuration:**
+
+- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim, multilingual)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- Memory: ~0.5 GB (no local models)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
+
+**Advantages:**
+
+- Zero local GPU or large Python dependencies — `torch` / `sentence-transformers` are not loaded
+- Excellent multilingual embedding quality, ideal for academic content
+- High-quality 70B LLM answers with 128k context window
+- Single API key for both embedding and LLM
+
+**Requires:** `KISSKI_API_KEY` environment variable
+
+---
+
+### `apple-silicon-kisski` (Recommended for Apple Silicon + KISSKI)
+
+**Best for:** Apple Silicon Macs (16-32 GB RAM) with KISSKI API access
+
+**Configuration:**
+
+- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- Memory: ~0.5 GB (fully remote)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
+
+**Note:** This preset is now fully remote (no local torch/sentence-transformers). It differs from `remote-kisski` only in its intended context; both presets are identical in configuration.
+
+**Requires:** `KISSKI_API_KEY` environment variable
+
+---
+
+
 ## Quick Selection Guide
 
 | Your Setup | Recommended Preset |
@@ -201,7 +202,7 @@ If you switch from a local preset to a fully-remote one, you can remove these pa
 uv remove sentence-transformers torch transformers accelerate bitsandbytes
 ```
 
-For Docker deployments, the image can be built without these packages using the `INSTALL_OCR=false` build argument (see [docker-deployment.md](docker-deployment.md)). The `sentence-transformers`/`torch` packages are never included in the Docker image — remote presets work without them by design.
+For Docker deployments, the image can be built without these packages using the `INSTALL_OCR=false` build argument (see [container-deployment.md](container-deployment.md)). The `sentence-transformers`/`torch` packages are never included in the Docker image — remote presets work without them by design.
 
 ---
 

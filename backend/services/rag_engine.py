@@ -143,7 +143,7 @@ class RAGEngine:
             doc_representatives.append(best_result)
 
             doc_meta = results_for_doc[0].chunk.metadata.document_metadata
-            header = f"[Source {i}: {doc_meta.title or 'Unknown'}]"
+            header = f"[S{i}: {doc_meta.title or 'Unknown'}]"
             passages = []
             for result in results_for_doc:
                 metadata = result.chunk.metadata
@@ -164,14 +164,15 @@ Question: {question}
 
 Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response.
 
-CRITICAL CITATION RULE: You MUST cite sources using ONLY bracket notation. The ONLY acceptable citation formats are:
-  - [N]        — reference to source N (e.g. [1], [3])
-  - [N:P]      — source N, page P (e.g. [2:7])
-  - [N,M]      — multiple sources (e.g. [1,2,3])
-  - [N:P,M:Q]  — multiple sources with pages (e.g. [1:10,2:20])
+CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. The ONLY acceptable citation formats are:
+  - [SN]        — reference to source N (e.g. [S1], [S3])
+  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7] NOT [S2:p. 7]
+  - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
+  - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
 
-NEVER write "Source 1", "Source 2", "*Source 3*", "(Source 4)", or any other textual form.
-Every reference to a source must use bracket notation such as [1] or [2:15].
+IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3] or [S1:p. 3].
+NEVER use plain numbers like [1] or [4] — those are bibliography references inside the documents, not source labels.
+NEVER write "Source 1", "S1", or any form other than the bracket notation above.
 
 PAGE SELECTION RULE: When citing a specific page, only cite pages that contain substantive content (arguments, analysis, findings). Do NOT cite pages that consist primarily of bibliographies, reference lists, or footnote-only content — use a different page from the same source instead, or omit the page number.
 """

@@ -2,6 +2,7 @@
 /// <reference path="./zotero-types.d.ts" />
 /// <reference path="./toolkit.d.ts" />
 
+
 /**
  * @typedef {Object} Library
  * @property {string} id - Library ID
@@ -34,6 +35,7 @@
  * @property {number} [topK] - Number of chunks to retrieve (default: 5)
  * @property {number} [minScore] - Minimum similarity score (default: 0.5)
  */
+
 
 /**
  * @typedef {Object} BackendVersion
@@ -656,13 +658,19 @@ class ZoteroRAGPlugin {
 	 * @returns {string} Text with citations replaced by HTML citation spans
 	 */
 	replaceCitationsInText(text, sources, libraryMap) {
-		// Fallback: normalise "Source N", "*Source N*", "**Source N**" → [N]
-		// so that LLM responses that ignored the bracket-notation instruction are still handled.
+		// Normalise legacy "Source N" word form → [SN]
 		const sourceWordPattern = /\*{0,2}Source\s+(\d+)\*{0,2}/g;
-		text = text.replace(sourceWordPattern, (_m, n) => `[${n}]`);
+		text = text.replace(sourceWordPattern, (_m, n) => `[S${n}]`);
 
-		// Pattern: [1], [1:10], [1,2,3], [1:10,2:20,3]
-		const citationPattern = /\[(\d+(?::\d+)?(?:,\s*\d+(?::\d+)?)*)\]/g;
+		// Primary pattern: [S1], [S1:10], [S1:p.10], [S1,S2,S3], [S1:10,S2:20]
+		// Fallback pattern: [1], [1:10] — kept for older cached responses
+		// Page part tolerates an optional "p." or "p " prefix that some LLMs insert.
+		const pageToken = '(?::p\\.?\\s*\\d+|:\\d+)?';
+		const sRef = `[Ss]\\d+${pageToken}`;
+		const nRef = `\\d+(?::\\d+)?`;
+		const citationPattern = new RegExp(
+			`\\[(${sRef}(?:,\\s*${sRef})*|${nRef}(?:,\\s*${nRef})*)\\]`, 'g'
+		);
 
 		return text.replace(citationPattern, (_match, citationList) => {
 			// Parse comma-separated citations
@@ -670,10 +678,13 @@ class ZoteroRAGPlugin {
 			const citationSpans = [];
 
 			for (let citation of citations) {
-				// Parse source number and optional page
-				const parts = citation.split(':');
-				const sourceNum = parseInt(parts[0], 10);
-				const page = parts.length > 1 ? parseInt(parts[1], 10) : null;
+				// Strip optional leading S/s prefix, then parse number and optional page
+				const normalised = citation.replace(/^[Ss]/, '');
+				// Accept "p. 3", "p.3", or plain "3" after the colon
+				const colonIdx = normalised.indexOf(':');
+				const sourceNum = parseInt(colonIdx >= 0 ? normalised.slice(0, colonIdx) : normalised, 10);
+				const pageRaw = colonIdx >= 0 ? normalised.slice(colonIdx + 1).replace(/^p\.?\s*/i, '') : null;
+				const page = pageRaw ? parseInt(pageRaw, 10) : null;
 
 				// Look up source metadata
 				const source = this.lookupSource(sourceNum, sources);

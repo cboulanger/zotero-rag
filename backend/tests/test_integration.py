@@ -68,7 +68,8 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
 
         self.vector_store = VectorStore(
             storage_path=self.vector_store_path,
-            embedding_dim=embedding_dim
+            embedding_dim=embedding_dim,
+            embedding_model_name=self.embedding_service.get_model_name(),
         )
 
         # Mock Zotero client

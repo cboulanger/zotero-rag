@@ -80,7 +80,6 @@ var ZoteroRAGDialog = {
 	selectedLibraries: new Set(),
 
 	/** @type {Map<string, EventSource>} */
-	indexingStreams: new Map(),
 
 	/** @type {Map<string, LibraryIndexMetadata|null>} */
 	libraryMetadata: new Map(),
@@ -90,6 +89,49 @@ var ZoteroRAGDialog = {
 
 	/** @type {AbortController|null} */
 	abortController: null,
+
+	/**
+	 * Cache of attachment Zotero key → local file path for attachments that have
+	 * been downloaded in this dialog session.  Zotero's getFilePathAsync() can
+	 * return null even after a successful download if the item's in-memory state
+	 * is stale; we resolve the path immediately after download and store it here.
+	 * @type {Map<string, string>}
+	 */
+	downloadedAttachmentPaths: new Map(),
+
+	/** Zotero preference key for persisting permanently-failed download keys. */
+	PREF_FAILED_DOWNLOADS: 'extensions.zotero-rag.failedDownloadKeys',
+
+	/**
+	 * Return the set of attachment keys that have permanently failed to download
+	 * (i.e. the file does not exist on Zotero's sync server).
+	 * @returns {Set<string>}
+	 */
+	_getFailedDownloadKeys() {
+		try {
+			return new Set(JSON.parse(Zotero.Prefs.get(this.PREF_FAILED_DOWNLOADS, true) || '[]'));
+		} catch (_) {
+			return new Set();
+		}
+	},
+
+	/**
+	 * Persist an attachment key as permanently failed so it is skipped in future sessions.
+	 * @param {string} key
+	 */
+	_markDownloadFailed(key) {
+		const keys = this._getFailedDownloadKeys();
+		keys.add(key);
+		Zotero.Prefs.set(this.PREF_FAILED_DOWNLOADS, JSON.stringify([...keys]), true);
+	},
+
+	/**
+	 * Total number of indexable attachments per library, populated when a library
+	 * is (re)selected.  Used to detect partial indexing by comparing against
+	 * metadata.total_items_indexed.
+	 * @type {Map<string, number>}
+	 */
+	libraryIndexableCount: new Map(),
 
 	/**
 	 * Initialize the dialog.
@@ -173,6 +215,13 @@ var ZoteroRAGDialog = {
 			const response = await fetch(`${this.plugin.backendURL}/api/config`, {
 				headers: this.plugin.getAuthHeaders()
 			});
+			if (response.status === 401) {
+				this.showStatus(
+					'Authentication required: please set the API key in Zotero RAG preferences (Tools → Zotero RAG → Preferences).',
+					'error'
+				);
+				return;
+			}
 			if (response.ok) {
 				const config = await response.json();
 				const defaultMinScore = config.default_min_score || 0.3;
@@ -213,6 +262,9 @@ var ZoteroRAGDialog = {
 				// Library not indexed yet
 				return null;
 			}
+			if (response.status === 401) {
+				throw new Error('Authentication required: please set the API key in Zotero RAG preferences (Tools → Zotero RAG → Preferences).');
+			}
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
@@ -220,6 +272,7 @@ var ZoteroRAGDialog = {
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.plugin.log(`Error fetching metadata for library ${libraryId}: ${errorMessage}`);
+			this.showStatus(errorMessage, 'error');
 			return null;
 		}
 	},
@@ -265,7 +318,18 @@ var ZoteroRAGDialog = {
 				if (libraryId) {
 					if (target.checked) {
 						this.selectedLibraries.add(libraryId);
-						// Fetch metadata if not already loaded
+						// Count indexable attachments so we can detect partial indexing.
+						// Run in the background — result is used by updateLibraryStatusIcon.
+						const lib = this.plugin ? this.plugin.getLibraries().find(l => l.id === libraryId) : null;
+						const libraryType = lib ? lib.type : 'user';
+						RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
+							.then(count => {
+								this.libraryIndexableCount.set(libraryId, count);
+								this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
+								this.updateSubmitButtonState();
+							})
+							.catch(() => {});
+						// Fetch backend metadata
 						if (!this.libraryMetadata.has(libraryId)) {
 							await this.fetchAndUpdateLibraryMetadata(libraryId);
 						} else {
@@ -304,8 +368,17 @@ var ZoteroRAGDialog = {
 			listContainer.appendChild(checkboxLabel);
 		}
 
-		// Load metadata for the currently selected library (if any)
+		// Load metadata and indexable count for the currently selected library (if any)
 		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
+			const currentLib = libraries.find(l => l.id === currentLibrary);
+			const currentLibType = currentLib ? currentLib.type : 'user';
+			RemoteIndexer.countIndexableAttachments(currentLibrary, currentLibType)
+				.then(count => {
+					this.libraryIndexableCount.set(currentLibrary, count);
+					this.updateLibraryStatusIcon(currentLibrary, this.libraryMetadata.get(currentLibrary) ?? null);
+					this.updateSubmitButtonState();
+				})
+				.catch(() => {});
 			await this.fetchAndUpdateLibraryMetadata(currentLibrary);
 			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata
 		} else {
@@ -346,7 +419,8 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Return true when every selected library has never been indexed.
+	 * Return true when every selected library needs (re-)indexing — either never
+	 * indexed or only partially indexed (indexed count < indexable count).
 	 * In this mode the question box is hidden and the button says "Index".
 	 * @returns {boolean}
 	 */
@@ -355,8 +429,13 @@ var ZoteroRAGDialog = {
 		for (const id of this.selectedLibraries) {
 			// If metadata hasn't loaded yet, assume indexed (optimistic — avoids flicker)
 			if (!this.libraryMetadata.has(id)) return false;
-			// If any selected library IS indexed, stay in normal Submit mode
-			if (this.libraryMetadata.get(id) !== null) return false;
+			const metadata = this.libraryMetadata.get(id);
+			if (metadata == null) continue; // never indexed — counts as needing indexing
+			// Partially indexed: if local count is known and indexed < total, treat as needing indexing
+			const totalIndexable = this.libraryIndexableCount.get(id);
+			if (totalIndexable !== undefined && metadata.total_items_indexed < totalIndexable) continue;
+			// At least one library is fully indexed → Submit mode
+			return false;
 		}
 		return true;
 	},
@@ -418,29 +497,73 @@ var ZoteroRAGDialog = {
 		const statusIcon = document.getElementById(`status-icon-${libraryId}`);
 		const metaSpan = document.getElementById(`meta-${libraryId}`);
 
+		const totalIndexable = this.libraryIndexableCount.get(libraryId);
+		const indexed = metadata ? metadata.total_items_indexed : 0;
+		const isPartial = metadata !== null
+			&& totalIndexable !== undefined
+			&& indexed < totalIndexable;
+
 		if (statusIcon) {
-			if (metadata) {
-				statusIcon.textContent = '\u2713'; // Checkmark for indexed
-				statusIcon.style.color = '#008000';
-			} else {
-				statusIcon.textContent = '\u2205'; // Empty set symbol for not indexed
+			statusIcon.style.display = 'inline';
+			if (!metadata) {
+				statusIcon.textContent = '\u2205'; // Empty set — never indexed
 				statusIcon.style.color = '#999';
+			} else if (isPartial) {
+				statusIcon.textContent = '\u26A0'; // Warning triangle — partially indexed
+				statusIcon.style.color = '#e07800';
+			} else {
+				statusIcon.textContent = '\u2713'; // Checkmark — fully indexed
+				statusIcon.style.color = '#008000';
 			}
 		}
 
 		if (metaSpan) {
-			metaSpan.style.display = 'inline'; // Show the metadata span
-			if (metadata) {
-				const lastIndexed = new Date(metadata.last_indexed_at);
-				const timeAgo = this.formatTimeAgo(lastIndexed);
-				metaSpan.textContent = `${timeAgo} · ${metadata.total_items_indexed} items`;
-				metaSpan.style.fontStyle = 'normal';
-				metaSpan.style.color = '#666';
-			} else {
+			metaSpan.style.display = 'inline';
+			if (!metadata) {
 				metaSpan.textContent = 'not indexed';
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#999';
+			} else if (isPartial) {
+				const lastIndexed = new Date(metadata.last_indexed_at);
+				const timeAgo = this.formatTimeAgo(lastIndexed);
+				const total = totalIndexable !== undefined ? `/${totalIndexable}` : '';
+				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items (incomplete)`;
+				metaSpan.style.fontStyle = 'italic';
+				metaSpan.style.color = '#e07800';
+			} else {
+				const lastIndexed = new Date(metadata.last_indexed_at);
+				const timeAgo = this.formatTimeAgo(lastIndexed);
+				const total = totalIndexable !== undefined ? `/${totalIndexable}` : '';
+				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items`;
+				metaSpan.style.fontStyle = 'normal';
+				metaSpan.style.color = '#666';
 			}
+		}
+	},
+
+	/**
+	 * Show a live progress text inside a library's list row.
+	 * Pass null to restore the normal metadata display.
+	 * @param {string} libraryId
+	 * @param {string|null} progressText
+	 */
+	updateLibraryProgressText(libraryId, progressText) {
+		const metaSpan = document.getElementById(`meta-${libraryId}`);
+		const statusIcon = document.getElementById(`status-icon-${libraryId}`);
+		if (!metaSpan) return;
+		if (progressText === null) {
+			// Restore normal metadata display
+			this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
+			return;
+		}
+		metaSpan.style.display = 'inline';
+		metaSpan.textContent = progressText;
+		metaSpan.style.fontStyle = 'italic';
+		metaSpan.style.color = '#0066cc';
+		if (statusIcon) {
+			statusIcon.style.display = 'inline';
+			statusIcon.textContent = '\u23F3'; // hourglass
+			statusIcon.style.color = '#0066cc';
 		}
 	},
 
@@ -515,6 +638,9 @@ var ZoteroRAGDialog = {
 			const libraryIds = Array.from(this.selectedLibraries);
 			await this.checkAndMonitorIndexing(libraryIds, indexingMode);
 
+			// If cancelled mid-indexing, bail — abortOperation() already cleaned up.
+			if (!this.isOperationInProgress) return;
+
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
@@ -534,6 +660,9 @@ var ZoteroRAGDialog = {
 				window.close();
 			}, 1000);
 		} catch (error) {
+			// If cancelled, abortOperation() already cleaned up the UI — don't double-apply.
+			if (!this.isOperationInProgress) return;
+
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			// DEBUG
 			this.plugin.log(`[DEBUG] submit() caught error: ${errorMessage}`);
@@ -604,6 +733,10 @@ var ZoteroRAGDialog = {
 		try {
 			await this.checkAndMonitorIndexing(libraryIds, 'full');
 
+			// If cancelled mid-indexing, checkAndMonitorIndexing already cleaned up the
+			// local metadata state; abortOperation() already fixed the UI — bail out.
+			if (!this.isOperationInProgress) return;
+
 			this.updateProgress(100, 'Indexing complete', 'Libraries are ready to query.');
 
 			// Refresh metadata for all indexed libraries so the button state updates
@@ -614,8 +747,11 @@ var ZoteroRAGDialog = {
 
 			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata,
 			// so by now the button will read "Submit" and the question box is re-enabled.
+			this.hideProgress();
 			this.setCancelMode('close');
 		} catch (error) {
+			// If the error is due to cancellation, abortOperation() already cleaned up.
+			if (!this.isOperationInProgress) return;
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.showStatus(`Error: ${errorMessage}`, 'error');
 			this.setCancelMode('close');
@@ -629,9 +765,10 @@ var ZoteroRAGDialog = {
 	 * Download missing attachments for items in a library.
 	 * @param {string} libraryId - Library ID
 	 * @param {string} libraryType - Library type ('user' or 'group')
+	 * @param {string} [libraryName] - Human-readable library name for progress display
 	 * @returns {Promise<void>}
 	 */
-	async downloadMissingAttachments(libraryId, libraryType) {
+	async downloadMissingAttachments(libraryId, libraryType, libraryName = '') {
 		if (!this.plugin) return;
 
 		const zoteroLibraryID = libraryType === 'group'
@@ -659,9 +796,20 @@ var ZoteroRAGDialog = {
 
 		const items = await Zotero.Items.getAsync(itemIDs);
 
-		// Collect all attachments that need downloading
+		// Collect all attachments that need downloading.
+		// Only include indexable MIME types stored in Zotero (not URL-only links).
+		const INDEXABLE_TYPES = new Set([
+			'application/pdf',
+			'text/html',
+			'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			'application/epub+zip',
+		]);
+		// Zotero link modes that store a file (imported_file=0, imported_url=1)
+		const STORED_LINK_MODES = new Set([0, 1]);
+
 		/** @type {Array<ZoteroItem>} */
 		const attachmentsToDownload = [];
+		const failedKeys = this._getFailedDownloadKeys();
 
 		for (let item of items) {
 			/** @type {Array<ZoteroItem>} */
@@ -676,6 +824,13 @@ var ZoteroRAGDialog = {
 			}
 
 			for (let attachment of attachments) {
+				// Skip non-indexable types and URL-only attachments (no file to download)
+				const mimeType = attachment.attachmentContentType || '';
+				if (!INDEXABLE_TYPES.has(mimeType)) continue;
+				if (!STORED_LINK_MODES.has(/** @type {any} */ (attachment).attachmentLinkMode)) continue;
+				// Skip attachments that have permanently failed to download in a prior session
+				if (failedKeys.has(attachment.key)) continue;
+
 				const path = await attachment.getFilePathAsync();
 				if (!path) {
 					attachmentsToDownload.push(attachment);
@@ -702,22 +857,31 @@ var ZoteroRAGDialog = {
 
 			current++;
 			const percentage = (current / total) * 100;
-			this.updateProgress(
-				percentage,
-				'Downloading attachments',
-				`Downloading attachment ${current} of ${total}`
-			);
+			const label = libraryName || libraryId;
+			this.updateProgress(percentage, 'Downloading attachments', `${label}: ${current}/${total}`);
+			this.updateLibraryProgressText(libraryId, `Downloading ${current}/${total}...`);
 
 			try {
 				await Zotero.Sync.Runner.downloadFile(attachment);
+				// Cache the path right after download while the in-memory object is fresh.
+				// getFilePathAsync() may return null later for stale item objects even
+				// though the file is on disk.
+				const downloadedPath = await attachment.getFilePathAsync();
+				if (downloadedPath) {
+					this.downloadedAttachmentPaths.set(attachment.key, downloadedPath);
+				}
 			} catch (error) {
-				// Log error but continue with other attachments
+				// Log error but continue with other attachments.
+				// Persist the key so this attachment is never retried — the file is not
+				// available on Zotero's sync server (e.g. linked file, never uploaded).
 				const errorMessage = error instanceof Error ? error.message : String(error);
-				this.plugin.log(`Error downloading attachment ${attachment.id}: ${errorMessage}`);
+				this.plugin.log(`Error downloading attachment ${attachment.key}: ${errorMessage}`);
+				this._markDownloadFailed(attachment.key);
 			}
 		}
 
 		this.plugin.log(`Completed downloading ${total} attachments for library ${libraryId}`);
+		this.updateLibraryProgressText(libraryId, null); // restore normal display
 	},
 
 	/**
@@ -730,11 +894,8 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return;
 
 		const backendURL = this.plugin.backendURL;
-
-		// Detect remote mode: backend URL does not point to the local machine.
-		// In remote mode the backend cannot access local Zotero files, so the
-		// plugin reads attachment bytes and uploads them directly.
-		const isRemote = !backendURL.includes('localhost') && !backendURL.includes('127.0.0.1');
+		if (!backendURL) return;
+		const plugin = this.plugin;
 
 		for (let libraryId of libraryIds) {
 			try {
@@ -743,84 +904,61 @@ var ZoteroRAGDialog = {
 				const libraryName = library ? library.name : libraryId;
 				const libraryType = library ? library.type : 'user';
 
-				if (isRemote) {
-					// ---------------------------------------------------------------
-					// Remote mode: plugin uploads attachment bytes to the backend
-					// ---------------------------------------------------------------
-					this.plugin.log(`Library ${libraryId}: remote mode — uploading attachments directly`);
+				this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
+				await this.downloadMissingAttachments(libraryId, libraryType, libraryName);
 
-					// Ensure all attachments are synced locally before uploading
-					this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
-					await this.downloadMissingAttachments(libraryId, libraryType);
+				this.showStatus(`Indexing library ${libraryName}...`, 'info');
 
-					this.showStatus(`Uploading documents for ${libraryName}...`, 'info');
+				// Fresh AbortController for this library so cancel kills in-flight requests
+				this.abortController = new AbortController();
+				const indexResult = await RemoteIndexer.indexLibrary({
+					libraryId,
+					libraryType,
+					libraryName,
+					backendURL,
+					mode,
+					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
+					log: (msg) => plugin.log(msg),
+					onProgress: ({ percentage, message, current, total }) => {
+						const detail = total > 0 ? `${libraryName}: ${message} ${current}/${total}` : `${libraryName}: ${message}`;
+						this.updateProgress(percentage, 'Indexing', detail);
+						this.updateLibraryProgressText(
+							libraryId,
+							total > 0 ? `${message} ${current}/${total}` : message
+						);
+					},
+					isCancelled: () => !this.isOperationInProgress,
+					signal: this.abortController.signal,
+					downloadedFilePaths: this.downloadedAttachmentPaths,
+				});
+				this.abortController = null;
+				this.updateLibraryProgressText(libraryId, null); // restore normal display
 
-					await RemoteIndexer.indexLibrary({
-						libraryId,
-						libraryType,
-						libraryName,
-						backendURL,
-						getAuthHeaders: (extra) => this.plugin.getAuthHeaders(extra),
-						log: (msg) => this.plugin.log(msg),
-						onProgress: ({ percentage, message, current, total }) => {
-							this.updateProgress(percentage, 'Uploading documents', message, current, total);
-						},
-						isCancelled: () => !this.isOperationInProgress,
-					});
-
-				} else {
-					// ---------------------------------------------------------------
-					// Local mode (unchanged): backend fetches files via Zotero local API
-					// ---------------------------------------------------------------
-					const statusResponse = await fetch(`${backendURL}/api/libraries/${libraryId}/status`, {
-						headers: this.plugin.getAuthHeaders()
-					});
-					const status = await statusResponse.json();
-
-					// For incremental mode, always trigger indexing to catch updates
-					// For full mode, force reindexing
-					// For auto mode, let backend decide
-					const shouldIndex = !status.indexed || status.item_count === 0 || mode !== 'auto';
-
-					if (shouldIndex) {
-						// Download missing attachments before indexing
-						this.showStatus(`Checking attachments for ${libraryName}...`, 'info');
-						await this.downloadMissingAttachments(libraryId, libraryType);
-
-						this.showStatus(`Indexing library ${libraryName}...`, 'info');
-
-						// Build URL with mode parameter
-						const indexURL = `${backendURL}/api/index/library/${libraryId}?mode=${mode}&library_type=${libraryType}&library_name=${encodeURIComponent(libraryName)}`;
-
-						const indexResponse = await fetch(indexURL, {
-							method: 'POST',
-							headers: this.plugin.getAuthHeaders()
-						});
-
-						if (!indexResponse.ok) {
-							const errorData = await indexResponse.json().catch(() => ({}));
-
-							// If indexing is already in progress (409 conflict), reconnect to it
-							if (indexResponse.status === 409) {
-								this.plugin.log(`Library ${libraryId} is already being indexed, reconnecting to progress stream...`);
-								this.showStatus(`Reconnecting to indexing for ${libraryName}...`, 'info');
-							} else {
-								// For other errors, throw
-								const errorMsg = errorData.detail || `HTTP ${indexResponse.status}`;
-								throw new Error(`Failed to start indexing: ${errorMsg}`);
-							}
-						}
-
-						// Monitor progress (whether we just started it or reconnected to existing)
-						await this.monitorIndexingProgress(libraryId);
-					}
+				// If the user cancelled while indexing was running, mark the library as
+				// not-ready so the Index button reappears.  Backend data is kept intact
+				// so the next run can resume incrementally.
+				if (!this.isOperationInProgress) {
+					this.libraryMetadata.set(libraryId, null);
+					this.updateLibraryStatusIcon(libraryId, null);
+					return;
 				}
+
+				if (indexResult.errors > 0 && indexResult.uploaded === 0) {
+					const detail = indexResult.firstError ? `: ${indexResult.firstError}` : '';
+					throw new Error(`All ${indexResult.errors} attachment(s) failed to index${detail}`);
+				}
+				if (indexResult.errors > 0) {
+					const detail = indexResult.firstError ? `: ${indexResult.firstError}` : '';
+					this.plugin.log(`[RemoteIndexer] Warning: ${indexResult.errors} attachment(s) failed during indexing of ${libraryName}`);
+					this.showStatus(`Warning: ${indexResult.errors} attachment(s) failed to index${detail}`, 'error');
+				}
+
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
 				const libraryName = this.getLibraryName(libraryId);
-				this.plugin.log(`Error checking library ${libraryId}: ${errorMessage}`);
+				this.plugin.log(`Error indexing library ${libraryId}: ${errorMessage}`);
 				this.showStatus(`Error indexing library ${libraryName}: ${errorMessage}`, 'error');
-				throw error; // Re-throw to stop the query process
+				throw error;
 			}
 		}
 	},
@@ -830,90 +968,6 @@ var ZoteroRAGDialog = {
 	 * @param {string} libraryId - Library ID to monitor
 	 * @returns {Promise<void>}
 	 */
-	monitorIndexingProgress(libraryId) {
-		return new Promise((resolve, reject) => {
-			if (!this.plugin) {
-				reject(new Error('Plugin not initialized'));
-				return;
-			}
-
-			const backendURL = this.plugin.backendURL;
-			const sseURL = this.plugin.addApiKeyParam(
-				`${backendURL}/api/index/library/${libraryId}/progress`
-			);
-			const eventSource = new EventSource(sseURL);
-
-			this.indexingStreams.set(libraryId, eventSource);
-
-			eventSource.onmessage = (event) => {
-				try {
-					const data = /** @type {SSEData} */ (JSON.parse(event.data));
-
-					switch (data.event) {
-						case 'started':
-							// Do not show a message yet — wait for actual progress or completion
-							break;
-
-						case 'progress':
-							const percentage = data.progress || 0;
-							const current = data.current_item || 0;
-							const total = data.total_items || 0;
-
-							// Determine label and detailed message
-							let label, detailedMessage;
-
-							// Priority: document count > custom message > generic progress
-							if (total > 0) {
-								// Show document count
-								label = 'Indexing';
-								detailedMessage = `Indexing document ${current} of ${total}`;
-							} else if (data.message) {
-								// Backend provided a message (like "Loading embedding model...")
-								label = 'Indexing';
-								detailedMessage = data.message;
-							} else {
-								// Generic progress
-								label = 'Processing';
-								detailedMessage = `${percentage.toFixed(0)}% complete`;
-							}
-
-							this.updateProgress(percentage, label, detailedMessage);
-							break;
-
-						case 'completed':
-							this.updateProgress(100, 'Completed', data.message || '');
-							eventSource.close();
-							this.indexingStreams.delete(libraryId);
-							resolve();
-							break;
-
-						case 'error':
-							this.updateProgress(0, 'Error', '');
-							this.showStatus(`Error: ${data.message || 'Unknown error'}`, 'error');
-							eventSource.close();
-							this.indexingStreams.delete(libraryId);
-							reject(new Error(data.message || 'Indexing failed'));
-							break;
-					}
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error);
-					if (this.plugin) {
-						this.plugin.log(`Error parsing SSE data: ${errorMessage}`);
-					}
-				}
-			};
-
-			eventSource.onerror = () => {
-				if (this.plugin) {
-					this.plugin.log(`SSE connection error for library ${libraryId}`);
-				}
-				eventSource.close();
-				this.indexingStreams.delete(libraryId);
-				resolve();
-			};
-		});
-	},
-
 	/**
 	 * Update progress bar with percentage and message.
 	 * @param {number} percentage - Progress percentage (0-100)
@@ -1066,24 +1120,6 @@ var ZoteroRAGDialog = {
 			this.abortController = null;
 		}
 
-		// Close all active SSE streams
-		for (const [libraryId, eventSource] of this.indexingStreams.entries()) {
-			eventSource.close();
-
-			// Send abort signal to backend
-			try {
-				await fetch(`${this.plugin.backendURL}/api/index/library/${libraryId}/cancel`, {
-					method: 'POST',
-					headers: this.plugin.getAuthHeaders()
-				});
-			} catch (error) {
-				// Log but don't throw - cancellation should always succeed
-				const errorMessage = error instanceof Error ? error.message : String(error);
-				this.plugin.log(`Error cancelling indexing for library ${libraryId}: ${errorMessage}`);
-			}
-		}
-		this.indexingStreams.clear();
-
 		// Reset UI state
 		this.isOperationInProgress = false;
 		this.setSubmitEnabled(true);
@@ -1107,10 +1143,32 @@ var ZoteroRAGDialog = {
 			cancelButton.textContent = 'Cancel';
 			cancelButton.title = 'Cancel the current operation';
 			this.isOperationInProgress = true;
+			this.setLibrarySelectionEnabled(false);
 		} else {
 			cancelButton.textContent = 'Close';
 			cancelButton.title = 'Close this dialog';
 			this.isOperationInProgress = false;
+			this.setLibrarySelectionEnabled(true);
+		}
+	},
+
+	/**
+	 * Enable or disable library checkboxes and the library list container.
+	 * @param {boolean} enabled
+	 * @returns {void}
+	 */
+	setLibrarySelectionEnabled(enabled) {
+		const listContainer = document.getElementById('library-list');
+		if (!listContainer) return;
+
+		const labels = /** @type {NodeListOf<HTMLElement>} */ (
+			listContainer.querySelectorAll('label.library-checkbox')
+		);
+		for (const label of labels) {
+			const cb = /** @type {HTMLInputElement|null} */ (label.querySelector('input[type="checkbox"]'));
+			if (cb) cb.disabled = !enabled;
+			label.style.opacity = enabled ? '' : '0.6';
+			label.style.pointerEvents = enabled ? '' : 'none';
 		}
 	}
 };

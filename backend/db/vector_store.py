@@ -4,6 +4,7 @@ Vector database interface using Qdrant.
 Handles storage and retrieval of document chunk embeddings with metadata.
 """
 
+import json
 import logging
 import warnings
 from typing import Optional
@@ -39,10 +40,13 @@ class VectorStore:
     DEDUP_COLLECTION = "deduplication"
     METADATA_COLLECTION = "library_metadata"
 
+    _CONFIG_FILE = "embedding_config.json"
+
     def __init__(
         self,
         storage_path: Path,
         embedding_dim: int,
+        embedding_model_name: str,
         distance: Distance = Distance.COSINE,
     ):
         """
@@ -51,10 +55,12 @@ class VectorStore:
         Args:
             storage_path: Path to Qdrant storage directory
             embedding_dim: Dimensionality of embeddings
+            embedding_model_name: Identifier of the embedding model (e.g. model name/path)
             distance: Distance metric (COSINE, EUCLID, DOT)
         """
         self.storage_path = storage_path
         self.embedding_dim = embedding_dim
+        self.embedding_model_name = embedding_model_name
         self.distance = distance
 
         # Ensure storage directory exists
@@ -68,30 +74,68 @@ class VectorStore:
         # Create collections if they don't exist
         self._ensure_collections()
 
+    def _load_embedding_config(self) -> Optional[dict]:
+        """Read the persisted embedding config from the sidecar file."""
+        config_file = self.storage_path / self._CONFIG_FILE
+        if config_file.exists():
+            try:
+                return json.loads(config_file.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning(f"Could not read {self._CONFIG_FILE}: {e}")
+        return None
+
+    def _save_embedding_config(self):
+        """Persist the current embedding model name and dim to the sidecar file."""
+        config_file = self.storage_path / self._CONFIG_FILE
+        config_file.write_text(
+            json.dumps({"model_name": self.embedding_model_name, "embedding_dim": self.embedding_dim}),
+            encoding="utf-8",
+        )
+
     def _ensure_collections(self):
-        """Create collections if they don't exist, or recreate if vector size changed."""
-        # Check if chunks collection exists
+        """Create collections if they don't exist, raising an error if the embedding model changed."""
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
+        has_chunks = self.CHUNKS_COLLECTION in collection_names
 
-        if self.CHUNKS_COLLECTION in collection_names:
-            # Verify the vector dimension matches the current embedding model
+        # Check persisted embedding config against current settings
+        saved = self._load_embedding_config()
+        if saved is not None:
+            saved_model = saved.get("model_name")
+            saved_dim = saved.get("embedding_dim")
+            model_changed = saved_model != self.embedding_model_name
+            dim_changed = saved_dim != self.embedding_dim
+            if model_changed or dim_changed:
+                raise ValueError(
+                    f"Embedding model mismatch: the vector database was built with "
+                    f"'{saved_model}' ({saved_dim}-dim) but the current configuration uses "
+                    f"'{self.embedding_model_name}' ({self.embedding_dim}-dim). "
+                    f"Re-index all libraries or clear the vector database before continuing."
+                )
+        elif has_chunks:
+            # Legacy database without a config file — assume current model and record it
+            logger.warning(
+                f"No embedding config file found for an existing database. "
+                f"Assuming current model '{self.embedding_model_name}' and recording it. "
+                f"If this is wrong, clear the database and re-index."
+            )
+
+        if has_chunks:
+            # Secondary sanity-check: stored vector dim must match even if config file agrees
             info = self.client.get_collection(self.CHUNKS_COLLECTION)
             vectors_config = info.config.params.vectors
-            # vectors_config is either a VectorParams (unnamed) or a dict (named vectors)
             existing_dim = (
                 vectors_config.size
                 if hasattr(vectors_config, "size")
                 else next(iter(vectors_config.values())).size
             )
             if existing_dim != self.embedding_dim:
-                logger.warning(
-                    f"Collection '{self.CHUNKS_COLLECTION}' has vector size {existing_dim} "
-                    f"but current embedding model produces {self.embedding_dim}-dim vectors. "
-                    f"Recreating collection (all previously indexed data will be lost)."
+                raise ValueError(
+                    f"Vector dimension mismatch: the '{self.CHUNKS_COLLECTION}' collection stores "
+                    f"{existing_dim}-dim vectors but the current model produces "
+                    f"{self.embedding_dim}-dim vectors. "
+                    f"Re-index all libraries or clear the vector database before continuing."
                 )
-                self.client.delete_collection(self.CHUNKS_COLLECTION)
-                collection_names.remove(self.CHUNKS_COLLECTION)
 
         if self.CHUNKS_COLLECTION not in collection_names:
             logger.info(f"Creating collection: {self.CHUNKS_COLLECTION}")
@@ -134,6 +178,9 @@ class VectorStore:
                     field_name="library_id",
                     field_schema="keyword"
                 )
+
+        # Persist (or refresh) the embedding config so future startups can validate it
+        self._save_embedding_config()
 
     def add_chunk(self, chunk: DocumentChunk) -> str:
         """
@@ -327,27 +374,33 @@ class VectorStore:
         logger.info(f"Search returned {len(search_results)} results")
         return search_results
 
-    def check_duplicate(self, content_hash: str) -> Optional[DeduplicationRecord]:
+    def check_duplicate(self, content_hash: str, library_id: Optional[str] = None) -> Optional[DeduplicationRecord]:
         """
         Check if a document with this content hash already exists.
 
         Args:
             content_hash: Content hash to check
+            library_id: When provided, only match records for this library.
 
         Returns:
             Deduplication record if found, None otherwise
         """
-        # Search in dedup collection
+        must_conditions: list = [
+            FieldCondition(
+                key="content_hash",
+                match=MatchValue(value=content_hash),
+            )
+        ]
+        if library_id is not None:
+            must_conditions.append(
+                FieldCondition(
+                    key="library_id",
+                    match=MatchValue(value=library_id),
+                )
+            )
         results = self.client.scroll(
             collection_name=self.DEDUP_COLLECTION,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="content_hash",
-                        match=MatchValue(value=content_hash),
-                    )
-                ]
-            ),
+            scroll_filter=Filter(must=must_conditions),
             limit=1,
         )
 
@@ -483,6 +536,7 @@ class VectorStore:
             "dedup_count": dedup_info.points_count,
             "metadata_count": metadata_info.points_count,
             "embedding_dim": self.embedding_dim,
+            "embedding_model_name": self.embedding_model_name,
             "distance": self.distance.value if hasattr(self.distance, 'value') else str(self.distance),
         }
 

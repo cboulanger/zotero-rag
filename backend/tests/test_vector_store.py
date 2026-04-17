@@ -31,6 +31,7 @@ class TestVectorStore(unittest.TestCase):
         self.vector_store = VectorStore(
             storage_path=self.storage_path,
             embedding_dim=384,
+            embedding_model_name="test-model",
             distance=Distance.COSINE,
         )
 

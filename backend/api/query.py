@@ -2,7 +2,7 @@
 Query API endpoints for RAG queries.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
 from markdown_it import MarkdownIt
@@ -12,6 +12,7 @@ from backend.services.embeddings import create_embedding_service
 from backend.services.llm import create_llm_service
 from backend.db.vector_store import VectorStore
 from backend.config.settings import get_settings
+from backend.dependencies import get_vector_store
 
 router = APIRouter()
 
@@ -44,7 +45,7 @@ class QueryResponse(BaseModel):
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query_libraries(request: QueryRequest):
+async def query_libraries(request: QueryRequest, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Query indexed libraries with a question.
 
@@ -72,6 +73,9 @@ async def query_libraries(request: QueryRequest):
             detail="Question cannot be empty"
         )
 
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
     try:
         # Initialize services
         settings = get_settings()
@@ -87,12 +91,7 @@ async def query_libraries(request: QueryRequest):
         top_k = request.top_k if request.top_k is not None else preset.rag.top_k
         min_score = request.min_score if request.min_score is not None else preset.rag.score_threshold
 
-        # Use context manager to ensure VectorStore is closed after query
-        with VectorStore(
-            storage_path=settings.vector_db_path,
-            embedding_dim=embedding_service.get_embedding_dim()
-        ) as vector_store:
-
+        if True:  # keep indentation for the block below
             # Validate that at least one library is indexed
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 

@@ -90,18 +90,6 @@ class Settings(BaseSettings):
         description="Path to Qdrant vector database"
     )
 
-    # Zotero Configuration
-    zotero_api_url: str = Field(
-        default="http://localhost:23119",
-        description="Zotero local API URL"
-    )
-    require_zotero: bool = Field(
-        default=True,
-        description="Require Zotero local API connectivity at startup. "
-                    "Set to False for remote deployments where the plugin "
-                    "uploads documents directly (no local Zotero access needed)."
-    )
-
     # Logging Configuration
     log_level: str = Field(default="INFO", description="Logging level")
     log_file: Optional[Path] = Field(

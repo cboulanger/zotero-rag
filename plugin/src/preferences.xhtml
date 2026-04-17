@@ -4,9 +4,11 @@
   <html:link rel="stylesheet" href="preferences.css" xmlns:html="http://www.w3.org/1999/xhtml"/>
 </linkset>
 
-<script src="preferences.js" xmlns="http://www.w3.org/1999/xhtml"/>
+<vbox id="zotero-rag-prefs-container"
+      onload="Zotero.ZoteroRAG.initPrefPane(window)"
+      xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml">
 
-<html:div class="preferences-container" xmlns:html="http://www.w3.org/1999/xhtml">
   <!-- Backend Settings -->
   <html:fieldset class="settings-group">
     <html:legend>Backend Server</html:legend>
@@ -28,13 +30,12 @@
       <html:label for="zotero-rag-api-key">API Key:</html:label>
       <html:input id="zotero-rag-api-key"
                   type="password"
-                  placeholder="Required when server is remote"
+                  placeholder="Leave empty if not required"
                   class="setting-input"/>
     </html:div>
 
     <html:div class="setting-description" id="zotero-rag-api-key-desc">
-      API key for authenticating with a remote backend (set API_KEY in the server's .env file).
-      Leave empty for local deployments.
+      API key for authenticating with the backend (set API_KEY in the server's .env file).
     </html:div>
   </html:fieldset>
 
@@ -55,4 +56,5 @@
       Maximum number of simultaneous queries allowed (1-10)
     </html:div>
   </html:fieldset>
-</html:div>
+
+</vbox>

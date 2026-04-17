@@ -22,7 +22,7 @@ The Zotero RAG Application is a Retrieval-Augmented Generation (RAG) system that
 1. **FastAPI Backend**: Python-based service handling document indexing, vector search, and LLM inference
 2. **Zotero Plugin**: JavaScript plugin providing a user interface within Zotero
 
-The backend can run locally (on the same machine as Zotero) or on a remote server. In local mode the backend reads documents directly from the filesystem. In remote mode the plugin uploads document bytes over the network.
+The backend can run locally or on a remote server. Indexing is push-based: the plugin reads attachment bytes from Zotero's local storage and uploads them to the backend via HTTP. The backend requires no access to Zotero or the local filesystem.
 
 ### Key Features
 
@@ -43,9 +43,8 @@ The backend can run locally (on the same machine as Zotero) or on a remote serve
 - Qdrant for vector database
 - sentence-transformers for embeddings
 - transformers + bitsandbytes for local LLM inference
-- PyZotero + direct local API for Zotero integration (local mode only)
 - Kreuzberg for document extraction (PDF, HTML, DOCX, EPUB; Rust-based, native async)
-- python-multipart for document upload (remote mode)
+- python-multipart for document upload
 
 **Plugin:**
 
@@ -59,109 +58,41 @@ The backend can run locally (on the same machine as Zotero) or on a remote serve
 
 ## System Architecture
 
-### Local Mode (default)
-
-```text
-┌────────────────────────────────────────────────────────────────┐
-│                      Zotero Plugin (Frontend)                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Dialog UI  │  │ Menu Item    │  │  Backend Client      │  │
-│  │  - Question  │  │ - Tools Menu │  │  - HTTP/REST         │  │
-│  │  - Libraries │  │              │  │  - SSE Streaming     │  │
-│  │  - Progress  │  │              │  │  - Error Handling    │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                   HTTP/SSE (configurable URL,
-                   default: localhost:8119)
-                              ▼
-┌────────────────────────────────────────────────────────────────┐
-│                    FastAPI Backend (Python)                    │
-│                                                                │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                      API Layer (REST/SSE)                 │ │
-│  │  /api/config  /api/libraries  /api/index  /api/query      │ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                              │                                 │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                     Service Layer                         │ │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
-│  │  │ Document     │ │ RAG Engine   │ │ Embedding        │   │ │
-│  │  │ Processor    │ │              │ │ Service          │   │ │
-│  │  │              │ │ - Retrieval  │ │ - Local Models   │   │ │
-│  │  │ - Extraction │ │ - Generation │ │ - Remote APIs    │   │ │
-│  │  │ - Chunking   │ │ - Citations  │ │ - Caching        │   │ │
-│  │  │ - Indexing   │ │              │ │                  │   │ │
-│  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  │                                                           │ │
-│  │  ┌──────────────┐                  ┌──────────────────┐   │ │
-│  │  │ LLM Service  │                  │ Zotero Client    │   │ │
-│  │  │              │                  │ (local mode only)│   │ │
-│  │  │ - Local      │                  │ - Local API      │   │ │
-│  │  │ - Remote     │                  │ - HTTP Client    │   │ │
-│  │  │ - Quantized  │                  │ - Library Access │   │ │
-│  │  └──────────────┘                  └──────────────────┘   │ │
-│  └───────────────────────────────────────────────────────────┘ │
-│                              │                                 │
-│  ┌───────────────────────────────────────────────────────────┐ │
-│  │                     Data Layer                            │ │
-│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐   │ │
-│  │  │ Vector Store │ │ Model Cache  │ │ Config Manager   │   │ │
-│  │  │  (Qdrant)    │ │              │ │                  │   │ │
-│  │  │              │ │ - Embeddings │ │ - Presets        │   │ │
-│  │  │ - Chunks     │ │ - LLM Weights│ │ - Settings       │   │ │
-│  │  │ - Dedup      │ │              │ │                  │   │ │
-│  │  └──────────────┘ └──────────────┘ └──────────────────┘   │ │
-│  └───────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────┘
-                              │
-                     HTTP (localhost:23119)
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      Zotero Desktop Application                 │
-│                    (Local API on port 23119)                    │
-│                                                                 │
-│  - Libraries, Collections, Items                                │
-│  - PDF Attachments                                              │
-│  - Full-text Content                                            │
-│  - Metadata (Authors, Titles, Years)                            │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### Remote Mode
-
-When the plugin's `backendURL` does not contain `localhost` or `127.0.0.1`, remote mode is activated. The plugin reads attachment bytes locally and uploads them to the backend; the backend needs no access to Zotero or the local filesystem.
+### Architecture
 
 ```text
 ┌────────────────────────────────────────────────────────────────┐
 │             Zotero Plugin + Zotero Desktop (local machine)     │
 │                                                                │
-│  Dialog UI → checkAndMonitorIndexing (remote branch)          │
+│  Dialog UI → checkAndMonitorIndexing()                         │
 │     ↓                                                          │
 │  RemoteIndexer.indexLibrary()                                  │
-│     1. GET /api/libraries/{id}/check-indexed                   │
+│     1. POST /api/libraries/{id}/check-indexed                  │
 │        (find which attachments need uploading)                 │
 │     2. IOUtils.read(localPath) → bytes                         │
 │     3. POST /api/index/document  (multipart: bytes + metadata) │
 │     4. Show progress per document                              │
 └────────────────────────────────────────────────────────────────┘
-              │  HTTPS (configurable, X-API-Key auth)
+              │  HTTP/HTTPS (configurable URL, X-API-Key auth)
               ▼
 ┌────────────────────────────────────────────────────────────────┐
-│           FastAPI Backend (remote server / container)          │
+│           FastAPI Backend (local or remote server)             │
 │                                                                │
 │  POST /api/index/document                                      │
 │     → validate API key                                         │
-│     → DocumentProcessor._process_attachment_bytes()           │
+│     → DocumentProcessor._process_attachment_bytes()            │
 │        (dedup check → extract → embed → store)                 │
 │                                                                │
 │  POST /api/libraries/{id}/check-indexed                        │
 │     → VectorStore.get_item_version() per attachment            │
 │     → return needs_indexing + reason per attachment            │
+│                                                                │
+│  POST /api/query                                               │
+│     → RAGEngine: embed query → search → generate → cite        │
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Mode detection:** `backendURL` is stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the plugin's Preferences pane, default `http://localhost:8119`). If the URL does not contain `localhost` or `127.0.0.1`, remote mode is used automatically.
+**Backend URL:** stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the Preferences pane, default `http://localhost:8119`). An API key can be configured on the backend (`API_KEY` env var) and entered in the plugin preferences.
 
 ---
 
@@ -178,7 +109,6 @@ The backend is organized into a layered architecture with clear separation of co
 - FastAPI application setup
 - Optional API key middleware (all endpoints except `/`, `/health`, `/api/version`)
 - Configurable CORS (`ALLOWED_ORIGINS` env var)
-- Conditional Zotero connectivity check at startup (`REQUIRE_ZOTERO` env var)
 - Lifespan context management
 
 **Configuration API:** [backend/api/config.py](../backend/api/config.py)
@@ -197,16 +127,13 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Indexing API:** [backend/api/indexing.py](../backend/api/indexing.py)
 
-- `POST /api/index/library/{library_id}` - Start library indexing with mode selection (auto/incremental/full) — **local mode only**
-  - Query parameters: `mode` (auto/incremental/full), `library_type`, `library_name`
-- `GET /api/index/library/{library_id}/progress` - Stream indexing progress via SSE (supports `?api_key=` for EventSource compatibility)
-- `POST /api/index/library/{library_id}/cancel` - Cancel ongoing indexing operation
+- `POST /api/index/library/{library_id}` — **410 Gone** (pull-based indexing removed)
+- `GET /api/index/library/{library_id}/progress` — **410 Gone**
+- `POST /api/index/library/{library_id}/cancel` — **410 Gone**
 
 **Document Upload API:** [backend/api/document_upload.py](../backend/api/document_upload.py)
 
-New endpoints for remote mode:
-
-- `POST /api/libraries/{library_id}/check-indexed` — accepts `CheckIndexedRequest` (list of attachment keys + versions); returns `CheckIndexedResponse` with `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment
+- `POST /api/libraries/{library_id}/check-indexed` — accepts a list of attachment descriptors (key, versions, MIME type); returns `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment
 - `POST /api/index/document` — accepts multipart form data (`file`: raw bytes, `metadata`: JSON string); validates API key, runs `DocumentProcessor._process_attachment_bytes()`, returns `DocumentUploadResult`
 
 **Query API:** [backend/api/query.py](../backend/api/query.py)
@@ -219,12 +146,10 @@ New endpoints for remote mode:
 
 - Orchestrates the complete indexing pipeline
 - Supports incremental indexing (version-based change detection)
-- Three indexing modes: auto, incremental, and full
-- Fetches items from Zotero libraries with version tracking (local mode)
 - Delegates extraction and chunking to a `DocumentExtractor` implementation
 - Generates embeddings and stores chunks in vector database with version metadata
 - Handles deduplication via content hashing
-- `_process_attachment_bytes(file_bytes, mime_type, doc_metadata, ...)` — shared processing core used by both the local Zotero-API path and the remote upload endpoint
+- `_process_attachment_bytes(file_bytes, mime_type, doc_metadata, ...)` — core processing entry point called by the document upload endpoint
 - Provides progress callbacks and cancellation support
 
 **Document Extraction:** [backend/services/extraction/](../backend/services/extraction/)
@@ -306,17 +231,7 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
   - Environment variable configuration
   - Path expansion for model weights and vector DB
   - Dynamic API key handling
-  - Remote deployment settings (`api_key`, `allowed_origins`, `require_zotero`)
-
-**Zotero Integration (local mode only):**
-
-- **Local API Client:** [backend/zotero/local_api.py](../backend/zotero/local_api.py)
-  - Direct HTTP interface to Zotero local server (localhost:23119)
-  - Async operations for listing libraries, items, attachments
-  - Version-aware item fetching with `?since=<version>` parameter
-  - Library version range detection
-  - PDF download and full-text extraction
-  - No API key required
+  - Remote deployment settings (`api_key`, `allowed_origins`)
 
 ### Zotero Plugin
 
@@ -353,12 +268,11 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 - SSE streaming for indexing progress (API key appended as query param)
 - Operation cancellation support (abort button)
 - All `fetch()` calls include `X-API-Key` header via `plugin.getAuthHeaders()`
-- Remote vs local mode branching in `checkAndMonitorIndexing()`
 - Status messages and error handling
 
 **Remote Indexer:** [plugin/src/remote_indexer.js](../plugin/src/remote_indexer.js)
 
-Coordinates document upload when `backendURL` is remote. Loaded as a subscript in `dialog.xhtml`.
+Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 
 - `RemoteIndexer.indexLibrary({libraryId, libraryType, backendURL, getAuthHeaders, onProgress, isCancelled})`
   1. Collect all locally-stored attachments with indexable MIME types
@@ -372,7 +286,7 @@ Coordinates document upload when `backendURL` is remote. Loaded as a subscript i
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
 - Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
-- API key configuration (`extensions.zotero-rag.apiKey`) — shown only when URL is not localhost/127.0.0.1
+- API key configuration (`extensions.zotero-rag.apiKey`)
 - Max concurrent queries setting
 - HTML-based preferences pane
 - Custom CSS styling: [plugin/src/preferences.css](../plugin/src/preferences.css)
@@ -392,7 +306,7 @@ Coordinates document upload when `backendURL` is remote. Loaded as a subscript i
 
 ## Data Flow
 
-### Indexing Workflow — Local Mode
+### Indexing Workflow
 
 ```text
 1. User selects "Ask Question" from Tools menu
@@ -403,62 +317,18 @@ Coordinates document upload when `backendURL` is remote. Loaded as a subscript i
    ↓
 4. User selects libraries, indexing mode (auto/incremental/full), and enters question
    ↓
-5. Plugin checks indexing status for each library
-   ↓
-6. For libraries needing indexing:
-   a. Plugin triggers indexing via POST /api/index/library/{id}?mode={mode}
-   b. Backend starts background indexing task with cancellation support
-   c. Plugin subscribes to SSE progress stream
-   d. Progress updates displayed in real-time
-   e. User can cancel operation at any time
-   ↓
-7. When all libraries indexed, plugin submits query
-```
-
-**Backend Indexing Pipeline (local mode):**
-
-```text
-1. DocumentProcessor.index_library(library_id, mode)
-   ↓
-2. Get or create library metadata from library_metadata collection
-   ↓
-3. Determine effective mode (auto → incremental if previously indexed, else full)
-   ↓
-4. Fetch items from Zotero via ZoteroLocalAPI:
-   - Incremental mode: Use ?since=<last_version> to get only new/modified items
-   - Full mode: Fetch all items
-   ↓
-5. Filter items with indexable attachments (PDF, HTML, DOCX, EPUB)
-   ↓
-6. For each item:
-   a. Check for cancellation (abort if requested)
-   b. Compare versions (incremental mode: skip if version unchanged)
-   c. Delete old chunks if item updated (incremental mode)
-   d. Download attachment file bytes
-   e. Call _process_attachment_bytes() → extract → embed → store
-   ↓
-7. Update library metadata (last_indexed_version, timestamp, counts, mode)
-   ↓
-8. Return statistics (mode, items processed/added/updated, chunks added/deleted, timing)
-```
-
-### Indexing Workflow — Remote Mode
-
-```text
-1. Plugin detects remote backend (URL not localhost/127.0.0.1)
-   ↓
-2. RemoteIndexer.indexLibrary() runs:
+5. RemoteIndexer.indexLibrary() runs:
    a. Collect all locally-stored attachments (Zotero JS API)
    b. POST /api/libraries/{id}/check-indexed → get list of which need uploading
    ↓
-3. For each attachment needing upload:
+6. For each attachment needing upload:
    a. IOUtils.read(localFilePath) → bytes
    b. Build FormData: file bytes + JSON metadata (title, authors, year, DOI, etc.)
    c. POST /api/index/document with X-API-Key header
    d. Backend: validate → dedup check → _process_attachment_bytes() → store
    e. Plugin updates progress display
    ↓
-4. When all attachments processed, plugin submits query
+7. When all attachments processed, plugin submits query
 ```
 
 ### Query Workflow
@@ -573,7 +443,6 @@ KISSKI_API_KEY=your-kisski-key
 # Remote server deployment (optional)
 API_KEY=your-secret-key          # Required X-API-Key header when set
 ALLOWED_ORIGINS=https://myhost   # CORS allowed origins (default: *)
-REQUIRE_ZOTERO=false             # Skip Zotero connectivity check (remote deployments)
 ```
 
 **Plugin Preferences:**
@@ -584,25 +453,13 @@ extensions.zotero-rag.apiKey     = (empty for local, set for remote)
 extensions.zotero-rag.maxQueries = 5
 ```
 
-The `backendURL` preference is the single configuration point for server location. Changing it to a remote URL automatically switches the plugin to remote mode.
+The `backendURL` preference is the single configuration point for server location.
 
 ---
 
 ## Key Design Decisions
 
-### 1. Zotero Local API vs PyZotero
-
-**Decision:** Use Zotero Local API (localhost:23119) as primary interface for local mode
-
-**Rationale:**
-
-- No API key required
-- Direct access to local data
-- Faster than cloud API
-- No rate limiting
-- Access to full-text content
-
-### 2. Vector Database Choice
+### 1. Vector Database Choice
 
 **Decision:** Qdrant
 
@@ -699,24 +556,22 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 - Automatic detection of metadata updates (title, author changes)
 - Hard reset API for manual full reindexing
 
-### 9. Remote Server Support
+### 9. Push-Based Indexing
 
-**Decision:** Plugin-side file upload with optional API key authentication
+**Decision:** Plugin uploads attachment bytes to the backend; backend has no Zotero dependency
 
 **Rationale:**
 
-- Backend on a remote/more-powerful machine requires a different document delivery mechanism
+- Enables remote server deployment without any access to the user's Zotero installation
 - Document extraction and embedding are bytes-based throughout — no filesystem assumptions
-- Shared `_process_attachment_bytes()` core avoids code duplication between local and remote paths
-- API key is optional: local mode works without any authentication, remote mode enforces it when `API_KEY` is set
+- `_process_attachment_bytes()` core keeps the processing path uniform regardless of who delivers the bytes
+- API key is optional: local deployments work without authentication; remote deployments set `API_KEY`
 
 **Implementation:**
 
-- Mode detection: `backendURL` not containing `localhost`/`127.0.0.1`
 - Plugin reads files via Firefox `IOUtils.read()` — available in Zotero's JS environment
 - `check-indexed` batch endpoint minimises unnecessary uploads (only changed/new attachments)
 - `X-API-Key` header for all endpoints; `?api_key=` query param for SSE (EventSource limitation)
-- `REQUIRE_ZOTERO=false` skips Zotero local API connectivity check for remote deployments
 
 ### 10. Operation Cancellation
 
@@ -731,10 +586,9 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 
 **Implementation:**
 
-- Frontend: Cancel button aborts SSE streams and calls cancel endpoint
-- Backend: Job status flag checked in each iteration
+- Frontend: Cancel button sets `isCancelled` flag, checked by `RemoteIndexer` between uploads
 - Document processor raises `RuntimeError` on cancellation
-- SSE stream sends cancellation event to frontend
+- Partial uploads are skipped; already-stored chunks remain valid
 
 ### 11. Testing Strategy
 
@@ -818,7 +672,7 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 - **Remote mode:** Set `API_KEY` env var on the backend to require `X-API-Key: <key>` on all requests
   - Health check (`/`, `/health`, `/api/version`) is exempt from API key check
   - SSE endpoint accepts key as `?api_key=` query param (EventSource API limitation)
-  - Plugin stores key in `extensions.zotero-rag.apiKey` preference; UI shows it only when URL is remote
+  - Plugin stores key in `extensions.zotero-rag.apiKey` preference
 
 ### CORS Configuration
 
@@ -833,7 +687,7 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 
 ### Deployment Recommendation
 
-For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or nginx) with TLS termination. Set `API_KEY`, restrict `ALLOWED_ORIGINS`, and set `REQUIRE_ZOTERO=false`.
+For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or nginx) with TLS termination. Set `API_KEY` and restrict `ALLOWED_ORIGINS`.
 
 ---
 
@@ -854,38 +708,3 @@ For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or n
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [sentence-transformers](https://www.sbert.net/)
 
----
-
-## Recent Updates
-
-**Version 1.1 - January 2025:**
-- Added incremental indexing with version-based change detection
-- Implemented operation cancellation support
-- Added library metadata tracking (last indexed, item counts, version numbers)
-- Enhanced API with new endpoints for index status and cancellation
-- Improved plugin UI with mode selection and status display
-
-**Version 1.3 - April 2025:**
-- Replaced monolithic PDF extraction pipeline with pluggable `DocumentExtractor` adapter pattern
-- Introduced Kreuzberg as the default extraction backend (Rust-based, native async, 91+ formats)
-- Extended indexable MIME types: PDF, HTML, DOCX, EPUB
-- Added `extractor_backend` setting (`kreuzberg` or `legacy`)
-- Legacy pypdf + spaCy pipeline retained as `LegacyExtractor` fallback
-
-**Version 1.4 - April 2026:**
-
-- **Remote server support**: backend can now run on a separate machine
-- New document upload API: `POST /api/index/document` (multipart bytes + metadata) and `POST /api/libraries/{id}/check-indexed` (batch version check)
-- Extracted `DocumentProcessor._process_attachment_bytes()` as shared processing core for both local and remote paths
-- Plugin-side `RemoteIndexer` (`plugin/src/remote_indexer.js`): reads attachment bytes via `IOUtils.read()`, uploads via multipart form data
-- Automatic local/remote mode detection based on `backendURL` (configurable via plugin preferences)
-- Optional API key authentication (`API_KEY` env var, `X-API-Key` header; `?api_key=` param for SSE)
-- Configurable CORS origins (`ALLOWED_ORIGINS` env var)
-- `REQUIRE_ZOTERO=false` setting to skip Zotero local API check in remote deployments
-- Plugin preferences: API key field shown/hidden based on whether URL is local or remote
-- Updated hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `apple-silicon-kisski`, `remote-kisski`, `windows-test`
-
----
-
-**Document Version:** 1.4
-**Last Updated:** April 2026

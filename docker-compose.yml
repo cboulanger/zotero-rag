@@ -11,7 +11,9 @@
 #   docker compose logs -f     # stream logs from all services
 #
 # Required environment variables (set in .env or shell):
-#   OPENAI_API_KEY   — required for remote-openai preset used here as example
+#   OPENAI_API_KEY    — required for remote-openai preset
+#   KISSKI_API_KEY    — required for kisski / academiccloud presets
+#   HF_TOKEN          — optional, for gated Hugging Face models
 
 services:
   kreuzberg:
@@ -29,19 +31,16 @@ services:
     volumes:
       - "${DATA_DIR:-./data}:/data"
     environment:
-      KREUZBERG_URL: http://kreuzberg:8100
+      KREUZBERG_URL: http://kreuzberg:8000
       MODEL_PRESET: ${MODEL_PRESET:-remote-openai}
-      # Must be set in the environment, otherwise it will not work
+      # API keys — set whichever your MODEL_PRESET requires
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      REQUIRE_ZOTERO: ${REQUIRE_ZOTERO:-false}
-      ZOTERO_API_URL: ${ZOTERO_API_URL:""} # Only needed if REQUIRE_ZOTERO=true
+      KISSKI_API_KEY: ${KISSKI_API_KEY:-}
+      HF_TOKEN: ${HF_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      # change this is a real configuration
-      API_KEY: ${API_KEY:-zotero-rag-1234}
+      # set a secret api key for a real deployment!
+      API_KEY: ${API_KEY:-}
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
-    extra_hosts:
-      # Allows the container to reach Zotero running on the host (Linux)
-      - "host.docker.internal:host-gateway"
     depends_on:
       - kreuzberg
     networks:

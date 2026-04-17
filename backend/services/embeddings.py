@@ -5,9 +5,11 @@ Supports both local models (sentence-transformers) and remote APIs (OpenAI-compa
 Includes content-hash based caching to avoid recomputing embeddings.
 """
 
+import asyncio
 import hashlib
 import logging
 import os
+import random
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -50,6 +52,10 @@ class EmbeddingService(ABC):
     @abstractmethod
     def get_embedding_dim(self) -> int:
         """Get the dimensionality of embeddings."""
+
+    @abstractmethod
+    def get_model_name(self) -> str:
+        """Return a stable identifier for the embedding model (used to detect model changes)."""
 
     @staticmethod
     def compute_content_hash(text: str) -> str:
@@ -164,6 +170,10 @@ class LocalEmbeddingService(EmbeddingService):
         self._load_model()
         return self._model.get_sentence_embedding_dimension()
 
+    def get_model_name(self) -> str:
+        """Return the model identifier."""
+        return self.config.model_name
+
     def clear_cache(self):
         """Clear the embedding cache."""
         self._embedding_cache.clear()
@@ -204,6 +214,8 @@ class RemoteEmbeddingService(EmbeddingService):
         self._client: Optional[Any] = None  # AsyncOpenAI, imported lazily
         self._embedding_cache: dict[str, list[float]] = {}
         self._dim: Optional[int] = None
+        self.rate_limit_retries: int = 0
+        self.rate_limit_wait_seconds: float = 0.0
         logger.info(
             f"Initialized RemoteEmbeddingService: model={config.model_name} "
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
@@ -241,6 +253,55 @@ class RemoteEmbeddingService(EmbeddingService):
             return "text-embedding-3-small"
         return name
 
+    async def _create_embeddings_with_backoff(self, input: Any) -> Any:
+        """Call the embeddings API with exponential backoff on rate-limit errors.
+
+        Reads the ``retry-after`` / ``ratelimit-reset`` header when available to
+        wait the exact amount of time the server requests, falling back to
+        exponential backoff with jitter (max 8 attempts, cap 64 s).
+        """
+        from openai import RateLimitError
+
+        client = self._get_client()
+        model = self._resolve_model_name()
+        max_attempts = 8
+        base_delay = 2.0
+
+        for attempt in range(max_attempts):
+            try:
+                return await client.embeddings.create(
+                    model=model,
+                    input=input,
+                    encoding_format="float",
+                )
+            except RateLimitError as exc:
+                if attempt == max_attempts - 1:
+                    raise
+                # Try to honour the server's requested wait time.
+                retry_after: Optional[float] = None
+                headers = getattr(exc, "response", None) and exc.response.headers
+                if headers:
+                    for header in ("retry-after", "ratelimit-reset", "x-ratelimit-reset-minute"):
+                        val = headers.get(header)
+                        if val is not None:
+                            try:
+                                retry_after = float(val)
+                            except ValueError:
+                                pass
+                            break
+                if retry_after is None:
+                    retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                else:
+                    # Add small jitter even to server-supplied values.
+                    retry_after += random.uniform(0, 1)
+                logger.warning(
+                    f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
+                    f"Waiting {retry_after:.1f}s before retry."
+                )
+                self.rate_limit_retries += 1
+                self.rate_limit_wait_seconds += retry_after
+                await asyncio.sleep(retry_after)
+
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
         if self.config.cache_enabled:
@@ -248,12 +309,7 @@ class RemoteEmbeddingService(EmbeddingService):
             if content_hash in self._embedding_cache:
                 return self._embedding_cache[content_hash]
 
-        client = self._get_client()
-        response = await client.embeddings.create(
-            model=self._resolve_model_name(),
-            input=text,
-            encoding_format="float",
-        )
+        response = await self._create_embeddings_with_backoff(text)
         embedding = response.data[0].embedding
 
         if self._dim is None:
@@ -287,7 +343,6 @@ class RemoteEmbeddingService(EmbeddingService):
             uncached_indices = list(range(len(texts)))
 
         if uncached_texts:
-            client = self._get_client()
             logger.info(
                 f"Requesting embeddings for {len(uncached_texts)} texts "
                 f"(model={self._resolve_model_name()})"
@@ -296,11 +351,7 @@ class RemoteEmbeddingService(EmbeddingService):
             batch_size = self.config.batch_size
             for batch_start in range(0, len(uncached_texts), batch_size):
                 batch = uncached_texts[batch_start:batch_start + batch_size]
-                response = await client.embeddings.create(
-                    model=self._resolve_model_name(),
-                    input=batch,
-                    encoding_format="float",
-                )
+                response = await self._create_embeddings_with_backoff(batch)
                 for j, item in enumerate(response.data):
                     embedding = item.embedding
                     global_idx = uncached_indices[batch_start + j]
@@ -332,6 +383,10 @@ class RemoteEmbeddingService(EmbeddingService):
             "Will be confirmed on first embedding call."
         )
         return 1536
+
+    def get_model_name(self) -> str:
+        """Return the resolved API model name."""
+        return self._resolve_model_name()
 
 
 def create_embedding_service(
