@@ -2,7 +2,7 @@ import { defineConfig } from "zotero-plugin-scaffold";
 
 export default defineConfig({
   name: "Zotero RAG Plugin",
-  id: "zotero-rag@example.com",
+  id: "zotero-rag@cboulanger.github.io",
   namespace: "zotero_rag",
   source: [
     "plugin/src"

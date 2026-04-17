@@ -44,6 +44,20 @@ class Settings(BaseSettings):
                     "Set to specific origins for remote deployments."
     )
 
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def parse_allowed_origins(cls, v):
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            import json
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else [parsed]
+            except (json.JSONDecodeError, ValueError):
+                return [o.strip() for o in v.split(",") if o.strip()]
+        return v
+
     # Model Configuration
     model_preset: str = Field(
         default="cpu-only",

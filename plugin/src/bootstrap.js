@@ -23,7 +23,7 @@ async function startup({ id, version, rootURI }) {
 
 	// Register preferences pane
 	Zotero.PreferencePanes.register({
-		pluginID: 'zotero-rag@example.com',
+		pluginID: 'zotero-rag@cboulanger.github.io',
 		src: rootURI + 'preferences.xhtml',
 		scripts: [rootURI + 'preferences.js']
 	});

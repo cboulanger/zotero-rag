@@ -21,8 +21,9 @@
         "assets": [
           "package.json",
           "pyproject.toml",
-          "plugin/manifest.json",
+          "plugin/src/manifest.json",
           "backend/__version__.py",
+          "updates.json",
           "CHANGELOG.md"
         ],
         "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"

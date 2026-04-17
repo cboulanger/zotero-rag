@@ -111,6 +111,32 @@ def update_manifest_json(new_version: str) -> None:
     print(f"[UPDATED] plugin/src/manifest.json -> {new_version}")
 
 
+def update_updates_json(new_version: str) -> None:
+    """Update updates.json with the new version and release link."""
+    updates_json = PROJECT_ROOT / "updates.json"
+    addon_id = "zotero-rag@cboulanger.github.io"
+    xpi_url = f"https://github.com/cboulanger/zotero-rag/releases/download/v{new_version}/zotero-rag-{new_version}.xpi"
+
+    data = {
+        "addons": {
+            addon_id: {
+                "updates": [
+                    {
+                        "version": new_version,
+                        "update_link": xpi_url
+                    }
+                ]
+            }
+        }
+    }
+
+    with open(updates_json, "w") as f:
+        json.dump(data, f, indent="\t")
+        f.write("\n")
+
+    print(f"[UPDATED] updates.json -> {new_version}")
+
+
 def create_version_file(new_version: str) -> None:
     """Create/update backend/__version__.py."""
     version_file = PROJECT_ROOT / "backend" / "__version__.py"
@@ -150,6 +176,7 @@ def main():
         update_pyproject_toml(new_version)
         update_manifest_json(new_version)
         create_version_file(new_version)
+        update_updates_json(new_version)
 
         print("=" * 50)
         print(f"\n[SUCCESS] All files updated to version {new_version}")

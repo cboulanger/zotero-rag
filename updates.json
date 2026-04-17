@@ -1,0 +1,12 @@
+{
+	"addons": {
+		"zotero-rag@example.com": {
+			"updates": [
+				{
+					"version": "1.4.0",
+					"update_link": "https://github.com/cboulanger/zotero-rag/releases/download/v1.4.0/zotero-rag-1.4.0.xpi"
+				}
+			]
+		}
+	}
+}

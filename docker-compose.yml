@@ -1,4 +1,4 @@
-# Local development / self-hosted deployment
+# Example compose file for local development / self-hosted deployment
 #
 # Services:
 #   zotero-rag  — FastAPI backend (port 8119)
@@ -11,9 +11,7 @@
 #   docker compose logs -f     # stream logs from all services
 #
 # Required environment variables (set in .env or shell):
-#   MODEL_PRESET     — e.g. remote-openai, remote-kisski
-#   OPENAI_API_KEY   — required for remote-openai preset
-#   KISSKI_API_KEY   — required for remote-kisski / apple-silicon-kisski
+#   OPENAI_API_KEY   — required for remote-openai preset used here as example
 
 services:
   kreuzberg:
@@ -33,14 +31,14 @@ services:
     environment:
       KREUZBERG_URL: http://kreuzberg:8100
       MODEL_PRESET: ${MODEL_PRESET:-remote-openai}
+      # Must be set in the environment, otherwise it will not work
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      KISSKI_API_KEY: ${KISSKI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ZOTERO_API_URL: ${ZOTERO_API_URL:-http://host.docker.internal:23119}
-      REQUIRE_ZOTERO: ${REQUIRE_ZOTERO:-true}
+      REQUIRE_ZOTERO: ${REQUIRE_ZOTERO:-false}
+      ZOTERO_API_URL: ${ZOTERO_API_URL:""} # Only needed if REQUIRE_ZOTERO=true
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      API_KEY: ${API_KEY:-}
-      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
+      # change this is a real configuration
+      API_KEY: ${API_KEY:-zotero-rag-1234}
+      #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
     extra_hosts:
       # Allows the container to reach Zotero running on the host (Linux)
       - "host.docker.internal:host-gateway"
