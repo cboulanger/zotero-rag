@@ -1,3 +1,10 @@
+## [1.5.2](https://github.com/cboulanger/zotero-rag/compare/v1.5.1...v1.5.2) (2026-04-17)
+
+
+### Bug Fixes
+
+* Fix connectivity issues ([b96ffd2](https://github.com/cboulanger/zotero-rag/commit/b96ffd2d08533bf5d2671467de4c56e35693402d))
+
 ## [1.5.1](https://github.com/cboulanger/zotero-rag/compare/v1.5.0...v1.5.1) (2026-04-17)
 
 
