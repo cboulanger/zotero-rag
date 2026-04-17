@@ -1,3 +1,10 @@
+## [1.5.1](https://github.com/cboulanger/zotero-rag/compare/v1.5.0...v1.5.1) (2026-04-17)
+
+
+### Bug Fixes
+
+* Fix ci and wrong kreuzberg port ([50b44b0](https://github.com/cboulanger/zotero-rag/commit/50b44b0b145aa5a59759f14c3bec71dd976664ce))
+
 # [1.5.0](https://github.com/cboulanger/zotero-rag/compare/v1.4.1...v1.5.0) (2026-04-17)
 
 
