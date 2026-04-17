@@ -1,3 +1,10 @@
+## [1.4.1](https://github.com/cboulanger/zotero-rag/compare/v1.4.0...v1.4.1) (2026-04-17)
+
+
+### Bug Fixes
+
+* sync plugin addon ID and version across all files ([d2d3a7f](https://github.com/cboulanger/zotero-rag/commit/d2d3a7f41966f32d12351d1e94a6754f935c8c25))
+
 # [1.4.0](https://github.com/cboulanger/zotero-rag/compare/v1.3.0...v1.4.0) (2026-04-16)
 
 
