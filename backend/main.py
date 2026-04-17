@@ -7,9 +7,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
-import asyncio
 
 from backend.config.settings import get_settings
+from backend.dependencies import make_vector_store
 from backend.api import config, libraries, indexing, query, document_upload
 
 # Get settings to access log configuration
@@ -71,80 +71,6 @@ uvicorn_error_logger.propagate = True
 logger = logging.getLogger(__name__)
 
 
-async def check_zotero_connectivity():
-    """
-    Check connectivity to Zotero local API at startup.
-    Raises RuntimeError if connection fails (hard requirement).
-    """
-    import aiohttp
-
-    zotero_url = settings.zotero_api_url
-    logger.info(f"Checking Zotero API connectivity at {zotero_url}")
-
-    # Common error message components
-    SEPARATOR = "=" * 80
-    COMMON_STEPS = (
-        "1. Zotero is running\n"
-        "2. HTTP server is enabled in Zotero preferences:\n"
-        "   Settings -> Advanced -> Miscellaneous\n"
-        "   [x] Allow other applications on this computer to communicate with Zotero\n"
-        "3. The port in ZOTERO_API_URL (.env) matches Zotero's HTTP server port\n"
-        "   (Default: http://localhost:23119)"
-    )
-
-    def format_error(title: str, details: str = "", action: str = "Please ensure") -> str:
-        """Format error message with consistent structure."""
-        msg_parts = [
-            f"\n{SEPARATOR}",
-            f"ERROR: {title}",
-            f"Configured URL: {zotero_url}",
-        ]
-        if details:
-            msg_parts.append(f"\n{details}")
-        msg_parts.extend([
-            f"{action}:",
-            COMMON_STEPS,
-            SEPARATOR
-        ])
-        return "\n".join(msg_parts) + "\n"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Try to connect to Zotero's ping endpoint
-            async with session.get(f"{zotero_url}/connector/ping", timeout=aiohttp.ClientTimeout(total=3)) as response:
-                if response.status == 200:
-                    logger.info(f"[OK] Successfully connected to Zotero API at {zotero_url}")
-                    return True
-                else:
-                    error_msg = format_error(
-                        "Cannot connect to Zotero API!",
-                        f"Zotero API responded with status {response.status}"
-                    )
-                    logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-    except aiohttp.ClientConnectorError as e:
-        error_msg = format_error(
-            "Cannot connect to Zotero API!",
-            f"Connection error: {e}"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg) from e
-    except asyncio.TimeoutError as e:
-        error_msg = format_error(
-            "Zotero API connection timeout!",
-            "Zotero may be running but not responding.",
-            "Please check"
-        )
-        logger.error(error_msg)
-        raise RuntimeError(error_msg) from e
-    except Exception as e:
-        if isinstance(e, RuntimeError):
-            raise
-        error_msg = f"Unexpected error checking Zotero connectivity: {e}"
-        logger.error(error_msg)
-        raise RuntimeError(error_msg) from e
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
@@ -153,14 +79,23 @@ async def lifespan(app: FastAPI):
     if settings.log_file:
         logger.info(f"Logging to file: {settings.log_file}")
 
-    # Check Zotero API connectivity (skip when REQUIRE_ZOTERO=false for remote deployments)
-    if settings.require_zotero:
-        await check_zotero_connectivity()
-    else:
-        logger.info("Zotero connectivity check skipped (REQUIRE_ZOTERO=false — remote deployment mode)")
+    # Open a single VectorStore for the lifetime of the process.
+    # Sharing one Qdrant client across all requests avoids the lock-file
+    # contention that causes BlockingIOError when requests overlap.
+    try:
+        vector_store = make_vector_store()
+        app.state.vector_store = vector_store
+        logger.info("VectorStore singleton initialised")
+    except Exception as e:
+        logger.error(f"Failed to initialise VectorStore: {e}")
+        app.state.vector_store = None
 
     yield
+
     logger.info("Shutting down Zotero RAG backend")
+    if getattr(app.state, "vector_store", None) is not None:
+        app.state.vector_store.close()
+        logger.info("VectorStore closed")
 
 
 # Create FastAPI app

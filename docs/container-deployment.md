@@ -39,6 +39,53 @@ sidecar, and all environment variables automatically.
 
 ---
 
+## Container Orchestration
+
+Both `docker compose` and `bin/container.mjs` run the same two containers and wire them together in the same way; they just do it through different mechanisms.
+
+### Shared network
+
+The two containers must be able to reach each other by hostname. Both approaches create a dedicated Docker bridge network and attach both containers to it:
+
+| Approach | Network name | How it is created |
+| -------- | ------------ | ----------------- |
+| `docker compose` | `internal` (project-scoped) | Declared in `docker-compose.yml`; created automatically |
+| `bin/container.mjs` | `zotero-rag-net` | Created by `ensureNetwork()` before any container starts |
+
+The kreuzberg container is given the network alias **`kreuzberg`** in both cases, so the backend can always reach it at `http://kreuzberg:8100` regardless of the container name.
+
+### Kreuzberg lifecycle
+
+**`docker compose`** manages kreuzberg as a regular service (`depends_on` ensures it starts before `zotero-rag`).  
+Stopping with `docker compose down` removes both containers and the network together.
+
+**`bin/container.mjs`** manages kreuzberg explicitly:
+
+- `start` / `deploy` → calls `startKreuzberg()`, which pulls the latest image, stops any existing sidecar with the same name, and runs it with `--network-alias kreuzberg`.  The sidecar is named `<app-container>-kreuzberg` (e.g. `zotero-rag-latest-kreuzberg`).
+- `stop` → calls `stopKreuzberg()` to stop and remove the paired sidecar.
+- `restart` → stops and restarts both the app container and its sidecar by name.
+- Pass `--no-kreuzberg` to `start` if you are already running a kreuzberg instance separately; the app container then joins the existing network but no new sidecar is launched.
+
+### Environment variable handoff
+
+The backend learns where to find kreuzberg via `KREUZBERG_URL`:
+
+| Approach | Where it is set |
+| -------- | --------------- |
+| `docker compose` | Hard-coded in `docker-compose.yml`: `KREUZBERG_URL: http://kreuzberg:8100` |
+| `bin/container.mjs` | Injected at runtime: `extraEnv.push({ key: 'KREUZBERG_URL', value: 'http://kreuzberg:8100' })` |
+
+### When to use which
+
+| Scenario | Recommended tool |
+| -------- | ---------------- |
+| Local development on your own machine | `docker compose up -d` |
+| CI image build | GitHub Actions workflow (no orchestration needed) |
+| Remote server deployment (nginx + SSL) | `bin/container.mjs deploy` or `bin/deploy.mjs` |
+| Fine-grained control (custom name, port, volumes) | `bin/container.mjs start` |
+
+---
+
 ## Files
 
 | File | Purpose |
@@ -53,7 +100,7 @@ sidecar, and all environment variables automatically.
 
 ## Dockerfile
 
-Multi-stage build — no Rust/C compilation required:
+Multi-stage build:
 
 ```dockerfile
 # Stage 1: dependency installer (uv)
@@ -132,7 +179,6 @@ PORT      = 8119
 | `--name NAME` | `zotero-rag-<tag>` | Container name |
 | `--port PORT` | `8119` | Host port |
 | `--data-dir DIR` | — | Host path mounted at `/data`; sets `VECTOR_DB_PATH` and `MODEL_WEIGHTS_PATH` |
-| `--zotero-host URL` | `http://host.docker.internal:23119` | Passed as `ZOTERO_API_URL` |
 | `--env KEY[=VAL]` | — | Extra env vars (repeatable); `KEY` alone transfers from host |
 | `--volume HOST:CTR` | — | Extra volume mounts (repeatable) |
 | `--restart POLICY` | — | Docker restart policy |
@@ -161,7 +207,7 @@ PORT      = 8119
 ### Platform handling
 
 - Detects `docker` or `podman` (prefers docker); verifies daemon connectivity
-- On **Linux**: automatically adds `--add-host=host.docker.internal:host-gateway`
+- On **Linux**: automatically adds `--add-host=host.docker.internal:host-gateway` (needed only if any service on the container accesses the host machine)
 - `--platform linux/amd64` cross-build via QEMU is supported but unreliable for Rust packages — prefer the GitHub Actions CI workflow instead
 
 ---
@@ -234,20 +280,6 @@ Create a token at [hub.docker.com/settings/security](https://hub.docker.com/sett
 ### Layer caching
 
 The workflow uses Docker's registry-based build cache (`buildcache` tag on Docker Hub). Subsequent builds reuse unchanged layers and complete in seconds for incremental changes.
-
----
-
-## Zotero Connectivity
-
-**Local mode** (Zotero on the host machine):
-
-- **Linux:** `--add-host=host.docker.internal:host-gateway` (added automatically)
-- **macOS/Windows:** `host.docker.internal` resolves automatically
-
-Default `ZOTERO_API_URL=http://host.docker.internal:23119`.
-
-**Remote mode** (plugin uploads documents): Set `REQUIRE_ZOTERO=false` to
-skip the Zotero connectivity check at startup.
 
 ---
 

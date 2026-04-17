@@ -45,17 +45,6 @@ Qdrant-based storage with three collections:
 - **deduplication**: Content hash → (library_id, item_key) mapping
 - **library_metadata**: Per-library indexing state
 
-#### ZoteroLocalAPI (local mode only)
-
-`backend/zotero/local_api.py`
-
-HTTP client for Zotero's local API (localhost:23119). Used only when the backend runs on the same machine as Zotero:
-
-- Fetch items with version filtering (?since parameter)
-- Get item children (attachments)
-- Download PDF files via file:// redirects
-- No authentication required
-
 ## Data Models
 
 ### LibraryIndexMetadata
@@ -110,89 +99,54 @@ Stored in vector database payload:
 
 ## Indexing Modes
 
+Indexing mode is chosen by the plugin's `RemoteIndexer` and influences what it uploads:
+
 ### Auto Mode (Default)
 
-```python
-await processor.index_library(library_id, mode="auto")
-```
-
-- First-time indexing: Uses **full** mode
-- Subsequent indexing: Uses **incremental** mode
-- Respects `force_reindex` flag for hard reset
+- First-time indexing: calls `check-indexed` with all attachments; uploads everything not yet indexed (**full** behaviour)
+- Subsequent indexing: calls `check-indexed` with current versions; uploads only new or changed attachments (**incremental** behaviour)
+- A hard reset (`reset-index`) sets `force_reindex=True`, causing the backend to wipe existing chunks before processing the next upload
 
 ### Incremental Mode
 
-```python
-await processor.index_library(library_id, mode="incremental")
-```
-
-- Fetches items modified since `last_indexed_version` using `?since` parameter
-- Compares existing chunk versions with current item versions
-- New items: Index normally
-- Updated items: Delete old chunks, reindex
-- Unchanged items: Skip (shouldn't occur with `?since`, but defensive)
-- Updates library metadata with new `last_indexed_version`
+- Calls `check-indexed` with current attachment versions
+- Uploads only attachments where `needs_indexing=true` (new or version changed)
+- Backend updates `last_indexed_version` after each document
 
 ### Full Mode
 
-```python
-await processor.index_library(library_id, mode="full")
-```
-
-- Deletes all library chunks from vector store
-- Deletes all deduplication records for library
-- Fetches all items (no version filter)
-- Indexes entire library from scratch
-- Updates library metadata with max version seen
+- Triggers a hard reset first (`POST /api/libraries/{id}/reset-index`)
+- Then uploads all attachments, regardless of indexed status
 
 ## Indexing Flow
 
-### Full Indexing
+### Plugin Side (all modes)
 
 ```
-1. Delete all library chunks (vector store)
-2. Delete all deduplication records
-3. Fetch all items from Zotero API
-4. Filter items with indexable attachments (PDF, HTML, DOCX, EPUB)
-5. For each item:
-   - Download attachment bytes
-   - Check content hash (skip if duplicate)
-   - Extract text + chunks (DocumentExtractor)
-   - Generate embeddings (batch)
-   - Store chunks with version metadata
-   - Record deduplication entry
-6. Update library metadata
+1. Collect locally-stored attachments (Zotero JS API, supported MIME types)
+2. POST /api/libraries/{id}/check-indexed → list of {needs_indexing, reason} per attachment
+3. For each attachment where needs_indexing=true:
+   - IOUtils.read(localPath) → file bytes
+   - Build multipart FormData (file bytes + JSON metadata)
+   - POST /api/index/document
+   - Update progress display
 ```
 
-### Incremental Indexing
+### Backend Side (per uploaded document)
 
 ```
-1. Get library metadata (last_indexed_version)
-2. Fetch items modified since version via ?since parameter
-3. Filter items with indexable attachments
-4. For each modified item:
-   - Check existing chunk version
-   - If new: Index normally
-   - If updated: Delete old chunks, reindex
-5. Update library metadata with max version
-```
-
-### Item Processing
-
-```
-For each item with indexable attachments:
-1. Extract authors, title, year from item data
-2. Get item children (attachments)
-3. Filter to supported MIME types
-4. For each attachment:
-   - Download file bytes
-   - Compute SHA256 hash
-   - Check deduplication table
-   - Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
-   - Generate embeddings (EmbeddingService: batch processing)
-   - Create ChunkMetadata with version info
-   - Store in vector database
-   - Add deduplication record
+For each POST /api/index/document:
+1. Validate API key (if API_KEY is configured)
+2. Parse multipart form: file bytes + metadata JSON
+3. Compute SHA256 content hash
+4. Check deduplication table (skip if already indexed with same hash)
+5. Delete existing chunks for this attachment (if updating)
+6. Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
+7. Generate embeddings (EmbeddingService: batch processing)
+8. Create ChunkMetadata with version info
+9. Store chunks in vector database
+10. Add deduplication record
+11. Update library metadata (last_indexed_version, total_chunks)
 ```
 
 ## Version Tracking
@@ -249,37 +203,6 @@ Deduplication record:
 
 ## API Endpoints
 
-### Index Library (local mode)
-
-```
-POST /api/index/library/{library_id}?mode=auto|incremental|full
-```
-
-Query parameters:
-
-- `mode`: Indexing mode (default: auto)
-- `library_type`: user|group (default: user)
-- `library_name`: Human-readable name
-
-Response:
-
-```json
-{
-    "success": true,
-    "library_id": "1",
-    "statistics": {
-        "mode": "incremental",
-        "items_processed": 5,
-        "items_added": 2,
-        "items_updated": 3,
-        "chunks_added": 150,
-        "chunks_deleted": 120,
-        "elapsed_seconds": 45.2,
-        "last_version": 12345
-    }
-}
-```
-
 ### Get Index Status
 
 ```
@@ -304,21 +227,13 @@ GET /api/libraries/indexed
 
 Returns array of LibraryIndexMetadata objects.
 
-### Cancel Indexing
-
-```
-POST /api/index/library/{library_id}/cancel
-```
-
-Signals cancellation for ongoing indexing operation.
-
-### Check Indexed Status (remote mode)
+### Check Indexed Status
 
 ```
 POST /api/libraries/{library_id}/check-indexed
 ```
 
-Batch endpoint used by the plugin in remote mode to determine which attachments need uploading.
+Batch endpoint used by the plugin to determine which attachments need uploading.
 
 Request body:
 
@@ -328,7 +243,9 @@ Request body:
     "library_type": "user",
     "attachments": [
         {
+            "item_key": "ABC123",
             "attachment_key": "DEF456",
+            "mime_type": "application/pdf",
             "item_version": 42,
             "attachment_version": 7
         }
@@ -343,6 +260,7 @@ Response:
     "library_id": "1",
     "statuses": [
         {
+            "item_key": "ABC123",
             "attachment_key": "DEF456",
             "needs_indexing": true,
             "reason": "version_changed"
@@ -353,7 +271,7 @@ Response:
 
 `reason` values: `"not_indexed"`, `"version_changed"`, `"up_to_date"`
 
-### Upload Document (remote mode)
+### Upload Document
 
 ```
 POST /api/index/document
@@ -520,7 +438,6 @@ count = vector_store.count_library_chunks(library_id)
 `backend/config/settings.py`
 
 ```python
-ZOTERO_API_URL = "http://localhost:23119"  # Local API URL
 QDRANT_STORAGE_PATH = Path("~/.local/share/zotero-rag/qdrant")
 EMBEDDING_DIM = 768  # Model-specific
 MAX_CHUNK_SIZE = 512
@@ -583,7 +500,6 @@ EXTRACTOR_BACKEND = "kreuzberg"  # or "legacy" for pypdf+spaCy
 
 - `backend/tests/test_document_processor.py`: DocumentProcessor core logic (uses mock extractor)
 - `backend/tests/test_incremental_indexing.py`: Incremental mode and version comparison
-- `backend/tests/test_zotero_client_versions.py`: Version API methods
 
 ### Integration Tests
 

@@ -49,26 +49,29 @@ var RemoteIndexer = {
 	 * @param {string} opts.libraryType - "user" or "group"
 	 * @param {string} opts.libraryName - Human-readable library name
 	 * @param {string} opts.backendURL - Backend base URL
+	 * @param {string} [opts.mode] - Indexing mode: "auto" | "incremental" | "full" (currently unused server-side)
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {function(UploadProgress): void} opts.onProgress
 	 * @param {function(): boolean} opts.isCancelled - Return true to abort
-	 * @returns {Promise<{uploaded: number, skipped: number, errors: number}>}
+	 * @param {AbortSignal} [opts.signal] - AbortSignal to cancel in-flight fetch requests immediately
+	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
+	 * @returns {Promise<{uploaded: number, skipped: number, errors: number, firstError: string|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, onProgress, isCancelled }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
 
 		// 1. Collect all indexable attachments from the local Zotero database
-		const attachments = await this._collectAttachments(libraryId, libraryType, log);
+		const attachments = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths);
 		log(`[RemoteIndexer] Found ${attachments.length} indexable attachments`);
 
 		if (attachments.length === 0) {
 			onProgress({ percentage: 100, message: 'No indexable attachments found', current: 0, total: 0 });
-			return { uploaded: 0, skipped: 0, errors: 0 };
+			return { uploaded: 0, skipped: 0, errors: 0, firstError: null };
 		}
 
 		// 2. Ask the backend which attachments actually need indexing
-		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log);
+		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal);
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
@@ -76,6 +79,8 @@ var RemoteIndexer = {
 		let uploaded = 0;
 		let skipped = attachments.length - toUpload.length;
 		let errors = 0;
+		/** @type {string|null} */
+		let firstError = null;
 		const total = toUpload.length;
 
 		for (let i = 0; i < toUpload.length; i++) {
@@ -98,18 +103,19 @@ var RemoteIndexer = {
 			});
 
 			try {
-				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log });
+				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal });
 				uploaded++;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				log(`[RemoteIndexer] Error uploading ${att.attachment_key}: ${msg}`);
+				if (!firstError) firstError = msg;
 				errors++;
 			}
 		}
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped}, Errors: ${errors}`, current: total, total });
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, errors=${errors}`);
-		return { uploaded, skipped, errors };
+		return { uploaded, skipped, errors, firstError };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -122,9 +128,10 @@ var RemoteIndexer = {
 	 * @param {string} libraryId
 	 * @param {string} libraryType
 	 * @param {function(string): void} log
-	 * @returns {Promise<Array<AttachmentInfo & {zoteroItem: any, parentItem: any}>>}
+	 * @param {Map<string, string>} [downloadedFilePaths] - Cache of attachment key → local path
+	 * @returns {Promise<Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}>>}
 	 */
-	async _collectAttachments(libraryId, libraryType, log) {
+	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths) {
 		const INDEXABLE_TYPES = new Set([
 			'application/pdf',
 			'text/html',
@@ -153,7 +160,7 @@ var RemoteIndexer = {
 
 		const items = await Zotero.Items.getAsync(itemIDs);
 
-		/** @type {Array<AttachmentInfo & {zoteroItem: any, parentItem: any}>} */
+		/** @type {Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}>} */
 		const result = [];
 
 		for (const item of items) {
@@ -162,8 +169,10 @@ var RemoteIndexer = {
 			const mimeType = item.attachmentContentType || '';
 			if (!INDEXABLE_TYPES.has(mimeType)) continue;
 
-			// Only include locally-stored attachments (file must exist)
-			const filePath = await item.getFilePathAsync();
+			// Prefer live path; fall back to cached path from a prior download in this session
+			const filePath = await item.getFilePathAsync()
+				|| (downloadedFilePaths && downloadedFilePaths.get(item.key))
+				|| null;
 			if (!filePath) continue;
 
 			// Get parent item for metadata
@@ -179,10 +188,50 @@ var RemoteIndexer = {
 				attachment_version: item.version || 0,
 				zoteroItem: item,
 				parentItem,
+				filePath,
 			});
 		}
 
 		return result;
+	},
+
+	/**
+	 * Count indexable attachments for a library without checking for local file existence.
+	 * Fast (local Zotero DB only) — suitable for use at library-selection time.
+	 *
+	 * @param {string} libraryId
+	 * @param {string} libraryType
+	 * @returns {Promise<number>}
+	 */
+	async countIndexableAttachments(libraryId, libraryType) {
+		const INDEXABLE_TYPES = new Set([
+			'application/pdf',
+			'text/html',
+			'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+			'application/epub+zip',
+		]);
+
+		let zoteroLibraryID;
+		if (libraryType === 'group') {
+			const group = Zotero.Groups.get(parseInt(libraryId, 10));
+			zoteroLibraryID = group ? group.libraryID : null;
+		} else {
+			zoteroLibraryID = parseInt(libraryId, 10);
+		}
+		if (!zoteroLibraryID) return 0;
+
+		const search = new Zotero.Search();
+		search.libraryID = zoteroLibraryID;
+		const itemIDs = await search.search();
+		if (!itemIDs.length) return 0;
+
+		const items = await Zotero.Items.getAsync(itemIDs);
+		let count = 0;
+		for (const item of items) {
+			if (!item.isAttachment()) continue;
+			if (INDEXABLE_TYPES.has(item.attachmentContentType || '')) count++;
+		}
+		return count;
 	},
 
 	/**
@@ -193,9 +242,10 @@ var RemoteIndexer = {
 	 * @param {string} backendURL
 	 * @param {function(Record<string,string>=): Record<string,string>} getAuthHeaders
 	 * @param {function(string): void} log
+	 * @param {AbortSignal} [signal]
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
-	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log) {
+	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal) {
 		try {
 			const body = {
 				library_id: libraryId,
@@ -212,6 +262,7 @@ var RemoteIndexer = {
 				method: 'POST',
 				headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
 				body: JSON.stringify(body),
+				signal,
 			});
 
 			if (!response.ok) {
@@ -242,17 +293,20 @@ var RemoteIndexer = {
 	 * Upload a single attachment to the backend.
 	 *
 	 * @param {Object} opts
-	 * @param {AttachmentInfo & {zoteroItem: any, parentItem: any}} opts.att
+	 * @param {AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string}} opts.att
 	 * @param {string} opts.libraryId
 	 * @param {string} opts.libraryType
 	 * @param {string} opts.libraryName
 	 * @param {string} opts.backendURL
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
+	 * @param {AbortSignal} [opts.signal]
 	 * @returns {Promise<void>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log }) {
-		const filePath = await att.zoteroItem.getFilePathAsync();
+	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal }) {
+		// Prefer the path already resolved in _collectAttachments (may come from the
+		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
+		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
 		if (!filePath) {
 			throw new Error(`No local file path for attachment ${att.attachment_key}`);
 		}
@@ -285,6 +339,7 @@ var RemoteIndexer = {
 			method: 'POST',
 			headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 			body: formData,
+			signal,
 		});
 
 		if (!response.ok) {
@@ -293,7 +348,13 @@ var RemoteIndexer = {
 		}
 
 		const result = await response.json();
-		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)`);
+		const rateLimitNote = result.rate_limit_retries > 0
+			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
+			: '';
+		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
+		if (result.status === 'error') {
+			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
+		}
 	},
 
 	/**

@@ -24,16 +24,17 @@ async function startup({ id, version, rootURI }) {
 	// Register preferences pane
 	Zotero.PreferencePanes.register({
 		pluginID: 'zotero-rag@cboulanger.github.io',
-		src: rootURI + 'preferences.xhtml',
-		scripts: [rootURI + 'preferences.js']
+		src: rootURI + 'preferences.xhtml'
 	});
 
 	// Load Zotero Plugin Toolkit bundle
 	Services.scriptloader.loadSubScript(rootURI + 'toolkit.bundle.js');
 
-	// Load main plugin script
+	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
+	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
+	Zotero.ZoteroRAG = ZoteroRAG;
 	ZoteroRAG.addToAllWindows();
 	await ZoteroRAG.main();
 }
@@ -52,6 +53,7 @@ function shutdown() {
 	if (ZoteroRAG) {
 		ZoteroRAG.removeFromAllWindows();
 		ZoteroRAG = undefined;
+		Zotero.ZoteroRAG = undefined;
 	}
 
 	// Unregister chrome:// protocol

@@ -1,91 +1,42 @@
-// Preferences script for Zotero RAG plugin
+// Preferences pane logic — called via onload in preferences.xhtml
 
-var ZoteroRAGPreferences = {
-	init() {
-		// Load current preferences
-		this.loadPreferences();
+/**
+ * Initialize the preferences pane. Called by the XUL onload attribute.
+ * ZoteroRAG is already loaded in the global scope by bootstrap.js.
+ * @param {Window} _window
+ */
+ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
+	const doc = _window.document;
 
-		// Add event listeners
-		const urlInput = document.getElementById('zotero-rag-backend-url');
-		urlInput.addEventListener('change', (e) => {
-			this.saveBackendURL(/** @type {HTMLInputElement} */ (e.target).value);
-		});
-		// Show/hide API key row depending on whether the URL is remote
-		urlInput.addEventListener('input', (e) => {
-			this.updateApiKeyVisibility(/** @type {HTMLInputElement} */ (e.target).value);
-		});
+	const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
+	const apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+	const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
 
-		document.getElementById('zotero-rag-api-key').addEventListener('change', (e) => {
-			this.saveApiKey(/** @type {HTMLInputElement} */ (e.target).value);
-		});
+	doc.getElementById('zotero-rag-backend-url').value = backendURL;
+	doc.getElementById('zotero-rag-api-key').value = apiKey;
+	doc.getElementById('zotero-rag-max-queries').value = maxQueries;
 
-		document.getElementById('zotero-rag-max-queries').addEventListener('change', (e) => {
-			this.saveMaxQueries(parseInt(/** @type {HTMLInputElement} */ (e.target).value));
-		});
-	},
-
-	loadPreferences() {
-		const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
-		const apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
-		const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
-
-		document.getElementById('zotero-rag-backend-url').value = backendURL;
-		document.getElementById('zotero-rag-api-key').value = apiKey;
-		document.getElementById('zotero-rag-max-queries').value = maxQueries;
-
-		this.updateApiKeyVisibility(backendURL);
-	},
-
-	/**
-	 * Show the API key row when the backend URL is remote (not localhost / 127.0.0.1).
-	 * @param {string} url
-	 */
-	updateApiKeyVisibility(url) {
-		const isLocal = url.includes('localhost') || url.includes('127.0.0.1');
-		const rowStyle = isLocal ? 'none' : '';
-		const row = document.getElementById('zotero-rag-api-key-row');
-		const desc = document.getElementById('zotero-rag-api-key-desc');
-		if (row) row.style.display = isLocal ? 'none' : '';
-		if (desc) desc.style.display = isLocal ? 'none' : '';
-	},
-
-	saveBackendURL(url) {
-		// Validate URL format
+	doc.getElementById('zotero-rag-backend-url').addEventListener('change', (e) => {
 		try {
-			new URL(url);
-			Zotero.Prefs.set('extensions.zotero-rag.backendURL', url, true);
-
-			// Update the plugin's backend URL
-			if (typeof ZoteroRAG !== 'undefined') {
-				ZoteroRAG.backendURL = url;
-			}
-
-			this.updateApiKeyVisibility(url);
-		} catch (e) {
-			Zotero.debug(`Invalid URL: ${url}`);
+			new URL(/** @type {HTMLInputElement} */ (e.target).value);
+			Zotero.Prefs.set('extensions.zotero-rag.backendURL', /** @type {HTMLInputElement} */ (e.target).value, true);
+			this.backendURL = /** @type {HTMLInputElement} */ (e.target).value;
+		} catch (_) {
+			Zotero.debug('Zotero RAG: Invalid URL: ' + /** @type {HTMLInputElement} */ (e.target).value);
 		}
-	},
+	});
 
-	saveApiKey(key) {
+	doc.getElementById('zotero-rag-api-key').addEventListener('change', (e) => {
+		const key = /** @type {HTMLInputElement} */ (e.target).value;
 		Zotero.Prefs.set('extensions.zotero-rag.apiKey', key, true);
-		if (typeof ZoteroRAG !== 'undefined') {
-			ZoteroRAG.apiKey = key;
-		}
-	},
+		this.apiKey = key;
+	});
 
-	saveMaxQueries(value) {
+	doc.getElementById('zotero-rag-max-queries').addEventListener('change', (e) => {
+		const value = parseInt(/** @type {HTMLInputElement} */ (e.target).value);
 		if (value >= 1 && value <= 10) {
 			Zotero.Prefs.set('extensions.zotero-rag.maxQueries', value, true);
-
-			// Update the plugin's max queries
-			if (typeof ZoteroRAG !== 'undefined') {
-				ZoteroRAG.maxConcurrentQueries = value;
-			}
+			this.maxConcurrentQueries = value;
 		}
-	}
+	});
 };
-
-// Initialize when preferences pane loads
-document.addEventListener('DOMContentLoaded', () => {
-	ZoteroRAGPreferences.init();
-});

@@ -458,7 +458,7 @@ class DocumentProcessor:
 
         # Check deduplication (content hash of raw file bytes)
         content_hash = hashlib.sha256(file_bytes).hexdigest()
-        if self.vector_store.check_duplicate(content_hash):
+        if self.vector_store.check_duplicate(content_hash, library_id=library_id):
             logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
             return 0
 
@@ -467,7 +467,7 @@ class DocumentProcessor:
             chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
         except Exception as e:
             logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
-            return 0
+            raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
 
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")

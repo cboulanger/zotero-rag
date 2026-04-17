@@ -75,7 +75,7 @@ node bin/container.mjs start --data-dir ./data
 node bin/deploy.mjs .env.deploy.myserver
 ```
 
-See [docs/docker-deployment.md](docs/docker-deployment.md) for full Docker setup, including remote server deployment with nginx and SSL.
+See [docs/container-deployment.md](docs/container-deployment.md) for full Docker setup, including remote server deployment with nginx and SSL.
 
 ### 4. Install the Plugin in Zotero
 

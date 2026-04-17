@@ -28,6 +28,7 @@ npm run server:start
 ### 3. Configure Plugin (Optional)
 
 In Zotero: **Edit → Preferences → Zotero RAG**
+
 - Backend URL: `http://localhost:8119` (default)
 - Max Concurrent Queries: `5` (default)
 
@@ -39,6 +40,7 @@ In Zotero: **Edit → Preferences → Zotero RAG**
 4. Click **Submit**
 
 The plugin will:
+
 - Index selected libraries (if needed) with real-time progress
 - Query the indexed content using RAG
 - Create a note in your collection with:
@@ -124,10 +126,11 @@ Remote presets (`remote-kisski`, `remote-openai`, `windows-test`, `apple-silicon
 | ------- | -------- |
 | "Backend server is not available" | Start server: `npm run server:start` |
 | "No results found" | Verify libraries are indexed and contain PDFs with text |
-| Indexing fails | Check Zotero is running, PDFs are attached to items |
+| Indexing fails | Check PDFs are downloaded and attached to items |
 | Plugin doesn't appear | Restart Zotero after installation |
 
 **Check server status:**
+
 ```bash
 npm run server:status
 curl http://localhost:8119/health

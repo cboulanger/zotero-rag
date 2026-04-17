@@ -322,7 +322,7 @@ Create `updates.json` for automatic plugin updates:
 ```json
 {
   "addons": {
-    "zotero-rag@example.com": {
+    "zotero-rag@cboulanger.github.io": {
       "updates": [
         {
           "version": "latest",

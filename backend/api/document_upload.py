@@ -15,20 +15,19 @@ Workflow
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
+from backend.dependencies import get_vector_store, make_embedding_service
 from backend.models.document import (
-    DeduplicationRecord,
     DocumentMetadata,
 )
+from backend.models.library import LibraryIndexMetadata
 from backend.services.document_processor import DocumentProcessor
-from backend.services.embeddings import create_embedding_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -82,22 +81,7 @@ class DocumentUploadResult(BaseModel):
     chunks_added: int
     status: str  # "indexed" | "skipped_duplicate" | "error"
     message: str = ""
-
-
-# ---------------------------------------------------------------------------
-# Helper: build services for the upload path
-# ---------------------------------------------------------------------------
-
-
-def _make_embedding_service():
-    """Create an EmbeddingService from the current settings."""
-    settings = get_settings()
-    preset = settings.get_hardware_preset()
-    return create_embedding_service(
-        preset.embedding,
-        cache_dir=str(settings.model_weights_path),
-        hf_token=settings.get_api_key("HF_TOKEN"),
-    )
+    rate_limit_retries: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +94,11 @@ def _make_embedding_service():
     response_model=CheckIndexedResponse,
     summary="Check which attachments need indexing (remote mode)",
 )
-async def check_indexed(library_id: str, request: CheckIndexedRequest):
+async def check_indexed(
+    library_id: str,
+    request: CheckIndexedRequest,
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Given a list of attachments the plugin has locally, return which ones
     need (re-)indexing on the backend.
@@ -127,6 +115,7 @@ async def check_indexed(library_id: str, request: CheckIndexedRequest):
 
     Raises:
         HTTPException 400: If library_id path param does not match request body.
+        HTTPException 503: If the vector store is unavailable.
     """
     if library_id != request.library_id:
         raise HTTPException(
@@ -134,14 +123,12 @@ async def check_indexed(library_id: str, request: CheckIndexedRequest):
             detail="library_id in URL must match library_id in request body",
         )
 
-    settings = get_settings()
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
     statuses: list[AttachmentIndexStatus] = []
 
-    embedding_service = _make_embedding_service()
-    with VectorStore(
-        storage_path=settings.vector_db_path,
-        embedding_dim=embedding_service.get_embedding_dim(),
-    ) as vector_store:
+    if True:  # keep indentation unchanged for the block below
         for att in request.attachments:
             indexed_version = vector_store.get_item_version(library_id, att.item_key)
 
@@ -167,6 +154,37 @@ async def check_indexed(library_id: str, request: CheckIndexedRequest):
                     reason="up_to_date",
                 ))
 
+        # Repair missing library metadata if chunks already exist.
+        # This handles the case where a previous indexing run stored chunks
+        # but never wrote library_metadata (e.g. before the metadata-update fix).
+        has_indexed_content = any(
+            s.reason in ("up_to_date", "version_changed") for s in statuses
+        )
+        if has_indexed_content and not vector_store.get_library_metadata(library_id):
+            best_version = max(
+                (a.item_version for a, s in zip(request.attachments, statuses)
+                 if s.reason in ("up_to_date", "version_changed")),
+                default=0,
+            )
+            up_to_date_count = sum(
+                1 for s in statuses if s.reason in ("up_to_date", "version_changed")
+            )
+            repaired = LibraryIndexMetadata(
+                library_id=library_id,
+                library_type=request.library_type,
+                library_name="",
+                last_indexed_version=best_version,
+                last_indexed_at=datetime.now(timezone.utc).isoformat(),
+                total_chunks=vector_store.count_library_chunks(library_id),
+                total_items_indexed=up_to_date_count,
+                indexing_mode="incremental",
+            )
+            vector_store.update_library_metadata(repaired)
+            logger.info(
+                f"Repaired missing library_metadata for {library_id} "
+                f"(chunks={repaired.total_chunks}, version={best_version})"
+            )
+
     return CheckIndexedResponse(library_id=library_id, statuses=statuses)
 
 
@@ -186,6 +204,7 @@ async def upload_and_index_document(
             "zotero_modified (ISO 8601 string)"
         ),
     ),
+    vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
     Upload a single document attachment and index it on the backend.
@@ -253,15 +272,14 @@ async def upload_and_index_document(
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    settings = get_settings()
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
     content_hash = hashlib.sha256(file_bytes).hexdigest()
 
-    embedding_service = _make_embedding_service()
-    with VectorStore(
-        storage_path=settings.vector_db_path,
-        embedding_dim=embedding_service.get_embedding_dim(),
-    ) as vector_store:
-        if vector_store.check_duplicate(content_hash):
+    embedding_service = make_embedding_service()
+    if True:  # keep indentation for the block below
+        if vector_store.check_duplicate(content_hash, library_id=library_id):
             logger.info(
                 f"Document {attachment_key} already indexed (hash {content_hash[:8]})"
             )
@@ -313,6 +331,23 @@ async def upload_and_index_document(
                 message=str(e),
             )
 
+        # Update library metadata so index-status reflects this upload
+        lib_meta = vector_store.get_library_metadata(library_id)
+        if lib_meta is None:
+            lib_meta = LibraryIndexMetadata(
+                library_id=library_id,
+                library_type=library_type,
+                library_name=meta_dict.get("library_name", ""),
+                indexing_mode="incremental",
+            )
+        lib_meta.last_indexed_version = max(
+            lib_meta.last_indexed_version, item_version
+        )
+        lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
+        lib_meta.total_chunks = vector_store.count_library_chunks(library_id)
+        lib_meta.total_items_indexed += 1
+        vector_store.update_library_metadata(lib_meta)
+
     return DocumentUploadResult(
         library_id=library_id,
         item_key=item_key,
@@ -320,4 +355,5 @@ async def upload_and_index_document(
         chunks_added=chunks_added,
         status="indexed",
         message=f"Indexed {chunks_added} chunks",
+        rate_limit_retries=embedding_service.rate_limit_retries,
     )

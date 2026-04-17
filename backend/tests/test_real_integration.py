@@ -103,7 +103,8 @@ async def temp_vector_store(integration_config):
     # Create vector store
     vector_store = VectorStore(
         storage_path=vector_store_path,
-        embedding_dim=embedding_dim
+        embedding_dim=embedding_dim,
+        embedding_model_name=embedding_service.get_model_name(),
     )
 
     yield vector_store
