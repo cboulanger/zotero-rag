@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/cboulanger/zotero-rag/compare/v1.4.1...v1.5.0) (2026-04-17)
+
+
+### Features
+
+* remove zotero dependency ([#5](https://github.com/cboulanger/zotero-rag/issues/5)) ([212eb31](https://github.com/cboulanger/zotero-rag/commit/212eb3122fab78c3f643acef909451934aa99bb9))
+
 ## [1.4.1](https://github.com/cboulanger/zotero-rag/compare/v1.4.0...v1.4.1) (2026-04-17)
 
 
