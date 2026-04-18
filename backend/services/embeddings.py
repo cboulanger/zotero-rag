@@ -20,6 +20,21 @@ from backend.config.presets import EmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
+_KNOWN_HEADERS: dict[str, str] = {
+    "OPENAI_API_KEY": "X-OpenAI-Api-Key",
+    "ANTHROPIC_API_KEY": "X-Anthropic-Api-Key",
+    "KISSKI_API_KEY": "X-Kisski-Api-Key",
+    "HF_TOKEN": "X-HF-Token",
+}
+
+
+def env_var_to_header(env_var: str) -> str:
+    """Convert env var name to HTTP header: KISSKI_API_KEY -> X-Kisski-Api-Key."""
+    if env_var in _KNOWN_HEADERS:
+        return _KNOWN_HEADERS[env_var]
+    return "X-" + "-".join(p.capitalize() for p in env_var.split("_"))
+
+
 # Known embedding dimensions for common remote models.
 # Used by get_embedding_dim() to avoid an extra API round-trip.
 _KNOWN_DIMS: dict[str, int] = {
@@ -56,6 +71,11 @@ class EmbeddingService(ABC):
     @abstractmethod
     def get_model_name(self) -> str:
         """Return a stable identifier for the embedding model (used to detect model changes)."""
+
+    @staticmethod
+    def required_api_keys(config: "EmbeddingConfig") -> list[dict]:
+        """Return API keys required by this service (empty for local services)."""
+        return []
 
     @staticmethod
     def compute_content_hash(text: str) -> str:
@@ -220,6 +240,19 @@ class RemoteEmbeddingService(EmbeddingService):
             f"Initialized RemoteEmbeddingService: model={config.model_name} "
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
         )
+
+    @staticmethod
+    def required_api_keys(config: EmbeddingConfig) -> list[dict]:
+        """Return the API key required by this remote embedding service."""
+        if config.model_type != "remote":
+            return []
+        api_key_env = config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+        return [{
+            "key_name": api_key_env,
+            "header_name": env_var_to_header(api_key_env),
+            "description": f"API key for remote embeddings ({config.model_name})",
+            "required_for": ["indexing"],
+        }]
 
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""

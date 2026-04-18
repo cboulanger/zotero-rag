@@ -2,17 +2,15 @@
 Query API endpoints for RAG queries.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from markdown_it import MarkdownIt
 
 from backend.services.rag_engine import RAGEngine
-from backend.services.embeddings import create_embedding_service
-from backend.services.llm import create_llm_service
 from backend.db.vector_store import VectorStore
 from backend.config.settings import get_settings
-from backend.dependencies import get_vector_store
+from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service, make_llm_service
 
 router = APIRouter()
 
@@ -45,7 +43,11 @@ class QueryResponse(BaseModel):
 
 
 @router.post("/query", response_model=QueryResponse)
-async def query_libraries(request: QueryRequest, vector_store: VectorStore = Depends(get_vector_store)):
+async def query_libraries(
+    query: QueryRequest,
+    http_request: Request,
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Query indexed libraries with a question.
 
@@ -61,13 +63,13 @@ async def query_libraries(request: QueryRequest, vector_store: VectorStore = Dep
     Raises:
         HTTPException: If query fails or libraries not indexed.
     """
-    if not request.library_ids:
+    if not query.library_ids:
         raise HTTPException(
             status_code=400,
             detail="At least one library ID must be provided"
         )
 
-    if not request.question.strip():
+    if not query.question.strip():
         raise HTTPException(
             status_code=400,
             detail="Question cannot be empty"
@@ -77,26 +79,24 @@ async def query_libraries(request: QueryRequest, vector_store: VectorStore = Dep
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
     try:
-        # Initialize services
+        # Initialize services with client-supplied API keys
         settings = get_settings()
         preset = settings.get_hardware_preset()
+        client_keys = get_client_api_keys(http_request)
 
-        embedding_service = create_embedding_service(
-            preset.embedding,
-            cache_dir=str(settings.model_weights_path)
-        )
-        llm_service = create_llm_service(settings)
+        embedding_service = make_embedding_service(client_keys)
+        llm_service = make_llm_service(client_keys)
 
         # Use preset defaults if not specified in request
-        top_k = request.top_k if request.top_k is not None else preset.rag.top_k
-        min_score = request.min_score if request.min_score is not None else preset.rag.score_threshold
+        top_k = query.top_k if query.top_k is not None else preset.rag.top_k
+        min_score = query.min_score if query.min_score is not None else preset.rag.score_threshold
 
         if True:  # keep indentation for the block below
             # Validate that at least one library is indexed
             from qdrant_client.models import Filter, FieldCondition, MatchValue
 
             indexed_count = 0
-            for library_id in request.library_ids:
+            for library_id in query.library_ids:
                 count = vector_store.client.count(
                     collection_name=vector_store.CHUNKS_COLLECTION,
                     count_filter=Filter(
@@ -127,8 +127,8 @@ async def query_libraries(request: QueryRequest, vector_store: VectorStore = Dep
 
             # Execute query with preset defaults
             result = await rag_engine.query(
-                question=request.question,
-                library_ids=request.library_ids,
+                question=query.question,
+                library_ids=query.library_ids,
                 top_k=top_k,
                 min_score=min_score
             )
@@ -151,11 +151,11 @@ async def query_libraries(request: QueryRequest, vector_store: VectorStore = Dep
             answer_html = md.render(result.answer)
 
             return QueryResponse(
-                question=request.question,
+                question=query.question,
                 answer=answer_html,
                 answer_format="html",
                 sources=sources,
-                library_ids=request.library_ids
+                library_ids=query.library_ids
             )
 
     except Exception as e:

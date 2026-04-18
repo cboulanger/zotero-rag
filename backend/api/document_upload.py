@@ -18,11 +18,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
 from backend.db.vector_store import VectorStore
-from backend.dependencies import get_vector_store, make_embedding_service
+from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service
 from backend.models.document import (
     DocumentMetadata,
 )
@@ -194,6 +194,7 @@ async def check_indexed(
     summary="Upload and index a single document attachment (remote mode)",
 )
 async def upload_and_index_document(
+    http_request: Request,
     file: UploadFile = File(..., description="Raw attachment bytes"),
     metadata: str = Form(
         ...,
@@ -277,7 +278,8 @@ async def upload_and_index_document(
 
     content_hash = hashlib.sha256(file_bytes).hexdigest()
 
-    embedding_service = make_embedding_service()
+    client_keys = get_client_api_keys(http_request)
+    embedding_service = make_embedding_service(client_keys)
     if True:  # keep indentation for the block below
         if vector_store.check_duplicate(content_hash, library_id=library_id):
             logger.info(

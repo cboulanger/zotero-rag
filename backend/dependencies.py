@@ -10,20 +10,49 @@ from fastapi import Request
 
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
-from backend.services.embeddings import create_embedding_service
+from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
+from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
 
 logger = logging.getLogger(__name__)
 
 
-def make_embedding_service():
-    """Create an EmbeddingService from current settings."""
+def get_client_api_keys(request: Request) -> dict[str, str]:
+    """Extract client-supplied API keys from request headers."""
     settings = get_settings()
     preset = settings.get_hardware_preset()
+    keys: dict[str, str] = {}
+    for key_info in RemoteEmbeddingService.required_api_keys(preset.embedding):
+        val = request.headers.get(key_info["header_name"])
+        if val:
+            keys[key_info["key_name"]] = val
+    for key_info in RemoteLLMService.required_api_keys(settings):
+        val = request.headers.get(key_info["header_name"])
+        if val:
+            keys[key_info["key_name"]] = val
+    return keys
+
+
+def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> EmbeddingService:
+    """Create an EmbeddingService from current settings, overriding API key with client-supplied value."""
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    api_key_env = preset.embedding.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+    client_key = (client_api_keys or {}).get(api_key_env) or None
     return create_embedding_service(
         preset.embedding,
         cache_dir=str(settings.model_weights_path),
+        api_key=client_key,
         hf_token=settings.get_api_key("HF_TOKEN"),
     )
+
+
+def make_llm_service(client_api_keys: dict[str, str] | None = None) -> LLMService:
+    """Create an LLMService from current settings, overriding API key with client-supplied value."""
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+    client_key = (client_api_keys or {}).get(api_key_env) or None
+    return create_llm_service(settings, api_key=client_key)
 
 
 def make_vector_store() -> VectorStore:

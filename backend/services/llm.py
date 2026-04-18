@@ -11,12 +11,18 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
+from backend.services.embeddings import env_var_to_header
 
 logger = logging.getLogger(__name__)
 
 
 class LLMService(ABC):
     """Abstract base class for LLM services."""
+
+    @staticmethod
+    def required_api_keys(settings: "Settings") -> list[dict]:
+        """Return API keys required by this service (empty for local services)."""
+        return []
 
     @abstractmethod
     async def generate(
@@ -212,6 +218,25 @@ class RemoteLLMService(LLMService):
         self._anthropic_client = None
 
         logger.info(f"Initialized RemoteLLMService with model: {self.llm_config.model_name}")
+
+    @staticmethod
+    def required_api_keys(settings: Settings) -> list[dict]:
+        """Return the API key required by this remote LLM service."""
+        config = settings.get_hardware_preset().llm
+        if config.model_type != "remote":
+            return []
+        if "api_key_env" in config.model_kwargs:
+            api_key_env = config.model_kwargs["api_key_env"]
+        elif "claude" in config.model_name.lower() or "anthropic" in config.model_name.lower():
+            api_key_env = "ANTHROPIC_API_KEY"
+        else:
+            api_key_env = "OPENAI_API_KEY"
+        return [{
+            "key_name": api_key_env,
+            "header_name": env_var_to_header(api_key_env),
+            "description": f"API key for remote LLM ({config.model_name})",
+            "required_for": ["querying"],
+        }]
 
     def _dump_inference_request(self, payload: Dict[str, Any]) -> None:
         """Write the inference request payload to logs/last-inference-request.json (overwrite)."""
