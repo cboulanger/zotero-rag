@@ -1,3 +1,11 @@
+# [1.6.0](https://github.com/cboulanger/zotero-rag/compare/v1.5.2...v1.6.0) (2026-04-18)
+
+
+### Features
+
+* Allow client to provide own API keys ([d2d23d1](https://github.com/cboulanger/zotero-rag/commit/d2d23d18b57b3b8a2bdeb53688bec0a7f7c37ea9))
+* fix CI ([fe1d248](https://github.com/cboulanger/zotero-rag/commit/fe1d248d5c291a95b2d48b2b5dfc82620cc2ed46))
+
 ## [1.5.2](https://github.com/cboulanger/zotero-rag/compare/v1.5.1...v1.5.2) (2026-04-17)
 
 
