@@ -169,6 +169,7 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
 ```
 
 **Tested on:**
+
 - Debian 12 (Bookworm) with Podman 4.3.1 — legacy systemd unit fallback
 - Ubuntu 22.04 / 24.04 with Docker 24+
 - macOS (Docker Desktop) — `build`, `push`, `start`, `stop`, `logs` only; nginx/SSL/systemd not available
@@ -295,11 +296,11 @@ If you run multiple backend instances on the same host, they can share one kreuz
 
 ```bash
 # First instance — creates zotero-rag-kreuzberg.service
-sudo env "PATH=$PATH" node bin/deploy.mjs .env.deploy.instance1
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .env.deploy.instance1
 
 # Second instance — reuses the existing kreuzberg service
 # Set DEPLOY_SHARED_KREUZBERG=zotero-rag-kreuzberg in .env.deploy.instance2
-sudo env "PATH=$PATH" node bin/deploy.mjs .env.deploy.instance2
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .env.deploy.instance2
 ```
 
 ### Useful commands
