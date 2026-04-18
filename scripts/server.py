@@ -213,7 +213,6 @@ def wait_for_plugin_startup(timeout=60):
 
     # Failure indicators in the log
     failure_indicators = [
-        "[ERROR] Zotero is already running",
         "Failed to execute",
         "Unexpected error"
     ]
@@ -395,13 +394,6 @@ def start_server(dev_mode=True, with_plugin=False):
     # If plugin mode is requested, start plugin server first (which launches Zotero)
     # This ensures Zotero is running before the backend tries to connect to it
     if with_plugin:
-        # First check if Zotero is already running
-        if is_zotero_running():
-            print("[ERROR] Zotero is already running")
-            print("[INFO] Please close all Zotero instances before starting in --dev mode")
-            print("[INFO] The plugin development server needs to start its own Zotero instance")
-            sys.exit(1)
-
         plugin_proc = find_plugin_process()
         if not plugin_proc:
             print("Starting plugin development server (this will launch Zotero)...")

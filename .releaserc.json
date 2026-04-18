@@ -21,6 +21,7 @@
         "assets": [
           "package.json",
           "pyproject.toml",
+          "uv.lock",
           "plugin/src/manifest.json",
           "backend/__version__.py",
           "updates.json",

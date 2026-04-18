@@ -336,9 +336,15 @@ async def upload_and_index_document(
             lib_meta.total_items_indexed += 1
             vector_store.update_library_metadata(lib_meta)
         except Exception as e:
-            logger.error(
-                f"Error processing upload for {attachment_key}: {e}", exc_info=True
-            )
+            import openai
+            if isinstance(e, openai.InternalServerError):
+                logger.warning(
+                    f"Upstream embedding service error for {attachment_key}: {e}"
+                )
+            else:
+                logger.error(
+                    f"Error processing upload for {attachment_key}: {e}", exc_info=True
+                )
             return DocumentUploadResult(
                 library_id=library_id,
                 item_key=item_key,

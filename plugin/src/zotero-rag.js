@@ -107,7 +107,7 @@ class ZoteroRAGPlugin {
 		}
 
 		// Load backend URL from preferences (default: localhost:8119)
-		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
+		this.backendURL = (Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119').replace(/\/+$/, '');
 
 		// Load optional API key (required when backend is on a remote host)
 		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';

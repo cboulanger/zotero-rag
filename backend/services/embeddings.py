@@ -260,7 +260,7 @@ class RemoteEmbeddingService(EmbeddingService):
         wait the exact amount of time the server requests, falling back to
         exponential backoff with jitter (max 8 attempts, cap 64 s).
         """
-        from openai import RateLimitError
+        from openai import InternalServerError, RateLimitError
 
         client = self._get_client()
         model = self._resolve_model_name()
@@ -274,6 +274,15 @@ class RemoteEmbeddingService(EmbeddingService):
                     input=input,
                     encoding_format="float",
                 )
+            except InternalServerError as exc:
+                if attempt == max_attempts - 1 or "try again" not in str(exc).lower():
+                    raise
+                retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                logger.warning(
+                    f"Embedding service not ready (attempt {attempt + 1}/{max_attempts}). "
+                    f"Waiting {retry_after:.1f}s before retry."
+                )
+                await asyncio.sleep(retry_after)
             except RateLimitError as exc:
                 if attempt == max_attempts - 1:
                     raise

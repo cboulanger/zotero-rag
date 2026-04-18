@@ -11,6 +11,7 @@ from typing import Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from backend.__version__ import __version__
 from .presets import HardwarePreset, get_preset
 
 
@@ -98,7 +99,7 @@ class Settings(BaseSettings):
     )
 
     # Application version
-    version: str = Field(default="0.1.0", description="Backend version")
+    version: str = Field(default=__version__, description="Backend version")
 
     @field_validator("model_weights_path", "vector_db_path", "log_file", mode="before")
     @classmethod

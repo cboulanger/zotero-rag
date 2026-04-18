@@ -6,8 +6,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import httpx
 import logging
 
+from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.dependencies import make_vector_store
 from backend.api import config, libraries, indexing, query, document_upload
@@ -102,7 +104,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Zotero RAG API",
     description="RAG (Retrieval-Augmented Generation) API for Zotero libraries",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan
 )
 
@@ -158,12 +160,35 @@ async def root():
     """Root endpoint."""
     return {
         "service": "Zotero RAG API",
-        "version": "0.1.0",
+        "version": __version__,
         "status": "running"
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """Health check endpoint — includes kreuzberg sidecar reachability."""
+    kreuzberg_url = settings.kreuzberg_url
+    kreuzberg_status = "unknown"
+    kreuzberg_error = None
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{kreuzberg_url.rstrip('/')}/health")
+            kreuzberg_status = "ok" if resp.is_success else f"http_{resp.status_code}"
+    except httpx.ConnectError as exc:
+        kreuzberg_status = "unreachable"
+        kreuzberg_error = str(exc)
+    except httpx.TimeoutException:
+        kreuzberg_status = "timeout"
+    except Exception as exc:
+        kreuzberg_status = "error"
+        kreuzberg_error = str(exc)
+
+    return {
+        "status": "healthy",
+        "kreuzberg": {
+            "url": kreuzberg_url,
+            "status": kreuzberg_status,
+            **({"error": kreuzberg_error} if kreuzberg_error else {}),
+        },
+    }

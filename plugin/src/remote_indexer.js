@@ -75,8 +75,8 @@ var RemoteIndexer = {
 		}
 
 		// 2. Ask the backend which attachments actually need indexing
-		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: 0 });
-		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal);
+		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: attachments.length });
+		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress);
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
@@ -286,38 +286,59 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} getAuthHeaders
 	 * @param {function(string): void} log
 	 * @param {AbortSignal} [signal]
+	 * @param {function(UploadProgress): void} [onProgress]
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
-	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal) {
-		try {
-			const body = {
-				library_id: libraryId,
-				attachments: attachments.map(a => ({
+	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress) {
+		const BATCH_SIZE = 100;
+		/** @type {Array<AttachmentIndexStatus>} */
+		const allStatuses = [];
+		let checked = 0;
+
+		for (let i = 0; i < attachments.length; i += BATCH_SIZE) {
+			const batch = attachments.slice(i, i + BATCH_SIZE);
+			try {
+				const body = {
+					library_id: libraryId,
+					attachments: batch.map(a => ({
+						item_key: a.item_key,
+						attachment_key: a.attachment_key,
+						mime_type: a.mime_type,
+						item_version: a.item_version,
+						attachment_version: a.attachment_version,
+					})),
+				};
+
+				const response = await this._apiFetch(
+					'POST',
+					`${backendURL}/api/libraries/${libraryId}/check-indexed`,
+					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
+				);
+
+				const data = await response.json();
+				allStatuses.push(...(data.statuses || []));
+			} catch (err) {
+				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing`);
+				allStatuses.push(...batch.map(a => ({
 					item_key: a.item_key,
 					attachment_key: a.attachment_key,
-					mime_type: a.mime_type,
-					item_version: a.item_version,
-					attachment_version: a.attachment_version,
-				})),
-			};
+					needs_indexing: true,
+					reason: 'check_failed',
+				})));
+			}
 
-			const response = await this._apiFetch(
-				'POST',
-				`${backendURL}/api/libraries/${libraryId}/check-indexed`,
-				{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
-			);
-
-			const data = await response.json();
-			return data.statuses || [];
-		} catch (err) {
-			log(`[RemoteIndexer] check-indexed error: ${err} — uploading all as fallback`);
-			return attachments.map(a => ({
-				item_key: a.item_key,
-				attachment_key: a.attachment_key,
-				needs_indexing: true,
-				reason: 'check_failed',
-			}));
+			checked += batch.length;
+			if (onProgress) {
+				onProgress({
+					percentage: (checked / attachments.length) * 100,
+					message: `Checking attachments`,
+					current: checked,
+					total: attachments.length,
+				});
+			}
 		}
+
+		return allStatuses;
 	},
 
 	/**
