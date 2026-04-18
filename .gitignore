@@ -61,4 +61,4 @@ plugin/dist/*
 node_modules
 
 # Local configuration files (e.g. for development)
-local/*
+.local/*
