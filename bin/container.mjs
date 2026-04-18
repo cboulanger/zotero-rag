@@ -988,38 +988,53 @@ function buildKreuzbergLegacyUnitContent(containerName, networkName) {
  */
 function setupSystemdService(serviceName, cfg, kreuzberg) {
   const quadlet = isQuadletAvailable();
-  const serviceDir = quadlet ? '/etc/containers/systemd' : '/etc/systemd/system';
-  const ext = quadlet ? '.container' : '.service';
-  console.log(`[INFO] Setting up systemd services via ${quadlet ? 'Quadlet' : 'legacy units (Podman < 4.4)'}...`);
-
   try {
-    if (quadlet && !fs.existsSync('/etc/containers/systemd')) {
-      fs.mkdirSync('/etc/containers/systemd', { recursive: true });
+    let useLegacy = !quadlet;
+
+    if (quadlet) {
+      // Try Quadlet: write .container files and reload
+      if (!fs.existsSync('/etc/containers/systemd')) fs.mkdirSync('/etc/containers/systemd', { recursive: true });
+      if (!kreuzberg.shared) {
+        fs.writeFileSync(
+          `/etc/containers/systemd/${kreuzberg.serviceName}.container`,
+          buildKreuzbergQuadletContent(kreuzberg.containerName, cfg.network || NETWORK_NAME)
+        );
+      }
+      fs.writeFileSync(`/etc/containers/systemd/${serviceName}.container`, buildQuadletContent(cfg, kreuzberg.serviceName));
+      console.log('[INFO] Setting up systemd services via Quadlet...');
+      execSync('systemctl daemon-reload', { stdio: 'inherit' });
+
+      // Verify the Quadlet generator actually produced a unit — it can silently fail
+      // (e.g. Podman 4.3 ships the generator binary but doesn't support all directives)
+      try {
+        execSync(`systemctl cat ${serviceName}`, { stdio: 'ignore' });
+        console.log('[INFO] Quadlet units generated successfully');
+      } catch {
+        console.log('[WARNING] Quadlet generator did not produce a unit — falling back to legacy service units');
+        try { fs.unlinkSync(`/etc/containers/systemd/${serviceName}.container`); } catch {}
+        if (!kreuzberg.shared) try { fs.unlinkSync(`/etc/containers/systemd/${kreuzberg.serviceName}.container`); } catch {}
+        useLegacy = true;
+      }
     }
 
-    if (!kreuzberg.shared) {
-      const kreuzbergContent = quadlet
-        ? buildKreuzbergQuadletContent(kreuzberg.containerName, cfg.network || NETWORK_NAME)
-        : buildKreuzbergLegacyUnitContent(kreuzberg.containerName, cfg.network || NETWORK_NAME);
-      const kreuzbergPath = `${serviceDir}/${kreuzberg.serviceName}${ext}`;
-      fs.writeFileSync(kreuzbergPath, kreuzbergContent);
-      console.log(`[INFO] Kreuzberg unit written to ${kreuzbergPath}`);
-    } else {
-      console.log(`[INFO] Using shared kreuzberg service '${kreuzberg.serviceName}'`);
+    if (useLegacy) {
+      console.log('[INFO] Setting up systemd services via legacy units...');
+      if (!kreuzberg.shared) {
+        const kreuzbergPath = `/etc/systemd/system/${kreuzberg.serviceName}.service`;
+        fs.writeFileSync(kreuzbergPath, buildKreuzbergLegacyUnitContent(kreuzberg.containerName, cfg.network || NETWORK_NAME));
+        console.log(`[INFO] Kreuzberg unit written to ${kreuzbergPath}`);
+      }
+      const mainPath = `/etc/systemd/system/${serviceName}.service`;
+      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName));
+      console.log(`[INFO] App unit written to ${mainPath}`);
+      execSync('systemctl daemon-reload', { stdio: 'inherit' });
     }
-
-    const mainContent = quadlet
-      ? buildQuadletContent(cfg, kreuzberg.serviceName)
-      : buildLegacyUnitContent(cfg, kreuzberg.serviceName);
-    const mainPath = `${serviceDir}/${serviceName}${ext}`;
-    fs.writeFileSync(mainPath, mainContent);
-    console.log(`[INFO] App unit written to ${mainPath}`);
-
-    execSync('systemctl daemon-reload', { stdio: 'inherit' });
 
     if (!kreuzberg.shared) {
       execSync(`systemctl enable --now ${kreuzberg.serviceName}`, { stdio: 'inherit' });
       console.log(`[SUCCESS] Kreuzberg service '${kreuzberg.serviceName}' enabled and started`);
+    } else {
+      console.log(`[INFO] Using shared kreuzberg service '${kreuzberg.serviceName}'`);
     }
 
     execSync(`systemctl enable --now ${serviceName}`, { stdio: 'inherit' });
