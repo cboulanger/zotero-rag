@@ -7,6 +7,7 @@
 
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
 
+
 ## Quick Start
 
 ### Install the dependencies
@@ -86,7 +87,15 @@ See [docs/container-deployment.md](docs/container-deployment.md) for full Docker
 5. Select the downloaded `.xpi` file
 6. Restart Zotero when prompted
 
-### 5. Using the Plugin
+### 5. Configure the Plugin for a Remote Server
+
+If the backend runs on a remote host, open **Zotero → Settings → Zotero RAG** and set:
+
+- **Server URL** — the full URL of the remote server (e.g. `https://rag.example.com`)
+- **API Key** — the server-side API key set during deployment (leave blank if the server has no key configured)
+- **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI), enter the corresponding API key here so the plugin can pass it to the server
+
+### 6. Using the Plugin
 
 Once installed:
 
