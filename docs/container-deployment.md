@@ -61,10 +61,12 @@ Stopping with `docker compose down` removes both containers and the network toge
 
 **`bin/container.mjs`** manages kreuzberg explicitly:
 
-- `start` / `deploy` → calls `startKreuzberg()`, which pulls the latest image, stops any existing sidecar with the same name, and runs it with `--network-alias kreuzberg`.  The sidecar is named `<app-container>-kreuzberg` (e.g. `zotero-rag-latest-kreuzberg`).
+- `start` / `deploy` (without `--systemd-service`) → calls `startKreuzberg()`, which pulls the latest image, stops any existing sidecar with the same name, and runs it with `--network-alias kreuzberg`.  The sidecar is named `<app-container>-kreuzberg` (e.g. `zotero-rag-latest-kreuzberg`).
 - `stop` → calls `stopKreuzberg()` to stop and remove the paired sidecar.
 - `restart` → stops and restarts both the app container and its sidecar by name.
 - Pass `--no-kreuzberg` to `start` if you are already running a kreuzberg instance separately; the app container then joins the existing network but no new sidecar is launched.
+
+**`deploy --systemd-service`** delegates lifecycle entirely to systemd (see [Systemd / Quadlet](#systemd--quadlet) below). Kreuzberg gets its own Quadlet unit; the main service declares `Requires=` on it so systemd starts them in order.
 
 ### Environment variable handoff
 
@@ -148,6 +150,31 @@ REGISTRY  = 'docker.io/cboulanger/zotero-rag'
 PORT      = 8119
 ```
 
+### External dependencies
+
+| Dependency | Required for | Notes |
+| ---------- | ------------ | ----- |
+| `docker` 20.10+ **or** `podman` 4.0+ | all subcommands | auto-detected; daemon/socket must be reachable |
+| `nginx` | `deploy` (nginx/SSL, default on) | skip with `--no-nginx` |
+| `certbot` + nginx plugin | `deploy` (SSL, default on) | e.g. `apt install certbot python3-certbot-nginx`; skip with `--no-ssl` |
+| `systemctl` | `deploy --systemd-service` | requires root |
+| Podman Quadlet generator | `deploy --systemd-service` (Podman 4.4+) | falls back to a traditional `[Service]` unit on Podman < 4.4 |
+
+**Podman on Debian/Ubuntu — PATH caveat:** both network backends (netavark and CNI) call `iptables` internally, which lives in `/usr/sbin`. `sudo` strips that directory from PATH by default, so always run with:
+
+```bash
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs ...
+# or
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
+```
+
+**Tested on:**
+
+- Debian 12 (Bookworm) with Podman 4.3.1 — legacy systemd unit fallback
+- Ubuntu 22.04 / 24.04 with Docker 24+
+- macOS (Docker Desktop) — `build`, `push`, `start`, `stop`, `logs` only; nginx/SSL/systemd not available
+- Windows — `deploy` not supported
+
 ### Commands
 
 | Command | Description |
@@ -202,6 +229,8 @@ PORT      = 8119
 | `--no-nginx` | — | Skip nginx configuration |
 | `--no-ssl` | — | Skip SSL certificate setup |
 | `--email EMAIL` | `admin@<fqdn>` | Email for certbot |
+| `--systemd-service NAME` | — | Register both containers as Quadlet systemd services (requires sudo) |
+| `--shared-kreuzberg NAME` | — | Depend on an existing kreuzberg service instead of creating one |
 | `--yes` | — | Skip confirmation prompt |
 
 ### Platform handling
@@ -233,10 +262,56 @@ node bin/deploy.mjs .env.deploy.myserver
 | `DEPLOY_SSL=false` | `--no-ssl` |
 | `DEPLOY_NGINX=false` | `--no-nginx` |
 | `DEPLOY_LOCAL_MODELS=true` | `--local-models` |
+| `DEPLOY_SYSTEMD_SERVICE` | `--systemd-service` |
+| `DEPLOY_SHARED_KREUZBERG` | `--shared-kreuzberg` |
 | Everything else | `--env KEY` (value loaded from env via `dotenv.config`) |
 
 If `DEPLOY_FQDN` is unset or equals `localhost`/`127.0.0.1`, the script
 automatically appends `--no-nginx --no-ssl`.
+
+---
+
+## Systemd / Quadlet
+
+Use `--systemd-service <name>` (or `DEPLOY_SYSTEMD_SERVICE=<name>` in the env file) to have `deploy` register both containers as systemd services via [Podman Quadlet](https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html) instead of relying on `--restart unless-stopped`.
+
+### Why Quadlet over `--restart unless-stopped`
+
+The podman restart policy only fires on clean process exits. If a container enters a zombie state (runtime thinks it's running but it isn't), the restart policy never triggers. Quadlet units always create a fresh container on start, force-removing any stale state first — the equivalent of `podman rm -f` before every `podman run`.
+
+### What gets created
+
+For `--systemd-service zotero-rag`:
+
+| File | Service | Purpose |
+| ---- | ------- | ------- |
+| `/etc/containers/systemd/zotero-rag-kreuzberg.container` | `zotero-rag-kreuzberg.service` | Kreuzberg sidecar |
+| `/etc/containers/systemd/zotero-rag.container` | `zotero-rag.service` | Main backend |
+
+The main service declares `Requires=zotero-rag-kreuzberg.service` so systemd starts them in the correct order.
+
+### Shared kreuzberg
+
+If you run multiple backend instances on the same host, they can share one kreuzberg sidecar. Deploy the first instance normally, then use `--shared-kreuzberg` for subsequent ones:
+
+```bash
+# First instance — creates zotero-rag-kreuzberg.service
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .env.deploy.instance1
+
+# Second instance — reuses the existing kreuzberg service
+# Set DEPLOY_SHARED_KREUZBERG=zotero-rag-kreuzberg in .env.deploy.instance2
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .env.deploy.instance2
+```
+
+### Useful commands
+
+```bash
+systemctl status zotero-rag
+journalctl -u zotero-rag -f
+journalctl -u zotero-rag-kreuzberg -f
+systemctl restart zotero-rag        # restarts app only
+systemctl restart zotero-rag-kreuzberg  # restarts sidecar (cascades to app via Requires)
+```
 
 ---
 

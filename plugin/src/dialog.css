@@ -78,6 +78,28 @@ body {
   background-color: rgba(0, 0, 0, 0.03);
 }
 
+.library-reindex-btn {
+  background: none;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  -moz-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 13px;
+  padding: 0 3px;
+  margin-left: 4px;
+  opacity: 0.6;
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.library-reindex-btn:hover {
+  opacity: 1;
+  color: #0066cc;
+}
+
 /* Progress Section */
 .progress-section {
   margin-bottom: 15px;

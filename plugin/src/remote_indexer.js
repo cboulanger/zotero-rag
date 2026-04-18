@@ -57,7 +57,7 @@ var RemoteIndexer = {
 	 * @param {AbortSignal} [opts.signal] - AbortSignal to cancel in-flight fetch requests immediately
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
-	 * @returns {Promise<{uploaded: number, skipped: number, errors: number, firstError: string|null}>}
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, firstError: string|null}>}
 	 */
 	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
@@ -71,12 +71,12 @@ var RemoteIndexer = {
 
 		if (attachments.length === 0) {
 			onProgress({ percentage: 100, message: 'No indexable attachments found', current: 0, total: 0 });
-			return { uploaded: 0, skipped: 0, errors: 0, firstError: null };
+			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null };
 		}
 
 		// 2. Ask the backend which attachments actually need indexing
-		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: 0 });
-		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal);
+		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: attachments.length });
+		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress);
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
@@ -117,11 +117,16 @@ var RemoteIndexer = {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && att.filePath;
 		});
-		// Count attachments we couldn't download as errors
+		// Attachments with no local file are reported separately — not counted as errors
 		const noFile = toUpload.length - uploadable.length;
 		if (noFile > 0) {
-			log(`[RemoteIndexer] Skipping ${noFile} attachment(s) with no local file`);
-			errors += noFile;
+			// BEGIN DEBUG
+			for (const s of toUpload) {
+				const att = attachments.find(a => a.attachment_key === s.attachment_key);
+				log(`[RemoteIndexer] DEBUG filePath for ${s.attachment_key}: ${att ? att.filePath : '(att not found)'}`);
+			}
+			// END DEBUG
+			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
 		}
 		const total = uploadable.length;
 
@@ -155,9 +160,9 @@ var RemoteIndexer = {
 			}
 		}
 
-		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped}, Errors: ${errors}`, current: total, total });
-		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, errors=${errors}`);
-		return { uploaded, skipped, errors, firstError };
+		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped}, No file: ${noFile}, Errors: ${errors}`, current: total, total });
+		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}`);
+		return { uploaded, skipped, noFile, errors, firstError };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -223,6 +228,7 @@ var RemoteIndexer = {
 				? await Zotero.Items.getAsync(item.parentItemID)
 				: null;
 
+			log(`[RemoteIndexer] DEBUG collect: ${item.key} mime=${mimeType} filePath=${filePath}`); // DEBUG
 			result.push({
 				item_key: parentItem ? parentItem.key : item.key,
 				attachment_key: item.key,
@@ -286,38 +292,59 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} getAuthHeaders
 	 * @param {function(string): void} log
 	 * @param {AbortSignal} [signal]
+	 * @param {function(UploadProgress): void} [onProgress]
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
-	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal) {
-		try {
-			const body = {
-				library_id: libraryId,
-				attachments: attachments.map(a => ({
+	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress) {
+		const BATCH_SIZE = 100;
+		/** @type {Array<AttachmentIndexStatus>} */
+		const allStatuses = [];
+		let checked = 0;
+
+		for (let i = 0; i < attachments.length; i += BATCH_SIZE) {
+			const batch = attachments.slice(i, i + BATCH_SIZE);
+			try {
+				const body = {
+					library_id: libraryId,
+					attachments: batch.map(a => ({
+						item_key: a.item_key,
+						attachment_key: a.attachment_key,
+						mime_type: a.mime_type,
+						item_version: a.item_version,
+						attachment_version: a.attachment_version,
+					})),
+				};
+
+				const response = await this._apiFetch(
+					'POST',
+					`${backendURL}/api/libraries/${libraryId}/check-indexed`,
+					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
+				);
+
+				const data = await response.json();
+				allStatuses.push(...(data.statuses || []));
+			} catch (err) {
+				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing`);
+				allStatuses.push(...batch.map(a => ({
 					item_key: a.item_key,
 					attachment_key: a.attachment_key,
-					mime_type: a.mime_type,
-					item_version: a.item_version,
-					attachment_version: a.attachment_version,
-				})),
-			};
+					needs_indexing: true,
+					reason: 'check_failed',
+				})));
+			}
 
-			const response = await this._apiFetch(
-				'POST',
-				`${backendURL}/api/libraries/${libraryId}/check-indexed`,
-				{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
-			);
-
-			const data = await response.json();
-			return data.statuses || [];
-		} catch (err) {
-			log(`[RemoteIndexer] check-indexed error: ${err} — uploading all as fallback`);
-			return attachments.map(a => ({
-				item_key: a.item_key,
-				attachment_key: a.attachment_key,
-				needs_indexing: true,
-				reason: 'check_failed',
-			}));
+			checked += batch.length;
+			if (onProgress) {
+				onProgress({
+					percentage: (checked / attachments.length) * 100,
+					message: `Checking attachments`,
+					current: checked,
+					total: attachments.length,
+				});
+			}
 		}
+
+		return allStatuses;
 	},
 
 	/**

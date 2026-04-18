@@ -20,6 +20,7 @@ Examples:
 
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Tuple
@@ -177,6 +178,10 @@ def main():
         update_manifest_json(new_version)
         create_version_file(new_version)
         update_updates_json(new_version)
+
+        # Regenerate uv.lock so it stays in sync with the new version in pyproject.toml
+        subprocess.run(["uv", "lock"], check=True, cwd=PROJECT_ROOT)
+        print(f"[UPDATED] uv.lock")
 
         print("=" * 50)
         print(f"\n[SUCCESS] All files updated to version {new_version}")

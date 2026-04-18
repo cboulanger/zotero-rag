@@ -230,13 +230,6 @@ def start_plugin_server():
         print("[INFO] Please check that ZOTERO_PLUGIN_ZOTERO_BIN_PATH points to a valid Zotero installation", file=sys.stderr)
         return 1
 
-    # Check if Zotero is already running (from a previous session or user instance)
-    if is_zotero_running():
-        print("[ERROR] Zotero is already running", file=sys.stderr)
-        print("[INFO] Please close all Zotero instances before running this command", file=sys.stderr)
-        print("[INFO] The plugin development server needs to start its own Zotero instance", file=sys.stderr)
-        return 1
-
     # Get project root and node_modules bin directory
     project_root = Path(__file__).parent.parent
     bin_dir = project_root / "node_modules" / ".bin"

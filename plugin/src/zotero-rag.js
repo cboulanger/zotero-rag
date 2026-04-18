@@ -75,6 +75,15 @@ class ZoteroRAGPlugin {
 		/** @type {number} */
 		this.maxConcurrentQueries = 5;
 
+		/**
+		 * API key requirements fetched from the backend. Cached in Zotero prefs.
+		 * @type {Array<{key_name: string, header_name: string, description: string, required_for: string[]}>}
+		 */
+		this.requiredApiKeys = [];
+
+		/** @type {Window|null} */
+		this._dialogWindow = null;
+
 		/** @type {import('./toolkit.d.ts').Toolkit} */
 		// @ts-ignore - Initialized in init() method
 		this.toolkit = null;
@@ -107,10 +116,18 @@ class ZoteroRAGPlugin {
 		}
 
 		// Load backend URL from preferences (default: localhost:8119)
-		this.backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119';
+		this.backendURL = (Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119').replace(/\/+$/, '');
 
 		// Load optional API key (required when backend is on a remote host)
 		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+
+		// Load cached required API keys list (refreshed on each successful backend connection)
+		try {
+			const cached = Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]';
+			this.requiredApiKeys = JSON.parse(cached);
+		} catch (_) {
+			this.requiredApiKeys = [];
+		}
 	}
 
 	/**
@@ -124,6 +141,11 @@ class ZoteroRAGPlugin {
 		const headers = { ...extra };
 		if (this.apiKey) {
 			headers['X-API-Key'] = this.apiKey;
+		}
+		// Include any service API keys the user has configured
+		for (const keyInfo of this.requiredApiKeys) {
+			const value = Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`, true) || '';
+			headers[keyInfo.header_name] = value;
 		}
 		return headers;
 	}
@@ -263,10 +285,34 @@ class ZoteroRAGPlugin {
 			this.log(`Backend version: ${data.api_version}`);
 
 			// TODO: Add version compatibility checking
+			// Refresh the list of required API keys from the server
+			await this.fetchRequiredApiKeys();
 			return data.api_version;
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to check backend version: ${errorMessage}`);
+		}
+	}
+
+	/**
+	 * Fetch the list of API keys required by the backend preset and cache them.
+	 * Silently no-ops if the server is unreachable.
+	 * @returns {Promise<void>}
+	 */
+	async fetchRequiredApiKeys() {
+		try {
+			const resp = await fetch(`${this.backendURL}/api/required-keys`, {
+				headers: {
+					'Content-Type': 'application/json',
+					...(this.apiKey ? { 'X-API-Key': this.apiKey } : {}),
+				},
+			});
+			if (!resp.ok) return;
+			const data = await resp.json();
+			this.requiredApiKeys = data.keys || [];
+			Zotero.Prefs.set('extensions.zotero-rag.requiredApiKeys', JSON.stringify(this.requiredApiKeys), true);
+		} catch (e) {
+			this.log('Could not fetch required API keys: ' + e);
 		}
 	}
 
@@ -293,12 +339,18 @@ class ZoteroRAGPlugin {
 			return;
 		}
 
+		// If dialog is already open, focus it instead of opening a new one
+		if (this._dialogWindow && !this._dialogWindow.closed) {
+			this._dialogWindow.focus();
+			return;
+		}
+
 		// Open dialog window using chrome:// URL
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
 		const dialogFeatures = 'chrome,centerscreen,resizable=yes,width=600,height=600';
 
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
-		window.openDialog(
+		this._dialogWindow = window.openDialog(
 			dialogURL,
 			'zotero-rag-dialog',
 			dialogFeatures,

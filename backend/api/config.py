@@ -10,6 +10,8 @@ import os
 
 from backend.config.settings import get_settings
 from backend.config.presets import PRESETS
+from backend.services.embeddings import RemoteEmbeddingService
+from backend.services.llm import RemoteLLMService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -28,6 +30,19 @@ class ConfigResponse(BaseModel):
     default_top_k: int
     default_min_score: float
     max_chunk_size: int
+
+
+class ApiKeyRequirement(BaseModel):
+    """A single API key required by the active preset."""
+    key_name: str
+    header_name: str
+    description: str
+    required_for: List[str]
+
+
+class RequiredKeysResponse(BaseModel):
+    """List of API keys required by the active preset."""
+    keys: List[ApiKeyRequirement]
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -99,6 +114,41 @@ async def update_config(request: ConfigUpdateRequest):
                    "Note: Changes require server restart to take effect.",
         "current_config": await get_config()
     }
+
+
+@router.get("/required-keys", response_model=RequiredKeysResponse)
+async def get_required_api_keys():
+    """
+    List the API keys required by the current backend preset.
+
+    The client should send each key in the specified HTTP header when calling
+    indexing or querying endpoints.  Keys in the header always override any
+    server-side environment variable with the same name.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+
+    seen: Dict[str, ApiKeyRequirement] = {}
+
+    for key_info in RemoteEmbeddingService.required_api_keys(preset.embedding):
+        key_name = key_info["key_name"]
+        if key_name in seen:
+            seen[key_name].required_for = list(
+                set(seen[key_name].required_for) | set(key_info["required_for"])
+            )
+        else:
+            seen[key_name] = ApiKeyRequirement(**key_info)
+
+    for key_info in RemoteLLMService.required_api_keys(settings):
+        key_name = key_info["key_name"]
+        if key_name in seen:
+            seen[key_name].required_for = list(
+                set(seen[key_name].required_for) | set(key_info["required_for"])
+            )
+        else:
+            seen[key_name] = ApiKeyRequirement(**key_info)
+
+    return RequiredKeysResponse(keys=list(seen.values()))
 
 
 @router.get("/version")

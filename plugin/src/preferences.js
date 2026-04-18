@@ -47,4 +47,65 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			this.maxConcurrentQueries = value;
 		}
 	});
+
+	/**
+	 * Render service API key input fields from the given list.
+	 * @param {Array<{key_name: string, header_name: string, description: string, required_for: string[]}>} requiredKeys
+	 */
+	const renderApiKeyFields = (requiredKeys) => {
+		const container = doc.getElementById('zotero-rag-service-keys-container');
+		const placeholder = doc.getElementById('zotero-rag-service-keys-placeholder');
+		if (!container) return;
+
+		// Remove previously rendered dynamic rows
+		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
+
+		if (!requiredKeys || requiredKeys.length === 0) {
+			if (placeholder) placeholder.style.display = '';
+			return;
+		}
+		if (placeholder) placeholder.style.display = 'none';
+
+		for (const keyInfo of requiredKeys) {
+			const prefKey = `extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`;
+			const storedValue = Zotero.Prefs.get(prefKey, true) || '';
+
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'setting-row service-key-row';
+
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.textContent = `${keyInfo.key_name}:`;
+			label.setAttribute('for', `zotero-rag-key-${keyInfo.key_name}`);
+
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.type = 'password';
+			input.id = `zotero-rag-key-${keyInfo.key_name}`;
+			input.className = 'setting-input';
+			input.value = storedValue;
+			input.placeholder = 'Enter API key';
+			input.addEventListener('change', (e) => {
+				Zotero.Prefs.set(prefKey, /** @type {HTMLInputElement} */ (e.target).value, true);
+			});
+
+			row.appendChild(label);
+			row.appendChild(input);
+			container.appendChild(row);
+
+			if (keyInfo.description) {
+				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+				desc.className = 'setting-description service-key-desc';
+				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				container.appendChild(desc);
+			}
+		}
+	};
+
+	// Render from cache immediately so fields appear without needing a server round-trip
+	try {
+		const cached = Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]';
+		renderApiKeyFields(JSON.parse(cached));
+	} catch (_) {}
+
+	// Refresh from server in background and re-render if the list has changed
+	this.fetchRequiredApiKeys().then(() => renderApiKeyFields(this.requiredApiKeys));
 };

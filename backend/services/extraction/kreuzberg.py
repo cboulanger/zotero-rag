@@ -84,26 +84,24 @@ class KreuzbergExtractor(DocumentExtractor):
                 )
                 response.raise_for_status()
         except httpx.ConnectError as exc:
-            logger.error(
+            raise RuntimeError(
                 f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
                 f"Ensure the kreuzberg container is running."
-            )
-            return []
+            ) from exc
         except httpx.HTTPStatusError as exc:
-            logger.error(
+            raise RuntimeError(
                 f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
                 f"for mime={mime_type}: {exc.response.text}"
-            )
-            return []
+            ) from exc
         except httpx.TimeoutException as exc:
-            logger.error(f"Request to kreuzberg sidecar timed out (mime={mime_type}): {exc}")
-            return []
+            raise RuntimeError(
+                f"kreuzberg sidecar timed out for mime={mime_type}: {exc}"
+            ) from exc
 
         try:
             results = response.json()
         except Exception as exc:
-            logger.error(f"Failed to parse kreuzberg response as JSON: {exc}")
-            return []
+            raise RuntimeError(f"Failed to parse kreuzberg response as JSON: {exc}") from exc
 
         # Response is a list of ExtractionResult objects (one per file sent)
         if not results or not isinstance(results, list):

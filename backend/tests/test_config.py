@@ -96,7 +96,8 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(settings.api_port, 8119)
             self.assertEqual(settings.model_preset, "cpu-only")
             self.assertEqual(settings.log_level, "INFO")
-            self.assertEqual(settings.version, "0.1.0")
+            self.assertIsInstance(settings.version, str)
+            self.assertTrue(len(settings.version) > 0)
 
     def test_path_expansion(self):
         """Test that paths are expanded correctly."""
