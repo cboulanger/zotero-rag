@@ -81,6 +81,9 @@ class ZoteroRAGPlugin {
 		 */
 		this.requiredApiKeys = [];
 
+		/** @type {Window|null} */
+		this._dialogWindow = null;
+
 		/** @type {import('./toolkit.d.ts').Toolkit} */
 		// @ts-ignore - Initialized in init() method
 		this.toolkit = null;
@@ -336,12 +339,18 @@ class ZoteroRAGPlugin {
 			return;
 		}
 
+		// If dialog is already open, focus it instead of opening a new one
+		if (this._dialogWindow && !this._dialogWindow.closed) {
+			this._dialogWindow.focus();
+			return;
+		}
+
 		// Open dialog window using chrome:// URL
 		const dialogURL = 'chrome://zotero-rag/content/dialog.xhtml';
 		const dialogFeatures = 'chrome,centerscreen,resizable=yes,width=600,height=600';
 
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
-		window.openDialog(
+		this._dialogWindow = window.openDialog(
 			dialogURL,
 			'zotero-rag-dialog',
 			dialogFeatures,

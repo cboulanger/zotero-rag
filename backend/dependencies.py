@@ -23,12 +23,15 @@ def get_client_api_keys(request: Request) -> dict[str, str]:
     keys: dict[str, str] = {}
     for key_info in RemoteEmbeddingService.required_api_keys(preset.embedding):
         val = request.headers.get(key_info["header_name"])
+        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
     for key_info in RemoteLLMService.required_api_keys(settings):
         val = request.headers.get(key_info["header_name"])
+        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
+    logger.debug("DEBUG client_api_keys resolved: %s", list(keys.keys()))  # DEBUG
     return keys
 
 

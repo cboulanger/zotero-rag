@@ -134,6 +134,15 @@ var ZoteroRAGDialog = {
 	libraryIndexableCount: new Map(),
 
 	/**
+	 * Number of attachments per library that are permanently unavailable (no local
+	 * file could be obtained even after a download attempt).  Persisted in prefs
+	 * and loaded when a library is selected.  Subtracted from totalIndexable so
+	 * that a library is considered fully indexed even when some items have no file.
+	 * @type {Map<string, number>}
+	 */
+	libraryUnavailableCount: new Map(),
+
+	/**
 	 * Initialize the dialog.
 	 * @returns {void}
 	 */
@@ -326,9 +335,12 @@ var ZoteroRAGDialog = {
 						// Run in the background — result is used by updateLibraryStatusIcon.
 						const lib = this.plugin ? this.plugin.getLibraries().find(l => l.id === libraryId) : null;
 						const libraryType = lib ? lib.type : 'user';
+						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+						const unavailForLib = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${libraryId}`, true) || '0') || 0;
 						RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
 							.then(count => {
 								this.libraryIndexableCount.set(libraryId, count);
+								this.libraryUnavailableCount.set(libraryId, unavailForLib);
 								this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
 								this.updateSubmitButtonState();
 							})
@@ -365,10 +377,24 @@ var ZoteroRAGDialog = {
 			metaSpan.textContent = '';
 			metaSpan.style.display = 'none'; // Hide until metadata is loaded
 
+			// Re-index button (shown only when the library has been indexed before)
+			const reindexBtn = document.createElement('button');
+			reindexBtn.className = 'library-reindex-btn';
+			reindexBtn.id = `reindex-btn-${library.id}`;
+			reindexBtn.textContent = '\u267B'; // ♻ Recycling symbol
+			reindexBtn.title = 'Re-index this library (keeps existing index, re-processes all items)';
+			reindexBtn.style.cssText = 'display:none;background:none;border:none;outline:none;box-shadow:none;-moz-appearance:none;appearance:none;padding:0 3px;margin-left:4px;cursor:pointer;color:#888;font-size:13px;opacity:0.6;vertical-align:middle;';
+			reindexBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				this.reindexLibrary(library.id, library.name);
+			});
+
 			checkboxLabel.appendChild(checkbox);
 			checkboxLabel.appendChild(statusIcon);
 			checkboxLabel.appendChild(nameSpan);
 			checkboxLabel.appendChild(metaSpan);
+			checkboxLabel.appendChild(reindexBtn);
 			listContainer.appendChild(checkboxLabel);
 		}
 
@@ -376,9 +402,13 @@ var ZoteroRAGDialog = {
 		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
 			const currentLib = libraries.find(l => l.id === currentLibrary);
 			const currentLibType = currentLib ? currentLib.type : 'user';
-			RemoteIndexer.countIndexableAttachments(currentLibrary, currentLibType)
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+		const unavailForCurrent = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${currentLibrary}`, true) || '0') || 0;
+		// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
+		RemoteIndexer.countIndexableAttachments(currentLibrary, currentLibType)
 				.then(count => {
 					this.libraryIndexableCount.set(currentLibrary, count);
+					this.libraryUnavailableCount.set(currentLibrary, unavailForCurrent);
 					this.updateLibraryStatusIcon(currentLibrary, this.libraryMetadata.get(currentLibrary) ?? null);
 					this.updateSubmitButtonState();
 				})
@@ -435,11 +465,14 @@ var ZoteroRAGDialog = {
 			if (!this.libraryMetadata.has(id)) return false;
 			const metadata = this.libraryMetadata.get(id);
 			if (metadata == null) continue; // never indexed — counts as needing indexing
-			// Partially indexed: if local count is known and indexed < total, treat as needing indexing
+			// A library is "complete" when indexed count reaches the effective total
+			// (total indexable minus permanently unavailable items).
 			const totalIndexable = this.libraryIndexableCount.get(id);
-			if (totalIndexable !== undefined && metadata.total_items_indexed < totalIndexable) continue;
-			// At least one library is fully indexed → Submit mode
-			return false;
+			const unavailable = this.libraryUnavailableCount.get(id) || 0;
+			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+			if (effectiveTotal !== undefined && metadata.total_items_indexed >= effectiveTotal) return false;
+			if (effectiveTotal === undefined && metadata.total_items_indexed > 0) return false;
+			// indexed < effectiveTotal → still incomplete, needs (re-)indexing
 		}
 		return true;
 	},
@@ -502,10 +535,12 @@ var ZoteroRAGDialog = {
 		const metaSpan = document.getElementById(`meta-${libraryId}`);
 
 		const totalIndexable = this.libraryIndexableCount.get(libraryId);
+		const unavailable = this.libraryUnavailableCount.get(libraryId) || 0;
+		const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
 		const indexed = metadata ? metadata.total_items_indexed : 0;
 		const isPartial = metadata !== null
-			&& totalIndexable !== undefined
-			&& indexed < totalIndexable;
+			&& effectiveTotal !== undefined
+			&& indexed < effectiveTotal;
 
 		if (statusIcon) {
 			statusIcon.style.display = 'inline';
@@ -523,6 +558,7 @@ var ZoteroRAGDialog = {
 
 		if (metaSpan) {
 			metaSpan.style.display = 'inline';
+			const unavailNote = unavailable > 0 ? ` · ${unavailable} unavailable` : '';
 			if (!metadata) {
 				metaSpan.textContent = 'not indexed';
 				metaSpan.style.fontStyle = 'italic';
@@ -530,18 +566,24 @@ var ZoteroRAGDialog = {
 			} else if (isPartial) {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
-				const total = totalIndexable !== undefined ? `/${totalIndexable}` : '';
-				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items (incomplete)`;
+				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
+				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items (incomplete)${unavailNote}`;
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#e07800';
 			} else {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
-				const total = totalIndexable !== undefined ? `/${totalIndexable}` : '';
-				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items`;
+				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
+				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items${unavailNote}`;
 				metaSpan.style.fontStyle = 'normal';
 				metaSpan.style.color = '#666';
 			}
+		}
+
+		// Show the re-index button only when the library has been indexed at least once
+		const reindexBtn = document.getElementById(`reindex-btn-${libraryId}`);
+		if (reindexBtn) {
+			reindexBtn.style.display = metadata ? 'inline' : 'none';
 		}
 	},
 
@@ -582,6 +624,73 @@ var ZoteroRAGDialog = {
 		const libraries = this.plugin.getLibraries();
 		const library = libraries.find(lib => lib.id === libraryId);
 		return library ? library.name : libraryId;
+	},
+
+	/**
+	 * Re-index a library after user confirmation.
+	 * Keeps the existing vector store index; resets the unavailable-item count and
+	 * runs a full indexing pass so every item (including previously skipped ones) is
+	 * retried.  Any items that still can't be indexed are recorded as unavailable.
+	 * @param {string} libraryId
+	 * @param {string} [libraryName]
+	 * @returns {Promise<void>}
+	 */
+	async reindexLibrary(libraryId, libraryName = '') {
+		if (!this.plugin) return;
+		if (this.isOperationInProgress) {
+			this.showStatus('An operation is already in progress. Please wait or cancel it first.', 'error');
+			return;
+		}
+		const name = libraryName || this.getLibraryName(libraryId);
+		const confirmed = window.confirm(
+			`Re-index "${name}"?\n\nThis will re-process all items and update the index. The existing index is kept — nothing will be deleted.`
+		);
+		if (!confirmed) return;
+
+		// Reset the unavailable count so the fresh run starts clean
+		this.libraryUnavailableCount.set(libraryId, 0);
+		// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+		Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, 0, true);
+		this.libraryMetadata.delete(libraryId);
+
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Re-indexing...', `Starting re-index of "${name}"...`);
+
+		try {
+			await this.checkAndMonitorIndexing([libraryId], 'full');
+
+			if (!this.isOperationInProgress) return;
+
+			this.updateProgress(100, 'Re-indexing complete', `"${name}" has been re-indexed.`);
+
+			// Refresh metadata and detect phantom gap
+			this.libraryMetadata.delete(libraryId);
+			await this.fetchAndUpdateLibraryMetadata(libraryId);
+			const totalIndexable = this.libraryIndexableCount.get(libraryId);
+			const freshMeta = this.libraryMetadata.get(libraryId);
+			if (totalIndexable !== undefined && freshMeta != null) {
+				const prevUnavail = this.libraryUnavailableCount.get(libraryId) || 0;
+				const gap = Math.max(0, totalIndexable - freshMeta.total_items_indexed);
+				const finalUnavail = Math.max(prevUnavail, gap);
+				if (finalUnavail !== prevUnavail) {
+					this.libraryUnavailableCount.set(libraryId, finalUnavail);
+					// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, finalUnavail, true);
+					this.updateLibraryStatusIcon(libraryId, freshMeta);
+					this.updateSubmitButtonState();
+				}
+			}
+
+			setTimeout(() => this.hideProgress(), 1500);
+		} catch (error) {
+			if (!this.isOperationInProgress) return;
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error re-indexing "${name}": ${errorMessage}`, 'error');
+		} finally {
+			this.setCancelMode('close');
+			this.setSubmitEnabled(true);
+		}
 	},
 
 	/**
@@ -747,6 +856,22 @@ var ZoteroRAGDialog = {
 			for (const id of libraryIds) {
 				this.libraryMetadata.delete(id);
 				await this.fetchAndUpdateLibraryMetadata(id);
+				// Phantom gap: items with local files that still couldn't be indexed count
+				// as permanently unavailable (backend accepted them but didn't embed them).
+				const totalIndexable = this.libraryIndexableCount.get(id);
+				const freshMeta = this.libraryMetadata.get(id);
+				if (totalIndexable !== undefined && freshMeta != null) {
+					const prevUnavail = this.libraryUnavailableCount.get(id) || 0;
+					const gap = Math.max(0, totalIndexable - freshMeta.total_items_indexed);
+					const finalUnavail = Math.max(prevUnavail, gap);
+					if (finalUnavail !== prevUnavail) {
+						this.libraryUnavailableCount.set(id, finalUnavail);
+						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+						Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${id}`, finalUnavail, true);
+						this.updateLibraryStatusIcon(id, freshMeta);
+						this.updateSubmitButtonState();
+					}
+				}
 			}
 
 			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata,
@@ -934,8 +1059,17 @@ var ZoteroRAGDialog = {
 					downloadedFilePaths: this.downloadedAttachmentPaths,
 					downloadAttachment: async (zoteroItem) => {
 						const key = zoteroItem.key;
-						if (this._getFailedDownloadKeys().has(key)) return null;
-						if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroItem.libraryID)) return null;
+						// BEGIN DEBUG
+						plugin.log(`[DEBUG] downloadAttachment called for ${key} (libraryID=${zoteroItem.libraryID})`);
+						// END DEBUG
+						if (this._getFailedDownloadKeys().has(key)) {
+							plugin.log(`[DEBUG] downloadAttachment: ${key} is in failed-download keys, skipping`); // DEBUG
+							return null;
+						}
+						if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroItem.libraryID)) {
+							plugin.log(`[DEBUG] downloadAttachment: sync storage disabled for libraryID=${zoteroItem.libraryID}, skipping`); // DEBUG
+							return null;
+						}
 						try {
 							await Zotero.Sync.Runner.downloadFile(zoteroItem);
 							const path = await zoteroItem.getFilePathAsync();
@@ -961,10 +1095,22 @@ var ZoteroRAGDialog = {
 					return;
 				}
 
-				if (indexResult.errors > 0 && indexResult.uploaded === 0) {
-					const detail = indexResult.firstError ? `: ${indexResult.firstError}` : '';
-					throw new Error(`All ${indexResult.errors} attachment(s) failed to index${detail}`);
+				// Persist unavailable count so status display survives dialog re-open
+				const prevUnavail = this.libraryUnavailableCount.get(libraryId) || 0;
+				const newUnavail = indexResult.noFile;
+				if (newUnavail !== prevUnavail) {
+					this.libraryUnavailableCount.set(libraryId, newUnavail);
+					// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newUnavail, true);
 				}
+
+				// Report missing-file count as informational — never fatal
+				if (newUnavail > 0) {
+					const msg = `${newUnavail} attachment(s) in ${libraryName} have no local file and were skipped`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					this.showStatus(msg, 'info');
+				}
+				// Upload errors are warnings but also non-fatal
 				if (indexResult.errors > 0) {
 					const detail = indexResult.firstError ? `: ${indexResult.firstError}` : '';
 					this.plugin.log(`[RemoteIndexer] Warning: ${indexResult.errors} attachment(s) failed during indexing of ${libraryName}`);
