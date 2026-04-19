@@ -1,13 +1,6 @@
 name: Docker Build & Push
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - 'Dockerfile'
   workflow_dispatch:
     inputs:
       tag:
