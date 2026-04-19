@@ -128,31 +128,34 @@ async def check_indexed(
 
     statuses: list[AttachmentIndexStatus] = []
 
-    if True:  # keep indentation unchanged for the block below
-        for att in request.attachments:
-            indexed_version = vector_store.get_item_version(library_id, att.item_key)
+    indexed_versions = vector_store.get_item_versions_bulk(
+        library_id, [att.item_key for att in request.attachments]
+    )
 
-            if indexed_version is None:
-                statuses.append(AttachmentIndexStatus(
-                    item_key=att.item_key,
-                    attachment_key=att.attachment_key,
-                    needs_indexing=True,
-                    reason="not_indexed",
-                ))
-            elif indexed_version < att.item_version:
-                statuses.append(AttachmentIndexStatus(
-                    item_key=att.item_key,
-                    attachment_key=att.attachment_key,
-                    needs_indexing=True,
-                    reason="version_changed",
-                ))
-            else:
-                statuses.append(AttachmentIndexStatus(
-                    item_key=att.item_key,
-                    attachment_key=att.attachment_key,
-                    needs_indexing=False,
-                    reason="up_to_date",
-                ))
+    for att in request.attachments:
+        indexed_version = indexed_versions.get(att.item_key)
+
+        if indexed_version is None:
+            statuses.append(AttachmentIndexStatus(
+                item_key=att.item_key,
+                attachment_key=att.attachment_key,
+                needs_indexing=True,
+                reason="not_indexed",
+            ))
+        elif indexed_version < att.item_version:
+            statuses.append(AttachmentIndexStatus(
+                item_key=att.item_key,
+                attachment_key=att.attachment_key,
+                needs_indexing=True,
+                reason="version_changed",
+            ))
+        else:
+            statuses.append(AttachmentIndexStatus(
+                item_key=att.item_key,
+                attachment_key=att.attachment_key,
+                needs_indexing=False,
+                reason="up_to_date",
+            ))
 
         # Repair missing library metadata if chunks already exist.
         # This handles the case where a previous indexing run stored chunks

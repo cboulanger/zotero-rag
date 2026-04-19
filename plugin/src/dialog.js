@@ -687,7 +687,8 @@ var ZoteroRAGDialog = {
 
 		// Validate input
 		if (!question) {
-			this.showStatus('Please enter a question.', 'error');
+			// @ts-ignore - Services is a Zotero/Firefox global
+			Services.prompt.alert(window, 'Zotero RAG', 'Please enter a question.');
 			return;
 		}
 

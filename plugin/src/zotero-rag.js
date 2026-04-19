@@ -564,14 +564,14 @@ class ZoteroRAGPlugin {
 		const html = this.formatNoteHTML(question, result, libraryIDs);
 		note.setNote(html);
 
+		// Add to collection before saving so it's included in the same transaction
+		if (collectionID) {
+			// @ts-ignore - addToCollection exists on Zotero.Item at runtime
+			note.addToCollection(collectionID);
+		}
+
 		// Save note
 		await note.saveTx();
-
-		// Add to collection if one is selected
-		if (collectionID) {
-			const collection = await Zotero.Collections.getAsync(collectionID);
-			await collection.addItem(note.id);
-		}
 
 		return note;
 	}

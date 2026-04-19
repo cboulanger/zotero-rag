@@ -232,6 +232,63 @@ For Docker deployments, the image can be built without these packages using the 
 
 ---
 
+## Choosing a preset by evaluating embedding performance
+
+The quick-selection guide above is a good starting point, but embedding quality varies by language, domain, and query style. Use `scripts/eval_embeddings.py` to run a data-driven comparison before committing to a preset.
+
+### Quick smoke test (no download required)
+
+Runs the built-in multilingual pair corpus (22 English + German + cross-lingual pairs):
+
+```bash
+uv run python scripts/eval_embeddings.py \
+  --preset-a remote-kisski \
+  --preset-b cloud-server-kisski
+```
+
+This verifies basic functionality and measures throughput, but the corpus is too easy to reveal quality differences — all well-separated presets will score 1.0.
+
+### Published IR benchmark (recommended)
+
+Downloads a real retrieval dataset and evaluates nDCG@10, MRR@10, and Recall@{1,5,10} against ground-truth relevance judgments. Requires `uv sync --extra eval`.
+
+```bash
+# English academic content (scientific fact-checking, ~500 corpus docs)
+uv run python scripts/eval_embeddings.py \
+  --preset-a remote-kisski \
+  --preset-b cloud-server-kisski \
+  --mteb-task scifact --max-queries 50
+
+```
+
+| Task | Language | Corpus size | Best for |
+| ---- | -------- | ----------- | -------- |
+| `scifact` | English | ~5 K | Academic / scientific content |
+| `nfcorpus` | English | ~3.6 K | Biomedical content |
+| `fiqa` | English | ~57 K (sampled) | Financial / social-science content |
+
+For multilingual quality, use the built-in pair corpus (`--data`) with your own German query/passage pairs extracted from your Zotero library.
+
+### Checking vector compatibility before switching presets
+
+If you already have an indexed library and want to switch presets, first check whether the existing vectors are reusable — re-indexing a large library can take hours:
+
+```bash
+uv run python scripts/check_embedding_compat.py \
+  --preset-a remote-kisski \
+  --preset-b apple-silicon-32gb
+```
+
+Compatibility requires cosine similarity ≥ 0.999 across all probe texts. A mismatch (different model, different dimension, or server-side preprocessing) means a full re-index is needed.
+
+### Interpreting results
+
+- **nDCG@10** is the primary MTEB metric — the most meaningful single number for ranking quality. Published scores for `multilingual-e5-large-instruct` on MIRACL-de are ~0.72; `multilingual-e5-small` scores ~0.66.
+- **Throughput** measured on a 22-passage corpus is dominated by model load time and is not representative. Run on a larger corpus (≥ 500 docs) for reliable throughput numbers.
+- **Embedding dim** mismatch is an instant incompatibility — vectors cannot be shared between Qdrant collections of different dimensions.
+
+---
+
 ## Usage
 
 Set `MODEL_PRESET` in your `.env` file:

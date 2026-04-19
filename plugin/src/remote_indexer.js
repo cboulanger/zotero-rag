@@ -7,6 +7,7 @@
 // Loaded by dialog.xhtml before dialog.js so ZoteroRAGDialog can call it.
 
 // @ts-check
+/// <reference path="./zotero-types.d.ts" />
 
 /**
  * @typedef {Object} AttachmentInfo
@@ -74,13 +75,46 @@ var RemoteIndexer = {
 			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null };
 		}
 
-		// 2. Ask the backend which attachments actually need indexing
-		onProgress({ percentage: 0, message: `Checking ${attachments.length} attachments`, current: 0, total: attachments.length });
-		const statuses = await this._checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress);
+		// 2. Load the client-side version cache and pre-classify attachments.
+		//    Attachments whose item_version matches the cache are up-to-date without
+		//    asking the backend.  Only new/changed/unknown ones go to check-indexed.
+		const versionCache = this._loadVersionCache(libraryId);
+		/** @type {Array<AttachmentIndexStatus>} */
+		const cachedStatuses = [];
+		/** @type {typeof attachments} */
+		const toCheck = [];
+		for (const att of attachments) {
+			const cachedVersion = versionCache[att.attachment_key];
+			if (cachedVersion !== undefined && cachedVersion >= att.item_version) {
+				cachedStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: false, reason: 'cached' });
+			} else {
+				toCheck.push(att);
+			}
+		}
+		log(`[RemoteIndexer] Client cache: ${cachedStatuses.length} up-to-date, ${toCheck.length} to verify with backend`);
+
+		// 3. Ask the backend which of the remaining attachments actually need indexing.
+		/** @type {Array<AttachmentIndexStatus>} */
+		let checkedStatuses = [];
+		if (toCheck.length > 0) {
+			onProgress({ percentage: 0, message: `Checking ${toCheck.length} attachments`, current: 0, total: toCheck.length });
+			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress);
+		}
+
+		// Update cache for items the backend confirmed are up-to-date.
+		for (let i = 0; i < checkedStatuses.length; i++) {
+			const s = checkedStatuses[i];
+			if (!s.needs_indexing) {
+				const att = toCheck.find(a => a.attachment_key === s.attachment_key);
+				if (att) versionCache[att.attachment_key] = att.item_version;
+			}
+		}
+
+		const statuses = [...cachedStatuses, ...checkedStatuses];
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
-		// 3. Download local files for toUpload items that have no cached path.
+		// 4. Download local files for toUpload items that have no cached path.
 		//    Skips attachments already indexed — avoids downloading files we won't use.
 		if (downloadAttachment) {
 			const needsDownload = toUpload.filter(s => {
@@ -107,7 +141,7 @@ var RemoteIndexer = {
 			}
 		}
 
-		// 4. Upload each attachment that needs indexing and has a local file
+		// 5. Upload each attachment that needs indexing and has a local file
 		let uploaded = 0;
 		let skipped = attachments.length - toUpload.length;
 		let errors = 0;
@@ -152,12 +186,18 @@ var RemoteIndexer = {
 			try {
 				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal });
 				uploaded++;
+				versionCache[att.attachment_key] = att.item_version;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				log(`[RemoteIndexer] Error uploading ${att.attachment_key}: ${msg}`);
 				if (!firstError) firstError = msg;
 				errors++;
 			}
+		}
+
+		// Persist the updated cache (only when at least something was confirmed/uploaded).
+		if (uploaded > 0 || checkedStatuses.some(s => !s.needs_indexing)) {
+			this._saveVersionCache(libraryId, versionCache);
 		}
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped}, No file: ${noFile}, Errors: ${errors}`, current: total, total });
@@ -414,6 +454,34 @@ var RemoteIndexer = {
 	 * The error message includes the method, path, HTTP status, and response body
 	 * so callers can tell exactly which endpoint failed and why.
 	 *
+	/**
+	 * Load the per-library version cache from Zotero prefs.
+	 * @param {string} libraryId
+	 * @returns {Record<string, number>} map of attachment_key → last confirmed item_version
+	 */
+	_loadVersionCache(libraryId) {
+		try {
+			const raw = Zotero.Prefs.get(`extensions.zotero-rag.indexCache.${libraryId}`, true) || '{}';
+			return JSON.parse(raw);
+		} catch (_) {
+			return {};
+		}
+	},
+
+	/**
+	 * Persist the per-library version cache to Zotero prefs.
+	 * @param {string} libraryId
+	 * @param {Record<string, number>} cache
+	 */
+	_saveVersionCache(libraryId, cache) {
+		try {
+			Zotero.Prefs.set(`extensions.zotero-rag.indexCache.${libraryId}`, JSON.stringify(cache), true);
+		} catch (e) {
+			// Non-fatal — cache miss on next session is acceptable
+		}
+	},
+
+	/**
 	 * @param {string} method
 	 * @param {string} url
 	 * @param {RequestInit} [init]

@@ -19,6 +19,7 @@ from qdrant_client.models import (
     Filter,
     FieldCondition,
     MatchValue,
+    MatchAny,
     SearchParams,
 )
 
@@ -689,6 +690,45 @@ class VectorStore:
         if chunks and "item_version" in chunks[0]["payload"]:
             return chunks[0]["payload"]["item_version"]
         return None  # Not indexed or legacy chunk without version
+
+    def get_item_versions_bulk(self, library_id: str, item_keys: list[str]) -> dict[str, int]:
+        """
+        Get the indexed version for multiple items in a single Qdrant query.
+
+        Returns a dict mapping item_key → item_version for every key that has
+        at least one indexed chunk with a version field.  Keys with no chunks
+        (or only legacy chunks lacking the version field) are absent from the
+        result.
+        """
+        if not item_keys:
+            return {}
+
+        versions: dict[str, int] = {}
+        offset = None
+
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
+                ]),
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for point in results:
+                ik = point.payload.get("item_key")
+                if ik and ik not in versions and "item_version" in point.payload:
+                    versions[ik] = point.payload["item_version"]
+
+            if set(item_keys).issubset(versions.keys()) or next_offset is None:
+                break
+            offset = next_offset
+
+        return versions
 
     def delete_item_chunks(self, library_id: str, item_key: str) -> int:
         """

@@ -123,9 +123,23 @@ class LocalEmbeddingService(EmbeddingService):
                 os.environ["HF_TOKEN"] = self.hf_token
                 model_kwargs["token"] = self.hf_token
 
+            # Auto-select best available device when the preset doesn't specify one.
+            if "device" not in model_kwargs:
+                try:
+                    import torch
+                    if torch.backends.mps.is_available():
+                        model_kwargs["device"] = "mps"
+                        logger.info("MPS (Apple Silicon) detected — using GPU acceleration.")
+                    elif torch.cuda.is_available():
+                        model_kwargs["device"] = "cuda"
+                        logger.info("CUDA detected — using GPU acceleration.")
+                except ImportError:
+                    pass
+
             self._model = SentenceTransformer(self.config.model_name, **model_kwargs)
             logger.info(
-                f"Model loaded. Embedding dimension: {self._model.get_sentence_embedding_dimension()}"
+                f"Model loaded on {model_kwargs.get('device', 'cpu')}. "
+                f"Embedding dimension: {self._model.get_sentence_embedding_dimension()}"
             )
 
     async def embed_text(self, text: str) -> list[float]:

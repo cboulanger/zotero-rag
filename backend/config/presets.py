@@ -56,7 +56,8 @@ PRESETS = {
         description="Optimized for Apple Silicon Macs with 32GB RAM — local multilingual embeddings via MPS",
         embedding=EmbeddingConfig(
             model_type="local",
-            model_name="intfloat/multilingual-e5-large-instruct",  # 1024-dim, same model as KISSKI remote; MPS-accelerated on Apple Silicon
+            model_name="intfloat/multilingual-e5-large-instruct",  # 1024-dim, same model as KISSKI remote
+            model_kwargs={"device": "mps"},
             batch_size=64,
         ),
         llm=LLMConfig(
