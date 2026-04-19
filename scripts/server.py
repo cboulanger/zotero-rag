@@ -468,9 +468,9 @@ def start_server(dev_mode=True, with_plugin=False):
             )
 
             # Wait for server to start and run connectivity check
-            # Poll for up to 30 seconds for the server to become ready
+            # Poll for up to 60 seconds for the server to become ready
             import requests
-            max_wait = 30
+            max_wait = 60
             poll_interval = 0.5
             server_ready = False
 
