@@ -12,6 +12,7 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 | `apple-silicon-kisski` | **No** | `KISSKI_API_KEY` |
 | `remote-kisski` | **No** | `KISSKI_API_KEY` |
 | `remote-openai` | **No** | `OPENAI_API_KEY` |
+| `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` |
 | `windows-test` | **No** | `KISSKI_API_KEY` |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
@@ -47,10 +48,12 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 
 **Configuration:**
 
-- Embedding: `nomic-ai/nomic-embed-text-v1.5` (local)
+- Embedding: `intfloat/multilingual-e5-large-instruct` (local, MPS-accelerated, 1024-dim, multilingual)
 - LLM: `mistralai/Mistral-7B-Instruct-v0.3` (local, 4-bit quantized)
 - Memory: ~10 GB
-- Top-k: 10 chunks / Max chunk: 768 tokens
+- Top-k: 10 chunks / Max chunk: 800 tokens
+
+**Note:** Uses the same model as `remote-kisski` and `apple-silicon-kisski`, so existing KISSKI-generated vectors are compatible (subject to the server applying no instruction prefix — verify with `scripts/check_embedding_compat.py`). MPS acceleration on Apple Silicon gives ~50–150 texts/sec, far faster than CPU-only inference.
 
 **Requires:** `sentence-transformers`, `torch` (~1-2 GB extra dependencies — see [Optional local dependencies](#optional-local-dependencies))
 
@@ -85,6 +88,29 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Trade-offs:** Lower quality; limited 2k context window.
 
 **Requires:** `sentence-transformers`, `torch`
+
+---
+
+### `cloud-server-kisski` (Cloud server with KISSKI LLM)
+
+**Best for:** Cloud servers with 16 GB RAM, 4 vCPU, no GPU — avoids KISSKI embedding outages while keeping high-quality answers
+
+**Configuration:**
+
+- Embedding: `intfloat/multilingual-e5-small` (local, ~470 MB, multilingual)
+- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- Memory: ~2 GB
+- Top-k: 10 chunks / Max chunk: 768 tokens
+
+**Advantages:**
+
+- Embedding is fully local — unaffected by KISSKI outages
+- Multilingual support (comparable quality to e5-large for typical queries)
+- High-quality 70B LLM answers via KISSKI
+
+**Trade-offs:** CPU embedding is slower than GPU or remote API (~5–20 sentences/sec); initial indexing may take minutes to hours depending on library size.
+
+**Requires:** `KISSKI_API_KEY` environment variable; `sentence-transformers`, `torch` (`uv sync --extra local-models`)
 
 ---
 
@@ -142,7 +168,6 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 
 ---
 
-
 ## Quick Selection Guide
 
 | Your Setup | Recommended Preset |
@@ -154,6 +179,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 | Apple Silicon Mac (32 GB), offline/privacy | `apple-silicon-32gb` |
 | High-memory GPU system (>24 GB), offline | `high-memory` |
 | CPU-only or low memory, offline | `cpu-only` |
+| Cloud server (no GPU) + KISSKI access | `cloud-server-kisski` |
 
 ---
 

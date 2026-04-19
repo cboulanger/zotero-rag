@@ -328,6 +328,81 @@ For menu items, use direct `setAttribute('label', ...)` if localization doesn't 
 menuitem.setAttribute('label', 'Fallback Label');
 ```
 
+## Logging
+
+Zotero plugins run in a privileged chrome context where standard `console.log()` is **silent** — messages do not appear anywhere visible. Use `Services.console` instead.
+
+### Where to view messages
+
+Open the **Browser Console** via **Tools > Developer > Browser Console** (or `Cmd+Shift+J` on macOS). This is the "Parent process Browser Console" that shows chrome-context output.
+
+### bootstrap.js (loadSubScript scope)
+
+`console` is not defined here. Use `Services.console.logStringMessage()` directly:
+
+```javascript
+function log(msg) {
+  Services.console.logStringMessage("My Plugin: " + msg);
+}
+```
+
+### Window/dialog scripts
+
+`console` exists in window scope but its methods are silent. Patch them at the top of the script to route through `Services.console`:
+
+- `log`/`info` → `logStringMessage` (neutral, no severity colour)
+- `warn`/`error` → `nsIScriptError` with the appropriate severity flag
+
+```javascript
+;(function() {
+  const nsFlags = { warn: 0x1, error: 0x0 };
+  const makeLogger = (level) => (...args) => {
+    const msg = "[My Plugin] " + args.join(" ");
+    if (level === "log" || level === "info") {
+      Services.console.logStringMessage(msg);
+    } else {
+      const e = Cc["@mozilla.org/scripterror;1"].createInstance(Ci.nsIScriptError);
+      e.init(msg, "", null, 0, 0, nsFlags[level], "chrome javascript");
+      Services.console.logMessage(e);
+    }
+  };
+  ["log", "info", "warn", "error"].forEach(level => { console[level] = makeLogger(level); });
+})();
+```
+
+For scripts loaded via `loadSubScript` (e.g. a main plugin script that also needs `console`), check whether `console` exists first and create it on `globalThis` if not:
+
+```javascript
+;(function() {
+  const nsFlags = { warn: 0x1, error: 0x0 };
+  const makeLogger = (level) => (...args) => {
+    const msg = "[My Plugin] " + args.join(" ");
+    if (level === "log" || level === "info") {
+      Services.console.logStringMessage(msg);
+    } else {
+      const e = Cc["@mozilla.org/scripterror;1"].createInstance(Ci.nsIScriptError);
+      e.init(msg, "", null, 0, 0, nsFlags[level], "chrome javascript");
+      Services.console.logMessage(e);
+    }
+  };
+  if (typeof console === "undefined") {
+    globalThis.console = { log: makeLogger("log"), info: makeLogger("info"), warn: makeLogger("warn"), error: makeLogger("error") };
+  } else {
+    ["log", "info", "warn", "error"].forEach(level => { console[level] = makeLogger(level); });
+  }
+})();
+```
+
+Wrap in an IIFE (as shown) to avoid `const` redeclaration errors on hot-reload, since `loadSubScript` re-runs the file in the same global scope.
+
+### nsIScriptError severity flags
+
+| Flag | Value | Display |
+| --- | --- | --- |
+| `errorFlag` | `0x0` | Red (error) |
+| `warningFlag` | `0x1` | Yellow (warning) |
+| `infoFlag` | `0x8` | Note: renders as error in practice; use `logStringMessage` for neutral output |
+
 ## Common Pitfalls
 
 1. **Empty dialog window**: Missing chrome protocol registration or incorrect script loading

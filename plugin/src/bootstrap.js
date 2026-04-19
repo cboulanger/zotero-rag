@@ -2,7 +2,7 @@ var ZoteroRAG;
 var chromeHandle;
 
 function log(msg) {
-	Zotero.debug("Zotero RAG: " + msg);
+	Services.console.logStringMessage("Zotero RAG: " + msg);
 }
 
 function install() {
@@ -11,6 +11,7 @@ function install() {
 
 async function startup({ id, version, rootURI }) {
 	log(`Starting version ${version}`);
+
 
 	// Register chrome:// protocol
 	var aomStartup = Components.classes[

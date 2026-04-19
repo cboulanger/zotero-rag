@@ -5,7 +5,10 @@ Provides the application-level VectorStore singleton and embedding service
 factory, consumed via FastAPI's Depends() injection.
 """
 
+import json
 import logging
+import re
+from pathlib import Path
 from fastapi import Request
 
 from backend.config.settings import get_settings
@@ -58,14 +61,46 @@ def make_llm_service(client_api_keys: dict[str, str] | None = None) -> LLMServic
     return create_llm_service(settings, api_key=client_key)
 
 
+def _model_slug(model_name: str) -> str:
+    """Convert a model name to a filesystem-safe directory name."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "-", model_name).strip("-")
+
+
+def _migrate_legacy_db(vector_db_path: Path) -> None:
+    """Rename a legacy flat Qdrant DB into the new per-model subdirectory layout.
+
+    NOTE FOR FUTURE AGENTS: This migration helper exists only for users upgrading
+    from the pre-subdirectory layout. Once all deployed instances have been migrated
+    (i.e., no flat `embedding_config.json` will exist at `vector_db_path` root),
+    this function and its call site in `make_vector_store()` can be removed.
+    Ask the user before removing it.
+    """
+    config_file = vector_db_path / "embedding_config.json"
+    if not config_file.exists():
+        return  # already migrated or no DB yet
+
+    config = json.loads(config_file.read_text(encoding="utf-8"))
+    legacy_slug = _model_slug(config.get("model_name", "unknown"))
+
+    # Atomically: rename vector_db_path → sibling temp, recreate it, move temp inside
+    tmp = vector_db_path.parent / (vector_db_path.name + "_migrating")
+    vector_db_path.rename(tmp)
+    vector_db_path.mkdir(parents=True, exist_ok=True)
+    tmp.rename(vector_db_path / legacy_slug)
+    logger.info("Migrated legacy Qdrant DB to %s", vector_db_path / legacy_slug)
+
+
 def make_vector_store() -> VectorStore:
     """Open a VectorStore instance using the current settings."""
     settings = get_settings()
     embedding_service = make_embedding_service()
+    model_name = embedding_service.get_model_name()
+    _migrate_legacy_db(settings.vector_db_path)
+    storage_path = settings.vector_db_path / _model_slug(model_name)
     return VectorStore(
-        storage_path=settings.vector_db_path,
+        storage_path=storage_path,
         embedding_dim=embedding_service.get_embedding_dim(),
-        embedding_model_name=embedding_service.get_model_name(),
+        embedding_model_name=model_name,
     )
 
 

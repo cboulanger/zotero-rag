@@ -11,6 +11,7 @@ import logging
 
 from backend.__version__ import __version__
 from backend.config.settings import get_settings
+from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
 from backend.api import config, libraries, indexing, query, document_upload
 
@@ -156,12 +157,54 @@ app.include_router(document_upload.router, prefix="/api", tags=["document-upload
 
 
 @app.get("/")
-async def root():
-    """Root endpoint."""
+async def root(request: Request):
+    """Root endpoint — service info, preset config, and vector store statistics."""
+    preset = settings.get_hardware_preset()
+    vector_store: VectorStore = request.app.state.vector_store
+
+    embedding_cfg = preset.embedding
+    llm_cfg = preset.llm
+    rag_cfg = preset.rag
+
+    try:
+        db_stats = vector_store.get_collection_info()
+    except Exception as exc:
+        db_stats = {"error": str(exc)}
+
     return {
         "service": "Zotero RAG API",
         "version": __version__,
-        "status": "running"
+        "status": "running",
+        "preset": {
+            "name": preset.name,
+            "description": preset.description,
+            "memory_budget_gb": preset.memory_budget_gb,
+        },
+        "embedding": {
+            "model_type": embedding_cfg.model_type,
+            "model_name": embedding_cfg.model_name,
+            "base_url": embedding_cfg.model_kwargs.get("base_url"),
+            "embedding_dim": db_stats.get("embedding_dim"),
+            "distance": db_stats.get("distance"),
+        },
+        "llm": {
+            "model_type": llm_cfg.model_type,
+            "model_name": llm_cfg.model_name,
+            "base_url": llm_cfg.model_kwargs.get("base_url"),
+            "max_context_length": llm_cfg.max_context_length,
+            "temperature": llm_cfg.temperature,
+        },
+        "rag": {
+            "top_k": rag_cfg.top_k,
+            "score_threshold": rag_cfg.score_threshold,
+            "max_chunk_size": rag_cfg.max_chunk_size,
+        },
+        "vector_db": {
+            "path": str(vector_store.storage_path),
+            "chunks": db_stats.get("chunks_count"),
+            "indexed_documents": db_stats.get("dedup_count"),
+            "libraries": db_stats.get("metadata_count"),
+        },
     }
 
 

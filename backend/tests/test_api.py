@@ -128,7 +128,21 @@ class TestRootEndpoints(unittest.TestCase):
     """Test root and health check endpoints."""
 
     def setUp(self):
+        mock_vs = MagicMock()
+        mock_vs.get_collection_info.return_value = {
+            "chunks_count": 0,
+            "dedup_count": 0,
+            "metadata_count": 0,
+            "embedding_dim": 1024,
+            "embedding_model_name": "test-model",
+            "distance": "Cosine",
+        }
+        mock_vs.storage_path = "/tmp/test-qdrant"
+        app.state.vector_store = mock_vs
         self.client = TestClient(app)
+
+    def tearDown(self):
+        del app.state.vector_store
 
     def test_root(self):
         """Test GET / endpoint."""
@@ -139,6 +153,9 @@ class TestRootEndpoints(unittest.TestCase):
         self.assertIn("service", data)
         self.assertIn("version", data)
         self.assertEqual(data["status"], "running")
+        self.assertIn("preset", data)
+        self.assertIn("embedding", data)
+        self.assertIn("vector_db", data)
 
     def test_health_check(self):
         """Test GET /health endpoint."""

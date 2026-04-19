@@ -14,8 +14,8 @@
 `npm start`
 
 [OK] Server started successfully (PID: 55430)
-[OK] Access at: http://localhost:8119
-[OK] API docs at: http://localhost:8119/docs
+[OK] Access at: <http://localhost:8119>
+[OK] API docs at: <http://localhost:8119/docs>
 [OK] Logs: /Volumes/Data-SSD/Code/zotero-rag/logs/server.log
 
 ## Testing
@@ -80,7 +80,8 @@ plugin/
 ### Development Workflow
 
 **Hot Reload Plugin Development Server:**
-- This project uses the `zotero-plugin` development scaffold (https://zotero-plugin-dev.github.io/zotero-plugin-scaffold/quick-start.html)
+
+- This project uses the `zotero-plugin` development scaffold (<https://zotero-plugin-dev.github.io/zotero-plugin-scaffold/quick-start.html>)
 - **DO NOT rebuild the plugin** after making changes to plugin source files
 - The development server automatically reloads changes in Zotero
 - To start development mode: `npm run start` (or appropriate command from package.json)
@@ -91,12 +92,14 @@ plugin/
 **XUL (XML User Interface Language) is deprecated in Firefox but still functional in Zotero 7/8.**
 
 **Recommended Approach:**
+
 - Use **HTML elements with `html:` namespace** when possible for future-proofing
 - **XUL is acceptable** for dialogs, preferences, and UI components if it simplifies development
 - Prefer HTML for new code, but don't block on XUL if it works
 - Focus on functionality over ideological purity
 
 **Common Patterns:**
+
 - XUL `<dialog>` with HTML children using `html:` namespace works well
 - Mix XUL layout (`<vbox>`, `<hbox>`) with HTML form elements
 - Use `createXULElement()` for menu items and structural elements
@@ -105,6 +108,7 @@ plugin/
 ### Dialog and Window Creation
 
 For creating dialog windows in Zotero plugins:
+
 1. Use XUL `<dialog>` or `<window>` as root element for `window.openDialog()`
 2. Mix HTML elements (with `html:` namespace) for form controls
 3. Apply styles using standard CSS files
@@ -115,7 +119,7 @@ For creating dialog windows in Zotero plugins:
 - **Type Hints**: Use Python type hints for all function signatures and class attributes
 - **Docstrings**: Document all public functions, classes, and modules using clear docstrings
 - **Error Handling**: Implement proper error handling with specific exception types
-- **Logging**: Use appropriate logging levels (DEBUG, INFO, WARNING, ERROR) for operational visibility
+- **Logging**: Use appropriate logging levels (DEBUG, INFO, WARNING, ERROR) for operational visibility. In Zotero plugin scripts, use `console.log/warn/error` as normal — the `console` object is patched at the top of each script to route output through `Services.console` so messages appear in the Browser Console (Tools > Developer > Browser Console). See `docs/zotero-plugin-dev.md` for details.
 - **Code Style**: Follow PEP 8 for Python, Standard JavaScript style for Node.js
 - **Console Output**: Avoid Unicode emoji characters (✅ ❌ ➜ etc.) in print statements as they cause UnicodeEncodeError on Windows. Use ASCII alternatives like `[PASS]`, `[FAIL]`, `->` instead
 
@@ -136,7 +140,7 @@ For creating dialog windows in Zotero plugins:
 - Include setup and installation instructions
 - Document configuration options and environment variables
 - Keep inline comments focused on "why" rather than "what"
-- In Javascript files, use TypeScript-compatible JSDOC annotations throughout for typing variables and documenting function parameters. Use the full power or typescript embedded in JSDoc, don't use generic types. Remember this is plain javascript, don't use Typescript directly. 
+- In Javascript files, use TypeScript-compatible JSDOC annotations throughout for typing variables and documenting function parameters. Use the full power or typescript embedded in JSDoc, don't use generic types. Remember this is plain javascript, don't use Typescript directly.
 
 ## Implementation progress documentation
 
@@ -163,4 +167,4 @@ For creating dialog windows in Zotero plugins:
 
 - Remember or check what platform you are running on to generate the right CLI commands (e.g. Windows PowerShell vs. Mac ZSH or Linux bash)
 - When using python on the command line, always use `uv run python`
-- For more complex tasks, create a python script in the `scripts` dir and run it. 
+- For more complex tasks, create a python script in the `scripts` dir and run it.

@@ -1,60 +1,12 @@
 // Dialog script for Zotero RAG query interface
 
+// todo: can https://windingwind.github.io/zotero-plugin-toolkit/ be used?
+
 // @ts-check
 
-// Type definitions (duplicated from zotero-rag.js for dialog context)
-
-/**
- * @typedef {Object} Library
- * @property {string} id - Library ID
- * @property {string} name - Library name
- * @property {string} type - Library type (user/group)
- */
-
-/**
- * @typedef {Object} QueryResult
- * @property {string} answer - Generated answer
- * @property {string} answer_format - Format of answer: "text", "html", or "markdown"
- * @property {Array<SourceCitation>} sources - Source citations
- */
-
-/**
- * @typedef {Object} SourceCitation
- * @property {string} item_id - Zotero item ID
- * @property {string} library_id - Zotero library ID
- * @property {string} title - Document title
- * @property {number|null} page_number - Page number (if available)
- * @property {string|null} text_anchor - Text anchor (first 5 words)
- * @property {number} relevance_score - Relevance score
- */
-
-/**
- * @typedef {Object} QueryOptions
- * @property {number} [topK] - Number of chunks to retrieve
- * @property {number} [minScore] - Minimum similarity score
- */
-
-/**
- * @typedef {Object} ZoteroRAGPlugin
- * @property {string} backendURL - Backend server URL
- * @property {string} apiKey - API key for remote backend (empty string if not set)
- * @property {function(Record<string,string>=): Record<string,string>} getAuthHeaders - Build auth headers
- * @property {function(string): string} addApiKeyParam - Append api_key query param for SSE URLs
- * @property {function(): Array<Library>} getLibraries - Get available libraries
- * @property {function(): string} getCurrentLibrary - Get current library ID
- * @property {function(string, Array<string>, QueryOptions=): Promise<QueryResult>} submitQuery - Submit RAG query
- * @property {function(string, QueryResult, Array<string>): Promise<void>} createResultNote - Create note with results
- * @property {function(string): void} log - Log message
- */
-
-/**
- * @typedef {Object} SSEData
- * @property {string} event - Event type (started, progress, completed, error)
- * @property {string} [message] - Optional message
- * @property {number} [progress] - Progress percentage
- * @property {number} [current_item] - Current item number
- * @property {number} [total_items] - Total items
- */
+/// Import global types from scripts 
+/// <reference path='./zotero-rag.js' />
+/// <reference path='./remote_indexer.js' />
 
 /**
  * @typedef {Object} LibraryIndexMetadata
@@ -749,7 +701,25 @@ var ZoteroRAGDialog = {
 
 		try {
 			const libraryIds = Array.from(this.selectedLibraries);
-			await this.checkAndMonitorIndexing(libraryIds, indexingMode);
+
+			// Skip attachment scan when all selected libraries are already fully indexed
+			// and the user hasn't forced a full re-index. The cached metadata (loaded at
+			// dialog-open time) already reflects any new items, so a mismatch between
+			// total_items_indexed and effectiveTotal means something is new/changed.
+			const allFullyIndexed = indexingMode !== 'full' && libraryIds.every(id => {
+				if (!this.libraryMetadata.has(id)) return false;
+				const metadata = this.libraryMetadata.get(id);
+				if (metadata == null) return false;
+				const totalIndexable = this.libraryIndexableCount.get(id);
+				const unavailable = this.libraryUnavailableCount.get(id) || 0;
+				const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+				if (effectiveTotal !== undefined) return metadata.total_items_indexed >= effectiveTotal;
+				return metadata.total_items_indexed > 0;
+			});
+
+			if (!allFullyIndexed) {
+				await this.checkAndMonitorIndexing(libraryIds, indexingMode);
+			}
 
 			// If cancelled mid-indexing, bail — abortOperation() already cleaned up.
 			if (!this.isOperationInProgress) return;
@@ -946,6 +916,7 @@ var ZoteroRAGDialog = {
 			if (item.isAttachment()) {
 				attachments.push(item);
 			} else if (item.isRegularItem()) {
+				// @ts-ignore - loadDataType exists on Zotero items at runtime
 				await item.loadDataType('childItems');
 				attachments = Zotero.Items.get(item.getAttachments());
 			} else {

@@ -1,6 +1,39 @@
+// Main plugin code
+
+// todo: can https://windingwind.github.io/zotero-plugin-toolkit/ be used?
+
 // @ts-check
 /// <reference path="./zotero-types.d.ts" />
 /// <reference path="./toolkit.d.ts" />
+
+// Wire console methods so messages appear in the Browser Console.
+// log/info → logStringMessage (neutral); warn/error → nsIScriptError with severity flag.
+// zotero-rag.js is loaded via loadSubScript where console may not exist — create it if needed.
+;(function() {
+	/** @type {Record<string, number>} */
+	const nsFlags = { warn: 0x1, error: 0x0 };
+	const makeLogger = (/** @type {string} */ level) => (/** @type {any[]} */ ...args) => {
+		const msg = "[Zotero RAG] " + args.join(" ");
+		if (level === "log" || level === "info") {
+			// @ts-ignore
+			Services.console.logStringMessage(msg);
+		} else {
+			// @ts-ignore
+			const e = Cc["@mozilla.org/scripterror;1"].createInstance(Ci.nsIScriptError);
+			// @ts-ignore
+			e.init(msg, "", null, 0, 0, nsFlags[level], "chrome javascript");
+			// @ts-ignore
+			Services.console.logMessage(e);
+		}
+	};
+	// @ts-ignore
+	if (typeof console === "undefined") {
+		// @ts-ignore - globalThis is available in Gecko
+		globalThis.console = { log: makeLogger("log"), info: makeLogger("info"), warn: makeLogger("warn"), error: makeLogger("error") };
+	} else {
+		["log", "info", "warn", "error"].forEach(level => { /** @type {any} */ (console)[level] = makeLogger(level); });
+	}
+})();
 
 
 /**
@@ -168,7 +201,7 @@ class ZoteroRAGPlugin {
 	 * @returns {void}
 	 */
 	log(msg) {
-		Zotero.debug("Zotero RAG: " + msg);
+		console.log(msg);
 	}
 
 	/**
@@ -260,6 +293,14 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			this.log(`Backend not available: ${errorMessage}`);
+			return;
+		}
+
+		// Log backend service configuration and DB statistics
+		try {
+			await this.logServerInfo();
+		} catch (e) {
+			this.log(`Could not fetch server info: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
 
@@ -292,6 +333,23 @@ class ZoteroRAGPlugin {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to check backend version: ${errorMessage}`);
 		}
+	}
+
+	/**
+	 * Fetch root endpoint and log service configuration and vector DB statistics.
+	 * @returns {Promise<void>}
+	 */
+	async logServerInfo() {
+		const response = await fetch(`${this.backendURL}/`, { headers: this.getAuthHeaders() });
+		if (!response.ok) return;
+		/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, embedding:{model_type:string,model_name:string,base_url:string|null,embedding_dim:number,distance:string}, llm:{model_type:string,model_name:string,base_url:string|null,max_context_length:number,temperature:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string,chunks:number,indexed_documents:number,libraries:number}}} */
+		const info = await response.json();
+		const { preset, embedding, llm, rag, vector_db } = info;
+		this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
+		this.log(`Embedding: [${embedding.model_type}] ${embedding.model_name}${embedding.base_url ? ` @ ${embedding.base_url}` : ''} (${embedding.embedding_dim}-dim, ${embedding.distance})`);
+		this.log(`LLM: [${llm.model_type}] ${llm.model_name}${llm.base_url ? ` @ ${llm.base_url}` : ''} (ctx ${llm.max_context_length}, temp ${llm.temperature})`);
+		this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
+		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries} libraries (${vector_db.path})`);
 	}
 
 	/**

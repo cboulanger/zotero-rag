@@ -53,17 +53,16 @@ class HardwarePreset(BaseModel):
 PRESETS = {
     "apple-silicon-32gb": HardwarePreset(
         name="apple-silicon-32gb",
-        description="Optimized for Apple Silicon Macs with 32GB RAM",
+        description="Optimized for Apple Silicon Macs with 32GB RAM — local multilingual embeddings via MPS",
         embedding=EmbeddingConfig(
             model_type="local",
-            model_name="nomic-ai/nomic-embed-text-v1.5",
-            model_kwargs={"trust_remote_code": True},
-            batch_size=64,  # Higher batch size for more memory
+            model_name="intfloat/multilingual-e5-large-instruct",  # 1024-dim, same model as KISSKI remote; MPS-accelerated on Apple Silicon
+            batch_size=64,
         ),
         llm=LLMConfig(
             model_type="local",
             model_name="mistralai/Mistral-7B-Instruct-v0.3",
-            quantization="4bit",  # 4bit quantization for Apple Silicon efficiency
+            quantization="4bit",
             max_context_length=8192,
             max_answer_tokens=2048,
             temperature=0.7,
@@ -71,10 +70,10 @@ PRESETS = {
         ),
         rag=RAGConfig(
             top_k=10,
-            score_threshold=0.35,  # nomic-embed-text-v1.5 with quality retrieval
-            max_chunk_size=768,
+            score_threshold=0.35,
+            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
-        memory_budget_gb=10.0,  # Can use more memory with 32GB available
+        memory_budget_gb=10.0,
     ),
 
     "high-memory": HardwarePreset(
@@ -210,6 +209,33 @@ PRESETS = {
             max_chunk_size=800,    # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
         memory_budget_gb=0.5,  # Fully remote — no local model weights
+    ),
+
+    "cloud-server-kisski": HardwarePreset(
+        name="cloud-server-kisski",
+        description="Cloud server (16GB RAM, 4 vCPU, no GPU): local multilingual embeddings + KISSKI LLM",
+        embedding=EmbeddingConfig(
+            model_type="local",
+            model_name="intfloat/multilingual-e5-small",  # ~470MB, CPU-friendly, multilingual
+            batch_size=16,  # Conservative batch size for CPU-only inference
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
+            max_context_length=128000,
+            max_answer_tokens=4096,
+            temperature=0.7,
+            model_kwargs={
+                "base_url": "https://chat-ai.academiccloud.de/v1",
+                "api_key_env": "KISSKI_API_KEY",
+            },
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.3,  # e5-small tends toward lower absolute scores
+            max_chunk_size=768,
+        ),
+        memory_budget_gb=2.0,  # ~470MB model + overhead
     ),
 
     "windows-test": HardwarePreset(

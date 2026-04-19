@@ -93,31 +93,17 @@ class VectorStore:
         )
 
     def _ensure_collections(self):
-        """Create collections if they don't exist, raising an error if the embedding model changed."""
+        """Create collections if they don't exist."""
         collections = self.client.get_collections().collections
         collection_names = [c.name for c in collections]
         has_chunks = self.CHUNKS_COLLECTION in collection_names
 
-        # Check persisted embedding config against current settings
-        saved = self._load_embedding_config()
-        if saved is not None:
-            saved_model = saved.get("model_name")
-            saved_dim = saved.get("embedding_dim")
-            model_changed = saved_model != self.embedding_model_name
-            dim_changed = saved_dim != self.embedding_dim
-            if model_changed or dim_changed:
-                raise ValueError(
-                    f"Embedding model mismatch: the vector database was built with "
-                    f"'{saved_model}' ({saved_dim}-dim) but the current configuration uses "
-                    f"'{self.embedding_model_name}' ({self.embedding_dim}-dim). "
-                    f"Re-index all libraries or clear the vector database before continuing."
-                )
-        elif has_chunks:
-            # Legacy database without a config file — assume current model and record it
+        # Write sidecar for human reference; model identity is guaranteed by the directory path
+        if self._load_embedding_config() is None and has_chunks:
             logger.warning(
-                f"No embedding config file found for an existing database. "
-                f"Assuming current model '{self.embedding_model_name}' and recording it. "
-                f"If this is wrong, clear the database and re-index."
+                "No embedding config file found for an existing database. "
+                "Assuming current model '%s' and recording it.",
+                self.embedding_model_name,
             )
 
         if has_chunks:
