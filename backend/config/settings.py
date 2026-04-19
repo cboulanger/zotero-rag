@@ -88,7 +88,11 @@ class Settings(BaseSettings):
 
     vector_db_path: Path = Field(
         default_factory=lambda: Path.home() / ".local" / "share" / "zotero-rag" / "qdrant",
-        description="Path to Qdrant vector database"
+        description="Path to Qdrant vector database (used in local file mode only)"
+    )
+    qdrant_url: Optional[str] = Field(
+        default=None,
+        description="Qdrant server URL (e.g. http://qdrant:6333). If set, uses server mode instead of local file mode."
     )
 
     # Logging Configuration

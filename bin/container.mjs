@@ -60,6 +60,8 @@ const APP_NAME = 'zotero-rag';
 const REGISTRY = 'docker.io/cboulanger/zotero-rag';
 const KREUZBERG_IMAGE = 'ghcr.io/kreuzberg-dev/kreuzberg:latest';
 const KREUZBERG_PORT = 8000;
+const QDRANT_IMAGE = 'qdrant/qdrant:v1.15';
+const QDRANT_PORT = 6333;
 const DEFAULT_PORT = 8119;
 const CONTAINER_PORT = 8119;
 const DEFAULT_ZOTERO_HOST = 'http://host.docker.internal:23119';
@@ -273,6 +275,77 @@ async function startKreuzberg(kreuzbergName, networkName) {
 }
 
 /**
+ * Start the Qdrant vector database sidecar container.
+ * @param {string} qdrantName   Container name for the sidecar
+ * @param {string} networkName  Docker network to attach to
+ * @param {string} [storagePath] Host path to mount at /qdrant/storage for persistence
+ * @returns {Promise<void>}
+ */
+async function startQdrant(qdrantName, networkName, storagePath) {
+  stopExisting(qdrantName);
+
+  console.log(`[INFO] Starting Qdrant sidecar (${qdrantName})...`);
+  if (!storagePath) {
+    console.log('[WARNING] No Qdrant storage path configured — data will not be persisted across restarts.');
+    console.log('[INFO] Use --qdrant-data-dir <path> or --data-dir <path> to enable persistence.');
+  }
+
+  try {
+    execSync(`${containerCmd} pull ${QDRANT_IMAGE}`, { stdio: 'inherit' });
+  } catch (e) {
+    console.log(`[WARNING] Could not pull ${QDRANT_IMAGE}: ${e.message}`);
+    console.log('[INFO] Continuing with existing image if available...');
+  }
+
+  const args = [
+    'run', '-d',
+    '--name', qdrantName,
+    '--network', networkName,
+    '--network-alias', 'qdrant',
+    '--restart', 'unless-stopped',
+  ];
+
+  if (storagePath) {
+    if (!fs.existsSync(storagePath)) fs.mkdirSync(storagePath, { recursive: true });
+    args.push('-v', `${storagePath}:/qdrant/storage`);
+  }
+
+  args.push(QDRANT_IMAGE);
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(containerCmd, args, { stdio: 'pipe' });
+    let out = '';
+    let err = '';
+    if (child.stdout) child.stdout.on('data', d => { out += d.toString(); });
+    if (child.stderr) child.stderr.on('data', d => { err += d.toString(); process.stderr.write(d); });
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error(`Qdrant sidecar start failed (exit ${code}):\n${err}`));
+      console.log(`[SUCCESS] Qdrant sidecar started (${out.trim().slice(0, 12)})`);
+      resolve();
+    });
+    child.on('error', reject);
+  });
+}
+
+/**
+ * Stop + optionally remove the Qdrant sidecar.
+ * @param {string} qdrantName
+ * @param {boolean} [remove]
+ */
+function stopQdrant(qdrantName, remove = true) {
+  try {
+    const id = execSync(
+      `${containerCmd} ps -a --filter "name=^${qdrantName}$" --format "{{.ID}}"`,
+      { encoding: 'utf8', stdio: 'pipe' }
+    ).trim();
+    if (!id) return;
+    execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
+    if (remove) execSync(`${containerCmd} rm ${qdrantName}`, { stdio: 'inherit' });
+    console.log(`[INFO] Stopped Qdrant sidecar (${qdrantName})`);
+  } catch {}
+}
+
+/**
  * Stop + optionally remove the kreuzberg sidecar.
  * @param {string} kreuzbergName
  * @param {boolean} [remove]
@@ -427,6 +500,19 @@ async function handlePush(options) {
 // ============================================================================
 
 /**
+ * Resolve the host path for Qdrant persistent storage.
+ * Explicit --qdrant-data-dir wins; falls back to <dataDir>/qdrant-server; undefined = no persistence.
+ * @param {string|undefined} qdrantDataDir
+ * @param {string|undefined} dataDir
+ * @returns {string|undefined}
+ */
+function resolveQdrantStoragePath(qdrantDataDir, dataDir) {
+  if (qdrantDataDir) return qdrantDataDir;
+  if (dataDir) return `${dataDir}/qdrant-server`;
+  return undefined;
+}
+
+/**
  * Add --env flags to runArgs from an array of "KEY" or "KEY=VAL" specs
  * @param {string[]} runArgs
  * @param {string[]|undefined} envSpecs
@@ -531,8 +617,8 @@ function stopExisting(name) {
 /**
  * @param {{
  *   tag?: string, name?: string, port?: number, detach?: boolean,
- *   dataDir?: string, zoteroHost?: string, env?: string[],
- *   volume?: string[], restart?: string, noKreuzberg?: boolean
+ *   dataDir?: string, qdrantDataDir?: string, zoteroHost?: string, env?: string[],
+ *   volume?: string[], restart?: string, noKreuzberg?: boolean, noQdrant?: boolean
  * }} options
  */
 async function handleStart(options) {
@@ -543,22 +629,24 @@ async function handleStart(options) {
   const port = options.port || DEFAULT_PORT;
   const detach = options.detach !== false;
   const kreuzbergName = `${name}-kreuzberg`;
+  const qdrantName = `${name}-qdrant`;
+  const qdrantStoragePath = resolveQdrantStoragePath(options.qdrantDataDir, options.dataDir);
 
   const imageName = resolveImage(tag);
   stopExisting(name);
 
-  // Set up shared network and kreuzberg sidecar
-  if (!options.noKreuzberg) {
-    ensureNetwork(NETWORK_NAME);
-    await startKreuzberg(kreuzbergName, NETWORK_NAME);
-  }
+  const useNetwork = !options.noKreuzberg || !options.noQdrant;
+
+  // Set up shared network and sidecars
+  if (useNetwork) ensureNetwork(NETWORK_NAME);
+  if (!options.noKreuzberg) await startKreuzberg(kreuzbergName, NETWORK_NAME);
+  if (!options.noQdrant) await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
 
   const volumes = [];
   const extraEnv = [];
 
   if (options.dataDir) {
     volumes.push({ host: options.dataDir, container: '/data' });
-    extraEnv.push({ key: 'VECTOR_DB_PATH', value: '/data/qdrant' });
     extraEnv.push({ key: 'MODEL_WEIGHTS_PATH', value: '/data/models' });
   }
 
@@ -572,6 +660,7 @@ async function handleStart(options) {
 
   const zoteroHost = options.zoteroHost || DEFAULT_ZOTERO_HOST;
   extraEnv.push({ key: 'KREUZBERG_URL', value: `http://kreuzberg:${KREUZBERG_PORT}` });
+  extraEnv.push({ key: 'QDRANT_URL', value: `http://qdrant:${QDRANT_PORT}` });
 
   const addHost = process.platform === 'linux';
 
@@ -583,7 +672,7 @@ async function handleStart(options) {
       restart: options.restart,
       env: options.env,
       volumes, extraEnv, addHost,
-      network: options.noKreuzberg ? undefined : NETWORK_NAME,
+      network: useNetwork ? NETWORK_NAME : undefined,
     });
     if (detach) {
       console.log(`\n[INFO] Logs:  ${containerCmd} logs -f ${name}`);
@@ -627,8 +716,9 @@ async function handleStop(options) {
   execSync(`${containerCmd} stop ${name}`, { stdio: 'inherit' });
   if (options.remove) execSync(`${containerCmd} rm ${name}`, { stdio: 'inherit' });
 
-  // Stop the associated kreuzberg sidecar
+  // Stop the associated sidecars
   stopKreuzberg(`${name}-kreuzberg`, options.remove !== false);
+  stopQdrant(`${name}-qdrant`, options.remove !== false);
   if (options.remove) removeNetwork(NETWORK_NAME);
 
   console.log('[SUCCESS] Done');
@@ -650,17 +740,24 @@ async function handleRestart(options) {
     const id = execSync(`${containerCmd} ps -a --filter "name=^${name}$" --format "{{.ID}}"`, { encoding: 'utf8', stdio: 'pipe' }).trim();
     if (id) {
       execSync(`${containerCmd} stop ${name}`, { stdio: 'inherit' });
-      // Restart kreuzberg sidecar too
+      // Restart sidecars too
       const kreuzbergName = `${name}-kreuzberg`;
+      const qdrantName = `${name}-qdrant`;
       const kreuzbergId = execSync(
         `${containerCmd} ps -a --filter "name=^${kreuzbergName}$" --format "{{.ID}}"`,
         { encoding: 'utf8', stdio: 'pipe' }
       ).trim();
+      const qdrantId = execSync(
+        `${containerCmd} ps -a --filter "name=^${qdrantName}$" --format "{{.ID}}"`,
+        { encoding: 'utf8', stdio: 'pipe' }
+      ).trim();
       if (kreuzbergId) execSync(`${containerCmd} stop ${kreuzbergName}`, { stdio: 'inherit' });
+      if (qdrantId) execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
 
       execSync(`${containerCmd} start ${name}`, { stdio: 'inherit' });
       if (kreuzbergId) execSync(`${containerCmd} start ${kreuzbergName}`, { stdio: 'inherit' });
-      console.log(`[SUCCESS] Restarted ${name} + ${kreuzbergName}`);
+      if (qdrantId) execSync(`${containerCmd} start ${qdrantName}`, { stdio: 'inherit' });
+      console.log(`[SUCCESS] Restarted ${name} + ${kreuzbergName} + ${qdrantName}`);
       console.log(`[INFO] Logs: ${containerCmd} logs -f ${name}`);
     } else {
       console.log(`[INFO] Container '${name}' not found, creating new container...`);
@@ -677,12 +774,15 @@ async function handleRestart(options) {
 // ============================================================================
 
 /**
- * @param {{name?: string, follow?: boolean, tail?: number, kreuzberg?: boolean}} options
+ * @param {{name?: string, follow?: boolean, tail?: number, kreuzberg?: boolean, qdrant?: boolean}} options
  */
 async function handleLogs(options) {
+  const baseName = options.name || `${APP_NAME}-latest`;
   const name = options.kreuzberg
-    ? `${options.name || `${APP_NAME}-latest`}-kreuzberg`
-    : (options.name || `${APP_NAME}-latest`);
+    ? `${baseName}-kreuzberg`
+    : options.qdrant
+      ? `${baseName}-qdrant`
+      : baseName;
   const args = ['logs'];
   if (options.follow) args.push('-f');
   if (options.tail !== undefined) args.push('--tail', String(options.tail));
@@ -789,6 +889,60 @@ async function setupSSL(fqdn, email) {
 }
 
 /**
+ * Build the content of a Podman Quadlet .container file for the Qdrant sidecar.
+ * @param {string} containerName
+ * @param {string} networkName
+ * @param {string} [volumePath] - host path for Qdrant storage (mounted at /qdrant/storage)
+ * @returns {string}
+ */
+function buildQdrantQuadletContent(containerName, networkName, volumePath) {
+  const lines = [
+    '# Generated by container.mjs — do not edit by hand',
+    '[Unit]',
+    'Description=Qdrant vector database sidecar',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Container]',
+    `ContainerName=${containerName}`,
+    `Image=${QDRANT_IMAGE}`,
+    `Network=${networkName}`,
+    'NetworkAlias=qdrant',
+  ];
+  if (volumePath) lines.push(`Volume=${volumePath}:/qdrant/storage`);
+  lines.push('', '[Service]', 'Restart=always', 'RestartSec=5', '', '[Install]', 'WantedBy=multi-user.target');
+  return lines.join('\n') + '\n';
+}
+
+/**
+ * Build a traditional systemd [Service] unit for the Qdrant sidecar.
+ * @param {string} containerName
+ * @param {string} networkName
+ * @param {string} [volumePath] - host path for Qdrant storage
+ * @returns {string}
+ */
+function buildQdrantLegacyUnitContent(containerName, networkName, volumePath) {
+  const volumeArg = volumePath ? `--volume ${volumePath}:/qdrant/storage ` : '';
+  return [
+    '# Generated by container.mjs — do not edit by hand',
+    '[Unit]',
+    'Description=Qdrant vector database sidecar',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Restart=always',
+    'RestartSec=5',
+    `ExecStartPre=-/usr/bin/podman rm -f ${containerName}`,
+    `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias qdrant ${volumeArg}${QDRANT_IMAGE}`,
+    `ExecStop=/usr/bin/podman stop ${containerName}`,
+    '',
+    '[Install]',
+    'WantedBy=multi-user.target',
+  ].join('\n') + '\n';
+}
+
+/**
  * Build the content of a Podman Quadlet .container file.
  * Quadlet is the modern replacement for the deprecated `podman generate systemd`.
  * Systemd picks up files from /etc/containers/systemd/ after `daemon-reload`.
@@ -803,12 +957,14 @@ async function setupSSL(fqdn, email) {
  *   network?: string,
  * }} cfg
  * @param {string} [kreuzbergService] - systemd service name of the kreuzberg sidecar to depend on
+ * @param {string} [qdrantService] - systemd service name of the Qdrant sidecar to depend on
  * @returns {string}
  */
-function buildQuadletContent(cfg, kreuzbergService) {
+function buildQuadletContent(cfg, kreuzbergService, qdrantService) {
   const { name, imageName, port, env, volumes = [], extraEnv = [], addHost, network } = cfg;
-  const afterTargets = kreuzbergService
-    ? `network-online.target ${kreuzbergService}.service`
+  const sidecars = [kreuzbergService, qdrantService].filter(Boolean).map(s => `${s}.service`);
+  const afterTargets = sidecars.length
+    ? `network-online.target ${sidecars.join(' ')}`
     : 'network-online.target';
   const lines = [
     '# Generated by container.mjs — do not edit by hand',
@@ -817,7 +973,7 @@ function buildQuadletContent(cfg, kreuzbergService) {
     `After=${afterTargets}`,
     'Wants=network-online.target',
   ];
-  if (kreuzbergService) lines.push(`Requires=${kreuzbergService}.service`);
+  for (const s of sidecars) lines.push(`Requires=${s}`);
   lines.push('', '[Container]', `ContainerName=${name}`, `Image=${imageName}`, `PublishPort=${port}:${CONTAINER_PORT}`);
 
   if (network) lines.push(`Network=${network}`);
@@ -898,9 +1054,10 @@ function isQuadletAvailable() {
  * Used as a fallback when Quadlet is unavailable (Podman < 4.4).
  * @param {Parameters<typeof buildQuadletContent>[0]} cfg
  * @param {string} [kreuzbergService]
+ * @param {string} [qdrantService]
  * @returns {string}
  */
-function buildLegacyUnitContent(cfg, kreuzbergService) {
+function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService) {
   const { name, imageName, port, env, volumes = [], extraEnv = [], addHost, network } = cfg;
 
   let hostIp = 'host-gateway';
@@ -929,8 +1086,9 @@ function buildLegacyUnitContent(cfg, kreuzbergService) {
   }
   runArgs.push(imageName);
 
-  const afterTargets = kreuzbergService
-    ? `network-online.target ${kreuzbergService}.service`
+  const sidecars = [kreuzbergService, qdrantService].filter(Boolean).map(s => `${s}.service`);
+  const afterTargets = sidecars.length
+    ? `network-online.target ${sidecars.join(' ')}`
     : 'network-online.target';
   const lines = [
     '# Generated by container.mjs — do not edit by hand',
@@ -939,7 +1097,7 @@ function buildLegacyUnitContent(cfg, kreuzbergService) {
     `After=${afterTargets}`,
     'Wants=network-online.target',
   ];
-  if (kreuzbergService) lines.push(`Requires=${kreuzbergService}.service`);
+  for (const s of sidecars) lines.push(`Requires=${s}`);
   lines.push(
     '', '[Service]', 'Restart=always', 'RestartSec=5',
     `ExecStartPre=-/usr/bin/podman rm -f ${name}`,
@@ -978,15 +1136,16 @@ function buildKreuzbergLegacyUnitContent(containerName, networkName) {
 }
 
 /**
- * Write systemd unit files for the app and its kreuzberg sidecar, then enable
- * both services. Uses Podman Quadlet when available (Podman 4.4+), otherwise
+ * Write systemd unit files for the app and its sidecars (kreuzberg + qdrant), then enable
+ * all services. Uses Podman Quadlet when available (Podman 4.4+), otherwise
  * falls back to traditional [Service] units compatible with Podman 4.3 and earlier.
  * @param {string} serviceName - main app service name
  * @param {Parameters<typeof buildQuadletContent>[0]} cfg - app container config
  * @param {{serviceName: string, containerName: string, shared: boolean}} kreuzberg
+ * @param {{serviceName: string, containerName: string, shared: boolean, volumePath?: string}} qdrant
  * @returns {boolean}
  */
-function setupSystemdService(serviceName, cfg, kreuzberg) {
+function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
   const quadlet = isQuadletAvailable();
   try {
     let useLegacy = !quadlet;
@@ -1000,7 +1159,16 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
           buildKreuzbergQuadletContent(kreuzberg.containerName, cfg.network || NETWORK_NAME)
         );
       }
-      fs.writeFileSync(`/etc/containers/systemd/${serviceName}.container`, buildQuadletContent(cfg, kreuzberg.serviceName));
+      if (!qdrant.shared) {
+        fs.writeFileSync(
+          `/etc/containers/systemd/${qdrant.serviceName}.container`,
+          buildQdrantQuadletContent(qdrant.containerName, cfg.network || NETWORK_NAME, qdrant.volumePath)
+        );
+      }
+      fs.writeFileSync(
+        `/etc/containers/systemd/${serviceName}.container`,
+        buildQuadletContent(cfg, kreuzberg.serviceName, qdrant.serviceName)
+      );
       console.log('[INFO] Setting up systemd services via Quadlet...');
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
 
@@ -1013,6 +1181,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
         console.log('[WARNING] Quadlet generator did not produce a unit — falling back to legacy service units');
         try { fs.unlinkSync(`/etc/containers/systemd/${serviceName}.container`); } catch {}
         if (!kreuzberg.shared) try { fs.unlinkSync(`/etc/containers/systemd/${kreuzberg.serviceName}.container`); } catch {}
+        if (!qdrant.shared) try { fs.unlinkSync(`/etc/containers/systemd/${qdrant.serviceName}.container`); } catch {}
         useLegacy = true;
       }
     }
@@ -1024,8 +1193,13 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
         fs.writeFileSync(kreuzbergPath, buildKreuzbergLegacyUnitContent(kreuzberg.containerName, cfg.network || NETWORK_NAME));
         console.log(`[INFO] Kreuzberg unit written to ${kreuzbergPath}`);
       }
+      if (!qdrant.shared) {
+        const qdrantPath = `/etc/systemd/system/${qdrant.serviceName}.service`;
+        fs.writeFileSync(qdrantPath, buildQdrantLegacyUnitContent(qdrant.containerName, cfg.network || NETWORK_NAME, qdrant.volumePath));
+        console.log(`[INFO] Qdrant unit written to ${qdrantPath}`);
+      }
       const mainPath = `/etc/systemd/system/${serviceName}.service`;
-      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName));
+      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName, qdrant.serviceName));
       console.log(`[INFO] App unit written to ${mainPath}`);
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
     }
@@ -1037,6 +1211,13 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
       console.log(`[INFO] Using shared kreuzberg service '${kreuzberg.serviceName}'`);
     }
 
+    if (!qdrant.shared) {
+      execSync(`systemctl enable --now ${qdrant.serviceName}`, { stdio: 'inherit' });
+      console.log(`[SUCCESS] Qdrant service '${qdrant.serviceName}' enabled and started`);
+    } else {
+      console.log(`[INFO] Using shared Qdrant service '${qdrant.serviceName}'`);
+    }
+
     execSync(`systemctl enable --now ${serviceName}`, { stdio: 'inherit' });
     console.log(`[SUCCESS] App service '${serviceName}' enabled and started`);
     console.log(`[INFO] App status:       systemctl status ${serviceName}`);
@@ -1044,6 +1225,10 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
     if (!kreuzberg.shared) {
       console.log(`[INFO] Kreuzberg status: systemctl status ${kreuzberg.serviceName}`);
       console.log(`[INFO] Kreuzberg logs:   journalctl -u ${kreuzberg.serviceName} -f`);
+    }
+    if (!qdrant.shared) {
+      console.log(`[INFO] Qdrant status:    systemctl status ${qdrant.serviceName}`);
+      console.log(`[INFO] Qdrant logs:      journalctl -u ${qdrant.serviceName} -f`);
     }
     return true;
   } catch (e) {
@@ -1055,10 +1240,10 @@ function setupSystemdService(serviceName, cfg, kreuzberg) {
 /**
  * @param {{
  *   fqdn: string, tag?: string, port?: number, name?: string,
- *   dataDir?: string, env?: string[],
+ *   dataDir?: string, qdrantDataDir?: string, env?: string[],
  *   pull?: boolean, rebuild?: boolean, cache?: boolean, localModels?: boolean, platform?: string,
  *   nginx?: boolean, ssl?: boolean, email?: string,
- *   systemdService?: string, sharedKreuzberg?: string, yes?: boolean
+ *   systemdService?: string, sharedKreuzberg?: string, sharedQdrant?: string, yes?: boolean
  * }} options
  */
 async function handleDeploy(options) {
@@ -1085,6 +1270,7 @@ async function handleDeploy(options) {
   const containerName = options.name || `${APP_NAME}-${options.fqdn.replace(/\./g, '-')}`;
   const kreuzbergName = `${containerName}-kreuzberg`;
   const email = options.email || `admin@${options.fqdn}`;
+  const qdrantStoragePath = resolveQdrantStoragePath(options.qdrantDataDir, options.dataDir);
 
   console.log(`[INFO] FQDN: ${options.fqdn}  Container: ${containerName}  Tag: ${tag}  Port: ${port}`);
   console.log(`[INFO] nginx: ${useNginx}  ssl: ${useSSL}`);
@@ -1115,12 +1301,15 @@ async function handleDeploy(options) {
     process.exit(1);
   }
 
-  // Set up network; kreuzberg is started by systemd when using --systemd-service
+  // Set up network; sidecars are started by systemd when using --systemd-service
+  const qdrantName = `${containerName}-qdrant`;
   ensureNetwork(NETWORK_NAME);
   if (!options.systemdService) {
     await startKreuzberg(kreuzbergName, NETWORK_NAME);
+    await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
   } else {
     stopExisting(kreuzbergName);
+    stopExisting(qdrantName);
   }
 
   stopExisting(containerName);
@@ -1128,10 +1317,10 @@ async function handleDeploy(options) {
   const volumes = options.dataDir ? [{ host: options.dataDir, container: '/data' }] : [];
   const extraEnv = [];
   if (options.dataDir) {
-    extraEnv.push({ key: 'VECTOR_DB_PATH', value: '/data/qdrant' });
     extraEnv.push({ key: 'MODEL_WEIGHTS_PATH', value: '/data/models' });
   }
   extraEnv.push({ key: 'KREUZBERG_URL', value: `http://kreuzberg:${KREUZBERG_PORT}` });
+  extraEnv.push({ key: 'QDRANT_URL', value: `http://qdrant:${QDRANT_PORT}` });
 
   const containerCfg = {
     name: containerName,
@@ -1146,12 +1335,19 @@ async function handleDeploy(options) {
 
   if (options.systemdService) {
     const kreuzbergServiceName = options.sharedKreuzberg || `${options.systemdService}-kreuzberg`;
+    const qdrantServiceName = options.sharedQdrant || `${options.systemdService}-qdrant`;
     const kreuzberg = {
       serviceName: kreuzbergServiceName,
       containerName: kreuzbergName,
       shared: !!options.sharedKreuzberg,
     };
-    if (!setupSystemdService(options.systemdService, containerCfg, kreuzberg)) process.exit(1);
+    const qdrant = {
+      serviceName: qdrantServiceName,
+      containerName: qdrantName,
+      shared: !!options.sharedQdrant,
+      volumePath: qdrantStoragePath,
+    };
+    if (!setupSystemdService(options.systemdService, containerCfg, kreuzberg, qdrant)) process.exit(1);
   } else {
     try {
       await startContainer({ ...containerCfg, detach: true, restart: 'unless-stopped' });
@@ -1178,7 +1374,8 @@ async function handleDeploy(options) {
   console.log(`[INFO] URL: ${scheme}://${options.fqdn}`);
   if (!options.systemdService) {
     console.log(`[INFO] App logs:       ${containerCmd} logs -f ${containerName}`);
-    console.log(`[INFO] Sidecar logs:   ${containerCmd} logs -f ${kreuzbergName}`);
+    console.log(`[INFO] Kreuzberg logs: ${containerCmd} logs -f ${kreuzbergName}`);
+    console.log(`[INFO] Qdrant logs:    ${containerCmd} logs -f ${qdrantName}`);
   }
 }
 
@@ -1217,7 +1414,7 @@ program
 
 program
   .command('start')
-  .description('Start the app container and kreuzberg sidecar')
+  .description('Start the app container and sidecars (kreuzberg + qdrant)')
   .option('--tag <tag>', 'Image tag (default: latest)')
   .option('--name <name>', `Container name (default: ${APP_NAME}-<tag>)`)
   .option('--port <port>', `Host port (default: ${DEFAULT_PORT})`, parseInt)
@@ -1227,12 +1424,14 @@ program
   .option('--volume <mapping>', 'Volume HOST:CONTAINER (repeatable)', collect, [])
   .option('--restart <policy>', 'Restart policy (no|on-failure|always|unless-stopped)')
   .option('--no-detach', 'Run in foreground')
+  .option('--qdrant-data-dir <dir>', 'Host path for Qdrant persistent storage (default: <data-dir>/qdrant-server)')
   .option('--no-kreuzberg', 'Skip kreuzberg sidecar (use if running kreuzberg separately)')
+  .option('--no-qdrant', 'Skip Qdrant sidecar (use if running Qdrant separately)')
   .action(handleStart);
 
 program
   .command('stop')
-  .description('Stop the app container and its kreuzberg sidecar')
+  .description('Stop the app container and its sidecars (kreuzberg + qdrant)')
   .option('--name <name>', `Container name (default: ${APP_NAME}-latest)`)
   .option('--all', `Stop all ${APP_NAME} containers`)
   .option('--remove', 'Remove containers and network after stopping')
@@ -1258,6 +1457,7 @@ program
   .option('-f, --follow', 'Follow log output')
   .option('--tail <lines>', 'Number of lines from end', parseInt)
   .option('--kreuzberg', 'Show kreuzberg sidecar logs instead of app logs')
+  .option('--qdrant', 'Show Qdrant sidecar logs instead of app logs')
   .action(handleLogs);
 
 program
@@ -1268,6 +1468,7 @@ program
   .option('--port <port>', `Host port (default: ${DEFAULT_PORT})`, parseInt)
   .option('--name <name>', 'Container name')
   .option('--data-dir <dir>', 'Persistent data directory (mounted at /data)')
+  .option('--qdrant-data-dir <dir>', 'Host path for Qdrant persistent storage (default: <data-dir>/qdrant-server)')
   .option('--env <var>', 'Env var KEY or KEY=VAL (repeatable)', collect, [])
   .option('--pull', 'Pull image from registry before deploying')
   .option('--rebuild', 'Rebuild image locally before deploying')
@@ -1279,6 +1480,7 @@ program
   .option('--email <email>', 'Email for certbot (default: admin@<fqdn>)')
   .option('--systemd-service <name>', 'Create/replace a Quadlet systemd service with this name (requires sudo; env: DEPLOY_SYSTEMD_SERVICE)')
   .option('--shared-kreuzberg <name>', 'Use an existing kreuzberg systemd service instead of creating one (env: DEPLOY_SHARED_KREUZBERG)')
+  .option('--shared-qdrant <name>', 'Use an existing Qdrant systemd service instead of creating one')
   .option('--yes', 'Skip confirmation')
   .addHelpText('after', `
 Examples:
@@ -1294,10 +1496,11 @@ Examples:
     --fqdn rag.example.com --data-dir /srv/zotero-rag/data --pull \\
     --systemd-service zotero-rag
 
-  # Deploy a second instance sharing an existing kreuzberg service
+  # Deploy a second instance sharing existing sidecar services
   sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy \\
     --fqdn rag2.example.com --data-dir /srv/zotero-rag2/data --pull \\
-    --systemd-service zotero-rag2 --shared-kreuzberg zotero-rag-kreuzberg
+    --systemd-service zotero-rag2 --shared-kreuzberg zotero-rag-kreuzberg \\
+    --shared-qdrant zotero-rag-qdrant
 
   # Deploy with extra env vars
   sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy \\

@@ -95,12 +95,15 @@ def make_vector_store() -> VectorStore:
     settings = get_settings()
     embedding_service = make_embedding_service()
     model_name = embedding_service.get_model_name()
-    _migrate_legacy_db(settings.vector_db_path)
     storage_path = settings.vector_db_path / _model_slug(model_name)
+    qdrant_url = settings.qdrant_url or None
+    if not qdrant_url:
+        _migrate_legacy_db(settings.vector_db_path)
     return VectorStore(
         storage_path=storage_path,
         embedding_dim=embedding_service.get_embedding_dim(),
         embedding_model_name=model_name,
+        url=qdrant_url,
     )
 
 

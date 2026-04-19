@@ -3,9 +3,10 @@
 # Services:
 #   zotero-rag  — FastAPI backend (port 8119)
 #   kreuzberg   — Document extraction sidecar (port 8100, internal only)
+#   qdrant      — Vector database server (port 6333, internal only)
 #
 # Usage:
-#   docker compose up          # start both containers
+#   docker compose up          # start all containers
 #   docker compose up -d       # start in background
 #   docker compose down        # stop and remove containers
 #   docker compose logs -f     # stream logs from all services
@@ -23,6 +24,15 @@ services:
     networks:
       - internal
 
+  qdrant:
+    image: qdrant/qdrant:v1.15
+    restart: unless-stopped
+    volumes:
+      - "${DATA_DIR:-./data}/qdrant-server:/qdrant/storage"
+    # No ports exposed to host — only the app service needs to reach it
+    networks:
+      - internal
+
   zotero-rag:
     image: ${ZOTERO_RAG_IMAGE:-cboulanger/zotero-rag:latest}
     restart: unless-stopped
@@ -32,6 +42,7 @@ services:
       - "${DATA_DIR:-./data}:/data"
     environment:
       KREUZBERG_URL: http://kreuzberg:8000
+      QDRANT_URL: http://qdrant:6333
       MODEL_PRESET: ${MODEL_PRESET:-remote-openai}
       # API keys — set whichever your MODEL_PRESET requires
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -43,6 +54,7 @@ services:
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
     depends_on:
       - kreuzberg
+      - qdrant
     networks:
       - internal
 

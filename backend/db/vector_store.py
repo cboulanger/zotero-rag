@@ -49,28 +49,32 @@ class VectorStore:
         embedding_dim: int,
         embedding_model_name: str,
         distance: Distance = Distance.COSINE,
+        url: Optional[str] = None,
     ):
         """
         Initialize vector store.
 
         Args:
-            storage_path: Path to Qdrant storage directory
+            storage_path: Path to Qdrant storage directory (local file mode)
             embedding_dim: Dimensionality of embeddings
             embedding_model_name: Identifier of the embedding model (e.g. model name/path)
             distance: Distance metric (COSINE, EUCLID, DOT)
+            url: Qdrant server URL. When set, connects to a running Qdrant server
+                 instead of using local file storage.
         """
         self.storage_path = storage_path
         self.embedding_dim = embedding_dim
         self.embedding_model_name = embedding_model_name
         self.distance = distance
 
-        # Ensure storage directory exists
-        storage_path.mkdir(parents=True, exist_ok=True)
-
-        # Initialize Qdrant client with persistent storage
-        self.client = QdrantClient(path=str(storage_path))
-
-        logger.info(f"Initialized VectorStore at {storage_path}")
+        if url:
+            self.client = QdrantClient(url=url)
+            logger.info(f"Initialized VectorStore connected to Qdrant server at {url}")
+        else:
+            # Ensure storage directory exists
+            storage_path.mkdir(parents=True, exist_ok=True)
+            self.client = QdrantClient(path=str(storage_path))
+            logger.info(f"Initialized VectorStore at {storage_path}")
 
         # Create collections if they don't exist
         self._ensure_collections()
