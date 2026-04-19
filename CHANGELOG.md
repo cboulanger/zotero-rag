@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/cboulanger/zotero-rag/compare/v1.8.0...v1.8.1) (2026-04-19)
+
+
+### Bug Fixes
+
+* Increase workers ([ad80cc3](https://github.com/cboulanger/zotero-rag/commit/ad80cc33c62512be146b382325ec506983e41d94))
+
 # [1.8.0](https://github.com/cboulanger/zotero-rag/compare/v1.7.1...v1.8.0) (2026-04-19)
 
 
