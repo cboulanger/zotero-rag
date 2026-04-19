@@ -1,3 +1,10 @@
+# [1.9.0](https://github.com/cboulanger/zotero-rag/compare/v1.8.2...v1.9.0) (2026-04-19)
+
+
+### Features
+
+* Use separate qdrant container ([2ae4281](https://github.com/cboulanger/zotero-rag/commit/2ae4281707791bcd4d149d360e8eb006cf5d0553))
+
 ## [1.8.2](https://github.com/cboulanger/zotero-rag/compare/v1.8.1...v1.8.2) (2026-04-19)
 
 
