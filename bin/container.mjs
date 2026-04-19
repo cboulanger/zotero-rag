@@ -1164,9 +1164,9 @@ async function handleDeploy(options) {
   // Wait for container readiness
   console.log('[INFO] Waiting for container to be ready...');
   let ready = false;
-  for (let i = 1; i <= 30; i++) {
+  for (let i = 1; i <= 60; i++) {
     try { execSync(`curl -sf http://localhost:${port}/health`, { stdio: 'ignore' }); ready = true; break; }
-    catch { if (i % 5 === 0) console.log(`[INFO] Attempt ${i}/30...`); await new Promise(r => setTimeout(r, 2000)); }
+    catch { if (i % 5 === 0) console.log(`[INFO] Attempt ${i}/60...`); await new Promise(r => setTimeout(r, 2000)); }
   }
   if (!ready) console.log('[WARNING] Container may not be fully ready, continuing anyway...');
 
