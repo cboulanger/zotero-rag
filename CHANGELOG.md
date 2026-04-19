@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/cboulanger/zotero-rag/compare/v1.6.0...v1.7.0) (2026-04-19)
+
+
+### Features
+
+* Allow to switch presets gracefully ([063b943](https://github.com/cboulanger/zotero-rag/commit/063b9435c26220854c94ae108c56c1c9031df5de))
+
 # [1.6.0](https://github.com/cboulanger/zotero-rag/compare/v1.5.2...v1.6.0) (2026-04-18)
 
 
