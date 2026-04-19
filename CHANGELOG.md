@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/cboulanger/zotero-rag/compare/v1.7.1...v1.8.0) (2026-04-19)
+
+
+### Features
+
+* Indexing speedup, bug fixes ([f48022c](https://github.com/cboulanger/zotero-rag/commit/f48022c4f522541bb4ccd5572f1ef1fa58c9d29d))
+
 ## [1.7.1](https://github.com/cboulanger/zotero-rag/compare/v1.7.0...v1.7.1) (2026-04-19)
 
 
