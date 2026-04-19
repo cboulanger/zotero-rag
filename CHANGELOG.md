@@ -1,3 +1,10 @@
+## [1.7.1](https://github.com/cboulanger/zotero-rag/compare/v1.7.0...v1.7.1) (2026-04-19)
+
+
+### Bug Fixes
+
+* Fix CI workflow order ([d2ce6dd](https://github.com/cboulanger/zotero-rag/commit/d2ce6ddbcd39cde069169c11029a2cc9ace9f2b7))
+
 # [1.7.0](https://github.com/cboulanger/zotero-rag/compare/v1.6.0...v1.7.0) (2026-04-19)
 
 
