@@ -21,6 +21,8 @@ services:
     image: ${ZOTERO_RAG_IMAGE:-zotero-rag:smoke-test}
     ports:
       - "${BACKEND_PORT:-18119}:8119"
+    volumes:
+      - smoke_data:/data
     environment:
       KREUZBERG_URL: http://kreuzberg:8100
       QDRANT_URL: http://qdrant:6333
@@ -39,3 +41,6 @@ services:
 networks:
   internal:
     driver: bridge
+
+volumes:
+  smoke_data:

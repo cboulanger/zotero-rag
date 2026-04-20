@@ -92,6 +92,7 @@ class VectorStore:
     def _save_embedding_config(self):
         """Persist the current embedding model name and dim to the sidecar file."""
         config_file = self.storage_path / self._CONFIG_FILE
+        config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(
             json.dumps({"model_name": self.embedding_model_name, "embedding_dim": self.embedding_dim}),
             encoding="utf-8",

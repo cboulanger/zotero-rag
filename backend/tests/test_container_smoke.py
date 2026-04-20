@@ -81,7 +81,7 @@ def stack(runtime: str, built_image: str) -> Generator[str, None, None]:
 
     # Ensure a clean slate before starting
     subprocess.run(
-        [*compose, "down", "--remove-orphans"],
+        [*compose, "down", "--remove-orphans", "-v"],
         cwd=PROJECT_ROOT, env=env, check=False, capture_output=True,
     )
 
@@ -122,7 +122,7 @@ def stack(runtime: str, built_image: str) -> Generator[str, None, None]:
     yield BASE_URL
 
     subprocess.run(
-        [*compose, "down", "--remove-orphans"],
+        [*compose, "down", "--remove-orphans", "-v"],
         cwd=PROJECT_ROOT, env=env, check=False, capture_output=True,
     )
 
