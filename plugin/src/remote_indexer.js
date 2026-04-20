@@ -154,12 +154,6 @@ var RemoteIndexer = {
 		// Attachments with no local file are reported separately — not counted as errors
 		const noFile = toUpload.length - uploadable.length;
 		if (noFile > 0) {
-			// BEGIN DEBUG
-			for (const s of toUpload) {
-				const att = attachments.find(a => a.attachment_key === s.attachment_key);
-				log(`[RemoteIndexer] DEBUG filePath for ${s.attachment_key}: ${att ? att.filePath : '(att not found)'}`);
-			}
-			// END DEBUG
 			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
 		}
 		const total = uploadable.length;
@@ -307,7 +301,6 @@ var RemoteIndexer = {
 				? await Zotero.Items.getAsync(item.parentItemID)
 				: null;
 
-			log(`[RemoteIndexer] DEBUG collect: ${item.key} mime=${mimeType} filePath=${filePath}`); // DEBUG
 			result.push({
 				item_key: parentItem ? parentItem.key : item.key,
 				attachment_key: item.key,

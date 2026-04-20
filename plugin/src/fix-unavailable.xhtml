@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+
+<head>
+  <title>Fix Unavailable Attachments - Zotero RAG</title>
+  <meta charset="utf-8"/>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero/content/include.js",
+          this
+        );
+      } catch (e) {
+        console.error("Failed to load include.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/fix-unavailable.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load fix-unavailable.js:", e);
+      }
+    });
+  </script>
+  <style>
+    body { margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; height: 100vh; overflow: hidden; box-sizing: border-box; }
+    .dialog-container { display: flex; flex-direction: column; height: 100%; }
+    .dialog-header { margin-bottom: 12px; flex-shrink: 0; }
+    .dialog-header p { margin: 0; color: #555; font-size: 12px; line-height: 1.5; }
+    .table-wrapper { flex: 1; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px; min-height: 0; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead th { position: sticky; top: 0; background: #f0f0f0; padding: 6px 8px; text-align: left; font-weight: 600; border-bottom: 1px solid #ccc; overflow: hidden; white-space: nowrap; }
+    thead th.col-check    { width: 28px;  text-align: center; }
+    thead th.col-author   { width: 110px; }
+    thead th.col-year     { width: 44px; }
+    thead th.col-key      { width: 80px; }
+    thead th.col-filename { width: 90px; }
+    thead th.col-status   { width: 160px; }
+    thead th.col-select   { width: 28px; text-align: center; }
+    /* title column takes remaining space — no explicit width */
+    tbody tr:nth-child(even) { background: #fafafa; }
+    tbody td { padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: middle; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    tbody td.col-check    { text-align: center; overflow: visible; }
+    tbody td.col-select   { text-align: center; overflow: visible; }
+    tbody td.col-filename { font-size: 11px; color: #666; }
+    .select-btn { background: none; border: none; padding: 0 2px; cursor: pointer; font-size: 12px; color: #666; line-height: 1; }
+    .select-btn:hover { color: #0066cc; }
+    .status-cell { font-size: 11px; }
+    .status-cell.found    { color: #008000; }
+    .status-cell.fixed    { color: #006600; font-weight: 600; }
+    .status-cell.not-found { color: #999; }
+    .status-cell.error    { color: #cc0000; }
+    .status-cell.searching { color: #0066cc; }
+    .status-bar { margin-top: 8px; font-size: 11px; color: #666; flex-shrink: 0; min-height: 16px; }
+    .dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; padding-top: 12px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    .dialog-button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; }
+    .dialog-button:hover { background: #e5e5e5; }
+    .dialog-button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .dialog-button.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
+    .dialog-button.primary:hover { background: #0052a3; }
+    .dialog-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background: #0066cc; }
+  </style>
+</head>
+
+<body>
+  <div class="dialog-container">
+
+    <div class="dialog-header">
+      <p>
+        The following items have attachment files that are missing locally, usually due to incomplete
+        synchronisation. This tool searches <strong>all other libraries</strong> for a file with the
+        same filename or MD5 hash and, when found, copies it into the correct Zotero storage location.
+      </p>
+    </div>
+
+    <div class="table-wrapper">
+      <table id="items-table">
+        <thead>
+          <tr>
+            <th class="col-check"><input type="checkbox" id="header-checkbox" title="Toggle all"/></th>
+            <th class="col-author">Author(s)</th>
+            <th class="col-year">Year</th>
+            <th>Title</th>
+            <th class="col-key">Zotero ID</th>
+            <th class="col-filename">Filename</th>
+            <th class="col-status">Status</th>
+            <th class="col-select"></th>
+          </tr>
+        </thead>
+        <tbody id="items-tbody">
+          <!-- Rows populated by fix-unavailable.js -->
+        </tbody>
+      </table>
+    </div>
+
+    <div id="status-bar" class="status-bar"></div>
+
+    <div class="dialog-buttons">
+      <button id="close-btn" type="button" class="dialog-button">Close</button>
+      <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix Selected</button>
+    </div>
+  </div>
+</body>
+</html>

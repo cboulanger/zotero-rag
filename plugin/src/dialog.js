@@ -536,25 +536,42 @@ var ZoteroRAGDialog = {
 
 		if (metaSpan) {
 			metaSpan.style.display = 'inline';
-			const unavailNote = unavailable > 0 ? ` · ${unavailable} unavailable` : '';
+			let mainText = '';
 			if (!metadata) {
-				metaSpan.textContent = 'not indexed';
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#999';
+				mainText = 'not indexed';
 			} else if (isPartial) {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
 				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
-				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items (incomplete)${unavailNote}`;
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#e07800';
+				mainText = `${timeAgo} · ${indexed}${total} items (incomplete)`;
 			} else {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
 				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
-				metaSpan.textContent = `${timeAgo} · ${indexed}${total} items${unavailNote}`;
 				metaSpan.style.fontStyle = 'normal';
 				metaSpan.style.color = '#666';
+				mainText = `${timeAgo} · ${indexed}${total} items`;
+			}
+
+			// Build the span content: plain text + optional clickable unavailable link
+			metaSpan.textContent = mainText;
+			if (unavailable > 0 && this.plugin) {
+				const plugin = this.plugin;
+				const link = document.createElement('a');
+				link.textContent = ` · ${unavailable} unavailable`;
+				link.href = '#';
+				link.style.cssText = 'color:#cc0000;text-decoration:underline;cursor:pointer;';
+				link.title = 'Click to find and fix missing attachment files';
+				link.addEventListener('click', (e) => {
+					e.preventDefault();
+					const mainWin = /** @type {any} */ (window.opener || window);
+					plugin.openFixUnavailableDialog(mainWin, parseInt(libraryId));
+				});
+				metaSpan.appendChild(link);
 			}
 		}
 
@@ -676,7 +693,6 @@ var ZoteroRAGDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async submit() {
-		this.showStatus(`[DEBUG] submit() called, plugin=${!!this.plugin}, libs=${this.selectedLibraries.size}`, 'info'); // DEBUG
 		if (!this.plugin) return;
 
 		if (this.selectedLibraries.size === 0) {
@@ -686,7 +702,6 @@ var ZoteroRAGDialog = {
 
 		// Index-only mode: all selected libraries have never been indexed
 		const indexOnly = this.isIndexOnlyMode();
-		this.showStatus(`[DEBUG] isIndexOnlyMode=${indexOnly}`, 'info'); // DEBUG
 		if (indexOnly) {
 			await this.submitIndexOnly();
 			return;
@@ -781,9 +796,7 @@ var ZoteroRAGDialog = {
 			if (!this.isOperationInProgress) return;
 
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			// DEBUG
-			this.plugin.log(`[DEBUG] submit() caught error: ${errorMessage}`);
-			this.showStatus(`Error: ${errorMessage}`, 'error'); // DEBUG - show all errors directly
+			this.showStatus(`Error: ${errorMessage}`, 'error');
 
 			// If the backend reports that a library has no indexed data, the vector
 			// store is out of sync (e.g. indexing ran but extracted 0 chunks).
@@ -811,20 +824,17 @@ var ZoteroRAGDialog = {
 	async clearLibraryIndexState(libraryIds) {
 		if (!this.plugin) return;
 		const { backendURL } = this.plugin;
-		this.showStatus(`[DEBUG] clearLibraryIndexState: ids=${libraryIds.join(',')} url=${backendURL}`, 'info'); // DEBUG
 
 		for (const id of libraryIds) {
 			try {
 				const url = `${backendURL}/api/libraries/${encodeURIComponent(id)}/index`;
-				this.showStatus(`[DEBUG] DELETE ${url}`, 'info'); // DEBUG
 				const resp = await fetch(url, {
 					method: 'DELETE',
 					headers: this.plugin.getAuthHeaders(),
 				});
-				const body = await resp.text();
-				this.showStatus(`[DEBUG] DELETE → ${resp.status}: ${body}`, 'info'); // DEBUG
+				await resp.text();
 			} catch (e) {
-				this.showStatus(`[DEBUG] DELETE threw: ${e}`, 'error'); // DEBUG
+				this.plugin.log(`clearLibraryIndexState: DELETE threw: ${e}`);
 			}
 			// Remove from local cache so fetchAndUpdateLibraryMetadata re-fetches
 			this.libraryMetadata.delete(id);
@@ -1064,15 +1074,10 @@ var ZoteroRAGDialog = {
 					downloadedFilePaths: this.downloadedAttachmentPaths,
 					downloadAttachment: async (zoteroItem) => {
 						const key = zoteroItem.key;
-						// BEGIN DEBUG
-						plugin.log(`[DEBUG] downloadAttachment called for ${key} (libraryID=${zoteroItem.libraryID})`);
-						// END DEBUG
 						if (this._getFailedDownloadKeys().has(key)) {
-							plugin.log(`[DEBUG] downloadAttachment: ${key} is in failed-download keys, skipping`); // DEBUG
 							return null;
 						}
 						if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroItem.libraryID)) {
-							plugin.log(`[DEBUG] downloadAttachment: sync storage disabled for libraryID=${zoteroItem.libraryID}, skipping`); // DEBUG
 							return null;
 						}
 						try {

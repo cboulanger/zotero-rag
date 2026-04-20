@@ -228,6 +228,63 @@ class ZoteroRAGPlugin {
 			toolsMenu.appendChild(menuitem);
 			this.storeAddedElement(menuitem);
 		}
+
+		// Inject a badge-style toolbar button showing the count of unavailable attachments.
+		const toolbar = doc.getElementById('zotero-items-toolbar');
+		if (toolbar) {
+			// @ts-ignore
+			const btn = /** @type {any} */ (doc.createXULElement('toolbarbutton'));
+			btn.id = 'zotero-rag-unavailable-btn';
+			btn.setAttribute('hidden', 'true');
+			btn.setAttribute('tooltiptext', 'Missing attachment files — click to find and fix');
+			btn.style.cssText = [
+				'position:relative',
+				'margin-left:6px',
+				'padding:2px 4px',
+				'min-width:0',
+				'-moz-appearance:none',
+				'appearance:none',
+				'background:none',
+				'border:none',
+				'cursor:pointer',
+			].join(';');
+
+			// Icon character (paperclip-like warning)
+			// @ts-ignore
+			const icon = /** @type {any} */ (doc.createXULElement('label'));
+			icon.setAttribute('value', '\u26A0');  // ⚠
+			icon.style.cssText = 'font-size:14px; color:#cc6600; pointer-events:none;';
+			btn.appendChild(icon);
+
+			// Badge overlay showing the count
+			// @ts-ignore
+			const badge = /** @type {any} */ (doc.createXULElement('label'));
+			badge.id = 'zotero-rag-unavailable-badge';
+			badge.setAttribute('value', '');
+			badge.style.cssText = [
+				'position:absolute',
+				'top:-4px',
+				'right:-6px',
+				'min-width:14px',
+				'height:14px',
+				'background:#cc0000',
+				'color:#fff',
+				'font-size:9px',
+				'font-weight:bold',
+				'border-radius:7px',
+				'text-align:center',
+				'padding:0 3px',
+				'pointer-events:none',
+				'line-height:14px',
+			].join(';');
+			btn.appendChild(badge);
+
+			btn.addEventListener('click', () => this.openFixUnavailableDialog(window));
+			toolbar.appendChild(btn);
+			this.storeAddedElement(btn);
+			// Initial async scan
+			this._scanUnavailableCount(window);
+		}
 	}
 
 	/**
@@ -239,6 +296,25 @@ class ZoteroRAGPlugin {
 		for (let win of windows) {
 			if (!win.ZoteroPane) continue;
 			this.addToWindow(win);
+		}
+		// Register a single notifier to refresh the unavailable-count label on collection selection
+		if (!this._unavailableNotifierID) {
+			// @ts-ignore - Zotero.Notifier exists at runtime
+			this._unavailableNotifierID = Zotero.Notifier.registerObserver(
+				{
+					notify: (/** @type {string} */ event) => {
+						if (event === 'select') {
+							clearTimeout(this._unavailableScanTimeout);
+							this._unavailableScanTimeout = setTimeout(() => {
+								for (const w of Zotero.getMainWindows()) {
+									if (w.ZoteroPane) this._scanUnavailableCount(w);
+								}
+							}, 400);
+						}
+					}
+				},
+				['collection']
+			);
 		}
 	}
 
@@ -277,6 +353,11 @@ class ZoteroRAGPlugin {
 		for (let win of windows) {
 			if (!win.ZoteroPane) continue;
 			this.removeFromWindow(win);
+		}
+		if (this._unavailableNotifierID) {
+			// @ts-ignore - Zotero.Notifier exists at runtime
+			Zotero.Notifier.unregisterObserver(this._unavailableNotifierID);
+			this._unavailableNotifierID = null;
 		}
 	}
 
@@ -724,11 +805,11 @@ class ZoteroRAGPlugin {
 	 * only when no page number is available.
 	 * @param {string} uri - zotero://open-pdf/ or zotero://select/ URI
 	 * @param {string} displayText - Display text (e.g., "Smith et al., 2020")
-	 * @param {number|null} [page] - Optional page number
+	 * @param {number|null} [_page] - Optional page number (currently unused)
 	 * @param {string|null} [textAnchor] - Optional quote context (used only when page is absent)
 	 * @returns {string} HTML anchor element
 	 */
-	formatCitationHTML(uri, displayText, page = null, textAnchor = null) {
+	formatCitationHTML(uri, displayText, _page = null, textAnchor = null) {
 		let label = this.escapeHTML(displayText);
 		let title = "";
 
@@ -997,6 +1078,252 @@ class ZoteroRAGPlugin {
 
 		return html;
 	}
+
+	// ── Fix Unavailable Attachments ──────────────────────────────────────────
+
+	/**
+	 * Open the fix-unavailable-attachments dialog.
+	 * @param {Window} win - Parent Zotero main window
+	 * @returns {void}
+	 */
+	/**
+	 * @param {Window} win - Zotero main window
+	 * @param {number} [libraryID] - Library to show; defaults to the currently selected library
+	 */
+	openFixUnavailableDialog(win, libraryID) {
+		// If the dialog is already open, bring it to the front instead of opening a new one.
+		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
+			this._fixUnavailableWindow.focus();
+			return;
+		}
+		if (!libraryID) {
+			const pane = Zotero.getActiveZoteroPane();
+			libraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._fixUnavailableWindow = win.openDialog(
+			'chrome://zotero-rag/content/fix-unavailable.xhtml',
+			'zotero-rag-fix-unavailable',
+			'chrome,centerscreen,resizable=yes,width=720,height=520',
+			{ plugin: this, libraryID }
+		);
+	}
+
+	/**
+	 * Scan the current library for unavailable attachments and update the toolbar label.
+	 * @param {Window} win - Zotero main window containing the label
+	 * @returns {Promise<void>}
+	 */
+	async _scanUnavailableCount(win) {
+		const btn = /** @type {any} */ (win.document.getElementById('zotero-rag-unavailable-btn'));
+		const badge = /** @type {any} */ (win.document.getElementById('zotero-rag-unavailable-badge'));
+		if (!btn || !badge) return;
+		const pane = Zotero.getActiveZoteroPane();
+		if (!pane) return;
+		const libraryID = pane.getSelectedLibraryID();
+		if (!libraryID) {
+			btn.setAttribute('hidden', 'true');
+			return;
+		}
+		try {
+			const count = await this._countUnavailableInLibrary(libraryID);
+			if (count > 0) {
+				badge.setAttribute('value', String(count));
+				btn.removeAttribute('hidden');
+			} else {
+				btn.setAttribute('hidden', 'true');
+			}
+		} catch (e) {
+			this.log(`[_scanUnavailableCount] error: ${e}`);
+			btn.setAttribute('hidden', 'true');
+		}
+	}
+
+	/**
+	 * Count imported attachments in a library whose file is missing locally.
+	 * Checks all imported-file attachments regardless of sync state.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<number>}
+	 */
+	async _countUnavailableInLibrary(libraryID) {
+		// linkMode 0 = imported_file, 1 = imported_url (both stored in Zotero storage).
+		// No storageHash filter — files added without going through sync have no hash.
+		const sql = `
+			SELECT ia.itemID FROM itemAttachments ia
+			JOIN items i ON i.itemID = ia.itemID
+			WHERE i.libraryID = ?
+			AND ia.linkMode IN (0, 1)
+		`;
+		// @ts-ignore - Zotero.DB exists at runtime
+		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
+		if (!ids || ids.length === 0) return 0;
+		const items = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
+		let count = 0;
+		for (const item of items) {
+			if (!(await item.fileExists())) count++;
+		}
+		return count;
+	}
+
+	/**
+	 * @typedef {Object} UnavailableAttachmentInfo
+	 * @property {*} parentItem - Parent Zotero item
+	 * @property {*} attachmentItem - Attachment Zotero item
+	 * @property {string} authors - Comma-separated author last names
+	 * @property {string} year - Publication year (4 digits) or empty string
+	 * @property {string} title - Item title
+	 * @property {string} zoteroID - Parent item key
+	 */
+
+	/**
+	 * Return full detail records for all unavailable attachments in a library.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getUnavailableAttachments(libraryID) {
+		const sql = `
+			SELECT ia.itemID FROM itemAttachments ia
+			JOIN items i ON i.itemID = ia.itemID
+			WHERE i.libraryID = ?
+			AND ia.linkMode IN (0, 1)
+		`;
+		// @ts-ignore - Zotero.DB exists at runtime
+		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
+		if (!ids || ids.length === 0) return [];
+		const attachments = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		for (const attachment of attachments) {
+			if (await attachment.fileExists()) continue;
+			if (!attachment.parentItemID) continue;
+			const parentItem = /** @type {any} */ (await Zotero.Items.getAsync(attachment.parentItemID));
+			if (!parentItem) continue;
+			const creators = parentItem.getCreators();
+			// getCreators() returns {creatorTypeID, firstName, lastName, name, fieldMode}
+			// — no creatorType string, so filter by all creators (not just 'author')
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter(/** @type {(s: string) => boolean} */ (s) => s.length > 0)
+				.join(', ');
+			const dateField = parentItem.getField('date') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: parentItem.getField('title') || '',
+				zoteroID: parentItem.key
+			});
+		}
+		return result;
+	}
+
+	/**
+	 * Try to download an attachment via Zotero's sync runner (WebDAV or Zotero Storage).
+	 * @param {*} attachmentItem
+	 * @returns {Promise<{downloaded: boolean, reason?: string}>}
+	 */
+	async _tryDownloadAttachment(attachmentItem) {
+		// @ts-ignore - Zotero.Sync.Storage.Local exists at runtime
+		if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(attachmentItem.libraryID)) {
+			return { downloaded: false, reason: 'sync-disabled' };
+		}
+		try {
+			// @ts-ignore - Zotero.Sync.Runner exists at runtime
+			await Zotero.Sync.Runner.downloadFile(attachmentItem);
+			if (await attachmentItem.fileExists()) {
+				return { downloaded: true };
+			}
+			return { downloaded: false, reason: 'still-missing' };
+		} catch (e) {
+			return { downloaded: false, reason: e instanceof Error ? e.message : String(e) };
+		}
+	}
+
+	/**
+	 * Search all libraries for a file matching the given attachment's MD5 hash and, if found, copy it.
+	 * @param {*} attachmentItem - The unavailable attachment item
+	 * @returns {Promise<{found: boolean, via: string, sourcePath?: string, error?: string}>}
+	 */
+	async _searchAndFixUnavailableAttachment(attachmentItem) {
+		// Strategy 1: MD5 storageHash — only populated by Zotero File Storage (not WebDAV)
+		const hash = attachmentItem.attachmentSyncedHash;
+		if (hash) {
+			// @ts-ignore - Zotero.DB exists at runtime
+			const ids = await Zotero.DB.columnQueryAsync(
+				`SELECT itemID FROM itemAttachments WHERE storageHash = ? AND itemID != ?`,
+				[hash, attachmentItem.id]
+			);
+			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'md5');
+			if (result) return result;
+		}
+
+		// Strategy 2: filename match — works for WebDAV and Zotero File Storage.
+		// Path is stored as "storage:<filename>" for imported attachments.
+		const filename = attachmentItem.attachmentFilename;
+		if (filename) {
+			// @ts-ignore - Zotero.DB exists at runtime
+			const ids = await Zotero.DB.columnQueryAsync(
+				`SELECT itemID FROM itemAttachments WHERE path = ? AND itemID != ?`,
+				[`storage:${filename}`, attachmentItem.id]
+			);
+			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'filename');
+			if (result) return result;
+		}
+
+		return { found: false, via: hash ? 'not-found' : 'no-hash-no-match' };
+	}
+
+	/**
+	 * Try each candidate attachment ID; copy the first one that has a local file.
+	 * @param {number[]|null} ids
+	 * @param {*} attachmentItem
+	 * @param {string} via
+	 * @returns {Promise<{found: boolean, via: string, sourcePath?: string, error?: string}|null>}
+	 */
+	async _tryCopyFromCandidates(ids, attachmentItem, via) {
+		if (!ids || ids.length === 0) return null;
+		for (const id of ids) {
+			const candidate = /** @type {any} */ (Zotero.Items.get(id));
+			if (!candidate) continue;
+			if (!(await candidate.fileExists())) continue;
+			const sourcePath = await candidate.getFilePathAsync();
+			if (!sourcePath) continue;
+			try {
+				await this._copyAttachmentFile(attachmentItem, sourcePath);
+				return { found: true, via, sourcePath };
+			} catch (e) {
+				return { found: true, via, sourcePath, error: e instanceof Error ? e.message : String(e) };
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Copy a file into the Zotero storage directory for a missing attachment.
+	 * @param {*} attachmentItem - The attachment item whose file is missing
+	 * @param {string} sourcePath - Full path of the source file to copy
+	 * @returns {Promise<void>}
+	 */
+	async _copyAttachmentFile(attachmentItem, sourcePath) {
+		// @ts-ignore - Zotero.Attachments exists at runtime
+		const storageDir = Zotero.Attachments.getStorageDirectory(attachmentItem);
+		// @ts-ignore - IOUtils is a global in Firefox/Zotero
+		await IOUtils.makeDirectory(storageDir.path, { createAncestors: true, ignoreExisting: true });
+		const filename = attachmentItem.attachmentFilename
+			// @ts-ignore - PathUtils is a global in Firefox/Zotero
+			|| PathUtils.filename(sourcePath);
+		// @ts-ignore
+		const destPath = PathUtils.join(storageDir.path, filename);
+		// @ts-ignore
+		await IOUtils.copy(sourcePath, destPath);
+		if (!(await attachmentItem.fileExists())) {
+			throw new Error('File was copied but attachment still reports missing');
+		}
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
 
 	/**
 	 * Escape HTML special characters.
