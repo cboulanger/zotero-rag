@@ -2,6 +2,7 @@
 FastAPI application entry point for Zotero RAG backend.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -85,13 +86,26 @@ async def lifespan(app: FastAPI):
     # Open a single VectorStore for the lifetime of the process.
     # Sharing one Qdrant client across all requests avoids the lock-file
     # contention that causes BlockingIOError when requests overlap.
-    try:
-        vector_store = make_vector_store()
-        app.state.vector_store = vector_store
-        logger.info("VectorStore singleton initialised")
-    except Exception as e:
-        logger.error(f"Failed to initialise VectorStore: {e}")
-        app.state.vector_store = None
+    # Retry to handle the case where Qdrant starts slightly after the app
+    # (common in docker-compose without a service_healthy dependency).
+    _vs_retries = 5
+    _vs_delay = 5.0
+    for _attempt in range(1, _vs_retries + 1):
+        try:
+            vector_store = make_vector_store()
+            app.state.vector_store = vector_store
+            logger.info("VectorStore singleton initialised")
+            break
+        except Exception as e:
+            if _attempt < _vs_retries:
+                logger.warning(
+                    f"VectorStore init attempt {_attempt}/{_vs_retries} failed: {e} — "
+                    f"retrying in {_vs_delay:.0f}s"
+                )
+                await asyncio.sleep(_vs_delay)
+            else:
+                logger.error(f"Failed to initialise VectorStore after {_vs_retries} attempts: {e}")
+                app.state.vector_store = None
 
     yield
 
@@ -208,30 +222,45 @@ async def root(request: Request):
     }
 
 
+async def _check_http(client: httpx.AsyncClient, url: str) -> tuple[str, str | None]:
+    """Probe a URL and return (status, error_or_None)."""
+    try:
+        resp = await client.get(url)
+        return ("ok" if resp.is_success else f"http_{resp.status_code}", None)
+    except httpx.ConnectError as exc:
+        return ("unreachable", str(exc))
+    except httpx.TimeoutException:
+        return ("timeout", None)
+    except Exception as exc:
+        return ("error", str(exc))
+
+
 @app.get("/health")
 async def health_check():
-    """Health check endpoint — includes kreuzberg sidecar reachability."""
+    """Health check endpoint — includes kreuzberg and Qdrant sidecar reachability."""
     kreuzberg_url = settings.kreuzberg_url
-    kreuzberg_status = "unknown"
-    kreuzberg_error = None
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{kreuzberg_url.rstrip('/')}/health")
-            kreuzberg_status = "ok" if resp.is_success else f"http_{resp.status_code}"
-    except httpx.ConnectError as exc:
-        kreuzberg_status = "unreachable"
-        kreuzberg_error = str(exc)
-    except httpx.TimeoutException:
-        kreuzberg_status = "timeout"
-    except Exception as exc:
-        kreuzberg_status = "error"
-        kreuzberg_error = str(exc)
+    qdrant_url = settings.qdrant_url
 
-    return {
+    async with httpx.AsyncClient(timeout=3.0) as client:
+        kreuzberg_status, kreuzberg_error = await _check_http(
+            client, f"{kreuzberg_url.rstrip('/')}/health"
+        )
+        if qdrant_url:
+            qdrant_status, qdrant_error = await _check_http(client, qdrant_url)
+        else:
+            qdrant_status, qdrant_error = "local-mode", None
+
+    result: dict = {
         "status": "healthy",
         "kreuzberg": {
             "url": kreuzberg_url,
             "status": kreuzberg_status,
             **({"error": kreuzberg_error} if kreuzberg_error else {}),
         },
+        "qdrant": {
+            "url": qdrant_url or "local",
+            "status": qdrant_status,
+            **({"error": qdrant_error} if qdrant_error else {}),
+        },
     }
+    return result

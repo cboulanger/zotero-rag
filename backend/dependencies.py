@@ -41,6 +41,11 @@ def get_client_api_keys(request: Request) -> dict[str, str]:
 def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> EmbeddingService:
     """Create an EmbeddingService from current settings, overriding API key with client-supplied value."""
     settings = get_settings()
+    if settings.testing:
+        from backend.services.embeddings import MockEmbeddingService, _KNOWN_DIMS
+        model_name = settings.get_hardware_preset().embedding.model_name
+        dim = next((d for k, d in _KNOWN_DIMS.items() if k in model_name), 1024)
+        return MockEmbeddingService(embedding_dim=dim)
     preset = settings.get_hardware_preset()
     api_key_env = preset.embedding.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
     client_key = (client_api_keys or {}).get(api_key_env) or None
@@ -55,6 +60,9 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
 def make_llm_service(client_api_keys: dict[str, str] | None = None) -> LLMService:
     """Create an LLMService from current settings, overriding API key with client-supplied value."""
     settings = get_settings()
+    if settings.testing:
+        from backend.services.llm import MockLLMService
+        return MockLLMService()
     preset = settings.get_hardware_preset()
     api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
     client_key = (client_api_keys or {}).get(api_key_env) or None

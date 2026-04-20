@@ -85,7 +85,7 @@ See [docs/container-deployment.md](docs/container-deployment.md) for full Docker
 3. Go to **Tools → Add-ons**
 4. Click the gear icon and select **Install Add-on From File**
 5. Select the downloaded `.xpi` file
-6. Restart Zotero when prompted
+6. The plugin will be installed and will auto-update if so configured.
 
 ### 5. Configure the Plugin for a Remote Server
 

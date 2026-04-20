@@ -13,6 +13,7 @@ Kreuzberg HTTP API (POST /extract):
 See https://docs.kreuzberg.dev/guides/docker/ for full API reference.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -22,6 +23,13 @@ import httpx
 from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 
 logger = logging.getLogger(__name__)
+
+_TIMEOUT_RETRIES = 2
+_TIMEOUT_RETRY_DELAY = 5.0
+
+
+class KreuzbergTimeoutError(RuntimeError):
+    """Raised when the kreuzberg sidecar times out after all retries."""
 
 
 class KreuzbergExtractor(DocumentExtractor):
@@ -75,28 +83,39 @@ class KreuzbergExtractor(DocumentExtractor):
             List of ExtractionChunk objects, empty if extraction fails.
         """
         url = f"{self._kreuzberg_url}/extract"
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(
-                    url,
-                    files={"files": ("document", content, mime_type)},
-                    data={"config": json.dumps(self._config)},
-                )
-                response.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
-                f"Ensure the kreuzberg container is running."
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
-                f"for mime={mime_type}: {exc.response.text}"
-            ) from exc
-        except httpx.TimeoutException as exc:
-            raise RuntimeError(
-                f"kreuzberg sidecar timed out for mime={mime_type}: {exc}"
-            ) from exc
+        last_exc: httpx.TimeoutException | None = None
+        for attempt in range(1, _TIMEOUT_RETRIES + 2):
+            try:
+                async with httpx.AsyncClient(timeout=120.0) as client:
+                    response = await client.post(
+                        url,
+                        files={"files": ("document", content, mime_type)},
+                        data={"config": json.dumps(self._config)},
+                    )
+                    response.raise_for_status()
+                break  # success
+            except httpx.ConnectError as exc:
+                raise RuntimeError(
+                    f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
+                    f"Ensure the kreuzberg container is running."
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(
+                    f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
+                    f"for mime={mime_type}: {exc.response.text}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                last_exc = exc
+                if attempt <= _TIMEOUT_RETRIES:
+                    logger.warning(
+                        f"kreuzberg sidecar timeout for mime={mime_type} "
+                        f"(attempt {attempt}/{_TIMEOUT_RETRIES + 1}), retrying in {_TIMEOUT_RETRY_DELAY}s"
+                    )
+                    await asyncio.sleep(_TIMEOUT_RETRY_DELAY)
+                else:
+                    raise KreuzbergTimeoutError(
+                        f"kreuzberg sidecar timed out for mime={mime_type} after {_TIMEOUT_RETRIES + 1} attempts"
+                    ) from last_exc
 
         try:
             results = response.json()

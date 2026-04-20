@@ -31,5 +31,7 @@ ENV LOG_FILE=/data/logs/server.log
 # Kreuzberg sidecar URL (set by docker-compose or container.mjs)
 ENV KREUZBERG_URL=http://kreuzberg:8100
 
+ENV UVICORN_WORKERS=4
+
 EXPOSE 8119
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8119", "--workers", "4"]
+CMD uvicorn backend.main:app --host 0.0.0.0 --port 8119 --workers ${UVICORN_WORKERS}

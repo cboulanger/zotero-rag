@@ -102,6 +102,11 @@ class Settings(BaseSettings):
         description="Path to log file"
     )
 
+    testing: bool = Field(
+        default=False,
+        description="Testing mode: use mock embedding/LLM services (no API keys or model downloads required)"
+    )
+
     # Application version
     version: str = Field(default=__version__, description="Backend version")
 

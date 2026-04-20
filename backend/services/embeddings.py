@@ -445,6 +445,26 @@ class RemoteEmbeddingService(EmbeddingService):
         return self._resolve_model_name()
 
 
+class MockEmbeddingService(EmbeddingService):
+    """Returns zero vectors. Used when TESTING=true — no model or API key needed."""
+
+    def __init__(self, embedding_dim: int = 1024):
+        self._dim = embedding_dim
+        logger.info(f"MockEmbeddingService active (dim={embedding_dim})")
+
+    async def embed_text(self, text: str) -> list[float]:
+        return [0.0] * self._dim
+
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] * self._dim for _ in texts]
+
+    def get_embedding_dim(self) -> int:
+        return self._dim
+
+    def get_model_name(self) -> str:
+        return "mock"
+
+
 def create_embedding_service(
     config: EmbeddingConfig,
     cache_dir: Optional[str] = None,

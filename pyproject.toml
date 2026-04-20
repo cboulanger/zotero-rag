@@ -49,9 +49,10 @@ markers = [
     "integration: marks tests that require real external services (Zotero, APIs)",
     "api: marks tests that require running backend server (API integration tests)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "container: marks tests that require a container runtime (podman or docker)",
 ]
-# Default: skip integration and API tests unless explicitly requested
-addopts = "-m 'not integration and not api'"
+# Default: skip integration, API, and container tests unless explicitly requested
+addopts = "-m 'not integration and not api and not container'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]

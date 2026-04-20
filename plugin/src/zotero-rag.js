@@ -924,7 +924,7 @@ class ZoteroRAGPlugin {
 		// Sort by first-author last name
 		entries.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
-		let html = `<hr/><p><strong>Sources</strong></p><ul>`;
+		let html = `<hr/><p><strong>References</strong></p><ul>`;
 		for (const entry of entries) {
 			html += `<li><a href="${entry.uri}">${this.escapeHTML(entry.label)}</a></li>`;
 		}

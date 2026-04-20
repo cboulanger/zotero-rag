@@ -1,0 +1,41 @@
+# Smoke-test compose file — used exclusively by backend/tests/test_container_smoke.py
+#
+# Differences from docker-compose.yml:
+#   - Qdrant has a healthcheck so zotero-rag waits until it is ready (avoids startup race)
+#   - KREUZBERG_URL uses the correct port :8100
+#   - TESTING=true activates mock embedding/LLM services (no API keys or model downloads)
+#   - No restart policies (containers are torn down after the test)
+
+services:
+  kreuzberg:
+    image: ghcr.io/kreuzberg-dev/kreuzberg:latest
+    networks:
+      - internal
+
+  qdrant:
+    image: docker.io/qdrant/qdrant:v1.15
+    networks:
+      - internal
+
+  zotero-rag:
+    image: ${ZOTERO_RAG_IMAGE:-zotero-rag:smoke-test}
+    ports:
+      - "${BACKEND_PORT:-18119}:8119"
+    environment:
+      KREUZBERG_URL: http://kreuzberg:8100
+      QDRANT_URL: http://qdrant:6333
+      MODEL_PRESET: ${MODEL_PRESET:-remote-kisski}
+      TESTING: "true"
+      LOG_LEVEL: INFO
+      UVICORN_WORKERS: "4"
+      KISSKI_API_KEY: ""
+      OPENAI_API_KEY: ""
+    depends_on:
+      - qdrant
+      - kreuzberg
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge

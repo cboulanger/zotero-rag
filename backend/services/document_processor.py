@@ -14,6 +14,7 @@ from typing import Callable, Optional, Literal
 from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
 from backend.services.extraction import DocumentExtractor, create_document_extractor
+from backend.services.extraction.kreuzberg import KreuzbergTimeoutError
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -465,6 +466,9 @@ class DocumentProcessor:
         # Extract text and chunk
         try:
             chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
+        except KreuzbergTimeoutError as e:
+            logger.warning(f"Skipping attachment {attachment_key}: {e}")
+            return 0
         except Exception as e:
             logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
             raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e

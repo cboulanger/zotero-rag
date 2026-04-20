@@ -41,7 +41,7 @@ services:
     volumes:
       - "${DATA_DIR:-./data}:/data"
     environment:
-      KREUZBERG_URL: http://kreuzberg:8000
+      KREUZBERG_URL: http://kreuzberg:8100
       QDRANT_URL: http://qdrant:6333
       MODEL_PRESET: ${MODEL_PRESET:-remote-openai}
       # API keys — set whichever your MODEL_PRESET requires
@@ -49,6 +49,7 @@ services:
       KISSKI_API_KEY: ${KISSKI_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
       # set a secret api key for a real deployment!
       API_KEY: ${API_KEY:-}
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}

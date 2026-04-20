@@ -390,6 +390,14 @@ class RemoteLLMService(LLMService):
         return generated_text.strip()
 
 
+class MockLLMService(LLMService):
+    """Returns a canned response. Used when TESTING=true — no model or API key needed."""
+
+    async def generate(self, prompt: str, max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> str:
+        logger.info("MockLLMService: returning canned response")
+        return "This is a mock response generated in testing mode."
+
+
 def create_llm_service(
     settings: Settings,
     cache_dir: Optional[str] = None,
