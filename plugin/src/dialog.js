@@ -137,6 +137,15 @@ var ZoteroRAGDialog = {
 			});
 		}
 
+		// Set up sources-count slider
+		const sourcesSlider = document.getElementById('sources-count');
+		const sourcesValue = document.getElementById('sources-count-value');
+		if (sourcesSlider && sourcesValue) {
+			sourcesSlider.addEventListener('input', (e) => {
+				sourcesValue.textContent = /** @type {HTMLInputElement} */ (e.target).value;
+			});
+		}
+
 		// Load preset configuration and set default min_score
 		this.loadPresetConfig();
 
@@ -198,7 +207,18 @@ var ZoteroRAGDialog = {
 					similarityValue.textContent = defaultMinScore.toFixed(1);
 				}
 
-				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}`);
+				// Update sources-count slider from preset default_top_k
+				const defaultTopK = config.default_top_k || 10;
+				const sourcesSlider = /** @type {HTMLInputElement|null} */ (
+					document.getElementById('sources-count')
+				);
+				const sourcesValue = document.getElementById('sources-count-value');
+				if (sourcesSlider && sourcesValue) {
+					sourcesSlider.value = defaultTopK.toString();
+					sourcesValue.textContent = defaultTopK.toString();
+				}
+
+				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}`);
 			}
 		} catch (error) {
 			// Silently fail and use hardcoded default (0.3)
@@ -685,6 +705,12 @@ var ZoteroRAGDialog = {
 		);
 		const minScore = similaritySlider ? parseFloat(similaritySlider.value) : 0.3;
 
+		// Get sources-to-consider count (top_k)
+		const sourcesSlider = /** @type {HTMLInputElement|null} */ (
+			document.getElementById('sources-count')
+		);
+		const topK = sourcesSlider ? parseInt(sourcesSlider.value, 10) : 10;
+
 		// Validate input
 		if (!question) {
 			// @ts-ignore - Services is a Zotero/Firefox global
@@ -729,7 +755,8 @@ var ZoteroRAGDialog = {
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
 			const result = await this.plugin.submitQuery(question, libraryIds, {
-				minScore: minScore
+				minScore: minScore,
+				topK: topK
 			});
 
 			// Update progress for note creation phase
