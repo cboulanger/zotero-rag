@@ -89,6 +89,14 @@
                   class="question-input"></textarea>
       </div>
 
+      <!-- Library selection -->
+      <div class="form-group">
+        <label>Select libraries to search:</label>
+        <div id="library-list" class="library-list">
+          <!-- Libraries will be populated by JavaScript -->
+        </div>
+      </div>
+
       <!-- Similarity threshold -->
       <div class="form-group">
         <label for="similarity-threshold">
@@ -123,14 +131,6 @@
         </div>
       </div>
 
-      <!-- Library selection -->
-      <div class="form-group">
-        <label>Select libraries to search:</label>
-        <div id="library-list" class="library-list">
-          <!-- Libraries will be populated by JavaScript -->
-        </div>
-      </div>
-
 
       <!-- Feedback container (fixed height) -->
       <div class="feedback-container">
@@ -153,6 +153,7 @@
 
     <!-- Dialog buttons -->
     <div class="dialog-buttons">
+      <span id="plugin-version" style="font-size: 11px; color: #999; align-self: center; margin-right: auto;"></span>
       <label id="force-reindex-container" class="force-reindex-label" style="display: none; margin-right: auto; align-items: center;">
         <input type="checkbox" id="force-full-reindex" style="margin-right: 5px;"/>
         <span style="font-size: 13px; color: #666;">Force Full Reindex (Dev)</span>

@@ -127,6 +127,12 @@ var ZoteroRAGDialog = {
 		// Check if dev-mode is enabled and show force reindex checkbox if so
 		this.initDevModeFeatures();
 
+		// Show plugin version
+		const versionEl = document.getElementById('plugin-version');
+		if (versionEl && this.plugin && this.plugin.version) {
+			versionEl.textContent = `v${this.plugin.version}`;
+		}
+
 		// Set up similarity threshold slider
 		const similaritySlider = document.getElementById('similarity-threshold');
 		const similarityValue = document.getElementById('similarity-value');
