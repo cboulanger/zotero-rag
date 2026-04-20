@@ -28,6 +28,7 @@ from backend.models.document import (
 )
 from backend.models.library import LibraryIndexMetadata
 from backend.services.document_processor import DocumentProcessor
+from backend.config.settings import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -82,6 +83,22 @@ class DocumentUploadResult(BaseModel):
     status: str  # "indexed" | "skipped_duplicate" | "error"
     message: str = ""
     rate_limit_retries: int = 0
+
+
+class AbstractIndexRequest(BaseModel):
+    """Request to index an item via its abstractNote (no attachment file)."""
+
+    library_id: str
+    library_type: str = "user"
+    item_key: str
+    item_version: int = 0
+    title: Optional[str] = "Untitled"
+    authors: list[str] = []
+    year: Optional[int] = None
+    item_type: Optional[str] = None
+    zotero_modified: str = ""
+    abstract_text: str
+    library_name: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -366,5 +383,109 @@ async def upload_and_index_document(
         chunks_added=chunks_added,
         status="indexed",
         message=f"Indexed {chunks_added} chunks",
+        rate_limit_retries=embedding_service.rate_limit_retries,
+    )
+
+
+@router.post(
+    "/index/abstract",
+    response_model=DocumentUploadResult,
+    summary="Index an item via its abstractNote (remote mode, no attachment file)",
+)
+async def upload_and_index_abstract(
+    http_request: Request,
+    request: AbstractIndexRequest,
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """
+    Index a Zotero item using its abstractNote when no attachment file is available.
+
+    The abstract is chunked and embedded directly.  A virtual attachment key
+    ``{item_key}:abstract`` is used so the chunks can be tracked independently.
+    The abstract must meet the configured minimum word count (MIN_ABSTRACT_WORDS).
+    """
+    settings = get_settings()
+    word_count = len(request.abstract_text.split())
+    if word_count < settings.min_abstract_words:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Abstract too short: {word_count} words (minimum {settings.min_abstract_words})",
+        )
+
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    abstract_key = f"{request.item_key}:abstract"
+    doc_metadata = DocumentMetadata(
+        library_id=request.library_id,
+        item_key=request.item_key,
+        attachment_key=abstract_key,
+        title=request.title or "Untitled",
+        authors=request.authors,
+        year=request.year,
+        item_type=request.item_type,
+    )
+
+    client_keys = get_client_api_keys(http_request)
+    embedding_service = make_embedding_service(client_keys)
+
+    processor = DocumentProcessor(
+        zotero_client=None,  # type: ignore[arg-type]
+        embedding_service=embedding_service,
+        vector_store=vector_store,
+    )
+
+    try:
+        # Delete stale chunks for this item before re-indexing
+        if request.item_version > 0:
+            stale = vector_store.get_item_version(request.library_id, request.item_key)
+            if stale is not None and stale < request.item_version:
+                deleted = vector_store.delete_item_chunks(request.library_id, request.item_key)
+                logger.info(
+                    f"Deleted {deleted} stale chunks for {request.item_key} "
+                    f"(v{stale} -> v{request.item_version})"
+                )
+
+        chunks_added = await processor._index_from_abstract(
+            abstract_text=request.abstract_text,
+            doc_metadata=doc_metadata,
+            item_version=request.item_version,
+            item_modified=request.zotero_modified or datetime.now(timezone.utc).isoformat(),
+        )
+
+        # Update library metadata
+        lib_meta = vector_store.get_library_metadata(request.library_id)
+        if lib_meta is None:
+            lib_meta = LibraryIndexMetadata(
+                library_id=request.library_id,
+                library_type=request.library_type,
+                library_name=request.library_name,
+                indexing_mode="incremental",
+            )
+        lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, request.item_version)
+        lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
+        lib_meta.total_chunks = vector_store.count_library_chunks(request.library_id)
+        lib_meta.total_items_indexed += 1
+        vector_store.update_library_metadata(lib_meta)
+
+    except Exception as e:
+        logger.error(f"Error indexing abstract for {request.item_key}: {e}", exc_info=True)
+        return DocumentUploadResult(
+            library_id=request.library_id,
+            item_key=request.item_key,
+            attachment_key=abstract_key,
+            chunks_added=0,
+            status="error",
+            message=str(e),
+        )
+
+    status = "indexed" if chunks_added > 0 else "skipped_duplicate"
+    return DocumentUploadResult(
+        library_id=request.library_id,
+        item_key=request.item_key,
+        attachment_key=abstract_key,
+        chunks_added=chunks_added,
+        status=status,
+        message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
     )

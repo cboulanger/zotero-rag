@@ -15,6 +15,7 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError
+from backend.services.chunking import TextChunker
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -392,38 +393,51 @@ class DocumentProcessor:
             if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
         ]
 
-        if not indexable_attachments:
-            logger.debug(f"Item {item_key} has no indexable attachments")
-            return 0
+        abstract_note = item["data"].get("abstractNote", "")
 
         total_chunks = 0
 
-        for attachment in indexable_attachments:
-            attachment_key = attachment["data"]["key"]
-            attachment_version = attachment.get("version", item_version)
-            mime_type = attachment["data"].get("contentType", "application/pdf")
-            doc_metadata.attachment_key = attachment_key
+        if indexable_attachments:
+            for attachment in indexable_attachments:
+                attachment_key = attachment["data"]["key"]
+                attachment_version = attachment.get("version", item_version)
+                mime_type = attachment["data"].get("contentType", "application/pdf")
+                doc_metadata.attachment_key = attachment_key
 
-            # Download attachment
-            file_bytes = await self.zotero_client.get_attachment_file(
-                library_id=library_id,
-                item_key=attachment_key,
-                library_type=library_type
-            )
+                # Download attachment
+                file_bytes = await self.zotero_client.get_attachment_file(
+                    library_id=library_id,
+                    item_key=attachment_key,
+                    library_type=library_type
+                )
 
-            if not file_bytes:
-                logger.warning(f"Could not download attachment {attachment_key}")
-                continue
+                if not file_bytes:
+                    logger.warning(f"Could not download attachment {attachment_key}")
+                    continue
 
-            chunks_added = await self._process_attachment_bytes(
-                file_bytes=file_bytes,
-                mime_type=mime_type,
+                chunks_added = await self._process_attachment_bytes(
+                    file_bytes=file_bytes,
+                    mime_type=mime_type,
+                    doc_metadata=doc_metadata,
+                    item_version=item_version,
+                    attachment_version=attachment_version,
+                    item_modified=item_modified,
+                )
+                total_chunks += chunks_added
+
+        # Fall back to abstractNote when no attachment is available or all downloads failed
+        if total_chunks == 0 and abstract_note:
+            abstract_chunks = await self._index_from_abstract(
+                abstract_text=abstract_note,
                 doc_metadata=doc_metadata,
                 item_version=item_version,
-                attachment_version=attachment_version,
                 item_modified=item_modified,
             )
-            total_chunks += chunks_added
+            if abstract_chunks > 0:
+                logger.info(f"Indexed {abstract_chunks} abstract chunks for {item_key} (no usable attachment)")
+            total_chunks += abstract_chunks
+        elif not indexable_attachments:
+            logger.debug(f"Item {item_key} has no indexable attachments and no abstract")
 
         return total_chunks
 
@@ -522,14 +536,92 @@ class DocumentProcessor:
         logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
         return len(doc_chunks)
 
+    async def _index_from_abstract(
+        self,
+        abstract_text: str,
+        doc_metadata: DocumentMetadata,
+        item_version: int,
+        item_modified: str,
+    ) -> int:
+        """
+        Index an item's abstractNote as a fallback when no attachment is available.
+
+        Uses a virtual attachment key ``{item_key}:abstract`` so the chunks can be
+        tracked and deduplicated independently of any real attachment.
+
+        Returns:
+            Number of chunks indexed (0 if abstract is too short or already indexed).
+        """
+        settings = get_settings()
+        word_count = len(abstract_text.split())
+        if word_count < settings.min_abstract_words:
+            logger.debug(
+                f"Abstract for {doc_metadata.item_key} too short "
+                f"({word_count} words, min {settings.min_abstract_words})"
+            )
+            return 0
+
+        abstract_key = f"{doc_metadata.item_key}:abstract"
+        meta = doc_metadata.model_copy(update={"attachment_key": abstract_key})
+        library_id = meta.library_id
+        item_key = meta.item_key
+
+        content_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+        if self.vector_store.check_duplicate(content_hash, library_id=library_id):
+            logger.info(f"Skipping duplicate abstract for {item_key}")
+            return 0
+
+        preset = settings.get_hardware_preset()
+        chunker = TextChunker(max_chunk_size=preset.rag.max_chunk_size)
+        chunks = chunker.chunk_text(abstract_text)
+
+        if not chunks:
+            return 0
+
+        chunk_texts = [c.text for c in chunks]
+        embeddings = await self.embedding_service.embed_batch(chunk_texts)
+
+        doc_chunks = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            chunk_id = f"{library_id}:{item_key}:{abstract_key}:{i}"
+            chunk_metadata = ChunkMetadata(
+                chunk_id=chunk_id,
+                document_metadata=meta,
+                page_number=None,
+                text_preview=chunk.text_preview,
+                chunk_index=i,
+                content_hash=content_hash,
+                item_version=item_version,
+                attachment_version=0,
+                indexed_at=datetime.now(UTC).isoformat(),
+                zotero_modified=item_modified,
+            )
+            doc_chunks.append(DocumentChunk(
+                text=chunk.text,
+                metadata=chunk_metadata,
+                embedding=embedding,
+            ))
+
+        self.vector_store.add_chunks_batch(doc_chunks)
+        self.vector_store.add_deduplication_record(DeduplicationRecord(
+            content_hash=content_hash,
+            library_id=library_id,
+            item_key=item_key,
+            relation_uri=None,
+        ))
+
+        logger.info(f"Indexed {len(doc_chunks)} abstract chunks for {item_key}")
+        return len(doc_chunks)
+
     async def _filter_indexed_attachments(
         self,
         items: list[dict],
         library_id: str,
         library_type: str
     ) -> list[dict]:
-        """Filter items to only those with at least one indexable attachment."""
-        items_with_attachments = []
+        """Filter items to those with at least one indexable attachment or a substantial abstract."""
+        min_words = get_settings().min_abstract_words
+        items_with_content = []
 
         for item in items:
             # Skip if not a regular item (skip attachments, notes, etc.)
@@ -554,9 +646,15 @@ class DocumentProcessor:
             )
 
             if has_indexable:
-                items_with_attachments.append(item)
+                items_with_content.append(item)
+                continue
 
-        return items_with_attachments
+            # Fall back: include items with a substantial abstractNote
+            abstract = item["data"].get("abstractNote", "")
+            if abstract and len(abstract.split()) >= min_words:
+                items_with_content.append(item)
+
+        return items_with_content
 
     def _extract_authors(self, item_data: dict) -> list[str]:
         """Extract author names from Zotero item data."""

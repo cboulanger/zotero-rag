@@ -65,6 +65,12 @@ class Settings(BaseSettings):
         description="Hardware preset name"
     )
 
+    # Abstract fallback indexing
+    min_abstract_words: int = Field(
+        default=100,
+        description="Minimum word count for abstractNote to be used as fallback when no attachment is available"
+    )
+
     # Extraction backend
     extractor_backend: str = Field(
         default="kreuzberg",

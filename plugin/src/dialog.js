@@ -1050,7 +1050,7 @@ var ZoteroRAGDialog = {
 						this.updateProgress(total === 0 ? null : percentage, phase, detail);
 						this.updateLibraryProgressText(
 							libraryId,
-							total > 0 ? `${message} ${current}/${total}` : message
+							total > 0 ? `${current}/${total}` : null
 						);
 					},
 					isCancelled: () => !this.isOperationInProgress,

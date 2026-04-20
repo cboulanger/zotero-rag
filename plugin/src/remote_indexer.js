@@ -176,9 +176,12 @@ var RemoteIndexer = {
 			);
 			if (!att) continue;
 
+			const label = att.parentItem
+				? this._formatCitationLabel(att.parentItem)
+				: this._formatCitationLabel(att.zoteroItem);
 			onProgress({
 				percentage: (i / total) * 100,
-				message: 'Uploading attachment',
+				message: `Indexing ${label}`,
 				current: i + 1,
 				total,
 			});
@@ -195,8 +198,44 @@ var RemoteIndexer = {
 			}
 		}
 
-		// Persist the updated cache (only when at least something was confirmed/uploaded).
-		if (uploaded > 0 || checkedStatuses.some(s => !s.needs_indexing)) {
+		// 6. Upload abstract-only items (no attachment file but substantial abstractNote)
+		const abstractItems = await this._collectAbstractItems(libraryId, libraryType, log, attachments);
+		log(`[RemoteIndexer] Found ${abstractItems.length} abstract-only item(s) to consider`);
+
+		const abstractTotal = abstractItems.length;
+		let abstractCurrent = 0;
+		for (const abstractItem of abstractItems) {
+			if (isCancelled()) break;
+
+			// Skip if already up-to-date according to version cache
+			const cachedVer = versionCache[abstractItem.attachment_key];
+			if (cachedVer !== undefined && cachedVer >= abstractItem.item_version) {
+				skipped++;
+				continue;
+			}
+
+			abstractCurrent++;
+			const label = this._formatCitationLabel(abstractItem.zoteroItem);
+			onProgress({
+				percentage: (abstractCurrent / abstractTotal) * 100,
+				message: `Indexing ${label} (abstract)`,
+				current: abstractCurrent,
+				total: abstractTotal,
+			});
+
+			try {
+				await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal });
+				uploaded++;
+				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				log(`[RemoteIndexer] Error uploading abstract for ${abstractItem.item_key}: ${msg}`);
+				if (!firstError) firstError = msg;
+				errors++;
+			}
+		}
+
+		if (uploaded > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
 			this._saveVersionCache(libraryId, versionCache);
 		}
 
@@ -504,6 +543,130 @@ var RemoteIndexer = {
 			throw new Error(`${method} ${path}: HTTP ${response.status}${detail ? ` — ${detail}` : ''}`);
 		}
 		return response;
+	},
+
+	/**
+	 * Collect regular items (non-attachments) that should be indexed via their abstractNote.
+	 * Includes items where no local attachment file is available but the abstract is substantial.
+	 *
+	 * @param {string} libraryId
+	 * @param {string} libraryType
+	 * @param {function(string): void} log
+	 * @param {Array<{item_key: string, filePath: string|null}>} existingAttachments - From _collectAttachments()
+	 * @param {number} [minWords=100] - Minimum abstract word count
+	 * @returns {Promise<Array<{item_key: string, attachment_key: string, item_version: number, zoteroItem: any, abstractNote: string}>>}
+	 */
+	async _collectAbstractItems(libraryId, libraryType, log, existingAttachments, minWords = 100) {
+		let zoteroLibraryID;
+		if (libraryType === 'group') {
+			const group = Zotero.Groups.get(parseInt(libraryId, 10));
+			zoteroLibraryID = group ? group.libraryID : null;
+		} else {
+			zoteroLibraryID = parseInt(libraryId, 10);
+		}
+		if (!zoteroLibraryID) return [];
+
+		// Item keys that already have a local file — no abstract fallback needed
+		const keysWithLocalFile = new Set(
+			existingAttachments.filter(a => a.filePath).map(a => a.item_key)
+		);
+
+		const search = new Zotero.Search();
+		search.libraryID = zoteroLibraryID;
+		const itemIDs = await search.search();
+		if (!itemIDs.length) return [];
+
+		const items = await Zotero.Items.getAsync(itemIDs);
+		/** @type {Array<{item_key: string, attachment_key: string, item_version: number, zoteroItem: any, abstractNote: string}>} */
+		const result = [];
+
+		for (const item of items) {
+			if (item.isAttachment() || item.isNote()) continue;
+
+			const itemKey = item.key;
+			if (keysWithLocalFile.has(itemKey)) continue;
+
+			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
+			if (!abstract) continue;
+
+			const wordCount = abstract.trim().split(/\s+/).filter(/** @param {string} w */ w => w.length > 0).length;
+			if (wordCount < minWords) continue;
+
+			result.push({
+				item_key: itemKey,
+				attachment_key: itemKey + ':abstract',
+				item_version: item.version || 0,
+				zoteroItem: item,
+				abstractNote: abstract,
+			});
+		}
+
+		log(`[RemoteIndexer] _collectAbstractItems: ${result.length} item(s) with usable abstract`);
+		return result;
+	},
+
+	/**
+	 * Upload an item's abstractNote to the backend for indexing.
+	 *
+	 * @param {Object} opts
+	 * @param {{item_key: string, attachment_key: string, item_version: number, zoteroItem: any, abstractNote: string}} opts.abstractItem
+	 * @param {string} opts.libraryId
+	 * @param {string} opts.libraryType
+	 * @param {string} opts.libraryName
+	 * @param {string} opts.backendURL
+	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
+	 * @param {function(string): void} opts.log
+	 * @param {AbortSignal} [opts.signal]
+	 * @returns {Promise<void>}
+	 */
+	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal }) {
+		const item = abstractItem.zoteroItem;
+		const body = {
+			library_id: libraryId,
+			library_type: libraryType,
+			library_name: libraryName,
+			item_key: abstractItem.item_key,
+			item_version: abstractItem.item_version,
+			title: item.getField ? (item.getField('title') || 'Untitled') : 'Untitled',
+			authors: this._extractAuthors(item),
+			year: this._extractYear(item),
+			item_type: item.itemType || null,
+			zotero_modified: item.dateModified || new Date().toISOString(),
+			abstract_text: abstractItem.abstractNote,
+		};
+
+		const response = await this._apiFetch('POST', `${backendURL}/api/index/abstract`, {
+			headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+			body: JSON.stringify(body),
+			signal,
+		});
+
+		const result = await response.json();
+		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
+		if (result.status === 'error') {
+			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
+		}
+	},
+
+	/**
+	 * Format a short citation label: "Lastname et al. (Year) \"Title...\""
+	 * @param {any} item - Zotero item
+	 * @param {number} [maxTitleLen=50]
+	 * @returns {string}
+	 */
+	_formatCitationLabel(item, maxTitleLen = 50) {
+		const authors = this._extractAuthors(item);
+		let authorPart = '';
+		if (authors.length > 0) {
+			const lastName = authors[0].split(' ').pop() || authors[0];
+			authorPart = authors.length > 1 ? `${lastName} et al.` : lastName;
+		}
+		const year = this._extractYear(item);
+		const yearPart = year ? ` (${year})` : '';
+		let title = (item.getField ? item.getField('title') : '') || '';
+		if (title.length > maxTitleLen) title = title.slice(0, maxTitleLen) + '\u2026';
+		const titlePart = title ? ` "${title}"` : '';
+		return `${authorPart}${yearPart}${titlePart}`.trim();
 	},
 
 	/**
