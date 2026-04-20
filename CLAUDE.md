@@ -87,6 +87,11 @@ plugin/
 
 ## Zotero Plugin Development
 
+### Reference Documentation
+
+- **`docs/zotero-plugin-dev.md`** — "vanilla" Zotero plugin development: bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, and Zotero API patterns.
+- **`docs/zotero-plugin-toolkit.md`** — ready-made helper classes (`UITool`, `DialogHelper`, `KeyboardManager`, `PromptManager`, etc.) for more complex UI and plugin behavior. Check here before writing boilerplate.
+
 ### Development Workflow
 
 **Hot Reload Plugin Development Server:**
