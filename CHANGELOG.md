@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/cboulanger/zotero-rag/compare/v1.9.1...v1.9.2) (2026-04-20)
+
+
+### Bug Fixes
+
+* Fix container startup bug identified by container smoke test ([ecafd71](https://github.com/cboulanger/zotero-rag/commit/ecafd71f28bc0eaf2f330618c627a04711970b3d))
+
 ## [1.9.1](https://github.com/cboulanger/zotero-rag/compare/v1.9.0...v1.9.1) (2026-04-20)
 
 
