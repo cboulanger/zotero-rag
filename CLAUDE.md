@@ -28,6 +28,16 @@
 - Aim for comprehensive coverage of all library methods and services
 - Write tests before or alongside implementation (TDD encouraged)
 
+### Container Smoke Test
+
+After any change to `Dockerfile`, `docker-compose.yml`, `docker-compose.smoke.yml`, or the container startup path (e.g. `backend/main.py`, `backend/dependencies.py`, `backend/config/settings.py`), run the container smoke test to verify the full stack builds and starts correctly:
+
+```bash
+uv run pytest -m container -v -s
+```
+
+This test is excluded from the default `uv run pytest` run. It requires podman or docker and is skipped automatically if neither is available.
+
 ### Node.js Tests
 
 - Use Node.js built-in test runner (available in Node 23)

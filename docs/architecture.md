@@ -440,6 +440,9 @@ OPENAI_API_KEY=sk-...
 ANTHROPIC_API_KEY=sk-ant-...
 KISSKI_API_KEY=your-kisski-key
 
+# Qdrant vector database (optional — omit for local embedded mode)
+QDRANT_URL=http://qdrant:6333    # Set when running Qdrant as a sidecar container
+
 # Remote server deployment (optional)
 API_KEY=your-secret-key          # Required X-API-Key header when set
 ALLOWED_ORIGINS=https://myhost   # CORS allowed origins (default: *)
@@ -466,10 +469,15 @@ The `backendURL` preference is the single configuration point for server locatio
 **Rationale:**
 
 - Excellent Python client
-- Persistent local storage
+- Persistent local storage (embedded mode) or server mode
 - Efficient similarity search
 - Payload filtering capabilities
-- No external service required
+- Supports both local embedded file mode (no external service) and Qdrant server mode via `QDRANT_URL`
+
+**Deployment modes:**
+
+- **Local file mode** (default, `QDRANT_URL` unset): `QdrantClient(path=...)` — no external service required, but limited to a single uvicorn worker due to file-lock contention
+- **Server mode** (`QDRANT_URL` set): `QdrantClient(url=...)` — Qdrant runs as a sidecar container; supports multiple uvicorn workers (`--workers 4`) for full CPU utilization
 
 ### 3. Embedding Strategy
 

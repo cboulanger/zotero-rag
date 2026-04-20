@@ -2,16 +2,19 @@
 
 ## Architecture
 
-The Zotero RAG backend runs as two containers:
+The Zotero RAG backend runs as three containers:
 
 | Container | Image | Purpose |
 | --------- | ----- | ------- |
 | `zotero-rag` | `cboulanger/zotero-rag` | FastAPI backend (port 8119) |
 | `kreuzberg` | `ghcr.io/kreuzberg-dev/kreuzberg` | Document extraction sidecar (internal) |
+| `qdrant` | `docker.io/qdrant/qdrant:v1.15` | Vector database sidecar (internal) |
 
-The two containers communicate over a shared Docker bridge network.  The
+All three containers communicate over a shared Docker bridge network. The
 kreuzberg sidecar bundles Tesseract, Pandoc, and PDFium — no build-time
-compilation is required in the main image.
+compilation is required in the main image. The Qdrant sidecar replaces the
+embedded local file mode, enabling multiple uvicorn workers to share one
+vector database server without file-lock contention.
 
 ---
 
@@ -41,41 +44,52 @@ sidecar, and all environment variables automatically.
 
 ## Container Orchestration
 
-Both `docker compose` and `bin/container.mjs` run the same two containers and wire them together in the same way; they just do it through different mechanisms.
+Both `docker compose` and `bin/container.mjs` run the same three containers and wire them together in the same way; they just do it through different mechanisms.
 
 ### Shared network
 
-The two containers must be able to reach each other by hostname. Both approaches create a dedicated Docker bridge network and attach both containers to it:
+All three containers must be able to reach each other by hostname. Both approaches create a dedicated Docker bridge network and attach all containers to it:
 
 | Approach | Network name | How it is created |
 | -------- | ------------ | ----------------- |
 | `docker compose` | `internal` (project-scoped) | Declared in `docker-compose.yml`; created automatically |
 | `bin/container.mjs` | `zotero-rag-net` | Created by `ensureNetwork()` before any container starts |
 
-The kreuzberg container is given the network alias **`kreuzberg`** in both cases, so the backend can always reach it at `http://kreuzberg:8100` regardless of the container name.
+Each sidecar is given a fixed network alias so the backend can always reach it by hostname regardless of the container name:
 
-### Kreuzberg lifecycle
+| Sidecar | Alias | URL |
+| ------- | ----- | --- |
+| kreuzberg | `kreuzberg` | `http://kreuzberg:8100` |
+| qdrant | `qdrant` | `http://qdrant:6333` |
 
-**`docker compose`** manages kreuzberg as a regular service (`depends_on` ensures it starts before `zotero-rag`).  
-Stopping with `docker compose down` removes both containers and the network together.
+### Sidecar lifecycle
 
-**`bin/container.mjs`** manages kreuzberg explicitly:
+**`docker compose`** manages all sidecars as regular services (`depends_on` ensures they start before `zotero-rag`).  
+Stopping with `docker compose down` removes all containers and the network together.
 
-- `start` / `deploy` (without `--systemd-service`) → calls `startKreuzberg()`, which pulls the latest image, stops any existing sidecar with the same name, and runs it with `--network-alias kreuzberg`.  The sidecar is named `<app-container>-kreuzberg` (e.g. `zotero-rag-latest-kreuzberg`).
-- `stop` → calls `stopKreuzberg()` to stop and remove the paired sidecar.
-- `restart` → stops and restarts both the app container and its sidecar by name.
-- Pass `--no-kreuzberg` to `start` if you are already running a kreuzberg instance separately; the app container then joins the existing network but no new sidecar is launched.
+**`bin/container.mjs`** manages sidecars explicitly:
 
-**`deploy --systemd-service`** delegates lifecycle entirely to systemd (see [Systemd / Quadlet](#systemd--quadlet) below). Kreuzberg gets its own Quadlet unit; the main service declares `Requires=` on it so systemd starts them in order.
+- `start` / `deploy` (without `--systemd-service`) → starts kreuzberg and Qdrant sidecars, pulls images, stops any existing sidecars with the same name, and runs them with the correct `--network-alias`. Sidecars are named `<app-container>-kreuzberg` and `<app-container>-qdrant`.
+- `stop` → stops and removes both sidecars.
+- `restart` → stops and restarts the app container and both sidecars.
+- Pass `--no-kreuzberg` to skip kreuzberg (if running it separately); pass `--no-qdrant` to skip the Qdrant sidecar (falls back to local file mode).
+
+**`deploy --systemd-service`** delegates lifecycle entirely to systemd (see [Systemd / Quadlet](#systemd--quadlet) below). Each sidecar gets its own Quadlet unit; the main service declares `Requires=` on both so systemd starts them in the correct order.
 
 ### Environment variable handoff
 
-The backend learns where to find kreuzberg via `KREUZBERG_URL`:
+The backend locates its sidecars via environment variables:
 
-| Approach | Where it is set |
-| -------- | --------------- |
-| `docker compose` | Hard-coded in `docker-compose.yml`: `KREUZBERG_URL: http://kreuzberg:8100` |
-| `bin/container.mjs` | Injected at runtime: `extraEnv.push({ key: 'KREUZBERG_URL', value: 'http://kreuzberg:8100' })` |
+| Variable | Sidecar | Approach | Where it is set |
+| -------- | ------- | -------- | --------------- |
+| `KREUZBERG_URL` | kreuzberg | `docker compose` | Hard-coded in `docker-compose.yml` |
+| `KREUZBERG_URL` | kreuzberg | `bin/container.mjs` | Injected at runtime via `extraEnv` |
+| `QDRANT_URL` | qdrant | `docker compose` | Hard-coded in `docker-compose.yml` |
+| `QDRANT_URL` | qdrant | `bin/container.mjs` | Injected at runtime via `extraEnv` |
+| `UVICORN_WORKERS` | — | `docker compose` | Passed from host env / `.env` (default `4`) |
+| `UVICORN_WORKERS` | — | `bin/container.mjs` | Pass via `--env UVICORN_WORKERS=N` |
+
+When `QDRANT_URL` is **not set**, the backend falls back to local embedded Qdrant file mode (`QdrantClient(path=...)`). This mode is incompatible with `--workers > 1` due to file-lock contention, so the Dockerfile uses a single worker in that case.
 
 ### When to use which
 
@@ -124,15 +138,17 @@ COPY backend/ ./backend/
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH=/app
 VOLUME /data
-ENV VECTOR_DB_PATH=/data/qdrant
 ENV MODEL_WEIGHTS_PATH=/data/models
 ENV LOG_FILE=/data/logs/server.log
 ENV KREUZBERG_URL=http://kreuzberg:8100
+ENV UVICORN_WORKERS=4
 EXPOSE 8119
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8119"]
+CMD uvicorn backend.main:app --host 0.0.0.0 --port 8119 --workers ${UVICORN_WORKERS}
 ```
 
 OCR (Tesseract) lives in the kreuzberg sidecar — the main image stays slim.
+
+The worker count is controlled by `UVICORN_WORKERS` (default `4`). Multiple workers require the Qdrant sidecar — set `UVICORN_WORKERS=1` when running without it (`--no-qdrant` / local embedded file mode).
 
 ### Build arguments
 
@@ -181,11 +197,11 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
 | ------- | ----------- |
 | `build [options]` | Build main image locally |
 | `push [options]` | Tag + push to registry (reads `DOCKER_HUB_USERNAME`/`DOCKER_HUB_TOKEN` from `.env`) |
-| `start [options]` | Start kreuzberg sidecar + app container; auto-detects local → registry image |
-| `stop [options]` | Stop app container and its kreuzberg sidecar |
-| `restart [options]` | Stop + start both containers |
+| `start [options]` | Start kreuzberg + Qdrant sidecars + app container; auto-detects local → registry image |
+| `stop [options]` | Stop app container and its sidecars |
+| `restart [options]` | Stop + start all containers |
 | `logs [options]` | Stream app or sidecar logs |
-| `deploy [options]` | Pull/rebuild → start both containers → nginx config → SSL cert (Linux only for nginx/SSL) |
+| `deploy [options]` | Pull/rebuild → start all containers → nginx config → SSL cert (Linux only for nginx/SSL) |
 
 ### `build` / `push` options
 
@@ -205,12 +221,14 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
 | `--tag TAG` | `latest` | Image tag |
 | `--name NAME` | `zotero-rag-<tag>` | Container name |
 | `--port PORT` | `8119` | Host port |
-| `--data-dir DIR` | — | Host path mounted at `/data`; sets `VECTOR_DB_PATH` and `MODEL_WEIGHTS_PATH` |
+| `--data-dir DIR` | — | Host path mounted at `/data`; sets `MODEL_WEIGHTS_PATH` (and Qdrant storage if `--qdrant-data-dir` is unset) |
+| `--qdrant-data-dir DIR` | — | Override Qdrant storage path (default: `<data-dir>/qdrant-server`) |
 | `--env KEY[=VAL]` | — | Extra env vars (repeatable); `KEY` alone transfers from host |
 | `--volume HOST:CTR` | — | Extra volume mounts (repeatable) |
 | `--restart POLICY` | — | Docker restart policy |
 | `--no-detach` | — | Run in foreground |
 | `--no-kreuzberg` | — | Skip kreuzberg sidecar (use if running kreuzberg separately) |
+| `--no-qdrant` | — | Skip Qdrant sidecar; falls back to local embedded file mode |
 
 ### `deploy` options
 
@@ -226,11 +244,14 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
 | `--no-cache` | — | Disable layer cache (use with `--rebuild`) |
 | `--local-models` | — | Install local-inference deps when rebuilding |
 | `--platform PLATFORM` | — | Target platform when rebuilding |
+| `--qdrant-data-dir DIR` | — | Override Qdrant storage path (default: `<data-dir>/qdrant-server`) |
 | `--no-nginx` | — | Skip nginx configuration |
 | `--no-ssl` | — | Skip SSL certificate setup |
 | `--email EMAIL` | `admin@<fqdn>` | Email for certbot |
-| `--systemd-service NAME` | — | Register both containers as Quadlet systemd services (requires sudo) |
+| `--systemd-service NAME` | — | Register all three containers as Quadlet systemd services (requires sudo) |
 | `--shared-kreuzberg NAME` | — | Depend on an existing kreuzberg service instead of creating one |
+| `--shared-qdrant NAME` | — | Depend on an existing Qdrant service instead of creating one |
+| `--no-qdrant` | — | Skip Qdrant sidecar; falls back to local embedded file mode |
 | `--yes` | — | Skip confirmation prompt |
 
 ### Platform handling
@@ -264,6 +285,8 @@ node bin/deploy.mjs .env.deploy.myserver
 | `DEPLOY_LOCAL_MODELS=true` | `--local-models` |
 | `DEPLOY_SYSTEMD_SERVICE` | `--systemd-service` |
 | `DEPLOY_SHARED_KREUZBERG` | `--shared-kreuzberg` |
+| `DEPLOY_SHARED_QDRANT` | `--shared-qdrant` |
+| `DEPLOY_QDRANT_DATA_DIR` | `--qdrant-data-dir` |
 | Everything else | `--env KEY` (value loaded from env via `dotenv.config`) |
 
 If `DEPLOY_FQDN` is unset or equals `localhost`/`127.0.0.1`, the script
@@ -286,9 +309,10 @@ For `--systemd-service zotero-rag`:
 | File | Service | Purpose |
 | ---- | ------- | ------- |
 | `/etc/containers/systemd/zotero-rag-kreuzberg.container` | `zotero-rag-kreuzberg.service` | Kreuzberg sidecar |
+| `/etc/containers/systemd/zotero-rag-qdrant.container` | `zotero-rag-qdrant.service` | Qdrant vector DB sidecar |
 | `/etc/containers/systemd/zotero-rag.container` | `zotero-rag.service` | Main backend |
 
-The main service declares `Requires=zotero-rag-kreuzberg.service` so systemd starts them in the correct order.
+The main service declares `Requires=zotero-rag-kreuzberg.service` and `Requires=zotero-rag-qdrant.service` so systemd starts all three in the correct order.
 
 ### Shared kreuzberg
 
@@ -309,8 +333,10 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .env.deploy.instance2
 systemctl status zotero-rag
 journalctl -u zotero-rag -f
 journalctl -u zotero-rag-kreuzberg -f
-systemctl restart zotero-rag        # restarts app only
-systemctl restart zotero-rag-kreuzberg  # restarts sidecar (cascades to app via Requires)
+journalctl -u zotero-rag-qdrant -f
+systemctl restart zotero-rag             # restarts app only
+systemctl restart zotero-rag-kreuzberg   # restarts kreuzberg (cascades to app via Requires)
+systemctl restart zotero-rag-qdrant      # restarts Qdrant (cascades to app via Requires)
 ```
 
 ---
