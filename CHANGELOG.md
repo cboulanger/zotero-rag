@@ -1,3 +1,10 @@
+## [1.9.1](https://github.com/cboulanger/zotero-rag/compare/v1.9.0...v1.9.1) (2026-04-20)
+
+
+### Bug Fixes
+
+* Fix qdrant image name ([46e48dc](https://github.com/cboulanger/zotero-rag/commit/46e48dc772fc108cc97961a60162c73e80bcf687))
+
 # [1.9.0](https://github.com/cboulanger/zotero-rag/compare/v1.8.2...v1.9.0) (2026-04-19)
 
 
