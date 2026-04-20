@@ -573,6 +573,11 @@ class ZoteroRAGPlugin {
 		// Save note
 		await note.saveTx();
 
+		// Open the note in a separate window and resize it
+		zoteroPane.openNoteWindow(note.id);
+		const noteWin = zoteroPane.findNoteWindow(note.id);
+		if (noteWin) noteWin.resizeTo(900, 700);
+
 		return note;
 	}
 

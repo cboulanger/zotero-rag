@@ -55,6 +55,8 @@ declare const Zotero: {
 interface ZoteroPane {
 	getSelectedLibraryID(): number | null;
 	getSelectedCollection(): ZoteroCollection | null;
+	openNoteWindow(itemID: number, col?: number, parentKey?: string): void;
+	findNoteWindow(itemID: number): Window | undefined;
 }
 
 interface ZoteroLibrary {
