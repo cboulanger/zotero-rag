@@ -1,3 +1,13 @@
+# [1.10.0](https://github.com/cboulanger/zotero-rag/compare/v1.9.2...v1.10.0) (2026-04-20)
+
+
+### Features
+
+* Add tool to fix unavailable attachments ([47a1a47](https://github.com/cboulanger/zotero-rag/commit/47a1a47edc5c32c099df12f32bebe0067007c9c7))
+* Add UI for number of sources to consider ([67544d5](https://github.com/cboulanger/zotero-rag/commit/67544d5eb5fa39b4b2d4de103686f7e61d2c7fde))
+* Index abstracts is there is no attachment ([f3dad16](https://github.com/cboulanger/zotero-rag/commit/f3dad16189fb4d63e5e9359de235f6fb7f7a47d7))
+* Open RAG result note in separate window ([610f13f](https://github.com/cboulanger/zotero-rag/commit/610f13fd94cb3f07c7a1233a38baf08cc65cef73))
+
 ## [1.9.2](https://github.com/cboulanger/zotero-rag/compare/v1.9.1...v1.9.2) (2026-04-20)
 
 
