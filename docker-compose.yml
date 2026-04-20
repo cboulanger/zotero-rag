@@ -25,7 +25,7 @@ services:
       - internal
 
   qdrant:
-    image: qdrant/qdrant:v1.15
+    image: docker.io/qdrant/qdrant:v1.15
     restart: unless-stopped
     volumes:
       - "${DATA_DIR:-./data}/qdrant-server:/qdrant/storage"

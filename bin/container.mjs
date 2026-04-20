@@ -60,7 +60,7 @@ const APP_NAME = 'zotero-rag';
 const REGISTRY = 'docker.io/cboulanger/zotero-rag';
 const KREUZBERG_IMAGE = 'ghcr.io/kreuzberg-dev/kreuzberg:latest';
 const KREUZBERG_PORT = 8000;
-const QDRANT_IMAGE = 'qdrant/qdrant:v1.15';
+const QDRANT_IMAGE = 'docker.io/qdrant/qdrant:v1.15';
 const QDRANT_PORT = 6333;
 const DEFAULT_PORT = 8119;
 const CONTAINER_PORT = 8119;
@@ -934,6 +934,7 @@ function buildQdrantLegacyUnitContent(containerName, networkName, volumePath) {
     'Restart=always',
     'RestartSec=5',
     `ExecStartPre=-/usr/bin/podman rm -f ${containerName}`,
+    ...(volumePath ? [`ExecStartPre=mkdir -p ${volumePath}`] : []),
     `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias qdrant ${volumeArg}${QDRANT_IMAGE}`,
     `ExecStop=/usr/bin/podman stop ${containerName}`,
     '',
