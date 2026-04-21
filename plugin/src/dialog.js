@@ -446,7 +446,7 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Return true when every selected library needs (re-)indexing — either never
+	 * Return true when at least one selected library needs (re-)indexing — either never
 	 * indexed or only partially indexed (indexed count < indexable count).
 	 * In this mode the question box is hidden and the button says "Index".
 	 * @returns {boolean}
@@ -454,20 +454,19 @@ var ZoteroRAGDialog = {
 	isIndexOnlyMode() {
 		if (this.selectedLibraries.size === 0) return false;
 		for (const id of this.selectedLibraries) {
-			// If metadata hasn't loaded yet, assume indexed (optimistic — avoids flicker)
-			if (!this.libraryMetadata.has(id)) return false;
+			// If metadata hasn't loaded yet, skip (optimistic — avoids flicker)
+			if (!this.libraryMetadata.has(id)) continue;
 			const metadata = this.libraryMetadata.get(id);
-			if (metadata == null) continue; // never indexed — counts as needing indexing
+			if (metadata == null) return true; // never indexed — needs indexing
 			// A library is "complete" when indexed count reaches the effective total
 			// (total indexable minus permanently unavailable items).
 			const totalIndexable = this.libraryIndexableCount.get(id);
 			const unavailable = this.libraryUnavailableCount.get(id) || 0;
 			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
-			if (effectiveTotal !== undefined && metadata.total_items_indexed >= effectiveTotal) return false;
-			if (effectiveTotal === undefined && metadata.total_items_indexed > 0) return false;
-			// indexed < effectiveTotal → still incomplete, needs (re-)indexing
+			if (effectiveTotal !== undefined && metadata.total_items_indexed < effectiveTotal) return true;
+			if (effectiveTotal === undefined && metadata.total_items_indexed === 0) return true;
 		}
-		return true;
+		return false;
 	},
 
 	/**
@@ -859,8 +858,8 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Index-only submit: triggered when all selected libraries are unindexed.
-	 * Runs a full index, then refreshes metadata and switches to normal Submit mode.
+	 * Index-only submit: triggered when at least one selected library is unindexed.
+	 * Indexes all unindexed/partial libraries, then refreshes metadata and switches to Submit mode.
 	 * @returns {Promise<void>}
 	 */
 	async submitIndexOnly() {
@@ -871,7 +870,17 @@ var ZoteroRAGDialog = {
 		this.setCancelMode('abort');
 		this.showProgress('Indexing...', 'Starting full index...');
 
-		const libraryIds = Array.from(this.selectedLibraries);
+		// Only index libraries that actually need it (unindexed or partially indexed)
+		const libraryIds = Array.from(this.selectedLibraries).filter(id => {
+			if (!this.libraryMetadata.has(id)) return false;
+			const metadata = this.libraryMetadata.get(id);
+			if (metadata == null) return true;
+			const totalIndexable = this.libraryIndexableCount.get(id);
+			const unavailable = this.libraryUnavailableCount.get(id) || 0;
+			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+			if (effectiveTotal !== undefined) return metadata.total_items_indexed < effectiveTotal;
+			return metadata.total_items_indexed === 0;
+		});
 
 		try {
 			await this.checkAndMonitorIndexing(libraryIds, 'full');
