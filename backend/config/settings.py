@@ -8,7 +8,7 @@ hardware presets and storage paths.
 import os
 from pathlib import Path
 from typing import Optional
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from backend.__version__ import __version__
@@ -87,15 +87,25 @@ class Settings(BaseSettings):
                     "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
     )
 
-    model_weights_path: Path = Field(
-        default_factory=lambda: Path.home() / ".cache" / "zotero-rag" / "models",
-        description="Path to store model weights"
+    # Data storage — all paths default to subdirs of data_path
+    data_path: Path = Field(
+        default_factory=lambda: Path(__file__).parent.parent.parent / "data",
+        description="Base directory for all persistent data (models, vector DB, logs, system). "
+                    "Defaults to <project_root>/data. Override individual paths below if needed."
+    )
+    model_weights_path: Optional[Path] = Field(
+        default=None,
+        description="Path to store model weights. Defaults to <data_path>/models."
+    )
+    vector_db_path: Optional[Path] = Field(
+        default=None,
+        description="Path to Qdrant vector database (local file mode only). Defaults to <data_path>/qdrant."
+    )
+    registrations_path: Optional[Path] = Field(
+        default=None,
+        description="Path to the library/user registrations JSON file. Defaults to <data_path>/system/registrations.json."
     )
 
-    vector_db_path: Path = Field(
-        default_factory=lambda: Path.home() / ".local" / "share" / "zotero-rag" / "qdrant",
-        description="Path to Qdrant vector database (used in local file mode only)"
-    )
     qdrant_url: Optional[str] = Field(
         default=None,
         description="Qdrant server URL (e.g. http://qdrant:6333). If set, uses server mode instead of local file mode."
@@ -104,8 +114,14 @@ class Settings(BaseSettings):
     # Logging Configuration
     log_level: str = Field(default="INFO", description="Logging level")
     log_file: Optional[Path] = Field(
-        default_factory=lambda: Path.home() / ".local" / "share" / "zotero-rag" / "logs" / "server.log",
-        description="Path to log file"
+        default=None,
+        description="Path to log file. Defaults to <data_path>/logs/server.log."
+    )
+
+    require_registration: bool = Field(
+        default=True,
+        description="Require users to register before indexing. "
+                    "Automatically skipped when api_host is localhost or 127.0.0.1."
     )
 
     testing: bool = Field(
@@ -116,17 +132,29 @@ class Settings(BaseSettings):
     # Application version
     version: str = Field(default=__version__, description="Backend version")
 
-    @field_validator("model_weights_path", "vector_db_path", "log_file", mode="before")
+    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", mode="before")
     @classmethod
     def expand_path(cls, v):
         """Expand user home directory in paths."""
         if v is None:
             return v
         path_str = str(v)
-        # Expand ~ to home directory
         if path_str.startswith("~"):
             path_str = os.path.expanduser(path_str)
         return Path(path_str)
+
+    @model_validator(mode="after")
+    def set_derived_paths(self) -> "Settings":
+        """Fill in paths that were not explicitly set, using data_path as base."""
+        if self.model_weights_path is None:
+            self.model_weights_path = self.data_path / "models"
+        if self.vector_db_path is None:
+            self.vector_db_path = self.data_path / "qdrant"
+        if self.log_file is None:
+            self.log_file = self.data_path / "logs" / "server.log"
+        if self.registrations_path is None:
+            self.registrations_path = self.data_path / "system" / "registrations.json"
+        return self
 
     @field_validator("log_level")
     @classmethod
@@ -144,11 +172,13 @@ class Settings(BaseSettings):
 
     def ensure_directories(self):
         """Create necessary directories if they don't exist."""
+        self.data_path.mkdir(parents=True, exist_ok=True)
         self.model_weights_path.mkdir(parents=True, exist_ok=True)
         self.vector_db_path.mkdir(parents=True, exist_ok=True)
-
         if self.log_file:
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.registrations_path:
+            self.registrations_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_api_key(self, env_var_name: str) -> Optional[str]:
         """

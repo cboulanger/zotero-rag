@@ -1042,6 +1042,19 @@ var ZoteroRAGDialog = {
 		if (!backendURL) return;
 		const plugin = this.plugin;
 
+		// Register all libraries with the backend before indexing (skipped on localhost)
+		if (!this.plugin.isLocalBackend()) {
+			for (const libraryId of libraryIds) {
+				const lib = this.plugin.getLibraries().find(l => l.id === libraryId);
+				try {
+					await this.plugin.registerLibrary(libraryId, lib ? lib.name : libraryId);
+				} catch (err) {
+					this.showStatus(err instanceof Error ? err.message : String(err), 'error');
+					return;
+				}
+			}
+		}
+
 		for (let libraryId of libraryIds) {
 			try {
 				const libraries = this.plugin.getLibraries();
@@ -1059,6 +1072,7 @@ var ZoteroRAGDialog = {
 					libraryName,
 					backendURL,
 					mode,
+					userId: this.plugin.getCurrentZoteroUserId(),
 					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {

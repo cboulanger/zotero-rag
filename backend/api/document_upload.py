@@ -28,7 +28,8 @@ from backend.models.document import (
 )
 from backend.models.library import LibraryIndexMetadata
 from backend.services.document_processor import DocumentProcessor
-from backend.config.settings import get_settings
+from backend.services.registration_service import RegistrationService
+from backend.config.settings import Settings, get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -99,6 +100,32 @@ class AbstractIndexRequest(BaseModel):
     zotero_modified: str = ""
     abstract_text: str
     library_name: str = ""
+    user_id: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _check_registration(library_id: str, user_id: Optional[int], settings: Settings) -> None:
+    """Raise 403 if registration is required and the user is not registered.
+
+    Skipped when api_host is localhost/127.0.0.1 or REQUIRE_REGISTRATION=false.
+    """
+    if not settings.require_registration:
+        return
+    if settings.api_host in ("localhost", "127.0.0.1"):
+        return
+    service = RegistrationService(settings.registrations_path)
+    if not service.is_registered(library_id, user_id):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Library not registered for this user. "
+                "Please update the plugin to the newest version."
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +297,8 @@ async def upload_and_index_document(
     library_id: str = meta_dict["library_id"]
     item_key: str = meta_dict["item_key"]
     attachment_key: str = meta_dict["attachment_key"]
+    user_id: Optional[int] = meta_dict.get("user_id")
+    _check_registration(library_id, user_id, get_settings())
     library_type: str = meta_dict.get("library_type", "user")
     mime_type: str = meta_dict.get("mime_type", "application/pdf")
     item_version: int = int(meta_dict.get("item_version", 0))
@@ -405,6 +434,7 @@ async def upload_and_index_abstract(
     The abstract must meet the configured minimum word count (MIN_ABSTRACT_WORDS).
     """
     settings = get_settings()
+    _check_registration(request.library_id, request.user_id, settings)
     word_count = len(request.abstract_text.split())
     if word_count < settings.min_abstract_words:
         raise HTTPException(

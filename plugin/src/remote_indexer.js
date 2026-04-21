@@ -55,6 +55,7 @@ var RemoteIndexer = {
 	 * @param {string} opts.libraryName - Human-readable library name
 	 * @param {string} opts.backendURL - Backend base URL
 	 * @param {string} [opts.mode] - Indexing mode: "auto" | "incremental" | "full" (currently unused server-side)
+	 * @param {number|null} [opts.userId] - Numeric zotero.org user ID of the indexing user
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {function(UploadProgress): void} opts.onProgress
@@ -64,7 +65,7 @@ var RemoteIndexer = {
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, firstError: string|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
 
 		// 1. Collect all indexable attachments from the local Zotero database.
@@ -203,7 +204,7 @@ var RemoteIndexer = {
 			});
 
 			try {
-				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal });
+				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
 				uploaded++;
 				versionCache[att.attachment_key] = att.item_version;
 			} catch (err) {
@@ -243,7 +244,7 @@ var RemoteIndexer = {
 			});
 
 			try {
-				await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal });
+				await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
 				uploaded++;
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
 			} catch (err) {
@@ -472,12 +473,13 @@ var RemoteIndexer = {
 	 * @param {string} opts.libraryType
 	 * @param {string} opts.libraryName
 	 * @param {string} opts.backendURL
+	 * @param {number|null} [opts.userId]
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
 	 * @returns {Promise<void>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal }) {
+	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -503,6 +505,7 @@ var RemoteIndexer = {
 			year: this._extractYear(parent),
 			item_type: parent.itemType || null,
 			zotero_modified: parent.dateModified || new Date().toISOString(),
+			user_id: userId ?? null,
 		};
 
 		const formData = new FormData();
@@ -693,12 +696,13 @@ var RemoteIndexer = {
 	 * @param {string} opts.libraryType
 	 * @param {string} opts.libraryName
 	 * @param {string} opts.backendURL
+	 * @param {number|null} [opts.userId]
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
 	 * @returns {Promise<void>}
 	 */
-	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, getAuthHeaders, log, signal }) {
+	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		const item = abstractItem.zoteroItem;
 		const body = {
 			library_id: libraryId,
@@ -712,6 +716,7 @@ var RemoteIndexer = {
 			item_type: item.itemType || null,
 			zotero_modified: item.dateModified || new Date().toISOString(),
 			abstract_text: abstractItem.abstractNote,
+			user_id: userId ?? null,
 		};
 
 		const abstractTimeoutMs = 2 * 60 * 1000;

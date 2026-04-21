@@ -518,6 +518,57 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Return true if the configured backend URL is a localhost address.
+	 * @returns {boolean}
+	 */
+	isLocalBackend() {
+		try {
+			const h = new URL(this.backendURL).hostname;
+			return h === 'localhost' || h === '127.0.0.1';
+		} catch {
+			return true;
+		}
+	}
+
+	/**
+	 * Return the numeric zotero.org user ID of the currently synced user, or null.
+	 * @returns {number|null}
+	 */
+	getCurrentZoteroUserId() {
+		const id = Zotero.Users.getCurrentUserID();
+		return id ? Number(id) : null;
+	}
+
+	/**
+	 * Register a library and the current zotero.org user with the backend.
+	 *
+	 * @param {string} libraryId
+	 * @param {string} libraryName
+	 * @returns {Promise<{exists: boolean}>}
+	 * @throws {Error} If the user has no Zotero sync account or registration fails
+	 */
+	async registerLibrary(libraryId, libraryName) {
+		const userId = this.getCurrentZoteroUserId();
+		const username = Zotero.Users.getCurrentUsername();
+		if (!userId || !username) {
+			throw new Error(
+				'Zotero user not found. Please set up synchronization with zotero.org ' +
+				'in Zotero Preferences > Sync.'
+			);
+		}
+		const response = await fetch(`${this.backendURL}/api/register`, {
+			method: 'POST',
+			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ library_id: libraryId, library_name: libraryName, user_id: userId, username })
+		});
+		if (!response.ok) {
+			const err = await response.json().catch(() => ({}));
+			throw new Error(`Registration failed: ${err.detail || response.status}`);
+		}
+		return response.json();
+	}
+
+	/**
 	 * Show error message to user.
 	 * @param {string} message - Error message
 	 * @returns {void}

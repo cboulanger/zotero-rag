@@ -14,7 +14,7 @@ from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
-from backend.api import config, libraries, indexing, query, document_upload
+from backend.api import config, libraries, indexing, query, document_upload, registration
 
 # Get settings to access log configuration
 settings = get_settings()
@@ -168,6 +168,7 @@ app.include_router(libraries.router, prefix="/api", tags=["libraries"])
 app.include_router(indexing.router, prefix="/api", tags=["indexing"])
 app.include_router(query.router, prefix="/api", tags=["query"])
 app.include_router(document_upload.router, prefix="/api", tags=["document-upload"])
+app.include_router(registration.router, prefix="/api", tags=["registration"])
 
 
 @app.get("/")
