@@ -62,6 +62,8 @@ var ZoteroFixUnavailableDialog = {
 
 		document.getElementById('close-btn').addEventListener('click', () => window.close());
 		document.getElementById('search-btn').addEventListener('click', () => this.searchAndFix());
+		document.getElementById('delete-btn').addEventListener('click', () => this.deleteSelected());
+		document.getElementById('refresh-btn').addEventListener('click', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('header-checkbox').addEventListener('change', (e) => {
 			this.setAllChecked(/** @type {HTMLInputElement} */ (e.target).checked);
 		});
@@ -89,9 +91,10 @@ var ZoteroFixUnavailableDialog = {
 		tbody.innerHTML = '';
 
 		if (this.items.length === 0) {
-			const row = document.createElement('tr');
-			const cell = document.createElement('td');
-			cell.colSpan = 6;
+			const row = document.createElement('div');
+			row.className = 'table-row';
+			const cell = document.createElement('div');
+			cell.style.flex = '1';
 			cell.style.textAlign = 'center';
 			cell.style.padding = '20px';
 			cell.style.color = '#666';
@@ -104,11 +107,12 @@ var ZoteroFixUnavailableDialog = {
 
 		for (let i = 0; i < this.items.length; i++) {
 			const info = this.items[i];
-			const row = document.createElement('tr');
+			const row = document.createElement('div');
+			row.className = 'table-row';
 			row.dataset.index = String(i);
 
 			// Checkbox
-			const tdCheck = document.createElement('td');
+			const tdCheck = document.createElement('div');
 			tdCheck.className = 'col-check';
 			const cb = document.createElement('input');
 			cb.type = 'checkbox';
@@ -119,44 +123,54 @@ var ZoteroFixUnavailableDialog = {
 			row.appendChild(tdCheck);
 
 			// Author(s)
-			const tdAuth = document.createElement('td');
+			const tdAuth = document.createElement('div');
+			tdAuth.className = 'col-author';
 			tdAuth.textContent = info.authors || '—';
+			tdAuth.title = info.authors || '';
 			row.appendChild(tdAuth);
 
 			// Year
-			const tdYear = document.createElement('td');
+			const tdYear = document.createElement('div');
+			tdYear.className = 'col-year';
 			tdYear.textContent = info.year || '—';
 			row.appendChild(tdYear);
 
 			// Title
-			const tdTitle = document.createElement('td');
-			tdTitle.className = 'truncate';
+			const tdTitle = document.createElement('div');
+			tdTitle.className = 'col-title';
 			tdTitle.textContent = info.title || '—';
 			tdTitle.title = info.title || '';
 			row.appendChild(tdTitle);
 
 			// Zotero ID
-			const tdKey = document.createElement('td');
+			const tdKey = document.createElement('div');
+			tdKey.className = 'col-key';
 			tdKey.textContent = info.zoteroID;
 			row.appendChild(tdKey);
 
 			// Filename
-			const tdFile = document.createElement('td');
+			const tdFile = document.createElement('div');
 			tdFile.className = 'col-filename';
 			const filename = info.attachmentItem.attachmentFilename || '';
 			tdFile.textContent = filename;
 			tdFile.title = filename;
 			row.appendChild(tdFile);
 
+			// File type
+			const tdType = document.createElement('div');
+			tdType.className = 'col-type';
+			tdType.textContent = this.getFileTypeLabel(info.attachmentItem);
+			row.appendChild(tdType);
+
 			// Status
-			const tdStatus = document.createElement('td');
+			const tdStatus = document.createElement('div');
 			tdStatus.className = 'status-cell col-status';
 			tdStatus.id = `status-${i}`;
 			tdStatus.textContent = '';
 			row.appendChild(tdStatus);
 
 			// Select-in-Zotero button
-			const tdSelect = document.createElement('td');
+			const tdSelect = document.createElement('div');
 			tdSelect.className = 'col-select';
 			const selectBtn = document.createElement('button');
 			selectBtn.className = 'select-btn';
@@ -169,6 +183,8 @@ var ZoteroFixUnavailableDialog = {
 			tbody.appendChild(row);
 		}
 
+		// Sync header checkbox with row checkboxes (all checked by default)
+		/** @type {HTMLInputElement} */ (document.getElementById('header-checkbox')).checked = this.items.length > 0;
 		this.updateSearchButton();
 		this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
 	},
@@ -196,7 +212,9 @@ var ZoteroFixUnavailableDialog = {
 		if (this.isRunning) return;
 		const anyChecked = Array.from(document.querySelectorAll('#items-tbody input[type="checkbox"]'))
 			.some(cb => /** @type {HTMLInputElement} */ (cb).checked);
-		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = !anyChecked || this.items.length === 0;
+		const hasItems = this.items.length > 0;
+		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = !anyChecked || !hasItems;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = !anyChecked || !hasItems;
 	},
 
 	/**
@@ -221,6 +239,61 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
+	 * Permanently delete the parent items of all selected rows after user confirmation.
+	 * @returns {Promise<void>}
+	 */
+	async deleteSelected() {
+		if (this.isRunning) return;
+		const checkboxes = /** @type {NodeListOf<HTMLInputElement>} */ (
+			document.querySelectorAll('#items-tbody input[type="checkbox"]')
+		);
+		const selected = Array.from(checkboxes)
+			.map((cb, i) => ({ cb, index: i }))
+			.filter(({ cb }) => cb.checked);
+		if (selected.length === 0) return;
+
+		const confirmed = window.confirm(
+			`Do you really want to permanently delete ${selected.length} item${selected.length !== 1 ? 's' : ''}? This cannot be undone.`
+		);
+		if (!confirmed) return;
+
+		this.isRunning = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = true;
+		this.setStatus(`Deleting ${selected.length} item${selected.length !== 1 ? 's' : ''}...`);
+
+		try {
+			// Collect unique parent item IDs (delete parent, not just the attachment)
+			const parentIDs = [...new Set(
+				selected
+					.map(({ index }) => this.items[index].parentItem?.id)
+					.filter(/** @type {(id: any) => id is number} */ (id) => typeof id === 'number')
+			)];
+			// @ts-ignore - Zotero.Items.erase exists at runtime
+			await Zotero.Items.erase(parentIDs);
+			this.setStatus(`Deleted ${parentIDs.length} item${parentIDs.length !== 1 ? 's' : ''}.`);
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			this.setStatus(`Delete failed: ${msg}`);
+			console.error('deleteSelected failed:', msg);
+		}
+
+		this.isRunning = false;
+		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
+		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
+		// Refresh the table — deleted items should no longer appear
+		await this.populateTable();
+		// Refresh toolbar badge
+		try {
+			if (window.opener && this.plugin) {
+				this.plugin._scanUnavailableCount(window.opener);
+			}
+		} catch (_) {}
+	},
+
+	/**
 	 * Run the search-and-fix operation on all selected rows.
 	 * Phase 1 (parallel): try Zotero sync download for every selected item.
 	 * Phase 2 (sequential): for items still unavailable, search other libraries by filename/MD5 and copy.
@@ -230,7 +303,9 @@ var ZoteroFixUnavailableDialog = {
 		if (this.isRunning) return;
 		this.isRunning = true;
 		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
 		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = true;
 
 		const checkboxes = /** @type {NodeListOf<HTMLInputElement>} */ (
 			document.querySelectorAll('#items-tbody input[type="checkbox"]')
@@ -328,6 +403,8 @@ var ZoteroFixUnavailableDialog = {
 
 		this.isRunning = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
+		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = false;
 		this.updateSearchButton();
 
 		// Refresh toolbar label count
@@ -346,6 +423,23 @@ var ZoteroFixUnavailableDialog = {
 	 * @param {string} [tooltip]
 	 * @returns {void}
 	 */
+	/**
+	 * Return a short label for the attachment file type.
+	 * @param {*} attachmentItem
+	 * @returns {string}
+	 */
+	getFileTypeLabel(attachmentItem) {
+		const mime = attachmentItem.attachmentContentType || '';
+		if (mime === 'application/pdf') return 'PDF';
+		if (mime === 'text/html') return 'HTML';
+		if (mime === 'application/epub+zip') return 'EPUB';
+		if (mime.startsWith('image/')) return mime.slice(6).toUpperCase();
+		// Fall back to file extension
+		const filename = attachmentItem.attachmentFilename || '';
+		const ext = filename.includes('.') ? filename.split('.').pop().toUpperCase() : '';
+		return ext || mime.split('/').pop() || '?';
+	},
+
 	setRowStatus(index, cssClass, text, tooltip = '') {
 		const cell = document.getElementById(`status-${index}`);
 		if (!cell) return;

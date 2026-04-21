@@ -233,7 +233,7 @@ var RemoteIndexer = {
 			this._saveVersionCache(libraryId, versionCache);
 		}
 
-		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped}, No file: ${noFile}, Errors: ${errors}`, current: total, total });
+		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}`, current: total, total });
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}`);
 		return { uploaded, skipped, noFile, errors, firstError };
 	},

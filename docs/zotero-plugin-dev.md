@@ -474,6 +474,170 @@ npm run plugin:build
 # Output: plugin/dist/zotero-rag-{version}.xpi
 ```
 
+## Useful Zotero APIs
+
+APIs discovered through development and source-code research. These are often undocumented or hard to find — add new entries here whenever you discover an API that isn't covered by the official docs.
+
+### Items
+
+```javascript
+// Check whether the attachment's local file exists
+await item.fileExists()                         // Promise<boolean>
+
+// Get the full local file path (null if missing)
+await item.getFilePathAsync()                   // Promise<string|null>
+
+// Attachment properties
+item.attachmentFilename                         // filename only (no directory), e.g. "paper.pdf"
+item.attachmentSyncedHash                       // MD5 hex string; only set by Zotero File Storage, NOT WebDAV
+item.attachmentContentType                      // MIME type string, e.g. "application/pdf"
+item.parentItemID                               // numeric ID of parent item, or false/null for top-level
+item.libraryID                                  // numeric library ID
+item.key                                        // 8-char alphanumeric Zotero key
+item.id                                         // numeric database ID
+item.deleted                                    // boolean — true if item is in the trash
+
+// Creators — returns raw DB objects, not typed strings
+item.getCreators()
+// → Array<{creatorTypeID: number, firstName: string, lastName: string, name: string, fieldMode: number}>
+// NOTE: no .creatorType string — use creatorTypeID or don't filter by type
+
+// Relations
+item.getRelations()                             // → Record<predicate, string|string[]>
+item.getRelationsByPredicate(predicate)         // → string[] of URIs
+
+// Attachment IDs on a regular item
+item.getAttachments()                           // → number[] of attachment itemIDs
+```
+
+### Relations
+
+```javascript
+Zotero.Relations.linkedObjectPredicate          // 'owl:sameAs'
+Zotero.Relations.replacedItemPredicate          // 'dc:replaces' URI
+
+// Resolve a Zotero URI to an item (cross-library)
+await Zotero.URI.getURIItem(uri)                // → Zotero.Item | null
+```
+
+### Attachments
+
+```javascript
+// Storage directory for an attachment (nsIFile)
+const dir = Zotero.Attachments.getStorageDirectory(attachmentItem)
+// dir.path → absolute path string
+
+// "Find Available PDF/File" pipeline — bypasses canFindFileForItem() check
+const resolvers = Zotero.Attachments.getFileResolvers(parentItem, methods, automatic)
+// methods defaults to ['doi', 'url', 'oa', 'custom']
+// returns array of resolver objects understood by downloadFirstAvailableFile()
+
+const { title, mimeType, url, props } =
+    await Zotero.Attachments.downloadFirstAvailableFile(resolvers, tmpFilePath, options)
+// Downloads the first successfully resolved file to tmpFilePath
+// options: { enforceFileType, onAccessMethodStart, onBeforeRequest, onRequestError }
+// Throws on failure; returns object with url=null if nothing found
+
+// High-level: find & attach a file to an item (creates a new attachment item)
+// NOTE: fails silently if item already has a PDF/EPUB attachment
+const newAtt = await Zotero.Attachments.addAvailableFile(item, { methods })
+// → Zotero.Item (new attachment) or false
+
+// canFindFileForItem: returns false if item already has a PDF/EPUB — often need to bypass
+Zotero.Attachments.canFindFileForItem(item)     // → boolean
+
+// Supported MIME types for the resolver pipeline
+Zotero.Attachments.FIND_AVAILABLE_FILE_TYPES    // ['application/pdf', 'application/epub+zip']
+
+// Temp directory scoped to an attachment storage pattern
+const { path: tmpDir } = await Zotero.Attachments.createTemporaryStorageDirectory()
+```
+
+### Sync
+
+```javascript
+// Check whether file sync is configured for a library
+Zotero.Sync.Storage.Local.getEnabledForLibrary(libraryID)   // → boolean
+// Returns false for libraries that only use Zotero sync metadata (no WebDAV / Zotero Storage)
+
+// Trigger a file download from WebDAV or Zotero Storage
+await Zotero.Sync.Runner.downloadFile(attachmentItem)
+// Does not return a meaningful value; check fileExists() afterwards
+// Throws on network error
+```
+
+### HTTP
+
+```javascript
+// Preferred over fetch() — honours Zotero proxy settings, cookies, and authentication
+const req = await Zotero.HTTP.request('GET', url, {
+    responseType: 'blob',       // 'blob' | 'arraybuffer' | 'text' | 'json'
+    followRedirects: false,     // optional
+    errorDelayMax: 0,           // optional
+})
+// req.status, req.response, req.getResponseHeader(name)
+// Throws Zotero.HTTP.UnexpectedStatusException on non-2xx when errorDelayMax is not 0
+```
+
+### Database
+
+```javascript
+// Direct SQL query — returns array of first-column values
+const ids = await Zotero.DB.columnQueryAsync(sql, [param1, param2])
+
+// Relevant itemAttachments columns:
+//   itemID        — FK to items.itemID
+//   linkMode      — 0=imported_file, 1=imported_url, 2=linked_file, 3=linked_url
+//   path          — "storage:<filename>" for imported attachments (linkMode 0/1)
+//   storageHash   — MD5 hex; only populated by Zotero File Storage, NULL for WebDAV
+//   contentType   — MIME type string
+```
+
+### Notifications (Notifier)
+
+```javascript
+// Watch for events (collection selection, item changes, etc.)
+const id = Zotero.Notifier.registerObserver(
+    { notify(event, type, ids, extraData) { /* ... */ } },
+    ['collection']   // array of type strings: 'item', 'collection', 'library', ...
+)
+Zotero.Notifier.unregisterObserver(id)
+```
+
+### Pane & Window
+
+```javascript
+const pane = Zotero.getActiveZoteroPane()
+pane.getSelectedLibraryID()     // → number
+await pane.selectItem(itemID)   // focuses item in item list, expanding parent if needed
+
+// Focus an already-open dialog window (if windowtype is registered)
+Services.wm.getMostRecentWindow('windowtype-string')   // → Window | null
+// NOTE: windowtype must be set on the document element; openDialog's name arg is NOT the windowtype
+
+// Window opened via openDialog
+window.arguments[0]             // args object passed as last arg to openDialog()
+window.opener                   // the window that called openDialog()
+window.closed                   // boolean — true after window.close()
+```
+
+### Utilities & Globals
+
+```javascript
+// Temporary directory (nsIFile)
+Zotero.getTempDirectory().path  // absolute path string
+
+// Cross-platform path helpers (Firefox/Zotero globals)
+PathUtils.join(a, b, ...)       // → string
+PathUtils.filename(path)        // → basename string
+
+// File I/O (Firefox/Zotero globals)
+await IOUtils.copy(srcPath, destPath)
+await IOUtils.makeDirectory(path, { createAncestors: true, ignoreExisting: true })
+await IOUtils.write(path, Uint8Array)
+await IOUtils.remove(path, { recursive: true })
+```
+
 ## References
 
 - Working example: `zotero-addons/addon/` directory shows HTML-based dialog with chrome protocol

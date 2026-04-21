@@ -1258,6 +1258,17 @@ var ZoteroRAGDialog = {
 	 * @param {Date} date - Date to format
 	 * @returns {string} Relative time string
 	 */
+	/**
+	 * Called by the plugin when a live scan finds a different unavailable count than the cached one.
+	 * Updates the in-memory map, prefs, and re-renders the status icon for the affected library.
+	 * @param {string} libraryId
+	 * @param {number} count
+	 */
+	onUnavailableCountUpdated(libraryId, count) {
+		this.libraryUnavailableCount.set(libraryId, count);
+		this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
+	},
+
 	formatTimeAgo(date) {
 		const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
 

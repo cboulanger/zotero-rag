@@ -285,6 +285,20 @@ class ZoteroRAGPlugin {
 			// Initial async scan
 			this._scanUnavailableCount(window);
 		}
+
+		// Wrap ZoteroPane.onCollectionSelected to detect both collection and library switches.
+		// This is the only reliable hook — the Notifier 'collection' select event does not fire
+		// when switching between libraries (only within a library).
+		const pane = /** @type {any} */ (window.ZoteroPane);
+		if (pane && !pane._zoteroRagOrigOnCollectionSelected) {
+			pane._zoteroRagOrigOnCollectionSelected = pane.onCollectionSelected;
+			pane.onCollectionSelected = async (/** @type {any[]} */ ...args) => {
+				const result = await pane._zoteroRagOrigOnCollectionSelected.apply(pane, args);
+				clearTimeout(this._unavailableScanTimeout);
+				this._unavailableScanTimeout = setTimeout(() => this._scanUnavailableCount(window), 150);
+				return result;
+			};
+		}
 	}
 
 	/**
@@ -296,25 +310,6 @@ class ZoteroRAGPlugin {
 		for (let win of windows) {
 			if (!win.ZoteroPane) continue;
 			this.addToWindow(win);
-		}
-		// Register a single notifier to refresh the unavailable-count label on collection selection
-		if (!this._unavailableNotifierID) {
-			// @ts-ignore - Zotero.Notifier exists at runtime
-			this._unavailableNotifierID = Zotero.Notifier.registerObserver(
-				{
-					notify: (/** @type {string} */ event) => {
-						if (event === 'select') {
-							clearTimeout(this._unavailableScanTimeout);
-							this._unavailableScanTimeout = setTimeout(() => {
-								for (const w of Zotero.getMainWindows()) {
-									if (w.ZoteroPane) this._scanUnavailableCount(w);
-								}
-							}, 400);
-						}
-					}
-				},
-				['collection']
-			);
 		}
 	}
 
@@ -342,6 +337,12 @@ class ZoteroRAGPlugin {
 			doc.getElementById(id)?.remove();
 		}
 		doc.querySelector('[href="zotero-rag.ftl"]')?.remove();
+		// Restore wrapped ZoteroPane.onCollectionSelected
+		const pane = /** @type {any} */ (window.ZoteroPane);
+		if (pane && pane._zoteroRagOrigOnCollectionSelected) {
+			pane.onCollectionSelected = pane._zoteroRagOrigOnCollectionSelected;
+			delete pane._zoteroRagOrigOnCollectionSelected;
+		}
 	}
 
 	/**
@@ -353,11 +354,6 @@ class ZoteroRAGPlugin {
 		for (let win of windows) {
 			if (!win.ZoteroPane) continue;
 			this.removeFromWindow(win);
-		}
-		if (this._unavailableNotifierID) {
-			// @ts-ignore - Zotero.Notifier exists at runtime
-			Zotero.Notifier.unregisterObserver(this._unavailableNotifierID);
-			this._unavailableNotifierID = null;
 		}
 	}
 
@@ -1148,11 +1144,14 @@ class ZoteroRAGPlugin {
 	async _countUnavailableInLibrary(libraryID) {
 		// linkMode 0 = imported_file, 1 = imported_url (both stored in Zotero storage).
 		// No storageHash filter — files added without going through sync have no hash.
+		// Exclude attachments and their parent items that are in the trash (deletedItems).
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
 			JOIN items i ON i.itemID = ia.itemID
 			WHERE i.libraryID = ?
 			AND ia.linkMode IN (0, 1)
+			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
+			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
 		// @ts-ignore - Zotero.DB exists at runtime
 		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
@@ -1162,7 +1161,32 @@ class ZoteroRAGPlugin {
 		for (const item of items) {
 			if (!(await item.fileExists())) count++;
 		}
+		// Keep the prefs-based cache in sync so the RAG dialog doesn't show stale counts.
+		this._syncUnavailableCountToPrefs(libraryID, count);
 		return count;
+	}
+
+	/**
+	 * Write the live unavailable count into prefs and refresh any open RAG dialog.
+	 * @param {number} libraryID
+	 * @param {number} count
+	 */
+	_syncUnavailableCountToPrefs(libraryID, count) {
+		const prefKey = `extensions.zotero-rag.unavailableItems.${libraryID}`;
+		try {
+			// @ts-ignore
+			const cached = parseInt(Zotero.Prefs.get(prefKey, true) || '0') || 0;
+			if (cached === count) return; // nothing changed
+			// @ts-ignore
+			Zotero.Prefs.set(prefKey, count, true);
+			// Push update into the open RAG dialog if it's showing this library.
+			if (this._dialogWindow && !this._dialogWindow.closed) {
+				const dlg = /** @type {any} */ (this._dialogWindow).ZoteroRAGDialog;
+				if (dlg && typeof dlg.onUnavailableCountUpdated === 'function') {
+					dlg.onUnavailableCountUpdated(String(libraryID), count);
+				}
+			}
+		} catch (_) {}
 	}
 
 	/**
@@ -1186,6 +1210,8 @@ class ZoteroRAGPlugin {
 			JOIN items i ON i.itemID = ia.itemID
 			WHERE i.libraryID = ?
 			AND ia.linkMode IN (0, 1)
+			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
+			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
 		// @ts-ignore - Zotero.DB exists at runtime
 		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
@@ -1242,37 +1268,187 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Search all libraries for a file matching the given attachment's MD5 hash and, if found, copy it.
-	 * @param {*} attachmentItem - The unavailable attachment item
-	 * @returns {Promise<{found: boolean, via: string, sourcePath?: string, error?: string}>}
+	 * Search all libraries / online sources for the missing attachment file and fix it.
+	 * Strategies attempted in order:
+	 *   1. MD5 hash match across all libraries (Zotero File Storage only)
+	 *   2. Filename match across all libraries
+	 *   3. owl:sameAs relation — copy from a linked item in another library
+	 *   4. Direct URL download — re-fetch the attachment's stored URL
+	 *   5. Zotero resolver — DOI / OA lookup via Find-Available-File pipeline
+	 * @param {*} attachmentItem
+	 * @returns {Promise<{found: boolean, via: string, error?: string}>}
 	 */
 	async _searchAndFixUnavailableAttachment(attachmentItem) {
-		// Strategy 1: MD5 storageHash — only populated by Zotero File Storage (not WebDAV)
+		const key = attachmentItem.key;
+		const parentItem = attachmentItem.parentItemID
+			? /** @type {any} */ (await Zotero.Items.getAsync(attachmentItem.parentItemID))
+			: null;
+
+		// Strategy 1: MD5 storageHash (Zotero File Storage only)
 		const hash = attachmentItem.attachmentSyncedHash;
 		if (hash) {
-			// @ts-ignore - Zotero.DB exists at runtime
+			this.log(`[fix] ${key}: trying MD5 hash ${hash}`);
+			// @ts-ignore
 			const ids = await Zotero.DB.columnQueryAsync(
 				`SELECT itemID FROM itemAttachments WHERE storageHash = ? AND itemID != ?`,
 				[hash, attachmentItem.id]
 			);
+			this.log(`[fix] ${key}: MD5 candidates: ${ids ? ids.length : 0}`);
 			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'md5');
-			if (result) return result;
+			if (result) { this.log(`[fix] ${key}: fixed via md5`); return result; }
+		} else {
+			this.log(`[fix] ${key}: no storageHash, skipping MD5`);
 		}
 
-		// Strategy 2: filename match — works for WebDAV and Zotero File Storage.
-		// Path is stored as "storage:<filename>" for imported attachments.
+		// Strategy 2: filename match across all libraries
 		const filename = attachmentItem.attachmentFilename;
 		if (filename) {
-			// @ts-ignore - Zotero.DB exists at runtime
+			this.log(`[fix] ${key}: trying filename match "${filename}"`);
+			// @ts-ignore
 			const ids = await Zotero.DB.columnQueryAsync(
 				`SELECT itemID FROM itemAttachments WHERE path = ? AND itemID != ?`,
 				[`storage:${filename}`, attachmentItem.id]
 			);
+			this.log(`[fix] ${key}: filename candidates: ${ids ? ids.length : 0}`);
 			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'filename');
-			if (result) return result;
+			if (result) { this.log(`[fix] ${key}: fixed via filename`); return result; }
 		}
 
-		return { found: false, via: hash ? 'not-found' : 'no-hash-no-match' };
+		// Strategy 3: owl:sameAs relation
+		if (parentItem) {
+			this.log(`[fix] ${key}: trying owl:sameAs relations`);
+			const result = await this._tryFixViaRelations(attachmentItem, parentItem);
+			if (result) { this.log(`[fix] ${key}: fixed via owl:sameAs`); return result; }
+		}
+
+		// Strategy 4: Direct URL re-download
+		const url = attachmentItem.getField('url');
+		this.log(`[fix] ${key}: trying direct URL download (url=${url || 'none'})`);
+		const result4 = await this._tryFixViaDirectURL(attachmentItem);
+		if (result4) { this.log(`[fix] ${key}: fixed via direct URL`); return result4; }
+
+		// Strategy 5: Zotero resolver (DOI / OA lookup)
+		if (parentItem) {
+			const doi = parentItem.getField('DOI') || parentItem.getExtraField('DOI');
+			this.log(`[fix] ${key}: trying Zotero resolver (DOI=${doi || 'none'})`);
+			const result = await this._tryFixViaResolver(attachmentItem, parentItem);
+			if (result) { this.log(`[fix] ${key}: fixed via resolver`); return result; }
+		}
+
+		this.log(`[fix] ${key}: all strategies exhausted — not found`);
+		return { found: false, via: 'not-found' };
+	}
+
+	/**
+	 * Strategy 3: copy from a linked item (owl:sameAs) in any library.
+	 * @param {*} attachmentItem
+	 * @param {*} parentItem
+	 * @returns {Promise<{found: boolean, via: string, error?: string}|null>}
+	 */
+	async _tryFixViaRelations(attachmentItem, parentItem) {
+		try {
+			// @ts-ignore
+			const predicate = Zotero.Relations.linkedObjectPredicate; // 'owl:sameAs'
+			const uris = parentItem.getRelationsByPredicate(predicate);
+			for (const uri of uris) {
+				// @ts-ignore
+				const relatedItem = await Zotero.URI.getURIItem(uri);
+				if (!relatedItem || relatedItem.deleted) continue;
+				for (const attID of relatedItem.getAttachments()) {
+					const att = /** @type {any} */ (Zotero.Items.get(attID));
+					if (!att) continue;
+					if (att.attachmentContentType !== attachmentItem.attachmentContentType) continue;
+					if (!(await att.fileExists())) continue;
+					const sourcePath = await att.getFilePathAsync();
+					if (!sourcePath) continue;
+					try {
+						await this._copyAttachmentFile(attachmentItem, sourcePath);
+						return { found: true, via: 'owl:sameAs' };
+					} catch (e) {
+						return { found: true, via: 'owl:sameAs', error: e instanceof Error ? e.message : String(e) };
+					}
+				}
+			}
+		} catch (e) {
+			this.log(`_tryFixViaRelations error: ${e}`);
+		}
+		return null;
+	}
+
+	/**
+	 * Strategy 4: Re-download from the attachment's stored URL via Zotero.HTTP.request.
+	 * @param {*} attachmentItem
+	 * @returns {Promise<{found: boolean, via: string, error?: string}|null>}
+	 */
+	async _tryFixViaDirectURL(attachmentItem) {
+		const url = attachmentItem.getField('url');
+		if (!url) return null;
+		this.log(`[fix] ${attachmentItem.key}: downloading from URL: ${url}`);
+		try {
+			// @ts-ignore - Zotero.HTTP exists at runtime
+			const req = await Zotero.HTTP.request('GET', url, { responseType: 'blob' });
+			if (!req || req.status !== 200 || !req.response) return null;
+			// Write blob to a temp file
+			// @ts-ignore - Zotero.getTempDirectory() exists at runtime
+			const tmpDir = /** @type {any} */ (Zotero.getTempDirectory()).path;
+			// @ts-ignore
+			const tmpPath = PathUtils.join(tmpDir, `zotero-rag-dl-${Date.now()}`);
+			const buf = await req.response.arrayBuffer();
+			// @ts-ignore
+			await IOUtils.write(tmpPath, new Uint8Array(buf));
+			try {
+				await this._copyAttachmentFile(attachmentItem, tmpPath);
+				return { found: true, via: 'url' };
+			} catch (e) {
+				return { found: true, via: 'url', error: e instanceof Error ? e.message : String(e) };
+			} finally {
+				// @ts-ignore
+				await IOUtils.remove(tmpPath).catch(() => {});
+			}
+		} catch (e) {
+			this.log(`_tryFixViaDirectURL error: ${e}`);
+			return null;
+		}
+	}
+
+	/**
+	 * Strategy 5: Use Zotero's Find-Available-File resolver (DOI/OA/URL lookup).
+	 * Bypasses canFindFileForItem() so it works even when the attachment item already exists.
+	 * @param {*} attachmentItem
+	 * @param {*} parentItem
+	 * @returns {Promise<{found: boolean, via: string, error?: string}|null>}
+	 */
+	async _tryFixViaResolver(attachmentItem, parentItem) {
+		try {
+			// @ts-ignore
+			const resolvers = Zotero.Attachments.getFileResolvers(parentItem);
+			if (!resolvers || resolvers.length === 0) {
+				this.log(`[fix] ${attachmentItem.key}: resolver: no resolvers available`);
+				return null;
+			}
+			this.log(`[fix] ${attachmentItem.key}: resolver: ${resolvers.length} resolver(s) found`);
+			// @ts-ignore
+			const tmpDir = (await Zotero.Attachments.createTemporaryStorageDirectory()).path;
+			// @ts-ignore
+			const tmpPath = PathUtils.join(tmpDir, 'file.tmp');
+			try {
+				// @ts-ignore
+				const dl = await Zotero.Attachments.downloadFirstAvailableFile(resolvers, tmpPath, {});
+				if (!dl || !dl.url) return null;
+				try {
+					await this._copyAttachmentFile(attachmentItem, tmpPath);
+					return { found: true, via: 'resolver' };
+				} catch (e) {
+					return { found: true, via: 'resolver', error: e instanceof Error ? e.message : String(e) };
+				}
+			} finally {
+				// @ts-ignore
+				await IOUtils.remove(tmpDir, { recursive: true }).catch(() => {});
+			}
+		} catch (e) {
+			this.log(`_tryFixViaResolver error: ${e}`);
+			return null;
+		}
 	}
 
 	/**

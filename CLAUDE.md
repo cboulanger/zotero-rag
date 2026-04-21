@@ -56,7 +56,7 @@ This test is excluded from the default `uv run pytest` run. It requires podman o
 
 ### Backend (Python/FastAPI)
 
-```
+```text
 backend/
 ├── api/              # FastAPI routes and endpoint handlers
 ├── services/         # Core business logic (embeddings, LLM, RAG)
@@ -71,7 +71,7 @@ backend/
 
 ### Plugin (Node.js/JavaScript)
 
-```
+```text
 plugin/
 ├── src/
 │   ├── bootstrap.js      # Plugin lifecycle
@@ -89,8 +89,12 @@ plugin/
 
 ### Reference Documentation
 
-- **`docs/zotero-plugin-dev.md`** — "vanilla" Zotero plugin development: bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, and Zotero API patterns.
+- **`docs/zotero-plugin-dev.md`** — "vanilla" Zotero plugin development: bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, and Zotero API patterns. The **"Useful Zotero APIs"** section at the bottom is a manually curated index of APIs found through source research — consult it before searching, and **add any newly discovered API methods there immediately** (with signature, return type, and a note on gotchas).
 - **`docs/zotero-plugin-toolkit.md`** — ready-made helper classes (`UITool`, `DialogHelper`, `KeyboardManager`, `PromptManager`, etc.) for more complex UI and plugin behavior. Check here before writing boilerplate.
+
+### Documenting New Zotero APIs
+
+Whenever you discover a Zotero API method or property that is undocumented or hard to find (e.g. found via source-code search in `/Users/cboulanger/Code/zotero`), **add it to the "Useful Zotero APIs" section of `docs/zotero-plugin-dev.md`** before finishing the task. Include: method signature, return type/value, and any non-obvious gotchas (e.g. "only populated by Zotero File Storage, not WebDAV"). Do this even for small findings.
 
 ### Development Workflow
 

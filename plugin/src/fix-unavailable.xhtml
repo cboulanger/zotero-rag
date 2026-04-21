@@ -33,24 +33,29 @@
     .dialog-container { display: flex; flex-direction: column; height: 100%; }
     .dialog-header { margin-bottom: 12px; flex-shrink: 0; }
     .dialog-header p { margin: 0; color: #555; font-size: 12px; line-height: 1.5; }
-    .table-wrapper { flex: 1; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px; min-height: 0; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    thead th { position: sticky; top: 0; background: #f0f0f0; padding: 6px 8px; text-align: left; font-weight: 600; border-bottom: 1px solid #ccc; overflow: hidden; white-space: nowrap; }
-    thead th.col-check    { width: 28px;  text-align: center; }
-    thead th.col-author   { width: 110px; }
-    thead th.col-year     { width: 44px; }
-    thead th.col-key      { width: 80px; }
-    thead th.col-filename { width: 90px; }
-    thead th.col-status   { width: 160px; }
-    thead th.col-select   { width: 28px; text-align: center; }
-    /* title column takes remaining space — no explicit width */
-    tbody tr:nth-child(even) { background: #fafafa; }
-    tbody td { padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: middle; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    tbody td.col-check    { text-align: center; overflow: visible; }
-    tbody td.col-select   { text-align: center; overflow: visible; }
-    tbody td.col-filename { font-size: 11px; color: #666; }
+    .table-wrapper { flex: 1; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px; min-height: 0; position: relative; }
+    #items-table { width: 100%; }
+    .table-row { display: flex; width: 100%; box-sizing: border-box; }
+    .header-row { position: sticky; top: 0; background: #f0f0f0; border-bottom: 1px solid #ccc; font-weight: 600; z-index: 1; }
+    .header-row > div { padding: 6px 8px; overflow: hidden; white-space: nowrap; display: flex; align-items: center; }
+    #items-tbody .table-row:nth-child(even) { background: #fafafa; }
+    #items-tbody .table-row > div { padding: 5px 8px; border-bottom: 1px solid #eee; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: flex; align-items: center; }
+    /* Fixed-width columns */
+    .col-check    { flex: 0 0 28px; justify-content: center; overflow: visible !important; }
+    .col-year     { flex: 0 0 44px; }
+    .col-key      { flex: 0 0 80px; }
+    .col-type     { flex: 0 0 50px; }
+    .col-select   { flex: 0 0 32px; justify-content: center; overflow: visible !important; }
+    /* Flexible columns */
+    .col-author   { flex: 2 1 0; min-width: 0; }
+    .col-title    { flex: 4 1 0; min-width: 0; }
+    .col-filename { flex: 2 1 0; min-width: 0; font-size: 11px; color: #666; }
+    .col-status   { flex: 2 1 0; min-width: 0; }
     .select-btn { background: none; border: none; padding: 0 2px; cursor: pointer; font-size: 12px; color: #666; line-height: 1; }
     .select-btn:hover { color: #0066cc; }
+    .refresh-btn { background: none; border: none; padding: 0; cursor: pointer; font-size: 13px; color: #888; line-height: 1; }
+    .refresh-btn:hover { color: #0066cc; }
+    .refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .status-cell { font-size: 11px; }
     .status-cell.found    { color: #008000; }
     .status-cell.fixed    { color: #006600; font-weight: 600; }
@@ -65,6 +70,9 @@
     .dialog-button.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
     .dialog-button.primary:hover { background: #0052a3; }
     .dialog-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background: #0066cc; }
+    .dialog-button.danger { background: #f5f5f5; color: #cc0000; border-color: #cc0000; }
+    .dialog-button.danger:hover { background: #cc0000; color: #fff; }
+    .dialog-button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
   </style>
 </head>
 
@@ -80,29 +88,29 @@
     </div>
 
     <div class="table-wrapper">
-      <table id="items-table">
-        <thead>
-          <tr>
-            <th class="col-check"><input type="checkbox" id="header-checkbox" title="Toggle all"/></th>
-            <th class="col-author">Author(s)</th>
-            <th class="col-year">Year</th>
-            <th>Title</th>
-            <th class="col-key">Zotero ID</th>
-            <th class="col-filename">Filename</th>
-            <th class="col-status">Status</th>
-            <th class="col-select"></th>
-          </tr>
-        </thead>
-        <tbody id="items-tbody">
+      <div id="items-table">
+        <div class="table-row header-row">
+          <div class="col-check"><input type="checkbox" id="header-checkbox" title="Toggle all"/></div>
+          <div class="col-author">Author(s)</div>
+          <div class="col-year">Year</div>
+          <div class="col-title">Title</div>
+          <div class="col-key">Zotero ID</div>
+          <div class="col-filename">Filename</div>
+          <div class="col-type">Type</div>
+          <div class="col-status">Status</div>
+          <div class="col-select"><button id="refresh-btn" class="refresh-btn" title="Refresh list">↻</button></div>
+        </div>
+        <div id="items-tbody">
           <!-- Rows populated by fix-unavailable.js -->
-        </tbody>
-      </table>
+        </div>
+      </div>
     </div>
 
     <div id="status-bar" class="status-bar"></div>
 
     <div class="dialog-buttons">
       <button id="close-btn" type="button" class="dialog-button">Close</button>
+      <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete Selected</button>
       <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix Selected</button>
     </div>
   </div>
