@@ -1,3 +1,17 @@
+# [1.11.0](https://github.com/cboulanger/zotero-rag/compare/v1.10.3...v1.11.0) (2026-04-21)
+
+
+### Bug Fixes
+
+* Any selected unindexed library  enforces indexing ([3fcafaa](https://github.com/cboulanger/zotero-rag/commit/3fcafaa6d8f6f1ac957c89928a4c0d65cf99e739))
+* Scroll first selected library into view when dialog opens ([d0cdc8d](https://github.com/cboulanger/zotero-rag/commit/d0cdc8d5f25dd31519cb320e4787166c55e1093b))
+
+
+### Features
+
+* Delete fragments when Zotero item is deleted ([29547db](https://github.com/cboulanger/zotero-rag/commit/29547dbd06e59c893e5e430bb2da16faa2084dcc))
+* Show indexing info for all libraries right away ([835e6b0](https://github.com/cboulanger/zotero-rag/commit/835e6b0fa37e7c599e342b008fcd89c6891d58d1))
+
 ## [1.10.3](https://github.com/cboulanger/zotero-rag/compare/v1.10.2...v1.10.3) (2026-04-21)
 
 
