@@ -388,6 +388,12 @@ var ZoteroRAGDialog = {
 			listContainer.appendChild(checkboxLabel);
 		}
 
+		// Scroll the first selected library into view
+		const firstChecked = listContainer.querySelector('input[type="checkbox"]:checked');
+		if (firstChecked) {
+			firstChecked.closest('label')?.scrollIntoView({ block: 'nearest' });
+		}
+
 		// Load metadata and indexable count for the currently selected library (if any)
 		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
 			const currentLib = libraries.find(l => l.id === currentLibrary);
