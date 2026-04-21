@@ -1,3 +1,10 @@
+## [1.10.3](https://github.com/cboulanger/zotero-rag/compare/v1.10.2...v1.10.3) (2026-04-21)
+
+
+### Bug Fixes
+
+* Set longer timeouts for indexing individual documents ([e160a45](https://github.com/cboulanger/zotero-rag/commit/e160a455e16e054a9a25eddee3307f320aed792c))
+
 ## [1.10.2](https://github.com/cboulanger/zotero-rag/compare/v1.10.1...v1.10.2) (2026-04-21)
 
 
