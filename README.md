@@ -1,5 +1,7 @@
 # Zotero RAG Plugin
 
+<!-- markdownlint-disable MD033 -->
+
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
 
 ## Quick Start
@@ -91,7 +93,7 @@ If the backend runs on a remote host, open **Zotero → Settings → Zotero RAG*
 
 ### 6. Using the Plugin
 
-![Screenshot of the RAG dialog](./docs/images/dialog.png)
+<img src="./docs/images/dialog.png" width="300" alt="Screenshot of the RAG dialog">
 
 Once installed:
 
@@ -104,11 +106,11 @@ Once installed:
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
 
-![Screenshot of a result note](./docs/images/note.png)
+<img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
 #### Fix Unavailable Attachments
 
-![Screenshot of the fix attachment tool](./docs/images/fix-attachments-tool.png)
+<img src="./docs/images/fix-attachments-tool.png" width="300" alt="Screenshot of the fix attachment tool">
 
 If Zotero sync is incomplete, some attachment files may be missing locally even though the metadata exists. The plugin detects this and shows a warning badge (e.g. **⚠ 3**) in the Zotero toolbar, or a message "x unavailable" in the list of libraries after indexing. Click on the badge or on that message to open the **Fix Unavailable Attachments** dialog, which lists all affected items in the current library.
 
