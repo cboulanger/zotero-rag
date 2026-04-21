@@ -117,6 +117,9 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._dialogWindow = null;
 
+		/** @type {string|null} */
+		this._notifierID = null;
+
 		/** @type {import('./toolkit.d.ts').Toolkit} */
 		// @ts-ignore - Initialized in init() method
 		this.toolkit = null;
@@ -161,6 +164,23 @@ class ZoteroRAGPlugin {
 		} catch (_) {
 			this.requiredApiKeys = [];
 		}
+
+		// Watch for permanent item deletions and remove their indexed chunks from the backend.
+		this._notifierID = Zotero.Notifier.registerObserver(
+			{
+				notify: (/** @type {string} */ event, /** @type {string} */ type, /** @type {number[]} */ ids, /** @type {Record<number, {libraryID: number, key: string}>} */ extraData) => {
+					if (event !== 'delete' || type !== 'item') return;
+					for (const id of ids) {
+						const { libraryID, key } = extraData[id] || {};
+						if (!libraryID || !key) continue;
+						const url = `${this.backendURL}/libraries/${libraryID}/items/${key}/chunks`;
+						fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
+							.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
+					}
+				}
+			},
+			['item']
+		);
 	}
 
 	/**
@@ -354,6 +374,10 @@ class ZoteroRAGPlugin {
 		for (let win of windows) {
 			if (!win.ZoteroPane) continue;
 			this.removeFromWindow(win);
+		}
+		if (this._notifierID) {
+			Zotero.Notifier.unregisterObserver(this._notifierID);
+			this._notifierID = null;
 		}
 	}
 

@@ -215,6 +215,32 @@ async def clear_library_index(library_id: str, vector_store: VectorStore = Depen
         raise HTTPException(status_code=500, detail=f"Failed to clear library index: {str(e)}")
 
 
+@router.delete("/libraries/{library_id}/items/{item_key}/chunks")
+async def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
+    """
+    Remove all indexed chunks for a specific item within a library.
+
+    Args:
+        library_id: Zotero library ID.
+        item_key: Zotero item key.
+
+    Returns:
+        Count of deleted chunks.
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    try:
+        chunks_deleted = vector_store.delete_item_chunks(library_id, item_key)
+        return {
+            "library_id": library_id,
+            "item_key": item_key,
+            "chunks_deleted": chunks_deleted,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear item chunks: {str(e)}")
+
+
 @router.get("/libraries/indexed", response_model=List[LibraryIndexMetadata])
 async def list_indexed_libraries(vector_store: VectorStore = Depends(get_vector_store)):
     """
