@@ -9,6 +9,10 @@
 // @ts-check
 /// <reference path="./zotero-types.d.ts" />
 
+const DEBUG = true;
+/** @param {function(string): void} log @param {string} msg */
+const debug = (log, msg) => { if (DEBUG) log(`[RemoteIndexer] [DEBUG] ${msg}`); };
+
 /**
  * @typedef {Object} AttachmentInfo
  * @property {string} item_key
@@ -78,7 +82,7 @@ var RemoteIndexer = {
 		// 2. Load the client-side version cache and pre-classify attachments.
 		//    Attachments whose item_version matches the cache are up-to-date without
 		//    asking the backend.  Only new/changed/unknown ones go to check-indexed.
-		const versionCache = this._loadVersionCache(libraryId);
+		const versionCache = await this._loadVersionCache(libraryId);
 		/** @type {Array<AttachmentIndexStatus>} */
 		const cachedStatuses = [];
 		/** @type {typeof attachments} */
@@ -252,7 +256,7 @@ var RemoteIndexer = {
 		}
 
 		if (uploaded > 0 || errors > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
-			this._saveVersionCache(libraryId, versionCache);
+			await this._saveVersionCache(libraryId, versionCache);
 		}
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}`, current: total, total });
@@ -505,12 +509,22 @@ var RemoteIndexer = {
 		formData.append('file', new Blob([bytes], { type: att.mime_type }), att.attachment_key);
 		formData.append('metadata', JSON.stringify(metadata));
 
-		const response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
-			headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
-			body: formData,
-			signal,
-			timeout: 10 * 60 * 1000,
-		});
+		const uploadTimeoutMs = 10 * 60 * 1000;
+		const t0 = Date.now();
+		debug(log, `${att.attachment_key}: upload start — size=${bytes.length}B, timeout=${uploadTimeoutMs}ms`);
+		let response;
+		try {
+			response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
+				headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
+				body: formData,
+				signal,
+				timeout: uploadTimeoutMs,
+			});
+		} catch (err) {
+			debug(log, `${att.attachment_key}: upload failed after ${Date.now() - t0}ms`);
+			throw err;
+		}
+		debug(log, `${att.attachment_key}: response received in ${Date.now() - t0}ms`);
 
 		const result = await response.json();
 		const rateLimitNote = result.rate_limit_retries > 0
@@ -528,28 +542,54 @@ var RemoteIndexer = {
 	 * so callers can tell exactly which endpoint failed and why.
 	 *
 	/**
-	 * Load the per-library version cache from Zotero prefs.
+	 * Return the path to the per-library cache file under the Zotero data directory.
 	 * @param {string} libraryId
-	 * @returns {Record<string, number>} map of attachment_key → last confirmed item_version
+	 * @returns {string}
 	 */
-	_loadVersionCache(libraryId) {
+	_cacheFilePath(libraryId) {
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `index-cache-${libraryId}.json`);
+	},
+
+	/**
+	 * Load the per-library version cache from disk.
+	 * On first run, migrates any existing data from Zotero prefs and deletes the pref.
+	 * @param {string} libraryId
+	 * @returns {Promise<Record<string, number>>} map of attachment_key → last confirmed item_version
+	 */
+	async _loadVersionCache(libraryId) {
+		const filePath = this._cacheFilePath(libraryId);
 		try {
-			const raw = Zotero.Prefs.get(`extensions.zotero-rag.indexCache.${libraryId}`, true) || '{}';
-			return JSON.parse(raw);
+			const text = await IOUtils.readUTF8(filePath);
+			return JSON.parse(text);
 		} catch (_) {
+			// File not found — check for legacy pref to migrate
+			const prefKey = `extensions.zotero-rag.indexCache.${libraryId}`;
+			try {
+				const raw = Zotero.Prefs.get(prefKey, true);
+				if (raw) {
+					const cache = JSON.parse(raw);
+					await this._saveVersionCache(libraryId, cache);
+					try { Zotero.Prefs.clear(prefKey, true); } catch (_2) {}
+					return cache;
+				}
+			} catch (_2) {}
 			return {};
 		}
 	},
 
 	/**
-	 * Persist the per-library version cache to Zotero prefs.
+	 * Persist the per-library version cache to disk.
 	 * @param {string} libraryId
 	 * @param {Record<string, number>} cache
+	 * @returns {Promise<void>}
 	 */
-	_saveVersionCache(libraryId, cache) {
+	async _saveVersionCache(libraryId, cache) {
+		const filePath = this._cacheFilePath(libraryId);
 		try {
-			Zotero.Prefs.set(`extensions.zotero-rag.indexCache.${libraryId}`, JSON.stringify(cache), true);
-		} catch (e) {
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			try { await IOUtils.makeDirectory(dir, { createAncestors: true }); } catch (_) {}
+			await IOUtils.writeUTF8(filePath, JSON.stringify(cache));
+		} catch (_) {
 			// Non-fatal — cache miss on next session is acceptable
 		}
 	},
@@ -674,12 +714,22 @@ var RemoteIndexer = {
 			abstract_text: abstractItem.abstractNote,
 		};
 
-		const response = await this._apiFetch('POST', `${backendURL}/api/index/abstract`, {
-			headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-			body: JSON.stringify(body),
-			signal,
-			timeout: 2 * 60 * 1000,
-		});
+		const abstractTimeoutMs = 2 * 60 * 1000;
+		const t0 = Date.now();
+		debug(log, `${abstractItem.item_key} (abstract): upload start — timeout=${abstractTimeoutMs}ms`);
+		let response;
+		try {
+			response = await this._apiFetch('POST', `${backendURL}/api/index/abstract`, {
+				headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+				signal,
+				timeout: abstractTimeoutMs,
+			});
+		} catch (err) {
+			debug(log, `${abstractItem.item_key} (abstract): upload failed after ${Date.now() - t0}ms`);
+			throw err;
+		}
+		debug(log, `${abstractItem.item_key} (abstract): response received in ${Date.now() - t0}ms`);
 
 		const result = await response.json();
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
