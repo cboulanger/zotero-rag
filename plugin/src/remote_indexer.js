@@ -93,6 +93,24 @@ var RemoteIndexer = {
 		}
 		log(`[RemoteIndexer] Client cache: ${cachedStatuses.length} up-to-date, ${toCheck.length} to verify with backend`);
 
+		// 2b. For cached items whose local file is missing, request a sync download so the
+		//     file is available locally even if the backend already has the content indexed.
+		if (downloadAttachment) {
+			const cachedMissingFile = cachedStatuses
+				.map(s => attachments.find(a => a.attachment_key === s.attachment_key))
+				.filter(/** @type {(a: any) => a is NonNullable<typeof a>} */ (a) => a && !a.filePath);
+			if (cachedMissingFile.length > 0) {
+				log(`[RemoteIndexer] Requesting download for ${cachedMissingFile.length} cached attachment(s) with no local file`);
+				for (const att of cachedMissingFile) {
+					if (isCancelled()) break;
+					try {
+						const path = await downloadAttachment(att.zoteroItem);
+						if (path) att.filePath = path;
+					} catch (_) { /* non-fatal — file stays missing locally */ }
+				}
+			}
+		}
+
 		// 3. Ask the backend which of the remaining attachments actually need indexing.
 		/** @type {Array<AttachmentIndexStatus>} */
 		let checkedStatuses = [];
@@ -189,6 +207,9 @@ var RemoteIndexer = {
 				log(`[RemoteIndexer] Error uploading ${att.attachment_key}: ${msg}`);
 				if (!firstError) firstError = msg;
 				errors++;
+				// Mark in cache so this item is not re-attempted on the next incremental run.
+				// It will be retried when the item version changes or on a full re-index.
+				versionCache[att.attachment_key] = att.item_version;
 			}
 		}
 
@@ -226,10 +247,11 @@ var RemoteIndexer = {
 				log(`[RemoteIndexer] Error uploading abstract for ${abstractItem.item_key}: ${msg}`);
 				if (!firstError) firstError = msg;
 				errors++;
+				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
 			}
 		}
 
-		if (uploaded > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
+		if (uploaded > 0 || errors > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
 			this._saveVersionCache(libraryId, versionCache);
 		}
 
@@ -348,9 +370,27 @@ var RemoteIndexer = {
 
 		const items = await Zotero.Items.getAsync(itemIDs);
 		let count = 0;
+		// Track parent item keys that have ANY indexable attachment (local or not).
+		// Mirrors _collectAbstractItems which excludes these from abstract indexing.
+		const keysWithAnyAttachment = new Set();
 		for (const item of items) {
 			if (!item.isAttachment()) continue;
-			if (INDEXABLE_TYPES.has(item.attachmentContentType || '')) count++;
+			if (!INDEXABLE_TYPES.has(item.attachmentContentType || '')) continue;
+			count++;
+			if (item.parentItemID) {
+				const parent = Zotero.Items.get(item.parentItemID);
+				if (parent) keysWithAnyAttachment.add(parent.key);
+			}
+		}
+		// Also count regular items with a substantial abstract and no indexable attachment at all.
+		const MIN_ABSTRACT_WORDS = 100;
+		for (const item of items) {
+			if (item.isAttachment() || item.isNote()) continue;
+			if (keysWithAnyAttachment.has(item.key)) continue;
+			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
+			if (!abstract) continue;
+			const wordCount = abstract.trim().split(/\s+/).filter(/** @param {string} w */ w => w.length > 0).length;
+			if (wordCount >= MIN_ABSTRACT_WORDS) count++;
 		}
 		return count;
 	},
@@ -559,10 +599,9 @@ var RemoteIndexer = {
 		}
 		if (!zoteroLibraryID) return [];
 
-		// Item keys that already have a local file — no abstract fallback needed
-		const keysWithLocalFile = new Set(
-			existingAttachments.filter(a => a.filePath).map(a => a.item_key)
-		);
+		// Parent item keys that have ANY indexable attachment in Zotero (local file or not).
+		// Abstract indexing is only a last resort for items with no attachment at all.
+		const keysWithAnyAttachment = new Set(existingAttachments.map(a => a.item_key));
 
 		const search = new Zotero.Search();
 		search.libraryID = zoteroLibraryID;
@@ -577,7 +616,7 @@ var RemoteIndexer = {
 			if (item.isAttachment() || item.isNote()) continue;
 
 			const itemKey = item.key;
-			if (keysWithLocalFile.has(itemKey)) continue;
+			if (keysWithAnyAttachment.has(itemKey)) continue;
 
 			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
 			if (!abstract) continue;

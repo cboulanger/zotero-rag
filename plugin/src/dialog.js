@@ -95,6 +95,15 @@ var ZoteroRAGDialog = {
 	libraryUnavailableCount: new Map(),
 
 	/**
+	 * Number of attachments per library whose local file is confirmed missing
+	 * (fileExists() === false).  Updated from the indexer's noFile count and from
+	 * live scans triggered by zotero-rag.js.  Used ONLY to decide whether to show
+	 * the fix-attachments dialog link — not for effective-total calculations.
+	 * @type {Map<string, number>}
+	 */
+	libraryMissingFilesCount: new Map(),
+
+	/**
 	 * Initialize the dialog.
 	 * @returns {void}
 	 */
@@ -315,10 +324,13 @@ var ZoteroRAGDialog = {
 						const libraryType = lib ? lib.type : 'user';
 						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
 						const unavailForLib = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${libraryId}`, true) || '0') || 0;
+						// @ts-ignore
+						const missingForLib = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${libraryId}`, true) || '0') || 0;
 						RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
 							.then(count => {
 								this.libraryIndexableCount.set(libraryId, count);
 								this.libraryUnavailableCount.set(libraryId, unavailForLib);
+								this.libraryMissingFilesCount.set(libraryId, missingForLib);
 								this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
 								this.updateSubmitButtonState();
 							})
@@ -382,11 +394,14 @@ var ZoteroRAGDialog = {
 			const currentLibType = currentLib ? currentLib.type : 'user';
 			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
 		const unavailForCurrent = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${currentLibrary}`, true) || '0') || 0;
+		// @ts-ignore
+		const missingForCurrent = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${currentLibrary}`, true) || '0') || 0;
 		// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
 		RemoteIndexer.countIndexableAttachments(currentLibrary, currentLibType)
 				.then(count => {
 					this.libraryIndexableCount.set(currentLibrary, count);
 					this.libraryUnavailableCount.set(currentLibrary, unavailForCurrent);
+					this.libraryMissingFilesCount.set(currentLibrary, missingForCurrent);
 					this.updateLibraryStatusIcon(currentLibrary, this.libraryMetadata.get(currentLibrary) ?? null);
 					this.updateSubmitButtonState();
 				})
@@ -557,12 +572,13 @@ var ZoteroRAGDialog = {
 				mainText = `${timeAgo} · ${indexed}${total} items`;
 			}
 
-			// Build the span content: plain text + optional clickable unavailable link
+			// Build the span content: plain text + optional clickable missing-files link
 			metaSpan.textContent = mainText;
-			if (unavailable > 0 && this.plugin) {
+			const missingFiles = this.libraryMissingFilesCount.get(libraryId) || 0;
+			if (missingFiles > 0 && this.plugin) {
 				const plugin = this.plugin;
 				const link = document.createElement('a');
-				link.textContent = ` · ${unavailable} unavailable`;
+				link.textContent = ` · ${missingFiles} unavailable`;
 				link.href = '#';
 				link.style.cssText = 'color:#cc0000;text-decoration:underline;cursor:pointer;';
 				link.title = 'Click to find and fix missing attachment files';
@@ -1105,18 +1121,23 @@ var ZoteroRAGDialog = {
 					return;
 				}
 
-				// Persist unavailable count so status display survives dialog re-open
+				// Persist missing-file count (noFile) so the fix-dialog link survives dialog re-open.
+				// This is separate from libraryUnavailableCount (phantom gap) which drives effectiveTotal.
+				const newMissing = indexResult.noFile;
+				this.libraryMissingFilesCount.set(libraryId, newMissing);
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, newMissing, true);
+				// Also update the phantom-gap unavailable count from noFile for effective-total bookkeeping
 				const prevUnavail = this.libraryUnavailableCount.get(libraryId) || 0;
-				const newUnavail = indexResult.noFile;
-				if (newUnavail !== prevUnavail) {
-					this.libraryUnavailableCount.set(libraryId, newUnavail);
-					// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newUnavail, true);
+				if (newMissing !== prevUnavail) {
+					this.libraryUnavailableCount.set(libraryId, newMissing);
+					// @ts-ignore
+					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newMissing, true);
 				}
 
 				// Report missing-file count as informational — never fatal
-				if (newUnavail > 0) {
-					const msg = `${newUnavail} attachment(s) in ${libraryName} have no local file and were skipped`;
+				if (newMissing > 0) {
+					const msg = `${newMissing} attachment(s) in ${libraryName} have no local file and were skipped`;
 					this.plugin.log(`[RemoteIndexer] ${msg}`);
 					this.showStatus(msg, 'info');
 				}
@@ -1265,7 +1286,10 @@ var ZoteroRAGDialog = {
 	 * @param {number} count
 	 */
 	onUnavailableCountUpdated(libraryId, count) {
-		this.libraryUnavailableCount.set(libraryId, count);
+		// Live scan result: actual missing files. Used for fix-dialog link only.
+		this.libraryMissingFilesCount.set(libraryId, count);
+		// @ts-ignore
+		Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, count, true);
 		this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
 	},
 
