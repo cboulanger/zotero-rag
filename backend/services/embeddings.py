@@ -6,6 +6,7 @@ Includes content-hash based caching to avoid recomputing embeddings.
 """
 
 import asyncio
+import datetime
 import hashlib
 import logging
 import os
@@ -313,6 +314,7 @@ class RemoteEmbeddingService(EmbeddingService):
         model = self._resolve_model_name()
         max_attempts = 8
         base_delay = 2.0
+        max_rate_limit_wait = 60.0
 
         for attempt in range(max_attempts):
             try:
@@ -350,6 +352,15 @@ class RemoteEmbeddingService(EmbeddingService):
                 else:
                     # Add small jitter even to server-supplied values.
                     retry_after += random.uniform(0, 1)
+                if retry_after > max_rate_limit_wait:
+                    wait_str = str(datetime.timedelta(seconds=int(retry_after)))
+                    raise RateLimitError(
+                        f"Rate limit exceeded and server requested a wait of {wait_str} "
+                        f"(max allowed: {max_rate_limit_wait:.0f}s). "
+                        "The API quota (daily or monthly) is likely exhausted.",
+                        response=exc.response,
+                        body=None,
+                    )
                 logger.warning(
                     f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
                     f"Waiting {retry_after:.1f}s before retry."
