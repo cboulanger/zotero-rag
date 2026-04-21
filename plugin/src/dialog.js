@@ -311,40 +311,16 @@ var ZoteroRAGDialog = {
 				this.selectedLibraries.add(library.id);
 			}
 
-			// Load metadata when library is selected
-			checkbox.addEventListener('change', async (e) => {
+			checkbox.addEventListener('change', (e) => {
 				const target = /** @type {HTMLInputElement} */ (e.target);
 				const libraryId = target.getAttribute('data-library-id');
 				if (libraryId) {
 					if (target.checked) {
 						this.selectedLibraries.add(libraryId);
-						// Count indexable attachments so we can detect partial indexing.
-						// Run in the background — result is used by updateLibraryStatusIcon.
-						const lib = this.plugin ? this.plugin.getLibraries().find(l => l.id === libraryId) : null;
-						const libraryType = lib ? lib.type : 'user';
-						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-						const unavailForLib = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${libraryId}`, true) || '0') || 0;
-						// @ts-ignore
-						const missingForLib = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${libraryId}`, true) || '0') || 0;
-						RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
-							.then(count => {
-								this.libraryIndexableCount.set(libraryId, count);
-								this.libraryUnavailableCount.set(libraryId, unavailForLib);
-								this.libraryMissingFilesCount.set(libraryId, missingForLib);
-								this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
-								this.updateSubmitButtonState();
-							})
-							.catch(() => {});
-						// Fetch backend metadata
-						if (!this.libraryMetadata.has(libraryId)) {
-							await this.fetchAndUpdateLibraryMetadata(libraryId);
-						} else {
-							this.updateSubmitButtonState();
-						}
 					} else {
 						this.selectedLibraries.delete(libraryId);
-						this.updateSubmitButtonState();
 					}
+					this.updateSubmitButtonState();
 				}
 			});
 
@@ -352,8 +328,7 @@ var ZoteroRAGDialog = {
 			const statusIcon = document.createElement('span');
 			statusIcon.className = 'library-status-icon';
 			statusIcon.id = `status-icon-${library.id}`;
-			statusIcon.textContent = '\u2205'; // Empty set symbol for not indexed
-			statusIcon.style.color = '#999';
+			statusIcon.textContent = ''; // Filled in once metadata loads
 
 			// Library name
 			const nameSpan = document.createElement('span');
@@ -394,28 +369,25 @@ var ZoteroRAGDialog = {
 			firstChecked.closest('label')?.scrollIntoView({ block: 'nearest' });
 		}
 
-		// Load metadata and indexable count for the currently selected library (if any)
-		if (currentLibrary && this.selectedLibraries.has(currentLibrary)) {
-			const currentLib = libraries.find(l => l.id === currentLibrary);
-			const currentLibType = currentLib ? currentLib.type : 'user';
+		// Load metadata and indexable counts for all libraries in parallel
+		for (const lib of libraries) {
+			const libId = lib.id;
+			const libType = lib.type;
 			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-		const unavailForCurrent = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${currentLibrary}`, true) || '0') || 0;
-		// @ts-ignore
-		const missingForCurrent = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${currentLibrary}`, true) || '0') || 0;
-		// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
-		RemoteIndexer.countIndexableAttachments(currentLibrary, currentLibType)
+			const unavail = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${libId}`, true) || '0') || 0;
+			// @ts-ignore
+			const missing = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${libId}`, true) || '0') || 0;
+			// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
+			RemoteIndexer.countIndexableAttachments(libId, libType)
 				.then(count => {
-					this.libraryIndexableCount.set(currentLibrary, count);
-					this.libraryUnavailableCount.set(currentLibrary, unavailForCurrent);
-					this.libraryMissingFilesCount.set(currentLibrary, missingForCurrent);
-					this.updateLibraryStatusIcon(currentLibrary, this.libraryMetadata.get(currentLibrary) ?? null);
+					this.libraryIndexableCount.set(libId, count);
+					this.libraryUnavailableCount.set(libId, unavail);
+					this.libraryMissingFilesCount.set(libId, missing);
+					this.updateLibraryStatusIcon(libId, this.libraryMetadata.get(libId) ?? null);
 					this.updateSubmitButtonState();
 				})
 				.catch(() => {});
-			await this.fetchAndUpdateLibraryMetadata(currentLibrary);
-			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata
-		} else {
-			this.updateSubmitButtonState();
+			this.fetchAndUpdateLibraryMetadata(libId);
 		}
 	},
 
@@ -541,7 +513,6 @@ var ZoteroRAGDialog = {
 			&& indexed < effectiveTotal;
 
 		if (statusIcon) {
-			statusIcon.style.display = 'inline';
 			if (!metadata) {
 				statusIcon.textContent = '\u2205'; // Empty set — never indexed
 				statusIcon.style.color = '#999';
@@ -623,7 +594,6 @@ var ZoteroRAGDialog = {
 		metaSpan.style.fontStyle = 'italic';
 		metaSpan.style.color = '#0066cc';
 		if (statusIcon) {
-			statusIcon.style.display = 'inline';
 			statusIcon.textContent = '\u23F3'; // hourglass
 			statusIcon.style.color = '#0066cc';
 		}
@@ -1308,6 +1278,7 @@ var ZoteroRAGDialog = {
 		this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
 	},
 
+	/** @param {Date} date */
 	formatTimeAgo(date) {
 		const seconds = Math.floor((new Date().getTime() - date.getTime()) / 1000);
 
