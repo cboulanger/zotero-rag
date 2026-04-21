@@ -1,12 +1,6 @@
 # Zotero RAG Plugin
 
-<div style="diplay:grid">
-    <img style="height:300px" src="docs/images/dialog.png">
-    <img style="height:300px" src="docs/images/note.png">
-</div>
-
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
-
 
 ## Quick Start
 
@@ -97,16 +91,37 @@ If the backend runs on a remote host, open **Zotero → Settings → Zotero RAG*
 
 ### 6. Using the Plugin
 
+![Screenshot of the RAG dialog](./docs/images/dialog.png)
+
 Once installed:
 
 1. Open your Zotero library
 2. Select a library (user or group)
 3. Open the "Tools" menu and then click on the "Zotero RAG" menu item
-4. In the dialog, the current library will be pre-selected, but you can add additional ones to search.
-5. Ask questions that can be answered by the PDF documents contained in the selected libraries
-6. The plugin will search through your documents and provide answers with source citations. The initial indexing of the library might take some time depending on the server hardware, subsequent queries will be much faster.
+4. In the dialog, the current library will be pre-selected, but you can add additional ones to search (this works only if all of them have already been indexed)
+5. If the library has not been indexed, you will not be able to ask a question on this library but need to index it first. This might take from minutes to hours depending on the size of the library.
+6. Once indexed, you can ask questions that can be answered by the PDF documents contained in the selected libraries. The plugin will search through your documents and provide answers with source citations.
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
+
+![Screenshot of a result note](./docs/images/note.png)
+
+#### Fix Unavailable Attachments
+
+![Screenshot of the fix attachment tool](./docs/images/fix-attachments-tool.png)
+
+If Zotero sync is incomplete, some attachment files may be missing locally even though the metadata exists. The plugin detects this and shows a warning badge (e.g. **⚠ 3**) in the Zotero toolbar, or a message "x unavailable" in the list of libraries after indexing. Click on the badge or on that message to open the **Fix Unavailable Attachments** dialog, which lists all affected items in the current library.
+
+For each missing file the tool tries the following strategies in order:
+
+1. **Zotero sync download** — triggers the normal Zotero file sync for that attachment.
+2. **Filename match** — searches all other libraries for an attachment with the same filename.
+3. **MD5 hash match** — searches by the file's stored sync hash (`storageHash`).
+4. **`owl:sameAs` relations** — follows cross-library item relations to find the same file elsewhere.
+5. **Direct URL download** — downloads from the attachment's stored URL using Zotero's proxy-aware HTTP client.
+6. **DOI / Open Access resolver** — uses Zotero's built-in file resolvers (Unpaywall, etc.) to locate a freely available copy.
+
+When a file is found it is copied into the correct Zotero storage directory. Items that cannot be recovered can be deleted permanently from the dialog using the **Delete Selected** button.
 
 ## Developer Documentation
 
