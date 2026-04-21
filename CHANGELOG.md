@@ -1,3 +1,10 @@
+## [1.12.2](https://github.com/cboulanger/zotero-rag/compare/v1.12.1...v1.12.2) (2026-04-21)
+
+
+### Bug Fixes
+
+* Fix rate limit errors do not lead to hard fail and errors are not displayed ([a9679e8](https://github.com/cboulanger/zotero-rag/commit/a9679e80c6311c2007cd24d5e00cb2ff0131cb0d))
+
 ## [1.12.1](https://github.com/cboulanger/zotero-rag/compare/v1.12.0...v1.12.1) (2026-04-21)
 
 
