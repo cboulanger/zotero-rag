@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/cboulanger/zotero-rag/compare/v1.11.0...v1.12.0) (2026-04-21)
+
+
+### Features
+
+* Add library and user registration ([2e5377c](https://github.com/cboulanger/zotero-rag/commit/2e5377cdc0d292359c629522a6765f1abd6777f5))
+
 # [1.11.0](https://github.com/cboulanger/zotero-rag/compare/v1.10.3...v1.11.0) (2026-04-21)
 
 
