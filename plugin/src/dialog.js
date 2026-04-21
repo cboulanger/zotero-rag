@@ -1055,6 +1055,9 @@ var ZoteroRAGDialog = {
 			}
 		}
 
+		/** @type {string[]} */
+		const indexingErrors = [];
+
 		for (let libraryId of libraryIds) {
 			try {
 				const libraries = this.plugin.getLibraries();
@@ -1140,11 +1143,11 @@ var ZoteroRAGDialog = {
 					this.plugin.log(`[RemoteIndexer] ${msg}`);
 					this.showStatus(msg, 'info');
 				}
-				// Upload errors are warnings but also non-fatal
 				if (indexResult.errors > 0) {
 					const detail = indexResult.firstError ? `: ${indexResult.firstError}` : '';
-					this.plugin.log(`[RemoteIndexer] Warning: ${indexResult.errors} attachment(s) failed during indexing of ${libraryName}`);
-					this.showStatus(`Warning: ${indexResult.errors} attachment(s) failed to index${detail}`, 'error');
+					const msg = `${indexResult.errors} attachment(s) failed to index in "${libraryName}"${detail}`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					indexingErrors.push(msg);
 				}
 
 			} catch (error) {
@@ -1152,6 +1155,10 @@ var ZoteroRAGDialog = {
 				this.plugin.log(`Error indexing library ${libraryId}: ${errorMessage}`);
 				throw error;
 			}
+		}
+
+		if (indexingErrors.length > 0) {
+			throw new Error(indexingErrors.join('\n'));
 		}
 	},
 

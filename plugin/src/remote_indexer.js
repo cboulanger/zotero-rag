@@ -210,6 +210,10 @@ var RemoteIndexer = {
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				log(`[RemoteIndexer] Error uploading ${att.attachment_key}: ${msg}`);
+				if (msg.startsWith('Rate limit exceeded')) {
+					await this._saveVersionCache(libraryId, versionCache);
+					throw err;
+				}
 				if (!firstError) firstError = msg;
 				errors++;
 				// Mark in cache so this item is not re-attempted on the next incremental run.
@@ -250,6 +254,10 @@ var RemoteIndexer = {
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				log(`[RemoteIndexer] Error uploading abstract for ${abstractItem.item_key}: ${msg}`);
+				if (msg.startsWith('Rate limit exceeded')) {
+					await this._saveVersionCache(libraryId, versionCache);
+					throw err;
+				}
 				if (!firstError) firstError = msg;
 				errors++;
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
