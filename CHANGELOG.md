@@ -1,3 +1,10 @@
+## [1.10.2](https://github.com/cboulanger/zotero-rag/compare/v1.10.1...v1.10.2) (2026-04-21)
+
+
+### Bug Fixes
+
+* Fix wrong indexed/cached count ([1aef88d](https://github.com/cboulanger/zotero-rag/commit/1aef88d76a39bb505f3f330123aaf3c04d3c2bcc))
+
 ## [1.10.1](https://github.com/cboulanger/zotero-rag/compare/v1.10.0...v1.10.1) (2026-04-21)
 
 
