@@ -12,6 +12,11 @@ declare const Zotero: {
 	Prefs: {
 		get(pref: string, global?: boolean): any;
 		set(pref: string, value: any, global?: boolean): void;
+		clear(pref: string, global?: boolean): void;
+	};
+
+	DataDirectory: {
+		dir: string;
 	};
 
 	Libraries: {
@@ -49,6 +54,18 @@ declare const Zotero: {
 		Runner: {
 			downloadFile(attachment: ZoteroItem): Promise<void>;
 		};
+	};
+
+	Notifier: {
+		registerObserver(
+			observer: {
+				notify(event: string, type: string, ids: number[], extraData: Record<number, { libraryID: number; key: string }>): void;
+			},
+			types: string[],
+			id?: string,
+			priority?: number
+		): string;
+		unregisterObserver(id: string): void;
 	};
 };
 
@@ -107,6 +124,18 @@ interface Window {
 	openDialog(url: string, name: string, features: string, args: any): Window | null;
 	arguments?: any[];
 }
+
+// Firefox/Gecko globals available in the extension context
+declare const PathUtils: {
+	join(...parts: string[]): string;
+};
+
+declare const IOUtils: {
+	readUTF8(path: string): Promise<string>;
+	writeUTF8(path: string, data: string): Promise<void>;
+	makeDirectory(path: string, options?: { createAncestors?: boolean }): Promise<void>;
+	read(path: string): Promise<Uint8Array>;
+};
 
 // Components (XPCOM)
 declare const Components: {

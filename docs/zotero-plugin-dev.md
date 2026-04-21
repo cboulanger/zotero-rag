@@ -602,6 +602,11 @@ const id = Zotero.Notifier.registerObserver(
     ['collection']   // array of type strings: 'item', 'collection', 'library', ...
 )
 Zotero.Notifier.unregisterObserver(id)
+
+// Permanent item deletion: event='delete', type='item'
+// extraData[id] = { libraryID: number, key: string } — populated even after item is gone from DB
+// NOTE: trashing an item does NOT fire 'delete'; only permanent erasure (empty trash / erase()) does.
+// Source: Zotero.DataObject.prototype._finalizeErase → Notifier.queue('delete', objectType, ...)
 ```
 
 ### Pane & Window
