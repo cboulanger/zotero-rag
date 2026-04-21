@@ -430,7 +430,7 @@ var RemoteIndexer = {
 				const response = await this._apiFetch(
 					'POST',
 					`${backendURL}/api/libraries/${libraryId}/check-indexed`,
-					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal },
+					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 30 * 1000 },
 				);
 
 				const data = await response.json();
@@ -509,6 +509,7 @@ var RemoteIndexer = {
 			headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 			body: formData,
 			signal,
+			timeout: 10 * 60 * 1000,
 		});
 
 		const result = await response.json();
@@ -556,11 +557,17 @@ var RemoteIndexer = {
 	/**
 	 * @param {string} method
 	 * @param {string} url
-	 * @param {RequestInit} [init]
+	 * @param {RequestInit & {timeout?: number}} [init]
 	 * @returns {Promise<Response>}
 	 */
-	async _apiFetch(method, url, init) {
-		const response = await fetch(url, { method, ...init });
+	async _apiFetch(method, url, init = {}) {
+		const { signal, timeout: timeoutMs, ...rest } = init;
+		let effectiveSignal = signal;
+		if (timeoutMs != null) {
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			effectiveSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		}
+		const response = await fetch(url, { method, ...rest, signal: effectiveSignal });
 		if (!response.ok) {
 			let detail = '';
 			const ct = response.headers.get('content-type') || '';
@@ -671,6 +678,7 @@ var RemoteIndexer = {
 			headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
 			body: JSON.stringify(body),
 			signal,
+			timeout: 2 * 60 * 1000,
 		});
 
 		const result = await response.json();
