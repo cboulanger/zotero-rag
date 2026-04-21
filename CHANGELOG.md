@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/cboulanger/zotero-rag/compare/v1.10.0...v1.10.1) (2026-04-21)
+
+
+### Bug Fixes
+
+* Improvements to the "fix unavailable attachments" tool ([b40eebf](https://github.com/cboulanger/zotero-rag/commit/b40eebf0b589dbc7e955e07505cf1c024638c738))
+
 # [1.10.0](https://github.com/cboulanger/zotero-rag/compare/v1.9.2...v1.10.0) (2026-04-20)
 
 
