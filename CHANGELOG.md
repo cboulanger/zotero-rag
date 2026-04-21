@@ -1,3 +1,10 @@
+## [1.12.1](https://github.com/cboulanger/zotero-rag/compare/v1.12.0...v1.12.1) (2026-04-21)
+
+
+### Bug Fixes
+
+*  Fix indexing gets stuck on embedder rate limits ([8f6f66d](https://github.com/cboulanger/zotero-rag/commit/8f6f66d620611c74755de1ac83be5bb75655287b))
+
 # [1.12.0](https://github.com/cboulanger/zotero-rag/compare/v1.11.0...v1.12.0) (2026-04-21)
 
 
