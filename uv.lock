@@ -3176,12 +3176,13 @@ wheels = [
 
 [[package]]
 name = "zotero-rag"
-version = "1.12.2"
+version = "1.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "fastapi" },
+    { name = "filelock" },
     { name = "httpx" },
     { name = "markdown-it-py" },
     { name = "openai" },
@@ -3221,6 +3222,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "sys_platform != 'darwin' and extra == 'local-models'", specifier = ">=0.48.2" },
     { name = "einops", marker = "extra == 'local-models'", specifier = ">=0.8.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "filelock", specifier = ">=3.12.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "ir-datasets", marker = "extra == 'eval'", specifier = ">=0.5.5" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },

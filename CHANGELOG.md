@@ -1,3 +1,17 @@
+# [1.13.0](https://github.com/cboulanger/zotero-rag/compare/v1.12.2...v1.13.0) (2026-04-22)
+
+
+### Bug Fixes
+
+* Add missing dependency ([8a7b807](https://github.com/cboulanger/zotero-rag/commit/8a7b807c6f4ba5a19f6b43b99541e785d811479f))
+* Fix tests ([4c8e3e4](https://github.com/cboulanger/zotero-rag/commit/4c8e3e4b04eedb39bbdf85012abbf06e3cc80214))
+* Make registration file edits thread-safe ([fb5367e](https://github.com/cboulanger/zotero-rag/commit/fb5367ec4e0844b815560a7c7025763f3f7e0500))
+
+
+### Features
+
+* Add rate limit widget to RAG dialog ([f9df5c7](https://github.com/cboulanger/zotero-rag/commit/f9df5c79e95e91ea63eba3a46d738ab025be1151))
+
 ## [1.12.2](https://github.com/cboulanger/zotero-rag/compare/v1.12.1...v1.12.2) (2026-04-21)
 
 
