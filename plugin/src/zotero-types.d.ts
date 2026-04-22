@@ -5,6 +5,8 @@
 
 // Zotero global object
 declare const Zotero: {
+	CreatorTypes: any;
+	Users: any;
 	debug(message: string): void;
 	getMainWindows(): Window[];
 	getActiveZoteroPane(): ZoteroPane | null;
@@ -94,16 +96,26 @@ interface ZoteroCollection {
 }
 
 interface ZoteroItem {
+	isNote(): boolean;
+	getField: any;
+	version: number;
+	parentItemID: any;
 	id: number;
 	key: string;
 	libraryID: number | null;
 	attachmentContentType: string | null;
+	/** 0=imported_file, 1=imported_url, 2=linked_file, 3=linked_url */
+	attachmentLinkMode: number | null;
+	itemType: string | null;
+	dateModified: string | null;
 	setNote(html: string): void;
 	saveTx(): Promise<void>;
 	isAttachment(): boolean;
 	isRegularItem(): boolean;
 	getAttachments(): number[];
 	getFilePathAsync(): Promise<string | null>;
+	/** Ensures all item fields are loaded from the local Zotero database. No-op if already loaded. */
+	loadAllData(): Promise<void>;
 }
 
 interface ZoteroSearch {

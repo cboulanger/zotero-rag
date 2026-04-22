@@ -491,7 +491,6 @@ async def upload_and_index_abstract(
             lib_meta = LibraryIndexMetadata(
                 library_id=request.library_id,
                 library_type=request.library_type,
-                library_name=request.library_name,
                 indexing_mode="incremental",
             )
         lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, request.item_version)
