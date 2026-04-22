@@ -1,3 +1,16 @@
+# [1.15.0](https://github.com/cboulanger/zotero-rag/compare/v1.14.0...v1.15.0) (2026-04-22)
+
+
+### Bug Fixes
+
+* Fix various UI bugs ([17016b9](https://github.com/cboulanger/zotero-rag/commit/17016b99be0184362ba16ef4981343ff315e41f4))
+* Use "u{user id}" instead of "1" as library id on the server to distinguish user libraries ([c5f1308](https://github.com/cboulanger/zotero-rag/commit/c5f1308c93f784d816f4f792dbbda4c79941a58f))
+
+
+### Features
+
+* Add fragment context for LLM ([7a22d23](https://github.com/cboulanger/zotero-rag/commit/7a22d23aad5ed6751097565f4261daab0a7de42f))
+
 # [1.14.0](https://github.com/cboulanger/zotero-rag/compare/v1.13.0...v1.14.0) (2026-04-22)
 
 
