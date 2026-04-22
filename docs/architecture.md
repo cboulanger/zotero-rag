@@ -119,11 +119,11 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Libraries API:** [backend/api/libraries.py](../backend/api/libraries.py)
 
-- `GET /api/libraries` - List available Zotero libraries
-- `GET /api/libraries/{library_id}/status` - Check indexing status (legacy)
-- `GET /api/libraries/{library_id}/index-status` - Get detailed indexing metadata (version tracking, item counts, timestamps)
-- `POST /api/libraries/{library_id}/reset-index` - Mark library for hard reset (full reindex)
-- `GET /api/libraries/indexed` - List all indexed libraries with metadata
+- `GET /api/libraries` — List all libraries known to the backend (indexed or registered). Returns `LibraryDetailResponse` for each: combined index metadata (`total_items_indexed`, `total_chunks`, `last_indexed_at`, `indexing_mode`), registration info (`registered_at`, `users[]`), library name and type. Union of indexed and registered libraries, sorted by ID.
+- `GET /api/libraries/{library_id}/status` — Same `LibraryDetailResponse` shape for a single library. Returns 404 if the library is neither indexed nor registered.
+- `GET /api/libraries/{library_id}/index-status` — Raw `LibraryIndexMetadata` for the plugin's sync-state tracking (last indexed version, item/chunk counts, force-reindex flag). Returns 404 if never indexed.
+- `DELETE /api/libraries/{library_id}/index` — Remove all indexed data for a library (chunks, dedup records, metadata). Returns deletion counts.
+- `DELETE /api/libraries/{library_id}/items/{item_key}/chunks` — Remove all indexed chunks for a specific item (called automatically when an item is permanently deleted in Zotero).
 
 **Indexing API:** [backend/api/indexing.py](../backend/api/indexing.py)
 
@@ -450,7 +450,7 @@ ALLOWED_ORIGINS=https://myhost   # CORS allowed origins (default: *)
 
 **Plugin Preferences:**
 
-```
+```text
 extensions.zotero-rag.backendURL = http://localhost:8119
 extensions.zotero-rag.apiKey     = (empty for local, set for remote)
 extensions.zotero-rag.maxQueries = 5
@@ -715,4 +715,3 @@ For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or n
 - [Qdrant Documentation](https://qdrant.tech/documentation/)
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [sentence-transformers](https://www.sbert.net/)
-

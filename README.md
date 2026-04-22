@@ -26,12 +26,11 @@ Copy `.env.dist` to `.env` and set `MODEL_PRESET`:
 
 ```bash
 # Recommended — fully remote, no local GPU or heavy dependencies
-MODEL_PRESET=remote-kisski       # requires KISSKI_API_KEY
 MODEL_PRESET=remote-openai       # requires OPENAI_API_KEY
 
 # Local inference (requires uv sync --extra local-models)
 MODEL_PRESET=apple-silicon-32gb  # Apple Silicon Mac, 32 GB RAM
-MODEL_PRESET=cpu-only            # CPU only / low memory
+MODEL_PRESET=cpu-only            # CPU only / low memory, will have bad performance
 ```
 
 See [docs/presets.md](docs/presets.md) for all presets and a dependency overview.
@@ -68,8 +67,8 @@ npm run server:stop
 # Build image and start container (requires Docker or Podman)
 node bin/container.mjs start --data-dir ./data
 
-# Or with a deployment env file (for servers):
-node bin/deploy.mjs .env.deploy.myserver
+# Or with a deployment env file (for servers, works only with Podman):
+node bin/deploy.mjs .env.deploy.example
 ```
 
 See [docs/container-deployment.md](docs/container-deployment.md) for full Docker setup, including remote server deployment with nginx and SSL.
