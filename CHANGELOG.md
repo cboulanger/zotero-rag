@@ -1,3 +1,10 @@
+## [1.15.1](https://github.com/cboulanger/zotero-rag/compare/v1.15.0...v1.15.1) (2026-04-22)
+
+
+### Bug Fixes
+
+* Fix data path ([1b8e06b](https://github.com/cboulanger/zotero-rag/commit/1b8e06bf58a8844b6a27a5caaf3d7213a6c03de2))
+
 # [1.15.0](https://github.com/cboulanger/zotero-rag/compare/v1.14.0...v1.15.0) (2026-04-22)
 
 
