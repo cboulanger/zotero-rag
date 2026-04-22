@@ -125,6 +125,12 @@ For each missing file the tool tries the following strategies in order:
 
 When a file is found it is copied into the correct Zotero storage directory. Items that cannot be recovered can be deleted permanently from the dialog using the **Delete Selected** button.
 
+## Versioning and Release Policy
+
+The project uses [Semantic Release](https://github.com/semantic-release/semantic-release) workflow, which relies on [Semantic Versioning](https://semver.org/) principles. This determines the version number. The major version increases each time a backwards-incompatible change is being merged in terms of the frontend (plugin client) and backend (server) communication. All backend and frontend instances with the same major version number should be compatible and will handle missing new features gracefully.
+
+Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be the first stable release. 
+
 ## Developer Documentation
 
 - **[Application architecture](docs/architecture.md)**
