@@ -142,12 +142,66 @@ def migrate_registrations(registrations_path: Path, old_id: str, new_id: str, dr
     return True
 
 
+def list_library_ids(vector_db_path: Path) -> None:
+    """Print all distinct library_id values found across all model dirs and collections."""
+    model_dirs = sorted(d for d in vector_db_path.iterdir() if d.is_dir())
+    if not model_dirs:
+        print("[WARN] No model subdirectories found.")
+        return
+
+    for model_dir in model_dirs:
+        print(f"\n--- Model dir: {model_dir.name} ---")
+        try:
+            client = QdrantClient(path=str(model_dir))
+        except Exception as e:
+            print(f"  [SKIP] {e}")
+            continue
+
+        for collection in (CHUNKS_COLLECTION, DEDUP_COLLECTION, METADATA_COLLECTION):
+            existing = [c.name for c in client.get_collections().collections]
+            if collection not in existing:
+                continue
+            seen: set = set()
+            offset = None
+            while True:
+                batch, offset = client.scroll(
+                    collection_name=collection,
+                    scroll_filter=None,
+                    limit=1000,
+                    offset=offset,
+                    with_payload=["library_id"],
+                )
+                for p in batch:
+                    seen.add(p.payload.get("library_id") if p.payload else "<no payload>")
+                if offset is None:
+                    break
+            print(f"  {collection}: library_ids = {sorted(str(v) for v in seen)}")
+
+        client.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Migrate a library_id across all Qdrant collections.")
-    parser.add_argument("--old-id", required=True, help="Current library_id (e.g. '1')")
-    parser.add_argument("--new-id", required=True, help="New library_id (e.g. 'u3866263')")
+    parser.add_argument("--old-id", help="Current library_id (e.g. '1')")
+    parser.add_argument("--new-id", help="New library_id (e.g. 'u3866263')")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing anything")
+    parser.add_argument("--list", action="store_true", help="List all distinct library_id values (no migration)")
     args = parser.parse_args()
+
+    settings = get_settings()
+    vector_db_path: Path = settings.vector_db_path
+    registrations_path: Path = settings.registrations_path
+
+    print(f"VECTOR_DB_PATH : {vector_db_path}")
+    print(f"REGISTRATIONS  : {registrations_path}\n")
+
+    if args.list:
+        list_library_ids(vector_db_path)
+        return
+
+    if not args.old_id or not args.new_id:
+        print("[ERROR] --old-id and --new-id are required unless --list is used.")
+        sys.exit(1)
 
     old_id, new_id = args.old_id, args.new_id
     dry_run = args.dry_run
@@ -155,12 +209,6 @@ def main():
     if dry_run:
         print("[DRY RUN] No changes will be written.\n")
 
-    settings = get_settings()
-    vector_db_path: Path = settings.vector_db_path
-    registrations_path: Path = settings.registrations_path
-
-    print(f"VECTOR_DB_PATH : {vector_db_path}")
-    print(f"REGISTRATIONS  : {registrations_path}")
     print(f"Migrating library_id: {old_id!r} -> {new_id!r}\n")
 
     if not vector_db_path.exists():
