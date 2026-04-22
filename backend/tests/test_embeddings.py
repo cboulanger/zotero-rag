@@ -210,14 +210,14 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         mock_response = MagicMock()
         mock_response.data = [mock_item]
 
+        mock_raw = MagicMock()
+        mock_raw.headers = {}
+        mock_raw.parse.return_value = mock_response
+
         mock_client = MagicMock()
-        mock_client.embeddings.create = MagicMock(
-            return_value=mock_response.__class__()  # placeholder
-        )
-        # Make embeddings.create an awaitable
-        async def fake_create(**kwargs):
-            return mock_response
-        mock_client.embeddings.create = fake_create
+        async def fake_raw_create(**kwargs):
+            return mock_raw
+        mock_client.embeddings.with_raw_response.create = fake_raw_create
         mock_openai_cls.return_value = mock_client
 
         service = RemoteEmbeddingService(self.config, api_key="test-key")
