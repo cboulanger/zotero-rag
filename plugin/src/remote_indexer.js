@@ -21,6 +21,7 @@ const debug = (log, msg) => { if (DEBUG) log(`[RemoteIndexer] [DEBUG] ${msg}`); 
  * @property {string} mime_type
  * @property {number} item_version
  * @property {number} attachment_version
+ * @property {number} linkMode - Zotero link mode: 0=imported_file, 1=imported_url, 2=linked_file, 3=linked_url
  */
 
 /**
@@ -178,8 +179,13 @@ var RemoteIndexer = {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && att.filePath;
 		});
-		// Attachments with no local file are reported separately — not counted as errors
-		const noFile = toUpload.length - uploadable.length;
+		// Only count imported files (linkMode 0/1) as "noFile" — linked files (linkMode 2)
+		// with a broken path can't be fixed by the fix dialog, so exclude them from the count
+		// that drives the "X unavailable" link in the RAG dialog.
+		const noFile = toUpload.filter(s => {
+			const att = attachments.find(a => a.attachment_key === s.attachment_key);
+			return att && !att.filePath && (att.linkMode === 0 || att.linkMode === 1);
+		}).length;
 		if (noFile > 0) {
 			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
 		}
@@ -208,7 +214,7 @@ var RemoteIndexer = {
 			});
 
 			try {
-				const uploadResult = await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
+				const uploadResult = await this._uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal });
 				if (uploadResult.rateLimitHeaders) {
 					rateLimitHeaders = uploadResult.rateLimitHeaders;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
@@ -312,7 +318,9 @@ var RemoteIndexer = {
 			const group = Zotero.Groups.get(parseInt(libraryId, 10));
 			zoteroLibraryID = group ? group.libraryID : null;
 		} else {
-			zoteroLibraryID = parseInt(libraryId, 10);
+			// User library: the backend ID may be "u<userId>" — always use the local
+			// userLibraryID rather than trying to parse the backend ID numerically.
+			zoteroLibraryID = Zotero.Libraries.userLibraryID;
 		}
 
 		if (!zoteroLibraryID) {
@@ -354,6 +362,7 @@ var RemoteIndexer = {
 				mime_type: mimeType,
 				item_version: parentItem ? (parentItem.version || 0) : (item.version || 0),
 				attachment_version: item.version || 0,
+				linkMode: item.attachmentLinkMode ?? 0,
 				zoteroItem: item,
 				parentItem,
 				filePath,
@@ -384,7 +393,9 @@ var RemoteIndexer = {
 			const group = Zotero.Groups.get(parseInt(libraryId, 10));
 			zoteroLibraryID = group ? group.libraryID : null;
 		} else {
-			zoteroLibraryID = parseInt(libraryId, 10);
+			// User library: the backend ID may be "u<userId>" — always use the local
+			// userLibraryID rather than trying to parse the backend ID numerically.
+			zoteroLibraryID = Zotero.Libraries.userLibraryID;
 		}
 		if (!zoteroLibraryID) return 0;
 
@@ -491,7 +502,6 @@ var RemoteIndexer = {
 	 * @param {AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}} opts.att
 	 * @param {string} opts.libraryId
 	 * @param {string} opts.libraryType
-	 * @param {string} opts.libraryName
 	 * @param {string} opts.backendURL
 	 * @param {number|null} [opts.userId]
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
@@ -499,7 +509,7 @@ var RemoteIndexer = {
 	 * @param {AbortSignal} [opts.signal]
 	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -512,6 +522,7 @@ var RemoteIndexer = {
 
 		// Collect item metadata from the parent Zotero item (or attachment itself)
 		const parent = att.parentItem || att.zoteroItem;
+		if (parent && parent.loadAllData) await parent.loadAllData();
 		const metadata = {
 			library_id: libraryId,
 			library_type: libraryType,
@@ -554,7 +565,7 @@ var RemoteIndexer = {
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
-		debug(log, `${att.attachment_key}: rate_limit_headers=${JSON.stringify(result.rate_limit_headers)}`); // DEBUG
+		
 		if (result.status === 'error') {
 			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
 		}
@@ -667,7 +678,9 @@ var RemoteIndexer = {
 			const group = Zotero.Groups.get(parseInt(libraryId, 10));
 			zoteroLibraryID = group ? group.libraryID : null;
 		} else {
-			zoteroLibraryID = parseInt(libraryId, 10);
+			// User library: the backend ID may be "u<userId>" — always use the local
+			// userLibraryID rather than trying to parse the backend ID numerically.
+			zoteroLibraryID = Zotero.Libraries.userLibraryID;
 		}
 		if (!zoteroLibraryID) return [];
 
@@ -690,6 +703,7 @@ var RemoteIndexer = {
 			const itemKey = item.key;
 			if (keysWithAnyAttachment.has(itemKey)) continue;
 
+			if (item.loadAllData) await item.loadAllData();
 			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
 			if (!abstract) continue;
 
@@ -726,6 +740,7 @@ var RemoteIndexer = {
 	 */
 	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		const item = abstractItem.zoteroItem;
+		if (item && item.loadAllData) await item.loadAllData();
 		const body = {
 			library_id: libraryId,
 			library_type: libraryType,
@@ -760,7 +775,7 @@ var RemoteIndexer = {
 
 		const result = await response.json();
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
-		debug(log, `${abstractItem.item_key} (abstract): rate_limit_headers=${JSON.stringify(result.rate_limit_headers)}`); // DEBUG
+		
 		if (result.status === 'error') {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}

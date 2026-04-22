@@ -91,6 +91,10 @@ var ZoteroFixUnavailableDialog = {
 		tbody.innerHTML = '';
 
 		if (this.items.length === 0) {
+			// Clear the stale count in the parent RAG dialog so the "X unavailable" link disappears.
+			if (this.plugin && typeof this.plugin.clearMissingFilesCount === 'function') {
+				this.plugin.clearMissingFilesCount(this.libraryID);
+			}
 			const row = document.createElement('div');
 			row.className = 'table-row';
 			const cell = document.createElement('div');

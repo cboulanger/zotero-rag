@@ -39,6 +39,9 @@ var ZoteroRAGDialog = {
 	/** @type {boolean} */
 	isOperationInProgress: false,
 
+	/** True while the initial backend connectivity check is in flight. */
+	isConnecting: false,
+
 	/** Whether the active embedding service supports rate limits (remote model). */
 	rateLimitAvailable: false,
 
@@ -180,10 +183,34 @@ var ZoteroRAGDialog = {
 			});
 		}
 
-		// Load preset configuration and set default min_score
-		this.loadPresetConfig();
+		// Show connecting state, check backend, then populate
+		this.connectAndInit();
+	},
 
-		// Populate library list
+	/**
+	 * Show "Connecting to RAG server..." immediately, verify backend availability,
+	 * then populate the dialog. Keeps submit disabled until the check resolves.
+	 * @returns {Promise<void>}
+	 */
+	async connectAndInit() {
+		this.isConnecting = true;
+		this.showProgress('Connecting to RAG server...');
+		this.updateSubmitButtonState();
+
+		try {
+			if (this.plugin) await this.plugin.checkBackendVersion();
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			this.showStatus(
+				`Cannot connect to RAG server: ${msg}. Please start the server and reopen this dialog.`,
+				'error'
+			);
+			return;
+		}
+
+		this.isConnecting = false;
+		this.hideProgress();
+		this.loadPresetConfig();
 		this.populateLibraries();
 	},
 
@@ -487,6 +514,11 @@ var ZoteroRAGDialog = {
 
 		if (!submitButton) return;
 
+		if (this.isConnecting) {
+			submitButton.disabled = true;
+			return;
+		}
+
 		if (this.selectedLibraries.size === 0) {
 			submitButton.disabled = true;
 			submitButton.textContent = 'Submit';
@@ -546,20 +578,15 @@ var ZoteroRAGDialog = {
 		const section = document.getElementById('rate-limit-section');
 		if (!section) return;
 		const show = this.isIndexOnlyMode() && this.rateLimitAvailable;
-		this.plugin && this.plugin.log(`[RateLimit] updateRateLimitDisplay: isIndexOnlyMode=${this.isIndexOnlyMode()}, rateLimitAvailable=${this.rateLimitAvailable}, hasHeaders=${!!this.rateLimitHeaders}`); // DEBUG
 		section.style.display = show ? '' : 'none';
 		if (!show || !this.rateLimitHeaders) return;
-
-		this.plugin && this.plugin.log(`[RateLimit] headers: ${JSON.stringify(this.rateLimitHeaders)}`); // DEBUG
 
 		for (const [period, label] of /** @type {[string, string][]} */ ([['hour', 'hour'], ['day', 'day']])) {
 			const limit = parseInt(this.rateLimitHeaders[`x-ratelimit-limit-${period}`] || '0', 10);
 			const remaining = parseInt(this.rateLimitHeaders[`x-ratelimit-remaining-${period}`] || '0', 10);
-			this.plugin && this.plugin.log(`[RateLimit] ${period}: limit=${limit}, remaining=${remaining}`); // DEBUG
 			const bar = /** @type {HTMLElement|null} */ (document.getElementById(`rate-limit-bar-${period}`));
 			const text = document.getElementById(`rate-limit-text-${period}`);
 			if (!limit || !bar || !text) {
-				this.plugin && this.plugin.log(`[RateLimit] ${period}: skipped — limit=${limit}, bar=${!!bar}, text=${!!text}`); // DEBUG
 				continue;
 			}
 			const usedPct = Math.round((limit - remaining) / limit * 100);
@@ -606,7 +633,7 @@ var ZoteroRAGDialog = {
 			if (!metadata) {
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#999';
-				mainText = 'not indexed';
+				mainText = totalIndexable === 0 ? 'no indexable attachments' : 'not indexed';
 			} else if (isPartial) {
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
@@ -708,11 +735,12 @@ var ZoteroRAGDialog = {
 		);
 		if (!confirmed) return;
 
-		// Reset the unavailable count so the fresh run starts clean
+		// Reset the unavailable count so the fresh run starts clean.
+		// Keep existing metadata so the status row shows the previous state during indexing
+		// instead of flashing "not indexed" when updateLibraryProgressText restores display.
 		this.libraryUnavailableCount.set(libraryId, 0);
 		// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
 		Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, 0, true);
-		this.libraryMetadata.delete(libraryId);
 
 		this.setSubmitEnabled(false);
 		this.setCancelMode('abort');
@@ -725,9 +753,8 @@ var ZoteroRAGDialog = {
 
 			this.updateProgress(100, 'Re-indexing complete', `"${name}" has been re-indexed.`);
 
-			// Refresh metadata and detect phantom gap
-			this.libraryMetadata.delete(libraryId);
-			await this.fetchAndUpdateLibraryMetadata(libraryId);
+			// Metadata was already refreshed inside checkAndMonitorIndexing.
+			// Apply phantom-gap detection on the fresh data.
 			const totalIndexable = this.libraryIndexableCount.get(libraryId);
 			const freshMeta = this.libraryMetadata.get(libraryId);
 			if (totalIndexable !== undefined && freshMeta != null) {
@@ -942,12 +969,10 @@ var ZoteroRAGDialog = {
 
 			this.updateProgress(100, 'Indexing complete', 'Libraries are ready to query.');
 
-			// Refresh metadata for all indexed libraries so the button state updates
+			// Metadata was already refreshed per-library inside checkAndMonitorIndexing.
+			// Apply phantom-gap detection: if the backend indexed fewer items than expected,
+			// the remainder are permanently unavailable (file present but not embeddable).
 			for (const id of libraryIds) {
-				this.libraryMetadata.delete(id);
-				await this.fetchAndUpdateLibraryMetadata(id);
-				// Phantom gap: items with local files that still couldn't be indexed count
-				// as permanently unavailable (backend accepted them but didn't embed them).
 				const totalIndexable = this.libraryIndexableCount.get(id);
 				const freshMeta = this.libraryMetadata.get(id);
 				if (totalIndexable !== undefined && freshMeta != null) {
@@ -1193,12 +1218,12 @@ var ZoteroRAGDialog = {
 				this.abortController = null;
 				this.updateLibraryProgressText(libraryId, null); // restore normal display
 
-				// If the user cancelled while indexing was running, mark the library as
-				// not-ready so the Index button reappears.  Backend data is kept intact
-				// so the next run can resume incrementally.
+				// If the user cancelled while indexing was running, fetch the actual partial
+				// state from the backend so the row shows "⚠ X/N items (incomplete)" rather
+				// than "not indexed".  Backend data is kept intact for incremental resume.
 				if (!this.isOperationInProgress) {
-					this.libraryMetadata.set(libraryId, null);
-					this.updateLibraryStatusIcon(libraryId, null);
+					this.libraryMetadata.delete(libraryId);
+					await this.fetchAndUpdateLibraryMetadata(libraryId);
 					return;
 				}
 
@@ -1234,6 +1259,11 @@ var ZoteroRAGDialog = {
 					this.plugin.log(`[RemoteIndexer] ${msg}`);
 					indexingErrors.push(msg);
 				}
+
+				// Refresh the library row from the backend so the label shows the accurate
+				// timestamp and indexed count immediately after indexing finishes.
+				this.libraryMetadata.delete(libraryId);
+				await this.fetchAndUpdateLibraryMetadata(libraryId);
 
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
