@@ -1,3 +1,15 @@
+# [1.14.0](https://github.com/cboulanger/zotero-rag/compare/v1.13.0...v1.14.0) (2026-04-22)
+
+
+### Bug Fixes
+
+* fix failed attachment cache, don't calculate library size ([e3f7a11](https://github.com/cboulanger/zotero-rag/commit/e3f7a11b274d5c80592a6e3eb65d867283a31509))
+
+
+### Features
+
+* Adapt non-functional libraries API ([09707a4](https://github.com/cboulanger/zotero-rag/commit/09707a425783175b5b6999483d1a86094ed18ae4))
+
 # [1.13.0](https://github.com/cboulanger/zotero-rag/compare/v1.12.2...v1.13.0) (2026-04-22)
 
 
