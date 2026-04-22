@@ -647,7 +647,7 @@ async function handleStart(options) {
 
   if (options.dataDir) {
     volumes.push({ host: options.dataDir, container: '/data' });
-    extraEnv.push({ key: 'MODEL_WEIGHTS_PATH', value: '/data/models' });
+    extraEnv.push({ key: 'DATA_PATH', value: '/data' });
   }
 
   if (options.volume) {
@@ -1318,7 +1318,7 @@ async function handleDeploy(options) {
   const volumes = options.dataDir ? [{ host: options.dataDir, container: '/data' }] : [];
   const extraEnv = [];
   if (options.dataDir) {
-    extraEnv.push({ key: 'MODEL_WEIGHTS_PATH', value: '/data/models' });
+    extraEnv.push({ key: 'DATA_PATH', value: '/data' });
   }
   extraEnv.push({ key: 'KREUZBERG_URL', value: `http://kreuzberg:${KREUZBERG_PORT}` });
   extraEnv.push({ key: 'QDRANT_URL', value: `http://qdrant:${QDRANT_PORT}` });

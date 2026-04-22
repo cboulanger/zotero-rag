@@ -52,6 +52,7 @@ services:
       UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
       # set a secret api key for a real deployment!
       API_KEY: ${API_KEY:-}
+      DATA_PATH: /data
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
     depends_on:
       - kreuzberg
