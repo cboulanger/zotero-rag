@@ -3,17 +3,20 @@ Library/user registration service.
 
 Stores a mapping of library IDs to the users who have registered to index them.
 Data is persisted as a JSON file under <data_path>/system/registrations.json.
+
+Concurrent writes are protected by a filelock so that multi-process uvicorn
+deployments (UVICORN_WORKERS > 1) cannot corrupt the file or silently drop
+registrations.
 """
 
 import json
 import logging
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from filelock import FileLock
 
-_lock = threading.Lock()
+logger = logging.getLogger(__name__)
 
 
 class RegistrationService:
@@ -21,6 +24,8 @@ class RegistrationService:
 
     def __init__(self, registrations_path: Path) -> None:
         self._path = registrations_path
+        # Lock file sits next to the data file; acquired for every write.
+        self._lock = FileLock(str(registrations_path) + ".lock")
 
     def _load(self) -> dict:
         if not self._path.exists():
@@ -42,10 +47,11 @@ class RegistrationService:
         """Register a user for a library.
 
         Returns True if the library entry already existed before this call,
-        False if it was created fresh.
+        False if it was created fresh. Safe to call concurrently from multiple
+        processes.
         """
         now = datetime.now(timezone.utc).isoformat()
-        with _lock:
+        with self._lock:
             data = self._load()
             existed = library_id in data
             if not existed:
@@ -56,9 +62,7 @@ class RegistrationService:
                     "users": [],
                 }
             entry = data[library_id]
-            # Update library name in case it changed
             entry["library_name"] = library_name
-            # Add user if not already present
             if not any(u["user_id"] == user_id for u in entry["users"]):
                 entry["users"].append({
                     "user_id": user_id,
