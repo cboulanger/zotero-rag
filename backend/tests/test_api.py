@@ -72,7 +72,6 @@ class TestLibrariesAPI(unittest.TestCase):
             total_items_indexed=5,
             total_chunks=50,
         )
-        mock_vs.get_library_size_bytes.return_value = 1024
         app.dependency_overrides[get_vector_store] = lambda: mock_vs
         self.client = TestClient(app)
 
@@ -83,7 +82,7 @@ class TestLibrariesAPI(unittest.TestCase):
         self.assertEqual(data["library_id"], "1")
         self.assertEqual(data["library_name"], "Test Library")
         self.assertEqual(data["total_chunks"], 50)
-        self.assertIn("size_bytes", data)
+        self.assertIn("users", data)
 
 
 class TestPullIndexingRemoved(unittest.TestCase):

@@ -74,7 +74,6 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
                                  total_chunks=1000),
         ]
         mock_vs.get_all_library_metadata.return_value = mock_libraries
-        mock_vs.get_library_size_bytes.return_value = 0
         self._override_vs(mock_vs)
 
         response = self.client.get("/api/libraries")
@@ -84,7 +83,6 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         self.assertEqual(len(data), 2)
         self.assertEqual(data[0]["library_id"], "1")
         self.assertEqual(data[0]["total_chunks"], 500)
-        self.assertIn("size_bytes", data[0])
         self.assertIn("users", data[0])
 
 

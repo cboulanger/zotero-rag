@@ -57,17 +57,25 @@ var ZoteroRAGDialog = {
 	 */
 	downloadedAttachmentPaths: new Map(),
 
-	/** Zotero preference key for persisting permanently-failed download keys. */
-	PREF_FAILED_DOWNLOADS: 'extensions.zotero-rag.failedDownloadKeys',
+	/**
+	 * Path to the JSON file storing permanently-failed download keys.
+	 * @returns {string}
+	 */
+	get _failedDownloadsPath() {
+		// @ts-ignore - PathUtils is a global in Firefox/Zotero
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', 'failed-downloads.json');
+	},
 
 	/**
 	 * Return the set of attachment keys that have permanently failed to download
 	 * (i.e. the file does not exist on Zotero's sync server).
-	 * @returns {Set<string>}
+	 * @returns {Promise<Set<string>>}
 	 */
-	_getFailedDownloadKeys() {
+	async _getFailedDownloadKeys() {
 		try {
-			return new Set(JSON.parse(Zotero.Prefs.get(this.PREF_FAILED_DOWNLOADS, true) || '[]'));
+			// @ts-ignore - IOUtils is a global in Firefox/Zotero
+			const text = await IOUtils.readUTF8(this._failedDownloadsPath);
+			return new Set(JSON.parse(text));
 		} catch (_) {
 			return new Set();
 		}
@@ -76,11 +84,16 @@ var ZoteroRAGDialog = {
 	/**
 	 * Persist an attachment key as permanently failed so it is skipped in future sessions.
 	 * @param {string} key
+	 * @returns {Promise<void>}
 	 */
-	_markDownloadFailed(key) {
-		const keys = this._getFailedDownloadKeys();
+	async _markDownloadFailed(key) {
+		const keys = await this._getFailedDownloadKeys();
 		keys.add(key);
-		Zotero.Prefs.set(this.PREF_FAILED_DOWNLOADS, JSON.stringify([...keys]), true);
+		const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+		// @ts-ignore - IOUtils/PathUtils are globals in Firefox/Zotero
+		try { await IOUtils.makeDirectory(dir, { createAncestors: true }); } catch (_) {}
+		// @ts-ignore
+		await IOUtils.writeUTF8(this._failedDownloadsPath, JSON.stringify([...keys]));
 	},
 
 	/**
@@ -1015,7 +1028,7 @@ var ZoteroRAGDialog = {
 
 		/** @type {Array<ZoteroItem>} */
 		const attachmentsToDownload = [];
-		const failedKeys = this._getFailedDownloadKeys();
+		const failedKeys = await this._getFailedDownloadKeys();
 
 		for (let item of items) {
 			/** @type {Array<ZoteroItem>} */
@@ -1083,7 +1096,7 @@ var ZoteroRAGDialog = {
 				// available on Zotero's sync server (e.g. linked file, never uploaded).
 				const errorMessage = error instanceof Error ? error.message : String(error);
 				this.plugin.log(`Error downloading attachment ${attachment.key}: ${errorMessage}`);
-				this._markDownloadFailed(attachment.key);
+				await this._markDownloadFailed(attachment.key);
 			}
 		}
 
@@ -1154,7 +1167,7 @@ var ZoteroRAGDialog = {
 					downloadedFilePaths: this.downloadedAttachmentPaths,
 					downloadAttachment: async (zoteroItem) => {
 						const key = zoteroItem.key;
-						if (this._getFailedDownloadKeys().has(key)) {
+						if ((await this._getFailedDownloadKeys()).has(key)) {
 							return null;
 						}
 						if (!Zotero.Sync.Storage.Local.getEnabledForLibrary(zoteroItem.libraryID)) {
@@ -1168,7 +1181,7 @@ var ZoteroRAGDialog = {
 						} catch (error) {
 							const msg = error instanceof Error ? error.message : String(error);
 							plugin.log(`Error downloading attachment ${key}: ${msg}`);
-							this._markDownloadFailed(key);
+							await this._markDownloadFailed(key);
 							return null;
 						}
 					},

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
+
 from backend.models.library import LibraryIndexMetadata
 from backend.db.vector_store import VectorStore
 from backend.dependencies import get_vector_store
@@ -25,7 +26,7 @@ class RegisteredUser(BaseModel):
 
 
 class LibraryDetailResponse(BaseModel):
-    """Combined library status: index metadata + registrations + storage stats."""
+    """Combined library status: index metadata + registrations."""
     library_id: str
     library_name: str
     library_type: str
@@ -35,8 +36,6 @@ class LibraryDetailResponse(BaseModel):
     total_items_indexed: int = 0
     total_chunks: int = 0
     indexing_mode: Optional[str] = None
-    # Storage stats
-    size_bytes: int = 0
     # Registration
     registered_at: Optional[str] = None
     users: list[RegisteredUser] = []
@@ -46,7 +45,6 @@ def _build_detail(
     library_id: str,
     metadata: Optional[LibraryIndexMetadata],
     reg_entry: Optional[dict],
-    size_bytes: int,
 ) -> LibraryDetailResponse:
     users: list[RegisteredUser] = []
     registered_at: Optional[str] = None
@@ -74,7 +72,6 @@ def _build_detail(
         total_items_indexed=metadata.total_items_indexed if metadata else 0,
         total_chunks=metadata.total_chunks if metadata else 0,
         indexing_mode=metadata.indexing_mode if metadata else None,
-        size_bytes=size_bytes,
         registered_at=registered_at,
         users=users,
     )
@@ -100,20 +97,16 @@ async def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
     # Union of all known library IDs (indexed + registered)
     all_ids = set(metadata_by_id.keys()) | set(registrations.keys())
 
-    results = []
-    for lid in sorted(all_ids):
-        meta = metadata_by_id.get(lid)
-        reg = registrations.get(lid)
-        size = vector_store.get_library_size_bytes(lid) if meta else 0
-        results.append(_build_detail(lid, meta, reg, size))
-
-    return results
+    return [
+        _build_detail(lid, metadata_by_id.get(lid), registrations.get(lid))
+        for lid in sorted(all_ids)
+    ]
 
 
 @router.get("/libraries/{library_id}/status", response_model=LibraryDetailResponse)
 async def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
-    Get combined status for a single library: index metadata, registrations, and storage stats.
+    Get combined status for a single library: index metadata and registrations.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
@@ -128,8 +121,7 @@ async def get_library_status(library_id: str, vector_store: VectorStore = Depend
     if metadata is None and reg is None:
         raise HTTPException(status_code=404, detail=f"Library {library_id} not found")
 
-    size = vector_store.get_library_size_bytes(library_id) if metadata else 0
-    return _build_detail(library_id, metadata, reg, size)
+    return _build_detail(library_id, metadata, reg)
 
 
 @router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
