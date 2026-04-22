@@ -486,18 +486,6 @@ class ZoteroRAGPlugin {
 			this.showError(`Maximum concurrent queries (${this.maxConcurrentQueries}) reached. Please wait for existing queries to complete.`);
 			return;
 		}
-		// test
-		// Check backend connectivity before opening dialog
-		try {
-			await this.checkBackendVersion();
-		} catch (e) {
-			const errorMessage = e instanceof Error ? e.message : String(e);
-			this.showError(
-				`Cannot connect to backend server!\n\n${errorMessage}\n\nPlease start the server:\n  npm run server:start\n\nDefault URL: ${this.backendURL || 'http://localhost:8119'}`
-			);
-			return;
-		}
-
 		// If dialog is already open, focus it instead of opening a new one
 		if (this._dialogWindow && !this._dialogWindow.closed) {
 			this._dialogWindow.focus();
@@ -523,7 +511,7 @@ class ZoteroRAGPlugin {
 	 */
 	isLocalBackend() {
 		try {
-			const h = new URL(this.backendURL).hostname;
+			const h = new URL(this.backendURL||'')?.hostname;
 			return h === 'localhost' || h === '127.0.0.1';
 		} catch {
 			return true;
@@ -587,10 +575,12 @@ class ZoteroRAGPlugin {
 		const userLibraryID = Zotero.Libraries.userLibraryID;
 		const userLibrary = Zotero.Libraries.get(userLibraryID);
 
+		const userId = this.getCurrentZoteroUserId();
+		const username = Zotero.Users.getCurrentUsername();
 		libraries.push({
-			id: String(userLibraryID),
-			name: userLibrary.name || 'My Library',
-			type: /** @type {'user'} */ ('user')
+			id: userId ? `u${userId}` : String(userLibraryID),
+			name: `${username}'s library`,
+			type: 'user'
 		});
 
 		// Get all group libraries
@@ -631,8 +621,9 @@ class ZoteroRAGPlugin {
 			}
 		}
 
-		// For user library, return the library ID as-is
-		return String(libraryID);
+		// For user library, use "u{zoteroUserId}" when synced; fall back to raw ID on localhost-no-registration
+		const userId = this.getCurrentZoteroUserId();
+		return userId ? `u${userId}` : String(libraryID);
 	}
 
 	/**
@@ -746,8 +737,8 @@ class ZoteroRAGPlugin {
 			const group = Zotero.Groups.get(parseInt(backendLibraryId, 10));
 			return group ? group.libraryID : null;
 		} else {
-			// For user library, it's already the library ID
-			return parseInt(backendLibraryId, 10);
+			// User library: backend ID may be "u<userId>" — always use the local userLibraryID.
+			return Zotero.Libraries.userLibraryID;
 		}
 	}
 
@@ -1259,6 +1250,24 @@ class ZoteroRAGPlugin {
 				const dlg = /** @type {any} */ (this._dialogWindow).ZoteroRAGDialog;
 				if (dlg && typeof dlg.onUnavailableCountUpdated === 'function') {
 					dlg.onUnavailableCountUpdated(String(libraryID), count);
+				}
+			}
+		} catch (_) {}
+	}
+
+	/**
+	 * Clear the missing-files count for a library and notify the open RAG dialog.
+	 * Called when the fix-unavailable dialog confirms there are no missing files.
+	 * @param {number} libraryID
+	 */
+	clearMissingFilesCount(libraryID) {
+		try {
+			// @ts-ignore
+			Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryID}`, 0, true);
+			if (this._dialogWindow && !this._dialogWindow.closed) {
+				const dlg = /** @type {any} */ (this._dialogWindow).ZoteroRAGDialog;
+				if (dlg && typeof dlg.onUnavailableCountUpdated === 'function') {
+					dlg.onUnavailableCountUpdated(String(libraryID), 0);
 				}
 			}
 		} catch (_) {}
