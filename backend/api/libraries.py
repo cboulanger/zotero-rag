@@ -2,140 +2,140 @@
 Library API endpoints.
 """
 
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Optional
 
-from backend.zotero.local_api import ZoteroLocalAPI
 from backend.models.library import LibraryIndexMetadata
 from backend.db.vector_store import VectorStore
 from backend.dependencies import get_vector_store
+from backend.config.settings import get_settings
+from backend.services.registration_service import RegistrationService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
-class LibraryInfo(BaseModel):
-    """Library information."""
+class RegisteredUser(BaseModel):
+    """A user who has registered a library."""
+    user_id: int
+    username: str
+    registered_at: str
+
+
+class LibraryDetailResponse(BaseModel):
+    """Combined library status: index metadata + registrations + storage stats."""
     library_id: str
-    name: str
-    type: str  # 'user' or 'group'
-    version: int
+    library_name: str
+    library_type: str
+    # Index state (None if never indexed)
+    last_indexed_at: Optional[str] = None
+    last_indexed_version: Optional[int] = None
+    total_items_indexed: int = 0
+    total_chunks: int = 0
+    indexing_mode: Optional[str] = None
+    # Storage stats
+    size_bytes: int = 0
+    # Registration
+    registered_at: Optional[str] = None
+    users: list[RegisteredUser] = []
 
 
-class LibraryStatusResponse(BaseModel):
-    """Library indexing status."""
-    library_id: str
-    indexed: bool
-    total_items: Optional[int] = None
-    indexed_items: Optional[int] = None
-    last_indexed: Optional[str] = None
+def _build_detail(
+    library_id: str,
+    metadata: Optional[LibraryIndexMetadata],
+    reg_entry: Optional[dict],
+    size_bytes: int,
+) -> LibraryDetailResponse:
+    users: list[RegisteredUser] = []
+    registered_at: Optional[str] = None
+    library_name = metadata.library_name if metadata else library_id
+    library_type = metadata.library_type if metadata else "user"
+
+    if reg_entry:
+        registered_at = reg_entry.get("registered_at")
+        library_name = reg_entry.get("library_name", library_name)
+        users = [
+            RegisteredUser(
+                user_id=u["user_id"],
+                username=u["username"],
+                registered_at=u["registered_at"],
+            )
+            for u in reg_entry.get("users", [])
+        ]
+
+    return LibraryDetailResponse(
+        library_id=library_id,
+        library_name=library_name,
+        library_type=library_type,
+        last_indexed_at=metadata.last_indexed_at if metadata else None,
+        last_indexed_version=metadata.last_indexed_version if metadata else None,
+        total_items_indexed=metadata.total_items_indexed if metadata else 0,
+        total_chunks=metadata.total_chunks if metadata else 0,
+        indexing_mode=metadata.indexing_mode if metadata else None,
+        size_bytes=size_bytes,
+        registered_at=registered_at,
+        users=users,
+    )
 
 
-@router.get("/libraries", response_model=List[LibraryInfo])
-async def list_libraries():
+@router.get("/libraries", response_model=list[LibraryDetailResponse])
+async def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
     """
-    List all available Zotero libraries.
+    List all libraries known to the backend (indexed or registered).
 
-    Returns:
-        List of libraries accessible via Zotero local API.
-
-    Raises:
-        HTTPException: If Zotero is not running or local API is unavailable.
-    """
-    try:
-        async with ZoteroLocalAPI() as client:
-            libraries = await client.list_libraries()
-
-            return [
-                LibraryInfo(
-                    library_id=lib["id"],
-                    name=lib["name"],
-                    type=lib["type"],
-                    version=lib.get("version", 0)
-                )
-                for lib in libraries
-            ]
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to connect to Zotero local API: {str(e)}"
-        )
-
-
-@router.get("/libraries/{library_id}/status", response_model=LibraryStatusResponse)
-async def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
-    """
-    Get indexing status for a library.
-
-    Args:
-        library_id: Zotero library ID.
-
-    Returns:
-        Library indexing status including item counts.
-
-    Raises:
-        HTTPException: If library not found or status unavailable.
+    Returns combined index metadata, registration info, and storage stats for each.
     """
     if vector_store is None:
-        return LibraryStatusResponse(library_id=library_id, indexed=False)
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
-    try:
-        from qdrant_client.models import Filter, FieldCondition, MatchValue
+    settings = get_settings()
+    reg_service = RegistrationService(settings.registrations_path)
+    registrations = reg_service.get_all()
 
-        query_filter = Filter(
-            must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))]
-        )
+    all_metadata = vector_store.get_all_library_metadata()
+    metadata_by_id = {m.library_id: m for m in all_metadata}
 
-        total_chunks = 0
-        unique_items: set[str] = set()
-        offset = None
+    # Union of all known library IDs (indexed + registered)
+    all_ids = set(metadata_by_id.keys()) | set(registrations.keys())
 
-        client = vector_store.client
-        if not client:
-            raise RuntimeError("Vector store client not initialized")
+    results = []
+    for lid in sorted(all_ids):
+        meta = metadata_by_id.get(lid)
+        reg = registrations.get(lid)
+        size = vector_store.get_library_size_bytes(lid) if meta else 0
+        results.append(_build_detail(lid, meta, reg, size))
 
-        while True:
-            batch, offset = client.scroll(
-                collection_name=vector_store.CHUNKS_COLLECTION,
-                scroll_filter=query_filter,
-                limit=100,
-                offset=offset,
-                with_payload=["item_id"],
-                with_vectors=False,
-            )
+    return results
 
-            total_chunks += len(batch)
-            for point in batch:
-                if point.payload and "item_id" in point.payload:
-                    unique_items.add(point.payload["item_id"])
 
-            if offset is None:
-                break
+@router.get("/libraries/{library_id}/status", response_model=LibraryDetailResponse)
+async def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+    """
+    Get combined status for a single library: index metadata, registrations, and storage stats.
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
-        indexed = total_chunks > 0
-        indexed_items = len(unique_items) if indexed else None
+    settings = get_settings()
+    reg_service = RegistrationService(settings.registrations_path)
+    registrations = reg_service.get_all()
 
-        return LibraryStatusResponse(
-            library_id=library_id,
-            indexed=indexed,
-            total_items=indexed_items,
-            indexed_items=indexed_items,
-            last_indexed=None,
-        )
-    except Exception:
-        return LibraryStatusResponse(library_id=library_id, indexed=False)
+    metadata = vector_store.get_library_metadata(library_id)
+    reg = registrations.get(library_id)
+
+    if metadata is None and reg is None:
+        raise HTTPException(status_code=404, detail=f"Library {library_id} not found")
+
+    size = vector_store.get_library_size_bytes(library_id) if metadata else 0
+    return _build_detail(library_id, metadata, reg, size)
 
 
 @router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
 async def get_library_index_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
-    Get detailed indexing status and metadata for a library.
-
-    Args:
-        library_id: Zotero library ID.
-
-    Returns:
-        Detailed library indexing metadata.
+    Get detailed indexing metadata for a library (used by the plugin to track sync state).
 
     Raises:
         HTTPException: 404 if library has never been indexed, 503 if store unavailable.
@@ -157,45 +157,10 @@ async def get_library_index_status(library_id: str, vector_store: VectorStore = 
         raise HTTPException(status_code=500, detail=f"Failed to retrieve library index status: {str(e)}")
 
 
-@router.post("/libraries/{library_id}/reset-index")
-async def reset_library_index(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
-    """
-    Mark a library for full reindex (hard reset).
-
-    Args:
-        library_id: Zotero library ID.
-
-    Returns:
-        Success message with new status.
-
-    Raises:
-        HTTPException: If operation fails.
-    """
-    if vector_store is None:
-        raise HTTPException(status_code=503, detail="Vector store is unavailable")
-
-    try:
-        vector_store.mark_library_for_reset(library_id)
-        metadata = vector_store.get_library_metadata(library_id)
-        return {
-            "message": f"Library {library_id} marked for hard reset",
-            "force_reindex": metadata.force_reindex if metadata else True,
-            "next_index_mode": "full",
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to reset library index: {str(e)}")
-
-
 @router.delete("/libraries/{library_id}/index")
 async def clear_library_index(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Remove all indexed data for a library (chunks, dedup records, metadata).
-
-    Args:
-        library_id: Zotero library ID.
-
-    Returns:
-        Counts of deleted records.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
@@ -219,13 +184,6 @@ async def clear_library_index(library_id: str, vector_store: VectorStore = Depen
 async def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Remove all indexed chunks for a specific item within a library.
-
-    Args:
-        library_id: Zotero library ID.
-        item_key: Zotero item key.
-
-    Returns:
-        Count of deleted chunks.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
@@ -239,23 +197,3 @@ async def clear_item_chunks(library_id: str, item_key: str, vector_store: Vector
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear item chunks: {str(e)}")
-
-
-@router.get("/libraries/indexed", response_model=List[LibraryIndexMetadata])
-async def list_indexed_libraries(vector_store: VectorStore = Depends(get_vector_store)):
-    """
-    List all libraries that have been indexed.
-
-    Returns:
-        Array of library metadata objects for all indexed libraries.
-
-    Raises:
-        HTTPException: If operation fails.
-    """
-    if vector_store is None:
-        raise HTTPException(status_code=503, detail="Vector store is unavailable")
-
-    try:
-        return vector_store.get_all_library_metadata()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list indexed libraries: {str(e)}")

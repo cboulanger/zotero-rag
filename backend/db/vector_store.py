@@ -781,6 +781,41 @@ class VectorStore:
             logger.warning(f"Error counting chunks for library {library_id}, returning 0: {e}")
             return 0
 
+    def get_library_size_bytes(self, library_id: str) -> int:
+        """
+        Compute the total byte size of all text stored across chunks for a library.
+
+        Scrolls the chunk collection with only the 'text' payload field to minimise
+        data transfer, then sums UTF-8 encoded lengths.
+
+        Args:
+            library_id: Library ID
+
+        Returns:
+            Total bytes of stored chunk text
+        """
+        total = 0
+        offset = None
+        query_filter = Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))])
+        try:
+            while True:
+                batch, offset = self.client.scroll(
+                    collection_name=self.CHUNKS_COLLECTION,
+                    scroll_filter=query_filter,
+                    limit=500,
+                    offset=offset,
+                    with_payload=["text"],
+                    with_vectors=False,
+                )
+                for point in batch:
+                    if point.payload and "text" in point.payload:
+                        total += len(point.payload["text"].encode("utf-8"))
+                if offset is None:
+                    break
+        except Exception as e:
+            logger.warning(f"Error computing size for library {library_id}: {e}")
+        return total
+
     def close(self):
         """
         Close the vector store and release resources.

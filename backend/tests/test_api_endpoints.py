@@ -62,47 +62,30 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertIn("not been indexed", response.json()["detail"])
 
-    def test_reset_library_index(self):
-        """Test marking a library for hard reset."""
-        mock_vs = MagicMock()
-        mock_metadata = LibraryIndexMetadata(
-            library_id="1",
-            library_type="user",
-            library_name="Test Library",
-            last_indexed_version=12345,
-            force_reindex=True
-        )
-        mock_vs.get_library_metadata.return_value = mock_metadata
-        self._override_vs(mock_vs)
-
-        response = self.client.post("/api/libraries/1/reset-index")
-
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertIn("hard reset", data["message"])
-        self.assertTrue(data["force_reindex"])
-        self.assertEqual(data["next_index_mode"], "full")
-        mock_vs.mark_library_for_reset.assert_called_once_with("1")
-
-    def test_list_indexed_libraries(self):
-        """Test listing all indexed libraries."""
+    def test_list_libraries(self):
+        """Test GET /api/libraries returns combined index + registration info."""
         mock_vs = MagicMock()
         mock_libraries = [
             LibraryIndexMetadata(library_id="1", library_type="user",
-                                 library_name="User Library", last_indexed_version=100),
+                                 library_name="User Library", last_indexed_version=100,
+                                 total_chunks=500),
             LibraryIndexMetadata(library_id="2", library_type="group",
-                                 library_name="Group Library", last_indexed_version=200)
+                                 library_name="Group Library", last_indexed_version=200,
+                                 total_chunks=1000),
         ]
         mock_vs.get_all_library_metadata.return_value = mock_libraries
+        mock_vs.get_library_size_bytes.return_value = 0
         self._override_vs(mock_vs)
 
-        response = self.client.get("/api/libraries/indexed")
+        response = self.client.get("/api/libraries")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(len(data), 2)
         self.assertEqual(data[0]["library_id"], "1")
-        self.assertEqual(data[1]["library_id"], "2")
+        self.assertEqual(data[0]["total_chunks"], 500)
+        self.assertIn("size_bytes", data[0])
+        self.assertIn("users", data[0])
 
 
 if __name__ == "__main__":

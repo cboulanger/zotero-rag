@@ -173,7 +173,7 @@ class ZoteroRAGPlugin {
 					for (const id of ids) {
 						const { libraryID, key } = extraData[id] || {};
 						if (!libraryID || !key) continue;
-						const url = `${this.backendURL}/libraries/${libraryID}/items/${key}/chunks`;
+						const url = `${this.backendURL}/api/libraries/${libraryID}/items/${key}/chunks`;
 						fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
 							.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
 					}

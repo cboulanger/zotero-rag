@@ -55,22 +55,35 @@ class TestLibrariesAPI(unittest.TestCase):
     """Test libraries API endpoints."""
 
     def setUp(self):
-        mock_vs = MagicMock()
-        mock_vs.client.scroll.return_value = ([], None)
-        app.dependency_overrides[get_vector_store] = lambda: mock_vs
-        self.client = TestClient(app)
+        pass
 
     def tearDown(self):
         app.dependency_overrides.clear()
 
     def test_get_library_status(self):
         """Test GET /api/libraries/{library_id}/status endpoint."""
+        from backend.models.library import LibraryIndexMetadata
+        mock_vs = MagicMock()
+        mock_vs.get_library_metadata.return_value = LibraryIndexMetadata(
+            library_id="1",
+            library_type="user",
+            library_name="Test Library",
+            last_indexed_version=100,
+            total_items_indexed=5,
+            total_chunks=50,
+        )
+        mock_vs.get_library_size_bytes.return_value = 1024
+        app.dependency_overrides[get_vector_store] = lambda: mock_vs
+        self.client = TestClient(app)
+
         response = self.client.get("/api/libraries/1/status")
         self.assertEqual(response.status_code, 200)
 
         data = response.json()
         self.assertEqual(data["library_id"], "1")
-        self.assertIn("indexed", data)
+        self.assertEqual(data["library_name"], "Test Library")
+        self.assertEqual(data["total_chunks"], 50)
+        self.assertIn("size_bytes", data)
 
 
 class TestPullIndexingRemoved(unittest.TestCase):
