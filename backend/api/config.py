@@ -22,6 +22,7 @@ class ConfigResponse(BaseModel):
     preset_name: str
     api_version: str
     embedding_model: str
+    embedding_model_type: str  # "local" | "remote"
     llm_model: str
     vector_db_path: str
     model_cache_dir: str
@@ -69,6 +70,7 @@ async def get_config():
         preset_name=settings.model_preset,
         api_version=settings.version,
         embedding_model=preset.embedding.model_name,
+        embedding_model_type=preset.embedding.model_type,
         llm_model=preset.llm.model_name,
         vector_db_path=str(settings.vector_db_path),
         model_cache_dir=str(settings.model_weights_path),

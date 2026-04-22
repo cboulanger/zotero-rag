@@ -74,6 +74,11 @@
     .dialog-button.primary:hover { background-color: #0052a3; }
     .dialog-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background-color: #0066cc; }
     .dialog-button.primary:disabled:hover { background-color: #0066cc; }
+    #rate-limit-section { display: flex; flex-direction: column; justify-content: center; gap: 5px; width: 33%; flex-shrink: 0; align-self: stretch; border-right: 1px solid #ddd; padding-right: 10px; margin-right: 10px; }
+    .rate-limit-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .rate-limit-bar-track { flex: 1; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; min-width: 0; }
+    .rate-limit-bar { height: 100%; border-radius: 3px; width: 0%; transition: width 0.3s, background-color 0.3s; }
+    .rate-limit-text { width: 9em; flex-shrink: 0; color: #555; white-space: nowrap; }
   </style>
 </head>
 
@@ -158,6 +163,17 @@
         <input type="checkbox" id="force-full-reindex" style="margin-right: 5px;"/>
         <span style="font-size: 13px; color: #666;">Force Full Reindex (Dev)</span>
       </label>
+      <!-- Rate limit indicators (shown in Index mode when embedding has rate limits) -->
+      <div id="rate-limit-section" style="display: none;">
+        <div class="rate-limit-row">
+          <div class="rate-limit-bar-track"><div id="rate-limit-bar-hour" class="rate-limit-bar"></div></div>
+          <span id="rate-limit-text-hour" class="rate-limit-text">— requests left/hour</span>
+        </div>
+        <div class="rate-limit-row">
+          <div class="rate-limit-bar-track"><div id="rate-limit-bar-day" class="rate-limit-bar"></div></div>
+          <span id="rate-limit-text-day" class="rate-limit-text">— requests left/day</span>
+        </div>
+      </div>
       <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>
       <button id="submit-button" type="button" class="dialog-button primary">Submit</button>
     </div>

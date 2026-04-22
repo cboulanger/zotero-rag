@@ -21,6 +21,10 @@ from backend.config.presets import EmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache for rate-limit headers received from the last remote embedding call.
+# Updated by RemoteEmbeddingService after every API response (success or 429).
+_last_rate_limit_headers: dict[str, str] | None = None
+
 _KNOWN_HEADERS: dict[str, str] = {
     "OPENAI_API_KEY": "X-OpenAI-Api-Key",
     "ANTHROPIC_API_KEY": "X-Anthropic-Api-Key",
@@ -77,6 +81,11 @@ class EmbeddingService(ABC):
     def required_api_keys(config: "EmbeddingConfig") -> list[dict]:
         """Return API keys required by this service (empty for local services)."""
         return []
+
+    @abstractmethod
+    async def get_rate_limit_info(self) -> dict[str, str] | None:
+        """Return cached rate-limit headers from the last API call, or None if not applicable."""
+        ...
 
     @staticmethod
     def compute_content_hash(text: str) -> str:
@@ -209,6 +218,9 @@ class LocalEmbeddingService(EmbeddingService):
         """Return the model identifier."""
         return self.config.model_name
 
+    async def get_rate_limit_info(self) -> dict[str, str] | None:
+        return None
+
     def clear_cache(self):
         """Clear the embedding cache."""
         self._embedding_cache.clear()
@@ -294,6 +306,19 @@ class RemoteEmbeddingService(EmbeddingService):
                 logger.info("OpenAI embeddings client initialised")
         return self._client
 
+    def _capture_rate_limit_headers(self, headers: Any) -> None:
+        """Extract and cache rate-limit headers from an API response."""
+        global _last_rate_limit_headers
+        extracted = {
+            k: v for k, v in headers.items()
+            if k.lower().startswith("x-ratelimit") or k.lower().startswith("ratelimit")
+        }
+        if extracted:
+            _last_rate_limit_headers = extracted
+
+    async def get_rate_limit_info(self) -> dict[str, str] | None:
+        return _last_rate_limit_headers
+
     def _resolve_model_name(self) -> str:
         """Return the actual API model name (maps 'openai' sentinel to a real name)."""
         name = self.config.model_name
@@ -318,11 +343,13 @@ class RemoteEmbeddingService(EmbeddingService):
 
         for attempt in range(max_attempts):
             try:
-                return await client.embeddings.create(
+                raw = await client.embeddings.with_raw_response.create(
                     model=model,
                     input=input,
                     encoding_format="float",
                 )
+                self._capture_rate_limit_headers(raw.headers)
+                return raw.parse()
             except InternalServerError as exc:
                 if attempt == max_attempts - 1 or "try again" not in str(exc).lower():
                     raise
@@ -339,6 +366,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 retry_after: Optional[float] = None
                 headers = getattr(exc, "response", None) and exc.response.headers
                 if headers:
+                    self._capture_rate_limit_headers(headers)
                     for header in ("retry-after", "ratelimit-reset", "x-ratelimit-reset-minute"):
                         val = headers.get(header)
                         if val is not None:
@@ -474,6 +502,9 @@ class MockEmbeddingService(EmbeddingService):
 
     def get_model_name(self) -> str:
         return "mock"
+
+    async def get_rate_limit_info(self) -> dict[str, str] | None:
+        return None
 
 
 def create_embedding_service(

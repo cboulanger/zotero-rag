@@ -84,6 +84,7 @@ class DocumentUploadResult(BaseModel):
     status: str  # "indexed" | "skipped_duplicate" | "error"
     message: str = ""
     rate_limit_retries: int = 0
+    rate_limit_headers: dict[str, str] | None = None
 
 
 class AbstractIndexRequest(BaseModel):
@@ -413,6 +414,7 @@ async def upload_and_index_document(
         status="indexed",
         message=f"Indexed {chunks_added} chunks",
         rate_limit_retries=embedding_service.rate_limit_retries,
+        rate_limit_headers=await embedding_service.get_rate_limit_info(),
     )
 
 
@@ -518,4 +520,5 @@ async def upload_and_index_abstract(
         status=status,
         message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
+        rate_limit_headers=await embedding_service.get_rate_limit_info(),
     )

@@ -13,6 +13,7 @@ const DEBUG = true;
 /** @param {function(string): void} log @param {string} msg */
 const debug = (log, msg) => { if (DEBUG) log(`[RemoteIndexer] [DEBUG] ${msg}`); };
 
+// 
 /**
  * @typedef {Object} AttachmentInfo
  * @property {string} item_key
@@ -63,9 +64,10 @@ var RemoteIndexer = {
 	 * @param {AbortSignal} [opts.signal] - AbortSignal to cancel in-flight fetch requests immediately
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
-	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, firstError: string|null}>}
+	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
 
 		// 1. Collect all indexable attachments from the local Zotero database.
@@ -77,7 +79,7 @@ var RemoteIndexer = {
 
 		if (attachments.length === 0) {
 			onProgress({ percentage: 100, message: 'No indexable attachments found', current: 0, total: 0 });
-			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null };
+			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null, rateLimitHeaders: null };
 		}
 
 		// 2. Load the client-side version cache and pre-classify attachments.
@@ -170,6 +172,8 @@ var RemoteIndexer = {
 		let errors = 0;
 		/** @type {string|null} */
 		let firstError = null;
+		/** @type {Record<string,string>|null} */
+		let rateLimitHeaders = null;
 		const uploadable = toUpload.filter(s => {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && att.filePath;
@@ -204,7 +208,11 @@ var RemoteIndexer = {
 			});
 
 			try {
-				await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
+				const uploadResult = await this._uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
+				if (uploadResult.rateLimitHeaders) {
+					rateLimitHeaders = uploadResult.rateLimitHeaders;
+					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
+				}
 				uploaded++;
 				versionCache[att.attachment_key] = att.item_version;
 			} catch (err) {
@@ -248,7 +256,11 @@ var RemoteIndexer = {
 			});
 
 			try {
-				await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
+				const abstractResult = await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
+				if (abstractResult.rateLimitHeaders) {
+					rateLimitHeaders = abstractResult.rateLimitHeaders;
+					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
+				}
 				uploaded++;
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
 			} catch (err) {
@@ -270,7 +282,7 @@ var RemoteIndexer = {
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}`, current: total, total });
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}`);
-		return { uploaded, skipped, noFile, errors, firstError };
+		return { uploaded, skipped, noFile, errors, firstError, rateLimitHeaders };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -485,7 +497,7 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
-	 * @returns {Promise<void>}
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async _uploadAttachment({ att, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
@@ -542,9 +554,11 @@ var RemoteIndexer = {
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
+		debug(log, `${att.attachment_key}: rate_limit_headers=${JSON.stringify(result.rate_limit_headers)}`); // DEBUG
 		if (result.status === 'error') {
 			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
 		}
+		return { rateLimitHeaders: result.rate_limit_headers || null };
 	},
 
 	/**
@@ -708,7 +722,7 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
-	 * @returns {Promise<void>}
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		const item = abstractItem.zoteroItem;
@@ -746,9 +760,11 @@ var RemoteIndexer = {
 
 		const result = await response.json();
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
+		debug(log, `${abstractItem.item_key} (abstract): rate_limit_headers=${JSON.stringify(result.rate_limit_headers)}`); // DEBUG
 		if (result.status === 'error') {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}
+		return { rateLimitHeaders: result.rate_limit_headers || null };
 	},
 
 	/**

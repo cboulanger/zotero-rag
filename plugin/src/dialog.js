@@ -39,6 +39,12 @@ var ZoteroRAGDialog = {
 	/** @type {boolean} */
 	isOperationInProgress: false,
 
+	/** Whether the active embedding service supports rate limits (remote model). */
+	rateLimitAvailable: false,
+
+	/** @type {Record<string,string>|null} */
+	rateLimitHeaders: null,
+
 	/** @type {AbortController|null} */
 	abortController: null,
 
@@ -233,7 +239,11 @@ var ZoteroRAGDialog = {
 					sourcesValue.textContent = defaultTopK.toString();
 				}
 
+				this.rateLimitAvailable = config.embedding_model_type === 'remote';
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}`);
+				if (this.rateLimitAvailable) {
+					this.fetchRateLimitHeaders();
+				}
 			}
 		} catch (error) {
 			// Silently fail and use hardcoded default (0.3)
@@ -491,6 +501,58 @@ var ZoteroRAGDialog = {
 				questionInput.placeholder = 'Enter your question here...';
 			}
 			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
+		}
+		this.updateRateLimitDisplay();
+	},
+
+	/**
+	 * Update the rate limit progress bars.
+	 * Visible only when the Index button is shown and rate limit data is available.
+	 * @returns {void}
+	 */
+	/** @returns {Promise<void>} */
+	async fetchRateLimitHeaders() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/rate-limits`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (response.ok) {
+				const data = await response.json();
+				if (data.available && data.limits) {
+					this.rateLimitHeaders = data.limits;
+					this.updateRateLimitDisplay();
+				}
+			}
+		} catch (_) {
+			// non-fatal — display stays empty
+		}
+	},
+
+	updateRateLimitDisplay() {
+		const section = document.getElementById('rate-limit-section');
+		if (!section) return;
+		const show = this.isIndexOnlyMode() && this.rateLimitAvailable;
+		this.plugin && this.plugin.log(`[RateLimit] updateRateLimitDisplay: isIndexOnlyMode=${this.isIndexOnlyMode()}, rateLimitAvailable=${this.rateLimitAvailable}, hasHeaders=${!!this.rateLimitHeaders}`); // DEBUG
+		section.style.display = show ? '' : 'none';
+		if (!show || !this.rateLimitHeaders) return;
+
+		this.plugin && this.plugin.log(`[RateLimit] headers: ${JSON.stringify(this.rateLimitHeaders)}`); // DEBUG
+
+		for (const [period, label] of /** @type {[string, string][]} */ ([['hour', 'hour'], ['day', 'day']])) {
+			const limit = parseInt(this.rateLimitHeaders[`x-ratelimit-limit-${period}`] || '0', 10);
+			const remaining = parseInt(this.rateLimitHeaders[`x-ratelimit-remaining-${period}`] || '0', 10);
+			this.plugin && this.plugin.log(`[RateLimit] ${period}: limit=${limit}, remaining=${remaining}`); // DEBUG
+			const bar = /** @type {HTMLElement|null} */ (document.getElementById(`rate-limit-bar-${period}`));
+			const text = document.getElementById(`rate-limit-text-${period}`);
+			if (!limit || !bar || !text) {
+				this.plugin && this.plugin.log(`[RateLimit] ${period}: skipped — limit=${limit}, bar=${!!bar}, text=${!!text}`); // DEBUG
+				continue;
+			}
+			const usedPct = Math.round((limit - remaining) / limit * 100);
+			bar.style.width = `${usedPct}%`;
+			bar.style.backgroundColor = usedPct >= 95 ? '#cc3300' : usedPct >= 75 ? '#e6a817' : '#2e9e4f';
+			text.textContent = `${remaining} requests left/${label}`;
 		}
 	},
 
@@ -1110,6 +1172,10 @@ var ZoteroRAGDialog = {
 							return null;
 						}
 					},
+					onRateLimitUpdate: (headers) => {
+						this.rateLimitHeaders = headers;
+						this.updateRateLimitDisplay();
+					},
 				});
 				this.abortController = null;
 				this.updateLibraryProgressText(libraryId, null); // restore normal display
@@ -1137,6 +1203,12 @@ var ZoteroRAGDialog = {
 					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newMissing, true);
 				}
 
+				// Update rate limit display from headers returned by this indexing run
+				if (indexResult.rateLimitHeaders) {
+					this.rateLimitHeaders = indexResult.rateLimitHeaders;
+					this.updateRateLimitDisplay();
+				}
+
 				// Report missing-file count as informational — never fatal
 				if (newMissing > 0) {
 					const msg = `${newMissing} attachment(s) in ${libraryName} have no local file and were skipped`;
@@ -1155,6 +1227,10 @@ var ZoteroRAGDialog = {
 				this.plugin.log(`Error indexing library ${libraryId}: ${errorMessage}`);
 				throw error;
 			}
+		}
+
+		if (this.rateLimitAvailable) {
+			this.fetchRateLimitHeaders();
 		}
 
 		if (indexingErrors.length > 0) {
