@@ -16,6 +16,17 @@ from backend.config.settings import Settings
 logger = logging.getLogger(__name__)
 
 
+def _format_authors(authors: list[str]) -> str:
+    if not authors:
+        return ""
+    last_names = [a.split(",")[0].strip() if "," in a else a.split()[-1] for a in authors]
+    if len(last_names) == 1:
+        return last_names[0]
+    if len(last_names) == 2:
+        return f"{last_names[0]} & {last_names[1]}"
+    return f"{last_names[0]} et al."
+
+
 class SourceInfo(BaseModel):
     """Source citation information."""
     item_id: str
@@ -143,7 +154,10 @@ class RAGEngine:
             doc_representatives.append(best_result)
 
             doc_meta = results_for_doc[0].chunk.metadata.document_metadata
-            header = f"[S{i}: {doc_meta.title or 'Unknown'}]"
+            authors_str = _format_authors(doc_meta.authors or [])
+            year_str = f" ({doc_meta.year})" if doc_meta.year else ""
+            attribution = f"{authors_str}{year_str} — " if authors_str or year_str else ""
+            header = f"[S{i}: {attribution}{doc_meta.title or 'Unknown'}]"
             passages = []
             for result in results_for_doc:
                 metadata = result.chunk.metadata
