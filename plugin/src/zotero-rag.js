@@ -1215,7 +1215,7 @@ class ZoteroRAGPlugin {
 			SELECT ia.itemID FROM itemAttachments ia
 			JOIN items i ON i.itemID = ia.itemID
 			WHERE i.libraryID = ?
-			AND ia.linkMode IN (0, 1)
+			AND ia.linkMode IN (0, 1, 2)
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
@@ -1225,7 +1225,11 @@ class ZoteroRAGPlugin {
 		const items = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
 		let count = 0;
 		for (const item of items) {
-			if (!(await item.fileExists())) count++;
+			try {
+				if (!(await item.fileExists())) count++;
+			} catch (_) {
+				count++; // unrecognized path (e.g. Windows UNC on Mac) → treat as missing
+			}
 		}
 		// Keep the prefs-based cache in sync so the RAG dialog doesn't show stale counts.
 		this._syncUnavailableCountToPrefs(libraryID, count);
@@ -1281,6 +1285,7 @@ class ZoteroRAGPlugin {
 	 * @property {string} year - Publication year (4 digits) or empty string
 	 * @property {string} title - Item title
 	 * @property {string} zoteroID - Parent item key
+	 * @property {boolean} isLinked - True for linked files (linkMode=2); can't be auto-downloaded
 	 */
 
 	/**
@@ -1293,7 +1298,7 @@ class ZoteroRAGPlugin {
 			SELECT ia.itemID FROM itemAttachments ia
 			JOIN items i ON i.itemID = ia.itemID
 			WHERE i.libraryID = ?
-			AND ia.linkMode IN (0, 1)
+			AND ia.linkMode IN (0, 1, 2)
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
@@ -1304,7 +1309,14 @@ class ZoteroRAGPlugin {
 		/** @type {Array<UnavailableAttachmentInfo>} */
 		const result = [];
 		for (const attachment of attachments) {
-			if (await attachment.fileExists()) continue;
+			let exists = false;
+			try {
+				exists = await attachment.fileExists();
+			} catch (_) {
+				// fileExists() throws for paths it can't parse (e.g. Windows UNC on Mac)
+				exists = false;
+			}
+			if (exists) continue;
 			if (!attachment.parentItemID) continue;
 			const parentItem = /** @type {any} */ (await Zotero.Items.getAsync(attachment.parentItemID));
 			if (!parentItem) continue;
@@ -1323,7 +1335,8 @@ class ZoteroRAGPlugin {
 				authors,
 				year: yearMatch ? yearMatch[1] : '',
 				title: parentItem.getField('title') || '',
-				zoteroID: parentItem.key
+				zoteroID: parentItem.key,
+				isLinked: (attachment.attachmentLinkMode ?? 0) === 2,
 			});
 		}
 		return result;

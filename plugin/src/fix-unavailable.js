@@ -60,7 +60,12 @@ var ZoteroFixUnavailableDialog = {
 		this.plugin = args.plugin;
 		this.libraryID = args.libraryID;
 
-		document.getElementById('close-btn').addEventListener('click', () => window.close());
+		document.getElementById('close-btn').addEventListener('click', () => {
+			try {
+				if (window.opener && this.plugin) this.plugin._scanUnavailableCount(window.opener);
+			} catch (_) {}
+			window.close();
+		});
 		document.getElementById('search-btn').addEventListener('click', () => this.searchAndFix());
 		document.getElementById('delete-btn').addEventListener('click', () => this.deleteSelected());
 		document.getElementById('refresh-btn').addEventListener('click', () => { if (!this.isRunning) this.populateTable(); });
@@ -152,10 +157,11 @@ var ZoteroFixUnavailableDialog = {
 			tdKey.textContent = info.zoteroID;
 			row.appendChild(tdKey);
 
-			// Filename
+			// Filename (linked files show the full broken path as a hint)
 			const tdFile = document.createElement('div');
 			tdFile.className = 'col-filename';
-			const filename = info.attachmentItem.attachmentFilename || '';
+			const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
+			const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
 			tdFile.textContent = filename;
 			tdFile.title = filename;
 			row.appendChild(tdFile);
@@ -163,7 +169,7 @@ var ZoteroFixUnavailableDialog = {
 			// File type
 			const tdType = document.createElement('div');
 			tdType.className = 'col-type';
-			tdType.textContent = this.getFileTypeLabel(info.attachmentItem);
+			tdType.textContent = info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem);
 			row.appendChild(tdType);
 
 			// Status
@@ -318,20 +324,29 @@ var ZoteroFixUnavailableDialog = {
 			.map((cb, i) => ({ cb, index: i }))
 			.filter(({ cb }) => cb.checked);
 
-		// Mark all selected rows as queued
-		for (const { index } of selected) {
+		// Separate linked files (linkMode=2) from imported files — linked files can't be
+		// auto-downloaded; mark them immediately so they don't enter the download phases.
+		/** @type {Array<{index: number}>} */
+		const linkedSelected = selected.filter(({ index }) => this.items[index].isLinked);
+		/** @type {Array<{index: number}>} */
+		const importedSelected = selected.filter(({ index }) => !this.items[index].isLinked);
+
+		for (const { index } of linkedSelected) {
+			this.setRowStatus(index, 'not-found', 'Linked file — fix path in Zotero');
+		}
+		for (const { index } of importedSelected) {
 			this.setRowStatus(index, 'searching', 'Queued...');
 		}
 
-		// Phase 1: batched sync downloads (10 at a time to avoid overwhelming the sync system)
+		// Phase 1: batched sync downloads for imported files only (10 at a time)
 		const BATCH_SIZE = 10;
 		/** @type {Array<{index: number, downloaded: boolean, reason?: string}>} */
 		const downloadResults = [];
 
-		for (let batchStart = 0; batchStart < selected.length; batchStart += BATCH_SIZE) {
-			const batch = selected.slice(batchStart, batchStart + BATCH_SIZE);
-			const batchEnd = Math.min(batchStart + BATCH_SIZE, selected.length);
-			this.setStatus(`Phase 1/2: downloading file(s) via Zotero sync (${batchEnd}/${selected.length})...`);
+		for (let batchStart = 0; batchStart < importedSelected.length; batchStart += BATCH_SIZE) {
+			const batch = importedSelected.slice(batchStart, batchStart + BATCH_SIZE);
+			const batchEnd = Math.min(batchStart + BATCH_SIZE, importedSelected.length);
+			this.setStatus(`Phase 1/2: downloading file(s) via Zotero sync (${batchEnd}/${importedSelected.length})...`);
 
 			for (const { index } of batch) {
 				this.setRowStatus(index, 'searching', 'Downloading...');
@@ -356,22 +371,22 @@ var ZoteroFixUnavailableDialog = {
 						this.setRowStatus(index, 'fixed', 'Downloaded');
 					} else {
 						this.setRowStatus(index, 'searching',
-							reason === 'sync-disabled' ? 'Sync disabled — searching...' : 'Not downloaded — searching...'
+							reason === 'sync-disabled' ? 'Sync off — searching...' : 'Searching...'
 						);
 					}
 				}
 			}
 		}
 
-		// Collect items that still need the copy fallback
+		// Collect imported items that still need the copy fallback
 		/** @type {Array<{index: number}>} */
 		const stillMissing = downloadResults
 			.filter(r => !r.downloaded && r.reason !== 'rejected')
 			.map(r => ({ index: r.index }));
 
-		// Phase 2: copy from another library for items still missing
+		// Phase 2: copy from another library for imported items still missing
 		let fixed = downloadResults.filter(r => r.downloaded).length;
-		let notFound = 0;
+		let notFound = linkedSelected.length; // linked files are never auto-fixable
 		let errors = 0;
 
 		if (stillMissing.length > 0) {

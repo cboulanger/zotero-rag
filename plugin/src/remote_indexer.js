@@ -180,11 +180,11 @@ var RemoteIndexer = {
 			return att && att.filePath;
 		});
 		// Only count imported files (linkMode 0/1) as "noFile" — linked files (linkMode 2)
-		// with a broken path can't be fixed by the fix dialog, so exclude them from the count
-		// that drives the "X unavailable" link in the RAG dialog.
+		// Attachments with no local file are reported separately — not counted as errors.
+		// Includes linked files (linkMode=2) with broken paths; the fix dialog shows those too.
 		const noFile = toUpload.filter(s => {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
-			return att && !att.filePath && (att.linkMode === 0 || att.linkMode === 1);
+			return att && !att.filePath;
 		}).length;
 		if (noFile > 0) {
 			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
@@ -347,9 +347,14 @@ var RemoteIndexer = {
 			// Prefer live path; fall back to cached path from a prior download in this session.
 			// Keep items with no local file (filePath: null) so check-indexed can decide
 			// whether they need indexing before we attempt to download them.
-			const filePath = await item.getFilePathAsync()
-				|| (downloadedFilePaths && downloadedFilePaths.get(item.key))
-				|| null;
+			// getFilePathAsync() can throw for linked files with unparseable paths
+			// (e.g. Windows UNC paths on Mac) — treat those as no local file.
+			let filePath = null;
+			try {
+				filePath = await item.getFilePathAsync()
+					|| (downloadedFilePaths && downloadedFilePaths.get(item.key))
+					|| null;
+			} catch (_) { /* unrecognized path — file unavailable */ }
 
 			// Get parent item for metadata
 			const parentItem = item.parentItemID

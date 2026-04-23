@@ -39,18 +39,19 @@
     .header-row { position: sticky; top: 0; background: #f0f0f0; border-bottom: 1px solid #ccc; font-weight: 600; z-index: 1; }
     .header-row > div { padding: 6px 8px; overflow: hidden; white-space: nowrap; display: flex; align-items: center; }
     #items-tbody .table-row:nth-child(even) { background: #fafafa; }
-    #items-tbody .table-row > div { padding: 5px 8px; border-bottom: 1px solid #eee; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; display: flex; align-items: center; }
+    /* Data cells: display:block so text-overflow:ellipsis works (flex containers clip without ellipsis) */
+    #items-tbody .table-row > div { padding: 5px 8px; border-bottom: 1px solid #eee; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 20px; min-width: 0; }
     /* Fixed-width columns */
-    .col-check    { flex: 0 0 28px; justify-content: center; overflow: visible !important; }
+    .col-check    { flex: 0 0 28px; display: flex !important; justify-content: center; align-items: center; overflow: visible !important; }
     .col-year     { flex: 0 0 44px; }
     .col-key      { flex: 0 0 80px; }
-    .col-type     { flex: 0 0 50px; }
-    .col-select   { flex: 0 0 32px; justify-content: center; overflow: visible !important; }
+    .col-type     { flex: 0 0 44px; }
+    .col-select   { flex: 0 0 32px; display: flex !important; justify-content: center; align-items: center; overflow: visible !important; }
     /* Flexible columns */
     .col-author   { flex: 2 1 0; min-width: 0; }
-    .col-title    { flex: 4 1 0; min-width: 0; }
+    .col-title    { flex: 3 1 0; min-width: 0; }
     .col-filename { flex: 2 1 0; min-width: 0; font-size: 11px; color: #666; }
-    .col-status   { flex: 2 1 0; min-width: 0; }
+    .col-status   { flex: 3 1 0; min-width: 0; }
     .select-btn { background: none; border: none; padding: 0 2px; cursor: pointer; font-size: 12px; color: #666; line-height: 1; }
     .select-btn:hover { color: #0066cc; }
     .refresh-btn { background: none; border: none; padding: 0; cursor: pointer; font-size: 13px; color: #888; line-height: 1; }
