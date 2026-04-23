@@ -1381,123 +1381,121 @@ async function handleDeploy(options) {
 }
 
 // ============================================================================
-// Migrate
+// Migrate — shared helpers
 // ============================================================================
 
 /**
- * Temporarily expose the Qdrant port on localhost, run the migration script,
- * then restore the container without the port binding.
+ * Find the running app container and return its image, network, and env vars.
+ * Exits the process with a helpful message if no container is found.
+ * @param {string} [preferredName] - Container name override from --name option.
+ * @returns {{ appContainerName: string, appImage: string, networkName: string, appEnv: string[] }}
+ */
+function getRunningAppContainer(preferredName) {
+  // Parse running containers from JSON (handles both Docker and Podman output)
+  const psRaw = execSync(`${containerCmd} ps --format json`, { encoding: 'utf8' }).trim() || '[]';
+  let psData;
+  try {
+    psData = JSON.parse(psRaw);
+    if (!Array.isArray(psData)) psData = [psData];
+  } catch {
+    psData = psRaw.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  }
+  const allNames = psData.flatMap(c => {
+    const n = c.Names ?? c.Name ?? c.names ?? c.name ?? [];
+    return Array.isArray(n) ? n : [n];
+  }).filter(Boolean);
+
+  const appContainerName = preferredName || allNames.find(n => n.includes(APP_NAME) && !n.endsWith('-qdrant') && !n.endsWith('-kreuzberg'));
+  if (!appContainerName) {
+    console.error('[ERROR] No running app container found. Use --name to specify it.');
+    if (allNames.length) {
+      console.error(`[INFO]  Running containers: ${allNames.join(', ')}`);
+    } else {
+      console.error('[INFO]  No containers appear to be running.');
+    }
+    console.error('[HINT]  On Linux you may need to prefix the command with:');
+    console.error('          sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs ...');
+    process.exit(1);
+  }
+
+  let inspect;
+  try {
+    inspect = JSON.parse(execSync(`${containerCmd} inspect ${appContainerName}`, { encoding: 'utf8' }));
+  } catch (e) {
+    console.error(`[ERROR] Could not inspect '${appContainerName}': ${e.message}`);
+    process.exit(1);
+  }
+
+  const info = inspect[0];
+  const appImage = info.Config.Image;
+  const networkName = Object.keys(info.NetworkSettings.Networks)[0] || NETWORK_NAME;
+  const appEnv = /** @type {string[]} */ (info.Config?.Env ?? []);
+
+  console.log(`[INFO] Using app container: ${appContainerName}`);
+  return { appContainerName, appImage, networkName, appEnv };
+}
+
+/**
+ * Run a script inside a temporary container on the app's internal network.
+ * The project directory is mounted at /project; the container's own venv at
+ * /app/.venv is used so the project mount does not shadow it.
+ * Environment variables from the running app container are forwarded so that
+ * settings.py uses the correct paths rather than values from the local .env file.
+ *
+ * @param {{ appImage: string, networkName: string, appEnv: string[] }} containerInfo
+ * @param {string[]} scriptCmd - Command + args to run inside the container (e.g. ['/app/.venv/bin/python', '/project/scripts/foo.py'])
+ * @param {string[]} [extraEnv] - Additional KEY=VALUE strings to pass via -e
+ */
+function runInTempContainer(containerInfo, scriptCmd, extraEnv = []) {
+  const { appImage, networkName, appEnv } = containerInfo;
+  const projectDir = process.cwd();
+
+  // Forward env vars that affect settings.py paths so the local .env is not used.
+  const forwardKeys = ['DATA_PATH', 'QDRANT_URL', 'MODEL_WEIGHTS_PATH', 'VECTOR_DB_PATH'];
+  const forwarded = appEnv
+    .filter(e => forwardKeys.some(k => e.startsWith(`${k}=`)))
+    .flatMap(e => ['-e', e]);
+
+  const extraEnvFlags = extraEnv.flatMap(e => ['-e', e]);
+
+  const runArgs = [
+    'run', '--rm',
+    '--network', networkName,
+    '-v', `${projectDir}:/project`,
+    '-w', '/project',
+    ...forwarded,
+    ...extraEnvFlags,
+    appImage,
+    ...scriptCmd,
+  ];
+
+  console.log(`[INFO] Image: ${appImage}  Network: ${networkName}  Project: ${projectDir}`);
+  console.log('[INFO] Running in a temporary container on the internal network...\n');
+  execSync(`${containerCmd} ${runArgs.join(' ')}`, { stdio: 'inherit' });
+}
+
+/**
  * @param {{name?: string, oldId?: string, newId?: string, dryRun?: boolean, list?: boolean}} options
  */
 async function handleMigrateLibraryId(options) {
   console.log('Zotero RAG - Library ID Migration');
   console.log('===================================');
 
-  const localPort = 16333; // use non-standard port to avoid conflicts
+  const containerInfo = getRunningAppContainer(options.name);
 
-  // Auto-detect the Qdrant container if --name not given
-  let qdrantName = options.name || null;
-  if (!qdrantName) {
-    const running = execSync(
-      `${containerCmd} ps --format "{{.Names}}"`,
-      { encoding: 'utf8' }
-    ).trim().split('\n').filter(Boolean);
-    const found = running.find(n => n.includes(APP_NAME) && n.endsWith('-qdrant'));
-    if (!found) {
-      console.error('[ERROR] No running Qdrant container found. Use --name to specify the full Qdrant container name.');
-      process.exit(1);
-    }
-    qdrantName = found;
-    console.log(`[INFO] Auto-detected Qdrant container: ${qdrantName}`);
-  }
-
-  // Inspect the running Qdrant container to get its image and volumes
-  let inspect;
-  try {
-    inspect = JSON.parse(execSync(`${containerCmd} inspect ${qdrantName}`, { encoding: 'utf8' }));
-  } catch {
-    console.error(`[ERROR] Qdrant container '${qdrantName}' not found. Is the server running?`);
-    process.exit(1);
-  }
-
-  const info = inspect[0];
-  const image = info.Config.Image;
-  const networkName = Object.keys(info.NetworkSettings.Networks)[0] || NETWORK_NAME;
-  const mounts = (info.Mounts || [])
-    .filter(m => m.Type === 'bind' || m.Type === 'volume')
-    .map(m => ({ host: m.Source, container: m.Destination }));
-
-  console.log(`[INFO] Qdrant container: ${qdrantName}  image: ${image}`);
-  console.log(`[INFO] Network: ${networkName}  Mounts: ${mounts.map(m => `${m.host}:${m.container}`).join(', ') || 'none'}`);
-
-  // Stop and recreate Qdrant with the port exposed on localhost
-  console.log(`[INFO] Stopping Qdrant to expose port ${localPort}...`);
-  execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
-  execSync(`${containerCmd} rm ${qdrantName}`, { stdio: 'inherit' });
-
-  const runArgs = [
-    'run', '-d',
-    '--name', qdrantName,
-    '--network', networkName,
-    '--network-alias', 'qdrant',
-    '--restart', 'unless-stopped',
-    '-p', `127.0.0.1:${localPort}:6333`,
-  ];
-  for (const m of mounts) runArgs.push('-v', `${m.host}:${m.container}`);
-  runArgs.push(image);
-
-  execSync(`${containerCmd} ${runArgs.join(' ')}`, { stdio: 'inherit' });
-  console.log(`[INFO] Qdrant restarted with port ${localPort} exposed on localhost`);
-
-  // Wait for Qdrant to be ready
-  let ready = false;
-  for (let i = 0; i < 20; i++) {
-    try {
-      execSync(`curl -sf http://localhost:${localPort}/healthz`, { stdio: 'ignore' });
-      ready = true;
-      break;
-    } catch {
-      await new Promise(r => setTimeout(r, 500));
-    }
-  }
-  if (!ready) {
-    console.error('[ERROR] Qdrant did not become ready in time');
-    process.exit(1);
-  }
-
-  // Run the migration
-  const scriptArgs = [
-    'run', 'python', 'scripts/migrate_library_id.py',
-    '--qdrant-url', `http://localhost:${localPort}`,
-  ];
+  const scriptArgs = ['/project/scripts/migrate_library_id.py', '--qdrant-url', 'http://qdrant:6333'];
   if (options.oldId) scriptArgs.push('--old-id', options.oldId);
   if (options.newId) scriptArgs.push('--new-id', options.newId);
   if (options.dryRun) scriptArgs.push('--dry-run');
   if (options.list) scriptArgs.push('--list');
 
   try {
-    execSync(`uv ${scriptArgs.join(' ')}`, { stdio: 'inherit' });
+    runInTempContainer(containerInfo, ['/app/.venv/bin/python', ...scriptArgs]);
+    console.log('\n[SUCCESS] Migration complete.');
   } catch (e) {
-    console.error('[ERROR] Migration script failed:', e.message);
+    console.error('\n[ERROR] Migration script failed:', e.message);
+    process.exit(1);
   }
-
-  // Restore Qdrant without the port binding
-  console.log('[INFO] Restoring Qdrant without exposed port...');
-  execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
-  execSync(`${containerCmd} rm ${qdrantName}`, { stdio: 'inherit' });
-
-  const restoreArgs = [
-    'run', '-d',
-    '--name', qdrantName,
-    '--network', networkName,
-    '--network-alias', 'qdrant',
-    '--restart', 'unless-stopped',
-  ];
-  for (const m of mounts) restoreArgs.push('-v', `${m.host}:${m.container}`);
-  restoreArgs.push(image);
-
-  execSync(`${containerCmd} ${restoreArgs.join(' ')}`, { stdio: 'inherit' });
-  console.log('[SUCCESS] Qdrant restored. Migration complete.');
 }
 
 // ============================================================================
