@@ -152,7 +152,7 @@ def _scan_library_ids(client: QdrantClient, label: str) -> None:
     for collection in (CHUNKS_COLLECTION, DEDUP_COLLECTION, METADATA_COLLECTION):
         if collection not in existing:
             continue
-        seen: set = set()
+        counts: dict = {}
         offset = None
         while True:
             batch, offset = client.scroll(
@@ -163,10 +163,12 @@ def _scan_library_ids(client: QdrantClient, label: str) -> None:
                 with_payload=["library_id"],
             )
             for p in batch:
-                seen.add(p.payload.get("library_id") if p.payload else "<no payload>")
+                lid = p.payload.get("library_id") if p.payload else "<no payload>"
+                counts[lid] = counts.get(lid, 0) + 1
             if offset is None:
                 break
-        print(f"  {collection}: library_ids = {sorted(str(v) for v in seen)}")
+        summary = ", ".join(f"{lid}({n})" for lid, n in sorted(counts.items(), key=lambda x: str(x[0])))
+        print(f"  {collection}: {summary}")
 
 
 def list_library_ids(vector_db_path: Path, qdrant_url: str | None) -> None:
