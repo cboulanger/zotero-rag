@@ -1393,9 +1393,23 @@ async function handleMigrateLibraryId(options) {
   console.log('Zotero RAG - Library ID Migration');
   console.log('===================================');
 
-  const baseName = options.name || `${APP_NAME}-latest`;
-  const qdrantName = `${baseName}-qdrant`;
   const localPort = 16333; // use non-standard port to avoid conflicts
+
+  // Auto-detect the Qdrant container if --name not given
+  let qdrantName = options.name ? `${options.name}-qdrant` : null;
+  if (!qdrantName) {
+    const running = execSync(
+      `${containerCmd} ps --filter "name=${APP_NAME}" --format "{{.Names}}"`,
+      { encoding: 'utf8' }
+    ).trim().split('\n').filter(Boolean);
+    const found = running.find(n => n.endsWith('-qdrant'));
+    if (!found) {
+      console.error('[ERROR] No running Qdrant container found. Use --name to specify the base container name.');
+      process.exit(1);
+    }
+    qdrantName = found;
+    console.log(`[INFO] Auto-detected Qdrant container: ${qdrantName}`);
+  }
 
   // Inspect the running Qdrant container to get its image and volumes
   let inspect;
