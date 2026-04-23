@@ -1396,15 +1396,15 @@ async function handleMigrateLibraryId(options) {
   const localPort = 16333; // use non-standard port to avoid conflicts
 
   // Auto-detect the Qdrant container if --name not given
-  let qdrantName = options.name ? `${options.name}-qdrant` : null;
+  let qdrantName = options.name || null;
   if (!qdrantName) {
     const running = execSync(
-      `${containerCmd} ps --filter "name=${APP_NAME}" --format "{{.Names}}"`,
+      `${containerCmd} ps --format "{{.Names}}"`,
       { encoding: 'utf8' }
     ).trim().split('\n').filter(Boolean);
-    const found = running.find(n => n.endsWith('-qdrant'));
+    const found = running.find(n => n.includes(APP_NAME) && n.endsWith('-qdrant'));
     if (!found) {
-      console.error('[ERROR] No running Qdrant container found. Use --name to specify the base container name.');
+      console.error('[ERROR] No running Qdrant container found. Use --name to specify the full Qdrant container name.');
       process.exit(1);
     }
     qdrantName = found;
@@ -1636,7 +1636,7 @@ const migrate = program
 migrate
   .command('library-id')
   .description('Rename a library_id across all Qdrant collections')
-  .option('--name <name>', `Base container name (default: ${APP_NAME}-latest)`)
+  .option('--name <name>', 'Full Qdrant container name (auto-detected if omitted)')
   .option('--old-id <id>', 'Current library_id to rename (e.g. 1)')
   .option('--new-id <id>', 'New library_id (e.g. u3866263)')
   .option('--list', 'List all distinct library_ids (no migration)')
