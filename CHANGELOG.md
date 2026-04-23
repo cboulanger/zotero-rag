@@ -1,3 +1,10 @@
+## [1.15.2](https://github.com/cboulanger/zotero-rag/compare/v1.15.1...v1.15.2) (2026-04-23)
+
+
+### Bug Fixes
+
+* Fix ltems with broken linked file are not listed in fix-unavailable-attachments tool ([87eb98d](https://github.com/cboulanger/zotero-rag/commit/87eb98d133c6d766ec544933e0e3d7df46368cd0))
+
 ## [1.15.1](https://github.com/cboulanger/zotero-rag/compare/v1.15.0...v1.15.1) (2026-04-22)
 
 
