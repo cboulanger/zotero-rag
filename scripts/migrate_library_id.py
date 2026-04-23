@@ -52,15 +52,9 @@ def _count_matching(client: QdrantClient, collection: str, library_id: str) -> i
         return 0
 
 
-def migrate_qdrant_dir(model_dir: Path, old_id: str, new_id: str, dry_run: bool) -> dict:
-    """Migrate one Qdrant model-slug directory. Returns counts of changed records."""
+def migrate_qdrant_client(client: QdrantClient, old_id: str, new_id: str, dry_run: bool) -> dict:
+    """Migrate library_id in all collections of an open Qdrant client. Returns counts."""
     counts = {"chunks": 0, "dedup": 0, "metadata": 0}
-
-    try:
-        client = QdrantClient(path=str(model_dir))
-    except Exception as e:
-        print(f"  [SKIP] Cannot open Qdrant at {model_dir}: {e}")
-        return counts
 
     collections = [c.name for c in client.get_collections().collections]
 
@@ -110,6 +104,17 @@ def migrate_qdrant_dir(model_dir: Path, old_id: str, new_id: str, dry_run: bool)
         else:
             print(f"  {METADATA_COLLECTION}: no entry found for {old_id!r}")
 
+    return counts
+
+
+def migrate_qdrant_dir(model_dir: Path, old_id: str, new_id: str, dry_run: bool) -> dict:
+    """Migrate one local Qdrant model-slug directory."""
+    try:
+        client = QdrantClient(path=str(model_dir))
+    except Exception as e:
+        print(f"  [SKIP] Cannot open Qdrant at {model_dir}: {e}")
+        return {"chunks": 0, "dedup": 0, "metadata": 0}
+    counts = migrate_qdrant_client(client, old_id, new_id, dry_run)
     client.close()
     return counts
 
@@ -142,13 +147,41 @@ def migrate_registrations(registrations_path: Path, old_id: str, new_id: str, dr
     return True
 
 
-def list_library_ids(vector_db_path: Path) -> None:
-    """Print all distinct library_id values found across all model dirs and collections."""
+def _scan_library_ids(client: QdrantClient, label: str) -> None:
+    existing = [c.name for c in client.get_collections().collections]
+    for collection in (CHUNKS_COLLECTION, DEDUP_COLLECTION, METADATA_COLLECTION):
+        if collection not in existing:
+            continue
+        seen: set = set()
+        offset = None
+        while True:
+            batch, offset = client.scroll(
+                collection_name=collection,
+                scroll_filter=None,
+                limit=1000,
+                offset=offset,
+                with_payload=["library_id"],
+            )
+            for p in batch:
+                seen.add(p.payload.get("library_id") if p.payload else "<no payload>")
+            if offset is None:
+                break
+        print(f"  {collection}: library_ids = {sorted(str(v) for v in seen)}")
+
+
+def list_library_ids(vector_db_path: Path, qdrant_url: str | None) -> None:
+    """Print all distinct library_id values found in Qdrant (server or local file mode)."""
+    if qdrant_url:
+        print(f"Server mode: {qdrant_url}\n")
+        client = QdrantClient(url=qdrant_url)
+        _scan_library_ids(client, "server")
+        client.close()
+        return
+
     model_dirs = sorted(d for d in vector_db_path.iterdir() if d.is_dir())
     if not model_dirs:
         print("[WARN] No model subdirectories found.")
         return
-
     for model_dir in model_dirs:
         print(f"\n--- Model dir: {model_dir.name} ---")
         try:
@@ -156,27 +189,7 @@ def list_library_ids(vector_db_path: Path) -> None:
         except Exception as e:
             print(f"  [SKIP] {e}")
             continue
-
-        for collection in (CHUNKS_COLLECTION, DEDUP_COLLECTION, METADATA_COLLECTION):
-            existing = [c.name for c in client.get_collections().collections]
-            if collection not in existing:
-                continue
-            seen: set = set()
-            offset = None
-            while True:
-                batch, offset = client.scroll(
-                    collection_name=collection,
-                    scroll_filter=None,
-                    limit=1000,
-                    offset=offset,
-                    with_payload=["library_id"],
-                )
-                for p in batch:
-                    seen.add(p.payload.get("library_id") if p.payload else "<no payload>")
-                if offset is None:
-                    break
-            print(f"  {collection}: library_ids = {sorted(str(v) for v in seen)}")
-
+        _scan_library_ids(client, model_dir.name)
         client.close()
 
 
@@ -186,17 +199,22 @@ def main():
     parser.add_argument("--new-id", help="New library_id (e.g. 'u3866263')")
     parser.add_argument("--dry-run", action="store_true", help="Preview changes without writing anything")
     parser.add_argument("--list", action="store_true", help="List all distinct library_id values (no migration)")
+    parser.add_argument("--qdrant-url", help="Qdrant server URL (overrides settings, e.g. http://localhost:6333)")
     args = parser.parse_args()
 
     settings = get_settings()
     vector_db_path: Path = settings.vector_db_path
     registrations_path: Path = settings.registrations_path
+    qdrant_url: str | None = args.qdrant_url or settings.qdrant_url
 
     print(f"VECTOR_DB_PATH : {vector_db_path}")
-    print(f"REGISTRATIONS  : {registrations_path}\n")
+    print(f"REGISTRATIONS  : {registrations_path}")
+    if qdrant_url:
+        print(f"QDRANT_URL     : {qdrant_url} (server mode)")
+    print()
 
     if args.list:
-        list_library_ids(vector_db_path)
+        list_library_ids(vector_db_path, qdrant_url)
         return
 
     if not args.old_id or not args.new_id:
@@ -211,21 +229,28 @@ def main():
 
     print(f"Migrating library_id: {old_id!r} -> {new_id!r}\n")
 
-    if not vector_db_path.exists():
-        print(f"[ERROR] VECTOR_DB_PATH does not exist: {vector_db_path}")
-        sys.exit(1)
-
     total = {"chunks": 0, "dedup": 0, "metadata": 0}
-    model_dirs = sorted(d for d in vector_db_path.iterdir() if d.is_dir())
 
-    if not model_dirs:
-        print("[WARN] No model subdirectories found under VECTOR_DB_PATH — nothing to migrate in Qdrant.")
+    if qdrant_url:
+        print(f"--- Qdrant server: {qdrant_url} ---")
+        client = QdrantClient(url=qdrant_url)
+        counts = migrate_qdrant_client(client, old_id, new_id, dry_run)
+        client.close()
+        for k in total:
+            total[k] += counts[k]
     else:
-        for model_dir in model_dirs:
-            print(f"\n--- Model dir: {model_dir.name} ---")
-            counts = migrate_qdrant_dir(model_dir, old_id, new_id, dry_run)
-            for k in total:
-                total[k] += counts[k]
+        if not vector_db_path.exists():
+            print(f"[ERROR] VECTOR_DB_PATH does not exist: {vector_db_path}")
+            sys.exit(1)
+        model_dirs = sorted(d for d in vector_db_path.iterdir() if d.is_dir())
+        if not model_dirs:
+            print("[WARN] No model subdirectories found under VECTOR_DB_PATH — nothing to migrate in Qdrant.")
+        else:
+            for model_dir in model_dirs:
+                print(f"\n--- Model dir: {model_dir.name} ---")
+                counts = migrate_qdrant_dir(model_dir, old_id, new_id, dry_run)
+                for k in total:
+                    total[k] += counts[k]
 
     print(f"\n--- registrations.json ---")
     migrate_registrations(registrations_path, old_id, new_id, dry_run)

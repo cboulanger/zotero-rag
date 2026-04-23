@@ -1381,6 +1381,112 @@ async function handleDeploy(options) {
 }
 
 // ============================================================================
+// Migrate
+// ============================================================================
+
+/**
+ * Temporarily expose the Qdrant port on localhost, run the migration script,
+ * then restore the container without the port binding.
+ * @param {{name?: string, oldId?: string, newId?: string, dryRun?: boolean, list?: boolean}} options
+ */
+async function handleMigrateLibraryId(options) {
+  console.log('Zotero RAG - Library ID Migration');
+  console.log('===================================');
+
+  const baseName = options.name || `${APP_NAME}-latest`;
+  const qdrantName = `${baseName}-qdrant`;
+  const localPort = 16333; // use non-standard port to avoid conflicts
+
+  // Inspect the running Qdrant container to get its image and volumes
+  let inspect;
+  try {
+    inspect = JSON.parse(execSync(`${containerCmd} inspect ${qdrantName}`, { encoding: 'utf8' }));
+  } catch {
+    console.error(`[ERROR] Qdrant container '${qdrantName}' not found. Is the server running?`);
+    process.exit(1);
+  }
+
+  const info = inspect[0];
+  const image = info.Config.Image;
+  const networkName = Object.keys(info.NetworkSettings.Networks)[0] || NETWORK_NAME;
+  const mounts = (info.Mounts || [])
+    .filter(m => m.Type === 'bind' || m.Type === 'volume')
+    .map(m => ({ host: m.Source, container: m.Destination }));
+
+  console.log(`[INFO] Qdrant container: ${qdrantName}  image: ${image}`);
+  console.log(`[INFO] Network: ${networkName}  Mounts: ${mounts.map(m => `${m.host}:${m.container}`).join(', ') || 'none'}`);
+
+  // Stop and recreate Qdrant with the port exposed on localhost
+  console.log(`[INFO] Stopping Qdrant to expose port ${localPort}...`);
+  execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
+  execSync(`${containerCmd} rm ${qdrantName}`, { stdio: 'inherit' });
+
+  const runArgs = [
+    'run', '-d',
+    '--name', qdrantName,
+    '--network', networkName,
+    '--network-alias', 'qdrant',
+    '--restart', 'unless-stopped',
+    '-p', `127.0.0.1:${localPort}:6333`,
+  ];
+  for (const m of mounts) runArgs.push('-v', `${m.host}:${m.container}`);
+  runArgs.push(image);
+
+  execSync(`${containerCmd} ${runArgs.join(' ')}`, { stdio: 'inherit' });
+  console.log(`[INFO] Qdrant restarted with port ${localPort} exposed on localhost`);
+
+  // Wait for Qdrant to be ready
+  let ready = false;
+  for (let i = 0; i < 20; i++) {
+    try {
+      execSync(`curl -sf http://localhost:${localPort}/healthz`, { stdio: 'ignore' });
+      ready = true;
+      break;
+    } catch {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  if (!ready) {
+    console.error('[ERROR] Qdrant did not become ready in time');
+    process.exit(1);
+  }
+
+  // Run the migration
+  const scriptArgs = [
+    'run', 'python', 'scripts/migrate_library_id.py',
+    '--qdrant-url', `http://localhost:${localPort}`,
+  ];
+  if (options.oldId) scriptArgs.push('--old-id', options.oldId);
+  if (options.newId) scriptArgs.push('--new-id', options.newId);
+  if (options.dryRun) scriptArgs.push('--dry-run');
+  if (options.list) scriptArgs.push('--list');
+
+  try {
+    execSync(`uv ${scriptArgs.join(' ')}`, { stdio: 'inherit' });
+  } catch (e) {
+    console.error('[ERROR] Migration script failed:', e.message);
+  }
+
+  // Restore Qdrant without the port binding
+  console.log('[INFO] Restoring Qdrant without exposed port...');
+  execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
+  execSync(`${containerCmd} rm ${qdrantName}`, { stdio: 'inherit' });
+
+  const restoreArgs = [
+    'run', '-d',
+    '--name', qdrantName,
+    '--network', networkName,
+    '--network-alias', 'qdrant',
+    '--restart', 'unless-stopped',
+  ];
+  for (const m of mounts) restoreArgs.push('-v', `${m.host}:${m.container}`);
+  restoreArgs.push(image);
+
+  execSync(`${containerCmd} ${restoreArgs.join(' ')}`, { stdio: 'inherit' });
+  console.log('[SUCCESS] Qdrant restored. Migration complete.');
+}
+
+// ============================================================================
 // CLI Setup
 // ============================================================================
 
@@ -1508,5 +1614,19 @@ Examples:
     --fqdn rag.example.com --env OPENAI_API_KEY=sk-... --pull
 `)
   .action(handleDeploy);
+
+const migrate = program
+  .command('migrate')
+  .description('Run data migrations against the live Qdrant instance');
+
+migrate
+  .command('library-id')
+  .description('Rename a library_id across all Qdrant collections')
+  .option('--name <name>', `Base container name (default: ${APP_NAME}-latest)`)
+  .option('--old-id <id>', 'Current library_id to rename (e.g. 1)')
+  .option('--new-id <id>', 'New library_id (e.g. u3866263)')
+  .option('--list', 'List all distinct library_ids (no migration)')
+  .option('--dry-run', 'Preview changes without writing anything')
+  .action(handleMigrateLibraryId);
 
 program.parse();
