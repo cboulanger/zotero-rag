@@ -277,10 +277,12 @@ class VectorStore:
             )
             points.append(point)
 
-        self.client.upsert(
-            collection_name=self.CHUNKS_COLLECTION,
-            points=points,
-        )
+        batch_size = 200
+        for i in range(0, len(points), batch_size):
+            self.client.upsert(
+                collection_name=self.CHUNKS_COLLECTION,
+                points=points[i : i + batch_size],
+            )
 
         logger.info(f"Added {len(points)} chunks in batch")
         return point_ids

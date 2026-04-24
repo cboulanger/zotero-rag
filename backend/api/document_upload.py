@@ -305,7 +305,7 @@ async def upload_and_index_document(
     item_version: int = int(meta_dict.get("item_version", 0))
     attachment_version: int = int(meta_dict.get("attachment_version", 0))
     item_modified: str = meta_dict.get(
-        "zotero_modified", datetime.utcnow().isoformat()
+        "zotero_modified", datetime.now(timezone.utc).isoformat()
     )
 
     doc_metadata = DocumentMetadata(
@@ -389,9 +389,21 @@ async def upload_and_index_document(
             vector_store.update_library_metadata(lib_meta)
         except Exception as e:
             import openai
+            from qdrant_client.http.exceptions import ResponseHandlingException
+            from httpx import WriteTimeout, ReadTimeout, TimeoutException
             if isinstance(e, openai.InternalServerError):
                 logger.warning(
                     f"Upstream embedding service error for {attachment_key}: {e}"
+                )
+            elif isinstance(e, (WriteTimeout, ReadTimeout, TimeoutException)):
+                logger.warning(
+                    f"Qdrant write timed out while storing chunks for {attachment_key} "
+                    f"— batch may be too large or Qdrant is under load"
+                )
+            elif isinstance(e, ResponseHandlingException) and "timed out" in str(e).lower():
+                logger.warning(
+                    f"Qdrant request timed out while storing chunks for {attachment_key} "
+                    f"— batch may be too large or Qdrant is under load"
                 )
             else:
                 logger.error(
