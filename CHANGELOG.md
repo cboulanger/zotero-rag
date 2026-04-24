@@ -1,3 +1,10 @@
+## [1.16.1](https://github.com/cboulanger/zotero-rag/compare/v1.16.0...v1.16.1) (2026-04-24)
+
+
+### Bug Fixes
+
+* Batch upsert requests to avoid timeouts ([4d6fde7](https://github.com/cboulanger/zotero-rag/commit/4d6fde725209284eb30775ab1b4965ad755db9a5))
+
 # [1.16.0](https://github.com/cboulanger/zotero-rag/compare/v1.15.3...v1.16.0) (2026-04-24)
 
 
