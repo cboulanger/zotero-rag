@@ -90,7 +90,11 @@ plugin/
 ### Reference Documentation
 
 - **`docs/zotero-plugin-dev.md`** — "vanilla" Zotero plugin development: bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, and Zotero API patterns. The **"Useful Zotero APIs"** section at the bottom is a manually curated index of APIs found through source research — consult it before searching, and **add any newly discovered API methods there immediately** (with signature, return type, and a note on gotchas).
-- **`docs/zotero-plugin-toolkit.md`** — ready-made helper classes (`UITool`, `DialogHelper`, `KeyboardManager`, `PromptManager`, etc.) for more complex UI and plugin behavior. Check here before writing boilerplate.
+- **`docs/zotero-plugin-toolkit.md`** — ready-made helper classes (`UITool`, `DialogHelper`, `KeyboardManager`, `PromptManager`, `VirtualizedTableHelper`, etc.) for more complex UI and plugin behavior. Check here before writing boilerplate. When implementing any table-like UI, read the **"VirtualizedTableHelper — Implementation Details"** section first — it covers required stylesheets, container CSS, column definitions, custom cell rendering, row refresh, and the checkbox selection pattern with its known limitations.
+
+### Adding Toolkit APIs to the Bundle
+
+When a needed toolkit class (e.g. `VirtualizedTableHelper`) is not yet available on the `ZoteroPluginToolkit` global, follow the **"Adding a New Toolkit API"** procedure in `docs/zotero-plugin-toolkit.md`: import the class in `plugin/src/toolkit.js`, rebuild with `node scripts/build_toolkit.js`, load the bundle in the target dialog window via `loadSubScript`, and commit both files.
 
 ### Documenting New Zotero APIs
 

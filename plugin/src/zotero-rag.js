@@ -1180,7 +1180,7 @@ class ZoteroRAGPlugin {
 		this._fixUnavailableWindow = win.openDialog(
 			'chrome://zotero-rag/content/fix-unavailable.xhtml',
 			'zotero-rag-fix-unavailable',
-			'chrome,centerscreen,resizable=yes,width=720,height=520',
+			'chrome,centerscreen,resizable=yes,width=720,height=560',
 			{ plugin: this, libraryID }
 		);
 	}

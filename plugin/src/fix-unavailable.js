@@ -32,6 +32,13 @@
  * @typedef {import('./zotero-rag.js').UnavailableAttachmentInfo} AttachmentInfo
  */
 
+/**
+ * @typedef {object} RowStatus
+ * @property {string} cssClass
+ * @property {string} text
+ * @property {string} [tooltip]
+ */
+
 var ZoteroFixUnavailableDialog = {
 	/** @type {any} */
 	plugin: null,
@@ -44,6 +51,24 @@ var ZoteroFixUnavailableDialog = {
 
 	/** @type {boolean} */
 	isRunning: false,
+
+	/**
+	 * Per-row status state, indexed by row index.
+	 * @type {Map<number, RowStatus>}
+	 */
+	rowStatus: new Map(),
+
+	/**
+	 * VirtualizedTableHelper instance.
+	 * @type {any}
+	 */
+	tableHelper: null,
+
+	/**
+	 * Set of checked row indices — independent of the VirtualizedTable native cursor selection.
+	 * @type {Set<number>}
+	 */
+	selected: new Set(),
 
 	/**
 	 * Initialise the dialog. Called automatically after DOMContentLoaded loads this script.
@@ -69,11 +94,139 @@ var ZoteroFixUnavailableDialog = {
 		document.getElementById('search-btn').addEventListener('click', () => this.searchAndFix());
 		document.getElementById('delete-btn').addEventListener('click', () => this.deleteSelected());
 		document.getElementById('refresh-btn').addEventListener('click', () => { if (!this.isRunning) this.populateTable(); });
-		document.getElementById('header-checkbox').addEventListener('change', (e) => {
-			this.setAllChecked(/** @type {HTMLInputElement} */ (e.target).checked);
+		document.getElementById('select-all-cb')?.addEventListener('change', (/** @type {Event} */ e) => {
+			if (/** @type {HTMLInputElement} */(e.target).checked) {
+				for (let i = 0; i < this.items.length; i++) this.selected.add(i);
+			} else {
+				this.selected.clear();
+			}
+			this.tableHelper?.treeInstance?.invalidate();
+			this.updateActionButtons();
 		});
 
+		this._initTable();
 		this.populateTable();
+	},
+
+	/**
+	 * Build the VirtualizedTable and render it into #table-container.
+	 * Uses getRowData for plain text columns and column.renderer for status/select.
+	 * The table uses the native selection model (click / Ctrl+click / Shift+click / Ctrl+A).
+	 * @returns {void}
+	 */
+	_initTable() {
+		// @ts-ignore - ZoteroPluginToolkit is loaded by the xhtml before this script
+		const { VirtualizedTableHelper } = ZoteroPluginToolkit;
+
+		// column.renderer(index, data, column) is called by makeRowRenderer when set on a column.
+		// column.className is auto-populated by VirtualizedTable to include the dataKey CSS class
+		// (see zotero/chrome/content/zotero/components/virtualized-table.jsx line 1475), so
+		// span.className = `cell ${column.className}` gives e.g. "cell status status_abc123".
+
+		/** @type {Array<any>} */
+		const columns = [
+			{
+				dataKey: 'checkbox',
+				label: '',
+				fixedWidth: true,
+				width: 28,
+				ignoreInColumnPicker: true,
+				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+					const span = document.createElement('span');
+					span.className = `cell ${column.className}`;
+					span.style.cssText = 'display:flex;align-items:center;justify-content:center;';
+					const cb = document.createElement('input');
+					cb.type = 'checkbox';
+					cb.checked = this.selected.has(index);
+					cb.style.margin = '0';
+					cb.addEventListener('change', () => {
+						if (cb.checked) {
+							this.selected.add(index);
+						} else {
+							this.selected.delete(index);
+						}
+						this.updateActionButtons();
+					});
+					span.appendChild(cb);
+					return span;
+				},
+			},
+			{ dataKey: 'author',   label: 'Author(s)', flex: 2 },
+			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48 },
+			{ dataKey: 'title',    label: 'Title',     flex: 3 },
+			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84 },
+			{ dataKey: 'filename', label: 'Filename',  flex: 2 },
+			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 50 },
+			{
+				dataKey: 'status',
+				label: 'Status',
+				flex: 2,
+				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+					const span = document.createElement('span');
+					const status = this.rowStatus.get(index);
+					span.className = `cell ${column.className}${status ? ' status-' + status.cssClass : ''}`;
+					span.textContent = status ? status.text : '';
+					if (status?.tooltip) span.title = status.tooltip;
+					return span;
+				},
+			},
+			{
+				dataKey: 'select',
+				label: '',
+				fixedWidth: true,
+				width: 28,
+				ignoreInColumnPicker: true,
+				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+					const span = document.createElement('span');
+					span.className = `cell ${column.className}`;
+					const btn = document.createElement('button');
+					btn.className = 'select-btn';
+					btn.textContent = '🔍';
+					btn.title = 'Select in Zotero';
+					btn.addEventListener('mousedown', e => e.stopPropagation());
+					btn.addEventListener('click', e => {
+						e.stopPropagation();
+						const info = this.items[index];
+						if (info) this.selectItemInZotero(info);
+					});
+					span.appendChild(btn);
+					return span;
+				},
+			},
+		];
+
+		this.tableHelper = new VirtualizedTableHelper(window)
+			.setContainerId('table-container')
+			.setProp({
+				id: 'fix-unavailable-table',
+				columns,
+				showHeader: true,
+				multiSelect: false,
+				staticColumns: true,
+				disableFontSizeScaling: false,
+				getRowCount: () => this.items.length,
+				getRowData: (/** @type {number} */ index) => {
+					const info = this.items[index];
+					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', type: '', status: '', select: '' };
+					const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
+					const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
+					return {
+						author:   info.authors || '—',
+						year:     info.year    || '—',
+						title:    info.title   || '—',
+						zoteroID: info.zoteroID,
+						filename,
+						type:   info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem),
+						status: '', // rendered by column.renderer reading this.rowStatus
+						select: '', // rendered by column.renderer
+					};
+				},
+				onSelectionChange: () => {},
+			});
+
+		this.tableHelper.render(undefined, () => {
+			this.updateActionButtons();
+		});
 	},
 
 	/**
@@ -81,7 +234,6 @@ var ZoteroFixUnavailableDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async populateTable() {
-		// Update library heading
 		const libraryHeader = document.getElementById('library-header');
 		if (libraryHeader) {
 			// @ts-ignore - Zotero is available globally
@@ -89,8 +241,8 @@ var ZoteroFixUnavailableDialog = {
 			libraryHeader.textContent = `Missing files in ${libraryName}`;
 		}
 		this.setStatus('Loading unavailable attachments...');
-		const searchBtn = /** @type {HTMLButtonElement} */ (document.getElementById('search-btn'));
-		searchBtn.disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
 
 		try {
 			this.items = await this.plugin._getUnavailableAttachments(this.libraryID);
@@ -99,143 +251,66 @@ var ZoteroFixUnavailableDialog = {
 			return;
 		}
 
-		const tbody = document.getElementById('items-tbody');
-		tbody.innerHTML = '';
+		this.rowStatus.clear();
 
 		if (this.items.length === 0) {
-			// Clear the stale count in the parent RAG dialog so the "X unavailable" link disappears.
 			if (this.plugin && typeof this.plugin.clearMissingFilesCount === 'function') {
 				this.plugin.clearMissingFilesCount(this.libraryID);
 			}
-			const row = document.createElement('div');
-			row.className = 'table-row';
-			const cell = document.createElement('div');
-			cell.style.flex = '1';
-			cell.style.textAlign = 'center';
-			cell.style.padding = '20px';
-			cell.style.color = '#666';
-			cell.textContent = 'No unavailable attachments found in this library.';
-			row.appendChild(cell);
-			tbody.appendChild(row);
-			this.setStatus('');
-			return;
+			this.setStatus('No unavailable attachments found in this library.');
+		} else {
+			this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
 		}
 
-		for (let i = 0; i < this.items.length; i++) {
-			const info = this.items[i];
-			const row = document.createElement('div');
-			row.className = 'table-row';
-			row.dataset.index = String(i);
+		// Pre-check all rows in our independent checkbox set
+		this.selected.clear();
+		for (let i = 0; i < this.items.length; i++) this.selected.add(i);
 
-			// Checkbox
-			const tdCheck = document.createElement('div');
-			tdCheck.className = 'col-check';
-			const cb = document.createElement('input');
-			cb.type = 'checkbox';
-			cb.checked = true;
-			cb.dataset.index = String(i);
-			cb.addEventListener('change', () => this.updateSearchButton());
-			tdCheck.appendChild(cb);
-			row.appendChild(tdCheck);
-
-			// Author(s)
-			const tdAuth = document.createElement('div');
-			tdAuth.className = 'col-author';
-			tdAuth.textContent = info.authors || '—';
-			tdAuth.title = info.authors || '';
-			row.appendChild(tdAuth);
-
-			// Year
-			const tdYear = document.createElement('div');
-			tdYear.className = 'col-year';
-			tdYear.textContent = info.year || '—';
-			row.appendChild(tdYear);
-
-			// Title
-			const tdTitle = document.createElement('div');
-			tdTitle.className = 'col-title';
-			tdTitle.textContent = info.title || '—';
-			tdTitle.title = info.title || '';
-			row.appendChild(tdTitle);
-
-			// Zotero ID
-			const tdKey = document.createElement('div');
-			tdKey.className = 'col-key';
-			tdKey.textContent = info.zoteroID;
-			row.appendChild(tdKey);
-
-			// Filename (linked files show the full broken path as a hint)
-			const tdFile = document.createElement('div');
-			tdFile.className = 'col-filename';
-			const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
-			const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
-			tdFile.textContent = filename;
-			tdFile.title = filename;
-			row.appendChild(tdFile);
-
-			// File type
-			const tdType = document.createElement('div');
-			tdType.className = 'col-type';
-			tdType.textContent = info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem);
-			row.appendChild(tdType);
-
-			// Status
-			const tdStatus = document.createElement('div');
-			tdStatus.className = 'status-cell col-status';
-			tdStatus.id = `status-${i}`;
-			tdStatus.textContent = '';
-			row.appendChild(tdStatus);
-
-			// Select-in-Zotero button
-			const tdSelect = document.createElement('div');
-			tdSelect.className = 'col-select';
-			const selectBtn = document.createElement('button');
-			selectBtn.className = 'select-btn';
-			selectBtn.textContent = '🔍';
-			selectBtn.title = 'Select in Zotero';
-			selectBtn.addEventListener('click', () => this.selectItemInZotero(info));
-			tdSelect.appendChild(selectBtn);
-			row.appendChild(tdSelect);
-
-			tbody.appendChild(row);
+		if (this.tableHelper?.treeInstance) {
+			this.tableHelper.treeInstance.invalidate();
+			this.updateActionButtons();
+		} else {
+			// Table not yet rendered — re-render with new data
+			this.tableHelper?.render(undefined, () => this.updateActionButtons());
 		}
-
-		// Sync header checkbox with row checkboxes (all checked by default)
-		/** @type {HTMLInputElement} */ (document.getElementById('header-checkbox')).checked = this.items.length > 0;
-		this.updateSearchButton();
-		this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
 	},
 
 	/**
-	 * Check or uncheck all row checkboxes.
-	 * @param {boolean} checked
+	 * Enable or disable action buttons based on current selection.
 	 * @returns {void}
 	 */
-	setAllChecked(checked) {
-		document.querySelectorAll('#items-tbody input[type="checkbox"]').forEach(cb => {
-			/** @type {HTMLInputElement} */ (cb).checked = checked;
-		});
-		/** @type {HTMLInputElement} */ (document.getElementById('header-checkbox')).checked = checked;
-		this.updateSearchButton();
-	},
-
-
-
-	/**
-	 * Enable or disable the Search button based on whether any rows are selected.
-	 * @returns {void}
-	 */
-	updateSearchButton() {
+	updateActionButtons() {
 		if (this.isRunning) return;
-		const anyChecked = Array.from(document.querySelectorAll('#items-tbody input[type="checkbox"]'))
-			.some(cb => /** @type {HTMLInputElement} */ (cb).checked);
+		const count = this.selected.size;
 		const hasItems = this.items.length > 0;
-		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = !anyChecked || !hasItems;
-		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = !anyChecked || !hasItems;
+		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = count === 0 || !hasItems;
+		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = count === 0 || !hasItems;
+		this._updateSelectAllCheckbox();
 	},
 
 	/**
-	 * Focus the main Zotero window and select the attachment item (and its parent) in the item list.
+	 * Sync the select-all checkbox in the toolbar to reflect the current checkbox state.
+	 * @returns {void}
+	 */
+	_updateSelectAllCheckbox() {
+		const cb = /** @type {HTMLInputElement|null} */ (document.getElementById('select-all-cb'));
+		if (!cb) return;
+		const count = this.selected.size;
+		const total = this.items.length;
+		cb.checked = total > 0 && count === total;
+		cb.indeterminate = count > 0 && count < total;
+	},
+
+	/**
+	 * Return the currently selected row indices.
+	 * @returns {number[]}
+	 */
+	getSelectedIndices() {
+		return [...this.selected];
+	},
+
+	/**
+	 * Focus the main Zotero window and select the attachment item in the item list.
 	 * @param {AttachmentInfo} info
 	 * @returns {void}
 	 */
@@ -248,7 +323,6 @@ var ZoteroFixUnavailableDialog = {
 				? opener.Zotero.getActiveZoteroPane()
 				: null;
 			if (!pane) return;
-			// Select the attachment item; Zotero will reveal it under its parent
 			pane.selectItem(info.attachmentItem.id);
 		} catch (e) {
 			console.error('selectItemInZotero failed:', e);
@@ -261,31 +335,22 @@ var ZoteroFixUnavailableDialog = {
 	 */
 	async deleteSelected() {
 		if (this.isRunning) return;
-		const checkboxes = /** @type {NodeListOf<HTMLInputElement>} */ (
-			document.querySelectorAll('#items-tbody input[type="checkbox"]')
-		);
-		const selected = Array.from(checkboxes)
-			.map((cb, i) => ({ cb, index: i }))
-			.filter(({ cb }) => cb.checked);
-		if (selected.length === 0) return;
+		const indices = this.getSelectedIndices();
+		if (indices.length === 0) return;
 
 		const confirmed = window.confirm(
-			`Do you really want to permanently delete ${selected.length} item${selected.length !== 1 ? 's' : ''}? This cannot be undone.`
+			`Do you really want to permanently delete ${indices.length} item${indices.length !== 1 ? 's' : ''}? This cannot be undone.`
 		);
 		if (!confirmed) return;
 
 		this.isRunning = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = true;
-		this.setStatus(`Deleting ${selected.length} item${selected.length !== 1 ? 's' : ''}...`);
+		this._setAllButtonsDisabled(true);
+		this.setStatus(`Deleting ${indices.length} item${indices.length !== 1 ? 's' : ''}...`);
 
 		try {
-			// Collect unique parent item IDs (delete parent, not just the attachment)
 			const parentIDs = [...new Set(
-				selected
-					.map(({ index }) => this.items[index].parentItem?.id)
+				indices
+					.map(i => this.items[i]?.parentItem?.id)
 					.filter(/** @type {(id: any) => id is number} */ (id) => typeof id === 'number')
 			)];
 			// @ts-ignore - Zotero.Items.erase exists at runtime
@@ -300,13 +365,9 @@ var ZoteroFixUnavailableDialog = {
 		this.isRunning = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
-		// Refresh the table — deleted items should no longer appear
 		await this.populateTable();
-		// Refresh toolbar badge
 		try {
-			if (window.opener && this.plugin) {
-				this.plugin._scanUnavailableCount(window.opener);
-			}
+			if (window.opener && this.plugin) this.plugin._scanUnavailableCount(window.opener);
 		} catch (_) {}
 	},
 
@@ -319,56 +380,37 @@ var ZoteroFixUnavailableDialog = {
 	async searchAndFix() {
 		if (this.isRunning) return;
 		this.isRunning = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = true;
-		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = true;
+		this._setAllButtonsDisabled(true);
 
-		const checkboxes = /** @type {NodeListOf<HTMLInputElement>} */ (
-			document.querySelectorAll('#items-tbody input[type="checkbox"]')
-		);
-		const selected = Array.from(checkboxes)
-			.map((cb, i) => ({ cb, index: i }))
-			.filter(({ cb }) => cb.checked);
+		const indices = this.getSelectedIndices();
+		const linkedIndices   = indices.filter(i => this.items[i].isLinked);
+		const importedIndices = indices.filter(i => !this.items[i].isLinked);
 
-		// Separate linked files (linkMode=2) from imported files — linked files can't be
-		// auto-downloaded; mark them immediately so they don't enter the download phases.
-		/** @type {Array<{index: number}>} */
-		const linkedSelected = selected.filter(({ index }) => this.items[index].isLinked);
-		/** @type {Array<{index: number}>} */
-		const importedSelected = selected.filter(({ index }) => !this.items[index].isLinked);
-
-		for (const { index } of linkedSelected) {
-			this.setRowStatus(index, 'not-found', 'Linked file — fix path in Zotero');
-		}
-		for (const { index } of importedSelected) {
-			this.setRowStatus(index, 'searching', 'Queued...');
-		}
+		for (const i of linkedIndices)   this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
+		for (const i of importedIndices) this.setRowStatus(i, 'searching', 'Queued...');
 
 		// Phase 1: batched sync downloads for imported files only (10 at a time)
 		const BATCH_SIZE = 10;
 		/** @type {Array<{index: number, downloaded: boolean, reason?: string}>} */
 		const downloadResults = [];
 
-		for (let batchStart = 0; batchStart < importedSelected.length; batchStart += BATCH_SIZE) {
-			const batch = importedSelected.slice(batchStart, batchStart + BATCH_SIZE);
-			const batchEnd = Math.min(batchStart + BATCH_SIZE, importedSelected.length);
-			this.setStatus(`Phase 1/2: downloading file(s) via Zotero sync (${batchEnd}/${importedSelected.length})...`);
+		for (let batchStart = 0; batchStart < importedIndices.length; batchStart += BATCH_SIZE) {
+			const batch = importedIndices.slice(batchStart, batchStart + BATCH_SIZE);
+			const batchEnd = Math.min(batchStart + BATCH_SIZE, importedIndices.length);
+			this.setStatus(`Phase 1/2: downloading file(s) via Zotero sync (${batchEnd}/${importedIndices.length})...`);
 
-			for (const { index } of batch) {
-				this.setRowStatus(index, 'searching', 'Downloading...');
-			}
+			for (const i of batch) this.setRowStatus(i, 'searching', 'Downloading...');
 
 			const batchOutcomes = await Promise.allSettled(
-				batch.map(({ index }) =>
-					this.plugin._tryDownloadAttachment(this.items[index].attachmentItem)
-						.then(r => ({ index, ...r }))
+				batch.map(i =>
+					this.plugin._tryDownloadAttachment(this.items[i].attachmentItem)
+						.then(/** @type {(r: any) => any} */ r => ({ index: i, ...r }))
 				)
 			);
 
 			for (const outcome of batchOutcomes) {
 				if (outcome.status === 'rejected') {
-					const { index } = /** @type {any} */ (outcome);
+					const index = /** @type {any} */ (outcome).index;
 					this.setRowStatus(index, 'error', 'Download error');
 					downloadResults.push({ index, downloaded: false, reason: 'rejected' });
 				} else {
@@ -385,36 +427,35 @@ var ZoteroFixUnavailableDialog = {
 			}
 		}
 
-		// Collect imported items that still need the copy fallback
-		/** @type {Array<{index: number}>} */
+		/** @type {Array<number>} */
 		const stillMissing = downloadResults
 			.filter(r => !r.downloaded && r.reason !== 'rejected')
-			.map(r => ({ index: r.index }));
+			.map(r => r.index);
 
 		// Phase 2: copy from another library for imported items still missing
-		let fixed = downloadResults.filter(r => r.downloaded).length;
-		let notFound = linkedSelected.length; // linked files are never auto-fixable
-		let errors = 0;
+		let fixed    = downloadResults.filter(r => r.downloaded).length;
+		let notFound = linkedIndices.length;
+		let errors   = 0;
 
 		if (stillMissing.length > 0) {
 			this.setStatus(`Phase 2/2: searching other libraries for ${stillMissing.length} remaining file(s)...`);
-			for (const { index } of stillMissing) {
-				const info = this.items[index];
+			for (const i of stillMissing) {
+				const info = this.items[i];
 				try {
 					const result = await this.plugin._searchAndFixUnavailableAttachment(info.attachmentItem);
 					if (result.found && !result.error) {
-						this.setRowStatus(index, 'fixed', `Fixed (${result.via})`);
+						this.setRowStatus(i, 'fixed', `Fixed (${result.via})`);
 						fixed++;
 					} else if (result.found && result.error) {
-						this.setRowStatus(index, 'error', `Copy failed: ${result.error}`, result.error);
+						this.setRowStatus(i, 'error', `Copy failed: ${result.error}`, result.error);
 						errors++;
 					} else {
-						this.setRowStatus(index, 'not-found', 'Not found');
+						this.setRowStatus(i, 'not-found', 'Not found');
 						notFound++;
 					}
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
-					this.setRowStatus(index, 'error', `Error: ${msg}`, msg);
+					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
 					errors++;
 					console.error(`fix-unavailable: error for item ${info.zoteroID}: ${msg}`);
 				}
@@ -422,56 +463,62 @@ var ZoteroFixUnavailableDialog = {
 		}
 
 		const parts = [];
-		if (fixed > 0) parts.push(`${fixed} fixed`);
+		if (fixed    > 0) parts.push(`${fixed} fixed`);
 		if (notFound > 0) parts.push(`${notFound} not found`);
-		if (errors > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
+		if (errors   > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
 		this.setStatus(`Done. ${parts.join(', ')}.`);
 
 		this.isRunning = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = false;
-		this.updateSearchButton();
+		this.updateActionButtons();
 
-		// Refresh toolbar label count
 		try {
-			if (window.opener && this.plugin) {
-				this.plugin._scanUnavailableCount(window.opener);
-			}
-		} catch (_) { /* opener may be gone */ }
+			if (window.opener && this.plugin) this.plugin._scanUnavailableCount(window.opener);
+		} catch (_) {}
 	},
 
 	/**
-	 * Update a row's status cell.
+	 * Update a row's status and trigger a repaint of that row.
 	 * @param {number} index
 	 * @param {string} cssClass - one of: searching, fixed, not-found, error
 	 * @param {string} text
 	 * @param {string} [tooltip]
 	 * @returns {void}
 	 */
+	setRowStatus(index, cssClass, text, tooltip = '') {
+		this.rowStatus.set(index, { cssClass, text, tooltip });
+		try {
+			this.tableHelper?.treeInstance?.invalidateRow(index);
+		} catch (_) {}
+	},
+
 	/**
 	 * Return a short label for the attachment file type.
-	 * @param {*} attachmentItem
+	 * @param {any} attachmentItem
 	 * @returns {string}
 	 */
 	getFileTypeLabel(attachmentItem) {
 		const mime = attachmentItem.attachmentContentType || '';
-		if (mime === 'application/pdf') return 'PDF';
-		if (mime === 'text/html') return 'HTML';
+		if (mime === 'application/pdf')      return 'PDF';
+		if (mime === 'text/html')            return 'HTML';
 		if (mime === 'application/epub+zip') return 'EPUB';
-		if (mime.startsWith('image/')) return mime.slice(6).toUpperCase();
-		// Fall back to file extension
+		if (mime.startsWith('image/'))       return mime.slice(6).toUpperCase();
 		const filename = attachmentItem.attachmentFilename || '';
 		const ext = filename.includes('.') ? filename.split('.').pop().toUpperCase() : '';
 		return ext || mime.split('/').pop() || '?';
 	},
 
-	setRowStatus(index, cssClass, text, tooltip = '') {
-		const cell = document.getElementById(`status-${index}`);
-		if (!cell) return;
-		cell.textContent = text;
-		cell.className = `status-cell ${cssClass}`;
-		cell.title = tooltip;
+	/**
+	 * Disable or enable all action/navigation buttons at once.
+	 * @param {boolean} disabled
+	 * @returns {void}
+	 */
+	_setAllButtonsDisabled(disabled) {
+		for (const id of ['search-btn', 'delete-btn', 'close-btn', 'refresh-btn']) {
+			/** @type {HTMLButtonElement} */ (document.getElementById(id)).disabled = disabled;
+		}
 	},
 
 	/**

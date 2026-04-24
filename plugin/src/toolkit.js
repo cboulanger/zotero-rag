@@ -3,7 +3,9 @@
  * This file imports and exposes the toolkit for use in the plugin
  */
 
-import { BasicTool, UITool, ProgressWindowHelper } from 'zotero-plugin-toolkit';
+import { BasicTool, UITool, ProgressWindowHelper, VirtualizedTableHelper } from 'zotero-plugin-toolkit';
+
+export { VirtualizedTableHelper };
 
 /**
  * Initialize and return toolkit instance

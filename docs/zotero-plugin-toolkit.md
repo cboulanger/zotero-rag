@@ -14,7 +14,40 @@ The toolkit provides UI helpers, managers, and utilities that abstract cross-ver
 
 The toolkit is pre-bundled at [plugin/src/toolkit.bundle.js](../plugin/src/toolkit.bundle.js), which is built from [plugin/src/toolkit.js](../plugin/src/toolkit.js). That wrapper exports a `createToolkit(config)` factory that returns a pre-initialized `basicTool`, `uiTool`, `progressHelper`, `showAlert()`, `showError()`, and `showNotification()`.
 
-To add more toolkit classes to this project, import them in `plugin/src/toolkit.js` from `'zotero-plugin-toolkit'` and expose them via the returned object.
+### Adding a New Toolkit API
+
+If you need a class or helper not currently in the bundle (e.g. `VirtualizedTableHelper`):
+
+1. **Edit `plugin/src/toolkit.js`** — import the class from `'zotero-plugin-toolkit'` and either re-export it or include it in the `createToolkit` return value:
+
+   ```js
+   import { BasicTool, UITool, ProgressWindowHelper, VirtualizedTableHelper } from 'zotero-plugin-toolkit';
+
+   export { VirtualizedTableHelper };  // re-export so it appears on the global
+
+   export function createToolkit(config) { /* ... */ }
+   ```
+
+2. **Rebuild the bundle**:
+
+   ```bash
+   node scripts/build_toolkit.js
+   ```
+
+   This regenerates `plugin/src/toolkit.bundle.js` (globalName `ZoteroPluginToolkit`). After the rebuild, `ZoteroPluginToolkit.VirtualizedTableHelper` is available in any window that loads the bundle.
+
+3. **Load the bundle in the target window** — dialog windows (e.g. `fix-unavailable.xhtml`) do not inherit the main window's globals. Load the bundle explicitly via `loadSubScript`:
+
+   ```js
+   Services.scriptloader.loadSubScript(
+     "chrome://zotero-rag/content/toolkit.bundle.js",
+     window
+   );
+   ```
+
+   After this, `ZoteroPluginToolkit.VirtualizedTableHelper` is available in that window's scope.
+
+4. **Commit both** `plugin/src/toolkit.js` and the rebuilt `plugin/src/toolkit.bundle.js`.
 
 **Two usage styles elsewhere**:
 
@@ -560,6 +593,151 @@ const table = new VirtualizedTableHelper(window)
 
 table.render();
 ```
+
+### Implementation Details (lessons from fix-unavailable dialog)
+
+#### Required stylesheets
+
+The VirtualizedTable React component needs two platform stylesheets that are **not** loaded by default in dialog windows. Without them every cell stacks vertically instead of rendering as a flex row. Add these `<?xml-stylesheet?>` PIs to your `.xhtml` before `<!DOCTYPE html>`:
+
+```xml
+<?xml-stylesheet href="chrome://zotero-platform/content/zotero-react-client.css" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero-platform/content/zotero.css" type="text/css"?>
+```
+
+Also load `include.js` and `toolkit.bundle.js` via `loadSubScript` on `DOMContentLoaded` — dialog windows do not inherit the main window's globals.
+
+#### Container CSS
+
+The container div must have a **definite pixel height** (not `auto`) for the windowed-list to calculate which rows are visible. Use flex layout:
+
+```css
+/* Parent flex column */
+.dialog-container { display: flex; flex-direction: column; height: 100%; padding: 12px 12px 0; box-sizing: border-box; }
+
+/* Table container: grows to fill remaining space, collapses to 0 when needed */
+#table-container { flex: 1; min-height: 0; overflow: auto; border: 1px solid #ccc; border-radius: 4px; }
+```
+
+Use `overflow: auto` (not `overflow: hidden`) on the container — the windowed-list renders all rows into the DOM when it cannot determine a constrained height, and the container's own scrollbar then provides scrolling. With `overflow: hidden` the scrollbar is simply clipped away.
+
+To keep the column header fixed while rows scroll, make the header sticky:
+
+```css
+#table-container .virtualized-table-header { position: sticky; top: 0; z-index: 1; }
+```
+
+#### Column definitions
+
+```js
+const columns = [
+  { dataKey: "title",  label: "Title",  flex: 2 },           // grows
+  { dataKey: "year",   label: "Year",   fixedWidth: true, width: 48 }, // fixed px
+  { dataKey: "type",   label: "Type",   fixedWidth: true, width: 50 },
+];
+```
+
+- Use `flex: N` for proportional columns, `fixedWidth: true, width: N` for fixed-pixel columns.
+- `ignoreInColumnPicker: true` hides a column from the user-facing column picker.
+- `column.className` is **auto-populated** by VirtualizedTable to a CSS class derived from the `dataKey` (see `virtualized-table.jsx` line 1475). Use it in renderers: `span.className = \`cell ${column.className}\``.
+
+#### Custom cell rendering with `column.renderer`
+
+Prefer `column.renderer` over a global `renderItem` override. It receives `(index, data, column)` and must return a `<span>` (not a `<div>`) — the table expects `span.cell` children:
+
+```js
+{
+  dataKey: "status",
+  label: "Status",
+  flex: 2,
+  renderer: (index, _data, column) => {
+    const span = document.createElement("span");
+    span.className = `cell ${column.className}`;
+    const status = myStatusMap.get(index);
+    if (status) {
+      span.classList.add("status-" + status.cssClass);
+      span.textContent = status.text;
+    }
+    return span;
+  }
+}
+```
+
+Column width CSS is injected by the React component and keyed on `column.className`, so cells that carry that class automatically get the right width — even with a custom renderer.
+
+#### Refreshing rows
+
+```js
+tableHelper.treeInstance.invalidateRow(index);  // repaint one row
+tableHelper.treeInstance.invalidate();           // repaint all rows
+```
+
+Call `invalidateRow` after any state change that affects a single row (e.g. a status update). The renderer is called again and returns a fresh element.
+
+#### `onSelectionChange` gotcha
+
+`onSelectionChange` is called by `clearSelection()` itself. **Never call `clearSelection()` (or any other selection mutation) inside `onSelectionChange`** — it causes infinite recursion. Use a no-op or a guard flag instead.
+
+---
+
+### Checkboxes in VirtualizedTable
+
+#### The fundamental constraint
+
+VirtualizedTable has a single **native cursor selection** model (highlighted row). There is no built-in checkbox selection. When the user clicks a row, `onSelectionChange` fires and the row is highlighted. Any checkbox you render via `column.renderer` is a plain DOM `<input type="checkbox">` that is **recreated on every render** of that row — including whenever the native selection changes.
+
+This means: if you tie checkbox state to the native selection, clicking a row to select it immediately re-renders the checkbox to match the new selection state, effectively resetting anything the user just checked.
+
+#### Recommended pattern: independent `selected` Set
+
+Keep checkbox state completely separate from the native cursor selection:
+
+```js
+// On the dialog object:
+selected: new Set(),   // indices of checked rows
+
+// In the checkbox column renderer:
+renderer: (index, _data, column) => {
+  const span = document.createElement("span");
+  span.className = `cell ${column.className}`;
+  span.style.cssText = "display:flex;align-items:center;justify-content:center;";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = this.selected.has(index);   // read from our own Set, not native selection
+  cb.style.margin = "0";
+  cb.addEventListener("change", () => {
+    if (cb.checked) this.selected.add(index);
+    else            this.selected.delete(index);
+    this.updateActionButtons();
+    // do NOT call invalidateRow here — the checkbox already reflects the new state
+  });
+  span.appendChild(cb);
+  return span;
+}
+
+// Leave onSelectionChange as a no-op:
+onSelectionChange: () => {}
+```
+
+- Read `this.selected` for all downstream logic (`getSelectedIndices`, button enable/disable).
+- Pre-populate `this.selected` on load (e.g. select all: `for (let i=0; i<items.length; i++) selected.add(i)`).
+
+#### Select-all toolbar
+
+Put a `<input type="checkbox" id="select-all-cb">` in a toolbar div **above** the table container (not inside VirtualizedTable — the header is not interactive). Sync it with an indeterminate state:
+
+```js
+function updateSelectAll() {
+  const cb = document.getElementById("select-all-cb");
+  const count = this.selected.size, total = this.items.length;
+  cb.checked       = total > 0 && count === total;
+  cb.indeterminate = count > 0 && count < total;
+}
+```
+
+#### Known limitation: first click selects, second click toggles
+
+Because VirtualizedTable intercepts `mousedown` at the capture phase to move the native cursor, the first click on a checkbox row moves the cursor AND fires the checkbox change. Subsequent clicks on the same row only fire the checkbox change. This means **unchecking a pre-checked row requires two clicks if that row is not already the cursor row**. This is an inherent limitation of mixing a cursor-selection table with overlay checkboxes. It is acceptable UX for most use cases; if true single-click toggle is required, a custom `renderItem` that manages row rendering entirely is needed (at the cost of losing automatic column-width management).
 
 ---
 
