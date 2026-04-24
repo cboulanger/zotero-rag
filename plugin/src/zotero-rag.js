@@ -1520,12 +1520,20 @@ class ZoteroRAGPlugin {
 	/**
 	 * Strategy 5: Use Zotero's Find-Available-File resolver (DOI/OA/URL lookup).
 	 * Bypasses canFindFileForItem() so it works even when the attachment item already exists.
+	 * Only applicable when the attachment type is one the resolver can provide (PDF/EPUB).
 	 * @param {*} attachmentItem
 	 * @param {*} parentItem
 	 * @returns {Promise<{found: boolean, via: string, error?: string}|null>}
 	 */
 	async _tryFixViaResolver(attachmentItem, parentItem) {
 		try {
+			const expectedMime = attachmentItem.attachmentContentType || '';
+			// @ts-ignore
+			const supportedTypes = Zotero.Attachments.FIND_AVAILABLE_FILE_TYPES || ['application/pdf', 'application/epub+zip'];
+			if (!supportedTypes.includes(expectedMime)) {
+				this.log(`[fix] ${attachmentItem.key}: resolver: skipping — content type "${expectedMime}" not supported by resolver`);
+				return null;
+			}
 			// @ts-ignore
 			const resolvers = Zotero.Attachments.getFileResolvers(parentItem);
 			if (!resolvers || resolvers.length === 0) {
@@ -1541,6 +1549,10 @@ class ZoteroRAGPlugin {
 				// @ts-ignore
 				const dl = await Zotero.Attachments.downloadFirstAvailableFile(resolvers, tmpPath, {});
 				if (!dl || !dl.url) return null;
+				if (dl.mimeType && dl.mimeType !== expectedMime) {
+					this.log(`[fix] ${attachmentItem.key}: resolver: skipping — downloaded type "${dl.mimeType}" does not match expected "${expectedMime}"`);
+					return null;
+				}
 				try {
 					await this._copyAttachmentFile(attachmentItem, tmpPath);
 					return { found: true, via: 'resolver' };
