@@ -1162,14 +1162,19 @@ class ZoteroRAGPlugin {
 	 * @param {number} [libraryID] - Library to show; defaults to the currently selected library
 	 */
 	openFixUnavailableDialog(win, libraryID) {
-		// If the dialog is already open, bring it to the front instead of opening a new one.
-		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
-			this._fixUnavailableWindow.focus();
-			return;
-		}
 		if (!libraryID) {
 			const pane = Zotero.getActiveZoteroPane();
 			libraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+		}
+		// If the dialog is already open, refresh its content for the (possibly new) library.
+		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
+			const dlg = /** @type {any} */ (this._fixUnavailableWindow).ZoteroFixUnavailableDialog;
+			if (dlg && !dlg.isRunning) {
+				dlg.libraryID = libraryID;
+				dlg.populateTable();
+			}
+			this._fixUnavailableWindow.focus();
+			return;
 		}
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		this._fixUnavailableWindow = win.openDialog(

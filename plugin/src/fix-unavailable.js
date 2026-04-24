@@ -81,6 +81,13 @@ var ZoteroFixUnavailableDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async populateTable() {
+		// Update library heading
+		const libraryHeader = document.getElementById('library-header');
+		if (libraryHeader) {
+			// @ts-ignore - Zotero is available globally
+			const libraryName = Zotero.Libraries.get(this.libraryID)?.name || 'Library';
+			libraryHeader.textContent = `Missing files in ${libraryName}`;
+		}
 		this.setStatus('Loading unavailable attachments...');
 		const searchBtn = /** @type {HTMLButtonElement} */ (document.getElementById('search-btn'));
 		searchBtn.disabled = true;
