@@ -1,3 +1,10 @@
+## [1.15.3](https://github.com/cboulanger/zotero-rag/compare/v1.15.2...v1.15.3) (2026-04-24)
+
+
+### Bug Fixes
+
+* Fix missing warning about unsecured connection ([5e052bb](https://github.com/cboulanger/zotero-rag/commit/5e052bb3fb06f8342d69030fe117917695f5affd))
+
 ## [1.15.2](https://github.com/cboulanger/zotero-rag/compare/v1.15.1...v1.15.2) (2026-04-23)
 
 
