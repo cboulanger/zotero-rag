@@ -1,3 +1,16 @@
+# [1.16.0](https://github.com/cboulanger/zotero-rag/compare/v1.15.3...v1.16.0) (2026-04-24)
+
+
+### Bug Fixes
+
+* Fix Fix tool: Fixing via resolver must match file type ([7e84b6d](https://github.com/cboulanger/zotero-rag/commit/7e84b6d7975168cc405dc74a8c09c969e444a768)), closes [#10](https://github.com/cboulanger/zotero-rag/issues/10)
+* Fix stale content in fix tool when switching libraries ([948edf3](https://github.com/cboulanger/zotero-rag/commit/948edf3606a66e365f4e670a4cc85c43eb5bae3c))
+
+
+### Features
+
+* Implement Urge user to fix attachment problems before indexing ([ab7fd68](https://github.com/cboulanger/zotero-rag/commit/ab7fd680406bf5bada5366792dd14ff5b84228a3)), closes [#7](https://github.com/cboulanger/zotero-rag/issues/7)
+
 ## [1.15.3](https://github.com/cboulanger/zotero-rag/compare/v1.15.2...v1.15.3) (2026-04-24)
 
 
