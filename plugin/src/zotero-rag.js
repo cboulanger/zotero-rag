@@ -544,12 +544,21 @@ class ZoteroRAGPlugin {
 				'in Zotero Preferences > Sync.'
 			);
 		}
-		const response = await fetch(`${this.backendURL}/api/register`, {
+		const requestURL = `${this.backendURL}/api/register`;
+		const response = await fetch(requestURL, {
 			method: 'POST',
 			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 			body: JSON.stringify({ library_id: libraryId, library_name: libraryName, user_id: userId, username })
 		});
 		if (!response.ok) {
+			// A 301 redirect from HTTP to HTTPS silently converts POST→GET, causing 405.
+			// Detect this and give the user an actionable message.
+			if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+				throw new Error(
+					'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+					'Please update the Backend URL in Zotero RAG preferences to start with "https://".'
+				);
+			}
 			const err = await response.json().catch(() => ({}));
 			throw new Error(`Registration failed: ${err.detail || response.status}`);
 		}

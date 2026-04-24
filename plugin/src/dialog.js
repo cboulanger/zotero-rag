@@ -1146,12 +1146,7 @@ var ZoteroRAGDialog = {
 		if (!this.plugin.isLocalBackend()) {
 			for (const libraryId of libraryIds) {
 				const lib = this.plugin.getLibraries().find(l => l.id === libraryId);
-				try {
-					await this.plugin.registerLibrary(libraryId, lib ? lib.name : libraryId);
-				} catch (err) {
-					this.showStatus(err instanceof Error ? err.message : String(err), 'error');
-					return;
-				}
+				await this.plugin.registerLibrary(libraryId, lib ? lib.name : libraryId);
 			}
 		}
 
