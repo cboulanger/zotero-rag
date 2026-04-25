@@ -544,12 +544,21 @@ class ZoteroRAGPlugin {
 				'in Zotero Preferences > Sync.'
 			);
 		}
-		const response = await fetch(`${this.backendURL}/api/register`, {
+		const requestURL = `${this.backendURL}/api/register`;
+		const response = await fetch(requestURL, {
 			method: 'POST',
 			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 			body: JSON.stringify({ library_id: libraryId, library_name: libraryName, user_id: userId, username })
 		});
 		if (!response.ok) {
+			// A 301 redirect from HTTP to HTTPS silently converts POST→GET, causing 405.
+			// Detect this and give the user an actionable message.
+			if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+				throw new Error(
+					'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+					'Please update the Backend URL in Zotero RAG preferences to start with "https://".'
+				);
+			}
 			const err = await response.json().catch(() => ({}));
 			throw new Error(`Registration failed: ${err.detail || response.status}`);
 		}
@@ -1153,20 +1162,25 @@ class ZoteroRAGPlugin {
 	 * @param {number} [libraryID] - Library to show; defaults to the currently selected library
 	 */
 	openFixUnavailableDialog(win, libraryID) {
-		// If the dialog is already open, bring it to the front instead of opening a new one.
-		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
-			this._fixUnavailableWindow.focus();
-			return;
-		}
 		if (!libraryID) {
 			const pane = Zotero.getActiveZoteroPane();
 			libraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+		}
+		// If the dialog is already open, refresh its content for the (possibly new) library.
+		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
+			const dlg = /** @type {any} */ (this._fixUnavailableWindow).ZoteroFixUnavailableDialog;
+			if (dlg && !dlg.isRunning) {
+				dlg.libraryID = libraryID;
+				dlg.populateTable();
+			}
+			this._fixUnavailableWindow.focus();
+			return;
 		}
 		// @ts-ignore - openDialog is available in XUL/Firefox extension context
 		this._fixUnavailableWindow = win.openDialog(
 			'chrome://zotero-rag/content/fix-unavailable.xhtml',
 			'zotero-rag-fix-unavailable',
-			'chrome,centerscreen,resizable=yes,width=720,height=520',
+			'chrome,centerscreen,resizable=yes,width=720,height=560',
 			{ plugin: this, libraryID }
 		);
 	}
@@ -1511,12 +1525,20 @@ class ZoteroRAGPlugin {
 	/**
 	 * Strategy 5: Use Zotero's Find-Available-File resolver (DOI/OA/URL lookup).
 	 * Bypasses canFindFileForItem() so it works even when the attachment item already exists.
+	 * Only applicable when the attachment type is one the resolver can provide (PDF/EPUB).
 	 * @param {*} attachmentItem
 	 * @param {*} parentItem
 	 * @returns {Promise<{found: boolean, via: string, error?: string}|null>}
 	 */
 	async _tryFixViaResolver(attachmentItem, parentItem) {
 		try {
+			const expectedMime = attachmentItem.attachmentContentType || '';
+			// @ts-ignore
+			const supportedTypes = Zotero.Attachments.FIND_AVAILABLE_FILE_TYPES || ['application/pdf', 'application/epub+zip'];
+			if (!supportedTypes.includes(expectedMime)) {
+				this.log(`[fix] ${attachmentItem.key}: resolver: skipping — content type "${expectedMime}" not supported by resolver`);
+				return null;
+			}
 			// @ts-ignore
 			const resolvers = Zotero.Attachments.getFileResolvers(parentItem);
 			if (!resolvers || resolvers.length === 0) {
@@ -1532,6 +1554,10 @@ class ZoteroRAGPlugin {
 				// @ts-ignore
 				const dl = await Zotero.Attachments.downloadFirstAvailableFile(resolvers, tmpPath, {});
 				if (!dl || !dl.url) return null;
+				if (dl.mimeType && dl.mimeType !== expectedMime) {
+					this.log(`[fix] ${attachmentItem.key}: resolver: skipping — downloaded type "${dl.mimeType}" does not match expected "${expectedMime}"`);
+					return null;
+				}
 				try {
 					await this._copyAttachmentFile(attachmentItem, tmpPath);
 					return { found: true, via: 'resolver' };

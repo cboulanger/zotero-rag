@@ -859,6 +859,13 @@ var ZoteroRAGDialog = {
 			});
 
 			if (!allFullyIndexed) {
+				// Warn user about missing attachments before committing to indexing
+				if (!this.checkMissingFilesBeforeIndexing(libraryIds)) {
+					this.setSubmitEnabled(true);
+					this.setCancelMode('close');
+					this.hideProgress();
+					return;
+				}
 				await this.checkAndMonitorIndexing(libraryIds, indexingMode);
 			}
 
@@ -936,17 +943,62 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Check if any of the given libraries have missing attachment files and, if so,
+	 * warn the user and offer to open the Fix Unavailable Attachments tool.
+	 * Returns true to proceed with indexing, false to abort.
+	 * @param {string[]} libraryIds
+	 * @returns {boolean}
+	 */
+	checkMissingFilesBeforeIndexing(libraryIds) {
+		const totalMissing = libraryIds.reduce(
+			(sum, id) => sum + (this.libraryMissingFilesCount.get(id) || 0),
+			0
+		);
+		if (totalMissing === 0) return true;
+
+		const msg =
+			`${totalMissing} attachment file${totalMissing === 1 ? ' is' : 's are'} unavailable in the selected ` +
+			`${libraryIds.length === 1 ? 'library' : 'libraries'}.\n\n` +
+			`Indexing will skip these files. It is recommended to fix the missing attachments first.\n\n` +
+			`Open the "Fix Unavailable Attachments" tool now?`;
+
+		// @ts-ignore - Services is a Zotero/Firefox global
+		const result = Services.prompt.confirmEx(
+			window,
+			'Missing Attachments Detected',
+			msg,
+			// Buttons: 0=Open Fix Tool, 1=Index Anyway, 2=Cancel
+			(Services.prompt.BUTTON_POS_0 * Services.prompt.BUTTON_TITLE_IS_STRING) +
+			(Services.prompt.BUTTON_POS_1 * Services.prompt.BUTTON_TITLE_IS_STRING) +
+			(Services.prompt.BUTTON_POS_2 * Services.prompt.BUTTON_TITLE_IS_STRING),
+			'Open Fix Tool',
+			'Index Anyway',
+			'Cancel',
+			null,
+			{}
+		);
+
+		if (result === 0) {
+			// Open Fix Unavailable Attachments dialog; abort indexing so user can fix first
+			const mainWin = Services.wm.getMostRecentWindow('navigator:browser');
+			if (this.plugin && mainWin) {
+				this.plugin.openFixUnavailableDialog(mainWin);
+			}
+			return false;
+		}
+		if (result === 2) {
+			return false; // User cancelled
+		}
+		return true; // result === 1: Index Anyway
+	},
+
+	/**
 	 * Index-only submit: triggered when at least one selected library is unindexed.
 	 * Indexes all unindexed/partial libraries, then refreshes metadata and switches to Submit mode.
 	 * @returns {Promise<void>}
 	 */
 	async submitIndexOnly() {
 		if (!this.plugin) return;
-
-		this.clearStatusMessages();
-		this.setSubmitEnabled(false);
-		this.setCancelMode('abort');
-		this.showProgress('Indexing...', 'Starting full index...');
 
 		// Only index libraries that actually need it (unindexed or partially indexed)
 		const libraryIds = Array.from(this.selectedLibraries).filter(id => {
@@ -959,6 +1011,14 @@ var ZoteroRAGDialog = {
 			if (effectiveTotal !== undefined) return metadata.total_items_indexed < effectiveTotal;
 			return metadata.total_items_indexed === 0;
 		});
+
+		// Warn user about missing attachments before committing to indexing
+		if (!this.checkMissingFilesBeforeIndexing(libraryIds)) return;
+
+		this.clearStatusMessages();
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Indexing...', 'Starting full index...');
 
 		try {
 			await this.checkAndMonitorIndexing(libraryIds, 'full');
@@ -1146,12 +1206,7 @@ var ZoteroRAGDialog = {
 		if (!this.plugin.isLocalBackend()) {
 			for (const libraryId of libraryIds) {
 				const lib = this.plugin.getLibraries().find(l => l.id === libraryId);
-				try {
-					await this.plugin.registerLibrary(libraryId, lib ? lib.name : libraryId);
-				} catch (err) {
-					this.showStatus(err instanceof Error ? err.message : String(err), 'error');
-					return;
-				}
+				await this.plugin.registerLibrary(libraryId, lib ? lib.name : libraryId);
 			}
 		}
 
