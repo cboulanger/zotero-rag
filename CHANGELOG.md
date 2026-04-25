@@ -1,3 +1,10 @@
+# [1.17.0](https://github.com/cboulanger/zotero-rag/compare/v1.16.1...v1.17.0) (2026-04-25)
+
+
+### Features
+
+* Add cross-library deduplication for vector store ([9b6bd40](https://github.com/cboulanger/zotero-rag/commit/9b6bd406331b49c4e2d15f21ab8b5339e3411415))
+
 ## [1.16.1](https://github.com/cboulanger/zotero-rag/compare/v1.16.0...v1.16.1) (2026-04-24)
 
 
