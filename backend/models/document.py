@@ -2,9 +2,25 @@
 Data models for documents and chunks.
 """
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Literal, Optional
 from datetime import datetime, UTC
 from pydantic import BaseModel, Field
+
+
+ProcessingStatus = Literal[
+    "indexed_fresh",
+    "skipped_duplicate",
+    "copied_cross_library",
+]
+
+
+@dataclass
+class AttachmentProcessingResult:
+    chunks_written: int
+    status: ProcessingStatus
+    source_library_id: Optional[str] = None
+    source_item_key: Optional[str] = None
 
 
 class DocumentMetadata(BaseModel):

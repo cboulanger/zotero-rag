@@ -23,6 +23,7 @@ from backend.models.document import (
     ChunkMetadata,
     DocumentChunk,
     DeduplicationRecord,
+    AttachmentProcessingResult,
 )
 from backend.models.library import LibraryIndexMetadata
 
@@ -415,7 +416,7 @@ class DocumentProcessor:
                     logger.warning(f"Could not download attachment {attachment_key}")
                     continue
 
-                chunks_added = await self._process_attachment_bytes(
+                result = await self._process_attachment_bytes(
                     file_bytes=file_bytes,
                     mime_type=mime_type,
                     doc_metadata=doc_metadata,
@@ -423,7 +424,7 @@ class DocumentProcessor:
                     attachment_version=attachment_version,
                     item_modified=item_modified,
                 )
-                total_chunks += chunks_added
+                total_chunks += result.chunks_written
 
         # Fall back to abstractNote when no attachment is available or all downloads failed
         if total_chunks == 0 and abstract_note:
@@ -449,7 +450,7 @@ class DocumentProcessor:
         item_version: int,
         attachment_version: int,
         item_modified: str,
-    ) -> int:
+    ) -> AttachmentProcessingResult:
         """
         Extract, embed, and store chunks for a single attachment.
 
@@ -465,17 +466,53 @@ class DocumentProcessor:
             item_modified: ISO 8601 modification timestamp from Zotero.
 
         Returns:
-            Number of chunks created and stored (0 if skipped/failed).
+            AttachmentProcessingResult with chunk count and processing status.
         """
         library_id = doc_metadata.library_id
         item_key = doc_metadata.item_key
         attachment_key = doc_metadata.attachment_key
 
-        # Check deduplication (content hash of raw file bytes)
         content_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        # Step 1: same-library dedup (existing behaviour)
         if self.vector_store.check_duplicate(content_hash, library_id=library_id):
             logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
-            return 0
+            return AttachmentProcessingResult(chunks_written=0, status="skipped_duplicate")
+
+        # Step 2: cross-library content-hash copy — reuse chunks from another library
+        cross_record = self.vector_store.find_cross_library_duplicate(content_hash, library_id)
+        if cross_record:
+            source_chunks = self.vector_store.get_item_chunks(cross_record.library_id, cross_record.item_key)
+            if source_chunks:
+                copied = self.vector_store.copy_chunks_cross_library(
+                    source_library_id=cross_record.library_id,
+                    source_item_key=cross_record.item_key,
+                    target_library_id=library_id,
+                    target_item_key=item_key,
+                    target_attachment_key=attachment_key,
+                    target_doc_metadata=doc_metadata,
+                    target_item_version=item_version,
+                    target_attachment_version=attachment_version,
+                    target_item_modified=item_modified,
+                )
+                if copied > 0:
+                    self.vector_store.add_deduplication_record(DeduplicationRecord(
+                        content_hash=content_hash,
+                        library_id=library_id,
+                        item_key=item_key,
+                        relation_uri=None,
+                    ))
+                    logger.info(
+                        f"Cross-library copy: {copied} chunks from "
+                        f"{cross_record.library_id}/{cross_record.item_key} -> {attachment_key}"
+                    )
+                    return AttachmentProcessingResult(
+                        chunks_written=copied,
+                        status="copied_cross_library",
+                        source_library_id=cross_record.library_id,
+                        source_item_key=cross_record.item_key,
+                    )
+            # Source dedup record exists but no chunks (abstract-only item): fall through to extraction
 
         # Extract text and chunk
         try:
@@ -534,7 +571,7 @@ class DocumentProcessor:
         self.vector_store.add_deduplication_record(dedup_record)
 
         logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
-        return len(doc_chunks)
+        return AttachmentProcessingResult(chunks_written=len(doc_chunks), status="indexed_fresh")
 
     async def _index_from_abstract(
         self,

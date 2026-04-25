@@ -139,14 +139,16 @@ For each POST /api/index/document:
 1. Validate API key (if API_KEY is configured)
 2. Parse multipart form: file bytes + metadata JSON
 3. Compute SHA256 content hash
-4. Check deduplication table (skip if already indexed with same hash)
-5. Delete existing chunks for this attachment (if updating)
-6. Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
-7. Generate embeddings (EmbeddingService: batch processing)
-8. Create ChunkMetadata with version info
-9. Store chunks in vector database
-10. Add deduplication record
-11. Update library metadata (last_indexed_version, total_chunks)
+4. Check same-library deduplication table (skip if already indexed with same hash)
+5. Check cross-library deduplication table (copy chunks from other library if hash match found)
+   → status: "copied_cross_library" — skips steps 6-7
+6. Delete existing chunks for this attachment (if updating)
+7. Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
+8. Generate embeddings (EmbeddingService: batch processing)
+9. Create ChunkMetadata with version info
+10. Store chunks in vector database
+11. Add deduplication record
+12. Update library metadata (last_indexed_version, total_chunks)
 ```
 
 ## Version Tracking
@@ -182,24 +184,43 @@ else:
 
 ## Deduplication
 
-Content-based deduplication prevents reprocessing identical PDFs across libraries:
+Content-based deduplication avoids reprocessing identical files. Two levels are checked in order:
+
+### Same-library deduplication
+
+If the same file was already indexed in the same library (e.g. duplicate attachment), it is skipped entirely.
 
 ```python
-content_hash = hashlib.sha256(pdf_bytes).hexdigest()
-if vector_store.check_duplicate(content_hash):
-    skip  # PDF already indexed
+content_hash = hashlib.sha256(file_bytes).hexdigest()
+if vector_store.check_duplicate(content_hash, library_id):
+    skip  # already indexed in this library
 ```
 
-Deduplication record:
+### Cross-library chunk reuse
+
+If the same file exists in a *different* library (common when exporting items from a personal library into thematic group libraries), the pre-computed chunks and embeddings are copied directly — no extraction, no embedding call. This is triggered when `find_cross_library_duplicate` returns a match.
+
+```python
+cross_record = vector_store.find_cross_library_duplicate(content_hash, current_library_id)
+if cross_record and vector_store.get_item_chunks(cross_record.library_id, cross_record.item_key):
+    vector_store.copy_chunks_cross_library(source=cross_record, target=current_item)
+    # status: "copied_cross_library"
+```
+
+The copy updates all identity fields (library_id, item_key, chunk_id, title, authors, year, timestamps) while preserving text content, page numbers, and the embedding vector verbatim.
+
+### Deduplication record
 
 ```python
 {
-    "content_hash": str,    # SHA256 of PDF content
+    "content_hash": str,    # SHA256 of raw file bytes
     "library_id": str,
     "item_key": str,
-    "relation_uri": str     # Optional owl:sameAs relation
+    "relation_uri": str     # Optional owl:sameAs relation (reserved)
 }
 ```
+
+A new deduplication record is written for the target library after a cross-library copy, so subsequent uploads of the same file to that library are caught at the cheaper same-library check.
 
 ## API Endpoints
 
@@ -431,6 +452,22 @@ count = vector_store.delete_item_chunks(library_id, item_key)
 count = vector_store.count_library_chunks(library_id)
 ```
 
+### Cross-Library Deduplication
+
+```python
+# Find a dedup record for content_hash in any library except current_library_id
+record = vector_store.find_cross_library_duplicate(content_hash, current_library_id)
+
+# Copy chunks from source item into target item (different library)
+# Returns number of chunks written; 0 if source has no chunks
+count = vector_store.copy_chunks_cross_library(
+    source_library_id, source_item_key,
+    target_library_id, target_item_key, target_attachment_key,
+    target_doc_metadata, target_item_version, target_attachment_version,
+    target_item_modified,
+)
+```
+
 ## Configuration
 
 ### Settings
@@ -464,6 +501,15 @@ EXTRACTOR_BACKEND = "kreuzberg"  # or "legacy" for pypdf+spaCy
 - Reduced API calls (only fetches changed items)
 - Lower CPU/memory usage
 - Near-instant updates for small changes
+
+### Cross-Library Reuse Benefits
+
+When items are exported from a personal library into group libraries, the attachment files are byte-identical. Cross-library chunk reuse eliminates redundant work for those duplicates:
+
+- Skips document extraction (Kreuzberg/PDF parsing)
+- Skips embedding generation (no model inference)
+- Cost: two Qdrant scroll calls on `DEDUP_COLLECTION` + one upsert of the copied points
+- Expected speedup: proportional to extraction + embedding time (typically 10–100×)
 
 ### Scalability Estimates
 

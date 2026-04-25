@@ -32,6 +32,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_zotero_client = AsyncMock()
         self.mock_embedding_service = AsyncMock()
         self.mock_vector_store = Mock()
+        self.mock_vector_store.find_cross_library_duplicate.return_value = None
 
         # Mock document extractor (replaces pdf_extractor + text_chunker)
         self.mock_extractor = AsyncMock(spec=DocumentExtractor)

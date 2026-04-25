@@ -362,7 +362,7 @@ async def upload_and_index_document(
             vector_store=vector_store,
         )
         try:
-            chunks_added = await processor._process_attachment_bytes(
+            proc_result = await processor._process_attachment_bytes(
                 file_bytes=file_bytes,
                 mime_type=mime_type,
                 doc_metadata=doc_metadata,
@@ -370,6 +370,7 @@ async def upload_and_index_document(
                 attachment_version=attachment_version,
                 item_modified=item_modified,
             )
+            chunks_added = proc_result.chunks_written
 
             # Update library metadata so index-status reflects this upload
             lib_meta = vector_store.get_library_metadata(library_id)
@@ -406,13 +407,14 @@ async def upload_and_index_document(
                 message=str(e),
             )
 
+    api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
     return DocumentUploadResult(
         library_id=library_id,
         item_key=item_key,
         attachment_key=attachment_key,
         chunks_added=chunks_added,
-        status="indexed",
-        message=f"Indexed {chunks_added} chunks",
+        status=api_status,
+        message=f"{api_status}: {chunks_added} chunks",
         rate_limit_retries=embedding_service.rate_limit_retries,
         rate_limit_headers=await embedding_service.get_rate_limit_info(),
     )

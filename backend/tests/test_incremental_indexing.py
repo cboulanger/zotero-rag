@@ -20,6 +20,7 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         """Set up test fixtures."""
         self.mock_vector_store = Mock(spec=VectorStore)
+        self.mock_vector_store.find_cross_library_duplicate.return_value = None
         self.mock_zotero_client = Mock(spec=ZoteroLocalAPI)
         self.mock_embedding_service = Mock(spec=EmbeddingService)
 

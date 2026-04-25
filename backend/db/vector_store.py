@@ -23,7 +23,7 @@ from qdrant_client.models import (
     SearchParams,
 )
 
-from backend.models.document import DocumentChunk, ChunkMetadata, SearchResult, DeduplicationRecord
+from backend.models.document import DocumentChunk, ChunkMetadata, SearchResult, DeduplicationRecord, DocumentMetadata
 from backend.models.library import LibraryIndexMetadata
 
 
@@ -170,6 +170,9 @@ class VectorStore:
                     field_name="library_id",
                     field_schema="keyword"
                 )
+
+        # Ensure payload indexes on DEDUP_COLLECTION (idempotent)
+        self._ensure_dedup_indexes()
 
         # Persist (or refresh) the embedding config so future startups can validate it
         self._save_embedding_config()
@@ -433,6 +436,108 @@ class VectorStore:
         )
 
         logger.debug(f"Added deduplication record for {record.item_key}")
+
+    def _ensure_dedup_indexes(self):
+        """Create payload index on content_hash in DEDUP_COLLECTION (idempotent)."""
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.client.create_payload_index(
+                    collection_name=self.DEDUP_COLLECTION,
+                    field_name="content_hash",
+                    field_schema="keyword",
+                )
+        except Exception:
+            pass  # already exists or local in-memory instance
+
+    def find_cross_library_duplicate(
+        self, content_hash: str, current_library_id: str
+    ) -> Optional[DeduplicationRecord]:
+        """
+        Return a dedup record for content_hash that belongs to a *different* library.
+
+        Used to detect cross-library duplicates so their chunks can be copied
+        instead of re-extracted and re-embedded.
+        """
+        record = self.check_duplicate(content_hash, library_id=None)
+        if record and record.library_id != current_library_id:
+            return record
+        return None
+
+    def copy_chunks_cross_library(
+        self,
+        source_library_id: str,
+        source_item_key: str,
+        target_library_id: str,
+        target_item_key: str,
+        target_attachment_key: str,
+        target_doc_metadata: DocumentMetadata,
+        target_item_version: int,
+        target_attachment_version: int,
+        target_item_modified: str,
+    ) -> int:
+        """
+        Clone all chunks from a source item into a target item in a different library.
+
+        Preserves text and vector; replaces all identity fields (library_id, item_key,
+        chunk_id, title, authors, year, timestamps). Returns the number of chunks written.
+        """
+        from datetime import datetime, UTC
+
+        source_filter = Filter(must=[
+            FieldCondition(key="library_id", match=MatchValue(value=source_library_id)),
+            FieldCondition(key="item_key",   match=MatchValue(value=source_item_key)),
+        ])
+        new_points = []
+        offset = None
+        while True:
+            batch, offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=source_filter,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in batch:
+                p = point.payload
+                i = p["chunk_index"]
+                new_payload = {
+                    # preserved verbatim
+                    "text":          p["text"],
+                    "text_preview":  p["text_preview"],
+                    "chunk_index":   i,
+                    "page_number":   p.get("page_number"),
+                    "content_hash":  p["content_hash"],
+                    "schema_version": p.get("schema_version", 2),
+                    # replaced with target identity
+                    "chunk_id":           f"{target_library_id}:{target_item_key}:{target_attachment_key}:{i}",
+                    "library_id":         target_library_id,
+                    "item_key":           target_item_key,
+                    "attachment_key":     target_attachment_key,
+                    "title":              target_doc_metadata.title,
+                    "authors":            target_doc_metadata.authors,
+                    "year":               target_doc_metadata.year,
+                    "item_version":       target_item_version,
+                    "attachment_version": target_attachment_version,
+                    "indexed_at":         datetime.now(UTC).isoformat(),
+                    "zotero_modified":    target_item_modified,
+                }
+                new_points.append(PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=point.vector,
+                    payload=new_payload,
+                ))
+            if offset is None:
+                break
+        if new_points:
+            self.client.upsert(collection_name=self.CHUNKS_COLLECTION, points=new_points)
+        logger.info(
+            f"Copied {len(new_points)} chunks "
+            f"{source_library_id}/{source_item_key} -> "
+            f"{target_library_id}/{target_item_key}"
+        )
+        return len(new_points)
 
     def delete_library_deduplication_records(self, library_id: str) -> int:
         """
