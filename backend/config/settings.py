@@ -111,6 +111,11 @@ class Settings(BaseSettings):
         description="Qdrant server URL (e.g. http://qdrant:6333). If set, uses server mode instead of local file mode."
     )
 
+    qdrant_timeout: int = Field(
+        default=30,
+        description="Qdrant client request timeout in seconds. Retries double this up to 3 attempts."
+    )
+
     # Logging Configuration
     log_level: str = Field(default="INFO", description="Logging level")
     log_file: Optional[Path] = Field(

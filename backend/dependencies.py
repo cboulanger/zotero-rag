@@ -112,6 +112,7 @@ def make_vector_store() -> VectorStore:
         embedding_dim=embedding_service.get_embedding_dim(),
         embedding_model_name=model_name,
         url=qdrant_url,
+        timeout=settings.qdrant_timeout,
     )
 
 

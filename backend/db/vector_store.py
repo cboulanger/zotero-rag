@@ -6,6 +6,7 @@ Handles storage and retrieval of document chunk embeddings with metadata.
 
 import json
 import logging
+import time
 import warnings
 from typing import Optional
 from pathlib import Path
@@ -50,6 +51,7 @@ class VectorStore:
         embedding_model_name: str,
         distance: Distance = Distance.COSINE,
         url: Optional[str] = None,
+        timeout: int = 30,
     ):
         """
         Initialize vector store.
@@ -61,15 +63,17 @@ class VectorStore:
             distance: Distance metric (COSINE, EUCLID, DOT)
             url: Qdrant server URL. When set, connects to a running Qdrant server
                  instead of using local file storage.
+            timeout: Qdrant client request timeout in seconds (server mode only).
         """
         self.storage_path = storage_path
         self.embedding_dim = embedding_dim
         self.embedding_model_name = embedding_model_name
         self.distance = distance
+        self.qdrant_timeout = timeout
 
         if url:
-            self.client = QdrantClient(url=url)
-            logger.info(f"Initialized VectorStore connected to Qdrant server at {url}")
+            self.client = QdrantClient(url=url, timeout=timeout)
+            logger.info(f"Initialized VectorStore connected to Qdrant server at {url} (timeout={timeout}s)")
         else:
             # Ensure storage directory exists
             storage_path.mkdir(parents=True, exist_ok=True)
@@ -815,32 +819,54 @@ class VectorStore:
         if not item_keys:
             return {}
 
-        versions: dict[str, int] = {}
-        offset = None
+        max_attempts = 3
+        base_timeout = self.qdrant_timeout
 
-        while True:
-            results, next_offset = self.client.scroll(
-                collection_name=self.CHUNKS_COLLECTION,
-                scroll_filter=Filter(must=[
-                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
-                    FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
-                ]),
-                limit=1000,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False,
-            )
+        for attempt in range(max_attempts):
+            call_timeout = base_timeout * (2 ** attempt)  # 30s → 60s → 120s
+            try:
+                versions: dict[str, int] = {}
+                offset = None
 
-            for point in results:
-                ik = point.payload.get("item_key")
-                if ik and ik not in versions and "item_version" in point.payload:
-                    versions[ik] = point.payload["item_version"]
+                while True:
+                    results, next_offset = self.client.scroll(
+                        collection_name=self.CHUNKS_COLLECTION,
+                        scroll_filter=Filter(must=[
+                            FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                            FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
+                        ]),
+                        limit=1000,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                        timeout=call_timeout,
+                    )
 
-            if set(item_keys).issubset(versions.keys()) or next_offset is None:
-                break
-            offset = next_offset
+                    for point in results:
+                        ik = point.payload.get("item_key")
+                        if ik and ik not in versions and "item_version" in point.payload:
+                            versions[ik] = point.payload["item_version"]
 
-        return versions
+                    if set(item_keys).issubset(versions.keys()) or next_offset is None:
+                        break
+                    offset = next_offset
+
+                return versions
+
+            except Exception as exc:
+                if attempt < max_attempts - 1:
+                    next_timeout = base_timeout * (2 ** (attempt + 1))
+                    logger.warning(
+                        f"get_item_versions_bulk attempt {attempt + 1}/{max_attempts} failed "
+                        f"(timeout={call_timeout}s): {exc} — retrying with timeout={next_timeout}s"
+                    )
+                    time.sleep(1)
+                else:
+                    logger.error(
+                        f"get_item_versions_bulk failed after {max_attempts} attempts "
+                        f"(final timeout={call_timeout}s): {exc}"
+                    )
+                    raise
 
     def delete_item_chunks(self, library_id: str, item_key: str) -> int:
         """
