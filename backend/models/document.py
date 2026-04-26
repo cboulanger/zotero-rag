@@ -11,6 +11,8 @@ from pydantic import BaseModel, Field
 ProcessingStatus = Literal[
     "indexed_fresh",
     "skipped_duplicate",
+    "skipped_timeout",
+    "skipped_empty",
     "copied_cross_library",
 ]
 

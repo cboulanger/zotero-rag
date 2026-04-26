@@ -524,14 +524,14 @@ class DocumentProcessor:
             chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
         except KreuzbergTimeoutError as e:
             logger.warning(f"Skipping attachment {attachment_key}: {e}")
-            return 0
+            return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout")
         except Exception as e:
             logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
             raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
 
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")
-            return 0
+            return AttachmentProcessingResult(chunks_written=0, status="skipped_empty")
 
         # Generate embeddings
         chunk_texts = [chunk.text for chunk in chunks]
