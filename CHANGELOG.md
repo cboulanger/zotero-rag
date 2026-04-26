@@ -1,3 +1,10 @@
+## [1.17.3](https://github.com/cboulanger/zotero-rag/compare/v1.17.2...v1.17.3) (2026-04-26)
+
+
+### Bug Fixes
+
+* Add Qdrant payload indexes and client-side circuit breaker to prevent check-indexed overload ([f773881](https://github.com/cboulanger/zotero-rag/commit/f773881a16b7ff1778ced48758c8abece86d7099))
+
 ## [1.17.2](https://github.com/cboulanger/zotero-rag/compare/v1.17.1...v1.17.2) (2026-04-26)
 
 
