@@ -86,6 +86,8 @@ var RemoteIndexer = {
 		// 2. Load the client-side version cache and pre-classify attachments.
 		//    Attachments whose item_version matches the cache are up-to-date without
 		//    asking the backend.  Only new/changed/unknown ones go to check-indexed.
+		//    In 'full' mode the cache is bypassed so the backend can confirm what it
+		//    actually has — handles the case where the backend lost data since the last run.
 		const versionCache = await this._loadVersionCache(libraryId);
 		/** @type {Array<AttachmentIndexStatus>} */
 		const cachedStatuses = [];
@@ -93,7 +95,7 @@ var RemoteIndexer = {
 		const toCheck = [];
 		for (const att of attachments) {
 			const cachedVersion = versionCache[att.attachment_key];
-			if (cachedVersion !== undefined && cachedVersion >= att.item_version) {
+			if (mode !== 'full' && cachedVersion !== undefined && cachedVersion >= att.item_version) {
 				cachedStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: false, reason: 'cached' });
 			} else {
 				toCheck.push(att);
@@ -197,7 +199,7 @@ var RemoteIndexer = {
 				break;
 			}
 
-			const status = toUpload[i];
+			const status = uploadable[i];
 			const att = attachments.find(
 				a => a.item_key === status.item_key && a.attachment_key === status.attachment_key
 			);
@@ -524,6 +526,9 @@ var RemoteIndexer = {
 
 		// Read raw bytes from local disk
 		const bytes = await IOUtils.read(filePath);
+		if (bytes.length === 0) {
+			throw new Error(`Attachment file is empty: ${att.attachment_key}`);
+		}
 
 		// Collect item metadata from the parent Zotero item (or attachment itself)
 		const parent = att.parentItem || att.zoteroItem;

@@ -754,22 +754,7 @@ var ZoteroRAGDialog = {
 			this.updateProgress(100, 'Re-indexing complete', `"${name}" has been re-indexed.`);
 
 			// Metadata was already refreshed inside checkAndMonitorIndexing.
-			// Apply phantom-gap detection on the fresh data.
-			const totalIndexable = this.libraryIndexableCount.get(libraryId);
-			const freshMeta = this.libraryMetadata.get(libraryId);
-			if (totalIndexable !== undefined && freshMeta != null) {
-				const prevUnavail = this.libraryUnavailableCount.get(libraryId) || 0;
-				const gap = Math.max(0, totalIndexable - freshMeta.total_items_indexed);
-				const finalUnavail = Math.max(prevUnavail, gap);
-				if (finalUnavail !== prevUnavail) {
-					this.libraryUnavailableCount.set(libraryId, finalUnavail);
-					// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, finalUnavail, true);
-					this.updateLibraryStatusIcon(libraryId, freshMeta);
-					this.updateSubmitButtonState();
-				}
-			}
-
+			// The noFile-based unavailable count was already persisted there — no phantom-gap override needed.
 			setTimeout(() => this.hideProgress(), 1500);
 		} catch (error) {
 			if (!this.isOperationInProgress) return;
@@ -1030,24 +1015,7 @@ var ZoteroRAGDialog = {
 			this.updateProgress(100, 'Indexing complete', 'Libraries are ready to query.');
 
 			// Metadata was already refreshed per-library inside checkAndMonitorIndexing.
-			// Apply phantom-gap detection: if the backend indexed fewer items than expected,
-			// the remainder are permanently unavailable (file present but not embeddable).
-			for (const id of libraryIds) {
-				const totalIndexable = this.libraryIndexableCount.get(id);
-				const freshMeta = this.libraryMetadata.get(id);
-				if (totalIndexable !== undefined && freshMeta != null) {
-					const prevUnavail = this.libraryUnavailableCount.get(id) || 0;
-					const gap = Math.max(0, totalIndexable - freshMeta.total_items_indexed);
-					const finalUnavail = Math.max(prevUnavail, gap);
-					if (finalUnavail !== prevUnavail) {
-						this.libraryUnavailableCount.set(id, finalUnavail);
-						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-						Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${id}`, finalUnavail, true);
-						this.updateLibraryStatusIcon(id, freshMeta);
-						this.updateSubmitButtonState();
-					}
-				}
-			}
+			// The noFile-based unavailable count was already persisted there — no phantom-gap override needed.
 
 			// updateSubmitButtonState() is called inside fetchAndUpdateLibraryMetadata,
 			// so by now the button will read "Submit" and the question box is re-enabled.
