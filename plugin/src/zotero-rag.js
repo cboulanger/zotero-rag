@@ -1158,19 +1158,43 @@ class ZoteroRAGPlugin {
 	 * @returns {void}
 	 */
 	/**
-	 * @param {Window} win - Zotero main window
-	 * @param {number} [libraryID] - Library to show; defaults to the currently selected library
+	 * Resolve a backend library ID string (e.g. "u12345" or "678") to the Zotero internal
+	 * numeric library ID used for DB queries.
+	 * @param {string} backendLibraryId
+	 * @returns {number|null}
 	 */
-	openFixUnavailableDialog(win, libraryID) {
-		if (!libraryID) {
+	_resolveZoteroLibraryID(backendLibraryId) {
+		if (!backendLibraryId || String(backendLibraryId).startsWith('u')) {
+			return Zotero.Libraries.userLibraryID;
+		}
+		const group = Zotero.Groups.get(parseInt(backendLibraryId, 10));
+		return group ? group.libraryID : null;
+	}
+
+	/**
+	 * @param {Window} win - Zotero main window
+	 * @param {string} [backendLibraryId] - Backend library ID (e.g. "u12345" or group numeric string);
+	 *   defaults to the currently selected library
+	 */
+	openFixUnavailableDialog(win, backendLibraryId) {
+		/** @type {number|null} */
+		let zoteroLibraryID;
+		if (!backendLibraryId) {
 			const pane = Zotero.getActiveZoteroPane();
-			libraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+			zoteroLibraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+			// Derive backendLibraryId from the Zotero internal ID
+			const libs = this.getLibraries();
+			const matched = libs.find(l => this._resolveZoteroLibraryID(l.id) === zoteroLibraryID);
+			backendLibraryId = matched ? matched.id : String(zoteroLibraryID);
+		} else {
+			zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
 		}
 		// If the dialog is already open, refresh its content for the (possibly new) library.
 		if (this._fixUnavailableWindow && !this._fixUnavailableWindow.closed) {
 			const dlg = /** @type {any} */ (this._fixUnavailableWindow).ZoteroFixUnavailableDialog;
 			if (dlg && !dlg.isRunning) {
-				dlg.libraryID = libraryID;
+				dlg.libraryID = zoteroLibraryID;
+				dlg.backendLibraryId = backendLibraryId;
 				dlg.populateTable();
 			}
 			this._fixUnavailableWindow.focus();
@@ -1181,7 +1205,7 @@ class ZoteroRAGPlugin {
 			'chrome://zotero-rag/content/fix-unavailable.xhtml',
 			'zotero-rag-fix-unavailable',
 			'chrome,centerscreen,resizable=yes,width=720,height=560',
-			{ plugin: this, libraryID }
+			{ plugin: this, libraryID: zoteroLibraryID, backendLibraryId }
 		);
 	}
 
@@ -1278,14 +1302,17 @@ class ZoteroRAGPlugin {
 	 * Called when the fix-unavailable dialog confirms there are no missing files.
 	 * @param {number} libraryID
 	 */
-	clearMissingFilesCount(libraryID) {
+	/**
+	 * @param {string} backendLibraryId - Backend library ID (e.g. "u12345" or group numeric string)
+	 */
+	clearMissingFilesCount(backendLibraryId) {
 		try {
 			// @ts-ignore
-			Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryID}`, 0, true);
+			Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${backendLibraryId}`, 0, true);
 			if (this._dialogWindow && !this._dialogWindow.closed) {
 				const dlg = /** @type {any} */ (this._dialogWindow).ZoteroRAGDialog;
 				if (dlg && typeof dlg.onUnavailableCountUpdated === 'function') {
-					dlg.onUnavailableCountUpdated(String(libraryID), 0);
+					dlg.onUnavailableCountUpdated(backendLibraryId, 0);
 				}
 			}
 		} catch (_) {}

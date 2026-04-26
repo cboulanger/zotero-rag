@@ -46,6 +46,9 @@ var ZoteroFixUnavailableDialog = {
 	/** @type {number|null} */
 	libraryID: null,
 
+	/** @type {string} */
+	backendLibraryId: '',
+
 	/** @type {Array<AttachmentInfo>} */
 	items: [],
 
@@ -84,6 +87,7 @@ var ZoteroFixUnavailableDialog = {
 		const args = window.arguments[0];
 		this.plugin = args.plugin;
 		this.libraryID = args.libraryID;
+		this.backendLibraryId = args.backendLibraryId || String(args.libraryID);
 
 		document.getElementById('close-btn').addEventListener('click', () => {
 			try {
@@ -255,7 +259,7 @@ var ZoteroFixUnavailableDialog = {
 
 		if (this.items.length === 0) {
 			if (this.plugin && typeof this.plugin.clearMissingFilesCount === 'function') {
-				this.plugin.clearMissingFilesCount(this.libraryID);
+				this.plugin.clearMissingFilesCount(this.backendLibraryId);
 			}
 			this.setStatus('No unavailable attachments found in this library.');
 		} else {

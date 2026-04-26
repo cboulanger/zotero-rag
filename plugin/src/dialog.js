@@ -663,7 +663,7 @@ var ZoteroRAGDialog = {
 				link.addEventListener('click', (e) => {
 					e.preventDefault();
 					const mainWin = /** @type {any} */ (window.opener || window);
-					plugin.openFixUnavailableDialog(mainWin, parseInt(libraryId));
+					plugin.openFixUnavailableDialog(mainWin, libraryId);
 				});
 				metaSpan.appendChild(link);
 			}
