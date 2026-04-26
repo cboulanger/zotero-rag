@@ -55,9 +55,9 @@ logging.basicConfig(
 
 # Suppress overly verbose third-party loggers
 # Set them to INFO level even if our log level is DEBUG
-logging.getLogger("httpcore").setLevel(logging.INFO)
-logging.getLogger("httpx").setLevel(logging.INFO)
-logging.getLogger("urllib3").setLevel(logging.INFO)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("bitsandbytes").setLevel(logging.INFO)
 logging.getLogger("markdown_it").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)  # suppress verbose request/response dumps

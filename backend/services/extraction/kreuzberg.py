@@ -62,7 +62,7 @@ class KreuzbergExtractor(DocumentExtractor):
                 "overlap": chunk_overlap,
             },
         }
-        logger.info(
+        logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
             f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled})"
         )

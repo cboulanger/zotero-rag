@@ -112,12 +112,12 @@ class LocalEmbeddingService(EmbeddingService):
         self.hf_token = hf_token
         self._model: Optional[Any] = None  # SentenceTransformer, imported lazily
         self._embedding_cache: dict[str, list[float]] = {}
-        logger.info(f"Initialized LocalEmbeddingService with model: {config.model_name}")
+        logger.debug(f"Initialized LocalEmbeddingService with model: {config.model_name}")
 
     def _load_model(self):
         """Lazy-load the embedding model (imports sentence-transformers on first call)."""
         if self._model is None:
-            logger.info(f"Loading embedding model: {self.config.model_name}")
+            logger.debug(f"Loading embedding model: {self.config.model_name}")
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError:
@@ -139,15 +139,15 @@ class LocalEmbeddingService(EmbeddingService):
                     import torch
                     if torch.backends.mps.is_available():
                         model_kwargs["device"] = "mps"
-                        logger.info("MPS (Apple Silicon) detected — using GPU acceleration.")
+                        logger.debug("MPS (Apple Silicon) detected — using GPU acceleration.")
                     elif torch.cuda.is_available():
                         model_kwargs["device"] = "cuda"
-                        logger.info("CUDA detected — using GPU acceleration.")
+                        logger.debug("CUDA detected — using GPU acceleration.")
                 except ImportError:
                     pass
 
             self._model = SentenceTransformer(self.config.model_name, **model_kwargs)
-            logger.info(
+            logger.debug(
                 f"Model loaded on {model_kwargs.get('device', 'cpu')}. "
                 f"Embedding dimension: {self._model.get_sentence_embedding_dimension()}"
             )
@@ -193,7 +193,7 @@ class LocalEmbeddingService(EmbeddingService):
 
         if uncached_texts:
             self._load_model()
-            logger.info(f"Generating embeddings for {len(uncached_texts)} texts")
+            logger.debug(f"Generating embeddings for {len(uncached_texts)} texts")
             embeddings = self._model.encode(
                 uncached_texts,
                 batch_size=self.config.batch_size,
@@ -263,7 +263,7 @@ class RemoteEmbeddingService(EmbeddingService):
         self._dim: Optional[int] = None
         self.rate_limit_retries: int = 0
         self.rate_limit_wait_seconds: float = 0.0
-        logger.info(
+        logger.debug(
             f"Initialized RemoteEmbeddingService: model={config.model_name} "
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
         )
@@ -300,10 +300,10 @@ class RemoteEmbeddingService(EmbeddingService):
             base_url = self.config.model_kwargs.get("base_url")
             if base_url:
                 self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-                logger.info(f"OpenAI-compatible client initialised with base_url={base_url}")
+                logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}")
             else:
                 self._client = AsyncOpenAI(api_key=api_key)
-                logger.info("OpenAI embeddings client initialised")
+                logger.debug("OpenAI embeddings client initialised")
         return self._client
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:
@@ -438,7 +438,7 @@ class RemoteEmbeddingService(EmbeddingService):
             uncached_indices = list(range(len(texts)))
 
         if uncached_texts:
-            logger.info(
+            logger.debug(
                 f"Requesting embeddings for {len(uncached_texts)} texts "
                 f"(model={self._resolve_model_name()})"
             )

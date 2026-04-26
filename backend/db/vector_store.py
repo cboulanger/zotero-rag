@@ -287,7 +287,7 @@ class VectorStore:
                 points=points[i : i + batch_size],
             )
 
-        logger.info(f"Added {len(points)} chunks in batch")
+        logger.debug(f"Added {len(points)} chunks in batch")
         return point_ids
 
     def search(
@@ -368,7 +368,7 @@ class VectorStore:
                 )
             )
 
-        logger.info(f"Search returned {len(search_results)} results")
+        logger.debug(f"Search returned {len(search_results)} results")
         return search_results
 
     def check_duplicate(self, content_hash: str, library_id: Optional[str] = None) -> Optional[DeduplicationRecord]:
@@ -698,7 +698,7 @@ class VectorStore:
             collection_name=self.METADATA_COLLECTION,
             points=[point]
         )
-        logger.info(f"Updated metadata for library {metadata.library_id}")
+        logger.debug(f"Updated metadata for library {metadata.library_id}")
 
     def mark_library_for_reset(self, library_id: str):
         """

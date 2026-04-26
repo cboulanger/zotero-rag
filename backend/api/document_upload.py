@@ -173,6 +173,10 @@ async def check_indexed(
 
     statuses: list[AttachmentIndexStatus] = []
 
+    logger.info(
+        f"Check-indexed: library={library_id} attachments={len(request.attachments)}"
+    )
+
     indexed_versions = vector_store.get_item_versions_bulk(
         library_id, [att.item_key for att in request.attachments]
     )
@@ -306,6 +310,11 @@ async def upload_and_index_document(
     attachment_version: int = int(meta_dict.get("attachment_version", 0))
     item_modified: str = meta_dict.get(
         "zotero_modified", datetime.now(timezone.utc).isoformat()
+    )
+
+    logger.info(
+        f"Upload request: library={library_id} user={user_id} "
+        f"item={item_key} attachment={attachment_key} mime={mime_type}"
     )
 
     doc_metadata = DocumentMetadata(
@@ -452,6 +461,10 @@ async def upload_and_index_abstract(
     settings = get_settings()
     _check_registration(request.library_id, request.user_id, settings)
     word_count = len(request.abstract_text.split())
+    logger.info(
+        f"Abstract index: library={request.library_id} user={request.user_id} "
+        f"item={request.item_key} words={word_count}"
+    )
     if word_count < settings.min_abstract_words:
         raise HTTPException(
             status_code=400,

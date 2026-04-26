@@ -84,7 +84,7 @@ class DocumentProcessor:
             )
         self.document_extractor = document_extractor
 
-        logger.info("Initialized DocumentProcessor")
+        logger.debug("Initialized DocumentProcessor")
 
     async def index_library(
         self,
@@ -144,7 +144,7 @@ class DocumentProcessor:
                 # Auto-select based on library state
                 effective_mode = "incremental" if metadata.last_indexed_version > 0 else "full"
 
-        logger.info(f"Selected indexing mode: {effective_mode}")
+        logger.debug(f"Selected indexing mode: {effective_mode}")
 
         # Execute indexing
         if effective_mode == "full":
@@ -166,7 +166,12 @@ class DocumentProcessor:
         stats["elapsed_seconds"] = elapsed
         stats["mode"] = effective_mode
 
-        logger.info(f"Indexing complete: {stats}")
+        logger.info(
+            f"Indexing complete: library={library_id} mode={stats['mode']} "
+            f"items={stats['items_processed']} added={stats['items_added']} "
+            f"updated={stats.get('items_updated', 0)} chunks={stats['chunks_added']} "
+            f"elapsed={stats['elapsed_seconds']:.1f}s"
+        )
         return stats
 
     async def _index_library_incremental(
@@ -179,7 +184,7 @@ class DocumentProcessor:
         max_items: Optional[int] = None
     ) -> dict:
         """Incremental indexing: only process new/modified items."""
-        logger.info(f"Incremental index from version {metadata.last_indexed_version}")
+        logger.debug(f"Incremental index from version {metadata.last_indexed_version}")
 
         # Fetch items modified since last index
         since_version = metadata.last_indexed_version
@@ -189,7 +194,7 @@ class DocumentProcessor:
             since_version=since_version
         )
 
-        logger.info(f"Found {len(items)} items modified since version {since_version}")
+        logger.debug(f"Found {len(items)} items modified since version {since_version}")
 
         if not items:
             return {
@@ -206,7 +211,7 @@ class DocumentProcessor:
         # Limit items if max_items is specified
         if max_items is not None and max_items > 0:
             items_with_attachments = items_with_attachments[:max_items]
-            logger.info(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
+            logger.debug(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
 
         items_added = 0
         items_updated = 0
@@ -235,13 +240,13 @@ class DocumentProcessor:
 
                 if existing_version is None:
                     # New item
-                    logger.info(f"Indexing new item {item_key} (version {item_version})")
+                    logger.debug(f"Indexing new item {item_key} (version {item_version})")
                     chunk_count = await self._index_item(item, library_id, library_type)
                     items_added += 1
                     chunks_added += chunk_count
                 elif existing_version < item_version:
                     # Updated item - delete old chunks and reindex
-                    logger.info(f"Reindexing updated item {item_key} ({existing_version} -> {item_version})")
+                    logger.debug(f"Reindexing updated item {item_key} ({existing_version} -> {item_version})")
                     deleted = self.vector_store.delete_item_chunks(library_id, item_key)
                     chunk_count = await self._index_item(item, library_id, library_type)
                     items_updated += 1
@@ -284,14 +289,14 @@ class DocumentProcessor:
         logger.info(f"Full reindex for library {library_id}")
 
         # Delete all existing chunks for this library
-        logger.info("Deleting all existing chunks...")
+        logger.debug("Deleting all existing chunks...")
         chunks_deleted = self.vector_store.delete_library_chunks(library_id)
-        logger.info(f"Deleted {chunks_deleted} existing chunks")
+        logger.debug(f"Deleted {chunks_deleted} existing chunks")
 
         # Also delete deduplication records to allow reprocessing of PDFs
-        logger.info("Deleting deduplication records...")
+        logger.debug("Deleting deduplication records...")
         dedup_deleted = self.vector_store.delete_library_deduplication_records(library_id)
-        logger.info(f"Deleted {dedup_deleted} deduplication records")
+        logger.debug(f"Deleted {dedup_deleted} deduplication records")
 
         # Fetch all items
         items = await self.zotero_client.get_library_items_since(
@@ -300,17 +305,17 @@ class DocumentProcessor:
             since_version=None  # Get all items
         )
 
-        logger.info(f"Retrieved {len(items)} total items")
+        logger.debug(f"Retrieved {len(items)} total items")
 
         # Filter to items with indexable attachments
         items_with_attachments = await self._filter_indexed_attachments(items, library_id, library_type)
 
-        logger.info(f"Found {len(items_with_attachments)} items with indexable attachments")
+        logger.debug(f"Found {len(items_with_attachments)} items with indexable attachments")
 
         # Limit items if max_items is specified
         if max_items is not None and max_items > 0:
             items_with_attachments = items_with_attachments[:max_items]
-            logger.info(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
+            logger.debug(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
 
         # Index all items
         chunks_added = 0
