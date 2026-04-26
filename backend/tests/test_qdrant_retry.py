@@ -1,9 +1,14 @@
 """
-Unit tests for get_item_versions_bulk retry and timeout logic.
+Unit tests for:
+- get_item_versions_bulk retry and timeout logic
+- _ensure_chunks_indexes payload index creation
 
 Uses a mock Qdrant client so no real Qdrant server is needed.
 The VectorStore is constructed with a very short base timeout (1s) so
 retry escalation (1s → 2s → 4s) can be verified without waiting real seconds.
+
+NOTE: The client-side circuit breaker (_checkIndexed in remote_indexer.js)
+has no JS test runner configured in this project and is not covered here.
 """
 
 import unittest
@@ -172,6 +177,63 @@ class TestGetItemVersionsBulkRetry(unittest.TestCase):
                     store.get_item_versions_bulk("lib1", ["KEY1"])
 
         self.assertTrue(any("failed after 3 attempts" in line for line in cm.output))
+
+
+class TestEnsureChunksIndexes(unittest.TestCase):
+    """Tests for _ensure_chunks_indexes — payload index creation on CHUNKS_COLLECTION."""
+
+    def test_creates_indexes_for_library_id_and_item_key(self):
+        """Both library_id and item_key indexes are created on CHUNKS_COLLECTION."""
+        store = _make_store()
+        store._ensure_chunks_indexes()
+
+        calls = store.client.create_payload_index.call_args_list
+        indexed_fields = {c[1]["field_name"] for c in calls}
+        self.assertIn("library_id", indexed_fields)
+        self.assertIn("item_key", indexed_fields)
+
+    def test_indexes_target_chunks_collection(self):
+        """create_payload_index is called with the CHUNKS_COLLECTION name."""
+        store = _make_store()
+        store._ensure_chunks_indexes()
+
+        for c in store.client.create_payload_index.call_args_list:
+            self.assertEqual(c[1]["collection_name"], store.CHUNKS_COLLECTION)
+
+    def test_indexes_use_keyword_schema(self):
+        """Both indexes use the keyword field schema for fast equality/MatchAny lookups."""
+        store = _make_store()
+        store._ensure_chunks_indexes()
+
+        for c in store.client.create_payload_index.call_args_list:
+            self.assertEqual(c[1]["field_schema"], "keyword")
+
+    def test_idempotent_when_index_already_exists(self):
+        """A second call does not raise even if create_payload_index returns an error."""
+        store = _make_store()
+        store.client.create_payload_index.side_effect = Exception("already exists")
+
+        # Must not propagate the exception.
+        try:
+            store._ensure_chunks_indexes()
+        except Exception as exc:
+            self.fail(f"_ensure_chunks_indexes raised unexpectedly: {exc}")
+
+    def test_called_during_ensure_collections(self):
+        """_ensure_chunks_indexes is invoked as part of _ensure_collections."""
+        store = _make_store()
+
+        # Stub the parts of _ensure_collections that need a real Qdrant response.
+        store.client.get_collections.return_value.collections = []
+        store.client.get_collection.return_value = MagicMock()
+
+        with patch.object(store, "_ensure_chunks_indexes") as mock_ensure, \
+             patch.object(store, "_ensure_dedup_indexes"), \
+             patch.object(store, "_save_embedding_config"), \
+             patch.object(store, "_load_embedding_config", return_value=None):
+            store._ensure_collections()
+
+        mock_ensure.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -452,12 +452,32 @@ var RemoteIndexer = {
 	 */
 	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress) {
 		const BATCH_SIZE = 100;
+		// After this many consecutive failures, stop asking and mark all remaining
+		// batches as needs_indexing immediately — prevents flooding an overloaded server.
+		const CIRCUIT_BREAKER_THRESHOLD = 3;
+
 		/** @type {Array<AttachmentIndexStatus>} */
 		const allStatuses = [];
 		let checked = 0;
+		let consecutiveFailures = 0;
 
 		for (let i = 0; i < attachments.length; i += BATCH_SIZE) {
 			const batch = attachments.slice(i, i + BATCH_SIZE);
+
+			if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+				// Circuit open: mark remainder as needs_indexing without hitting the server.
+				const remaining = attachments.slice(i);
+				log(`[RemoteIndexer] check-indexed circuit breaker open after ${consecutiveFailures} consecutive failures — marking ${remaining.length} remaining attachment(s) as needs_indexing`);
+				allStatuses.push(...remaining.map(a => ({
+					item_key: a.item_key,
+					attachment_key: a.attachment_key,
+					needs_indexing: true,
+					reason: 'check_failed',
+				})));
+				checked += remaining.length;
+				break;
+			}
+
 			try {
 				const body = {
 					library_id: libraryId,
@@ -478,8 +498,10 @@ var RemoteIndexer = {
 
 				const data = await response.json();
 				allStatuses.push(...(data.statuses || []));
+				consecutiveFailures = 0;
 			} catch (err) {
-				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing`);
+				consecutiveFailures++;
+				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing ${consecutiveFailures}`);
 				allStatuses.push(...batch.map(a => ({
 					item_key: a.item_key,
 					attachment_key: a.attachment_key,

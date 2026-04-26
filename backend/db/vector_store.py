@@ -178,6 +178,10 @@ class VectorStore:
         # Ensure payload indexes on DEDUP_COLLECTION (idempotent)
         self._ensure_dedup_indexes()
 
+        # Ensure payload indexes on CHUNKS_COLLECTION (idempotent — also applied to
+        # existing collections so existing deployments benefit without a rebuild).
+        self._ensure_chunks_indexes()
+
         # Persist (or refresh) the embedding config so future startups can validate it
         self._save_embedding_config()
 
@@ -455,6 +459,28 @@ class VectorStore:
                 )
         except Exception:
             pass  # already exists or local in-memory instance
+
+    def _ensure_chunks_indexes(self):
+        """
+        Create payload indexes on library_id and item_key in CHUNKS_COLLECTION (idempotent).
+
+        These indexes make get_item_versions_bulk scroll queries efficient: without them
+        every MatchAny batch is a full O(N) scan across all chunks in the collection.
+        Called on every startup so existing deployments pick up the indexes without a rebuild.
+        """
+        for field in ("library_id", "item_key"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.client.create_payload_index(
+                        collection_name=self.CHUNKS_COLLECTION,
+                        field_name=field,
+                        field_schema="keyword",
+                    )
+                logger.info(f"Ensured payload index on {self.CHUNKS_COLLECTION}.{field}")
+            except Exception as exc:
+                # Already exists, or local in-memory instance that ignores indexes.
+                logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.{field}: {exc}")
 
     def find_cross_library_duplicate(
         self, content_hash: str, current_library_id: str
