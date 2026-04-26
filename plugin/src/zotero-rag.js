@@ -1,9 +1,6 @@
 // Main plugin code
 
-// todo: can https://windingwind.github.io/zotero-plugin-toolkit/ be used?
-
 // @ts-check
-/// <reference path="./zotero-types.d.ts" />
 /// <reference path="./toolkit.d.ts" />
 
 // Wire console methods so messages appear in the Browser Console.
@@ -623,7 +620,6 @@ class ZoteroRAGPlugin {
 		// @ts-ignore - libraryType exists on ZoteroLibrary at runtime
 		if (library && library.libraryType === 'group') {
 			// Get the group associated with this library
-			// @ts-ignore - getByLibraryID exists on Zotero.Groups at runtime
 			const group = Zotero.Groups.getByLibraryID(libraryID);
 			if (group) {
 				return String(group.id);  // Return group ID for backend
@@ -742,7 +738,6 @@ class ZoteroRAGPlugin {
 	getZoteroLibraryID(backendLibraryId, libraryType) {
 		if (libraryType === 'group') {
 			// For groups, convert group ID back to library ID
-			// @ts-ignore - getByLibraryID exists on Zotero.Groups at runtime
 			const group = Zotero.Groups.get(parseInt(backendLibraryId, 10));
 			return group ? group.libraryID : null;
 		} else {
@@ -759,7 +754,6 @@ class ZoteroRAGPlugin {
 	 */
 	getZoteroItem(itemKey, libraryID) {
 		try {
-			// @ts-ignore - Zotero.Items.getByLibraryAndKey exists at runtime
 			return Zotero.Items.getByLibraryAndKey(libraryID, itemKey);
 		} catch (e) {
 			this.log(`Failed to get item ${itemKey} from library ${libraryID}: ${e}`);
@@ -1257,7 +1251,6 @@ class ZoteroRAGPlugin {
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
-		// @ts-ignore - Zotero.DB exists at runtime
 		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
 		if (!ids || ids.length === 0) return 0;
 		const items = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
@@ -1343,7 +1336,6 @@ class ZoteroRAGPlugin {
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
-		// @ts-ignore - Zotero.DB exists at runtime
 		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
 		if (!ids || ids.length === 0) return [];
 		const attachments = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
@@ -1426,7 +1418,6 @@ class ZoteroRAGPlugin {
 		const hash = attachmentItem.attachmentSyncedHash;
 		if (hash) {
 			this.log(`[fix] ${key}: trying MD5 hash ${hash}`);
-			// @ts-ignore
 			const ids = await Zotero.DB.columnQueryAsync(
 				`SELECT itemID FROM itemAttachments WHERE storageHash = ? AND itemID != ?`,
 				[hash, attachmentItem.id]
@@ -1442,7 +1433,6 @@ class ZoteroRAGPlugin {
 		const filename = attachmentItem.attachmentFilename;
 		if (filename) {
 			this.log(`[fix] ${key}: trying filename match "${filename}"`);
-			// @ts-ignore
 			const ids = await Zotero.DB.columnQueryAsync(
 				`SELECT itemID FROM itemAttachments WHERE path = ? AND itemID != ?`,
 				[`storage:${filename}`, attachmentItem.id]

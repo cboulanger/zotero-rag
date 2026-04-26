@@ -29,7 +29,7 @@ Pluggable extraction layer supporting multiple backends and MIME types.
 **Supported MIME types:** `application/pdf`, `text/html`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/epub+zip`
 
 | Class | Backend | Notes |
-|-------|---------|-------|
+| ------- | --------- | ------- |
 | `KreuzbergExtractor` | Kreuzberg (Rust) | Default; native async; 91+ formats; PDFium-based |
 | `LegacyExtractor` | pypdf + spaCy | PDF-only fallback |
 
@@ -122,7 +122,7 @@ Indexing mode is chosen by the plugin's `RemoteIndexer` and influences what it u
 
 ### Plugin Side (all modes)
 
-```
+```text
 1. Collect locally-stored attachments (Zotero JS API, supported MIME types)
 2. POST /api/libraries/{id}/check-indexed → list of {needs_indexing, reason} per attachment
 3. For each attachment where needs_indexing=true:
@@ -134,7 +134,7 @@ Indexing mode is chosen by the plugin's `RemoteIndexer` and influences what it u
 
 ### Backend Side (per uploaded document)
 
-```
+```text
 For each POST /api/index/document:
 1. Validate API key (if API_KEY is configured)
 2. Parse multipart form: file bytes + metadata JSON
@@ -226,7 +226,7 @@ A new deduplication record is written for the target library after a cross-libra
 
 ### Get Index Status
 
-```
+```text
 GET /api/libraries/{library_id}/index-status
 ```
 
@@ -234,7 +234,7 @@ Response: LibraryIndexMetadata object
 
 ### Reset Index
 
-```
+```text
 POST /api/libraries/{library_id}/reset-index
 ```
 
@@ -242,7 +242,7 @@ Sets `force_reindex=True` for next indexing operation.
 
 ### List Indexed Libraries
 
-```
+```text
 GET /api/libraries/indexed
 ```
 
@@ -250,7 +250,7 @@ Returns array of LibraryIndexMetadata objects.
 
 ### Check Indexed Status
 
-```
+```text
 POST /api/libraries/{library_id}/check-indexed
 ```
 
@@ -294,7 +294,7 @@ Response:
 
 ### Upload Document
 
-```
+```text
 POST /api/index/document
 ```
 
@@ -350,6 +350,7 @@ chunks: list[ExtractionChunk] = await extractor.extract_and_chunk(file_bytes, mi
 ```
 
 **KreuzbergExtractor** (default):
+
 - Rust-based library, native async, handles 91+ formats
 - Chunking config: `max_chars=512`, `max_overlap=50` (default)
 - Page numbers tracked via `chunk.metadata['first_page']` (1-based)
@@ -357,6 +358,7 @@ chunks: list[ExtractionChunk] = await extractor.extract_and_chunk(file_bytes, mi
 - Graceful fallback to no-OCR if Tesseract not installed
 
 **LegacyExtractor** (fallback, PDF-only):
+
 - pypdf for extraction, spaCy for sentence-boundary chunking
 - Equivalent defaults: `max_chunk_size=512`, `chunk_overlap=50`
 

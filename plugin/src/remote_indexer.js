@@ -7,7 +7,6 @@
 // Loaded by dialog.xhtml before dialog.js so ZoteroRAGDialog can call it.
 
 // @ts-check
-/// <reference path="./zotero-types.d.ts" />
 
 const DEBUG = true;
 /** @param {function(string): void} log @param {string} msg */

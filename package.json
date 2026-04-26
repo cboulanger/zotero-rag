@@ -60,6 +60,7 @@
   "dependencies": {
     "commander": "^12.1.0",
     "dotenv": "^16.6.1",
-    "zotero-plugin-toolkit": "^5.1.2"
+    "zotero-plugin-toolkit": "^5.1.2",
+    "zotero-types": "^4.1.2"
   }
 }
