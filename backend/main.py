@@ -123,6 +123,13 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Global handler: log every unhandled exception before FastAPI returns 500.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
+    return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
+
 # API key authentication middleware
 # Exempt health-check / version endpoints so the plugin can discover the backend
 # without needing credentials first.

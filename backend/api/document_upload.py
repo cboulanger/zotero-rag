@@ -177,9 +177,13 @@ async def check_indexed(
         f"Check-indexed: library={library_id} attachments={len(request.attachments)}"
     )
 
-    indexed_versions = vector_store.get_item_versions_bulk(
-        library_id, [att.item_key for att in request.attachments]
-    )
+    try:
+        indexed_versions = vector_store.get_item_versions_bulk(
+            library_id, [att.item_key for att in request.attachments]
+        )
+    except Exception as exc:
+        logger.exception(f"check-indexed failed for library={library_id}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
 
     for att in request.attachments:
         indexed_version = indexed_versions.get(att.item_key)
