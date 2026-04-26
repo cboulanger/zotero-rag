@@ -1,3 +1,10 @@
+## [1.17.4](https://github.com/cboulanger/zotero-rag/compare/v1.17.3...v1.17.4) (2026-04-26)
+
+
+### Bug Fixes
+
+* Fix process_attachment_bytes  returned a bare int 0 instead of AttachmentProcessingResult. ([41c1378](https://github.com/cboulanger/zotero-rag/commit/41c1378d70066322ed472742ffb267405323118f))
+
 ## [1.17.3](https://github.com/cboulanger/zotero-rag/compare/v1.17.2...v1.17.3) (2026-04-26)
 
 
