@@ -802,9 +802,10 @@ async function handleLogs(options) {
 /**
  * @param {string} fqdn
  * @param {number} port
+ * @param {string} [maxBodySize]
  * @returns {boolean}
  */
-function setupNginx(fqdn, port) {
+function setupNginx(fqdn, port, maxBodySize = '500M') {
   console.log('[INFO] Setting up nginx...');
   const config = `# Zotero RAG configuration for ${fqdn}
 server {
@@ -818,7 +819,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
         proxy_redirect off;
-        client_max_body_size 100M;
+        client_max_body_size ${maxBodySize};
         proxy_read_timeout 300s;
         proxy_connect_timeout 300s;
         proxy_send_timeout 300s;
@@ -833,7 +834,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
         proxy_redirect off;
-        client_max_body_size 100M;
+        client_max_body_size ${maxBodySize};
         proxy_read_timeout 1800s;
         proxy_connect_timeout 300s;
         proxy_send_timeout 300s;
@@ -1243,7 +1244,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
  *   fqdn: string, tag?: string, port?: number, name?: string,
  *   dataDir?: string, qdrantDataDir?: string, env?: string[],
  *   pull?: boolean, rebuild?: boolean, cache?: boolean, localModels?: boolean, platform?: string,
- *   nginx?: boolean, ssl?: boolean, email?: string,
+ *   nginx?: boolean, ssl?: boolean, email?: string, maxBodySize?: string,
  *   systemdService?: string, sharedKreuzberg?: string, sharedQdrant?: string, yes?: boolean
  * }} options
  */
@@ -1367,7 +1368,7 @@ async function handleDeploy(options) {
   }
   if (!ready) console.log('[WARNING] Container may not be fully ready, continuing anyway...');
 
-  if (useNginx) setupNginx(options.fqdn, port);
+  if (useNginx) setupNginx(options.fqdn, port, options.maxBodySize);
   if (useSSL) await setupSSL(options.fqdn, email);
 
   console.log('\n[SUCCESS] Deployment complete!');
@@ -1596,6 +1597,7 @@ program
   .option('--platform <platform>', 'Target platform when rebuilding, e.g. linux/amd64')
   .option('--no-nginx', 'Skip nginx configuration')
   .option('--no-ssl', 'Skip SSL certificate setup')
+  .option('--max-body-size <size>', 'nginx client_max_body_size for uploads (default: 500M)', '500M')
   .option('--email <email>', 'Email for certbot (default: admin@<fqdn>)')
   .option('--systemd-service <name>', 'Create/replace a Quadlet systemd service with this name (requires sudo; env: DEPLOY_SYSTEMD_SERVICE)')
   .option('--shared-kreuzberg <name>', 'Use an existing kreuzberg systemd service instead of creating one (env: DEPLOY_SHARED_KREUZBERG)')
