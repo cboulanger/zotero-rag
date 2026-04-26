@@ -1,3 +1,11 @@
+## [1.17.1](https://github.com/cboulanger/zotero-rag/compare/v1.17.0...v1.17.1) (2026-04-26)
+
+
+### Bug Fixes
+
+* Fix log noise ([f82f3e8](https://github.com/cboulanger/zotero-rag/commit/f82f3e8023eba81147f8bd152a2e3d8eeba8858e))
+* Fix wrong library id being used when counting unavailable items ([034a2c3](https://github.com/cboulanger/zotero-rag/commit/034a2c364748e09576c9ddb11fac63d6a2be1604))
+
 # [1.17.0](https://github.com/cboulanger/zotero-rag/compare/v1.16.1...v1.17.0) (2026-04-25)
 
 
