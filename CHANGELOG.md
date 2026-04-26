@@ -1,3 +1,12 @@
+## [1.17.2](https://github.com/cboulanger/zotero-rag/compare/v1.17.1...v1.17.2) (2026-04-26)
+
+
+### Bug Fixes
+
+* Add configurable timeout and retry to Qdrant check-indexed scroll ([1cdf0d7](https://github.com/cboulanger/zotero-rag/commit/1cdf0d7219ecfc7aa5f151dc8943a1a0ea6c3e5c))
+* Fix three indexing bugs in remote indexer and dialog ([9db8224](https://github.com/cboulanger/zotero-rag/commit/9db822433bbadc187008b07ed0094fa9c923d533))
+* Log unhandled exceptions that produce silent HTTP 500 responses ([0059b0e](https://github.com/cboulanger/zotero-rag/commit/0059b0e5d2dd97f03122f39d08d0fde72df9a6e0))
+
 ## [1.17.1](https://github.com/cboulanger/zotero-rag/compare/v1.17.0...v1.17.1) (2026-04-26)
 
 
