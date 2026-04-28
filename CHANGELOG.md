@@ -1,3 +1,15 @@
+## [1.17.5](https://github.com/cboulanger/zotero-rag/compare/v1.17.4...v1.17.5) (2026-04-28)
+
+
+### Bug Fixes
+
+* **ci:** Pre-install en_core_web_sm and remove obsolete retry tests ([53f7b94](https://github.com/cboulanger/zotero-rag/commit/53f7b943323b819d37382a711e6df264a431e565))
+* Fix tests ([e6fa9e7](https://github.com/cboulanger/zotero-rag/commit/e6fa9e7c38f8cb59da7170e35e4f71a0e547f848))
+* Pre-install en_core_web_sm in Docker builder and fix runtime fallback ([dd15502](https://github.com/cboulanger/zotero-rag/commit/dd155026ce6ae778cefbdc79b6163fb5d59ac411)), closes [#16](https://github.com/cboulanger/zotero-rag/issues/16)
+* Resolve check-indexed timeout for large libraries ([#13](https://github.com/cboulanger/zotero-rag/issues/13)) ([e17c8a2](https://github.com/cboulanger/zotero-rag/commit/e17c8a273e889000a7fe06794b3ee421278cf8a1))
+* Skip download for non-stored attachments to suppress spurious errors ([#14](https://github.com/cboulanger/zotero-rag/issues/14)) ([889a44f](https://github.com/cboulanger/zotero-rag/commit/889a44ff056e7a0a3e0009f8a59854836d0f7f73))
+* Treat kreuzberg 422 ParsingError as skipped_parse_error and flag in Fix Unavailable ([427f7e3](https://github.com/cboulanger/zotero-rag/commit/427f7e3fae43d2631bca272823e28b7b6b57dbab)), closes [#15](https://github.com/cboulanger/zotero-rag/issues/15)
+
 ## [1.17.4](https://github.com/cboulanger/zotero-rag/compare/v1.17.3...v1.17.4) (2026-04-26)
 
 
