@@ -106,9 +106,9 @@ class TextChunker:
                     model_url = model_urls[self.model_name]
                     logger.info(f"Downloading {self.model_name} from {model_url}")
 
-                    # Use uv pip install to download the model
+                    # Use pip to install the model (via the running interpreter, works with or without uv)
                     result = subprocess.run(
-                        ["uv", "pip", "install", model_url],
+                        [sys.executable, "-m", "pip", "install", model_url],
                         check=True,
                         capture_output=True,
                         text=True
@@ -129,7 +129,7 @@ class TextChunker:
                     logger.error(f"Failed to download spaCy model '{self.model_name}': {e}")
                     raise RuntimeError(
                         f"spaCy model '{self.model_name}' not found and could not be downloaded. "
-                        f"Install it manually with: uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+                        f"Install it manually with: pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
                     ) from e
 
     def chunk_text(
