@@ -500,7 +500,7 @@ var RemoteIndexer = {
 				const response = await this._apiFetch(
 					'POST',
 					`${backendURL}/api/libraries/${libraryId}/check-indexed`,
-					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 30 * 1000 },
+					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 120 * 1000 },
 				);
 
 				const data = await response.json();
