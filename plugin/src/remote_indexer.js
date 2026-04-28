@@ -65,7 +65,7 @@ var RemoteIndexer = {
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
-	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, parseErrors: number, parseErrorKeys: string[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
@@ -172,6 +172,9 @@ var RemoteIndexer = {
 		let uploaded = 0;
 		let skipped = attachments.length - toUpload.length;
 		let errors = 0;
+		let parseErrors = 0;
+		/** @type {string[]} */
+		const parseErrorKeys = [];
 		/** @type {string|null} */
 		let firstError = null;
 		/** @type {Record<string,string>|null} */
@@ -220,7 +223,12 @@ var RemoteIndexer = {
 					rateLimitHeaders = uploadResult.rateLimitHeaders;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
 				}
-				uploaded++;
+				if (uploadResult.parseError) {
+					parseErrors++;
+					parseErrorKeys.push(att.attachment_key);
+				} else {
+					uploaded++;
+				}
 				versionCache[att.attachment_key] = att.item_version;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -287,9 +295,9 @@ var RemoteIndexer = {
 			await this._saveVersionCache(libraryId, versionCache);
 		}
 
-		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}`, current: total, total });
-		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}`);
-		return { uploaded, skipped, noFile, errors, firstError, rateLimitHeaders };
+		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}, Parse errors: ${parseErrors}`, current: total, total });
+		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}`);
+		return { uploaded, skipped, noFile, errors, parseErrors, parseErrorKeys, firstError, rateLimitHeaders };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -599,6 +607,10 @@ var RemoteIndexer = {
 		
 		if (result.status === 'error') {
 			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
+		}
+		if (result.status === 'skipped_parse_error') {
+			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
+			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true };
 		}
 		return { rateLimitHeaders: result.rate_limit_headers || null };
 	},

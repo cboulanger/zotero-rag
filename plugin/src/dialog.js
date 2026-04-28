@@ -1270,6 +1270,15 @@ var ZoteroRAGDialog = {
 					this.updateRateLimitDisplay();
 				}
 
+				// Persist parse-error attachment keys so Fix Unavailable dialog can show them
+				if (indexResult.parseErrorKeys && indexResult.parseErrorKeys.length > 0) {
+					await this.plugin.storeParseErrorItems(libraryId, indexResult.parseErrorKeys);
+					const n = indexResult.parseErrorKeys.length;
+					const msg = `${n} attachment(s) in "${libraryName}" could not be parsed (binary data) — see Fix Unavailable`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					this.showStatus(msg, 'warn');
+				}
+
 				// Report missing-file count as informational — never fatal
 				if (newMissing > 0) {
 					const msg = `${newMissing} attachment(s) in ${libraryName} have no local file and were skipped`;

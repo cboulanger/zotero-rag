@@ -13,6 +13,7 @@ ProcessingStatus = Literal[
     "skipped_duplicate",
     "skipped_timeout",
     "skipped_empty",
+    "skipped_parse_error",
     "copied_cross_library",
 ]
 

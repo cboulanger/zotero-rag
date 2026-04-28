@@ -14,7 +14,7 @@ from typing import Callable, Optional, Literal
 from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
 from backend.services.extraction import DocumentExtractor, create_document_extractor
-from backend.services.extraction.kreuzberg import KreuzbergTimeoutError
+from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
@@ -525,6 +525,9 @@ class DocumentProcessor:
         except KreuzbergTimeoutError as e:
             logger.warning(f"Skipping attachment {attachment_key}: {e}")
             return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout")
+        except KreuzbergParsingError as e:
+            logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
+            return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
         except Exception as e:
             logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
             raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e

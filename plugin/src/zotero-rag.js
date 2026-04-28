@@ -1320,7 +1320,107 @@ class ZoteroRAGPlugin {
 	 * @property {string} title - Item title
 	 * @property {string} zoteroID - Parent item key
 	 * @property {boolean} isLinked - True for linked files (linkMode=2); can't be auto-downloaded
+	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
 	 */
+
+	/**
+	 * @param {number} zoteroLibraryID
+	 * @returns {string}
+	 */
+	_parseErrorsFilePath(zoteroLibraryID) {
+		// @ts-ignore
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `parse-errors-${zoteroLibraryID}.json`);
+	}
+
+	/**
+	 * Merge new parse-error attachment keys into the persistent per-library store.
+	 * Keys already present are retained; duplicates are ignored.
+	 * @param {string} backendLibraryId - Backend library ID (e.g. "u12345" or group numeric string)
+	 * @param {string[]} newKeys - Attachment keys that returned skipped_parse_error
+	 * @returns {Promise<void>}
+	 */
+	async storeParseErrorItems(backendLibraryId, newKeys) {
+		if (!newKeys || newKeys.length === 0) return;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return;
+		const filePath = this._parseErrorsFilePath(zoteroLibraryID);
+		/** @type {string[]} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {}
+		const merged = [...new Set([...existing, ...newKeys])];
+		try {
+			// @ts-ignore
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			// @ts-ignore
+			await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(merged));
+		} catch (e) {
+			this.log(`[storeParseErrorItems] Failed to write parse-errors file: ${e}`);
+		}
+	}
+
+	/**
+	 * Load parse-error attachment keys and resolve them to UnavailableAttachmentInfo objects.
+	 * Silently drops keys where the Zotero item no longer exists.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getParseErrorAttachments(libraryID) {
+		const filePath = this._parseErrorsFilePath(libraryID);
+		/** @type {string[]} */
+		let keys = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			keys = JSON.parse(text);
+		} catch (_) {
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		/** @type {string[]} */
+		const validKeys = [];
+		for (const key of keys) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
+			if (!attachment || attachment.deleted) continue;
+			validKeys.push(key);
+			if (!attachment.parentItemID) continue;
+			// @ts-ignore
+			const parentItem = await Zotero.Items.getAsync(attachment.parentItemID);
+			if (!parentItem) continue;
+			const creators = parentItem.getCreators();
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = parentItem.getField('date') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: parentItem.getField('title') || '',
+				zoteroID: parentItem.key,
+				isLinked: false,
+				isParseError: true,
+			});
+		}
+		// Rewrite file dropping any keys whose items were deleted
+		if (validKeys.length !== keys.length) {
+			try {
+				// @ts-ignore
+				await IOUtils.writeUTF8(filePath, JSON.stringify(validKeys));
+			} catch (_) {}
+		}
+		return result;
+	}
 
 	/**
 	 * Return full detail records for all unavailable attachments in a library.
@@ -1371,6 +1471,12 @@ class ZoteroRAGPlugin {
 				zoteroID: parentItem.key,
 				isLinked: (attachment.attachmentLinkMode ?? 0) === 2,
 			});
+		}
+		// Append parse-error items (file present but unreadable), deduplicating by attachment key
+		const missingKeys = new Set(result.map(r => r.attachmentItem.key));
+		const parseErrorItems = await this._getParseErrorAttachments(libraryID);
+		for (const item of parseErrorItems) {
+			if (!missingKeys.has(item.attachmentItem.key)) result.push(item);
 		}
 		return result;
 	}
