@@ -1215,6 +1215,11 @@ var ZoteroRAGDialog = {
 					downloadedFilePaths: this.downloadedAttachmentPaths,
 					downloadAttachment: async (zoteroItem) => {
 						const key = zoteroItem.key;
+						// Zotero.Sync.Runner.downloadFile only handles stored files (linkMode 0/1).
+						// Linked files and URL attachments can't be fetched via sync.
+						if (!zoteroItem.isStoredFileAttachment()) {
+							return null;
+						}
 						if ((await this._getFailedDownloadKeys()).has(key)) {
 							return null;
 						}
