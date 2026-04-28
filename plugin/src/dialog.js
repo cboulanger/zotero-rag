@@ -1215,6 +1215,11 @@ var ZoteroRAGDialog = {
 					downloadedFilePaths: this.downloadedAttachmentPaths,
 					downloadAttachment: async (zoteroItem) => {
 						const key = zoteroItem.key;
+						// Zotero.Sync.Runner.downloadFile only handles stored files (linkMode 0/1).
+						// Linked files and URL attachments can't be fetched via sync.
+						if (!zoteroItem.isStoredFileAttachment()) {
+							return null;
+						}
 						if ((await this._getFailedDownloadKeys()).has(key)) {
 							return null;
 						}
@@ -1268,6 +1273,15 @@ var ZoteroRAGDialog = {
 				if (indexResult.rateLimitHeaders) {
 					this.rateLimitHeaders = indexResult.rateLimitHeaders;
 					this.updateRateLimitDisplay();
+				}
+
+				// Persist parse-error attachment keys so Fix Unavailable dialog can show them
+				if (indexResult.parseErrorKeys && indexResult.parseErrorKeys.length > 0) {
+					await this.plugin.storeParseErrorItems(libraryId, indexResult.parseErrorKeys);
+					const n = indexResult.parseErrorKeys.length;
+					const msg = `${n} attachment(s) in "${libraryName}" could not be parsed (binary data) — see Fix Unavailable`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					this.showStatus(msg, 'warn');
 				}
 
 				// Report missing-file count as informational — never fatal

@@ -12,6 +12,7 @@ RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \
     else \
       uv sync --frozen --no-dev --no-install-project; \
     fi
+RUN uv pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
 
 # Stage 2: runtime
 FROM python:3.12-slim-bookworm AS runtime

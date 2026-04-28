@@ -32,6 +32,10 @@ class KreuzbergTimeoutError(RuntimeError):
     """Raised when the kreuzberg sidecar times out after all retries."""
 
 
+class KreuzbergParsingError(RuntimeError):
+    """Raised when kreuzberg returns a 422 ParsingError (e.g. binary data in an HTML file)."""
+
+
 class KreuzbergExtractor(DocumentExtractor):
     """
     Extraction adapter that calls the kreuzberg sidecar HTTP API.
@@ -100,6 +104,15 @@ class KreuzbergExtractor(DocumentExtractor):
                     f"Ensure the kreuzberg container is running."
                 ) from exc
             except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 422:
+                    try:
+                        body = exc.response.json()
+                        if body.get("error_type") == "ParsingError":
+                            raise KreuzbergParsingError(
+                                f"kreuzberg sidecar returned HTTP 422 for mime={mime_type}: {exc.response.text}"
+                            ) from exc
+                    except (ValueError, AttributeError):
+                        pass
                 raise RuntimeError(
                     f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
                     f"for mime={mime_type}: {exc.response.text}"

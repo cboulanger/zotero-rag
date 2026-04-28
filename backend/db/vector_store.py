@@ -845,54 +845,33 @@ class VectorStore:
         if not item_keys:
             return {}
 
-        max_attempts = 3
-        base_timeout = self.qdrant_timeout
+        versions: dict[str, int] = {}
+        offset = None
 
-        for attempt in range(max_attempts):
-            call_timeout = base_timeout * (2 ** attempt)  # 30s → 60s → 120s
-            try:
-                versions: dict[str, int] = {}
-                offset = None
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
+                ]),
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
 
-                while True:
-                    results, next_offset = self.client.scroll(
-                        collection_name=self.CHUNKS_COLLECTION,
-                        scroll_filter=Filter(must=[
-                            FieldCondition(key="library_id", match=MatchValue(value=library_id)),
-                            FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
-                        ]),
-                        limit=1000,
-                        offset=offset,
-                        with_payload=True,
-                        with_vectors=False,
-                        timeout=call_timeout,
-                    )
+            for point in results:
+                ik = point.payload.get("item_key")
+                if ik and ik not in versions and "item_version" in point.payload:
+                    versions[ik] = point.payload["item_version"]
 
-                    for point in results:
-                        ik = point.payload.get("item_key")
-                        if ik and ik not in versions and "item_version" in point.payload:
-                            versions[ik] = point.payload["item_version"]
+            if set(item_keys).issubset(versions.keys()) or next_offset is None:
+                break
+            offset = next_offset
 
-                    if set(item_keys).issubset(versions.keys()) or next_offset is None:
-                        break
-                    offset = next_offset
-
-                return versions
-
-            except Exception as exc:
-                if attempt < max_attempts - 1:
-                    next_timeout = base_timeout * (2 ** (attempt + 1))
-                    logger.warning(
-                        f"get_item_versions_bulk attempt {attempt + 1}/{max_attempts} failed "
-                        f"(timeout={call_timeout}s): {exc} — retrying with timeout={next_timeout}s"
-                    )
-                    time.sleep(1)
-                else:
-                    logger.error(
-                        f"get_item_versions_bulk failed after {max_attempts} attempts "
-                        f"(final timeout={call_timeout}s): {exc}"
-                    )
-                    raise
+        return versions
 
     def delete_item_chunks(self, library_id: str, item_key: str) -> int:
         """
