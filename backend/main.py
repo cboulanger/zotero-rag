@@ -223,7 +223,7 @@ async def root(request: Request):
             "max_chunk_size": rag_cfg.max_chunk_size,
         },
         "vector_db": {
-            "path": str(vector_store.storage_path),
+            "path": str(vector_store.storage_path) if vector_store is not None else None,
             "chunks": db_stats.get("chunks_count"),
             "indexed_documents": db_stats.get("dedup_count"),
             "libraries": db_stats.get("metadata_count"),
