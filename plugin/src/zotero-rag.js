@@ -228,27 +228,42 @@ class ZoteroRAGPlugin {
 	 */
 	addToWindow(window) {
 		let doc = window.document;
+		const iconURL = `chrome://zotero-rag/content/icons/ask-rag.svg`;
+		const ui = this.toolkit.uiTool;
 
-		// Add menu item under Tools menu
-		// Note: Menu items still need to use XUL elements as they integrate with Zotero's existing XUL menus
-		// @ts-ignore - createXULElement is available in Zotero/Firefox XUL context
-		let menuitem = doc.createXULElement('menuitem');
-		menuitem.id = 'zotero-rag-ask-question';
-		menuitem.setAttribute('label', 'Zotero RAG: Ask Question...');
-		menuitem.addEventListener('command', async () => {
-			await this.openQueryDialog(window);
-		});
-
-		// Add to Tools menu
+		// Add menu item with icon under Tools menu
 		let toolsMenu = doc.getElementById('menu_ToolsPopup');
 		if (toolsMenu) {
+			const menuitem = ui.createElement(doc, 'menuitem', {
+				namespace: 'xul',
+				id: 'zotero-rag-ask-question',
+				classList: ['menuitem-iconic'],
+				attributes: {
+					label: 'Zotero RAG: Ask Question...',
+					image: iconURL,
+				},
+				listeners: [{ type: 'command', listener: async () => this.openQueryDialog(window) }],
+			});
 			toolsMenu.appendChild(menuitem);
 			this.storeAddedElement(menuitem);
 		}
 
-		// Inject a badge-style toolbar button showing the count of unavailable attachments.
 		const toolbar = doc.getElementById('zotero-items-toolbar');
 		if (toolbar) {
+			// RAG ask-question toolbar button — inserted before the flex spacer that
+			// separates built-in buttons from the search bar (end of native icon group).
+			const spacerNode = toolbar.querySelector(':scope > [flex="1"]');
+			const ragBtn = ui.createElement(doc, 'toolbarbutton', {
+				namespace: 'xul',
+				id: 'zotero-rag-ask-btn',
+				attributes: { tooltiptext: 'Ask a question (Zotero RAG)' },
+				styles: { listStyleImage: `url(${iconURL})` },
+				listeners: [{ type: 'command', listener: () => this.openQueryDialog(window) }],
+			});
+			toolbar.insertBefore(ragBtn, spacerNode || null);
+			this.storeAddedElement(ragBtn);
+
+			// Badge-style button for missing attachments
 			// @ts-ignore
 			const btn = /** @type {any} */ (doc.createXULElement('toolbarbutton'));
 			btn.id = 'zotero-rag-unavailable-btn';
@@ -266,14 +281,12 @@ class ZoteroRAGPlugin {
 				'cursor:pointer',
 			].join(';');
 
-			// Icon character (paperclip-like warning)
 			// @ts-ignore
 			const icon = /** @type {any} */ (doc.createXULElement('label'));
 			icon.setAttribute('value', '\u26A0');  // ⚠
 			icon.style.cssText = 'font-size:14px; color:#cc6600; pointer-events:none;';
 			btn.appendChild(icon);
 
-			// Badge overlay showing the count
 			// @ts-ignore
 			const badge = /** @type {any} */ (doc.createXULElement('label'));
 			badge.id = 'zotero-rag-unavailable-badge';
@@ -1251,9 +1264,9 @@ class ZoteroRAGPlugin {
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
-		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
+		const ids = /** @type {number[]} */ (await Zotero.DB.columnQueryAsync(sql, [libraryID]));
 		if (!ids || ids.length === 0) return 0;
-		const items = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
+		const items = /** @type {any[]} */ (await Zotero.Items.getAsync(ids));
 		let count = 0;
 		for (const item of items) {
 			try {
@@ -1436,9 +1449,9 @@ class ZoteroRAGPlugin {
 			AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
-		const ids = await Zotero.DB.columnQueryAsync(sql, [libraryID]);
+		const ids = /** @type {number[]} */ (await Zotero.DB.columnQueryAsync(sql, [libraryID]));
 		if (!ids || ids.length === 0) return [];
-		const attachments = /** @type {any[]} */ (/** @type {unknown} */ (await Zotero.Items.getAsync(ids)));
+		const attachments = /** @type {any[]} */ (await Zotero.Items.getAsync(ids));
 		/** @type {Array<UnavailableAttachmentInfo>} */
 		const result = [];
 		for (const attachment of attachments) {
