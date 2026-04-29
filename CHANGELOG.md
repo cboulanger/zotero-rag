@@ -1,3 +1,10 @@
+## [1.17.7](https://github.com/cboulanger/zotero-rag/compare/v1.17.6...v1.17.7) (2026-04-29)
+
+
+### Bug Fixes
+
+* fix startup error ([a46839c](https://github.com/cboulanger/zotero-rag/commit/a46839ce47f4c61f33ff39e9b27f4255dc7dfc9d))
+
 ## [1.17.6](https://github.com/cboulanger/zotero-rag/compare/v1.17.5...v1.17.6) (2026-04-29)
 
 
