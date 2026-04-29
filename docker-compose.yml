@@ -32,6 +32,12 @@ services:
     # No ports exposed to host — only the app service needs to reach it
     networks:
       - internal
+    healthcheck:
+      test: ["CMD", "grep", "-q", ":18BD ", "/proc/net/tcp"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
   zotero-rag:
     image: ${ZOTERO_RAG_IMAGE:-cboulanger/zotero-rag:latest}
@@ -55,8 +61,10 @@ services:
       DATA_PATH: /data
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
     depends_on:
-      - kreuzberg
-      - qdrant
+      kreuzberg:
+        condition: service_started
+      qdrant:
+        condition: service_healthy
     networks:
       - internal
 
