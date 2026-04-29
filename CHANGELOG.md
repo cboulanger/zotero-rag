@@ -1,3 +1,11 @@
+## [1.17.6](https://github.com/cboulanger/zotero-rag/compare/v1.17.5...v1.17.6) (2026-04-29)
+
+
+### Bug Fixes
+
+* Fix Kreuzberg timeout issues ([db9a628](https://github.com/cboulanger/zotero-rag/commit/db9a628e6ddb23da523cabad4f43f8805bb644f1))
+* Make upload limit configurable and display failed upload size ([5d6a607](https://github.com/cboulanger/zotero-rag/commit/5d6a60769a7d8e5b60beb0b2f5a4ab74003b9f8c))
+
 ## [1.17.5](https://github.com/cboulanger/zotero-rag/compare/v1.17.4...v1.17.5) (2026-04-28)
 
 
