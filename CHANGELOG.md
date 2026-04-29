@@ -1,3 +1,11 @@
+## [1.17.9](https://github.com/cboulanger/zotero-rag/compare/v1.17.8...v1.17.9) (2026-04-29)
+
+
+### Bug Fixes
+
+* Skip check-indexed for items already confirmed as needing indexing ([0803887](https://github.com/cboulanger/zotero-rag/commit/0803887d68648b216dc3f577f470c012f8fbea3d))
+* Wait for Qdrant to be ready before starting main container ([319e69b](https://github.com/cboulanger/zotero-rag/commit/319e69bc0104dc72d587fce95cf32f8ae207dae8))
+
 ## [1.17.8](https://github.com/cboulanger/zotero-rag/compare/v1.17.7...v1.17.8) (2026-04-29)
 
 
