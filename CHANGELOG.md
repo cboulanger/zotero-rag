@@ -1,3 +1,11 @@
+## [1.17.8](https://github.com/cboulanger/zotero-rag/compare/v1.17.7...v1.17.8) (2026-04-29)
+
+
+### Bug Fixes
+
+* Fix feedback container css ([c47bd2e](https://github.com/cboulanger/zotero-rag/commit/c47bd2ec9bb0d949eb2fb5e27ce2fe2c66e13792))
+* Persist check-indexed results to version cache after each batch ([8d0165e](https://github.com/cboulanger/zotero-rag/commit/8d0165e471fb953897cb6fc592f4f6ac9c855e26))
+
 ## [1.17.7](https://github.com/cboulanger/zotero-rag/compare/v1.17.6...v1.17.7) (2026-04-29)
 
 
