@@ -81,6 +81,7 @@ class DocumentProcessor:
                 chunk_overlap=chunk_overlap,
                 ocr_enabled=settings.ocr_enabled,
                 kreuzberg_url=settings.kreuzberg_url,
+                kreuzberg_timeout_seconds=settings.kreuzberg_timeout_seconds,
             )
         self.document_extractor = document_extractor
 

@@ -50,6 +50,7 @@ class KreuzbergExtractor(DocumentExtractor):
         max_chunk_size: int = 512,
         chunk_overlap: int = 50,
         ocr_enabled: bool = True,
+        timeout_seconds: int = 300,
     ):
         """
         Args:
@@ -57,9 +58,12 @@ class KreuzbergExtractor(DocumentExtractor):
             max_chunk_size: Maximum characters per chunk.
             chunk_overlap: Overlap characters between consecutive chunks.
             ocr_enabled: Whether to attempt OCR on image-only pages.
+            timeout_seconds: Per-request HTTP timeout. Large HTML snapshots and
+                OCR-heavy PDFs may need more than the default 120s.
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
         self._ocr_enabled = ocr_enabled
+        self._timeout_seconds = timeout_seconds
         self._config: dict[str, Any] = {
             "chunking": {
                 "max_characters": max_chunk_size,
@@ -68,7 +72,8 @@ class KreuzbergExtractor(DocumentExtractor):
         }
         logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
-            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled})"
+            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled}, "
+            f"timeout={timeout_seconds}s)"
         )
 
     async def extract_and_chunk(
@@ -90,7 +95,7 @@ class KreuzbergExtractor(DocumentExtractor):
         last_exc: httpx.TimeoutException | None = None
         for attempt in range(1, _TIMEOUT_RETRIES + 2):
             try:
-                async with httpx.AsyncClient(timeout=120.0) as client:
+                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                     response = await client.post(
                         url,
                         files={"files": ("document", content, mime_type)},
