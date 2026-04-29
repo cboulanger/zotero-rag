@@ -7,6 +7,7 @@ ARG INSTALL_LOCAL_MODELS=false
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
+ENV UV_HTTP_TIMEOUT=120
 RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \
       uv sync --frozen --no-dev --no-install-project --extra local-models; \
     else \

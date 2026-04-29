@@ -783,7 +783,8 @@ async function handleRestart(options) {
       if (kreuzbergId) execSync(`${containerCmd} stop ${kreuzbergName}`, { stdio: 'inherit' });
       if (qdrantId) execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
 
-      if (kreuzbergId) execSync(`${containerCmd} start ${kreuzbergName}`, { stdio: 'inherit' });
+      // Pull + recreate kreuzberg so the restart picks up any new image
+      if (kreuzbergId) await startKreuzberg(kreuzbergName, NETWORK_NAME);
       if (qdrantId) {
         execSync(`${containerCmd} start ${qdrantName}`, { stdio: 'inherit' });
         await waitForQdrant(qdrantName);
@@ -1067,6 +1068,7 @@ function buildKreuzbergQuadletContent(containerName, networkName) {
     `Image=${KREUZBERG_IMAGE}`,
     `Network=${networkName}`,
     'NetworkAlias=kreuzberg',
+    'AutoUpdate=registry',
     '',
     '[Service]',
     'Restart=always',
@@ -1174,7 +1176,7 @@ function buildKreuzbergLegacyUnitContent(containerName, networkName) {
     'Restart=always',
     'RestartSec=5',
     `ExecStartPre=-/usr/bin/podman rm -f ${containerName}`,
-    `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias kreuzberg ${KREUZBERG_IMAGE}`,
+    `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias kreuzberg --label io.containers.autoupdate=registry ${KREUZBERG_IMAGE}`,
     `ExecStop=/usr/bin/podman stop ${containerName}`,
     '',
     '[Install]',

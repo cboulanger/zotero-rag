@@ -92,7 +92,7 @@ class KreuzbergExtractor(DocumentExtractor):
             List of ExtractionChunk objects, empty if extraction fails.
         """
         url = f"{self._kreuzberg_url}/extract"
-        last_exc: httpx.TimeoutException | None = None
+        last_exc: httpx.TimeoutException | httpx.ReadError | None = None
         for attempt in range(1, _TIMEOUT_RETRIES + 2):
             try:
                 async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
@@ -133,6 +133,19 @@ class KreuzbergExtractor(DocumentExtractor):
                 else:
                     raise KreuzbergTimeoutError(
                         f"kreuzberg sidecar timed out for mime={mime_type} after {_TIMEOUT_RETRIES + 1} attempts"
+                    ) from last_exc
+            except httpx.ReadError as exc:
+                # Sidecar dropped the connection mid-response (crash, OOM, etc.)
+                last_exc = exc
+                if attempt <= _TIMEOUT_RETRIES:
+                    logger.warning(
+                        f"kreuzberg sidecar read error for mime={mime_type} "
+                        f"(attempt {attempt}/{_TIMEOUT_RETRIES + 1}), retrying in {_TIMEOUT_RETRY_DELAY}s"
+                    )
+                    await asyncio.sleep(_TIMEOUT_RETRY_DELAY)
+                else:
+                    raise KreuzbergTimeoutError(
+                        f"kreuzberg sidecar connection dropped for mime={mime_type} after {_TIMEOUT_RETRIES + 1} attempts"
                     ) from last_exc
 
         try:
