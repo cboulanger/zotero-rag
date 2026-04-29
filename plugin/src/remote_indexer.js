@@ -82,14 +82,17 @@ var RemoteIndexer = {
 			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null, rateLimitHeaders: null };
 		}
 
-		// 2. Load the client-side version cache and pre-classify attachments.
-		//    Attachments whose item_version matches the cache are up-to-date without
-		//    asking the backend.  Only new/changed/unknown ones go to check-indexed.
-		//    In 'full' mode the cache is bypassed so the backend can confirm what it
-		//    actually has — handles the case where the backend lost data since the last run.
+		// 2. Load the client-side caches and pre-classify attachments into three tiers:
+		//    - version cache hit  → confirmed up-to-date, skip entirely
+		//    - pending cache hit  → previously confirmed as needing indexing, go straight to upload
+		//    - neither            → unknown, must ask the backend via check-indexed
+		//    Both caches are bypassed in 'full' mode so the backend can confirm state.
 		const versionCache = await this._loadVersionCache(libraryId);
+		const pendingCache = await this._loadPendingCache(libraryId);
 		/** @type {Array<AttachmentIndexStatus>} */
 		const cachedStatuses = [];
+		/** @type {Array<AttachmentIndexStatus>} */
+		const pendingStatuses = [];
 		/** @type {typeof attachments} */
 		const toCheck = [];
 		for (const att of attachments) {
@@ -97,10 +100,15 @@ var RemoteIndexer = {
 			if (mode !== 'full' && cachedVersion !== undefined && cachedVersion >= att.item_version) {
 				cachedStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: false, reason: 'cached' });
 			} else {
-				toCheck.push(att);
+				const pendingVersion = pendingCache[att.attachment_key];
+				if (mode !== 'full' && pendingVersion !== undefined && pendingVersion >= att.item_version) {
+					pendingStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: true, reason: 'pending' });
+				} else {
+					toCheck.push(att);
+				}
 			}
 		}
-		log(`[RemoteIndexer] Client cache: ${cachedStatuses.length} up-to-date, ${toCheck.length} to verify with backend`);
+		log(`[RemoteIndexer] Client cache: ${cachedStatuses.length} up-to-date, ${pendingStatuses.length} pending upload, ${toCheck.length} to verify with backend`);
 
 		// 2b. For cached items whose local file is missing, request a sync download so the
 		//     file is available locally even if the backend already has the content indexed.
@@ -130,17 +138,23 @@ var RemoteIndexer = {
 			/** @param {Array<AttachmentIndexStatus>} batchStatuses @param {typeof toCheck} batchAttachments */
 			const onBatchComplete = async (batchStatuses, batchAttachments) => {
 				for (const s of batchStatuses) {
-					if (!s.needs_indexing) {
-						const att = batchAttachments.find(a => a.attachment_key === s.attachment_key);
-						if (att) versionCache[att.attachment_key] = att.item_version;
+					const att = batchAttachments.find(a => a.attachment_key === s.attachment_key);
+					if (!att) continue;
+					if (s.needs_indexing) {
+						pendingCache[att.attachment_key] = att.item_version;
+					} else {
+						versionCache[att.attachment_key] = att.item_version;
 					}
 				}
-				await this._saveVersionCache(libraryId, versionCache);
+				await Promise.all([
+					this._saveVersionCache(libraryId, versionCache),
+					this._savePendingCache(libraryId, pendingCache),
+				]);
 			};
 			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete);
 		}
 
-		const statuses = [...cachedStatuses, ...checkedStatuses];
+		const statuses = [...cachedStatuses, ...pendingStatuses, ...checkedStatuses];
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
 
@@ -233,6 +247,7 @@ var RemoteIndexer = {
 					uploaded++;
 				}
 				versionCache[att.attachment_key] = att.item_version;
+				delete pendingCache[att.attachment_key];
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				log(`[RemoteIndexer] Error uploading ${att.attachment_key}: ${msg}`);
@@ -245,6 +260,7 @@ var RemoteIndexer = {
 				// Mark in cache so this item is not re-attempted on the next incremental run.
 				// It will be retried when the item version changes or on a full re-index.
 				versionCache[att.attachment_key] = att.item_version;
+				delete pendingCache[att.attachment_key];
 			}
 		}
 
@@ -295,7 +311,10 @@ var RemoteIndexer = {
 		}
 
 		if (uploaded > 0 || errors > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
-			await this._saveVersionCache(libraryId, versionCache);
+			await Promise.all([
+				this._saveVersionCache(libraryId, versionCache),
+				this._savePendingCache(libraryId, pendingCache),
+			]);
 		}
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}, Parse errors: ${parseErrors}`, current: total, total });
@@ -640,6 +659,39 @@ var RemoteIndexer = {
 	 */
 	_cacheFilePath(libraryId) {
 		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `index-cache-${libraryId}.json`);
+	},
+
+	/** @param {string} libraryId @returns {string} */
+	_pendingCacheFilePath(libraryId) {
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `pending-cache-${libraryId}.json`);
+	},
+
+	/**
+	 * Load the pending cache: items the backend confirmed as needing indexing but not yet uploaded.
+	 * @param {string} libraryId
+	 * @returns {Promise<Record<string, number>>} map of attachment_key → item_version
+	 */
+	async _loadPendingCache(libraryId) {
+		try {
+			const text = await IOUtils.readUTF8(this._pendingCacheFilePath(libraryId));
+			return JSON.parse(text);
+		} catch (_) {
+			return {};
+		}
+	},
+
+	/**
+	 * Persist the pending cache to disk.
+	 * @param {string} libraryId
+	 * @param {Record<string, number>} cache
+	 * @returns {Promise<void>}
+	 */
+	async _savePendingCache(libraryId, cache) {
+		try {
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			try { await IOUtils.makeDirectory(dir, { createAncestors: true }); } catch (_) {}
+			await IOUtils.writeUTF8(this._pendingCacheFilePath(libraryId), JSON.stringify(cache));
+		} catch (_) {}
 	},
 
 	/**
