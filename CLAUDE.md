@@ -1,5 +1,11 @@
 # General Coding Guidelines
 
+## Container Runtime
+
+- **Always use `podman`** for all container operations — never `docker`
+- The deploy commands in `bin/container.mjs` only support podman
+- For compose operations use `podman compose` (not `docker-compose`)
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
@@ -37,6 +43,20 @@ uv run pytest -m container -v -s
 ```
 
 This test is excluded from the default `uv run pytest` run. It requires podman or docker and is skipped automatically if neither is available.
+
+### Startup Sequence Test
+
+After any change to `docker-compose.yml` or `bin/container.mjs` (especially the Qdrant wait logic, healthcheck, or sidecar startup order), run the startup sequence test:
+
+```bash
+uv run python scripts/test_startup_sequence.py
+```
+
+This verifies that:
+
+- `podman compose up` waits for Qdrant to be healthy before starting `zotero-rag`
+- `container.mjs start` calls `waitForQdrant` and resolves it before launching the main container
+- `container.mjs restart` does the same during a restart cycle
 
 ### Node.js Tests
 

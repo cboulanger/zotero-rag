@@ -346,6 +346,32 @@ function stopQdrant(qdrantName, remove = true) {
 }
 
 /**
+ * Wait until Qdrant is accepting connections on port 6333.
+ * Uses /proc/net/tcp inside the container — works on any Linux image without
+ * requiring curl/wget/nc to be installed.  Port 6333 = 0x18BD.
+ * Throws if Qdrant does not become ready within the timeout.
+ * @param {string} qdrantName - Qdrant container name
+ * @param {number} [timeoutMs] - Max wait in ms (default: 90000)
+ */
+async function waitForQdrant(qdrantName, timeoutMs = 90000) {
+  const interval = 2000;
+  const deadline = Date.now() + timeoutMs;
+  console.log(`[INFO] Waiting for Qdrant (${qdrantName}) to accept connections...`);
+  while (Date.now() < deadline) {
+    try {
+      execSync(
+        `${containerCmd} exec ${qdrantName} grep -q ":18BD " /proc/net/tcp`,
+        { stdio: 'ignore' }
+      );
+      console.log('[INFO] Qdrant is ready');
+      return;
+    } catch {}
+    await new Promise(r => setTimeout(r, interval));
+  }
+  throw new Error(`Qdrant (${qdrantName}) did not become ready within ${timeoutMs / 1000}s`);
+}
+
+/**
  * Stop + optionally remove the kreuzberg sidecar.
  * @param {string} kreuzbergName
  * @param {boolean} [remove]
@@ -640,7 +666,10 @@ async function handleStart(options) {
   // Set up shared network and sidecars
   if (useNetwork) ensureNetwork(NETWORK_NAME);
   if (!options.noKreuzberg) await startKreuzberg(kreuzbergName, NETWORK_NAME);
-  if (!options.noQdrant) await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
+  if (!options.noQdrant) {
+    await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
+    await waitForQdrant(qdrantName);
+  }
 
   const volumes = [];
   const extraEnv = [];
@@ -754,9 +783,12 @@ async function handleRestart(options) {
       if (kreuzbergId) execSync(`${containerCmd} stop ${kreuzbergName}`, { stdio: 'inherit' });
       if (qdrantId) execSync(`${containerCmd} stop ${qdrantName}`, { stdio: 'inherit' });
 
-      execSync(`${containerCmd} start ${name}`, { stdio: 'inherit' });
       if (kreuzbergId) execSync(`${containerCmd} start ${kreuzbergName}`, { stdio: 'inherit' });
-      if (qdrantId) execSync(`${containerCmd} start ${qdrantName}`, { stdio: 'inherit' });
+      if (qdrantId) {
+        execSync(`${containerCmd} start ${qdrantName}`, { stdio: 'inherit' });
+        await waitForQdrant(qdrantName);
+      }
+      execSync(`${containerCmd} start ${name}`, { stdio: 'inherit' });
       console.log(`[SUCCESS] Restarted ${name} + ${kreuzbergName} + ${qdrantName}`);
       console.log(`[INFO] Logs: ${containerCmd} logs -f ${name}`);
     } else {
@@ -962,7 +994,7 @@ function buildQdrantLegacyUnitContent(containerName, networkName, volumePath) {
  * @param {string} [qdrantService] - systemd service name of the Qdrant sidecar to depend on
  * @returns {string}
  */
-function buildQuadletContent(cfg, kreuzbergService, qdrantService) {
+function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrantContainerName) {
   const { name, imageName, port, env, volumes = [], extraEnv = [], addHost, network } = cfg;
   const sidecars = [kreuzbergService, qdrantService].filter(Boolean).map(s => `${s}.service`);
   const afterTargets = sidecars.length
@@ -1005,7 +1037,14 @@ function buildQuadletContent(cfg, kreuzbergService, qdrantService) {
     lines.push(`Volume=${v.host}:${v.container}`);
   }
 
-  lines.push('', '[Service]', 'Restart=always', 'RestartSec=5', '', '[Install]', 'WantedBy=multi-user.target');
+  lines.push('', '[Service]');
+  if (qdrantContainerName) {
+    // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
+    lines.push(
+      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 30 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
+    );
+  }
+  lines.push('Restart=always', 'RestartSec=5', '', '[Install]', 'WantedBy=multi-user.target');
   return lines.join('\n') + '\n';
 }
 
@@ -1059,7 +1098,7 @@ function isQuadletAvailable() {
  * @param {string} [qdrantService]
  * @returns {string}
  */
-function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService) {
+function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdrantContainerName) {
   const { name, imageName, port, env, volumes = [], extraEnv = [], addHost, network } = cfg;
 
   let hostIp = 'host-gateway';
@@ -1100,9 +1139,15 @@ function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService) {
     'Wants=network-online.target',
   ];
   for (const s of sidecars) lines.push(`Requires=${s}`);
+  lines.push('', '[Service]', 'Restart=always', 'RestartSec=5');
+  lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${name}`);
+  if (qdrantContainerName) {
+    // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
+    lines.push(
+      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 30 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
+    );
+  }
   lines.push(
-    '', '[Service]', 'Restart=always', 'RestartSec=5',
-    `ExecStartPre=-/usr/bin/podman rm -f ${name}`,
     `ExecStart=/usr/bin/podman run ${runArgs.join(' ')}`,
     `ExecStop=/usr/bin/podman stop ${name}`,
     '', '[Install]', 'WantedBy=multi-user.target',
@@ -1169,7 +1214,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
       }
       fs.writeFileSync(
         `/etc/containers/systemd/${serviceName}.container`,
-        buildQuadletContent(cfg, kreuzberg.serviceName, qdrant.serviceName)
+        buildQuadletContent(cfg, kreuzberg.serviceName, qdrant.serviceName, qdrant.containerName)
       );
       console.log('[INFO] Setting up systemd services via Quadlet...');
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
@@ -1201,7 +1246,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
         console.log(`[INFO] Qdrant unit written to ${qdrantPath}`);
       }
       const mainPath = `/etc/systemd/system/${serviceName}.service`;
-      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName, qdrant.serviceName));
+      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName, qdrant.serviceName, qdrant.containerName));
       console.log(`[INFO] App unit written to ${mainPath}`);
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
     }
@@ -1309,6 +1354,7 @@ async function handleDeploy(options) {
   if (!options.systemdService) {
     await startKreuzberg(kreuzbergName, NETWORK_NAME);
     await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
+    await waitForQdrant(qdrantName);
   } else {
     stopExisting(kreuzbergName);
     stopExisting(qdrantName);
