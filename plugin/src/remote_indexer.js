@@ -121,20 +121,23 @@ var RemoteIndexer = {
 		}
 
 		// 3. Ask the backend which of the remaining attachments actually need indexing.
+		//    onBatchComplete flushes the cache after each batch so a cancelled run
+		//    doesn't re-check already-verified attachments on the next restart.
 		/** @type {Array<AttachmentIndexStatus>} */
 		let checkedStatuses = [];
 		if (toCheck.length > 0) {
 			onProgress({ percentage: 0, message: `Checking ${toCheck.length} attachments`, current: 0, total: toCheck.length });
-			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress);
-		}
-
-		// Update cache for items the backend confirmed are up-to-date.
-		for (let i = 0; i < checkedStatuses.length; i++) {
-			const s = checkedStatuses[i];
-			if (!s.needs_indexing) {
-				const att = toCheck.find(a => a.attachment_key === s.attachment_key);
-				if (att) versionCache[att.attachment_key] = att.item_version;
-			}
+			/** @param {Array<AttachmentIndexStatus>} batchStatuses @param {typeof toCheck} batchAttachments */
+			const onBatchComplete = async (batchStatuses, batchAttachments) => {
+				for (const s of batchStatuses) {
+					if (!s.needs_indexing) {
+						const att = batchAttachments.find(a => a.attachment_key === s.attachment_key);
+						if (att) versionCache[att.attachment_key] = att.item_version;
+					}
+				}
+				await this._saveVersionCache(libraryId, versionCache);
+			};
+			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete);
 		}
 
 		const statuses = [...cachedStatuses, ...checkedStatuses];
@@ -455,9 +458,10 @@ var RemoteIndexer = {
 	 * @param {function(string): void} log
 	 * @param {AbortSignal} [signal]
 	 * @param {function(UploadProgress): void} [onProgress]
+	 * @param {function(Array<AttachmentIndexStatus>, Array<AttachmentInfo>): Promise<void>} [onBatchComplete] - Called after each successful batch; use to flush the version cache incrementally.
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
-	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress) {
+	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete) {
 		const BATCH_SIZE = 100;
 		// After this many consecutive failures, stop asking and mark all remaining
 		// batches as needs_indexing immediately — prevents flooding an overloaded server.
@@ -504,8 +508,13 @@ var RemoteIndexer = {
 				);
 
 				const data = await response.json();
-				allStatuses.push(...(data.statuses || []));
+				const batchStatuses = data.statuses || [];
+				const needsIndexing = batchStatuses.filter(s => s.needs_indexing).length;
+				const upToDate = batchStatuses.length - needsIndexing;
+				log(`[RemoteIndexer] check-indexed batch: ${batchStatuses.length} checked, ${needsIndexing} need indexing, ${upToDate} up-to-date`);
+				allStatuses.push(...batchStatuses);
 				consecutiveFailures = 0;
+				if (onBatchComplete) await onBatchComplete(batchStatuses, batch);
 			} catch (err) {
 				consecutiveFailures++;
 				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing ${consecutiveFailures}`);
