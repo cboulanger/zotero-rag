@@ -1,3 +1,15 @@
+# [1.18.0](https://github.com/cboulanger/zotero-rag/compare/v1.17.9...v1.18.0) (2026-04-29)
+
+
+### Bug Fixes
+
+* Handle kreuzberg ReadError, add auto-update, raise UV_HTTP_TIMEOUT ([3687e77](https://github.com/cboulanger/zotero-rag/commit/3687e7710c8cf4ae78a355e824c6885652632cd6))
+
+
+### Features
+
+* Add app icon and toolbar button ([654ae3e](https://github.com/cboulanger/zotero-rag/commit/654ae3ee792c23d0b89cd23129e850d7bcd0c94f))
+
 ## [1.17.9](https://github.com/cboulanger/zotero-rag/compare/v1.17.8...v1.17.9) (2026-04-29)
 
 
