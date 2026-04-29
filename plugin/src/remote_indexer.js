@@ -595,6 +595,10 @@ var RemoteIndexer = {
 			});
 		} catch (err) {
 			debug(log, `${att.attachment_key}: upload failed after ${Date.now() - t0}ms`);
+			if (err instanceof Error && err.message.includes('HTTP 413')) {
+				const sizeMB = (bytes.length / (1024 * 1024)).toFixed(1);
+				throw new Error(`${err.message} (file size: ${sizeMB} MB — server upload limit exceeded)`);
+			}
 			throw err;
 		}
 		debug(log, `${att.attachment_key}: response received in ${Date.now() - t0}ms`);

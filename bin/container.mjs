@@ -805,7 +805,7 @@ async function handleLogs(options) {
  * @param {string} [maxBodySize]
  * @returns {boolean}
  */
-function setupNginx(fqdn, port, maxBodySize = '500M') {
+function setupNginx(fqdn, port, maxBodySize = '300M') {
   console.log('[INFO] Setting up nginx...');
   const config = `# Zotero RAG configuration for ${fqdn}
 server {
@@ -1597,7 +1597,7 @@ program
   .option('--platform <platform>', 'Target platform when rebuilding, e.g. linux/amd64')
   .option('--no-nginx', 'Skip nginx configuration')
   .option('--no-ssl', 'Skip SSL certificate setup')
-  .option('--max-body-size <size>', 'nginx client_max_body_size for uploads (default: 500M)', '500M')
+  .option('--max-body-size <size>', 'nginx client_max_body_size for uploads (default: 300M)', '300M')
   .option('--email <email>', 'Email for certbot (default: admin@<fqdn>)')
   .option('--systemd-service <name>', 'Create/replace a Quadlet systemd service with this name (requires sudo; env: DEPLOY_SYSTEMD_SERVICE)')
   .option('--shared-kreuzberg <name>', 'Use an existing kreuzberg systemd service instead of creating one (env: DEPLOY_SHARED_KREUZBERG)')

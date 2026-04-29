@@ -345,7 +345,7 @@ systemctl restart zotero-rag-qdrant      # restarts Qdrant (cascades to app via 
 
 Proxies to `http://127.0.0.1:8119` with:
 
-- `client_max_body_size 100M`
+- `client_max_body_size 300M` (configurable via `--max-body-size` / `DEPLOY_MAX_BODY_SIZE`)
 - 300 s proxy timeouts
 - `proxy_buffering off` for SSE endpoints (`/api/query/stream`)
 
