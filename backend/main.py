@@ -86,9 +86,11 @@ async def lifespan(app: FastAPI):
     # Open a single VectorStore for the lifetime of the process.
     # Sharing one Qdrant client across all requests avoids the lock-file
     # contention that causes BlockingIOError when requests overlap.
-    # Retry to handle the case where Qdrant starts slightly after the app
-    # (common in docker-compose without a service_healthy dependency).
-    _vs_retries = 5
+    # Retry to handle the case where Qdrant starts after the app — common when
+    # podman compose doesn't enforce the service_healthy dependency, or when
+    # Qdrant takes >20 s to load existing collections (e.g. large datasets).
+    # 20 retries × 5 s = 95 s total window, well above Qdrant's worst-case startup.
+    _vs_retries = 20
     _vs_delay = 5.0
     for _attempt in range(1, _vs_retries + 1):
         try:
