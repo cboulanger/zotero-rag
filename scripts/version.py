@@ -183,6 +183,10 @@ def main():
         subprocess.run(["uv", "lock"], check=True, cwd=PROJECT_ROOT)
         print(f"[UPDATED] uv.lock")
 
+        # Regenerate package-lock.json so it stays in sync with the new version in package.json
+        subprocess.run(["npm", "install", "--package-lock-only"], check=True, cwd=PROJECT_ROOT)
+        print(f"[UPDATED] package-lock.json")
+
         print("=" * 50)
         print(f"\n[SUCCESS] All files updated to version {new_version}")
         print(f"\nNext steps:")
