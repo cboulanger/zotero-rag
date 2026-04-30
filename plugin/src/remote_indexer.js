@@ -441,30 +441,31 @@ var RemoteIndexer = {
 		if (!itemIDs.length) return 0;
 
 		const items = await Zotero.Items.getAsync(itemIDs);
-		let count = 0;
-		// Track parent item keys that have ANY indexable attachment (local or not).
-		// Mirrors _collectAbstractItems which excludes these from abstract indexing.
-		const keysWithAnyAttachment = new Set();
+		// Count unique parent item keys, mirroring the item_key logic in _collectAttachments.
+		// Multiple attachments of the same parent item count as one indexable item because
+		// check-indexed uses item_key (the parent key) as the indexed-state key, so indexing
+		// any one attachment marks the whole item as up-to-date.
+		const uniqueItemKeys = new Set();
 		for (const item of items) {
 			if (!item.isAttachment()) continue;
 			if (!INDEXABLE_TYPES.has(item.attachmentContentType || '')) continue;
-			count++;
-			if (item.parentItemID) {
-				const parent = Zotero.Items.get(item.parentItemID);
-				if (parent) keysWithAnyAttachment.add(parent.key);
-			}
+			const parentKey = item.parentItemID
+				? (Zotero.Items.get(item.parentItemID)?.key ?? item.key)
+				: item.key;
+			uniqueItemKeys.add(parentKey);
 		}
 		// Also count regular items with a substantial abstract and no indexable attachment at all.
 		const MIN_ABSTRACT_WORDS = 100;
+		let abstractCount = 0;
 		for (const item of items) {
 			if (item.isAttachment() || item.isNote()) continue;
-			if (keysWithAnyAttachment.has(item.key)) continue;
+			if (uniqueItemKeys.has(item.key)) continue;
 			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
 			if (!abstract) continue;
 			const wordCount = abstract.trim().split(/\s+/).filter(/** @param {string} w */ w => w.length > 0).length;
-			if (wordCount >= MIN_ABSTRACT_WORDS) count++;
+			if (wordCount >= MIN_ABSTRACT_WORDS) abstractCount++;
 		}
-		return count;
+		return uniqueItemKeys.size + abstractCount;
 	},
 
 	/**
