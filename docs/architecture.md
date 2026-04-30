@@ -133,7 +133,7 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Document Upload API:** [backend/api/document_upload.py](../backend/api/document_upload.py)
 
-- `POST /api/libraries/{library_id}/check-indexed` — accepts a list of attachment descriptors (key, versions, MIME type); returns `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment
+- `POST /api/libraries/{library_id}/check-indexed` — accepts a list of attachment descriptors (key, versions, MIME type); returns `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment. Results are cached server-side for 5 minutes (keyed by library + attachment set); pass `force_refresh: true` to bypass the cache (sent automatically by the plugin when `mode === "full"`). The cache is also invalidated automatically after each successful document or abstract upload.
 - `POST /api/index/document` — accepts multipart form data (`file`: raw bytes, `metadata`: JSON string); validates API key, runs `DocumentProcessor._process_attachment_bytes()`, returns `DocumentUploadResult`
 
 **Query API:** [backend/api/query.py](../backend/api/query.py)

@@ -262,6 +262,7 @@ Request body:
 {
     "library_id": "1",
     "library_type": "user",
+    "force_refresh": false,
     "attachments": [
         {
             "item_key": "ABC123",
@@ -273,6 +274,8 @@ Request body:
     ]
 }
 ```
+
+`force_refresh` (default `false`): when `true`, the server-side cache for this library is invalidated before querying the vector store. The plugin sets this to `true` automatically when `mode === "full"`.
 
 Response:
 
@@ -291,6 +294,18 @@ Response:
 ```
 
 `reason` values: `"not_indexed"`, `"version_changed"`, `"up_to_date"`
+
+#### Server-side caching
+
+The result of `get_item_versions_bulk` is cached in memory for 5 minutes, keyed by `library_id + md5(sorted item_keys)`. This avoids repeated Qdrant scroll queries when multiple clients check the same library in quick succession (e.g. on first plugin startup across multiple Zotero instances sharing a remote backend).
+
+Cache invalidation happens in three cases:
+
+1. `force_refresh: true` in the request (full-reindex mode)
+2. A document is successfully indexed via `POST /api/index/document`
+3. An abstract is successfully indexed via `POST /api/index/abstract`
+
+The cache is an in-memory dict and is not shared across workers. In multi-worker deployments (Qdrant server mode with `--workers > 1`), each worker maintains its own cache — invalidation is per-worker, so a cache hit within the TTL window may still return slightly stale data. This is acceptable because staleness is bounded by the 5-minute TTL and the next successful upload resets the cache on the worker that served it.
 
 ### Upload Document
 

@@ -151,7 +151,7 @@ var RemoteIndexer = {
 					this._savePendingCache(libraryId, pendingCache),
 				]);
 			};
-			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete);
+			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode);
 		}
 
 		const statuses = [...cachedStatuses, ...pendingStatuses, ...checkedStatuses];
@@ -480,7 +480,7 @@ var RemoteIndexer = {
 	 * @param {function(Array<AttachmentIndexStatus>, Array<AttachmentInfo>): Promise<void>} [onBatchComplete] - Called after each successful batch; use to flush the version cache incrementally.
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
-	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete) {
+	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode) {
 		const BATCH_SIZE = 100;
 		// After this many consecutive failures, stop asking and mark all remaining
 		// batches as needs_indexing immediately — prevents flooding an overloaded server.
@@ -518,6 +518,7 @@ var RemoteIndexer = {
 						item_version: a.item_version,
 						attachment_version: a.attachment_version,
 					})),
+					force_refresh: mode === 'full',
 				};
 
 				const response = await this._apiFetch(

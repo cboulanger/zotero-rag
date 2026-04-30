@@ -15,7 +15,9 @@ Workflow
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -33,6 +35,40 @@ from backend.config.settings import Settings, get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Server-side cache for check-indexed results
+# ---------------------------------------------------------------------------
+
+_CHECK_INDEXED_CACHE_TTL = 300  # seconds
+_check_indexed_cache: dict[str, tuple[dict[str, int], float]] = {}
+_check_indexed_cache_lock = Lock()
+
+
+def _check_indexed_cache_key(library_id: str, item_keys: list[str]) -> str:
+    keys_hash = hashlib.md5(",".join(sorted(item_keys)).encode()).hexdigest()
+    return f"{library_id}:{keys_hash}"
+
+
+def _get_cached_versions(key: str) -> dict[str, int] | None:
+    with _check_indexed_cache_lock:
+        entry = _check_indexed_cache.get(key)
+        if entry and entry[1] > time.monotonic():
+            return entry[0]
+        return None
+
+
+def _set_cached_versions(key: str, versions: dict[str, int]) -> None:
+    with _check_indexed_cache_lock:
+        _check_indexed_cache[key] = (versions, time.monotonic() + _CHECK_INDEXED_CACHE_TTL)
+
+
+def _invalidate_library_cache(library_id: str) -> None:
+    prefix = f"{library_id}:"
+    with _check_indexed_cache_lock:
+        stale = [k for k in _check_indexed_cache if k.startswith(prefix)]
+        for k in stale:
+            del _check_indexed_cache[k]
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +92,7 @@ class CheckIndexedRequest(BaseModel):
     library_id: str
     library_type: str = "user"
     attachments: list[AttachmentInfo]
+    force_refresh: bool = False  # set by client when doing a full reindex
 
 
 class AttachmentIndexStatus(BaseModel):
@@ -174,16 +211,29 @@ async def check_indexed(
     statuses: list[AttachmentIndexStatus] = []
 
     logger.info(
-        f"Check-indexed: library={library_id} attachments={len(request.attachments)}"
+        f"Check-indexed: library={library_id} attachments={len(request.attachments)} "
+        f"force_refresh={request.force_refresh}"
     )
 
-    try:
-        indexed_versions = vector_store.get_item_versions_bulk(
-            library_id, [att.item_key for att in request.attachments]
-        )
-    except Exception as exc:
-        logger.exception(f"check-indexed failed for library={library_id}: {exc}")
-        raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
+    item_keys = [att.item_key for att in request.attachments]
+    cache_key = _check_indexed_cache_key(library_id, item_keys)
+
+    if request.force_refresh:
+        _invalidate_library_cache(library_id)
+        indexed_versions = None
+    else:
+        indexed_versions = _get_cached_versions(cache_key)
+
+    if indexed_versions is None:
+        try:
+            indexed_versions = vector_store.get_item_versions_bulk(library_id, item_keys)
+        except Exception as exc:
+            logger.exception(f"check-indexed failed for library={library_id}: {exc}")
+            raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
+        _set_cached_versions(cache_key, indexed_versions)
+        logger.debug(f"Check-indexed cache miss for library={library_id}")
+    else:
+        logger.debug(f"Check-indexed cache hit for library={library_id}")
 
     for att in request.attachments:
         indexed_version = indexed_versions.get(att.item_key)
@@ -433,6 +483,8 @@ async def upload_and_index_document(
             )
 
     api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
+    if api_status == "indexed":
+        _invalidate_library_cache(library_id)
     return DocumentUploadResult(
         library_id=library_id,
         item_key=item_key,
@@ -542,6 +594,8 @@ async def upload_and_index_abstract(
         )
 
     status = "indexed" if chunks_added > 0 else "skipped_duplicate"
+    if status == "indexed":
+        _invalidate_library_cache(request.library_id)
     return DocumentUploadResult(
         library_id=request.library_id,
         item_key=request.item_key,
