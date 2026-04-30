@@ -275,7 +275,7 @@ Request body:
 }
 ```
 
-`force_refresh` (default `false`): when `true`, the server-side cache for this library is invalidated before querying the vector store. The plugin sets this to `true` automatically when `mode === "full"`.
+`force_refresh` (default `false`): when `true`, the cached result for this batch is bypassed and a fresh query is sent to the vector store. The fresh result is still written to the cache, so subsequent batches or other clients can benefit from it. The plugin sets this to `true` automatically when `mode === "full"`.
 
 Response:
 
@@ -299,11 +299,12 @@ Response:
 
 The result of `get_item_versions_bulk` is cached in memory for 5 minutes, keyed by `library_id + md5(sorted item_keys)`. This avoids repeated Qdrant scroll queries when multiple clients check the same library in quick succession (e.g. on first plugin startup across multiple Zotero instances sharing a remote backend).
 
-Cache invalidation happens in three cases:
+Cache invalidation (all entries for a library are cleared) happens in two cases:
 
-1. `force_refresh: true` in the request (full-reindex mode)
-2. A document is successfully indexed via `POST /api/index/document`
-3. An abstract is successfully indexed via `POST /api/index/abstract`
+1. A document is successfully indexed via `POST /api/index/document`
+2. An abstract is successfully indexed via `POST /api/index/abstract`
+
+`force_refresh: true` does **not** invalidate other cached entries — it only skips reading the cache for the current batch, then writes the fresh result back. This means even a large full reindex populates the cache batch by batch, and a second concurrent client can still get cache hits for batches already fetched.
 
 The cache is an in-memory dict and is not shared across workers. In multi-worker deployments (Qdrant server mode with `--workers > 1`), each worker maintains its own cache — invalidation is per-worker, so a cache hit within the TTL window may still return slightly stale data. This is acceptable because staleness is bounded by the 5-minute TTL and the next successful upload resets the cache on the worker that served it.
 

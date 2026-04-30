@@ -55,7 +55,7 @@ var RemoteIndexer = {
 	 * @param {string} opts.libraryType - "user" or "group"
 	 * @param {string} opts.libraryName - Human-readable library name
 	 * @param {string} opts.backendURL - Backend base URL
-	 * @param {string} [opts.mode] - Indexing mode: "auto" | "incremental" | "full" (currently unused server-side)
+	 * @param {string} [opts.mode] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
 	 * @param {number|null} [opts.userId] - Numeric zotero.org user ID of the indexing user
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
@@ -86,7 +86,7 @@ var RemoteIndexer = {
 		//    - version cache hit  → confirmed up-to-date, skip entirely
 		//    - pending cache hit  → previously confirmed as needing indexing, go straight to upload
 		//    - neither            → unknown, must ask the backend via check-indexed
-		//    Both caches are bypassed in 'full' mode so the backend can confirm state.
+		//    Both caches are bypassed in 'full' and 'reindex' modes so the backend confirms state.
 		const versionCache = await this._loadVersionCache(libraryId);
 		const pendingCache = await this._loadPendingCache(libraryId);
 		/** @type {Array<AttachmentIndexStatus>} */
@@ -97,11 +97,11 @@ var RemoteIndexer = {
 		const toCheck = [];
 		for (const att of attachments) {
 			const cachedVersion = versionCache[att.attachment_key];
-			if (mode !== 'full' && cachedVersion !== undefined && cachedVersion >= att.item_version) {
+			if (mode !== 'full' && mode !== 'reindex' && cachedVersion !== undefined && cachedVersion >= att.item_version) {
 				cachedStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: false, reason: 'cached' });
 			} else {
 				const pendingVersion = pendingCache[att.attachment_key];
-				if (mode !== 'full' && pendingVersion !== undefined && pendingVersion >= att.item_version) {
+				if (mode !== 'full' && mode !== 'reindex' && pendingVersion !== undefined && pendingVersion >= att.item_version) {
 					pendingStatuses.push({ item_key: att.item_key, attachment_key: att.attachment_key, needs_indexing: true, reason: 'pending' });
 				} else {
 					toCheck.push(att);
@@ -518,7 +518,7 @@ var RemoteIndexer = {
 						item_version: a.item_version,
 						attachment_version: a.attachment_version,
 					})),
-					force_refresh: mode === 'full',
+					force_refresh: mode === 'reindex',
 				};
 
 				const response = await this._apiFetch(

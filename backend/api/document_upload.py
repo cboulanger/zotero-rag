@@ -218,11 +218,10 @@ async def check_indexed(
     item_keys = [att.item_key for att in request.attachments]
     cache_key = _check_indexed_cache_key(library_id, item_keys)
 
-    if request.force_refresh:
-        _invalidate_library_cache(library_id)
-        indexed_versions = None
-    else:
-        indexed_versions = _get_cached_versions(cache_key)
+    # force_refresh skips reading from the cache but always writes the fresh result back,
+    # so subsequent batches (same or other clients) can still benefit from it.
+    # Wholesale library cache invalidation only happens after a successful upload.
+    indexed_versions = None if request.force_refresh else _get_cached_versions(cache_key)
 
     if indexed_versions is None:
         try:
@@ -231,7 +230,7 @@ async def check_indexed(
             logger.exception(f"check-indexed failed for library={library_id}: {exc}")
             raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
         _set_cached_versions(cache_key, indexed_versions)
-        logger.debug(f"Check-indexed cache miss for library={library_id}")
+        logger.debug(f"Check-indexed cache miss for library={library_id} force_refresh={request.force_refresh}")
     else:
         logger.debug(f"Check-indexed cache hit for library={library_id}")
 

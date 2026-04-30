@@ -747,7 +747,7 @@ var ZoteroRAGDialog = {
 		this.showProgress('Re-indexing...', `Starting re-index of "${name}"...`);
 
 		try {
-			await this.checkAndMonitorIndexing([libraryId], 'full');
+			await this.checkAndMonitorIndexing([libraryId], 'reindex');
 
 			if (!this.isOperationInProgress) return;
 
@@ -1160,7 +1160,7 @@ var ZoteroRAGDialog = {
 	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
-	 * @param {string} [mode='auto'] - Indexing mode (auto/incremental/full)
+	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
 	 * @returns {Promise<void>}
 	 */
 	async checkAndMonitorIndexing(libraryIds, mode = 'auto') {
