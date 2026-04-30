@@ -1,3 +1,16 @@
+# [1.19.0](https://github.com/cboulanger/zotero-rag/compare/v1.18.0...v1.19.0) (2026-04-30)
+
+
+### Bug Fixes
+
+* Increase retries waiting for qdrant sidecar ([99f2ce2](https://github.com/cboulanger/zotero-rag/commit/99f2ce218b3def971976eca07e610be772af4659))
+
+
+### Features
+
+* Add OpenAlex → Zotero bulk import script ([f564c00](https://github.com/cboulanger/zotero-rag/commit/f564c0010a5d3c7506620a8c78470f909b8b1b61))
+* Add public web UI for unauthenticated RAG queries ([276dedd](https://github.com/cboulanger/zotero-rag/commit/276dedd66df4b20370f69b22678831415ddfb69a))
+
 # [1.18.0](https://github.com/cboulanger/zotero-rag/compare/v1.17.9...v1.18.0) (2026-04-29)
 
 
