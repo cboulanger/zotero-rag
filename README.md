@@ -2,7 +2,14 @@
 
 <!-- markdownlint-disable MD033 -->
 
+[![CI](https://github.com/cboulanger/zotero-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/cboulanger/zotero-rag/actions/workflows/ci.yml)
+[![Release](https://github.com/cboulanger/zotero-rag/actions/workflows/release.yml/badge.svg)](https://github.com/cboulanger/zotero-rag/actions/workflows/release.yml)
+![Status: Beta](https://img.shields.io/badge/status-beta-yellow)
+![API: unstable](https://img.shields.io/badge/API-unstable-orange)
+
 This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero which allows to ask questions on the literature in a library and get a response with links to the sources.
+
+> **Beta:** The API and feature set are still evolving. Breaking changes may occur between releases.
 
 ## Quick Start
 
