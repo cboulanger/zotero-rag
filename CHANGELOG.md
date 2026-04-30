@@ -1,3 +1,10 @@
+## [1.19.5](https://github.com/cboulanger/zotero-rag/compare/v1.19.4...v1.19.5) (2026-04-30)
+
+
+### Bug Fixes
+
+* Count unique parent items in countIndexableAttachments, not total attachments ([9d14dae](https://github.com/cboulanger/zotero-rag/commit/9d14dae1bf2c6c0033b4559f2e3297dc0e0e2d70))
+
 ## [1.19.4](https://github.com/cboulanger/zotero-rag/compare/v1.19.3...v1.19.4) (2026-04-30)
 
 
