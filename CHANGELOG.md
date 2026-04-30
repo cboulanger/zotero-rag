@@ -1,3 +1,10 @@
+## [1.19.6](https://github.com/cboulanger/zotero-rag/compare/v1.19.5...v1.19.6) (2026-04-30)
+
+
+### Bug Fixes
+
+* Use author/year from vector index when Zotero API metadata is unavailable ([2135274](https://github.com/cboulanger/zotero-rag/commit/213527465fae7b6b69bbe5b05c8d41a186ba561f)), closes [#22](https://github.com/cboulanger/zotero-rag/issues/22)
+
 ## [1.19.5](https://github.com/cboulanger/zotero-rag/compare/v1.19.4...v1.19.5) (2026-04-30)
 
 
