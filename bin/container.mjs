@@ -351,9 +351,9 @@ function stopQdrant(qdrantName, remove = true) {
  * requiring curl/wget/nc to be installed.  Port 6333 = 0x18BD.
  * Throws if Qdrant does not become ready within the timeout.
  * @param {string} qdrantName - Qdrant container name
- * @param {number} [timeoutMs] - Max wait in ms (default: 90000)
+ * @param {number} [timeoutMs] - Max wait in ms (default: 180000)
  */
-async function waitForQdrant(qdrantName, timeoutMs = 90000) {
+async function waitForQdrant(qdrantName, timeoutMs = 180000) {
   const interval = 2000;
   const deadline = Date.now() + timeoutMs;
   console.log(`[INFO] Waiting for Qdrant (${qdrantName}) to accept connections...`);
@@ -1042,7 +1042,7 @@ function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrantContain
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
     lines.push(
-      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 30 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
+      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 60 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
     );
   }
   lines.push('Restart=always', 'RestartSec=5', '', '[Install]', 'WantedBy=multi-user.target');
@@ -1146,7 +1146,7 @@ function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdrantCont
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
     lines.push(
-      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 30 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
+      `ExecStartPre=/bin/sh -c 'i=0; while [ "$$i" -lt 60 ]; do /usr/bin/podman exec ${qdrantContainerName} grep -q ":18BD " /proc/net/tcp 2>/dev/null && exit 0; i=$$((i+1)); sleep 3; done; exit 1'`
     );
   }
   lines.push(
@@ -1410,9 +1410,9 @@ async function handleDeploy(options) {
   // Wait for container readiness
   console.log('[INFO] Waiting for container to be ready...');
   let ready = false;
-  for (let i = 1; i <= 60; i++) {
+  for (let i = 1; i <= 120; i++) {
     try { execSync(`curl -sf http://localhost:${port}/health`, { stdio: 'ignore' }); ready = true; break; }
-    catch { if (i % 5 === 0) console.log(`[INFO] Attempt ${i}/60...`); await new Promise(r => setTimeout(r, 2000)); }
+    catch { if (i % 10 === 0) console.log(`[INFO] Attempt ${i}/120...`); await new Promise(r => setTimeout(r, 2000)); }
   }
   if (!ready) console.log('[WARNING] Container may not be fully ready, continuing anyway...');
 
