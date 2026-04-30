@@ -3198,6 +3198,7 @@ dependencies = [
     { name = "qdrant-client" },
     { name = "spacy" },
     { name = "sse-starlette" },
+    { name = "tqdm" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -3241,6 +3242,7 @@ requires-dist = [
     { name = "spacy", specifier = ">=3.8.0" },
     { name = "sse-starlette", specifier = ">=2.2.0" },
     { name = "torch", marker = "extra == 'local-models'", specifier = ">=2.5.0" },
+    { name = "tqdm", specifier = ">=4.0.0" },
     { name = "transformers", marker = "extra == 'local-models'", specifier = ">=4.46.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
