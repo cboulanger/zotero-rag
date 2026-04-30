@@ -1,3 +1,10 @@
+## [1.19.3](https://github.com/cboulanger/zotero-rag/compare/v1.19.2...v1.19.3) (2026-04-30)
+
+
+### Bug Fixes
+
+* Add TimeoutStartSec=300 to override systemd's 90s ExecStartPre limit ([49c617f](https://github.com/cboulanger/zotero-rag/commit/49c617fa94e481ae97fd00ed85b5a4d9e8aad856))
+
 ## [1.19.2](https://github.com/cboulanger/zotero-rag/compare/v1.19.1...v1.19.2) (2026-04-30)
 
 
