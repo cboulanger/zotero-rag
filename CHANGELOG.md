@@ -1,3 +1,11 @@
+## [1.19.2](https://github.com/cboulanger/zotero-rag/compare/v1.19.1...v1.19.2) (2026-04-30)
+
+
+### Bug Fixes
+
+* Correct cache invalidation logic for check-indexed ([1bfbf84](https://github.com/cboulanger/zotero-rag/commit/1bfbf8401c508d53759b5b21d88cf53228cc353c))
+* Increase Qdrant and app readiness timeouts to handle slow collection recovery ([dcdb5a0](https://github.com/cboulanger/zotero-rag/commit/dcdb5a09756eedb3c8e977498c8dfe348dac129a))
+
 ## [1.19.1](https://github.com/cboulanger/zotero-rag/compare/v1.19.0...v1.19.1) (2026-04-30)
 
 
