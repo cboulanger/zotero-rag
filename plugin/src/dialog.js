@@ -1297,6 +1297,20 @@ var ZoteroRAGDialog = {
 					indexingErrors.push(msg);
 				}
 
+				// For reindex runs, reconcile the server-side item count before
+				// refreshing the UI — the counter can be stale when items were already
+				// indexed (all check-indexed results "up_to_date", 0 uploads).
+				if (mode === 'reindex') {
+					try {
+						await fetch(`${backendURL}/api/libraries/${libraryId}/reconcile-count`, {
+							method: 'POST',
+							headers: plugin.getAuthHeaders(),
+						});
+					} catch (e) {
+						plugin.log(`[Dialog] reconcile-count failed for ${libraryId}: ${e}`);
+					}
+				}
+
 				// Refresh the library row from the backend so the label shows the accurate
 				// timestamp and indexed count immediately after indexing finishes.
 				this.libraryMetadata.delete(libraryId);

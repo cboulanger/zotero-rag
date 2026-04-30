@@ -172,6 +172,32 @@ async def clear_library_index(library_id: str, vector_store: VectorStore = Depen
         raise HTTPException(status_code=500, detail=f"Failed to clear library index: {str(e)}")
 
 
+@router.post("/libraries/{library_id}/reconcile-count", response_model=LibraryIndexMetadata)
+async def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+    """
+    Recompute total_items_indexed from actual vector store data and persist it.
+
+    Called by the plugin after a reindex pass to fix stale counters caused by
+    interrupted indexing runs or other counting inconsistencies.
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    meta = vector_store.get_library_metadata(library_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Library not indexed")
+
+    try:
+        actual_count = vector_store.count_indexed_items(library_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to count indexed items: {e}")
+
+    meta.total_items_indexed = actual_count
+    vector_store.update_library_metadata(meta)
+    logger.info(f"Reconciled total_items_indexed for library={library_id}: {actual_count}")
+    return meta
+
+
 @router.delete("/libraries/{library_id}/items/{item_key}/chunks")
 async def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
     """

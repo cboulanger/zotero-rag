@@ -919,6 +919,31 @@ class VectorStore:
             logger.warning(f"Error counting chunks for library {library_id}, returning 0: {e}")
             return 0
 
+    def count_indexed_items(self, library_id: str) -> int:
+        """Count distinct item_keys with at least one indexed chunk for a library."""
+        item_keys: set[str] = set()
+        offset = None
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id))
+                ]),
+                limit=1000,
+                offset=offset,
+                with_payload=["item_key"],
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
+            for point in results:
+                ik = point.payload.get("item_key")
+                if ik:
+                    item_keys.add(ik)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return len(item_keys)
+
     def get_library_size_bytes(self, library_id: str) -> int:
         """
         Compute the total byte size of all text stored across chunks for a library.
