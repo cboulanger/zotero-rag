@@ -1038,7 +1038,7 @@ function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrantContain
     lines.push(`Volume=${v.host}:${v.container}`);
   }
 
-  lines.push('', '[Service]');
+  lines.push('', '[Service]', 'TimeoutStartSec=300');
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
     lines.push(
@@ -1141,7 +1141,7 @@ function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdrantCont
     'Wants=network-online.target',
   ];
   for (const s of sidecars) lines.push(`Requires=${s}`);
-  lines.push('', '[Service]', 'Restart=always', 'RestartSec=5');
+  lines.push('', '[Service]', 'TimeoutStartSec=300', 'Restart=always', 'RestartSec=5');
   lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${name}`);
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
