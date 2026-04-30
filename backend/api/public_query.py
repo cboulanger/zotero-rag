@@ -29,7 +29,7 @@ from markdown_it import MarkdownIt
 from backend.config.settings import get_settings
 from backend.dependencies import get_vector_store, make_embedding_service, make_llm_service
 from backend.db.vector_store import VectorStore
-from backend.services.rag_engine import RAGEngine
+from backend.services.rag_engine import RAGEngine, SourceInfo
 
 logger = logging.getLogger(__name__)
 
@@ -128,34 +128,62 @@ async def _fetch_item_metadata(client: httpx.AsyncClient, slug: str, item_id: st
     return None
 
 
-def _format_display_text(meta: Optional[dict], fallback_title: str) -> str:
-    """Format author/year citation display text from Zotero API item metadata."""
-    if not meta:
-        return fallback_title
-    try:
-        data = meta.get("data", {})
-        creators = data.get("creators", [])
-        author_name = ""
-        if creators:
-            first = creators[0]
-            author_name = first.get("lastName") or first.get("name") or first.get("firstName") or ""
-            if len(creators) > 1:
-                author_name += " et al."
-        date_str = data.get("date", "")
-        year = ""
-        if date_str:
-            m = re.search(r"\b(\d{4})\b", date_str)
-            if m:
-                year = m.group(1)
-        if author_name and year:
-            return f"{author_name}, {year}"
-        if author_name:
-            return author_name
-        if year:
-            return year
-        return data.get("title") or fallback_title
-    except Exception:
-        return fallback_title
+def _format_display_text(meta: Optional[dict], src: SourceInfo) -> str:
+    """Format author/year citation display text.
+
+    Prefers Zotero web API metadata when available; falls back to author/year
+    stored in the vector index, and only uses the title as a last resort.
+    """
+    author_name = ""
+    year_str = ""
+
+    if meta:
+        try:
+            data = meta.get("data", {})
+            creators = data.get("creators", [])
+            if creators:
+                first = creators[0]
+                author_name = first.get("lastName") or first.get("name") or first.get("firstName") or ""
+                if len(creators) > 1:
+                    author_name += " et al."
+            date_str = data.get("date", "")
+            if date_str:
+                m = re.search(r"\b(\d{4})\b", date_str)
+                if m:
+                    year_str = m.group(1)
+            if author_name and year_str:
+                return f"{author_name}, {year_str}"
+            if author_name:
+                return author_name
+            if year_str:
+                return year_str
+            title_from_api = data.get("title")
+            if title_from_api:
+                return title_from_api
+        except Exception:
+            pass
+
+    # Fall back to vector-store metadata (author/year preferred over title)
+    if src.authors:
+        last_names = [
+            a.split(",")[0].strip() if "," in a else a.split()[-1]
+            for a in src.authors
+        ]
+        if len(last_names) == 1:
+            author_name = last_names[0]
+        elif len(last_names) == 2:
+            author_name = f"{last_names[0]} & {last_names[1]}"
+        else:
+            author_name = f"{last_names[0]} et al."
+    if src.year:
+        year_str = str(src.year)
+    if author_name and year_str:
+        return f"{author_name}, {year_str}"
+    if author_name:
+        return author_name
+    if year_str:
+        return year_str
+    return src.title
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +226,7 @@ async def _process_citations(text: str, sources: list) -> str:
         meta = meta_map.get((slug, src.item_id))
         source_data[i] = {
             "url": f"{ZOTERO_WEB_BASE}/{slug}/items/{src.item_id}",
-            "display": _format_display_text(meta, src.title),
+            "display": _format_display_text(meta, src),
             "anchor": src.text_anchor or "",
         }
 
@@ -291,7 +319,7 @@ async def _build_bibliography(sources: list) -> list[dict]:
         if isinstance(meta, Exception):
             meta = None
         slug = backend_id_to_slug(src.library_id)
-        display = _format_display_text(meta, src.title)
+        display = _format_display_text(meta, src)
         # For bibliography, show full title when available
         label = display
         if meta:

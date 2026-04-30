@@ -32,6 +32,8 @@ class SourceInfo(BaseModel):
     item_id: str
     library_id: str
     title: str
+    authors: list[str] = []
+    year: int | None = None
     page_number: int | None = None
     text_anchor: str | None = None
     score: float
@@ -218,6 +220,8 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                 item_id=doc_meta.item_key or "unknown",
                 library_id=doc_meta.library_id,
                 title=doc_meta.title or "Unknown Document",
+                authors=doc_meta.authors or [],
+                year=doc_meta.year,
                 # Don't set page_number here: the representative chunk for a deduplicated
                 # document may come from any page (e.g. a bibliography section).  Inline
                 # citations get the correct page via the LLM's explicit [N:P] notation
