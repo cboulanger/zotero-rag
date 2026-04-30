@@ -59,6 +59,8 @@ services:
       # set a secret api key for a real deployment!
       API_KEY: ${API_KEY:-}
       DATA_PATH: /data
+      # Path to public libraries config inside the container (e.g. /data/public-libraries.json)
+      PUBLIC_LIBRARIES_CONFIG: ${PUBLIC_LIBRARIES_CONFIG:-}
       #ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-"*"}
     depends_on:
       kreuzberg:
