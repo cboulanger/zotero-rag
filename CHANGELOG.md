@@ -1,3 +1,10 @@
+## [1.19.4](https://github.com/cboulanger/zotero-rag/compare/v1.19.3...v1.19.4) (2026-04-30)
+
+
+### Bug Fixes
+
+* Reconcile total_items_indexed after reindex via live vector store count ([9bcc3b9](https://github.com/cboulanger/zotero-rag/commit/9bcc3b9fd74495383341f6a7dcaadc94afbcbe2e))
+
 ## [1.19.3](https://github.com/cboulanger/zotero-rag/compare/v1.19.2...v1.19.3) (2026-04-30)
 
 
