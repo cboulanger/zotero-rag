@@ -107,6 +107,48 @@ The plugin uses AI to understand your questions and retrieve relevant informatio
 
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
+#### Public Web Interface
+
+The backend can optionally expose a browser-accessible query UI at `/public/` that lets anyone query a publicly readable Zotero library **without** the Zotero plugin or an API key.
+
+**1. Make sure the Zotero library is set to *Public* in your Zotero.org account settings.**
+
+**2. Create a config file** (use [`public-libraries.example.json`](public-libraries.example.json) as a template):
+
+```json
+{
+  "users/1234567": {
+    "title": "My Research Library",
+    "description": "Papers on computational linguistics.",
+    "placeholder": "e.g. What methods are used for cross-lingual transfer?"
+  },
+  "groups/9876543": {
+    "title": "DH Working Group",
+    "description": "Digital humanities reading list."
+  }
+}
+```
+
+Keys are Zotero.org library slugs (`users/{userId}` or `groups/{groupId}`). The optional `placeholder` field customises the hint text in the question input; `title` and `description` are shown on the query page.
+
+**3. Point the server at the file** by adding this line to your `.env`:
+
+```env
+PUBLIC_LIBRARIES_CONFIG=/path/to/public-libraries.json
+```
+
+**4. (Re)start the server.** The UI is then available at:
+
+| URL | Page |
+| --- | --- |
+| `/public/` | Index listing all configured libraries |
+| `/public/users/{id}` | Query form + results for a user library |
+| `/public/groups/{id}` | Query form + results for a group library |
+
+Results include inline citations linked to the corresponding item on `www.zotero.org`, with author/year labels fetched from the Zotero web API. Libraries that are not listed in the config file return **403 Forbidden**.
+
+> **Note:** The public UI only works for libraries that have already been indexed in **this running backend instance** via the Zotero plugin. It does not provide access to arbitrary public Zotero libraries — the library must first be indexed locally before queries can be answered.
+
 #### Fix Unavailable Attachments
 
 <img src="./docs/images/fix-attachments-tool.png" width="300" alt="Screenshot of the fix attachment tool">
@@ -128,7 +170,7 @@ When a file is found it is copied into the correct Zotero storage directory. Ite
 
 The project uses [Semantic Release](https://github.com/semantic-release/semantic-release) workflow, which relies on [Semantic Versioning](https://semver.org/) principles. This determines the version number. The major version increases each time a backwards-incompatible change is being merged in terms of the frontend (plugin client) and backend (server) communication. All backend and frontend instances with the same major version number should be compatible and will handle missing new features gracefully.
 
-Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be the first stable release. 
+Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be the first stable release.
 
 ## Developer Documentation
 
@@ -137,6 +179,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**
 - **[Setup CI/CD](docs/setup-ci-cd.md)**
+- **[Resources for coding agents](docs/agents.md)**
 
 ## License
 

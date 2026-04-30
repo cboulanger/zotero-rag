@@ -879,27 +879,48 @@ class ZoteroRAGPlugin {
 
 	/**
 	 * Format an inline citation as a zotero://open-pdf/ hyperlink.
-	 * Page number is shown without quotes; text anchor (quote context) is shown in quotes
-	 * only when no page number is available.
+	 * When a page or section label is provided it is appended to the display text.
+	 * The text anchor is shown as a tooltip.
 	 * @param {string} uri - zotero://open-pdf/ or zotero://select/ URI
 	 * @param {string} displayText - Display text (e.g., "Smith et al., 2020")
-	 * @param {number|null} [_page] - Optional page number (currently unused)
-	 * @param {string|null} [textAnchor] - Optional quote context (used only when page is absent)
+	 * @param {string|null} [pageLabel] - Optional page or section label cited by the LLM (e.g. "5" or "0.3.1")
+	 * @param {string|null} [textAnchor] - Optional quote context shown as tooltip
 	 * @returns {string} HTML anchor element
 	 */
-	formatCitationHTML(uri, displayText, _page = null, textAnchor = null) {
+	formatCitationHTML(uri, displayText, pageLabel = null, textAnchor = null) {
 		let label = this.escapeHTML(displayText);
 		let title = "";
 
-		// this is the page index which is uninformative without the page offset in the PDF, which don't have
-		// if (page !== null && page !== undefined) {
-		// 	label += `, p. ${page}`;
-		// }  
-			
+		if (pageLabel !== null && pageLabel !== undefined) {
+			label += `, p. ${this.escapeHTML(String(pageLabel))}`;
+		}
+
 		if (textAnchor) {
 			title = this.escapeHTML(textAnchor);
 		}
 		return `<a href="${uri}" title="${title}">(${label})</a>`;
+	}
+
+	/**
+	 * Merge runs of adjacent citation links into one semicolon-separated group.
+	 * Converts:  <a href="u1">(A)</a> <a href="u2">(B)</a> <a href="u3">(C)</a>
+	 * To:        (<a href="u1">A</a>; <a href="u2">B</a>; <a href="u3">C</a>)
+	 * @param {string} html - HTML string with citation anchors
+	 * @returns {string} HTML with consecutive citations merged
+	 */
+	mergeConsecutiveCitations(html) {
+		const anchorPat = '<a\\s+[^>]*>\\([^<)]+\\)<\\/a>';
+		const groupPat = new RegExp('(' + anchorPat + ')(\\s+' + anchorPat + ')+', 'g');
+		return html.replace(groupPat, (groupMatch) => {
+			/** @type {string[]} */
+			const parts = [];
+			const singlePat = /(<a\s+[^>]*>)\(([^<)]+)\)(<\/a>)/g;
+			let m;
+			while ((m = singlePat.exec(groupMatch)) !== null) {
+				parts.push(`${m[1]}${m[2]}${m[3]}`);
+			}
+			return '(' + parts.join('; ') + ')';
+		});
 	}
 
 	/**
@@ -942,10 +963,10 @@ class ZoteroRAGPlugin {
 
 		// Primary pattern: [S1], [S1:10], [S1:p.10], [S1,S2,S3], [S1:10,S2:20]
 		// Fallback pattern: [1], [1:10] — kept for older cached responses
-		// Page part tolerates an optional "p." or "p " prefix that some LLMs insert.
-		const pageToken = '(?::p\\.?\\s*\\d+|:\\d+)?';
+		// Page part tolerates an optional "p." or "p " prefix and section numbers (e.g. 0.3.1).
+		const pageToken = '(?::p\\.?\\s*[\\d.]+|:[\\d.]+)?';
 		const sRef = `[Ss]\\d+${pageToken}`;
-		const nRef = `\\d+(?::\\d+)?`;
+		const nRef = `\\d+(?::[\\d.]+)?`;
 		const citationPattern = new RegExp(
 			`\\[(${sRef}(?:,\\s*${sRef})*|${nRef}(?:,\\s*${nRef})*)\\]`, 'g'
 		);
@@ -984,12 +1005,12 @@ class ZoteroRAGPlugin {
 					displayText = this.formatCitationDisplayText(item);
 				}
 
-				// Build zotero://open-pdf/ URI using the LLM-cited page when available,
+				// Build zotero://open-pdf/ URI using the integer page when available,
 				// falling back to the chunk's stored page_number.
 				const uri = this.buildZoteroPDFURI(source, libraryType, item, page);
 
-				// Generate citation HTML (page unquoted; text_anchor quoted only when no page)
-				const citationHTML = this.formatCitationHTML(uri, displayText, page, source.text_anchor);
+				// Generate citation HTML — pass raw page string (may be a section like "0.3.1")
+				const citationHTML = this.formatCitationHTML(uri, displayText, pageRaw, source.text_anchor);
 				citationSpans.push(citationHTML);
 			}
 
@@ -1133,7 +1154,7 @@ class ZoteroRAGPlugin {
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
 		html += `<p><strong>Answer:</strong></p>`;
 
-		// Process answer text to replace inline citations
+		// Process answer text to replace inline citations, then merge consecutive ones
 		let answerHTML = '';
 		if (result.answer_format === 'html') {
 			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap);
@@ -1141,7 +1162,7 @@ class ZoteroRAGPlugin {
 			const escapedAnswer = this.escapeHTML(result.answer);
 			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap)}</p>`;
 		}
-		html += answerHTML;
+		html += this.mergeConsecutiveCitations(answerHTML);
 
 		// Add bibliography
 		html += this.formatBibliographyHTML(result.sources || [], libraryMap);

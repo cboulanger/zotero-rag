@@ -1,0 +1,29 @@
+{
+  "_doc": {
+    "title": "PUBLIC_LIBRARIES_CONFIG — schema reference",
+    "description": "Keys are Zotero.org library slugs in the form 'users/{userId}' or 'groups/{groupId}'. The numeric ID is the one visible in your Zotero.org profile URL or group URL. Only libraries whose visibility is set to 'Public' in Zotero.org settings should be listed here. Keys with the form 'groups/{id}/{short-name}' are normalized automatically — the short-name suffix is stripped.",
+    "fields": {
+      "title":       "Required. Displayed as the page heading on the query form.",
+      "description": "Required. Shown below the heading to explain the library's scope.",
+      "placeholder": "Optional. Placeholder text in the question textarea. Omit to use a generic default."
+    }
+  },
+
+  "users/1234567": {
+    "title": "My Personal Research Library",
+    "description": "A curated collection of papers on computational linguistics and NLP gathered over the last decade.",
+    "placeholder": "e.g. What methods are used for cross-lingual transfer learning?"
+  },
+
+  "groups/9876543": {
+    "title": "Digital Humanities Working Group",
+    "description": "Shared reading list of the DH Working Group, covering digital methods, text encoding, and cultural analytics.",
+    "placeholder": "e.g. How is the concept of affordance used in digital humanities scholarship?"
+  },
+
+  "groups/1111111/optional-short-name-is-ignored": {
+    "title": "Open Access Science Collection",
+    "description": "Open-access articles on climate science and sustainability — no placeholder configured.",
+    "_note": "The '/optional-short-name-is-ignored' suffix is stripped automatically; the key is treated as 'groups/1111111'."
+  }
+}

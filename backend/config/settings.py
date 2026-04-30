@@ -39,6 +39,12 @@ class Settings(BaseSettings):
                     "When set, all requests must include this key. "
                     "Leave unset for local-only deployments."
     )
+    public_libraries_config: Optional[str] = Field(
+        default=None,
+        description="Path to JSON file listing publicly exposed library slugs "
+                    "(users/{id} or groups/{id}) with title and description. "
+                    "When set, enables the /public/ web UI for unauthenticated RAG queries."
+    )
     allowed_origins: list[str] = Field(
         default=["*"],
         description="CORS allowed origins. Use ['*'] for local deployments. "

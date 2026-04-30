@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ question|truncate(60) }} — {{ title }}</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.3rem; color: #333; }
+  .answer { line-height: 1.7; }
+  .answer a { color: #1a5c9e; }
+  .answer p { margin: 0.75em 0; }
+  .references { border-top: 1px solid #ddd; margin-top: 2rem; padding-top: 1rem; }
+  .references h2 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.05em; color: #555; }
+  .references ul { padding-left: 1.2rem; }
+  .references li { margin-bottom: 0.4rem; font-size: 0.9rem; }
+  .references a { color: #1a5c9e; }
+  nav { font-size: 0.85rem; margin-top: 2rem; border-top: 1px solid #eee; padding-top: 1rem; }
+  nav a { color: #1a5c9e; margin-right: 1.5rem; }
+</style>
+</head>
+<body>
+<h1>{{ question }}</h1>
+<div class="answer">{{ answer_html|safe }}</div>
+
+{% if sources %}
+<div class="references">
+  <h2>References</h2>
+  <ul>
+    {% for src in sources %}
+    <li><a href="{{ src.url }}" target="_blank" rel="noopener">{{ src.label }}</a></li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+<nav>
+  <a href="/public/{{ slug }}">&#8592; Ask another question</a>
+  <a href="/public/">All libraries</a>
+</nav>
+</body>
+</html>

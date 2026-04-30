@@ -14,7 +14,7 @@ from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
-from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits
+from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query
 
 # Get settings to access log configuration
 settings = get_settings()
@@ -154,6 +154,7 @@ async def api_key_middleware(request: Request, call_next):
         settings.api_key
         and request.method != "OPTIONS"
         and request.url.path not in _AUTH_EXEMPT_PATHS
+        and not request.url.path.startswith("/public")
     ):
         header_key = request.headers.get("X-API-Key")
         query_key = request.query_params.get("api_key")
@@ -179,6 +180,7 @@ app.include_router(query.router, prefix="/api", tags=["query"])
 app.include_router(document_upload.router, prefix="/api", tags=["document-upload"])
 app.include_router(registration.router, prefix="/api", tags=["registration"])
 app.include_router(rate_limits.router, prefix="/api", tags=["rate-limits"])
+app.include_router(public_query.router, tags=["public"])
 
 
 @app.get("/")
