@@ -1,3 +1,10 @@
+## [1.19.1](https://github.com/cboulanger/zotero-rag/compare/v1.19.0...v1.19.1) (2026-04-30)
+
+
+### Bug Fixes
+
+* Cache check-indexed results server-side, invalidate on full reindex ([a29b793](https://github.com/cboulanger/zotero-rag/commit/a29b793d9769dbfedee289fd2bc07e4f15f66a98)), closes [#18](https://github.com/cboulanger/zotero-rag/issues/18)
+
 # [1.19.0](https://github.com/cboulanger/zotero-rag/compare/v1.18.0...v1.19.0) (2026-04-30)
 
 
