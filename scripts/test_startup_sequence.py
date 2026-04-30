@@ -216,6 +216,66 @@ def test_container_mjs_restart() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Test 4 — container.mjs deploy without --restart-sidecars leaves sidecars running
+# ---------------------------------------------------------------------------
+
+def get_container_id(name: str) -> str:
+    """Return the container ID for a running container, or empty string."""
+    result = run(["podman", "ps", "--filter", f"name=^{name}$", "--format", "{{.ID}}"])
+    return result.stdout.strip()
+
+
+def test_deploy_no_restart_sidecars() -> bool:
+    print(f"\n{INFO} Test 4: container.mjs deploy (no --restart-sidecars) leaves sidecars untouched")
+
+    # Ensure containers are running from the previous test
+    base_name = "zotero-rag-latest"
+    kreuzberg_name = f"{base_name}-kreuzberg"
+    qdrant_name = f"{base_name}-qdrant"
+
+    kreuzberg_id_before = get_container_id(kreuzberg_name)
+    qdrant_id_before = get_container_id(qdrant_name)
+
+    if not kreuzberg_id_before or not qdrant_id_before:
+        print(f"{FAIL} Sidecars not running before deploy test (kreuzberg={kreuzberg_id_before!r}, qdrant={qdrant_id_before!r})")
+        return False
+
+    # Deploy without --restart-sidecars; reuse the same container name so sidecar
+    # names match.  --no-nginx --no-ssl avoids the root requirement.
+    result = mjs("deploy", "--fqdn", "localhost", "--name", "zotero-rag-latest", "--no-nginx", "--no-ssl", "--yes")
+    output = result.stdout + result.stderr
+
+    if result.returncode != 0:
+        print(f"{FAIL} container.mjs deploy failed (exit {result.returncode}):\n{output[-2000:]}")
+        return False
+
+    kreuzberg_id_after = get_container_id(kreuzberg_name)
+    qdrant_id_after = get_container_id(qdrant_name)
+
+    if kreuzberg_id_before != kreuzberg_id_after:
+        print(
+            f"{FAIL} Kreuzberg sidecar was restarted without --restart-sidecars "
+            f"(before={kreuzberg_id_before}, after={kreuzberg_id_after})"
+        )
+        return False
+
+    if qdrant_id_before != qdrant_id_after:
+        print(
+            f"{FAIL} Qdrant sidecar was restarted without --restart-sidecars "
+            f"(before={qdrant_id_before}, after={qdrant_id_after})"
+        )
+        return False
+
+    skipped = "already running" in output
+    if not skipped:
+        print(f"{FAIL} Expected 'already running' in deploy output but did not find it:\n{output[-2000:]}")
+        return False
+
+    print(f"{PASS} Sidecars left untouched (kreuzberg={kreuzberg_id_before}, qdrant={qdrant_id_before})")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -230,6 +290,7 @@ def main() -> None:
         results.append(("podman compose — healthcheck ordering", test_compose_healthcheck()))
         results.append(("container.mjs start — waitForQdrant", test_container_mjs_start()))
         results.append(("container.mjs restart — waitForQdrant", test_container_mjs_restart()))
+        results.append(("container.mjs deploy — sidecars left running without --restart-sidecars", test_deploy_no_restart_sidecars()))
     finally:
         print(f"\n{INFO} Cleaning up...")
         mjs_stop()

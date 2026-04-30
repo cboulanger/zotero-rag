@@ -641,6 +641,23 @@ function stopExisting(name) {
 }
 
 /**
+ * Return true if a container is currently running (not stopped/exited).
+ * @param {string} name
+ * @returns {boolean}
+ */
+function isContainerRunning(name) {
+  try {
+    const id = execSync(
+      `${containerCmd} ps --filter "name=^${name}$" --format "{{.ID}}"`,
+      { encoding: 'utf8', stdio: 'pipe' }
+    ).trim();
+    return !!id;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {{
  *   tag?: string, name?: string, port?: number, detach?: boolean,
  *   dataDir?: string, qdrantDataDir?: string, zoteroHost?: string, env?: string[],
@@ -831,6 +848,24 @@ async function handleLogs(options) {
 // ============================================================================
 // Deploy
 // ============================================================================
+
+/**
+ * Return true if an nginx site config already exists for this FQDN.
+ * @param {string} fqdn
+ * @returns {boolean}
+ */
+function isNginxConfigured(fqdn) {
+  return fs.existsSync(`/etc/nginx/sites-available/${APP_NAME}-${fqdn}`);
+}
+
+/**
+ * Return true if a Let's Encrypt certificate already exists for this FQDN.
+ * @param {string} fqdn
+ * @returns {boolean}
+ */
+function isSSLConfigured(fqdn) {
+  return fs.existsSync(`/etc/letsencrypt/live/${fqdn}/fullchain.pem`);
+}
 
 /**
  * @param {string} fqdn
@@ -1292,7 +1327,8 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
  *   dataDir?: string, qdrantDataDir?: string, env?: string[],
  *   pull?: boolean, rebuild?: boolean, cache?: boolean, localModels?: boolean, platform?: string,
  *   nginx?: boolean, ssl?: boolean, email?: string, maxBodySize?: string,
- *   systemdService?: string, sharedKreuzberg?: string, sharedQdrant?: string, yes?: boolean
+ *   systemdService?: string, sharedKreuzberg?: string, sharedQdrant?: string, yes?: boolean,
+ *   restartSidecars?: boolean, reconfigureNginx?: boolean, reconfigureSSL?: boolean
  * }} options
  */
 async function handleDeploy(options) {
@@ -1354,12 +1390,29 @@ async function handleDeploy(options) {
   const qdrantName = `${containerName}-qdrant`;
   ensureNetwork(NETWORK_NAME);
   if (!options.systemdService) {
-    await startKreuzberg(kreuzbergName, NETWORK_NAME);
-    await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
-    await waitForQdrant(qdrantName);
+    const kreuzbergRunning = isContainerRunning(kreuzbergName);
+    const qdrantRunning = isContainerRunning(qdrantName);
+
+    if (!kreuzbergRunning || options.restartSidecars) {
+      if (kreuzbergRunning) console.log('[INFO] --restart-sidecars: restarting kreuzberg sidecar...');
+      await startKreuzberg(kreuzbergName, NETWORK_NAME);
+    } else {
+      console.log(`[INFO] Kreuzberg sidecar already running — skipping (use --restart-sidecars to force)`);
+    }
+
+    if (!qdrantRunning || options.restartSidecars) {
+      if (qdrantRunning) console.log('[INFO] --restart-sidecars: restarting Qdrant sidecar...');
+      await startQdrant(qdrantName, NETWORK_NAME, qdrantStoragePath);
+      await waitForQdrant(qdrantName);
+    } else {
+      console.log(`[INFO] Qdrant sidecar already running — skipping (use --restart-sidecars to force)`);
+    }
   } else {
-    stopExisting(kreuzbergName);
-    stopExisting(qdrantName);
+    // systemd manages sidecars; only stop them if the caller explicitly wants a restart
+    if (options.restartSidecars) {
+      stopExisting(kreuzbergName);
+      stopExisting(qdrantName);
+    }
   }
 
   stopExisting(containerName);
@@ -1379,7 +1432,7 @@ async function handleDeploy(options) {
     env: options.env,
     volumes,
     extraEnv,
-    addHost: true,
+    addHost: process.platform === 'linux',
     network: NETWORK_NAME,
   };
 
@@ -1416,8 +1469,22 @@ async function handleDeploy(options) {
   }
   if (!ready) console.log('[WARNING] Container may not be fully ready, continuing anyway...');
 
-  if (useNginx) setupNginx(options.fqdn, port, options.maxBodySize);
-  if (useSSL) await setupSSL(options.fqdn, email);
+  if (useNginx) {
+    if (!isNginxConfigured(options.fqdn) || options.reconfigureNginx) {
+      if (isNginxConfigured(options.fqdn)) console.log('[INFO] --reconfigure-nginx: updating existing nginx config...');
+      setupNginx(options.fqdn, port, options.maxBodySize);
+    } else {
+      console.log('[INFO] nginx already configured — skipping (use --reconfigure-nginx to update)');
+    }
+  }
+  if (useSSL) {
+    if (!isSSLConfigured(options.fqdn) || options.reconfigureSSL) {
+      if (isSSLConfigured(options.fqdn)) console.log('[INFO] --reconfigure-ssl: re-running certbot...');
+      await setupSSL(options.fqdn, email);
+    } else {
+      console.log('[INFO] SSL certificate already exists — skipping certbot (use --reconfigure-ssl to renew/reconfigure)');
+    }
+  }
 
   console.log('\n[SUCCESS] Deployment complete!');
   const scheme = useSSL ? 'https' : 'http';
@@ -1651,6 +1718,9 @@ program
   .option('--shared-kreuzberg <name>', 'Use an existing kreuzberg systemd service instead of creating one (env: DEPLOY_SHARED_KREUZBERG)')
   .option('--shared-qdrant <name>', 'Use an existing Qdrant systemd service instead of creating one')
   .option('--yes', 'Skip confirmation')
+  .option('--restart-sidecars', 'Restart kreuzberg/qdrant sidecars even if already running (default: skip if already running)')
+  .option('--reconfigure-nginx', 'Rewrite nginx config even if already present')
+  .option('--reconfigure-ssl', 'Run certbot even if SSL certificate already exists')
   .addHelpText('after', `
 Examples:
   # Deploy with nginx + SSL

@@ -69,7 +69,7 @@ Stopping with `docker compose down` removes all containers and the network toget
 
 **`bin/container.mjs`** manages sidecars explicitly:
 
-- `start` / `deploy` (without `--systemd-service`) → starts kreuzberg and Qdrant sidecars, pulls images, stops any existing sidecars with the same name, and runs them with the correct `--network-alias`. Sidecars are named `<app-container>-kreuzberg` and `<app-container>-qdrant`.
+- `start` / `deploy` (without `--systemd-service`) → starts kreuzberg and Qdrant sidecars if they are not already running, pulls images, and runs them with the correct `--network-alias`. Sidecars are named `<app-container>-kreuzberg` and `<app-container>-qdrant`. During `deploy`, already-running sidecars are left untouched by default; pass `--restart-sidecars` to force a stop-and-restart.
 - `stop` → stops and removes both sidecars.
 - `restart` → stops and restarts the app container and both sidecars.
 - Pass `--no-kreuzberg` to skip kreuzberg (if running it separately); pass `--no-qdrant` to skip the Qdrant sidecar (falls back to local file mode).
@@ -253,6 +253,9 @@ sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/container.mjs deploy ...
 | `--shared-qdrant NAME` | — | Depend on an existing Qdrant service instead of creating one |
 | `--no-qdrant` | — | Skip Qdrant sidecar; falls back to local embedded file mode |
 | `--yes` | — | Skip confirmation prompt |
+| `--restart-sidecars` | — | Restart kreuzberg/qdrant even if already running (default: skip if running) |
+| `--reconfigure-nginx` | — | Rewrite nginx config even if already set up |
+| `--reconfigure-ssl` | — | Re-run certbot even if SSL certificate already exists |
 
 ### Platform handling
 
@@ -287,6 +290,9 @@ node bin/deploy.mjs .env.deploy.myserver
 | `DEPLOY_SHARED_KREUZBERG` | `--shared-kreuzberg` |
 | `DEPLOY_SHARED_QDRANT` | `--shared-qdrant` |
 | `DEPLOY_QDRANT_DATA_DIR` | `--qdrant-data-dir` |
+| `DEPLOY_RESTART_SIDECARS=true` | `--restart-sidecars` |
+| `DEPLOY_RECONFIGURE_NGINX=true` | `--reconfigure-nginx` |
+| `DEPLOY_RECONFIGURE_SSL=true` | `--reconfigure-ssl` |
 | Everything else | `--env KEY` (value loaded from env via `dotenv.config`) |
 
 If `DEPLOY_FQDN` is unset or equals `localhost`/`127.0.0.1`, the script
