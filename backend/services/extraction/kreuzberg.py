@@ -13,7 +13,6 @@ Kreuzberg HTTP API (POST /extract):
 See https://docs.kreuzberg.dev/guides/docker/ for full API reference.
 """
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -24,8 +23,16 @@ from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 
 logger = logging.getLogger(__name__)
 
-_TIMEOUT_RETRIES = 2
-_TIMEOUT_RETRY_DELAY = 5.0
+_TIMEOUT_FLOOR = 60       # seconds
+_TIMEOUT_CAP = 1800       # seconds (30 min)
+_BYTES_PER_SECOND_PDF = 3_000    # OCR-heavy; slow per byte
+_BYTES_PER_SECOND_OTHER = 10_000
+
+
+def _compute_timeout(content_size: int, mime_type: str) -> int:
+    """Return a per-request timeout scaled to document size and type."""
+    rate = _BYTES_PER_SECOND_PDF if mime_type == "application/pdf" else _BYTES_PER_SECOND_OTHER
+    return max(_TIMEOUT_FLOOR, min(_TIMEOUT_CAP, content_size // rate))
 
 
 class KreuzbergTimeoutError(RuntimeError):
@@ -50,7 +57,6 @@ class KreuzbergExtractor(DocumentExtractor):
         max_chunk_size: int = 512,
         chunk_overlap: int = 50,
         ocr_enabled: bool = True,
-        timeout_seconds: int = 300,
     ):
         """
         Args:
@@ -58,12 +64,9 @@ class KreuzbergExtractor(DocumentExtractor):
             max_chunk_size: Maximum characters per chunk.
             chunk_overlap: Overlap characters between consecutive chunks.
             ocr_enabled: Whether to attempt OCR on image-only pages.
-            timeout_seconds: Per-request HTTP timeout. Large HTML snapshots and
-                OCR-heavy PDFs may need more than the default 120s.
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
         self._ocr_enabled = ocr_enabled
-        self._timeout_seconds = timeout_seconds
         self._config: dict[str, Any] = {
             "chunking": {
                 "max_characters": max_chunk_size,
@@ -72,8 +75,7 @@ class KreuzbergExtractor(DocumentExtractor):
         }
         logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
-            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled}, "
-            f"timeout={timeout_seconds}s)"
+            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled})"
         )
 
     async def extract_and_chunk(
@@ -92,61 +94,47 @@ class KreuzbergExtractor(DocumentExtractor):
             List of ExtractionChunk objects, empty if extraction fails.
         """
         url = f"{self._kreuzberg_url}/extract"
-        last_exc: httpx.TimeoutException | httpx.ReadError | None = None
-        for attempt in range(1, _TIMEOUT_RETRIES + 2):
-            try:
-                async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                    response = await client.post(
-                        url,
-                        files={"files": ("document", content, mime_type)},
-                        data={"config": json.dumps(self._config)},
-                    )
-                    response.raise_for_status()
-                break  # success
-            except httpx.ConnectError as exc:
-                raise RuntimeError(
-                    f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
-                    f"Ensure the kreuzberg container is running."
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 422:
-                    try:
-                        body = exc.response.json()
-                        if body.get("error_type") == "ParsingError":
-                            raise KreuzbergParsingError(
-                                f"kreuzberg sidecar returned HTTP 422 for mime={mime_type}: {exc.response.text}"
-                            ) from exc
-                    except (ValueError, AttributeError):
-                        pass
-                raise RuntimeError(
-                    f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
-                    f"for mime={mime_type}: {exc.response.text}"
-                ) from exc
-            except httpx.TimeoutException as exc:
-                last_exc = exc
-                if attempt <= _TIMEOUT_RETRIES:
-                    logger.warning(
-                        f"kreuzberg sidecar timeout for mime={mime_type} "
-                        f"(attempt {attempt}/{_TIMEOUT_RETRIES + 1}), retrying in {_TIMEOUT_RETRY_DELAY}s"
-                    )
-                    await asyncio.sleep(_TIMEOUT_RETRY_DELAY)
-                else:
-                    raise KreuzbergTimeoutError(
-                        f"kreuzberg sidecar timed out for mime={mime_type} after {_TIMEOUT_RETRIES + 1} attempts"
-                    ) from last_exc
-            except httpx.ReadError as exc:
-                # Sidecar dropped the connection mid-response (crash, OOM, etc.)
-                last_exc = exc
-                if attempt <= _TIMEOUT_RETRIES:
-                    logger.warning(
-                        f"kreuzberg sidecar read error for mime={mime_type} "
-                        f"(attempt {attempt}/{_TIMEOUT_RETRIES + 1}), retrying in {_TIMEOUT_RETRY_DELAY}s"
-                    )
-                    await asyncio.sleep(_TIMEOUT_RETRY_DELAY)
-                else:
-                    raise KreuzbergTimeoutError(
-                        f"kreuzberg sidecar connection dropped for mime={mime_type} after {_TIMEOUT_RETRIES + 1} attempts"
-                    ) from last_exc
+        timeout = _compute_timeout(len(content), mime_type)
+        logger.debug(
+            f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    url,
+                    files={"files": ("document", content, mime_type)},
+                    data={"config": json.dumps(self._config)},
+                )
+                response.raise_for_status()
+        except httpx.ConnectError as exc:
+            raise RuntimeError(
+                f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
+                f"Ensure the kreuzberg container is running."
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 422:
+                try:
+                    body = exc.response.json()
+                    if body.get("error_type") == "ParsingError":
+                        raise KreuzbergParsingError(
+                            f"kreuzberg sidecar returned HTTP 422 for mime={mime_type}: {exc.response.text}"
+                        ) from exc
+                except (ValueError, AttributeError):
+                    pass
+            raise RuntimeError(
+                f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
+                f"for mime={mime_type}: {exc.response.text}"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise KreuzbergTimeoutError(
+                f"kreuzberg sidecar timed out for mime={mime_type} "
+                f"(size={len(content)}, timeout={timeout}s)"
+            ) from exc
+        except httpx.ReadError as exc:
+            raise KreuzbergTimeoutError(
+                f"kreuzberg sidecar connection dropped for mime={mime_type} "
+                f"(size={len(content)}, timeout={timeout}s)"
+            ) from exc
 
         try:
             results = response.json()

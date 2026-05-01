@@ -92,12 +92,6 @@ class Settings(BaseSettings):
         description="URL of the kreuzberg sidecar HTTP API. "
                     "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
     )
-    kreuzberg_timeout_seconds: int = Field(
-        default=300,
-        description="Per-request timeout in seconds for the kreuzberg sidecar. "
-                    "Large HTML snapshots and OCR-heavy PDFs may need >120s. Default: 300."
-    )
-
     # Data storage — all paths default to subdirs of data_path
     data_path: Path = Field(
         default_factory=lambda: Path(__file__).parent.parent.parent / "data",

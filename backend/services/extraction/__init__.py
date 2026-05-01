@@ -29,7 +29,6 @@ def create_document_extractor(
     chunk_overlap: int = 50,
     ocr_enabled: bool = True,
     kreuzberg_url: str = "http://localhost:8100",
-    kreuzberg_timeout_seconds: int = 300,
 ) -> DocumentExtractor:
     """
     Factory: create a DocumentExtractor for the named backend.
@@ -40,7 +39,6 @@ def create_document_extractor(
         chunk_overlap: Overlap between consecutive chunks.
         ocr_enabled: Whether to enable OCR (Kreuzberg only).
         kreuzberg_url: Base URL of the kreuzberg sidecar (kreuzberg backend only).
-        kreuzberg_timeout_seconds: Per-request timeout for the kreuzberg sidecar.
 
     Returns:
         Configured DocumentExtractor instance.
@@ -55,7 +53,6 @@ def create_document_extractor(
                 max_chunk_size=max_chunk_size,
                 chunk_overlap=chunk_overlap,
                 ocr_enabled=ocr_enabled,
-                timeout_seconds=kreuzberg_timeout_seconds,
             )
         case "legacy":
             return LegacyExtractor(
