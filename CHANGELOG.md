@@ -1,3 +1,11 @@
+## [1.19.8](https://github.com/cboulanger/zotero-rag/compare/v1.19.7...v1.19.8) (2026-05-01)
+
+
+### Bug Fixes
+
+* log upload file size in human-readable format ([24d2533](https://github.com/cboulanger/zotero-rag/commit/24d25332e099eec112b487179dc03edd1b3db71f))
+* replace fixed kreuzberg timeout with size-scaled single attempt ([821967e](https://github.com/cboulanger/zotero-rag/commit/821967ed1a246c873b16bddc17624d8593592b84))
+
 ## [1.19.7](https://github.com/cboulanger/zotero-rag/compare/v1.19.6...v1.19.7) (2026-05-01)
 
 
