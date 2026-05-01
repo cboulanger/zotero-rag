@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Optional
 
@@ -71,6 +72,34 @@ def _update_item_cache(library_id: str, updates: dict[str, int | None]) -> None:
     """Merge {item_key: version|None} entries into the item-level cache."""
     with _check_indexed_item_cache_lock:
         _check_indexed_item_cache.setdefault(library_id, {}).update(updates)
+
+
+def load_item_cache(path: Path) -> None:
+    """Load the item-level cache from disk (called once at startup)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        with _check_indexed_item_cache_lock:
+            _check_indexed_item_cache.clear()
+            _check_indexed_item_cache.update(data)
+        total = sum(len(v) for v in data.values())
+        logger.info(f"Loaded check-indexed item cache from {path} ({len(data)} libraries, {total} entries)")
+    except FileNotFoundError:
+        logger.info(f"No check-indexed cache file at {path} — starting with empty cache")
+    except Exception as e:
+        logger.warning(f"Failed to load check-indexed cache from {path}: {e} — starting with empty cache")
+
+
+def save_item_cache(path: Path) -> None:
+    """Persist the item-level cache to disk (called once at shutdown)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _check_indexed_item_cache_lock:
+            data = {lib: dict(entries) for lib, entries in _check_indexed_item_cache.items()}
+        path.write_text(json.dumps(data), encoding="utf-8")
+        total = sum(len(v) for v in data.values())
+        logger.info(f"Saved check-indexed item cache to {path} ({len(data)} libraries, {total} entries)")
+    except Exception as e:
+        logger.warning(f"Failed to save check-indexed cache to {path}: {e}")
 
 
 # ---------------------------------------------------------------------------

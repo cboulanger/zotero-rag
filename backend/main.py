@@ -15,6 +15,7 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
 from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query
+from backend.api.document_upload import load_item_cache, save_item_cache
 
 # Get settings to access log configuration
 settings = get_settings()
@@ -83,6 +84,9 @@ async def lifespan(app: FastAPI):
     if settings.log_file:
         logger.info(f"Logging to file: {settings.log_file}")
 
+    _cache_path = settings.data_path / "system" / "check_indexed_cache.json"
+    load_item_cache(_cache_path)
+
     # Open a single VectorStore for the lifetime of the process.
     # Sharing one Qdrant client across all requests avoids the lock-file
     # contention that causes BlockingIOError when requests overlap.
@@ -112,6 +116,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down Zotero RAG backend")
+    save_item_cache(_cache_path)
     if getattr(app.state, "vector_store", None) is not None:
         app.state.vector_store.close()
         logger.info("VectorStore closed")
