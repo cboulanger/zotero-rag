@@ -220,7 +220,11 @@ async def check_indexed(
         try:
             fresh_versions = vector_store.get_item_versions_bulk(library_id, cache_misses)
         except Exception as exc:
-            logger.exception(f"check-indexed failed for library={library_id}: {exc}")
+            from qdrant_client.http.exceptions import ResponseHandlingException
+            if isinstance(exc, ResponseHandlingException):
+                logger.warning(f"check-indexed failed for library={library_id} (transient Qdrant error): {exc}")
+            else:
+                logger.exception(f"check-indexed failed for library={library_id}: {exc}")
             raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
         # Cache results: None for items confirmed absent from the index
         _update_item_cache(library_id, {k: fresh_versions.get(k) for k in cache_misses})
