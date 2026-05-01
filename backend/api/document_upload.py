@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from backend.db.vector_store import VectorStore
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service
 from backend.models.document import (
+    CURRENT_SCHEMA_VERSION,
     DocumentMetadata,
 )
 from backend.models.library import LibraryIndexMetadata
@@ -46,16 +47,16 @@ logger = logging.getLogger(__name__)
 # successful uploads update specific entries.
 # ---------------------------------------------------------------------------
 
-_check_indexed_item_cache: dict[str, dict[str, int | None]] = {}
+_check_indexed_item_cache: dict[str, dict[str, dict | None]] = {}
 _check_indexed_item_cache_lock = Lock()
 
 
 def _get_cached_item_versions(
     library_id: str, item_keys: list[str], force_refresh: bool
-) -> tuple[dict[str, int | None], list[str]]:
+) -> tuple[dict[str, dict | None], list[str]]:
     """Return (cache_hits, cache_misses).
 
-    cache_hits maps item_key -> version|None (None = confirmed not indexed).
+    cache_hits maps item_key -> state_dict|None (None = confirmed not indexed).
     cache_misses is the list of item_keys not found in the cache.
     When force_refresh=True all keys are treated as misses.
     """
@@ -68,8 +69,8 @@ def _get_cached_item_versions(
     return hits, misses
 
 
-def _update_item_cache(library_id: str, updates: dict[str, int | None]) -> None:
-    """Merge {item_key: version|None} entries into the item-level cache."""
+def _update_item_cache(library_id: str, updates: dict[str, dict | None]) -> None:
+    """Merge {item_key: state_dict|None} entries into the item-level cache."""
     with _check_indexed_item_cache_lock:
         _check_indexed_item_cache.setdefault(library_id, {}).update(updates)
 
@@ -133,6 +134,32 @@ class AttachmentIndexStatus(BaseModel):
     attachment_key: str
     needs_indexing: bool
     reason: str  # "not_indexed" | "version_changed" | "up_to_date"
+    needs_metadata_update: bool = False  # True when schema_version < CURRENT_SCHEMA_VERSION
+
+
+class ItemMetadataUpdate(BaseModel):
+    """Metadata fields to update for a single Zotero item."""
+
+    item_key: str
+    title: Optional[str] = None
+    authors: list[str] = []
+    year: Optional[int] = None
+    item_type: Optional[str] = None
+
+
+class BatchMetadataUpdateRequest(BaseModel):
+    """Batch metadata-only update request (no file re-upload, no re-embedding)."""
+
+    library_id: str
+    items: list[ItemMetadataUpdate]
+
+
+class BatchMetadataUpdateResult(BaseModel):
+    """Result of a batch metadata update."""
+
+    library_id: str
+    updated_items: int
+    updated_chunks: int
 
 
 class CheckIndexedResponse(BaseModel):
@@ -244,10 +271,10 @@ async def check_indexed(
     item_keys = [att.item_key for att in request.attachments]
     cache_hits, cache_misses = _get_cached_item_versions(library_id, item_keys, request.force_refresh)
 
-    fresh_versions: dict[str, int] = {}
+    fresh_states: dict[str, dict] = {}
     if cache_misses:
         try:
-            fresh_versions = vector_store.get_item_versions_bulk(library_id, cache_misses)
+            fresh_states = vector_store.get_item_states_bulk(library_id, cache_misses)
         except Exception as exc:
             from qdrant_client.http.exceptions import ResponseHandlingException
             if isinstance(exc, ResponseHandlingException):
@@ -256,12 +283,12 @@ async def check_indexed(
                 logger.exception(f"check-indexed failed for library={library_id}: {exc}")
             raise HTTPException(status_code=500, detail=f"Vector store error: {exc}") from exc
         # Cache results: None for items confirmed absent from the index
-        _update_item_cache(library_id, {k: fresh_versions.get(k) for k in cache_misses})
+        _update_item_cache(library_id, {k: fresh_states.get(k) for k in cache_misses})
 
-    # Merge: cache_hits has int|None, fresh_versions has int (absent = not indexed → None)
-    indexed_versions: dict[str, int | None] = {
+    # Merge: cache_hits has dict|None, fresh_states has dict (absent = not indexed → None)
+    item_states: dict[str, dict | None] = {
         **cache_hits,
-        **{k: fresh_versions.get(k) for k in cache_misses},
+        **{k: fresh_states.get(k) for k in cache_misses},
     }
 
     logger.info(
@@ -271,16 +298,16 @@ async def check_indexed(
     )
 
     for att in request.attachments:
-        indexed_version = indexed_versions.get(att.item_key)
+        state = item_states.get(att.item_key)
 
-        if indexed_version is None:
+        if state is None:
             statuses.append(AttachmentIndexStatus(
                 item_key=att.item_key,
                 attachment_key=att.attachment_key,
                 needs_indexing=True,
                 reason="not_indexed",
             ))
-        elif indexed_version < att.item_version:
+        elif state["item_version"] < att.item_version:
             statuses.append(AttachmentIndexStatus(
                 item_key=att.item_key,
                 attachment_key=att.attachment_key,
@@ -288,11 +315,13 @@ async def check_indexed(
                 reason="version_changed",
             ))
         else:
+            schema_outdated = state.get("schema_version", 2) < CURRENT_SCHEMA_VERSION
             statuses.append(AttachmentIndexStatus(
                 item_key=att.item_key,
                 attachment_key=att.attachment_key,
                 needs_indexing=False,
                 reason="up_to_date",
+                needs_metadata_update=schema_outdated,
             ))
 
         # Repair missing library metadata if chunks already exist.
@@ -539,7 +568,7 @@ async def upload_and_index_document(
         "indexed_fresh", "copied_cross_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
     ):
-        _update_item_cache(library_id, {item_key: item_version})
+        _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(
         library_id=library_id,
         item_key=item_key,
@@ -554,6 +583,7 @@ async def upload_and_index_document(
 
 @router.post(
     "/index/abstract",
+
     response_model=DocumentUploadResult,
     summary="Index an item via its abstractNote (remote mode, no attachment file)",
 )
@@ -650,7 +680,7 @@ async def upload_and_index_abstract(
 
     status = "indexed" if chunks_added > 0 else "skipped_duplicate"
     if status == "indexed":
-        _update_item_cache(request.library_id, {request.item_key: request.item_version})
+        _update_item_cache(request.library_id, {request.item_key: {"item_version": request.item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(
         library_id=request.library_id,
         item_key=request.item_key,
@@ -660,4 +690,55 @@ async def upload_and_index_abstract(
         message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
         rate_limit_headers=await embedding_service.get_rate_limit_info(),
+    )
+
+
+@router.post(
+    "/index/items/metadata",
+    response_model=BatchMetadataUpdateResult,
+    summary="Update payload metadata for existing chunks without re-embedding",
+)
+async def batch_update_metadata(
+    request: BatchMetadataUpdateRequest,
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """
+    Update bibliographic metadata fields on existing indexed chunks without re-embedding.
+
+    Used by the plugin after check-indexed returns needs_metadata_update=True for items
+    whose schema_version is below the current version (e.g. item_type was added in v3).
+
+    No file bytes are uploaded; the backend calls Qdrant set_payload() directly.
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    updated_items = 0
+    updated_chunks = 0
+
+    for item in request.items:
+        fields: dict = {"schema_version": CURRENT_SCHEMA_VERSION}
+        if item.title is not None:
+            fields["title"] = item.title
+        if item.authors:
+            fields["authors"] = item.authors
+        if item.year is not None:
+            fields["year"] = item.year
+        if item.item_type is not None:
+            fields["item_type"] = item.item_type
+
+        n = vector_store.update_item_metadata(request.library_id, item.item_key, fields)
+        if n > 0:
+            updated_items += 1
+            updated_chunks += n
+
+    logger.info(
+        f"Metadata update: library={request.library_id} "
+        f"items={updated_items}/{len(request.items)} chunks={updated_chunks}"
+    )
+    _invalidate_library_cache(request.library_id)
+    return BatchMetadataUpdateResult(
+        library_id=request.library_id,
+        updated_items=updated_items,
+        updated_chunks=updated_chunks,
     )

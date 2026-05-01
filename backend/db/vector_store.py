@@ -21,10 +21,15 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue,
     MatchAny,
+    MatchText,
+    Range,
     SearchParams,
+    TextIndexParams,
+    TokenizerType,
 )
 
 from backend.models.document import DocumentChunk, ChunkMetadata, SearchResult, DeduplicationRecord, DocumentMetadata
+from backend.models.filters import MetadataFilters
 from backend.models.library import LibraryIndexMetadata
 
 
@@ -217,11 +222,12 @@ class VectorStore:
                 "title": chunk.metadata.document_metadata.title,
                 "authors": chunk.metadata.document_metadata.authors,
                 "year": chunk.metadata.document_metadata.year,
+                "item_type": chunk.metadata.document_metadata.item_type,
                 "page_number": chunk.metadata.page_number,
                 "text_preview": chunk.metadata.text_preview,
                 "chunk_index": chunk.metadata.chunk_index,
                 "content_hash": chunk.metadata.content_hash,
-                # Version tracking fields (schema v2)
+                # Version tracking fields (schema v2+)
                 "item_version": chunk.metadata.item_version,
                 "attachment_version": chunk.metadata.attachment_version,
                 "indexed_at": chunk.metadata.indexed_at,
@@ -274,11 +280,12 @@ class VectorStore:
                     "title": chunk.metadata.document_metadata.title,
                     "authors": chunk.metadata.document_metadata.authors,
                     "year": chunk.metadata.document_metadata.year,
+                    "item_type": chunk.metadata.document_metadata.item_type,
                     "page_number": chunk.metadata.page_number,
                     "text_preview": chunk.metadata.text_preview,
                     "chunk_index": chunk.metadata.chunk_index,
                     "content_hash": chunk.metadata.content_hash,
-                    # Version tracking fields (schema v2)
+                    # Version tracking fields (schema v2+)
                     "item_version": chunk.metadata.item_version,
                     "attachment_version": chunk.metadata.attachment_version,
                     "indexed_at": chunk.metadata.indexed_at,
@@ -298,12 +305,35 @@ class VectorStore:
         logger.debug(f"Added {len(points)} chunks in batch")
         return point_ids
 
+    def _build_metadata_must_conditions(self, filters: MetadataFilters) -> list:
+        """Return Qdrant FieldCondition list for the given MetadataFilters (AND semantics)."""
+        conditions = []
+        if filters.year_min is not None or filters.year_max is not None:
+            conditions.append(FieldCondition(
+                key="year",
+                range=Range(
+                    gte=filters.year_min,
+                    lte=filters.year_max,
+                ),
+            ))
+        for author in filters.authors:
+            conditions.append(FieldCondition(key="authors", match=MatchText(text=author)))
+        if filters.item_types:
+            conditions.append(FieldCondition(
+                key="item_type",
+                match=MatchAny(any=filters.item_types),
+            ))
+        for kw in filters.title_keywords:
+            conditions.append(FieldCondition(key="title", match=MatchText(text=kw)))
+        return conditions
+
     def search(
         self,
         query_vector: list[float],
         limit: int = 5,
         score_threshold: Optional[float] = None,
         library_ids: Optional[list[str]] = None,
+        filters: Optional[MetadataFilters] = None,
     ) -> list[SearchResult]:
         """
         Search for similar chunks.
@@ -313,22 +343,30 @@ class VectorStore:
             limit: Maximum number of results
             score_threshold: Minimum similarity score
             library_ids: Optional list of library IDs to filter by
+            filters: Optional bibliographic metadata filters
 
         Returns:
             List of search results with chunks and scores
         """
-        # Build filter if library_ids specified
-        query_filter = None
+        # library_ids → OR filter in should; metadata filters → AND filter in must
+        should_conditions = []
         if library_ids:
+            should_conditions = [
+                FieldCondition(key="library_id", match=MatchValue(value=lib_id))
+                for lib_id in library_ids
+            ]
+
+        must_conditions = []
+        if filters and not filters.is_empty():
+            must_conditions = self._build_metadata_must_conditions(filters)
+
+        if should_conditions or must_conditions:
             query_filter = Filter(
-                should=[
-                    FieldCondition(
-                        key="library_id",
-                        match=MatchValue(value=lib_id),
-                    )
-                    for lib_id in library_ids
-                ]
+                should=should_conditions or None,
+                must=must_conditions or None,
             )
+        else:
+            query_filter = None
 
         # Search using query_points (replaces deprecated search method)
         results = self.client.query_points(
@@ -355,7 +393,7 @@ class VectorStore:
                     "title": payload.get("title"),
                     "authors": payload.get("authors", []),
                     "year": payload.get("year"),
-                    "item_type": None,  # Not stored in vector DB
+                    "item_type": payload.get("item_type"),
                 },
                 page_number=payload.get("page_number"),
                 text_preview=payload["text_preview"],
@@ -378,6 +416,149 @@ class VectorStore:
 
         logger.debug(f"Search returned {len(search_results)} results")
         return search_results
+
+    def get_items_by_metadata(
+        self,
+        library_ids: Optional[list[str]],
+        filters: MetadataFilters,
+        limit: int = 50,
+    ) -> list[dict]:
+        """
+        Return one representative payload dict per unique item matching the given filters.
+
+        Uses Qdrant scroll (no query vector) — pure metadata lookup. Results are
+        deduplicated by item_key so callers receive one entry per Zotero item, not per chunk.
+
+        Args:
+            library_ids: Libraries to restrict the search to (OR logic).
+            filters: Bibliographic metadata filters.
+            limit: Maximum number of distinct items to return.
+
+        Returns:
+            List of payload dicts, one per unique item_key.
+        """
+        must_conditions: list = self._build_metadata_must_conditions(filters)
+        should_conditions: list = []
+        if library_ids:
+            should_conditions = [
+                FieldCondition(key="library_id", match=MatchValue(value=lib_id))
+                for lib_id in library_ids
+            ]
+
+        scroll_filter = Filter(
+            should=should_conditions or None,
+            must=must_conditions or None,
+        ) if (should_conditions or must_conditions) else None
+
+        seen_items: set[str] = set()
+        results: list[dict] = []
+        offset = None
+
+        while len(results) < limit:
+            batch, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in batch:
+                ik = point.payload.get("item_key")
+                if ik and ik not in seen_items:
+                    seen_items.add(ik)
+                    results.append(point.payload)
+                    if len(results) >= limit:
+                        break
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        logger.debug(f"get_items_by_metadata returned {len(results)} distinct items")
+        return results
+
+    def get_item_states_bulk(
+        self,
+        library_id: str,
+        item_keys: list[str],
+    ) -> dict[str, dict]:
+        """
+        Return item_version and schema_version for multiple items in one Qdrant scroll.
+
+        Returns a dict mapping item_key → {"item_version": int, "schema_version": int}.
+        Keys absent from the result have no indexed chunks (or only legacy chunks).
+        """
+        if not item_keys:
+            return {}
+
+        states: dict[str, dict] = {}
+        offset = None
+
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="item_key", match=MatchAny(any=item_keys)),
+                ]),
+                limit=1000,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
+            for point in results:
+                ik = point.payload.get("item_key")
+                if ik and ik not in states and "item_version" in point.payload:
+                    states[ik] = {
+                        "item_version": point.payload["item_version"],
+                        "schema_version": point.payload.get("schema_version", 2),
+                    }
+            if set(item_keys).issubset(states.keys()) or next_offset is None:
+                break
+            offset = next_offset
+
+        return states
+
+    def update_item_metadata(
+        self,
+        library_id: str,
+        item_key: str,
+        fields: dict,
+    ) -> int:
+        """
+        Update payload fields for all chunks of an item without re-embedding.
+
+        Used to backfill schema-outdated chunks (e.g. add item_type to existing chunks).
+
+        Args:
+            library_id: Library the item belongs to.
+            item_key: Zotero item key.
+            fields: Payload fields to set (merged into existing payload).
+
+        Returns:
+            Number of points updated.
+        """
+        chunks = self.client.scroll(
+            collection_name=self.CHUNKS_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                FieldCondition(key="item_key", match=MatchValue(value=item_key)),
+            ]),
+            limit=1000,
+            with_payload=False,
+            with_vectors=False,
+        )
+        point_ids = [p.id for p in chunks[0]]
+        if not point_ids:
+            return 0
+        self.client.set_payload(
+            collection_name=self.CHUNKS_COLLECTION,
+            payload=fields,
+            points=point_ids,
+        )
+        logger.debug(f"Updated {len(point_ids)} chunks for {library_id}/{item_key}")
+        return len(point_ids)
 
     def check_duplicate(self, content_hash: str, library_id: Optional[str] = None) -> Optional[DeduplicationRecord]:
         """
@@ -462,13 +643,15 @@ class VectorStore:
 
     def _ensure_chunks_indexes(self):
         """
-        Create payload indexes on library_id and item_key in CHUNKS_COLLECTION (idempotent).
+        Create payload indexes on CHUNKS_COLLECTION (idempotent).
 
-        These indexes make get_item_versions_bulk scroll queries efficient: without them
-        every MatchAny batch is a full O(N) scan across all chunks in the collection.
-        Called on every startup so existing deployments pick up the indexes without a rebuild.
+        Keyword indexes make version-bulk and library-filter queries efficient.
+        Integer index on year enables range filters.
+        Text indexes on authors and title enable substring matching.
+        Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        for field in ("library_id", "item_key"):
+        keyword_fields = ("library_id", "item_key", "item_type")
+        for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
@@ -477,9 +660,41 @@ class VectorStore:
                         field_name=field,
                         field_schema="keyword",
                     )
-                logger.info(f"Ensured payload index on {self.CHUNKS_COLLECTION}.{field}")
+                logger.debug(f"Ensured keyword index on {self.CHUNKS_COLLECTION}.{field}")
             except Exception as exc:
-                # Already exists, or local in-memory instance that ignores indexes.
+                logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.{field}: {exc}")
+
+        # Integer index for year range queries
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.client.create_payload_index(
+                    collection_name=self.CHUNKS_COLLECTION,
+                    field_name="year",
+                    field_schema="integer",
+                )
+            logger.debug(f"Ensured integer index on {self.CHUNKS_COLLECTION}.year")
+        except Exception as exc:
+            logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.year: {exc}")
+
+        # Text indexes for authors and title (enable MatchText substring filtering)
+        text_index_params = TextIndexParams(
+            type="text",
+            tokenizer=TokenizerType.WORD,
+            min_token_len=2,
+            lowercase=True,
+        )
+        for field in ("authors", "title"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.client.create_payload_index(
+                        collection_name=self.CHUNKS_COLLECTION,
+                        field_name=field,
+                        field_schema=text_index_params,
+                    )
+                logger.debug(f"Ensured text index on {self.CHUNKS_COLLECTION}.{field}")
+            except Exception as exc:
                 logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.{field}: {exc}")
 
     def find_cross_library_duplicate(
@@ -550,6 +765,7 @@ class VectorStore:
                     "title":              target_doc_metadata.title,
                     "authors":            target_doc_metadata.authors,
                     "year":               target_doc_metadata.year,
+                    "item_type":          target_doc_metadata.item_type,
                     "item_version":       target_item_version,
                     "attachment_version": target_attachment_version,
                     "indexed_at":         datetime.now(UTC).isoformat(),

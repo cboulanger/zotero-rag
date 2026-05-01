@@ -112,6 +112,16 @@ Once installed:
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
 
+#### Query Routing
+
+The backend automatically routes your question to the most appropriate search strategy before answering:
+
+- **Semantic (RAG) search** — for content questions: arguments, definitions, quotes, or explanations found in document text. Example: *"Where does Luhmann define autopoiesis?"*
+- **Metadata catalog search** — for bibliographic questions about what items exist. Example: *"List all books on Rechtssoziologie published between 1960 and 1990."*
+- **Combined** — for questions that need both, e.g. *"Papers by Habermas on communicative action after 1980"* uses a metadata filter while still searching document content.
+
+Routing is transparent and requires no extra configuration. To bypass routing and use pure RAG (faster, no routing LLM call), include `"enable_routing": false` in the API request body. See [Query Routing Architecture](docs/query-routing.md) for details.
+
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
 #### Public Web Interface
@@ -212,6 +222,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 ## Developer Documentation
 
 - **[Application architecture](docs/architecture.md)**
+- **[Query routing & agent system](docs/query-routing.md)**
 - **[Plugin development & hot reload](docs/zotero-plugin-dev.md)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**

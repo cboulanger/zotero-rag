@@ -41,6 +41,7 @@ function formatFileSize(bytes) {
  * @property {string} attachment_key
  * @property {boolean} needs_indexing
  * @property {string} reason
+ * @property {boolean} [needs_metadata_update]
  */
 
 /**
@@ -185,7 +186,11 @@ var RemoteIndexer = {
 		}
 		const statuses = [...cachedStatuses, ...pendingStatuses, ...checkedStatuses];
 		const toUpload = statuses.filter(s => s.needs_indexing);
+		const toMetadataUpdate = checkedStatuses.filter(s => s.needs_metadata_update && !s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
+		if (toMetadataUpdate.length > 0) {
+			log(`[RemoteIndexer] ${toMetadataUpdate.length} attachment(s) need metadata-only update`);
+		}
 
 		// 4. Download local files for toUpload items that have no cached path.
 		//    Skips attachments already indexed — avoids downloading files we won't use.
@@ -363,6 +368,23 @@ var RemoteIndexer = {
 				if (!firstError) firstError = msg;
 				errors++;
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
+			}
+		}
+
+		// Send metadata-only updates for schema-outdated items (no re-embedding needed)
+		if (toMetadataUpdate.length > 0 && !isCancelled()) {
+			try {
+				await this._sendMetadataUpdates({
+					statuses: toMetadataUpdate,
+					attachments,
+					libraryId,
+					backendURL,
+					getAuthHeaders,
+					log,
+					signal,
+				});
+			} catch (err) {
+				log(`[RemoteIndexer] Metadata update failed: ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 
@@ -550,6 +572,7 @@ var RemoteIndexer = {
 	 * @param {AbortSignal} [signal]
 	 * @param {function(UploadProgress): void} [onProgress]
 	 * @param {function(Array<AttachmentIndexStatus>, Array<AttachmentInfo>): Promise<void>} [onBatchComplete] - Called after each successful batch; use to flush the version cache incrementally.
+	 * @param {string} [mode] - Indexing mode ('incremental', 'full', or 'reindex'); controls force_refresh.
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
 	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode) {
@@ -929,6 +952,48 @@ var RemoteIndexer = {
 	 * @param {AbortSignal} [opts.signal]
 	 * @returns {Promise<{status: string, rateLimitHeaders: Record<string,string>|null}>}
 	 */
+	/**
+	 * Send metadata-only updates for items whose schema_version is below the current backend version.
+	 * No file bytes are uploaded; the backend calls Qdrant set_payload() directly.
+	 *
+	 * @param {Object} opts
+	 * @param {Array<AttachmentIndexStatus>} opts.statuses - Items marked needs_metadata_update
+	 * @param {Array<{item_key: string, attachment_key: string, parentItem: any, zoteroItem: any}>} opts.attachments
+	 * @param {string} opts.libraryId
+	 * @param {string} opts.backendURL
+	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
+	 * @param {function(string): void} opts.log
+	 * @param {AbortSignal} [opts.signal]
+	 */
+	async _sendMetadataUpdates({ statuses, attachments, libraryId, backendURL, getAuthHeaders, log, signal }) {
+		/** @type {Array<{item_key: string, title: string|null, authors: string[], year: number|null, item_type: string|null}>} */
+		const items = [];
+
+		for (const status of statuses) {
+			const att = attachments.find(a => a.item_key === status.item_key);
+			if (!att) continue;
+			const parent = att.parentItem || att.zoteroItem;
+			if (parent && parent.loadAllData) await parent.loadAllData();
+			items.push({
+				item_key: status.item_key,
+				title: parent && parent.getField ? (parent.getField('title') || null) : null,
+				authors: parent ? this._extractAuthors(parent) : [],
+				year: parent ? this._extractYear(parent) : null,
+				item_type: parent ? (parent.itemType || null) : null,
+			});
+		}
+
+		if (items.length === 0) return;
+
+		const response = await this._apiFetch('POST', `${backendURL}/api/index/items/metadata`, {
+			headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+			body: JSON.stringify({ library_id: libraryId, items }),
+			signal,
+		});
+		const result = await response.json();
+		log(`[RemoteIndexer] Metadata update: ${result.updated_items} items, ${result.updated_chunks} chunks updated`);
+	},
+
 	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		const item = abstractItem.zoteroItem;
 		if (item && item.loadAllData) await item.loadAllData();
