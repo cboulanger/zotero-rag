@@ -1325,24 +1325,27 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Clear the missing-files count for a library and notify the open RAG dialog.
-	 * Called when the fix-unavailable dialog confirms there are no missing files.
-	 * @param {number} libraryID
-	 */
-	/**
+	 * Update the missing-files count for a library and notify the open RAG dialog.
+	 * Called by the fix-unavailable dialog after scanning to keep the link count accurate.
 	 * @param {string} backendLibraryId - Backend library ID (e.g. "u12345" or group numeric string)
+	 * @param {number} count - Current actual count (0 hides the link)
 	 */
-	clearMissingFilesCount(backendLibraryId) {
+	updateMissingFilesCount(backendLibraryId, count) {
 		try {
 			// @ts-ignore
-			Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${backendLibraryId}`, 0, true);
+			Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${backendLibraryId}`, count, true);
 			if (this._dialogWindow && !this._dialogWindow.closed) {
 				const dlg = /** @type {any} */ (this._dialogWindow).ZoteroRAGDialog;
 				if (dlg && typeof dlg.onUnavailableCountUpdated === 'function') {
-					dlg.onUnavailableCountUpdated(backendLibraryId, 0);
+					dlg.onUnavailableCountUpdated(backendLibraryId, count);
 				}
 			}
 		} catch (_) {}
+	}
+
+	/** @param {string} backendLibraryId */
+	clearMissingFilesCount(backendLibraryId) {
+		this.updateMissingFilesCount(backendLibraryId, 0);
 	}
 
 	/**

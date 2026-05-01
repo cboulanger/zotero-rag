@@ -129,12 +129,14 @@ var RemoteIndexer = {
 		}
 
 		// 3. Ask the backend which of the remaining attachments actually need indexing.
-		//    onBatchComplete flushes the cache after each batch so a cancelled run
-		//    doesn't re-check already-verified attachments on the next restart.
+		//    onBatchComplete flushes the cache every 10 batches so a cancelled run
+		//    doesn't re-check already-verified attachments on the next restart,
+		//    without the O(n²) I/O of saving after every batch.
 		/** @type {Array<AttachmentIndexStatus>} */
 		let checkedStatuses = [];
 		if (toCheck.length > 0) {
 			onProgress({ percentage: 0, message: `Checking ${toCheck.length} attachments`, current: 0, total: toCheck.length });
+			let checkBatchCount = 0;
 			/** @param {Array<AttachmentIndexStatus>} batchStatuses @param {typeof toCheck} batchAttachments */
 			const onBatchComplete = async (batchStatuses, batchAttachments) => {
 				for (const s of batchStatuses) {
@@ -146,12 +148,20 @@ var RemoteIndexer = {
 						versionCache[att.attachment_key] = att.item_version;
 					}
 				}
-				await Promise.all([
-					this._saveVersionCache(libraryId, versionCache),
-					this._savePendingCache(libraryId, pendingCache),
-				]);
+				checkBatchCount++;
+				if (checkBatchCount % 10 === 0) {
+					await Promise.all([
+						this._saveVersionCache(libraryId, versionCache),
+						this._savePendingCache(libraryId, pendingCache),
+					]);
+				}
 			};
 			checkedStatuses = await this._checkIndexed(libraryId, toCheck, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode);
+			// Final flush for the last < 10 batches
+			await Promise.all([
+				this._saveVersionCache(libraryId, versionCache),
+				this._savePendingCache(libraryId, pendingCache),
+			]);
 		}
 
 		const statuses = [...cachedStatuses, ...pendingStatuses, ...checkedStatuses];
@@ -310,12 +320,10 @@ var RemoteIndexer = {
 			}
 		}
 
-		if (uploaded > 0 || errors > 0 || checkedStatuses.some(s => !s.needs_indexing) || abstractItems.length > 0) {
-			await Promise.all([
-				this._saveVersionCache(libraryId, versionCache),
-				this._savePendingCache(libraryId, pendingCache),
-			]);
-		}
+		await Promise.all([
+			this._saveVersionCache(libraryId, versionCache),
+			this._savePendingCache(libraryId, pendingCache),
+		]);
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}, Parse errors: ${parseErrors}`, current: total, total });
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}`);
@@ -532,7 +540,9 @@ var RemoteIndexer = {
 				const batchStatuses = data.statuses || [];
 				const needsIndexing = batchStatuses.filter(s => s.needs_indexing).length;
 				const upToDate = batchStatuses.length - needsIndexing;
-				log(`[RemoteIndexer] check-indexed batch: ${batchStatuses.length} checked, ${needsIndexing} need indexing, ${upToDate} up-to-date`);
+				const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+				const totalBatches = Math.ceil(attachments.length / BATCH_SIZE);
+				log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches}: ${batchStatuses.length} checked, ${needsIndexing} need indexing, ${upToDate} up-to-date`);
 				allStatuses.push(...batchStatuses);
 				consecutiveFailures = 0;
 				if (onBatchComplete) await onBatchComplete(batchStatuses, batch);

@@ -257,10 +257,11 @@ var ZoteroFixUnavailableDialog = {
 
 		this.rowStatus.clear();
 
+		// Sync the "N unavailable" link in the RAG dialog to the live count from this scan.
+		if (this.plugin && typeof this.plugin.updateMissingFilesCount === 'function') {
+			this.plugin.updateMissingFilesCount(this.backendLibraryId, this.items.length);
+		}
 		if (this.items.length === 0) {
-			if (this.plugin && typeof this.plugin.clearMissingFilesCount === 'function') {
-				this.plugin.clearMissingFilesCount(this.backendLibraryId);
-			}
 			this.setStatus('No unavailable attachments found in this library.');
 		} else {
 			this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
