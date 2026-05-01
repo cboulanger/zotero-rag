@@ -1,3 +1,11 @@
+## [1.19.7](https://github.com/cboulanger/zotero-rag/compare/v1.19.6...v1.19.7) (2026-05-01)
+
+
+### Bug Fixes
+
+* Four indexing correctness/performance fixes for large libraries ([394950f](https://github.com/cboulanger/zotero-rag/commit/394950ffe0d80385daf8ccb4e6897bf8cd90d23b))
+* suppress kreuzberg stack traces in logs; auto-start podman machine ([545e5d6](https://github.com/cboulanger/zotero-rag/commit/545e5d6345ad009637d68696af86d52bcc3b6ac8))
+
 ## [1.19.6](https://github.com/cboulanger/zotero-rag/compare/v1.19.5...v1.19.6) (2026-04-30)
 
 
