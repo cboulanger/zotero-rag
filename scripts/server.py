@@ -262,6 +262,9 @@ def get_extractor_backend():
 def find_container_runtime():
     """Detect an available container runtime (docker or podman).
 
+    For podman, attempts to start the machine via `podman machine start` if the
+    daemon is not reachable (common on macOS when the VM is stopped).
+
     Returns:
         str: 'docker' or 'podman' if available and daemon is running, None otherwise.
     """
@@ -274,6 +277,18 @@ def find_container_runtime():
             subprocess.run([cmd, 'info'], capture_output=True, check=True)
             return cmd
         except (subprocess.CalledProcessError, FileNotFoundError):
+            if cmd == 'podman':
+                # On macOS the podman machine may simply be stopped — try starting it.
+                print("[INFO] Podman daemon not reachable, attempting `podman machine start`...")
+                result = subprocess.run(
+                    ['podman', 'machine', 'start'],
+                    capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    print("[OK] Podman machine started")
+                    return cmd
+                else:
+                    print(f"[WARN] `podman machine start` failed: {result.stderr.strip()}")
             continue
     return None
 
