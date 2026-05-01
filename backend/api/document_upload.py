@@ -31,6 +31,7 @@ from backend.models.library import LibraryIndexMetadata
 from backend.services.document_processor import DocumentProcessor
 from backend.services.registration_service import RegistrationService
 from backend.config.settings import Settings, get_settings
+from backend.utils import format_file_size
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -367,11 +368,6 @@ async def upload_and_index_document(
         "zotero_modified", datetime.now(timezone.utc).isoformat()
     )
 
-    logger.info(
-        f"Upload request: library={library_id} user={user_id} "
-        f"item={item_key} attachment={attachment_key} mime={mime_type}"
-    )
-
     doc_metadata = DocumentMetadata(
         library_id=library_id,
         item_key=item_key,
@@ -386,6 +382,12 @@ async def upload_and_index_document(
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    logger.info(
+        f"Upload request: library={library_id} user={user_id} "
+        f"item={item_key} attachment={attachment_key} mime={mime_type} "
+        f"size={format_file_size(len(file_bytes))}"
+    )
 
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")

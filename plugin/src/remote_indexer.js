@@ -12,6 +12,18 @@ const DEBUG = true;
 /** @param {function(string): void} log @param {string} msg */
 const debug = (log, msg) => { if (DEBUG) log(`[RemoteIndexer] [DEBUG] ${msg}`); };
 
+/**
+ * Formats a byte count as a human-readable string with 2 decimal places.
+ * @param {number} bytes
+ * @returns {string} e.g. "150.34 KB", "25.34 MB", "1.23 GB"
+ */
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(2)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(2)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+}
+
 // 
 /**
  * @typedef {Object} AttachmentInfo
@@ -624,7 +636,7 @@ var RemoteIndexer = {
 
 		const uploadTimeoutMs = 10 * 60 * 1000;
 		const t0 = Date.now();
-		debug(log, `${att.attachment_key}: upload start — size=${bytes.length}B, timeout=${uploadTimeoutMs}ms`);
+		debug(log, `${att.attachment_key}: upload start — size=${formatFileSize(bytes.length)}, timeout=${uploadTimeoutMs}ms`);
 		let response;
 		try {
 			response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
