@@ -1,3 +1,15 @@
+# [1.20.0](https://github.com/cboulanger/zotero-rag/compare/v1.19.8...v1.20.0) (2026-05-02)
+
+
+### Bug Fixes
+
+* suppress stack trace for transient Qdrant disconnects in check-indexed ([2a733a9](https://github.com/cboulanger/zotero-rag/commit/2a733a9b79a5ae5622bc19436132cf30d7fbf5c2))
+
+
+### Features
+
+* persist check-indexed item cache across server restarts ([f8d3a5c](https://github.com/cboulanger/zotero-rag/commit/f8d3a5ced280b861f902350128eb80092b208b84))
+
 ## [1.19.8](https://github.com/cboulanger/zotero-rag/compare/v1.19.7...v1.19.8) (2026-05-01)
 
 
