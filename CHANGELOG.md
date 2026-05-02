@@ -1,3 +1,10 @@
+## [1.20.2](https://github.com/cboulanger/zotero-rag/compare/v1.20.1...v1.20.2) (2026-05-02)
+
+
+### Bug Fixes
+
+* sync toolbar button badge with Fix Unavailable count ([0f7878b](https://github.com/cboulanger/zotero-rag/commit/0f7878b1a34c9925f7cc2bfa5779fe8cb158f1c6))
+
 ## [1.20.1](https://github.com/cboulanger/zotero-rag/compare/v1.20.0...v1.20.1) (2026-05-02)
 
 
