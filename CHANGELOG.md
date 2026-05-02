@@ -1,3 +1,10 @@
+## [1.20.1](https://github.com/cboulanger/zotero-rag/compare/v1.20.0...v1.20.1) (2026-05-02)
+
+
+### Bug Fixes
+
+* correct indexing counts, skip tracking, and Fix Unavailable completeness ([6f83346](https://github.com/cboulanger/zotero-rag/commit/6f8334660fad13df5f1a159b485eb02c0e804a9c))
+
 # [1.20.0](https://github.com/cboulanger/zotero-rag/compare/v1.19.8...v1.20.0) (2026-05-02)
 
 
