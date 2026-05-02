@@ -326,6 +326,14 @@ async def check_indexed(
                 f"(chunks={repaired.total_chunks}, version={best_version})"
             )
 
+    _reason_counts: dict[str, int] = {}
+    for _s in statuses:
+        _reason_counts[_s.reason] = _reason_counts.get(_s.reason, 0) + 1
+    logger.info(
+        f"[DIAG] check-indexed reasons: library={library_id} "
+        + " ".join(f"{k}={v}" for k, v in sorted(_reason_counts.items()))
+    )
+
     return CheckIndexedResponse(library_id=library_id, statuses=statuses)
 
 
@@ -470,6 +478,11 @@ async def upload_and_index_document(
                 item_modified=item_modified,
             )
             chunks_added = proc_result.chunks_written
+            logger.info(
+                f"[DIAG] upload result: attachment={attachment_key} "
+                f"status={proc_result.status} chunks={chunks_added} "
+                f"mime={mime_type} size_bytes={len(file_bytes)}"
+            )
 
             # Update library metadata so index-status reflects this upload
             lib_meta = vector_store.get_library_metadata(library_id)

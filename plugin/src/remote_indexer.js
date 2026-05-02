@@ -101,6 +101,7 @@ var RemoteIndexer = {
 		//    Both caches are bypassed in 'full' and 'reindex' modes so the backend confirms state.
 		const versionCache = await this._loadVersionCache(libraryId);
 		const pendingCache = await this._loadPendingCache(libraryId);
+		log(`[RemoteIndexer] [DIAG] run start: mode=${mode} attachments=${attachments.length} versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
 		/** @type {Array<AttachmentIndexStatus>} */
 		const cachedStatuses = [];
 		/** @type {Array<AttachmentIndexStatus>} */
@@ -121,6 +122,12 @@ var RemoteIndexer = {
 			}
 		}
 		log(`[RemoteIndexer] Client cache: ${cachedStatuses.length} up-to-date, ${pendingStatuses.length} pending upload, ${toCheck.length} to verify with backend`);
+		{
+			const toCheckNoFile = toCheck.filter(a => !a.filePath).length;
+			const pendingNoFile = pendingStatuses.map(s => attachments.find(a => a.attachment_key === s.attachment_key)).filter(a => a && !a.filePath).length;
+			const cachedNoFile  = cachedStatuses.map(s => attachments.find(a => a.attachment_key === s.attachment_key)).filter(a => a && !a.filePath).length;
+			log(`[RemoteIndexer] [DIAG] tiers: cached=${cachedStatuses.length}(noFile:${cachedNoFile}) pending=${pendingStatuses.length}(noFile:${pendingNoFile}) toCheck=${toCheck.length}(noFile:${toCheckNoFile})`);
+		}
 
 		// 2b. For cached items whose local file is missing, request a sync download so the
 		//     file is available locally even if the backend already has the content indexed.
@@ -176,6 +183,11 @@ var RemoteIndexer = {
 			]);
 		}
 
+		if (checkedStatuses.length > 0) {
+			const reasonCounts = /** @type {Record<string,number>} */ ({});
+			for (const s of checkedStatuses) reasonCounts[s.reason] = (reasonCounts[s.reason] || 0) + 1;
+			log(`[RemoteIndexer] [DIAG] check-indexed reasons: ${JSON.stringify(reasonCounts)}`);
+		}
 		const statuses = [...cachedStatuses, ...pendingStatuses, ...checkedStatuses];
 		const toUpload = statuses.filter(s => s.needs_indexing);
 		log(`[RemoteIndexer] ${toUpload.length} of ${attachments.length} attachments need indexing`);
@@ -231,6 +243,17 @@ var RemoteIndexer = {
 		}).length;
 		if (noFile > 0) {
 			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
+			const noFileLinkModes = { imported_file: 0, imported_url: 0, linked_file: 0, other: 0 };
+			for (const s of toUpload) {
+				const att = attachments.find(a => a.attachment_key === s.attachment_key);
+				if (att && !att.filePath) {
+					if (att.linkMode === 0) noFileLinkModes.imported_file++;
+					else if (att.linkMode === 1) noFileLinkModes.imported_url++;
+					else if (att.linkMode === 2) noFileLinkModes.linked_file++;
+					else noFileLinkModes.other++;
+				}
+			}
+			log(`[RemoteIndexer] [DIAG] noFile=${noFile} by linkMode: ${JSON.stringify(noFileLinkModes)}`);
 		}
 		const total = uploadable.length;
 
@@ -339,6 +362,7 @@ var RemoteIndexer = {
 
 		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}, Parse errors: ${parseErrors}`, current: total, total });
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}`);
+		log(`[RemoteIndexer] [DIAG] run end: versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
 		return { uploaded, skipped, noFile, errors, parseErrors, parseErrorKeys, firstError, rateLimitHeaders };
 	},
 
