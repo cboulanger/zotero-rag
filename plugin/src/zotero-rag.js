@@ -1238,11 +1238,14 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Scan the current library for unavailable attachments and update the toolbar label.
+	 * Update the toolbar button badge to show the persisted missingFiles count for the
+	 * current library.  The missingFiles pref is updated after each indexing run and
+	 * includes noFile + skipped_empty + skipped_timeout + parse_error items — the same
+	 * set that appears in the Fix Unavailable Attachments dialog.
 	 * @param {Window} win - Zotero main window containing the label
-	 * @returns {Promise<void>}
+	 * @returns {void}
 	 */
-	async _scanUnavailableCount(win) {
+	_scanUnavailableCount(win) {
 		const btn = /** @type {any} */ (win.document.getElementById('zotero-rag-unavailable-btn'));
 		const badge = /** @type {any} */ (win.document.getElementById('zotero-rag-unavailable-badge'));
 		if (!btn || !badge) return;
@@ -1254,7 +1257,18 @@ class ZoteroRAGPlugin {
 			return;
 		}
 		try {
-			const count = await this._countUnavailableInLibrary(libraryID);
+			// Map Zotero internal library ID → backend library ID to read the pref.
+			let backendId = null;
+			if (libraryID === Zotero.Libraries.userLibraryID) {
+				const userId = this.getCurrentZoteroUserId();
+				backendId = userId ? `u${userId}` : String(libraryID);
+			} else {
+				const group = Zotero.Groups.getAll().find(/** @param {any} g */ g => g.libraryID === libraryID);
+				if (group) backendId = String(group.id);
+			}
+			const count = backendId
+				? (parseInt(/** @type {any} */ (Zotero.Prefs).get(`extensions.zotero-rag.missingFiles.${backendId}`, true) || '0') || 0)
+				: 0;
 			if (count > 0) {
 				badge.setAttribute('value', String(count));
 				btn.removeAttribute('hidden');
@@ -1346,6 +1360,20 @@ class ZoteroRAGPlugin {
 	/** @param {string} backendLibraryId */
 	clearMissingFilesCount(backendLibraryId) {
 		this.updateMissingFilesCount(backendLibraryId, 0);
+	}
+
+	/**
+	 * Refresh the toolbar button badge in all open Zotero windows.
+	 * Called after an indexing run updates the missingFiles pref so the badge
+	 * stays in sync without waiting for the user to switch libraries.
+	 * @returns {void}
+	 */
+	refreshUnavailableBadge() {
+		try {
+			for (const win of Zotero.getMainWindows()) {
+				this._scanUnavailableCount(win);
+			}
+		} catch (_) {}
 	}
 
 	/**

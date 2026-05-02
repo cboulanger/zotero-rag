@@ -1280,6 +1280,7 @@ var ZoteroRAGDialog = {
 				this.libraryMissingFilesCount.set(libraryId, runFixable);
 				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
 				Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, runFixable, true);
+				plugin.refreshUnavailableBadge();
 
 				// unavailableCount drives effectiveTotal = totalIndexable - unavailableCount.
 				// Accumulate across runs so previously-cached unindexable items (not re-submitted
