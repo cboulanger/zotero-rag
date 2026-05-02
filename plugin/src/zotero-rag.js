@@ -1358,6 +1358,7 @@ class ZoteroRAGPlugin {
 	 * @property {string} zoteroID - Parent item key
 	 * @property {boolean} isLinked - True for linked files (linkMode=2); can't be auto-downloaded
 	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
+	 * @property {'no text'|'timeout'} [skipReason] - Set for items skipped by the server (skipped_empty / skipped_timeout)
 	 */
 
 	/**
@@ -1402,6 +1403,109 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * @param {number} zoteroLibraryID
+	 * @returns {string}
+	 */
+	_skippedServerFilePath(zoteroLibraryID) {
+		// @ts-ignore
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `skipped-server-${zoteroLibraryID}.json`);
+	}
+
+	/**
+	 * Merge new server-skipped attachment entries into the persistent per-library store.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {Array<{key: string, reason: 'skipped_empty'|'skipped_timeout'}>} newEntries
+	 * @returns {Promise<void>}
+	 */
+	async storeSkippedServerItems(backendLibraryId, newEntries) {
+		if (!newEntries || newEntries.length === 0) return;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return;
+		const filePath = this._skippedServerFilePath(zoteroLibraryID);
+		/** @type {Array<{key: string, reason: string}>} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {}
+		const existingKeys = new Set(existing.map(e => e.key));
+		for (const entry of newEntries) {
+			if (!existingKeys.has(entry.key)) existing.push(entry);
+		}
+		try {
+			// @ts-ignore
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			// @ts-ignore
+			await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(existing));
+		} catch (e) {
+			this.log(`[storeSkippedServerItems] Failed to write skipped-server file: ${e}`);
+		}
+	}
+
+	/**
+	 * Load server-skipped attachment entries and resolve them to UnavailableAttachmentInfo objects.
+	 * Silently drops entries where the Zotero item no longer exists.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getSkippedServerAttachments(libraryID) {
+		const filePath = this._skippedServerFilePath(libraryID);
+		/** @type {Array<{key: string, reason: string}>} */
+		let entries = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			entries = JSON.parse(text);
+		} catch (_) {
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		/** @type {Array<{key: string, reason: string}>} */
+		const validEntries = [];
+		for (const entry of entries) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, entry.key);
+			if (!attachment || attachment.deleted) continue;
+			validEntries.push(entry);
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			/** @type {'no text'|'timeout'} */
+			const skipReason = entry.reason === 'skipped_timeout' ? 'timeout' : 'no text';
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				skipReason,
+			});
+		}
+		if (validEntries.length !== entries.length) {
+			try {
+				// @ts-ignore
+				await IOUtils.writeUTF8(filePath, JSON.stringify(validEntries));
+			} catch (_) {}
+		}
+		return result;
+	}
+
+	/**
 	 * Load parse-error attachment keys and resolve them to UnavailableAttachmentInfo objects.
 	 * Silently drops keys where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
@@ -1427,24 +1531,26 @@ class ZoteroRAGPlugin {
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
 			if (!attachment || attachment.deleted) continue;
 			validKeys.push(key);
-			if (!attachment.parentItemID) continue;
-			// @ts-ignore
-			const parentItem = await Zotero.Items.getAsync(attachment.parentItemID);
-			if (!parentItem) continue;
-			const creators = parentItem.getCreators();
+			// For standalone attachments (no parent), use the attachment itself as the source item
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
 			const authors = creators
 				.map((/** @type {any} */ c) => c.lastName || c.name || '')
 				.filter((/** @type {string} */ s) => s.length > 0)
 				.join(', ');
-			const dateField = parentItem.getField('date') || '';
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
 			const yearMatch = dateField.match(/\b(\d{4})\b/);
 			result.push({
-				parentItem,
+				parentItem: parentItem ?? attachment,
 				attachmentItem: attachment,
 				authors,
 				year: yearMatch ? yearMatch[1] : '',
-				title: parentItem.getField('title') || '',
-				zoteroID: parentItem.key,
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
 				isLinked: false,
 				isParseError: true,
 			});
@@ -1513,6 +1619,14 @@ class ZoteroRAGPlugin {
 		const missingKeys = new Set(result.map(r => r.attachmentItem.key));
 		const parseErrorItems = await this._getParseErrorAttachments(libraryID);
 		for (const item of parseErrorItems) {
+			if (!missingKeys.has(item.attachmentItem.key)) {
+				missingKeys.add(item.attachmentItem.key);
+				result.push(item);
+			}
+		}
+		// Append server-skipped items (skipped_empty / skipped_timeout), deduplicating by key
+		const skippedServerItems = await this._getSkippedServerAttachments(libraryID);
+		for (const item of skippedServerItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) result.push(item);
 		}
 		return result;

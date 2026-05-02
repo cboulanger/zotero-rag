@@ -220,7 +220,7 @@ var ZoteroFixUnavailableDialog = {
 						title:    info.title   || '—',
 						zoteroID: info.zoteroID,
 						filename,
-						type:   info.isParseError ? 'parse err' : (info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem)),
+						type:   info.skipReason === 'no text' ? 'empty' : info.skipReason === 'timeout' ? 'timeout' : info.isParseError ? 'parse err' : (info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem)),
 						status: '', // rendered by column.renderer reading this.rowStatus
 						select: '', // rendered by column.renderer
 					};
@@ -267,10 +267,15 @@ var ZoteroFixUnavailableDialog = {
 			this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
 		}
 
-		// Pre-set status label for parse-error items so it's visible without running a search
+		// Pre-set status labels for non-fixable items so they're visible without running a search
 		for (let i = 0; i < this.items.length; i++) {
-			if (this.items[i].isParseError) {
+			const item = this.items[i];
+			if (item.isParseError) {
 				this.rowStatus.set(i, { cssClass: 'not-found', text: 'binary data', tooltip: 'File is present but cannot be parsed (binary data detected)' });
+			} else if (item.skipReason === 'no text') {
+				this.rowStatus.set(i, { cssClass: 'not-found', text: 'no text', tooltip: 'No text could be extracted (scanned or protected PDF)' });
+			} else if (item.skipReason === 'timeout') {
+				this.rowStatus.set(i, { cssClass: 'not-found', text: 'timeout', tooltip: 'Text extraction timed out (file may be too large)' });
 			}
 		}
 
@@ -395,12 +400,14 @@ var ZoteroFixUnavailableDialog = {
 		this._setAllButtonsDisabled(true);
 
 		const indices = this.getSelectedIndices();
-		const parseErrorIndices = indices.filter(i => this.items[i].isParseError);
-		const linkedIndices     = indices.filter(i => !this.items[i].isParseError && this.items[i].isLinked);
-		const importedIndices   = indices.filter(i => !this.items[i].isParseError && !this.items[i].isLinked);
+		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
+		const skippedServerIndices = indices.filter(i => !!this.items[i].skipReason);
+		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
+		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked);
 
-		for (const i of parseErrorIndices) this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
-		for (const i of linkedIndices)     this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
+		for (const i of parseErrorIndices)    this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
+		for (const i of skippedServerIndices) this.setRowStatus(i, 'not-found', 'Not indexable — delete or reindex after upgrade');
+		for (const i of linkedIndices)        this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
 		for (const i of importedIndices)   this.setRowStatus(i, 'searching', 'Queued...');
 
 		// Phase 1: batched sync downloads for imported files only (10 at a time)
@@ -448,7 +455,7 @@ var ZoteroFixUnavailableDialog = {
 
 		// Phase 2: copy from another library for imported items still missing
 		let fixed    = downloadResults.filter(r => r.downloaded).length;
-		let notFound = linkedIndices.length + parseErrorIndices.length;
+		let notFound = linkedIndices.length + parseErrorIndices.length + skippedServerIndices.length;
 		let errors   = 0;
 
 		if (stillMissing.length > 0) {

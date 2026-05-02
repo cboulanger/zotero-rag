@@ -498,7 +498,8 @@ async def upload_and_index_document(
             )
             lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
             lib_meta.total_chunks = vector_store.count_library_chunks(library_id)
-            lib_meta.total_items_indexed += 1
+            if proc_result.status in ("indexed_fresh", "copied_cross_library"):
+                lib_meta.total_items_indexed += 1
             vector_store.update_library_metadata(lib_meta)
         except Exception as e:
             import openai
@@ -534,7 +535,10 @@ async def upload_and_index_document(
             )
 
     api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
-    if api_status == "indexed":
+    if proc_result.status in (
+        "indexed_fresh", "copied_cross_library",
+        "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
+    ):
         _update_item_cache(library_id, {item_key: item_version})
     return DocumentUploadResult(
         library_id=library_id,

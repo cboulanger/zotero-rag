@@ -333,7 +333,7 @@ class RemoteEmbeddingService(EmbeddingService):
         wait the exact amount of time the server requests, falling back to
         exponential backoff with jitter (max 8 attempts, cap 64 s).
         """
-        from openai import InternalServerError, RateLimitError
+        from openai import BadRequestError, InternalServerError, RateLimitError
 
         client = self._get_client()
         model = self._resolve_model_name()
@@ -396,6 +396,26 @@ class RemoteEmbeddingService(EmbeddingService):
                 self.rate_limit_retries += 1
                 self.rate_limit_wait_seconds += retry_after
                 await asyncio.sleep(retry_after)
+            except BadRequestError as exc:
+                msg = str(exc).lower()
+                if "context length" not in msg and "maximum context" not in msg:
+                    raise
+                # Truncate and retry: remove ~15% of words from the end each attempt.
+                if isinstance(input, str):
+                    words = input.split()
+                    input = " ".join(words[: int(len(words) * 0.85)])
+                    logger.warning(
+                        f"Embedding input exceeded context length — truncated to {len(words)} words "
+                        f"(attempt {attempt + 1})"
+                    )
+                elif isinstance(input, list):
+                    input = [" ".join(t.split()[: int(len(t.split()) * 0.85)]) for t in input]
+                    logger.warning(
+                        f"Embedding batch exceeded context length — truncated texts "
+                        f"(attempt {attempt + 1})"
+                    )
+                else:
+                    raise
 
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""

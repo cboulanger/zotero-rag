@@ -71,6 +71,10 @@ MIME type and calls `getFilePathAsync()` on each.  Items with `filePath = null` 
 not present locally) are included — they are kept so `check-indexed` can decide
 whether the backend already has them before attempting a download.
 
+**linkMode=3 (linked_url) items are excluded.**  These are web-only bookmarks with no
+local file; they can never be uploaded.  The count of excluded items is returned as
+`linkedUrls` and logged for diagnostics, but never counted as "unavailable".
+
 ### Step 2 — Client version cache
 A local JSON cache (`versionCache`) stores `{ attachmentKey → item_version }` for
 every item the client has successfully uploaded or confirmed up-to-date.
@@ -106,10 +110,28 @@ uploadable = toUpload where filePath != null
 noFile     = toUpload where filePath == null   (counted, not uploaded)
 ```
 
-`uploadable` items are uploaded to `POST /api/index/document`.  Each successful
-upload writes the item's version into the cache.  Failed uploads are also written into
-the cache so they are not retried on the next incremental run (they will be retried on
-a full re-index or when the item version changes).
+`uploadable` items are uploaded to `POST /api/index/document`.  The server returns one
+of the following statuses:
+
+| Server status          | Client outcome     | Notes                                               |
+|------------------------|--------------------|-----------------------------------------------------|
+| `indexed_fresh`        | `uploaded++`       | Stored in Qdrant                                    |
+| `copied_cross_library` | `uploaded++`       | Copied from another library's chunks                |
+| `skipped_duplicate`    | `uploaded++`       | Already present with same version                   |
+| `skipped_empty`        | `skippedEmpty++`   | No text extracted (scanned or protected PDF)        |
+| `skipped_timeout`      | `skippedTimeout++` | Kreuzberg timed out (very large files)              |
+| `skipped_parse_error`  | `parseErrors++`    | Binary data / corrupt file                          |
+| `error`                | `errors++`         | Thrown as exception                                 |
+
+**Version cache**: all outcomes except `error` write `versionCache[key] = version`.
+This prevents pointless re-uploads on the next incremental run.  A reindex
+(`force_refresh=True`) bypasses the client version cache and retries everything.
+
+**Server cache**: the backend updates its own `check-indexed` cache for all terminal
+skipped statuses (`skipped_empty`, `skipped_timeout`, `skipped_parse_error`,
+`skipped_duplicate`), in addition to successfully indexed items.  On the next
+incremental run the server returns `up_to_date` for these items — no Kreuzberg call is
+made.  On a forced reindex the server cache is bypassed and Kreuzberg is retried.
 
 A 0-byte file is rejected client-side before the upload attempt.
 
@@ -119,13 +141,20 @@ text-only documents.  They follow the same version-cache logic.
 
 ### Return values
 
-| Field        | Meaning |
-|--------------|---------|
-| `uploaded`   | Items successfully sent to the backend |
-| `skipped`    | Items not needing indexing (cache or backend confirmed) |
-| `noFile`     | Items needing indexing but with no local file after download attempts |
-| `errors`     | Items that failed to upload (server error, empty file, etc.) |
-| `firstError` | Error message of the first failure, shown in the UI |
+| Field              | Meaning                                                              |
+|--------------------|----------------------------------------------------------------------|
+| `uploaded`         | Items actually stored in Qdrant (`indexed_fresh` / `copied_*`)      |
+| `skipped`          | Items not needing indexing (cache or backend confirmed)              |
+| `noFile`           | Items needing indexing but with no local file after download attempts |
+| `linkedUrls`       | linkMode=3 attachments excluded from indexing (web-only bookmarks)  |
+| `skippedEmpty`     | Items where server extracted no text (`skipped_empty`)              |
+| `skippedEmptyKeys` | Attachment keys for `skippedEmpty` items (persisted for Fix dialog) |
+| `skippedTimeout`   | Items where Kreuzberg timed out (`skipped_timeout`)                 |
+| `skippedTimeoutKeys` | Attachment keys for `skippedTimeout` items                        |
+| `parseErrors`      | Items with binary/corrupt data (`skipped_parse_error`)              |
+| `parseErrorKeys`   | Attachment keys for `parseErrors` items                             |
+| `errors`           | Items that failed to upload (server error, empty file, etc.)        |
+| `firstError`       | Error message of the first failure, shown in the UI                 |
 
 ---
 

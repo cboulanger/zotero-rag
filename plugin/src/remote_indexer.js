@@ -77,7 +77,7 @@ var RemoteIndexer = {
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
-	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, errors: number, parseErrors: number, parseErrorKeys: string[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
@@ -86,13 +86,8 @@ var RemoteIndexer = {
 		//    Items without a local file are included (filePath: null) so check-indexed
 		//    can decide whether they actually need indexing before we download them.
 		onProgress({ percentage: 0, message: 'Scanning library', current: 0, total: 0 });
-		const attachments = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths);
-		log(`[RemoteIndexer] Found ${attachments.length} indexable attachments`);
-
-		if (attachments.length === 0) {
-			onProgress({ percentage: 100, message: 'No indexable attachments found', current: 0, total: 0 });
-			return { uploaded: 0, skipped: 0, noFile: 0, errors: 0, firstError: null, rateLimitHeaders: null };
-		}
+		const { attachments, linkedUrls } = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths);
+		log(`[RemoteIndexer] Found ${attachments.length} indexable attachments${linkedUrls > 0 ? `, ${linkedUrls} linked URL(s) skipped (no local file)` : ''}`);
 
 		// 2. Load the client-side caches and pre-classify attachments into three tiers:
 		//    - version cache hit  → confirmed up-to-date, skip entirely
@@ -101,7 +96,7 @@ var RemoteIndexer = {
 		//    Both caches are bypassed in 'full' and 'reindex' modes so the backend confirms state.
 		const versionCache = await this._loadVersionCache(libraryId);
 		const pendingCache = await this._loadPendingCache(libraryId);
-		log(`[RemoteIndexer] [DIAG] run start: mode=${mode} attachments=${attachments.length} versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
+		log(`[RemoteIndexer] [DIAG] run start: mode=${mode} attachments=${attachments.length} linkedUrls=${linkedUrls} versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
 		/** @type {Array<AttachmentIndexStatus>} */
 		const cachedStatuses = [];
 		/** @type {Array<AttachmentIndexStatus>} */
@@ -224,8 +219,14 @@ var RemoteIndexer = {
 		let skipped = attachments.length - toUpload.length;
 		let errors = 0;
 		let parseErrors = 0;
+		let skippedEmpty = 0;
+		let skippedTimeout = 0;
 		/** @type {string[]} */
 		const parseErrorKeys = [];
+		/** @type {string[]} */
+		const skippedEmptyKeys = [];
+		/** @type {string[]} */
+		const skippedTimeoutKeys = [];
 		/** @type {string|null} */
 		let firstError = null;
 		/** @type {Record<string,string>|null} */
@@ -234,7 +235,6 @@ var RemoteIndexer = {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && att.filePath;
 		});
-		// Only count imported files (linkMode 0/1) as "noFile" — linked files (linkMode 2)
 		// Attachments with no local file are reported separately — not counted as errors.
 		// Includes linked files (linkMode=2) with broken paths; the fix dialog shows those too.
 		const noFile = toUpload.filter(s => {
@@ -288,9 +288,18 @@ var RemoteIndexer = {
 				if (uploadResult.parseError) {
 					parseErrors++;
 					parseErrorKeys.push(att.attachment_key);
+				} else if (uploadResult.skippedEmpty) {
+					skippedEmpty++;
+					skippedEmptyKeys.push(att.attachment_key);
+				} else if (uploadResult.skippedTimeout) {
+					skippedTimeout++;
+					skippedTimeoutKeys.push(att.attachment_key);
 				} else {
 					uploaded++;
 				}
+				// Write to versionCache for ALL outcomes (including skipped/errors) so the next
+				// incremental run skips these items.  A reindex (force_refresh) bypasses the cache
+				// and retries everything including previously-skipped items.
 				versionCache[att.attachment_key] = att.item_version;
 				delete pendingCache[att.attachment_key];
 			} catch (err) {
@@ -302,8 +311,6 @@ var RemoteIndexer = {
 				}
 				if (!firstError) firstError = msg;
 				errors++;
-				// Mark in cache so this item is not re-attempted on the next incremental run.
-				// It will be retried when the item version changes or on a full re-index.
 				versionCache[att.attachment_key] = att.item_version;
 				delete pendingCache[att.attachment_key];
 			}
@@ -318,9 +325,9 @@ var RemoteIndexer = {
 		for (const abstractItem of abstractItems) {
 			if (isCancelled()) break;
 
-			// Skip if already up-to-date according to version cache
+			// Skip if already up-to-date according to version cache (bypassed in full/reindex mode)
 			const cachedVer = versionCache[abstractItem.attachment_key];
-			if (cachedVer !== undefined && cachedVer >= abstractItem.item_version) {
+			if (mode !== 'full' && mode !== 'reindex' && cachedVer !== undefined && cachedVer >= abstractItem.item_version) {
 				skipped++;
 				continue;
 			}
@@ -340,7 +347,11 @@ var RemoteIndexer = {
 					rateLimitHeaders = abstractResult.rateLimitHeaders;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
 				}
-				uploaded++;
+				if (abstractResult.status === 'skipped_duplicate') {
+					skipped++;
+				} else {
+					uploaded++;
+				}
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
@@ -360,10 +371,17 @@ var RemoteIndexer = {
 			this._savePendingCache(libraryId, pendingCache),
 		]);
 
-		onProgress({ percentage: 100, message: `Done. Uploaded: ${uploaded}, Skipped: ${skipped + noFile}, Errors: ${errors}, Parse errors: ${parseErrors}`, current: total, total });
-		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}`);
+		const unreadable = skippedEmpty + skippedTimeout + parseErrors;
+		onProgress({
+			percentage: 100,
+			message: `Done. Indexed: ${uploaded}, Unreadable: ${unreadable}, Skipped: ${skipped + noFile}, Errors: ${errors}`,
+			current: total,
+			total,
+		});
+		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}, skippedEmpty=${skippedEmpty}, skippedTimeout=${skippedTimeout}`);
 		log(`[RemoteIndexer] [DIAG] run end: versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
-		return { uploaded, skipped, noFile, errors, parseErrors, parseErrorKeys, firstError, rateLimitHeaders };
+		return { uploaded, skipped, noFile, linkedUrls, errors, parseErrors, parseErrorKeys,
+			skippedEmpty, skippedEmptyKeys, skippedTimeout, skippedTimeoutKeys, firstError, rateLimitHeaders };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -373,11 +391,14 @@ var RemoteIndexer = {
 	/**
 	 * Collect all indexable attachments from the local Zotero library.
 	 *
+	 * linkMode=3 (linked_url) attachments are excluded — they are web-only links with no local
+	 * file and cannot be indexed.  Their count is returned in `linkedUrls` for display purposes.
+	 *
 	 * @param {string} libraryId
 	 * @param {string} libraryType
 	 * @param {function(string): void} log
 	 * @param {Map<string, string>} [downloadedFilePaths] - Cache of attachment key → local path
-	 * @returns {Promise<Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>>}
+	 * @returns {Promise<{attachments: Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>, linkedUrls: number}>}
 	 */
 	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths) {
 		const INDEXABLE_TYPES = new Set([
@@ -400,24 +421,28 @@ var RemoteIndexer = {
 
 		if (!zoteroLibraryID) {
 			log(`[RemoteIndexer] Could not resolve libraryID for ${libraryId}`);
-			return [];
+			return { attachments: [], linkedUrls: 0 };
 		}
 
 		const search = new Zotero.Search();
 		search.libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
-		if (!itemIDs.length) return [];
+		if (!itemIDs.length) return { attachments: [], linkedUrls: 0 };
 
 		const items = await Zotero.Items.getAsync(itemIDs);
 
 		/** @type {Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>} */
 		const result = [];
+		let linkedUrls = 0;
 
 		for (const item of items) {
 			if (!item.isAttachment()) continue;
 
 			const mimeType = item.attachmentContentType || '';
 			if (!INDEXABLE_TYPES.has(mimeType)) continue;
+
+			// linkMode=3 = linked_url: web-only link, no local file possible — exclude from indexing.
+			if ((item.attachmentLinkMode ?? 0) === 3) { linkedUrls++; continue; }
 
 			// Prefer live path; fall back to cached path from a prior download in this session.
 			// Keep items with no local file (filePath: null) so check-indexed can decide
@@ -449,7 +474,7 @@ var RemoteIndexer = {
 			});
 		}
 
-		return result;
+		return { attachments: result, linkedUrls };
 	},
 
 	/**
@@ -493,6 +518,7 @@ var RemoteIndexer = {
 		for (const item of items) {
 			if (!item.isAttachment()) continue;
 			if (!INDEXABLE_TYPES.has(item.attachmentContentType || '')) continue;
+			if ((item.attachmentLinkMode ?? 0) === 3) continue; // linked_url — no local file possible
 			const parentKey = item.parentItemID
 				? (Zotero.Items.get(item.parentItemID)?.key ?? item.key)
 				: item.key;
@@ -504,6 +530,7 @@ var RemoteIndexer = {
 		for (const item of items) {
 			if (item.isAttachment() || item.isNote()) continue;
 			if (uniqueItemKeys.has(item.key)) continue;
+			if (item.loadAllData) await item.loadAllData();
 			const abstract = item.getField ? (item.getField('abstractNote') || '') : '';
 			if (!abstract) continue;
 			const wordCount = abstract.trim().split(/\s+/).filter(/** @param {string} w */ w => w.length > 0).length;
@@ -619,7 +646,7 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean}>}
 	 */
 	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
@@ -691,6 +718,14 @@ var RemoteIndexer = {
 		if (result.status === 'skipped_parse_error') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
 			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true };
+		}
+		if (result.status === 'skipped_empty') {
+			log(`[RemoteIndexer] ${att.attachment_key}: skipped (no text extracted)`);
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true };
+		}
+		if (result.status === 'skipped_timeout') {
+			log(`[RemoteIndexer] ${att.attachment_key}: skipped (Kreuzberg timeout)`);
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true };
 		}
 		return { rateLimitHeaders: result.rate_limit_headers || null };
 	},
@@ -892,7 +927,7 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{status: string, rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
 		const item = abstractItem.zoteroItem;
@@ -931,11 +966,11 @@ var RemoteIndexer = {
 
 		const result = await response.json();
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
-		
+
 		if (result.status === 'error') {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}
-		return { rateLimitHeaders: result.rate_limit_headers || null };
+		return { status: result.status, rateLimitHeaders: result.rate_limit_headers || null };
 	},
 
 	/**

@@ -610,6 +610,10 @@ var ZoteroRAGDialog = {
 		const unavailable = this.libraryUnavailableCount.get(libraryId) || 0;
 		const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
 		const indexed = metadata ? metadata.total_items_indexed : 0;
+		// Cap displayed count at effectiveTotal when the backend has indexed more entries than
+		// countIndexableAttachments reports (e.g. a parent item with multiple attachments is
+		// counted once here but creates one backend entry per attachment).
+		const displayIndexed = effectiveTotal !== undefined && indexed > effectiveTotal ? effectiveTotal : indexed;
 		const isPartial = metadata !== null
 			&& effectiveTotal !== undefined
 			&& indexed < effectiveTotal;
@@ -647,7 +651,7 @@ var ZoteroRAGDialog = {
 				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
 				metaSpan.style.fontStyle = 'normal';
 				metaSpan.style.color = '#666';
-				mainText = `${timeAgo} · ${indexed}${total} items`;
+				mainText = `${timeAgo} · ${displayIndexed}${total} items`;
 			}
 
 			// Build the span content: plain text + optional clickable missing-files link
@@ -1003,10 +1007,10 @@ var ZoteroRAGDialog = {
 		this.clearStatusMessages();
 		this.setSubmitEnabled(false);
 		this.setCancelMode('abort');
-		this.showProgress('Indexing...', 'Starting full index...');
+		this.showProgress('Indexing...', 'Starting index...');
 
 		try {
-			await this.checkAndMonitorIndexing(libraryIds, 'full');
+			await this.checkAndMonitorIndexing(libraryIds, 'auto');
 
 			// If cancelled mid-indexing, checkAndMonitorIndexing already cleaned up the
 			// local metadata state; abortOperation() already fixed the UI — bail out.
@@ -1255,18 +1259,38 @@ var ZoteroRAGDialog = {
 					return;
 				}
 
-				// Persist missing-file count (noFile) so the fix-dialog link survives dialog re-open.
-				// This is separate from libraryUnavailableCount (phantom gap) which drives effectiveTotal.
-				const newMissing = indexResult.noFile;
-				this.libraryMissingFilesCount.set(libraryId, newMissing);
+				// Items that could not be indexed — used to lower effectiveTotal so the
+				// library can be considered "complete" even when some items are unindexable.
+				// Includes hard errors (e.g. context-length) so a reindex always yields a
+				// submittable state regardless of unindexable content.
+				const runUnindexable = indexResult.noFile
+					+ (indexResult.skippedEmpty   || 0)
+					+ (indexResult.skippedTimeout  || 0)
+					+ (indexResult.parseErrors     || 0)
+					+ (indexResult.errors          || 0);
+
+				// missingFilesCount drives the "X unavailable" clickable link.  Errors are
+				// excluded here because the Fix dialog has no entry for them — only items
+				// stored in the fix JSON files (noFile, skipped-server, parse-error) appear.
+				const runFixable = indexResult.noFile
+					+ (indexResult.skippedEmpty   || 0)
+					+ (indexResult.skippedTimeout  || 0)
+					+ (indexResult.parseErrors     || 0);
+
+				this.libraryMissingFilesCount.set(libraryId, runFixable);
 				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-				Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, newMissing, true);
-				// Also update the phantom-gap unavailable count from noFile for effective-total bookkeeping
+				Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, runFixable, true);
+
+				// unavailableCount drives effectiveTotal = totalIndexable - unavailableCount.
+				// Accumulate across runs so previously-cached unindexable items (not re-submitted
+				// in auto mode) are preserved.  For reindex runs, prevUnavail was reset to 0 at
+				// the start of reindexLibrary(), so the result equals runUnindexable exactly.
 				const prevUnavail = this.libraryUnavailableCount.get(libraryId) || 0;
-				if (newMissing !== prevUnavail) {
-					this.libraryUnavailableCount.set(libraryId, newMissing);
+				const newUnavail = prevUnavail + runUnindexable;
+				if (newUnavail !== prevUnavail) {
+					this.libraryUnavailableCount.set(libraryId, newUnavail);
 					// @ts-ignore
-					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newMissing, true);
+					Zotero.Prefs.set(`extensions.zotero-rag.unavailableItems.${libraryId}`, newUnavail, true);
 				}
 
 				// Update rate limit display from headers returned by this indexing run
@@ -1281,12 +1305,31 @@ var ZoteroRAGDialog = {
 					const n = indexResult.parseErrorKeys.length;
 					const msg = `${n} attachment(s) in "${libraryName}" could not be parsed (binary data) — see Fix Unavailable`;
 					this.plugin.log(`[RemoteIndexer] ${msg}`);
-					this.showStatus(msg, 'warn');
+					this.showStatus(msg, 'error');
+				}
+
+				// Persist server-skipped attachments (no text / timeout) so Fix Unavailable can show them
+				const skippedServerEntries = [
+					...(indexResult.skippedEmptyKeys || []).map(key => ({ key, reason: /** @type {'skipped_empty'} */ ('skipped_empty') })),
+					...(indexResult.skippedTimeoutKeys || []).map(key => ({ key, reason: /** @type {'skipped_timeout'} */ ('skipped_timeout') })),
+				];
+				if (skippedServerEntries.length > 0) {
+					await this.plugin.storeSkippedServerItems(libraryId, skippedServerEntries);
+				}
+				if (indexResult.skippedEmpty > 0) {
+					const msg = `${indexResult.skippedEmpty} attachment(s) in "${libraryName}" produced no text (unreadable PDF/HTML) — see Fix Unavailable`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					this.showStatus(msg, 'info');
+				}
+				if (indexResult.skippedTimeout > 0) {
+					const msg = `${indexResult.skippedTimeout} attachment(s) in "${libraryName}" timed out during text extraction — see Fix Unavailable`;
+					this.plugin.log(`[RemoteIndexer] ${msg}`);
+					this.showStatus(msg, 'info');
 				}
 
 				// Report missing-file count as informational — never fatal
-				if (newMissing > 0) {
-					const msg = `${newMissing} attachment(s) in ${libraryName} have no local file and were skipped`;
+				if (indexResult.noFile > 0) {
+					const msg = `${indexResult.noFile} attachment(s) in ${libraryName} have no local file and were skipped`;
 					this.plugin.log(`[RemoteIndexer] ${msg}`);
 					this.showStatus(msg, 'info');
 				}
@@ -1315,6 +1358,16 @@ var ZoteroRAGDialog = {
 				// timestamp and indexed count immediately after indexing finishes.
 				this.libraryMetadata.delete(libraryId);
 				await this.fetchAndUpdateLibraryMetadata(libraryId);
+
+				// Refresh the local indexable count — abstract-only items may have been
+				// discovered during this run that weren't counted at dialog open time.
+				RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
+					.then(count => {
+						this.libraryIndexableCount.set(libraryId, count);
+						this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
+						this.updateSubmitButtonState();
+					})
+					.catch(() => {});
 
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : String(error);
