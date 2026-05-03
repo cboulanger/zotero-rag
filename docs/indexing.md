@@ -573,14 +573,59 @@ When items are exported from a personal library into group libraries, the attach
 
 - `docs/implementation/incremental-indexing-manual-test-checklist.md`
 
-## Migration from Legacy System
+## Schema Versioning and Metadata Migration
 
-### Schema v1 to v2
+Every chunk stored in Qdrant carries a `schema_version` integer in its payload.
+The current version is defined as `CURRENT_SCHEMA_VERSION` in `backend/models/document.py`.
+Bumping this constant is the trigger for the lightweight metadata migration flow described below.
 
-- Old chunks lack version fields (item_version, attachment_version, indexed_at)
-- No migration script required
-- Gradual migration: chunks replaced naturally as items reindex
-- Version queries treat legacy chunks as version 0
+### When to bump the version
+
+Bump `CURRENT_SCHEMA_VERSION` whenever a new payload field is added that you want to
+filter or search on (e.g. `item_type` was added in v3). You do **not** need to bump it
+for changes that only affect vector content — those are handled by full re-indexing.
+
+### How migration works (no re-embedding required)
+
+1. **Detection** — When the plugin calls `check-indexed`, the backend reads both
+   `item_version` and `schema_version` from each item's Qdrant payload via
+   `get_item_states_bulk()`. Items whose `schema_version < CURRENT_SCHEMA_VERSION`
+   but are otherwise up-to-date receive `needs_metadata_update: true` in the response.
+
+2. **Collection** — The plugin collects those items after the check-indexed loop and
+   calls `_sendMetadataUpdates()`, which POSTs the current Zotero bibliographic
+   metadata (title, authors, year, item_type, …) to:
+
+   ```http
+   POST /api/index/items/metadata
+   { "library_id": "...", "items": [{ "item_key": "ABC", "title": "...", ... }] }
+   ```
+
+   No file bytes are sent; the metadata comes from the Zotero parent item in memory.
+
+3. **Application** — `batch_update_metadata()` calls `vector_store.update_item_metadata()`
+   for each item, which uses Qdrant's `set_payload()` to patch the new fields on all
+   existing chunks for that item and writes `schema_version: CURRENT_SCHEMA_VERSION`.
+   Vectors are untouched — no re-embedding occurs.
+
+### Graceful degradation
+
+Items that are never re-checked (user never clicks "Re-index") keep their old
+`schema_version`. The new fields will be absent or `None` in those payloads, so
+metadata filters on the new field simply won't match them. Nothing breaks; coverage
+improves incrementally as items are checked.
+
+### Adding a new payload field — checklist
+
+1. Bump `CURRENT_SCHEMA_VERSION` in `backend/models/document.py`.
+2. Add the field to the payload dict in `add_chunk()` and `add_chunks_batch()` in
+   `backend/db/vector_store.py`.
+3. Add a Qdrant payload index for it in `_ensure_chunks_indexes()` if you need to
+   filter on it efficiently (keyword, integer, or text index as appropriate).
+4. Add the field to `ItemMetadataUpdate` in `backend/api/document_upload.py`.
+5. Include it in the `fields` dict inside `update_item_metadata()`.
+6. The plugin's `_sendMetadataUpdates()` already reads all standard Zotero bibliographic
+   fields from the parent item, so no plugin-side changes are needed for standard fields.
 
 ## References
 
