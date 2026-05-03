@@ -1,3 +1,10 @@
+## [1.20.3](https://github.com/cboulanger/zotero-rag/compare/v1.20.2...v1.20.3) (2026-05-03)
+
+
+### Bug Fixes
+
+* enable OCR in kreuzberg and split large PDFs to prevent OOM kills ([e21cf39](https://github.com/cboulanger/zotero-rag/commit/e21cf393b74c42cb1ec98cd3120c60547797cec4))
+
 ## [1.20.2](https://github.com/cboulanger/zotero-rag/compare/v1.20.1...v1.20.2) (2026-05-02)
 
 
