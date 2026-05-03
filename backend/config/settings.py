@@ -92,6 +92,28 @@ class Settings(BaseSettings):
         description="URL of the kreuzberg sidecar HTTP API. "
                     "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
     )
+    pdf_split_threshold: int = Field(
+        default=50 * 1024 ** 2,
+        description="PDFs larger than this are split into parts before sending to kreuzberg. "
+                    "Accepts '50MB', '1GB', or a raw byte count.",
+    )
+    pdf_split_target_part_size: int = Field(
+        default=30 * 1024 ** 2,
+        description="Target byte size of each part when splitting a large PDF. "
+                    "Accepts '30MB', '500KB', or a raw byte count.",
+    )
+
+    @field_validator("pdf_split_threshold", "pdf_split_target_part_size", mode="before")
+    @classmethod
+    def _parse_size_fields(cls, v: int | str) -> int:
+        if isinstance(v, int):
+            return v
+        s = str(v).strip().upper()
+        for suffix, mult in [("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)]:
+            if s.endswith(suffix):
+                return int(float(s[: -len(suffix)]) * mult)
+        return int(s)
+
     # Data storage — all paths default to subdirs of data_path
     data_path: Path = Field(
         default_factory=lambda: Path(__file__).parent.parent.parent / "data",

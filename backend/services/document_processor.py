@@ -14,6 +14,7 @@ from typing import Callable, Optional, Literal
 from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import EmbeddingService
 from backend.services.extraction import DocumentExtractor, create_document_extractor
+from backend.services.extraction.base import ExtractionChunk
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker
 from backend.config.settings import get_settings
@@ -519,18 +520,24 @@ class DocumentProcessor:
                     )
             # Source dedup record exists but no chunks (abstract-only item): fall through to extraction
 
-        # Extract text and chunk
-        try:
-            chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
-        except KreuzbergTimeoutError as e:
-            logger.warning(f"Skipping attachment {attachment_key}: {e}")
-            return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout")
-        except KreuzbergParsingError as e:
-            logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
-            return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
-        except Exception as e:
-            logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
-            raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
+        # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
+        settings = get_settings()
+        if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
+            chunks = await self._extract_pdf_in_parts(
+                file_bytes, attachment_key, settings.pdf_split_target_part_size
+            )
+        else:
+            try:
+                chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
+            except KreuzbergTimeoutError as e:
+                logger.warning(f"Skipping attachment {attachment_key}: {e}")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout")
+            except KreuzbergParsingError as e:
+                logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
+            except Exception as e:
+                logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
+                raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
 
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")
@@ -580,6 +587,56 @@ class DocumentProcessor:
 
         logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
         return AttachmentProcessingResult(chunks_written=len(doc_chunks), status="indexed_fresh")
+
+    async def _extract_pdf_in_parts(
+        self,
+        pdf_bytes: bytes,
+        attachment_key: str,
+        target_part_bytes: int,
+    ) -> list[ExtractionChunk]:
+        """Split a large PDF by target byte size and extract each part via kreuzberg.
+
+        Page numbers returned by kreuzberg are 1-based within each part; adding
+        page_offset (0-based pages before the part) converts them back to the
+        original document's page numbers.
+        """
+        from backend.utils.pdf_splitter import split_pdf_bytes
+
+        try:
+            parts = split_pdf_bytes(pdf_bytes, target_part_bytes)
+        except ValueError as e:
+            logger.warning(f"Could not split {attachment_key}: {e} — sending whole file.")
+            parts = [(pdf_bytes, 0)]
+
+        mb = target_part_bytes // (1024 * 1024)
+        logger.info(f"Split {attachment_key} into {len(parts)} parts (~{mb} MB target each)")
+
+        all_chunks: list[ExtractionChunk] = []
+        for part_bytes, page_offset in parts:
+            try:
+                part_chunks = await self.document_extractor.extract_and_chunk(
+                    part_bytes, "application/pdf"
+                )
+            except KreuzbergTimeoutError as e:
+                logger.warning(
+                    f"Part (offset={page_offset}) of {attachment_key} timed out: {e}"
+                )
+                continue
+            except KreuzbergParsingError as e:
+                logger.warning(
+                    f"Part (offset={page_offset}) of {attachment_key} parse error: {e}"
+                )
+                continue
+
+            for chunk in part_chunks:
+                if chunk.page_number is not None:
+                    chunk.page_number += page_offset
+            all_chunks.extend(part_chunks)
+
+        for i, chunk in enumerate(all_chunks):
+            chunk.chunk_index = i
+
+        return all_chunks
 
     async def _index_from_abstract(
         self,

@@ -72,6 +72,7 @@ class KreuzbergExtractor(DocumentExtractor):
                 "max_characters": max_chunk_size,
                 "overlap": chunk_overlap,
             },
+            "force_ocr": ocr_enabled,
         }
         logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
