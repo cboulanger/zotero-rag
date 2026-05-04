@@ -126,6 +126,38 @@ var ZoteroRAGDialog = {
 	libraryMissingFilesCount: new Map(),
 
 	/**
+	 * Zotero library version recorded at the end of the last completed indexing run.
+	 * When this equals the current library version, there is nothing new to index —
+	 * the library is treated as fully synced regardless of the backend item count.
+	 * Persisted in prefs so it survives dialog restarts.
+	 * @type {Map<string, number>}
+	 */
+	librarySyncedVersion: new Map(),
+
+	/**
+	 * Get the current Zotero sync version for a RAG library ID.
+	 * Returns null when the library cannot be resolved (e.g. group not found).
+	 * @param {string} libraryId - RAG library ID ("u39226" for user, numeric string for groups)
+	 * @returns {number|null}
+	 */
+	_getZoteroLibraryVersion(libraryId) {
+		if (!this.plugin) return null;
+		const library = this.plugin.getLibraries().find(l => l.id === libraryId);
+		if (!library) return null;
+		let zoteroLibraryID;
+		if (library.type === 'group') {
+			// @ts-ignore - Zotero.Groups is available in Zotero plugin context
+			zoteroLibraryID = Zotero.Groups.get(parseInt(libraryId, 10))?.libraryID;
+		} else {
+			// @ts-ignore
+			zoteroLibraryID = Zotero.Libraries.userLibraryID;
+		}
+		if (!zoteroLibraryID) return null;
+		// @ts-ignore
+		return Zotero.Libraries.get(zoteroLibraryID)?.libraryVersion ?? null;
+	},
+
+	/**
 	 * Initialize the dialog.
 	 * @returns {void}
 	 */
@@ -427,6 +459,9 @@ var ZoteroRAGDialog = {
 			const unavail = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.unavailableItems.${libId}`, true) || '0') || 0;
 			// @ts-ignore
 			const missing = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.missingFiles.${libId}`, true) || '0') || 0;
+			// @ts-ignore
+			const syncedVer = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.syncedVersion.${libId}`, true) || '0') || 0;
+			this.librarySyncedVersion.set(libId, syncedVer);
 			// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
 			RemoteIndexer.countIndexableAttachments(libId, libType)
 				.then(count => {
@@ -486,8 +521,12 @@ var ZoteroRAGDialog = {
 			if (!this.libraryMetadata.has(id)) continue;
 			const metadata = this.libraryMetadata.get(id);
 			if (metadata == null) return true; // never indexed — needs indexing
-			// A library is "complete" when indexed count reaches the effective total
-			// (total indexable minus permanently unavailable items).
+			// If the Zotero library version hasn't changed since the last completed
+			// indexing run, there is nothing new to index — treat as fully synced.
+			const currentVersion = this._getZoteroLibraryVersion(id);
+			const syncedVersion = this.librarySyncedVersion.get(id) || 0;
+			if (currentVersion !== null && syncedVersion >= currentVersion) continue;
+			// Fall back to count comparison when no version tracking is available yet.
 			const totalIndexable = this.libraryIndexableCount.get(id);
 			const unavailable = this.libraryUnavailableCount.get(id) || 0;
 			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
@@ -516,6 +555,12 @@ var ZoteroRAGDialog = {
 
 		if (this.isConnecting) {
 			submitButton.disabled = true;
+			return;
+		}
+
+		// While an operation (indexing or query) is running, the operation itself
+		// controls the button via setSubmitEnabled() — don't interfere.
+		if (this.isOperationInProgress) {
 			return;
 		}
 
@@ -614,19 +659,27 @@ var ZoteroRAGDialog = {
 		// countIndexableAttachments reports (e.g. a parent item with multiple attachments is
 		// counted once here but creates one backend entry per attachment).
 		const displayIndexed = effectiveTotal !== undefined && indexed > effectiveTotal ? effectiveTotal : indexed;
-		const isPartial = metadata !== null
+		const missingFiles = this.libraryMissingFilesCount.get(libraryId) || 0;
+
+		// "count gap" — available items not yet reflected in backend count (may be permanent
+		// when caused by counting drift, or temporary when the library needs another run).
+		const isCountGap = metadata !== null
 			&& effectiveTotal !== undefined
 			&& indexed < effectiveTotal;
+
+		// Warning icon when there is a count gap OR unavailable items the user can fix.
+		// Green checkmark appears only when both conditions are clear.
+		const isPartial = isCountGap || (metadata !== null && missingFiles > 0);
 
 		if (statusIcon) {
 			if (!metadata) {
 				statusIcon.textContent = '\u2205'; // Empty set — never indexed
 				statusIcon.style.color = '#999';
 			} else if (isPartial) {
-				statusIcon.textContent = '\u26A0'; // Warning triangle — partially indexed
+				statusIcon.textContent = '\u26A0'; // Warning triangle — count gap or unavailable items
 				statusIcon.style.color = '#e07800';
 			} else {
-				statusIcon.textContent = '\u2713'; // Checkmark — fully indexed
+				statusIcon.textContent = '\u2713'; // Checkmark — fully indexed, no unavailable items
 				statusIcon.style.color = '#008000';
 			}
 		}
@@ -638,7 +691,8 @@ var ZoteroRAGDialog = {
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#999';
 				mainText = totalIndexable === 0 ? 'no indexable attachments' : 'not indexed';
-			} else if (isPartial) {
+			} else if (isCountGap) {
+				// Show count and "incomplete" label — available items not yet in the index.
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
 				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
@@ -646,6 +700,7 @@ var ZoteroRAGDialog = {
 				metaSpan.style.color = '#e07800';
 				mainText = `${timeAgo} · ${indexed}${total} items (incomplete)`;
 			} else {
+				// All available items indexed; unavailable items (if any) shown via link below.
 				const lastIndexed = new Date(metadata.last_indexed_at);
 				const timeAgo = this.formatTimeAgo(lastIndexed);
 				const total = effectiveTotal !== undefined ? `/${effectiveTotal}` : '';
@@ -656,7 +711,6 @@ var ZoteroRAGDialog = {
 
 			// Build the span content: plain text + optional clickable missing-files link
 			metaSpan.textContent = mainText;
-			const missingFiles = this.libraryMissingFilesCount.get(libraryId) || 0;
 			if (missingFiles > 0 && this.plugin) {
 				const plugin = this.plugin;
 				const link = document.createElement('a');
@@ -833,19 +887,11 @@ var ZoteroRAGDialog = {
 			const libraryIds = Array.from(this.selectedLibraries);
 
 			// Skip attachment scan when all selected libraries are already fully indexed
-			// and the user hasn't forced a full re-index. The cached metadata (loaded at
-			// dialog-open time) already reflects any new items, so a mismatch between
-			// total_items_indexed and effectiveTotal means something is new/changed.
-			const allFullyIndexed = indexingMode !== 'full' && libraryIds.every(id => {
-				if (!this.libraryMetadata.has(id)) return false;
-				const metadata = this.libraryMetadata.get(id);
-				if (metadata == null) return false;
-				const totalIndexable = this.libraryIndexableCount.get(id);
-				const unavailable = this.libraryUnavailableCount.get(id) || 0;
-				const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
-				if (effectiveTotal !== undefined) return metadata.total_items_indexed >= effectiveTotal;
-				return metadata.total_items_indexed > 0;
-			});
+			// and the user hasn't forced a full re-index.  Uses the same version-aware
+			// logic as isIndexOnlyMode(): a library whose syncedVersion matches the current
+			// Zotero library version is considered up-to-date even if the backend item
+			// count doesn't perfectly match (permanent counting drift is acceptable).
+			const allFullyIndexed = indexingMode !== 'full' && !this.isIndexOnlyMode();
 
 			if (!allFullyIndexed) {
 				// Warn user about missing attachments before committing to indexing
@@ -1353,6 +1399,16 @@ var ZoteroRAGDialog = {
 					} catch (e) {
 						plugin.log(`[Dialog] reconcile-count failed for ${libraryId}: ${e}`);
 					}
+				}
+
+				// Record the current Zotero library version so future opens know the library
+				// is fully synced — prevents "Index" mode from reappearing when the count
+				// discrepancy is permanent (e.g. skipped/unindexable items).
+				const currentLibVer = this._getZoteroLibraryVersion(libraryId);
+				if (currentLibVer !== null) {
+					this.librarySyncedVersion.set(libraryId, currentLibVer);
+					// @ts-ignore
+					Zotero.Prefs.set(`extensions.zotero-rag.syncedVersion.${libraryId}`, currentLibVer, true);
 				}
 
 				// Refresh the library row from the backend so the label shows the accurate

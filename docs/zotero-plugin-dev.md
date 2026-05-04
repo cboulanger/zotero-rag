@@ -626,6 +626,21 @@ window.opener                   // the window that called openDialog()
 window.closed                   // boolean — true after window.close()
 ```
 
+### Libraries
+
+```javascript
+// Current sync version of a library (highest item version seen by Zotero sync).
+// Increases whenever items are added or modified.  Use to detect whether the library
+// has changed since a previous operation.
+Zotero.Libraries.get(libraryID).libraryVersion   // → number (0 if never synced)
+
+// Numeric ID of the user's personal library (always present)
+Zotero.Libraries.userLibraryID                   // → number
+
+// Convert group → numeric library ID
+Zotero.Groups.get(groupId).libraryID             // → number
+```
+
 ### Utilities & Globals
 
 ```javascript
