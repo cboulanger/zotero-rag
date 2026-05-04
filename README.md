@@ -11,6 +11,21 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 > **Beta:** The API and feature set are still evolving. Breaking changes may occur between releases.
 
+## Why Zotero RAG?
+
+Most document-chat tools require you to manually upload PDFs to a cloud service. Zotero RAG works differently:
+
+- **Always in sync** — the plugin reads directly from your local Zotero library. When you add, update, or delete an item in Zotero, the index stays current without any manual export or re-upload step.
+- **Bibliographic awareness** — because the index carries full Zotero metadata (authors, year, item type, title), you can ask questions that go beyond document content: *"List all books by Luhmann in my library"* or *"What journal articles on systems theory were published between 1975 and 1990?"* — answered instantly from the metadata index, without reading a single PDF.
+- **Abstracts indexed automatically** — for items without a locally available attachment, the abstract is indexed so the item still shows up in relevant search results.
+- **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete.
+- **No file uploads to third parties** — the plugin sends file bytes only to the backend you control. With a local model preset, nothing ever leaves your machine.
+- **Multi-library** — query across several Zotero libraries in a single question.
+- **Rich source citations** — answers include page numbers and text anchors (first words of the source passage), not just titles, making it easy to locate the original passage.
+- **Multi-format** — indexes PDFs, HTML snapshots, EPUB, and DOCX attachments — not PDFs only.
+- **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin.
+- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code.
+
 ## Quick Start
 
 ### Install the dependencies
