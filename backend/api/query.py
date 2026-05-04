@@ -2,6 +2,8 @@
 Query API endpoints for RAG queries.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Optional
@@ -13,6 +15,7 @@ from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service, make_llm_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class SourceCitation(BaseModel):
@@ -159,6 +162,7 @@ async def query_libraries(
             )
 
     except Exception as e:
+        logger.exception("Query failed")
         raise HTTPException(
             status_code=500,
             detail=f"Query failed: {str(e)}"
