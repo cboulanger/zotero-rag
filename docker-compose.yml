@@ -23,6 +23,10 @@ services:
     # No ports exposed to host — only the app service needs to reach it
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          memory: ${KREUZBERG_MEMORY_LIMIT:-8G}
 
   qdrant:
     image: docker.io/qdrant/qdrant:v1.15
