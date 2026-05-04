@@ -1,3 +1,11 @@
+## [1.20.4](https://github.com/cboulanger/zotero-rag/compare/v1.20.3...v1.20.4) (2026-05-04)
+
+
+### Bug Fixes
+
+* log exception traceback on query 500 errors ([a31b34a](https://github.com/cboulanger/zotero-rag/commit/a31b34a13f4d87897b653af5f80bb88245a29be3))
+* resolve incomplete indexing blocking question submission (closes [#24](https://github.com/cboulanger/zotero-rag/issues/24)) ([158f888](https://github.com/cboulanger/zotero-rag/commit/158f88829ee0175fd2f42a6d7610011efb96517c))
+
 ## [1.20.3](https://github.com/cboulanger/zotero-rag/compare/v1.20.2...v1.20.3) (2026-05-03)
 
 
