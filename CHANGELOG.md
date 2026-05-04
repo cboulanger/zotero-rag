@@ -1,3 +1,11 @@
+## [1.20.5](https://github.com/cboulanger/zotero-rag/compare/v1.20.4...v1.20.5) (2026-05-04)
+
+
+### Bug Fixes
+
+* reject PDFs whose split parts inflate to near original size ([b5df91e](https://github.com/cboulanger/zotero-rag/commit/b5df91ea7928f00d4ecf7d2d08927292f4ff0e41))
+* set 8 GB memory limit on kreuzberg container ([138ad91](https://github.com/cboulanger/zotero-rag/commit/138ad91bd93638f6e4b60dcacfc333eafc805963))
+
 ## [1.20.4](https://github.com/cboulanger/zotero-rag/compare/v1.20.3...v1.20.4) (2026-05-04)
 
 
