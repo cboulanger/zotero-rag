@@ -523,9 +523,13 @@ class DocumentProcessor:
         # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
         settings = get_settings()
         if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
-            chunks = await self._extract_pdf_in_parts(
-                file_bytes, attachment_key, settings.pdf_split_target_part_size
-            )
+            try:
+                chunks = await self._extract_pdf_in_parts(
+                    file_bytes, attachment_key, settings.pdf_split_target_part_size
+                )
+            except KreuzbergParsingError as e:
+                logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
         else:
             try:
                 chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
@@ -610,6 +614,16 @@ class DocumentProcessor:
 
         mb = target_part_bytes // (1024 * 1024)
         logger.info(f"Split {attachment_key} into {len(parts)} parts (~{mb} MB target each)")
+
+        original_size = len(pdf_bytes)
+        if len(parts) > 1 and original_size > target_part_bytes:
+            inflated = [i for i, (b, _) in enumerate(parts) if len(b) >= original_size * 0.8]
+            if inflated:
+                raise KreuzbergParsingError(
+                    f"PDF split produced inflated parts (parts {inflated} are ≥ 80% of "
+                    f"the original {original_size // (1024*1024)} MB) — the PDF has "
+                    "unsplittable shared resources and cannot be OCR-processed"
+                )
 
         all_chunks: list[ExtractionChunk] = []
         for part_bytes, page_offset in parts:
