@@ -524,6 +524,33 @@ async function handlePush(options) {
 }
 
 // ============================================================================
+// Log Utilities
+// ============================================================================
+
+/**
+ * Truncate the server log file before container startup.
+ * The log lives at <dataDir>/logs/server.log (mirrors settings.py default).
+ * @param {string|undefined} dataDir - Host path mounted at /data
+ */
+function clearLogFile(dataDir) {
+  if (!dataDir) {
+    console.log('[WARNING] --clear-log has no effect without --data-dir (log path unknown)');
+    return;
+  }
+  const logFile = `${dataDir}/logs/server.log`;
+  try {
+    if (fs.existsSync(logFile)) {
+      fs.writeFileSync(logFile, '');
+      console.log(`[INFO] Truncated log file: ${logFile}`);
+    } else {
+      console.log(`[INFO] Log file does not exist yet, nothing to clear: ${logFile}`);
+    }
+  } catch (e) {
+    console.log(`[WARNING] Could not truncate log file ${logFile}: ${e.message}`);
+  }
+}
+
+// ============================================================================
 // Start
 // ============================================================================
 
@@ -663,12 +690,14 @@ function isContainerRunning(name) {
  * @param {{
  *   tag?: string, name?: string, port?: number, detach?: boolean,
  *   dataDir?: string, qdrantDataDir?: string, zoteroHost?: string, env?: string[],
- *   volume?: string[], restart?: string, noKreuzberg?: boolean, noQdrant?: boolean
+ *   volume?: string[], restart?: string, noKreuzberg?: boolean, noQdrant?: boolean,
+ *   clearLog?: boolean
  * }} options
  */
 async function handleStart(options) {
   console.log('Zotero RAG - Container Start');
   console.log('=============================');
+  if (options.clearLog) clearLogFile(options.dataDir);
   const tag = options.tag || 'latest';
   const name = options.name || `${APP_NAME}-${tag}`;
   const port = options.port || DEFAULT_PORT;
@@ -777,11 +806,12 @@ async function handleStop(options) {
 // ============================================================================
 
 /**
- * @param {{name?: string, tag?: string, port?: number, dataDir?: string, zoteroHost?: string, env?: string[], volume?: string[], restart?: string}} options
+ * @param {{name?: string, tag?: string, port?: number, dataDir?: string, zoteroHost?: string, env?: string[], volume?: string[], restart?: string, clearLog?: boolean}} options
  */
 async function handleRestart(options) {
   console.log('Zotero RAG - Container Restart');
   console.log('===============================');
+  if (options.clearLog) clearLogFile(options.dataDir);
   const name = options.name || `${APP_NAME}-latest`;
 
   try {
@@ -1333,12 +1363,14 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
  *   pull?: boolean, rebuild?: boolean, cache?: boolean, localModels?: boolean, platform?: string,
  *   nginx?: boolean, ssl?: boolean, email?: string, maxBodySize?: string,
  *   systemdService?: string, sharedKreuzberg?: string, sharedQdrant?: string, yes?: boolean,
- *   restartSidecars?: boolean, reconfigureNginx?: boolean, reconfigureSSL?: boolean
+ *   restartSidecars?: boolean, reconfigureNginx?: boolean, reconfigureSSL?: boolean,
+ *   clearLog?: boolean
  * }} options
  */
 async function handleDeploy(options) {
   console.log('Zotero RAG - Container Deploy');
   console.log('==============================');
+  if (options.clearLog) clearLogFile(options.dataDir);
 
   if (process.platform === 'win32') {
     console.log('[ERROR] Deploy is not supported on Windows (requires nginx/certbot/systemctl)');
@@ -1667,6 +1699,7 @@ program
   .option('--qdrant-data-dir <dir>', 'Host path for Qdrant persistent storage (default: <data-dir>/qdrant-server)')
   .option('--no-kreuzberg', 'Skip kreuzberg sidecar (use if running kreuzberg separately)')
   .option('--no-qdrant', 'Skip Qdrant sidecar (use if running Qdrant separately)')
+  .option('--clear-log', 'Truncate the server log file before starting (requires --data-dir)')
   .action(handleStart);
 
 program
@@ -1688,6 +1721,7 @@ program
   .option('--env <var>', 'Env var (if creating new container, repeatable)', collect, [])
   .option('--volume <mapping>', 'Volume (if creating new container, repeatable)', collect, [])
   .option('--restart <policy>', 'Restart policy')
+  .option('--clear-log', 'Truncate the server log file before restarting (requires --data-dir)')
   .action(handleRestart);
 
 program
@@ -1726,6 +1760,7 @@ program
   .option('--restart-sidecars', 'Restart kreuzberg/qdrant sidecars even if already running (default: skip if already running)')
   .option('--reconfigure-nginx', 'Rewrite nginx config even if already present')
   .option('--reconfigure-ssl', 'Run certbot even if SSL certificate already exists')
+  .option('--clear-log', 'Truncate the server log file before deploying (requires --data-dir)')
   .addHelpText('after', `
 Examples:
   # Deploy with nginx + SSL
