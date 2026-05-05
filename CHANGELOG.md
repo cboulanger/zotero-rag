@@ -1,3 +1,10 @@
+## [1.21.1](https://github.com/cboulanger/zotero-rag/compare/v1.21.0...v1.21.1) (2026-05-05)
+
+
+### Bug Fixes
+
+* restore rate limit widget visibility during active indexing operations ([57891ae](https://github.com/cboulanger/zotero-rag/commit/57891aec103e57245f1702c64687e1e841a2c195))
+
 # [1.21.0](https://github.com/cboulanger/zotero-rag/compare/v1.20.5...v1.21.0) (2026-05-05)
 
 
