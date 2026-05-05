@@ -1,3 +1,10 @@
+# [1.21.0](https://github.com/cboulanger/zotero-rag/compare/v1.20.5...v1.21.0) (2026-05-05)
+
+
+### Features
+
+* query routing and agent dispatch for bibliographic metadata queries ([4adf045](https://github.com/cboulanger/zotero-rag/commit/4adf0452a45c153dca65e829baa5e343e5cc696a)), closes [#19](https://github.com/cboulanger/zotero-rag/issues/19)
+
 ## [1.20.5](https://github.com/cboulanger/zotero-rag/compare/v1.20.4...v1.20.5) (2026-05-04)
 
 
