@@ -8,6 +8,8 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
+CURRENT_SCHEMA_VERSION: int = 4
+
 ProcessingStatus = Literal[
     "indexed_fresh",
     "skipped_duplicate",
@@ -66,8 +68,11 @@ class ChunkMetadata(BaseModel):
         description="Item's dateModified field from Zotero"
     )
 
-    # Schema version for future migrations
-    schema_version: int = Field(default=2)
+    # Schema version for future migrations.
+    # v2: added item_version / attachment_version / indexed_at / zotero_modified
+    # v3: added item_type to Qdrant payload
+    # v4: added author_lastnames keyword field for Qdrant-native author filtering
+    schema_version: int = Field(default=CURRENT_SCHEMA_VERSION)
 
 
 class DocumentChunk(BaseModel):

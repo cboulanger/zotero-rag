@@ -5,9 +5,10 @@ Coordinates retrieval from vector database and generation with LLM.
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
+from backend.models.filters import MetadataFilters
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore
@@ -80,7 +81,8 @@ class RAGEngine:
         question: str,
         library_ids: List[str],
         top_k: int = 5,
-        min_score: float = 0.3  # Fallback default, should use preset value from API layer
+        min_score: float = 0.3,  # Fallback default, should use preset value from API layer
+        filters: Optional[MetadataFilters] = None,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -107,6 +109,7 @@ class RAGEngine:
             limit=top_k,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
+            filters=filters if filters and not filters.is_empty() else None,
         )
 
         if not search_results:

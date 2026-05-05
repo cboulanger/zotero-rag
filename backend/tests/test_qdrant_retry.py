@@ -47,13 +47,20 @@ class TestEnsureChunksIndexes(unittest.TestCase):
         for c in store.client.create_payload_index.call_args_list:
             self.assertEqual(c[1]["collection_name"], store.CHUNKS_COLLECTION)
 
-    def test_indexes_use_keyword_schema(self):
-        """Both indexes use the keyword field schema for fast equality/MatchAny lookups."""
+    def test_indexes_use_correct_schema(self):
+        """library_id, item_key, item_type and author_lastnames use keyword; year uses integer; title uses text."""
+        from qdrant_client.models import TextIndexParams
         store = _make_store()
         store._ensure_chunks_indexes()
 
-        for c in store.client.create_payload_index.call_args_list:
-            self.assertEqual(c[1]["field_schema"], "keyword")
+        field_schemas = {c[1]["field_name"]: c[1]["field_schema"]
+                         for c in store.client.create_payload_index.call_args_list}
+        self.assertEqual(field_schemas.get("library_id"), "keyword")
+        self.assertEqual(field_schemas.get("item_key"), "keyword")
+        self.assertEqual(field_schemas.get("item_type"), "keyword")
+        self.assertEqual(field_schemas.get("author_lastnames"), "keyword")
+        self.assertEqual(field_schemas.get("year"), "integer")
+        self.assertIsInstance(field_schemas.get("title"), TextIndexParams)
 
     def test_idempotent_when_index_already_exists(self):
         """A second call does not raise even if create_payload_index returns an error."""

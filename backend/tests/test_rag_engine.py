@@ -122,6 +122,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             limit=5,
             score_threshold=0.5,
             library_ids=library_ids,
+            filters=None,
         )
 
         # Verify LLM was called with context
@@ -238,6 +239,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             limit=10,
             score_threshold=0.6,
             library_ids=library_ids,
+            filters=None,
         )
 
         # Verify result
@@ -331,6 +333,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             limit=20,
             score_threshold=0.8,
             library_ids=library_ids,
+            filters=None,
         )
 
     async def test_query_llm_parameters(self):

@@ -11,6 +11,21 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 > **Beta:** The API and feature set are still evolving. Breaking changes may occur between releases.
 
+## Why Zotero RAG?
+
+Most document-chat tools require you to manually upload PDFs to a cloud service. Zotero RAG works differently:
+
+- **Always in sync** — the plugin reads directly from your local Zotero library. When you add, update, or delete an item in Zotero, the index stays current without any manual export or re-upload step.
+- **Bibliographic awareness** — because the index carries full Zotero metadata (authors, year, item type, title), you can ask questions that go beyond document content: *"List all books by Luhmann in my library"* or *"What journal articles on systems theory were published between 1975 and 1990?"* — answered instantly from the metadata index, without reading a single PDF.
+- **Abstracts indexed automatically** — for items without a locally available attachment, the abstract is indexed so the item still shows up in relevant search results.
+- **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete.
+- **No file uploads to third parties** — the plugin sends file bytes only to the backend you control. With a local model preset, nothing ever leaves your machine.
+- **Multi-library** — query across several Zotero libraries in a single question.
+- **Rich source citations** — answers include page numbers and text anchors (first words of the source passage), not just titles, making it easy to locate the original passage.
+- **Multi-format** — indexes PDFs, HTML snapshots, EPUB, and DOCX attachments — not PDFs only.
+- **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin.
+- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code.
+
 ## Quick Start
 
 ### Install the dependencies
@@ -112,6 +127,16 @@ Once installed:
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
 
+#### Query Routing
+
+The backend automatically routes your question to the most appropriate search strategy before answering:
+
+- **Semantic (RAG) search** — for content questions: arguments, definitions, quotes, or explanations found in document text. Example: *"Where does Luhmann define autopoiesis?"*
+- **Metadata catalog search** — for bibliographic questions about what items exist. Example: *"List all books on Rechtssoziologie published between 1960 and 1990."*
+- **Combined** — for questions that need both, e.g. *"Papers by Habermas on communicative action after 1980"* uses a metadata filter while still searching document content.
+
+Routing is transparent and requires no extra configuration. To bypass routing and use pure RAG (faster, no routing LLM call), include `"enable_routing": false` in the API request body. See [Query Routing Architecture](docs/query-routing.md) for details.
+
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
 #### Public Web Interface
@@ -212,6 +237,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 ## Developer Documentation
 
 - **[Application architecture](docs/architecture.md)**
+- **[Query routing & agent system](docs/query-routing.md)**
 - **[Plugin development & hot reload](docs/zotero-plugin-dev.md)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**

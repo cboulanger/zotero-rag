@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from markdown_it import MarkdownIt
 
-from backend.services.rag_engine import RAGEngine
+from backend.services.query_orchestrator import QueryOrchestrator
 from backend.db.vector_store import VectorStore
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service, make_llm_service
@@ -34,6 +34,7 @@ class QueryRequest(BaseModel):
     library_ids: List[str]
     top_k: Optional[int] = None  # Number of chunks to retrieve (uses preset default if not specified)
     min_score: Optional[float] = None  # Minimum similarity score (uses preset default if not specified)
+    enable_routing: bool = True  # False skips routing LLM call (backward-compatible pure-RAG mode)
 
 
 class QueryResponse(BaseModel):
@@ -94,72 +95,70 @@ async def query_libraries(
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k
         min_score = query.min_score if query.min_score is not None else preset.rag.score_threshold
 
-        if True:  # keep indentation for the block below
-            # Validate that at least one library is indexed
-            from qdrant_client.models import Filter, FieldCondition, MatchValue
+        # Validate that at least one library is indexed
+        from qdrant_client.models import Filter, FieldCondition, MatchValue
 
-            indexed_count = 0
-            for library_id in query.library_ids:
-                count = vector_store.client.count(
-                    collection_name=vector_store.CHUNKS_COLLECTION,
-                    count_filter=Filter(
-                        must=[
-                            FieldCondition(
-                                key="library_id",
-                                match=MatchValue(value=library_id)
-                            )
-                        ]
-                    )
-                ).count
-                if count > 0:
-                    indexed_count += 1
-
-            if indexed_count == 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"None of the specified libraries have been indexed. Please index the libraries before querying."
+        indexed_count = 0
+        for library_id in query.library_ids:
+            count = vector_store.client.count(
+                collection_name=vector_store.CHUNKS_COLLECTION,
+                count_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="library_id",
+                            match=MatchValue(value=library_id)
+                        )
+                    ]
                 )
+            ).count
+            if count > 0:
+                indexed_count += 1
 
-            # Create RAG engine
-            rag_engine = RAGEngine(
-                embedding_service=embedding_service,
-                llm_service=llm_service,
-                vector_store=vector_store,
-                settings=settings
+        if indexed_count == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="None of the specified libraries have been indexed. Please index the libraries before querying."
             )
 
-            # Execute query with preset defaults
-            result = await rag_engine.query(
-                question=query.question,
-                library_ids=query.library_ids,
-                top_k=top_k,
-                min_score=min_score
+        # Create orchestrator and run query (routing is enabled by default)
+        orchestrator = QueryOrchestrator(
+            embedding_service=embedding_service,
+            llm_service=llm_service,
+            vector_store=vector_store,
+            settings=settings,
+        )
+        result = await orchestrator.query(
+            question=query.question,
+            library_ids=query.library_ids,
+            top_k=top_k,
+            min_score=min_score,
+            enable_routing=query.enable_routing,
+        )
+
+        # Format citations
+        sources = [
+            SourceCitation(
+                item_id=source.item_id,
+                library_id=source.library_id,
+                title=source.title,
+                page_number=source.page_number,
+                text_anchor=source.text_anchor,
+                relevance_score=source.score
             )
+            for source in result.sources
+        ]
 
-            # Format citations
-            sources = [
-                SourceCitation(
-                    item_id=source.item_id,
-                    library_id=source.library_id,
-                    title=source.title,
-                    page_number=source.page_number,
-                    text_anchor=source.text_anchor,
-                    relevance_score=source.score
-                )
-                for source in result.sources
-            ]
+        # Convert markdown answer to HTML
+        md = MarkdownIt()
+        answer_html = md.render(result.answer)
 
-            # Convert markdown answer to HTML
-            md = MarkdownIt()
-            answer_html = md.render(result.answer)
-
-            return QueryResponse(
-                question=query.question,
-                answer=answer_html,
-                answer_format="html",
-                sources=sources,
-                library_ids=query.library_ids
-            )
+        return QueryResponse(
+            question=query.question,
+            answer=answer_html,
+            answer_format="html",
+            sources=sources,
+            library_ids=query.library_ids
+        )
 
     except Exception as e:
         logger.exception("Query failed")
