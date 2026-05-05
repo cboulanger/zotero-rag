@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 HOST = "localhost"
 PORT = 8119
 PROJECT_ROOT = Path(__file__).parent.parent
-LOG_DIR = PROJECT_ROOT / "logs"
+LOG_DIR = PROJECT_ROOT / "data" / "logs"
 LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
 

@@ -46,7 +46,7 @@ def _results_to_context(results: list[MetadataResult]) -> str:
     for i, r in enumerate(results, 1):
         year_str = f" ({r.year})" if r.year else ""
         type_str = f" [{r.item_type}]" if r.item_type else ""
-        lines.append(f"[M{i}] {_format_authors(r.authors)}{year_str} — {r.title}{type_str}")
+        lines.append(f"[S{i}] {_format_authors(r.authors)}{year_str} — {r.title}{type_str}")
         if r.text_preview:
             lines.append(f"      \"{r.text_preview}...\"")
     return "\n".join(lines)

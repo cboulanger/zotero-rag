@@ -42,7 +42,7 @@ class TestResultsToContext(unittest.TestCase):
             text_preview="Systems theory is",
         )
         text = _results_to_context([result])
-        self.assertIn("[M1]", text)
+        self.assertIn("[S1]", text)
         self.assertIn("Social Systems", text)
         self.assertIn("1984", text)
         self.assertIn("book", text)
@@ -59,7 +59,7 @@ class TestResultsToContext(unittest.TestCase):
             text_preview=None,
         )
         text = _results_to_context([result])
-        self.assertIn("[M1]", text)
+        self.assertIn("[S1]", text)
         self.assertNotIn("None", text)
 
 

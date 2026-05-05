@@ -11,6 +11,7 @@ Custom agents can be registered before the first query:
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from backend.config.settings import Settings
@@ -36,9 +37,11 @@ Retrieved information:
 
 Instructions:
 - Provide a comprehensive answer based on the retrieved information above.
-- For catalog listings (items found by metadata search), present them as a formatted list.
-- Use [SN] citation notation (where N is a source number) only for direct passages from documents.
-- If information from multiple sources is combined, acknowledge where each part comes from.
+- For catalog listings, present items as a formatted list with author, year, and title.
+- Cite every source you mention using [SN] notation (e.g. [S1], [S2]).
+  Use [SN] for both catalog entries and quoted document passages.
+  For document passages with a page number use [SN:P] (e.g. [S2:7]).
+- Do not invent source numbers — only use the [SN] labels present in the retrieved information above.
 - If no relevant information was found, say so clearly.
 """
 
@@ -143,10 +146,16 @@ class QueryOrchestrator:
         plan: QueryPlan,
         results: list[AgentResult],
     ) -> QueryResult:
-        context_blocks = "\n\n---\n\n".join(
-            f"[{r.agent_name.upper()} AGENT RESULTS]\n{r.context_text}"
-            for r in results
-        )
+        # Renumber each agent's local [S1],[S2]... citations into a global sequence
+        # so the merged sources list stays consistent with what the LLM sees.
+        offset = 0
+        renumbered_blocks = []
+        for r in results:
+            text = _shift_source_refs(r.context_text, offset)
+            renumbered_blocks.append(f"[{r.agent_name.upper()} AGENT RESULTS]\n{text}")
+            offset += len(r.sources)
+
+        context_blocks = "\n\n---\n\n".join(renumbered_blocks)
         prompt = _SYNTHESIS_PROMPT.format(
             question=question,
             context_blocks=context_blocks,
@@ -161,6 +170,19 @@ class QueryOrchestrator:
 
         sources = _merge_sources(results)
         return QueryResult(question=question, answer=answer, sources=sources)
+
+
+def _shift_source_refs(text: str, offset: int) -> str:
+    """Add `offset` to every [SN] / [SN:P] citation number in text."""
+    if offset == 0:
+        return text
+
+    def _replace(m: re.Match) -> str:
+        n = int(m.group(1))
+        page = m.group(2) or ""
+        return f"[S{n + offset}{page}]"
+
+    return re.sub(r'\[S(\d+)(:\d+)?\]', _replace, text)
 
 
 def _rag_passthrough(agent_result: AgentResult, question: str) -> QueryResult:

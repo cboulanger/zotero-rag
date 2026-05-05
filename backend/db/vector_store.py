@@ -36,6 +36,25 @@ from backend.models.library import LibraryIndexMetadata
 logger = logging.getLogger(__name__)
 
 
+def _extract_lastnames(authors: list[str]) -> list[str]:
+    """Return lowercase last names from a list of author strings.
+
+    Handles "Last, First" (comma-separated) and "First Last" formats.
+    Used as a keyword-indexed payload field for Qdrant-native author filtering.
+    """
+    lastnames = []
+    for author in authors:
+        name = author.strip()
+        if "," in name:
+            lastname = name.split(",", 1)[0].strip()
+        else:
+            parts = name.split()
+            lastname = parts[-1] if parts else name
+        if lastname:
+            lastnames.append(lastname.lower())
+    return lastnames
+
+
 class VectorStore:
     """
     Vector database interface using Qdrant.
@@ -221,6 +240,7 @@ class VectorStore:
                 "attachment_key": chunk.metadata.document_metadata.attachment_key,
                 "title": chunk.metadata.document_metadata.title,
                 "authors": chunk.metadata.document_metadata.authors,
+                "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
                 "year": chunk.metadata.document_metadata.year,
                 "item_type": chunk.metadata.document_metadata.item_type,
                 "page_number": chunk.metadata.page_number,
@@ -279,6 +299,7 @@ class VectorStore:
                     "attachment_key": chunk.metadata.document_metadata.attachment_key,
                     "title": chunk.metadata.document_metadata.title,
                     "authors": chunk.metadata.document_metadata.authors,
+                    "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
                     "year": chunk.metadata.document_metadata.year,
                     "item_type": chunk.metadata.document_metadata.item_type,
                     "page_number": chunk.metadata.page_number,
@@ -316,8 +337,12 @@ class VectorStore:
                     lte=filters.year_max,
                 ),
             ))
-        for author in filters.authors:
-            conditions.append(FieldCondition(key="authors", match=MatchText(text=author)))
+        if filters.authors:
+            # author_lastnames is a keyword-indexed list[str] — MatchAny works reliably in all modes
+            conditions.append(FieldCondition(
+                key="author_lastnames",
+                match=MatchAny(any=[a.lower() for a in filters.authors]),
+            ))
         if filters.item_types:
             conditions.append(FieldCondition(
                 key="item_type",
@@ -650,7 +675,7 @@ class VectorStore:
         Text indexes on authors and title enable substring matching.
         Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        keyword_fields = ("library_id", "item_key", "item_type")
+        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames")
         for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
@@ -677,14 +702,14 @@ class VectorStore:
         except Exception as exc:
             logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.year: {exc}")
 
-        # Text indexes for authors and title (enable MatchText substring filtering)
+        # Text index for title (single string field — MatchText works reliably)
         text_index_params = TextIndexParams(
             type="text",
             tokenizer=TokenizerType.WORD,
             min_token_len=2,
             lowercase=True,
         )
-        for field in ("authors", "title"):
+        for field in ("title",):
             try:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)

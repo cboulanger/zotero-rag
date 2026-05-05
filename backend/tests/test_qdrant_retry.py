@@ -48,7 +48,7 @@ class TestEnsureChunksIndexes(unittest.TestCase):
             self.assertEqual(c[1]["collection_name"], store.CHUNKS_COLLECTION)
 
     def test_indexes_use_correct_schema(self):
-        """library_id and item_key use keyword schema; year uses integer; authors/title use text."""
+        """library_id, item_key, item_type and author_lastnames use keyword; year uses integer; title uses text."""
         from qdrant_client.models import TextIndexParams
         store = _make_store()
         store._ensure_chunks_indexes()
@@ -58,8 +58,8 @@ class TestEnsureChunksIndexes(unittest.TestCase):
         self.assertEqual(field_schemas.get("library_id"), "keyword")
         self.assertEqual(field_schemas.get("item_key"), "keyword")
         self.assertEqual(field_schemas.get("item_type"), "keyword")
+        self.assertEqual(field_schemas.get("author_lastnames"), "keyword")
         self.assertEqual(field_schemas.get("year"), "integer")
-        self.assertIsInstance(field_schemas.get("authors"), TextIndexParams)
         self.assertIsInstance(field_schemas.get("title"), TextIndexParams)
 
     def test_idempotent_when_index_already_exists(self):

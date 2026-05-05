@@ -23,7 +23,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from backend.db.vector_store import VectorStore
+from backend.db.vector_store import VectorStore, _extract_lastnames
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service
 from backend.models.document import (
     CURRENT_SCHEMA_VERSION,
@@ -722,6 +722,7 @@ async def batch_update_metadata(
             fields["title"] = item.title
         if item.authors:
             fields["authors"] = item.authors
+            fields["author_lastnames"] = _extract_lastnames(item.authors)
         if item.year is not None:
             fields["year"] = item.year
         if item.item_type is not None:
