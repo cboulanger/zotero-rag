@@ -736,7 +736,13 @@ async def batch_update_metadata(
         f"Metadata update: library={request.library_id} "
         f"items={updated_items}/{len(request.items)} chunks={updated_chunks}"
     )
-    _invalidate_library_cache(request.library_id)
+    # Update cache: bump schema_version for each successfully updated item
+    # (item_version unchanged — preserve whatever was already cached)
+    for item in request.items:
+        with _check_indexed_item_cache_lock:
+            lib = _check_indexed_item_cache.get(request.library_id, {})
+            if item.item_key in lib and lib[item.item_key] is not None:
+                lib[item.item_key] = {**lib[item.item_key], "schema_version": CURRENT_SCHEMA_VERSION}
     return BatchMetadataUpdateResult(
         library_id=request.library_id,
         updated_items=updated_items,
