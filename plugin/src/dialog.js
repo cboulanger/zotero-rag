@@ -622,7 +622,7 @@ var ZoteroRAGDialog = {
 	updateRateLimitDisplay() {
 		const section = document.getElementById('rate-limit-section');
 		if (!section) return;
-		const show = this.isIndexOnlyMode() && this.rateLimitAvailable;
+		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
 		section.style.display = show ? '' : 'none';
 		if (!show || !this.rateLimitHeaders) return;
 
