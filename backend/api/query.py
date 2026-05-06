@@ -44,6 +44,9 @@ class QueryResponse(BaseModel):
     answer_format: str  # Format of answer: "text", "html", or "markdown"
     sources: List[SourceCitation]
     library_ids: List[str]
+    model_name: Optional[str] = None
+    agents_used: List[str] = []
+    library_document_counts: dict[str, int] = {}
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -95,10 +98,11 @@ async def query_libraries(
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k
         min_score = query.min_score if query.min_score is not None else preset.rag.score_threshold
 
-        # Validate that at least one library is indexed
+        # Validate that at least one library is indexed; collect per-library document counts
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
         indexed_count = 0
+        library_document_counts: dict[str, int] = {}
         for library_id in query.library_ids:
             count = vector_store.client.count(
                 collection_name=vector_store.CHUNKS_COLLECTION,
@@ -113,6 +117,9 @@ async def query_libraries(
             ).count
             if count > 0:
                 indexed_count += 1
+            meta = vector_store.get_library_metadata(library_id)
+            if meta and meta.total_items_indexed > 0:
+                library_document_counts[library_id] = meta.total_items_indexed
 
         if indexed_count == 0:
             raise HTTPException(
@@ -157,7 +164,10 @@ async def query_libraries(
             answer=answer_html,
             answer_format="html",
             sources=sources,
-            library_ids=query.library_ids
+            library_ids=query.library_ids,
+            model_name=result.model_name,
+            agents_used=result.agents_used,
+            library_document_counts=library_document_counts,
         )
 
     except Exception as e:

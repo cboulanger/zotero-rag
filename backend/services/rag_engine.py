@@ -45,6 +45,8 @@ class QueryResult(BaseModel):
     question: str
     answer: str
     sources: List[SourceInfo]
+    model_name: Optional[str] = None
+    agents_used: list[str] = []
 
 
 class RAGEngine:

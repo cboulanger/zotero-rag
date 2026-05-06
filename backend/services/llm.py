@@ -24,6 +24,11 @@ class LLMService(ABC):
         """Return API keys required by this service (empty for local services)."""
         return []
 
+    @property
+    def model_name(self) -> str:
+        """Name of the LLM model in use. Subclasses should override this."""
+        return "unknown"
+
     @abstractmethod
     async def generate(
         self,
@@ -76,6 +81,10 @@ class LocalLLMService(LLMService):
         self._tokenizer = None
 
         logger.info(f"Initialized LocalLLMService with model: {self.llm_config.model_name}")
+
+    @property
+    def model_name(self) -> str:
+        return self.llm_config.model_name
 
     def _load_model(self):
         """Lazy load the LLM model and tokenizer."""
@@ -218,6 +227,10 @@ class RemoteLLMService(LLMService):
         self._anthropic_client = None
 
         logger.info(f"Initialized RemoteLLMService with model: {self.llm_config.model_name}")
+
+    @property
+    def model_name(self) -> str:
+        return self.llm_config.model_name
 
     @staticmethod
     def required_api_keys(settings: Settings) -> list[dict]:

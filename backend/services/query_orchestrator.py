@@ -135,16 +135,22 @@ class QueryOrchestrator:
         ])
 
         # 4. Synthesize or pass through
+        agents_used = [a.name for a in selected]
+        llm_model = self._llm_service.model_name
         if len(agent_results) == 1 and agent_results[0].agent_name == "rag":
-            return _rag_passthrough(agent_results[0], question)
+            return _rag_passthrough(agent_results[0], question,
+                                    model_name=llm_model, agents_used=agents_used)
 
-        return await self._synthesize(question, plan, agent_results)
+        return await self._synthesize(question, plan, agent_results,
+                                      model_name=llm_model, agents_used=agents_used)
 
     async def _synthesize(
         self,
         question: str,
         plan: QueryPlan,
         results: list[AgentResult],
+        model_name: Optional[str] = None,
+        agents_used: Optional[list[str]] = None,
     ) -> QueryResult:
         # Renumber each agent's local [S1],[S2]... citations into a global sequence
         # so the merged sources list stays consistent with what the LLM sees.
@@ -169,7 +175,13 @@ class QueryOrchestrator:
         )
 
         sources = _merge_sources(results)
-        return QueryResult(question=question, answer=answer, sources=sources)
+        return QueryResult(
+            question=question,
+            answer=answer,
+            sources=sources,
+            model_name=model_name,
+            agents_used=agents_used or [],
+        )
 
 
 def _shift_source_refs(text: str, offset: int) -> str:
@@ -185,7 +197,12 @@ def _shift_source_refs(text: str, offset: int) -> str:
     return re.sub(r'\[S(\d+)(:\d+)?\]', _replace, text)
 
 
-def _rag_passthrough(agent_result: AgentResult, question: str) -> QueryResult:
+def _rag_passthrough(
+    agent_result: AgentResult,
+    question: str,
+    model_name: Optional[str] = None,
+    agents_used: Optional[list[str]] = None,
+) -> QueryResult:
     """Convert a single RAGAgent result directly to a QueryResult without synthesis."""
     sources: list[SourceInfo] = []
     for s in agent_result.sources:
@@ -197,6 +214,8 @@ def _rag_passthrough(agent_result: AgentResult, question: str) -> QueryResult:
         question=question,
         answer=agent_result.context_text,
         sources=sources,
+        model_name=model_name,
+        agents_used=agents_used or [],
     )
 
 

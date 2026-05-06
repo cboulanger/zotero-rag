@@ -47,6 +47,9 @@
  * @property {string} answer_format - Format of answer: "text", "html", or "markdown"
  * @property {Array<SourceCitation>} sources - Source citations
  * @property {Array<string>} library_ids - Libraries queried
+ * @property {string|null} [model_name] - LLM model used for answering
+ * @property {Array<string>} [agents_used] - Agent(s) dispatched to answer
+ * @property {Record<string, number>} [library_document_counts] - Indexed document count per library ID
  */
 
 
@@ -1148,7 +1151,11 @@ class ZoteroRAGPlugin {
 			}
 		}
 
-		const libraryNames = Array.from(libraryMap.values()).map(info => info.name).join(', ');
+		const counts = result.library_document_counts || {};
+		const libraryNames = Array.from(libraryMap.entries()).map(([id, info]) => {
+			const n = counts[id];
+			return n ? `${info.name} (${n} documents)` : info.name;
+		}).join(', ');
 
 		let html = `<div>`;
 		html += `<h2>${this.escapeHTML(question)}</h2>`;
@@ -1171,8 +1178,15 @@ class ZoteroRAGPlugin {
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
 		html += `<em>Generated: ${timestamp}<br/>`;
-		html += `Libraries: ${this.escapeHTML(libraryNames)}</em>`;
-		html += `</p>`;
+		html += `Libraries: ${this.escapeHTML(libraryNames)}<br/>`;
+		if (result.model_name) {
+			html += `Model: ${this.escapeHTML(result.model_name)}<br/>`;
+		}
+		if (result.agents_used && result.agents_used.length > 0) {
+			html += `Agents: ${this.escapeHTML(result.agents_used.join(', '))}<br/>`;
+		}
+		html += `Plugin: v${this.escapeHTML(this.version)}`;
+		html += `</em></p>`;
 		html += `</div>`;
 
 		return html;
