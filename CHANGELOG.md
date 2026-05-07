@@ -1,3 +1,16 @@
+# [1.22.0](https://github.com/cboulanger/zotero-rag/compare/v1.21.1...v1.22.0) (2026-05-07)
+
+
+### Bug Fixes
+
+* address indexing reliability — event loop blocking, cache migration, batched metadata, retry logic ([0af7d2d](https://github.com/cboulanger/zotero-rag/commit/0af7d2dfec4f71dc377c3d19914433458c297316))
+* guard llm_service.model_name against non-string values in orchestrator ([f420965](https://github.com/cboulanger/zotero-rag/commit/f4209653e7bc21642dc9e143d1750bf39cad36ab))
+
+
+### Features
+
+* enrich generated note footer with model, agents, and document counts ([1f00ae7](https://github.com/cboulanger/zotero-rag/commit/1f00ae7af2e01bb68faabddc615e99192ce703d3))
+
 ## [1.21.1](https://github.com/cboulanger/zotero-rag/compare/v1.21.0...v1.21.1) (2026-05-05)
 
 
