@@ -286,7 +286,7 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = await response.json();
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string}} */ (await response.json());
 				const defaultMinScore = config.default_min_score || 0.3;
 
 				// Update slider and display
@@ -345,12 +345,12 @@ var ZoteroRAGDialog = {
 			}
 			if (!response.ok) {
 				const ct = response.headers.get('content-type') || '';
-				const body = ct.includes('application/json')
+				const body = /** @type {{detail?: string}} */ (ct.includes('application/json')
 					? await response.json().catch(() => ({}))
-					: { detail: (await response.text().catch(() => '')).slice(0, 300) };
+					: { detail: (await response.text().catch(() => '')).slice(0, 300) });
 				throw new Error(`GET /api/libraries/${libraryId}/index-status: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`);
 			}
-			return await response.json();
+			return /** @type {LibraryIndexMetadata} */ (/** @type {unknown} */ (await response.json()));
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.plugin.log(`Error fetching metadata for library ${libraryId}: ${errorMessage}`);
@@ -608,7 +608,7 @@ var ZoteroRAGDialog = {
 				headers: this.plugin.getAuthHeaders(),
 			});
 			if (response.ok) {
-				const data = await response.json();
+				const data = /** @type {{available?: boolean, limits?: Record<string, string>}} */ (await response.json());
 				if (data.available && data.limits) {
 					this.rateLimitHeaders = data.limits;
 					this.updateRateLimitDisplay();
@@ -1003,7 +1003,7 @@ var ZoteroRAGDialog = {
 
 		// @ts-ignore - Services is a Zotero/Firefox global
 		const result = Services.prompt.confirmEx(
-			window,
+			/** @type {any} */ (window),
 			'Missing Attachments Detected',
 			msg,
 			// Buttons: 0=Open Fix Tool, 1=Index Anyway, 2=Cancel
@@ -1014,14 +1014,14 @@ var ZoteroRAGDialog = {
 			'Index Anyway',
 			'Cancel',
 			null,
-			{}
+			/** @type {any} */ ({ value: false })
 		);
 
 		if (result === 0) {
 			// Open Fix Unavailable Attachments dialog; abort indexing so user can fix first
 			const mainWin = Services.wm.getMostRecentWindow('navigator:browser');
 			if (this.plugin && mainWin) {
-				this.plugin.openFixUnavailableDialog(mainWin);
+				this.plugin.openFixUnavailableDialog(/** @type {any} */ (mainWin));
 			}
 			return false;
 		}
@@ -1113,7 +1113,7 @@ var ZoteroRAGDialog = {
 
 		// Get all items in the library
 		const search = new Zotero.Search();
-		search.libraryID = zoteroLibraryID;
+		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
 
 		if (itemIDs.length === 0) {
@@ -1502,6 +1502,7 @@ var ZoteroRAGDialog = {
 	hideProgress() {
 		const labelElement = document.getElementById('progress-label');
 		const messageElement = document.getElementById('progress-message');
+		const spinnerElement = document.getElementById('progress-spinner');
 		const progressBar = /** @type {HTMLProgressElement|null} */ (
 			document.getElementById('progress-bar')
 		);
@@ -1509,6 +1510,7 @@ var ZoteroRAGDialog = {
 		// Reset to ready state
 		if (labelElement) labelElement.textContent = 'Ready';
 		if (messageElement) messageElement.textContent = '';
+		if (spinnerElement) spinnerElement.style.display = 'none';
 		if (progressBar) progressBar.value = 0;
 	},
 
@@ -1666,10 +1668,9 @@ var ZoteroRAGDialog = {
 		const listContainer = document.getElementById('library-list');
 		if (!listContainer) return;
 
-		const labels = /** @type {NodeListOf<HTMLElement>} */ (
-			listContainer.querySelectorAll('label.library-checkbox')
-		);
-		for (const label of labels) {
+		const labels = listContainer.querySelectorAll('label.library-checkbox');
+		for (const labelNode of labels) {
+			const label = /** @type {HTMLElement} */ (labelNode);
 			const cb = /** @type {HTMLInputElement|null} */ (label.querySelector('input[type="checkbox"]'));
 			if (cb) cb.disabled = !enabled;
 			label.style.opacity = enabled ? '' : '0.6';
