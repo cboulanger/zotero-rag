@@ -67,4 +67,19 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Data Management -->
+  <html:fieldset class="settings-group">
+    <html:legend>Data</html:legend>
+
+    <html:div class="setting-row">
+      <html:button id="zotero-rag-clear-cache">Clear local index cache</html:button>
+    </html:div>
+
+    <html:div class="setting-description">
+      Removes the local cache files that track which items have been indexed. Use this when the
+      plugin thinks everything is up-to-date but the backend has no data (e.g. after wiping the
+      backend index). The next indexing run will re-check all items with the backend.
+    </html:div>
+  </html:fieldset>
+
 </vbox>

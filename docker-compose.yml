@@ -18,7 +18,7 @@
 
 services:
   kreuzberg:
-    image: ghcr.io/kreuzberg-dev/kreuzberg:latest
+    image: ghcr.io/kreuzberg-dev/kreuzberg:4.9.5
     restart: unless-stopped
     # No ports exposed to host — only the app service needs to reach it
     networks:

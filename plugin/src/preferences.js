@@ -108,4 +108,38 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 
 	// Refresh from server in background and re-render if the list has changed
 	this.fetchRequiredApiKeys().then(() => renderApiKeyFields(this.requiredApiKeys));
+
+	doc.getElementById('zotero-rag-clear-cache').addEventListener('click', async () => {
+		// @ts-ignore - Services is a Zotero/Firefox global
+		const confirmed = Services.prompt.confirm(
+			_window,
+			'Clear local index cache',
+			'This will delete the local cache files that track which items have been indexed.\n\n' +
+			'The next indexing run will re-check all items with the backend.\n\n' +
+			'Continue?'
+		);
+		if (!confirmed) return;
+
+		try {
+			const cacheDir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			let deleted = 0;
+			try {
+				const entries = await IOUtils.getChildren(cacheDir);
+				for (const entry of entries) {
+					const filename = PathUtils.filename(entry);
+					if (filename.startsWith('index-cache-') || filename.startsWith('pending-cache-')) {
+						await IOUtils.remove(entry);
+						deleted++;
+					}
+				}
+			} catch (_) {
+				// Directory may not exist yet — nothing to clear
+			}
+			// @ts-ignore
+			Services.prompt.alert(_window, 'Cache cleared', `Removed ${deleted} cache file${deleted === 1 ? '' : 's'}.`);
+		} catch (e) {
+			// @ts-ignore
+			Services.prompt.alert(_window, 'Error', `Failed to clear cache: ${e}`);
+		}
+	});
 };

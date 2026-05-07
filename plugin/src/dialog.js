@@ -727,10 +727,14 @@ var ZoteroRAGDialog = {
 			}
 		}
 
-		// Show the re-index button only when the library has been indexed at least once
+		// Show the re-index button whenever there are (or may be) indexable attachments.
+		// When not yet indexed, it acts as a forced index that bypasses the client cache.
 		const reindexBtn = document.getElementById(`reindex-btn-${libraryId}`);
 		if (reindexBtn) {
-			reindexBtn.style.display = metadata ? 'inline' : 'none';
+			reindexBtn.style.display = (totalIndexable === undefined || totalIndexable > 0) ? 'inline' : 'none';
+			reindexBtn.title = metadata
+				? 'Re-index this library (keeps existing index, re-processes all items)'
+				: 'Force index this library (bypasses local cache, re-checks all items with backend)';
 		}
 	},
 

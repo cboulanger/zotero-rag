@@ -382,6 +382,7 @@ var RemoteIndexer = {
 					getAuthHeaders,
 					log,
 					signal,
+					onProgress,
 				});
 			} catch (err) {
 				log(`[RemoteIndexer] Metadata update failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -709,23 +710,36 @@ var RemoteIndexer = {
 		formData.append('metadata', JSON.stringify(metadata));
 
 		const uploadTimeoutMs = 10 * 60 * 1000;
+		const MAX_UPLOAD_RETRIES = 3;
+		const RETRY_DELAY_MS = 3000;
 		const t0 = Date.now();
 		debug(log, `${att.attachment_key}: upload start — size=${formatFileSize(bytes.length)}, timeout=${uploadTimeoutMs}ms`);
 		let response;
-		try {
-			response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
-				headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
-				body: formData,
-				signal,
-				timeout: uploadTimeoutMs,
-			});
-		} catch (err) {
-			debug(log, `${att.attachment_key}: upload failed after ${Date.now() - t0}ms`);
-			if (err instanceof Error && err.message.includes('HTTP 413')) {
-				const sizeMB = (bytes.length / (1024 * 1024)).toFixed(1);
-				throw new Error(`${err.message} (file size: ${sizeMB} MB — server upload limit exceeded)`);
+		for (let attempt = 1; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
+			try {
+				response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
+					headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
+					body: formData,
+					signal,
+					timeout: uploadTimeoutMs,
+				});
+				break; // success
+			} catch (err) {
+				debug(log, `${att.attachment_key}: upload failed after ${Date.now() - t0}ms`);
+				// Never retry on cancellation or payload-too-large
+				const isCancelled = signal?.aborted || err?.name === 'AbortError' || (err instanceof Error && err.message.includes('aborted'));
+				if (isCancelled) throw err;
+				if (err instanceof Error && err.message.includes('HTTP 413')) {
+					const sizeMB = (bytes.length / (1024 * 1024)).toFixed(1);
+					throw new Error(`${err.message} (file size: ${sizeMB} MB — server upload limit exceeded)`);
+				}
+				if (attempt < MAX_UPLOAD_RETRIES) {
+					log(`[RemoteIndexer] ${att.attachment_key}: upload error (attempt ${attempt}/${MAX_UPLOAD_RETRIES}), retrying in ${RETRY_DELAY_MS / 1000}s — ${err instanceof Error ? err.message : err}`);
+					await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+				} else {
+					throw err;
+				}
 			}
-			throw err;
 		}
 		debug(log, `${att.attachment_key}: response received in ${Date.now() - t0}ms`);
 
@@ -964,8 +978,10 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
+	 * @param {function(UploadProgress): void} [opts.onProgress]
 	 */
-	async _sendMetadataUpdates({ statuses, attachments, libraryId, backendURL, getAuthHeaders, log, signal }) {
+	async _sendMetadataUpdates({ statuses, attachments, libraryId, backendURL, getAuthHeaders, log, signal, onProgress }) {
+		const BATCH_SIZE = 100;
 		/** @type {Array<{item_key: string, title: string|null, authors: string[], year: number|null, item_type: string|null}>} */
 		const items = [];
 
@@ -985,13 +1001,32 @@ var RemoteIndexer = {
 
 		if (items.length === 0) return;
 
-		const response = await this._apiFetch('POST', `${backendURL}/api/index/items/metadata`, {
-			headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-			body: JSON.stringify({ library_id: libraryId, items }),
-			signal,
-		});
-		const result = await response.json();
-		log(`[RemoteIndexer] Metadata update: ${result.updated_items} items, ${result.updated_chunks} chunks updated`);
+		const totalBatches = Math.ceil(items.length / BATCH_SIZE);
+		let totalUpdatedItems = 0;
+		let totalUpdatedChunks = 0;
+
+		for (let i = 0; i < items.length; i += BATCH_SIZE) {
+			const batch = items.slice(i, i + BATCH_SIZE);
+			const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+			if (onProgress) {
+				onProgress({
+					percentage: (batchNum / totalBatches) * 100,
+					message: 'Updating metadata',
+					current: Math.min(i + BATCH_SIZE, items.length),
+					total: items.length,
+				});
+			}
+			const response = await this._apiFetch('POST', `${backendURL}/api/index/items/metadata`, {
+				headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ library_id: libraryId, items: batch }),
+				signal,
+			});
+			const result = await response.json();
+			totalUpdatedItems += result.updated_items;
+			totalUpdatedChunks += result.updated_chunks;
+			log(`[RemoteIndexer] Metadata batch ${batchNum}/${totalBatches}: ${result.updated_items} items, ${result.updated_chunks} chunks`);
+		}
+		log(`[RemoteIndexer] Metadata update total: ${totalUpdatedItems} items, ${totalUpdatedChunks} chunks updated`);
 	},
 
 	async _uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal }) {
@@ -1053,7 +1088,10 @@ var RemoteIndexer = {
 		}
 		const year = this._extractYear(item);
 		const yearPart = year ? ` (${year})` : '';
-		let title = (item.getField ? item.getField('title') : '') || '';
+		let title = '';
+		try {
+			title = (item.getField ? item.getField('title') : '') || '';
+		} catch (_) {}
 		if (title.length > maxTitleLen) title = title.slice(0, maxTitleLen) + '\u2026';
 		const titlePart = title ? ` "${title}"` : '';
 		return `${authorPart}${yearPart}${titlePart}`.trim();

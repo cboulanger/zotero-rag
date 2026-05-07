@@ -12,6 +12,7 @@ Workflow
 2. Plugin uploads each needed attachment via POST /api/index/document.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -79,6 +80,11 @@ def load_item_cache(path: Path) -> None:
     """Load the item-level cache from disk (called once at startup)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        # Migrate old format: bare int values → {"item_version": int}
+        for lib_entries in data.values():
+            for key, val in lib_entries.items():
+                if isinstance(val, int):
+                    lib_entries[key] = {"item_version": val}
         with _check_indexed_item_cache_lock:
             _check_indexed_item_cache.clear()
             _check_indexed_item_cache.update(data)
@@ -274,7 +280,7 @@ async def check_indexed(
     fresh_states: dict[str, dict] = {}
     if cache_misses:
         try:
-            fresh_states = vector_store.get_item_states_bulk(library_id, cache_misses)
+            fresh_states = await asyncio.to_thread(vector_store.get_item_states_bulk, library_id, cache_misses)
         except Exception as exc:
             from qdrant_client.http.exceptions import ResponseHandlingException
             if isinstance(exc, ResponseHandlingException):
@@ -467,7 +473,9 @@ async def upload_and_index_document(
     client_keys = get_client_api_keys(http_request)
     embedding_service = make_embedding_service(client_keys)
     if True:  # keep indentation for the block below
-        if vector_store.check_duplicate(content_hash, library_id=library_id):
+        # Run blocking Qdrant calls in a thread pool so the asyncio event loop
+        # stays free for other requests (avoids NetworkError on slow Qdrant ops).
+        if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
             logger.info(
                 f"Document {attachment_key} already indexed (hash {content_hash[:8]})"
             )
@@ -482,9 +490,9 @@ async def upload_and_index_document(
 
         # Delete stale chunks for this item before re-indexing
         if item_version > 0:
-            stale = vector_store.get_item_version(library_id, item_key)
+            stale = await asyncio.to_thread(vector_store.get_item_version, library_id, item_key)
             if stale is not None and stale < item_version:
-                deleted = vector_store.delete_item_chunks(library_id, item_key)
+                deleted = await asyncio.to_thread(vector_store.delete_item_chunks, library_id, item_key)
                 logger.info(
                     f"Deleted {deleted} stale chunks for {item_key} "
                     f"(v{stale} → v{item_version})"
@@ -514,7 +522,7 @@ async def upload_and_index_document(
             )
 
             # Update library metadata so index-status reflects this upload
-            lib_meta = vector_store.get_library_metadata(library_id)
+            lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
             if lib_meta is None:
                 lib_meta = LibraryIndexMetadata(
                     library_id=library_id,
@@ -526,10 +534,10 @@ async def upload_and_index_document(
                 lib_meta.last_indexed_version, item_version
             )
             lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
-            lib_meta.total_chunks = vector_store.count_library_chunks(library_id)
+            lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
             if proc_result.status in ("indexed_fresh", "copied_cross_library"):
                 lib_meta.total_items_indexed += 1
-            vector_store.update_library_metadata(lib_meta)
+            await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
         except Exception as e:
             import openai
             from qdrant_client.http.exceptions import ResponseHandlingException
@@ -638,9 +646,9 @@ async def upload_and_index_abstract(
     try:
         # Delete stale chunks for this item before re-indexing
         if request.item_version > 0:
-            stale = vector_store.get_item_version(request.library_id, request.item_key)
+            stale = await asyncio.to_thread(vector_store.get_item_version, request.library_id, request.item_key)
             if stale is not None and stale < request.item_version:
-                deleted = vector_store.delete_item_chunks(request.library_id, request.item_key)
+                deleted = await asyncio.to_thread(vector_store.delete_item_chunks, request.library_id, request.item_key)
                 logger.info(
                     f"Deleted {deleted} stale chunks for {request.item_key} "
                     f"(v{stale} -> v{request.item_version})"
@@ -654,7 +662,7 @@ async def upload_and_index_abstract(
         )
 
         # Update library metadata
-        lib_meta = vector_store.get_library_metadata(request.library_id)
+        lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, request.library_id)
         if lib_meta is None:
             lib_meta = LibraryIndexMetadata(
                 library_id=request.library_id,
@@ -663,9 +671,9 @@ async def upload_and_index_abstract(
             )
         lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, request.item_version)
         lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
-        lib_meta.total_chunks = vector_store.count_library_chunks(request.library_id)
+        lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, request.library_id)
         lib_meta.total_items_indexed += 1
-        vector_store.update_library_metadata(lib_meta)
+        await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
 
     except Exception as e:
         logger.error(f"Error indexing abstract for {request.item_key}: {e}", exc_info=True)
@@ -698,7 +706,7 @@ async def upload_and_index_abstract(
     response_model=BatchMetadataUpdateResult,
     summary="Update payload metadata for existing chunks without re-embedding",
 )
-async def batch_update_metadata(
+def batch_update_metadata(
     request: BatchMetadataUpdateRequest,
     vector_store: VectorStore = Depends(get_vector_store),
 ):

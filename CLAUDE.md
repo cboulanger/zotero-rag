@@ -206,6 +206,32 @@ For creating dialog windows in Zotero plugins:
 - Profile code to identify bottlenecks before optimizing
 - Document performance considerations for resource-intensive operations
 
+## FastAPI: Never block the event loop
+
+In FastAPI, **`async def` route handlers must not call synchronous blocking I/O** (e.g. synchronous Qdrant `scroll()`, `set_payload()`, file reads, or any other blocking call). Doing so freezes the entire asyncio event loop for the duration of the call — no other requests can be processed, active HTTP connections go silent, and clients drop them with `NetworkError` before the response is ever sent.
+
+**Rule**: If a route handler only calls synchronous (non-awaitable) code, declare it as `def`, not `async def`. FastAPI automatically runs `def` handlers in a thread pool (`anyio.to_thread`), keeping the event loop free.
+
+```python
+# WRONG — blocks the event loop for every Qdrant call in the loop
+async def batch_update_metadata(request: ..., vector_store = Depends(...)):
+    for item in request.items:
+        vector_store.update_item_metadata(...)   # synchronous Qdrant I/O
+
+# CORRECT — FastAPI runs this in a thread pool
+def batch_update_metadata(request: ..., vector_store = Depends(...)):
+    for item in request.items:
+        vector_store.update_item_metadata(...)
+```
+
+If a handler mixes `await` calls with blocking I/O, wrap the blocking parts in `asyncio.to_thread()`:
+
+```python
+async def mixed_handler(...):
+    await some_async_operation()
+    result = await asyncio.to_thread(vector_store.slow_sync_call, ...)
+```
+
 ## Calling command line utilities
 
 - Remember or check what platform you are running on to generate the right CLI commands (e.g. Windows PowerShell vs. Mac ZSH or Linux bash)

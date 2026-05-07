@@ -173,7 +173,7 @@ async def clear_library_index(library_id: str, vector_store: VectorStore = Depen
 
 
 @router.post("/libraries/{library_id}/reconcile-count", response_model=LibraryIndexMetadata)
-async def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Recompute total_items_indexed from actual vector store data and persist it.
 

@@ -25,7 +25,8 @@ async function startup({ id, version, rootURI }) {
 	// Register preferences pane
 	Zotero.PreferencePanes.register({
 		pluginID: 'zotero-rag@cboulanger.github.io',
-		src: rootURI + 'preferences.xhtml'
+		src: rootURI + 'preferences.xhtml',
+		image: rootURI + 'icons/ask-rag.svg'
 	});
 
 	// Load Zotero Plugin Toolkit bundle

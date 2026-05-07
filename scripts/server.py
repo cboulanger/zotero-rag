@@ -34,10 +34,16 @@ LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
 
 # Kreuzberg sidecar configuration
-KREUZBERG_IMAGE = "ghcr.io/kreuzberg-dev/kreuzberg:latest"
+KREUZBERG_IMAGE = "ghcr.io/kreuzberg-dev/kreuzberg:4.9.5"
 KREUZBERG_CONTAINER = "zotero-rag-kreuzberg"
 KREUZBERG_PORT = 8100          # host-side port for kreuzberg sidecar
 KREUZBERG_CONTAINER_PORT = 8000  # kreuzberg listens on 8000 inside the container
+
+# Qdrant sidecar configuration
+QDRANT_IMAGE = "docker.io/qdrant/qdrant:v1.15"
+QDRANT_CONTAINER = "zotero-rag-qdrant"
+QDRANT_PORT = 6333
+QDRANT_STORAGE_DIR = PROJECT_ROOT / "data" / "qdrant-server"
 
 # Track subprocess references to prevent handle cleanup errors on Windows
 # These need to be module-level to prevent premature garbage collection
@@ -386,6 +392,134 @@ def stop_kreuzberg():
         pass
 
 
+def start_qdrant():
+    """Start the Qdrant vector store sidecar container.
+
+    Skipped when QDRANT_URL is already configured (external or remote Qdrant).
+    Pulls the image if needed, then starts the container on localhost:6333.
+    Data is persisted in data/qdrant-server/.
+
+    Returns:
+        bool: True if the sidecar is running (or was already running), False otherwise.
+    """
+    runtime = find_container_runtime()
+    if runtime is None:
+        print("[WARN] No container runtime found (docker/podman) — Qdrant sidecar will not be started")
+        return False
+
+    # Check if already running
+    try:
+        result = subprocess.run(
+            [runtime, 'ps', '--filter', f'name=^{QDRANT_CONTAINER}$', '--format', '{{.ID}}'],
+            capture_output=True, text=True, check=True
+        )
+        if result.stdout.strip():
+            print(f"[OK] Qdrant sidecar already running ({QDRANT_CONTAINER})")
+            return True
+    except subprocess.CalledProcessError:
+        pass
+
+    # Remove stopped container with the same name, if any
+    subprocess.run([runtime, 'rm', '-f', QDRANT_CONTAINER], capture_output=True)
+
+    # Ensure persistent storage directory exists
+    QDRANT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    print(f"[INFO] Pulling Qdrant image ({QDRANT_IMAGE})...")
+    subprocess.run([runtime, 'pull', QDRANT_IMAGE], capture_output=True)
+
+    print(f"[INFO] Starting Qdrant sidecar on port {QDRANT_PORT}...")
+    try:
+        subprocess.run(
+            [
+                runtime, 'run', '-d',
+                '--name', QDRANT_CONTAINER,
+                '-p', f'127.0.0.1:{QDRANT_PORT}:{QDRANT_PORT}',
+                '-v', f'{QDRANT_STORAGE_DIR}:/qdrant/storage',
+                QDRANT_IMAGE,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"[OK] Qdrant sidecar started ({QDRANT_CONTAINER})")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"[ERROR] Failed to start Qdrant sidecar: {e.stderr.decode().strip()}")
+        return False
+
+
+def wait_for_qdrant(timeout=60):
+    """Wait until Qdrant accepts TCP connections on QDRANT_PORT.
+
+    Returns:
+        bool: True if Qdrant became ready within timeout, False otherwise.
+    """
+    import socket
+    print("[INFO] Waiting for Qdrant to be ready...")
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            with socket.create_connection(("127.0.0.1", QDRANT_PORT), timeout=1):
+                print("[OK] Qdrant is ready")
+                return True
+        except OSError:
+            time.sleep(1)
+    print(f"[WARN] Qdrant did not become ready within {timeout}s — continuing anyway")
+    return False
+
+
+def stop_qdrant():
+    """Stop and remove the Qdrant sidecar container.
+
+    Loads .env/.env.local so the setting is respected even when called from
+    stop_server (which does not call load_dotenv itself).
+    """
+    env_local = PROJECT_ROOT / ".env.local"
+    env_file = PROJECT_ROOT / ".env"
+    if env_local.exists():
+        load_dotenv(env_local, override=True)
+    if env_file.exists():
+        load_dotenv(env_file, override=True)
+
+    runtime = find_container_runtime()
+    if runtime is None:
+        return
+
+    try:
+        result = subprocess.run(
+            [runtime, 'ps', '-a', '--filter', f'name=^{QDRANT_CONTAINER}$', '--format', '{{.ID}}'],
+            capture_output=True, text=True, check=True
+        )
+        if not result.stdout.strip():
+            return  # not running
+        subprocess.run([runtime, 'stop', QDRANT_CONTAINER], capture_output=True)
+        subprocess.run([runtime, 'rm', QDRANT_CONTAINER], capture_output=True)
+        print(f"[OK] Qdrant sidecar stopped ({QDRANT_CONTAINER})")
+    except subprocess.CalledProcessError:
+        pass
+
+
+def _start_plugin_server_and_wait():
+    """Start the plugin development server and wait until it is ready.
+
+    Exits the process on failure.
+    """
+    print("Starting plugin development server (this will launch Zotero)...")
+    result = start_plugin_server()
+    if not result:
+        print("[ERROR] Failed to start plugin development server")
+        sys.exit(1)
+
+    print("Waiting for plugin server to start...")
+    if not wait_for_plugin_startup(timeout=60):
+        print("[ERROR] Plugin server failed to start within timeout")
+        print(f"[INFO] Check logs at: {PLUGIN_LOG_FILE}")
+        stop_plugin_server()
+        sys.exit(1)
+
+    print("[OK] Plugin server started successfully")
+
+
 def start_server(dev_mode=True, with_plugin=False):
     """Start the FastAPI server and optionally the plugin development server.
 
@@ -406,38 +540,32 @@ def start_server(dev_mode=True, with_plugin=False):
     model_preset = os.environ.get("MODEL_PRESET", "not set")
     print(f"MODEL_PRESET: {model_preset}")
 
-    # If plugin mode is requested, start plugin server first (which launches Zotero)
-    # This ensures Zotero is running before the backend tries to connect to it
-    if with_plugin:
-        plugin_proc = find_plugin_process()
-        if not plugin_proc:
-            print("Starting plugin development server (this will launch Zotero)...")
-            result = start_plugin_server()
-            if not result:
-                print("[ERROR] Failed to start plugin development server")
-                sys.exit(1)
-
-            # Wait for plugin server to fully start up by monitoring logs
-            print("Waiting for plugin server to start...")
-            if not wait_for_plugin_startup(timeout=60):
-                print("[ERROR] Plugin server failed to start within timeout")
-                print(f"[INFO] Check logs at: {PLUGIN_LOG_FILE}")
-                stop_plugin_server()  # Clean up
-                sys.exit(1)
-
-            print("[OK] Plugin server started successfully")
-        else:
-            print(f"[INFO] Plugin server already running (PID: {plugin_proc.pid})")
-
     # Check if backend server already running
     existing = find_server_process()
     if existing:
         print(f"Server is already running (PID: {existing.pid})")
         print(f"Access at: http://{HOST}:{PORT}")
+        if with_plugin:
+            plugin_proc = find_plugin_process()
+            if not plugin_proc:
+                _start_plugin_server_and_wait()
+            else:
+                print(f"[INFO] Plugin server already running (PID: {plugin_proc.pid})")
         return
 
     # Start kreuzberg extraction sidecar
     start_kreuzberg()
+
+    # Start Qdrant sidecar unless an external QDRANT_URL is already configured
+    qdrant_url = os.environ.get('QDRANT_URL')
+    if qdrant_url:
+        print(f"[INFO] QDRANT_URL already set ({qdrant_url}) — skipping local Qdrant sidecar")
+    else:
+        if start_qdrant():
+            wait_for_qdrant()
+            qdrant_url = f"http://localhost:{QDRANT_PORT}"
+        else:
+            print("[WARN] Qdrant sidecar could not be started; falling back to local file mode")
 
     # Start the backend server
     log_config_path = PROJECT_ROOT / "backend" / "logging_config.json"
@@ -449,7 +577,7 @@ def start_server(dev_mode=True, with_plugin=False):
     ]
 
     if dev_mode:
-        cmd.append("--reload")
+        cmd.extend(["--reload", "--reload-dir", str(PROJECT_ROOT / "backend")])
         print("Starting server in development mode (with auto-reload)...")
     else:
         print("Starting server in production mode...")
@@ -470,6 +598,10 @@ def start_server(dev_mode=True, with_plugin=False):
             # If we don't have a value from .env files, remove the system one
             # so pydantic will use the default
             del env["MODEL_PRESET"]
+
+        # Point the backend at our local Qdrant sidecar (or the pre-configured URL)
+        if qdrant_url:
+            env["QDRANT_URL"] = qdrant_url
 
         # Open log file for output (truncate to start fresh)
         with open(LOG_FILE, 'w') as log_file:
@@ -520,6 +652,11 @@ def start_server(dev_mode=True, with_plugin=False):
                     print(f"[INFO] Check logs for Zotero API connectivity status ({zotero_url})")
 
                     if with_plugin:
+                        plugin_proc = find_plugin_process()
+                        if not plugin_proc:
+                            _start_plugin_server_and_wait()
+                        else:
+                            print(f"[INFO] Plugin server already running (PID: {plugin_proc.pid})")
                         print(f"[INFO] Plugin development server is running")
                         print(f"[INFO] Plugin logs: {PLUGIN_LOG_FILE}")
 
@@ -557,6 +694,9 @@ def stop_server():
 
     # Stop kreuzberg extraction sidecar
     stop_kreuzberg()
+
+    # Stop Qdrant sidecar
+    stop_qdrant()
 
     # Try to find backend server by process
     proc = find_server_process()
@@ -862,6 +1002,11 @@ def main():
         start_kreuzberg()
     elif command == "kreuzberg:stop":
         stop_kreuzberg()
+    elif command == "qdrant:start":
+        if start_qdrant():
+            wait_for_qdrant()
+    elif command == "qdrant:stop":
+        stop_qdrant()
     else:
         print(f"Unknown command: {command}")
         print(__doc__)
