@@ -4,6 +4,7 @@ RAG (Retrieval-Augmented Generation) query engine.
 Coordinates retrieval from vector database and generation with LLM.
 """
 
+import asyncio
 import logging
 from typing import List, Optional
 from pydantic import BaseModel
@@ -106,7 +107,8 @@ class RAGEngine:
 
         # Step 2: Search vector database for relevant chunks
         logger.debug(f"Searching for top {top_k} chunks in libraries: {library_ids}")
-        search_results = self.vector_store.search(
+        search_results = await asyncio.to_thread(
+            self.vector_store.search,
             query_vector=query_embedding,
             limit=top_k,
             score_threshold=min_score,

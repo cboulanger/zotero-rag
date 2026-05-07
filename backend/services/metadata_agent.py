@@ -5,6 +5,7 @@ Searches the Qdrant payload index (no query vector / no semantic similarity)
 to return items matching author, year range, item type, or title keywords.
 """
 
+import asyncio
 import logging
 from typing import Optional
 from pydantic import BaseModel
@@ -80,7 +81,8 @@ class MetadataAgent(BaseAgent):
     ) -> AgentResult:
         limit: int = kwargs.get("metadata_limit", 30)
 
-        raw = self._vector_store.get_items_by_metadata(
+        raw = await asyncio.to_thread(
+            self._vector_store.get_items_by_metadata,
             library_ids=library_ids if library_ids else None,
             filters=filters,
             limit=limit,

@@ -438,10 +438,11 @@ async def public_library_query(
 
         # Verify the library has indexed content
         from qdrant_client.models import Filter, FieldCondition, MatchValue
-        count = vector_store.client.count(
+        count = (await asyncio.to_thread(
+            vector_store.client.count,
             collection_name=vector_store.CHUNKS_COLLECTION,
-            count_filter=Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=backend_lib_id))])
-        ).count
+            count_filter=Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=backend_lib_id))]),
+        )).count
         if count == 0:
             return _form(question, "This library has not been indexed yet. Please check back later.")
 

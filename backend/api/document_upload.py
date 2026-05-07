@@ -9,17 +9,22 @@ Workflow
 --------
 1. Plugin calls POST /api/libraries/{id}/check-indexed with the list of items
    it has locally.  The backend replies with which attachments need indexing.
-2. Plugin uploads each needed attachment via POST /api/index/document.
+2. Plugin uploads each needed attachment via POST /api/index/document (sync)
+   or POST /api/index/document/async (returns task_id immediately; poll via
+   GET /api/index/tasks/{task_id}).
 """
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -110,6 +115,25 @@ def save_item_cache(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Background-task store for async upload endpoint
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _UploadTask:
+    """In-memory record for a single async upload task."""
+
+    status: str                              # "processing" | "done"
+    result: "DocumentUploadResult | None"
+    created_at: float                        # time.monotonic()
+    progress_message: str | None = None
+
+
+_upload_tasks: dict[str, _UploadTask] = {}
+_upload_tasks_lock = Lock()
+
+
+# ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
@@ -188,6 +212,15 @@ class DocumentUploadResult(BaseModel):
     rate_limit_headers: dict[str, str] | None = None
 
 
+class AsyncUploadResponse(BaseModel):
+    """Response from the async upload endpoint and the task-status poll endpoint."""
+
+    task_id: str | None = None
+    status: str  # "processing" | "done" | any DocumentUploadResult.status
+    result: DocumentUploadResult | None = None
+    progress_message: str | None = None
+
+
 class AbstractIndexRequest(BaseModel):
     """Request to index an item via its abstractNote (no attachment file)."""
 
@@ -228,6 +261,169 @@ def _check_registration(library_id: str, user_id: Optional[int], settings: Setti
                 "Please update the plugin to the newest version."
             ),
         )
+
+
+async def _execute_upload(
+    *,
+    file_bytes: bytes,
+    content_hash: str,
+    doc_metadata: DocumentMetadata,
+    library_id: str,
+    library_type: str,
+    item_key: str,
+    attachment_key: str,
+    mime_type: str,
+    item_version: int,
+    attachment_version: int,
+    item_modified: str,
+    library_name: str,
+    vector_store: VectorStore,
+    embedding_service,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> DocumentUploadResult:
+    """Core upload processing: duplicate-check → extract → embed → store → update lib meta.
+
+    Called by both the synchronous and async upload endpoints.
+    """
+    # Duplicate check
+    if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
+        logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
+        return DocumentUploadResult(
+            library_id=library_id,
+            item_key=item_key,
+            attachment_key=attachment_key,
+            chunks_added=0,
+            status="skipped_duplicate",
+            message="Document already indexed (content hash match)",
+        )
+
+    # Delete stale chunks for this item before re-indexing
+    if item_version > 0:
+        stale = await asyncio.to_thread(vector_store.get_item_version, library_id, item_key)
+        if stale is not None and stale < item_version:
+            deleted = await asyncio.to_thread(vector_store.delete_item_chunks, library_id, item_key)
+            logger.info(
+                f"Deleted {deleted} stale chunks for {item_key} "
+                f"(v{stale} → v{item_version})"
+            )
+
+    # Process: extract → embed → store
+    processor = DocumentProcessor(
+        zotero_client=None,  # type: ignore[arg-type]
+        embedding_service=embedding_service,
+        vector_store=vector_store,
+    )
+    try:
+        proc_result = await processor._process_attachment_bytes(
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            doc_metadata=doc_metadata,
+            item_version=item_version,
+            attachment_version=attachment_version,
+            item_modified=item_modified,
+            on_progress=on_progress,
+        )
+        chunks_added = proc_result.chunks_written
+        logger.info(
+            f"[DIAG] upload result: attachment={attachment_key} "
+            f"status={proc_result.status} chunks={chunks_added} "
+            f"mime={mime_type} size_bytes={len(file_bytes)}"
+        )
+
+        # Update library metadata so index-status reflects this upload
+        lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
+        if lib_meta is None:
+            lib_meta = LibraryIndexMetadata(
+                library_id=library_id,
+                library_type=library_type,
+                library_name=library_name,
+                indexing_mode="incremental",
+            )
+        lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, item_version)
+        lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
+        lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
+        if proc_result.status in ("indexed_fresh", "copied_cross_library"):
+            lib_meta.total_items_indexed += 1
+        await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
+    except Exception as e:
+        import openai
+        from qdrant_client.http.exceptions import ResponseHandlingException
+        from httpx import ConnectError, WriteTimeout, ReadTimeout, TimeoutException
+        if isinstance(e, openai.InternalServerError):
+            logger.warning(
+                f"Upstream embedding service error for {attachment_key}: {e}"
+            )
+        elif isinstance(e, (WriteTimeout, ReadTimeout, TimeoutException)):
+            logger.warning(
+                f"Qdrant write timed out while storing chunks for {attachment_key} "
+                f"— batch may be too large or Qdrant is under load"
+            )
+        elif isinstance(e, ResponseHandlingException) and "timed out" in str(e).lower():
+            logger.warning(
+                f"Qdrant request timed out while storing chunks for {attachment_key} "
+                f"— batch may be too large or Qdrant is under load"
+            )
+        elif isinstance(e, ResponseHandlingException) and isinstance(e.__cause__, ConnectError):
+            logger.warning(
+                f"Qdrant unavailable while storing chunks for {attachment_key} "
+                f"(connection refused — server shutting down or Qdrant crashed)"
+            )
+        elif isinstance(e, RuntimeError) and "kreuzberg sidecar" in str(e):
+            logger.warning(f"Error processing upload for {attachment_key}: {e}")
+        else:
+            logger.error(
+                f"Error processing upload for {attachment_key}: {e}", exc_info=True
+            )
+        return DocumentUploadResult(
+            library_id=library_id,
+            item_key=item_key,
+            attachment_key=attachment_key,
+            chunks_added=0,
+            status="error",
+            message=str(e),
+        )
+
+    api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
+    if proc_result.status in (
+        "indexed_fresh", "copied_cross_library",
+        "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
+    ):
+        _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
+    return DocumentUploadResult(
+        library_id=library_id,
+        item_key=item_key,
+        attachment_key=attachment_key,
+        chunks_added=chunks_added,
+        status=api_status,
+        message=f"{api_status}: {chunks_added} chunks",
+        rate_limit_retries=embedding_service.rate_limit_retries,
+        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+    )
+
+
+async def _run_task(task_id: str, **kwargs: object) -> None:
+    """Background coroutine: run _execute_upload and store the result in _upload_tasks."""
+    def _update_progress(message: str) -> None:
+        with _upload_tasks_lock:
+            if task_id in _upload_tasks:
+                _upload_tasks[task_id].progress_message = message
+
+    try:
+        result = await _execute_upload(on_progress=_update_progress, **kwargs)  # type: ignore[arg-type]
+    except Exception as e:
+        logger.error(f"Unexpected error in background upload task {task_id}: {e}", exc_info=True)
+        result = DocumentUploadResult(
+            library_id=str(kwargs.get("library_id", "")),
+            item_key=str(kwargs.get("item_key", "")),
+            attachment_key=str(kwargs.get("attachment_key", "")),
+            chunks_added=0,
+            status="error",
+            message=str(e),
+        )
+    with _upload_tasks_lock:
+        if task_id in _upload_tasks:
+            _upload_tasks[task_id].status = "done"
+            _upload_tasks[task_id].result = result
 
 
 # ---------------------------------------------------------------------------
@@ -330,36 +526,36 @@ async def check_indexed(
                 needs_metadata_update=schema_outdated,
             ))
 
-        # Repair missing library metadata if chunks already exist.
-        # This handles the case where a previous indexing run stored chunks
-        # but never wrote library_metadata (e.g. before the metadata-update fix).
-        has_indexed_content = any(
-            s.reason in ("up_to_date", "version_changed") for s in statuses
+    # Repair missing library metadata if chunks already exist.
+    # This handles the case where a previous indexing run stored chunks
+    # but never wrote library_metadata (e.g. before the metadata-update fix).
+    has_indexed_content = any(
+        s.reason in ("up_to_date", "version_changed") for s in statuses
+    )
+    if has_indexed_content and not await asyncio.to_thread(vector_store.get_library_metadata, library_id):
+        best_version = max(
+            (a.item_version for a, s in zip(request.attachments, statuses)
+             if s.reason in ("up_to_date", "version_changed")),
+            default=0,
         )
-        if has_indexed_content and not vector_store.get_library_metadata(library_id):
-            best_version = max(
-                (a.item_version for a, s in zip(request.attachments, statuses)
-                 if s.reason in ("up_to_date", "version_changed")),
-                default=0,
-            )
-            up_to_date_count = sum(
-                1 for s in statuses if s.reason in ("up_to_date", "version_changed")
-            )
-            repaired = LibraryIndexMetadata(
-                library_id=library_id,
-                library_type=request.library_type,
-                library_name="",
-                last_indexed_version=best_version,
-                last_indexed_at=datetime.now(timezone.utc).isoformat(),
-                total_chunks=vector_store.count_library_chunks(library_id),
-                total_items_indexed=up_to_date_count,
-                indexing_mode="incremental",
-            )
-            vector_store.update_library_metadata(repaired)
-            logger.info(
-                f"Repaired missing library_metadata for {library_id} "
-                f"(chunks={repaired.total_chunks}, version={best_version})"
-            )
+        up_to_date_count = sum(
+            1 for s in statuses if s.reason in ("up_to_date", "version_changed")
+        )
+        repaired = LibraryIndexMetadata(
+            library_id=library_id,
+            library_type=request.library_type,
+            library_name="",
+            last_indexed_version=best_version,
+            last_indexed_at=datetime.now(timezone.utc).isoformat(),
+            total_chunks=await asyncio.to_thread(vector_store.count_library_chunks, library_id),
+            total_items_indexed=up_to_date_count,
+            indexing_mode="incremental",
+        )
+        await asyncio.to_thread(vector_store.update_library_metadata, repaired)
+        logger.info(
+            f"Repaired missing library_metadata for {library_id} "
+            f"(chunks={repaired.total_chunks}, version={best_version})"
+        )
 
     _reason_counts: dict[str, int] = {}
     for _s in statuses:
@@ -375,7 +571,7 @@ async def check_indexed(
 @router.post(
     "/index/document",
     response_model=DocumentUploadResult,
-    summary="Upload and index a single document attachment (remote mode)",
+    summary="Upload and index a single document attachment (remote mode, synchronous)",
 )
 async def upload_and_index_document(
     http_request: Request,
@@ -392,11 +588,11 @@ async def upload_and_index_document(
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
-    Upload a single document attachment and index it on the backend.
+    Upload a single document attachment and index it synchronously.
 
-    Used by the Zotero plugin when the backend is remote and cannot access
-    local Zotero files.  The plugin reads the file bytes locally and POSTs
-    them here together with item metadata.
+    Blocks until processing is complete.  For long-running extractions (e.g. OCR-heavy
+    PDFs) the connection may time out on slow networks.  Use POST /api/index/document/async
+    and GET /api/index/tasks/{task_id} for a non-blocking alternative.
 
     Form fields
     -----------
@@ -409,55 +605,16 @@ async def upload_and_index_document(
 
     Returns
     -------
-    DocumentUploadResult with the number of chunks added or a skip/error
-    status.
+    DocumentUploadResult with the number of chunks added or a skip/error status.
 
     Raises
     ------
     HTTPException 400
         If metadata JSON is invalid or required fields are missing.
     """
-    # Parse metadata
-    try:
-        meta_dict = json.loads(metadata)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {e}")
-
-    required = {"library_id", "item_key", "attachment_key"}
-    missing = required - meta_dict.keys()
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Missing required metadata fields: {sorted(missing)}",
-        )
-
-    library_id: str = meta_dict["library_id"]
-    item_key: str = meta_dict["item_key"]
-    attachment_key: str = meta_dict["attachment_key"]
-    user_id: Optional[int] = meta_dict.get("user_id")
-    _check_registration(library_id, user_id, get_settings())
-    library_type: str = meta_dict.get("library_type", "user")
-    mime_type: str = meta_dict.get("mime_type", "application/pdf")
-    item_version: int = int(meta_dict.get("item_version", 0))
-    attachment_version: int = int(meta_dict.get("attachment_version", 0))
-    item_modified: str = meta_dict.get(
-        "zotero_modified", datetime.now(timezone.utc).isoformat()
-    )
-
-    doc_metadata = DocumentMetadata(
-        library_id=library_id,
-        item_key=item_key,
-        attachment_key=attachment_key,
-        title=meta_dict.get("title", "Untitled"),
-        authors=meta_dict.get("authors", []),
-        year=meta_dict.get("year"),
-        item_type=meta_dict.get("item_type"),
-    )
-
-    # Read file bytes
-    file_bytes = await file.read()
-    if not file_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
+        library_type, mime_type, item_version, attachment_version, item_modified, \
+        file_bytes = await _parse_upload_request(file, metadata)
 
     logger.info(
         f"Upload request: library={library_id} user={user_id} "
@@ -469,129 +626,142 @@ async def upload_and_index_document(
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
     content_hash = hashlib.sha256(file_bytes).hexdigest()
-
     client_keys = get_client_api_keys(http_request)
     embedding_service = make_embedding_service(client_keys)
-    if True:  # keep indentation for the block below
-        # Run blocking Qdrant calls in a thread pool so the asyncio event loop
-        # stays free for other requests (avoids NetworkError on slow Qdrant ops).
-        if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
-            logger.info(
-                f"Document {attachment_key} already indexed (hash {content_hash[:8]})"
-            )
-            return DocumentUploadResult(
-                library_id=library_id,
-                item_key=item_key,
-                attachment_key=attachment_key,
-                chunks_added=0,
-                status="skipped_duplicate",
-                message="Document already indexed (content hash match)",
-            )
 
-        # Delete stale chunks for this item before re-indexing
-        if item_version > 0:
-            stale = await asyncio.to_thread(vector_store.get_item_version, library_id, item_key)
-            if stale is not None and stale < item_version:
-                deleted = await asyncio.to_thread(vector_store.delete_item_chunks, library_id, item_key)
-                logger.info(
-                    f"Deleted {deleted} stale chunks for {item_key} "
-                    f"(v{stale} → v{item_version})"
-                )
-
-        # Process: extract → embed → store
-        # ZoteroLocalAPI is not needed here — the plugin already sent the bytes
-        processor = DocumentProcessor(
-            zotero_client=None,  # type: ignore[arg-type]
-            embedding_service=embedding_service,
-            vector_store=vector_store,
-        )
-        try:
-            proc_result = await processor._process_attachment_bytes(
-                file_bytes=file_bytes,
-                mime_type=mime_type,
-                doc_metadata=doc_metadata,
-                item_version=item_version,
-                attachment_version=attachment_version,
-                item_modified=item_modified,
-            )
-            chunks_added = proc_result.chunks_written
-            logger.info(
-                f"[DIAG] upload result: attachment={attachment_key} "
-                f"status={proc_result.status} chunks={chunks_added} "
-                f"mime={mime_type} size_bytes={len(file_bytes)}"
-            )
-
-            # Update library metadata so index-status reflects this upload
-            lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
-            if lib_meta is None:
-                lib_meta = LibraryIndexMetadata(
-                    library_id=library_id,
-                    library_type=library_type,
-                    library_name=meta_dict.get("library_name", ""),
-                    indexing_mode="incremental",
-                )
-            lib_meta.last_indexed_version = max(
-                lib_meta.last_indexed_version, item_version
-            )
-            lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
-            lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
-            if proc_result.status in ("indexed_fresh", "copied_cross_library"):
-                lib_meta.total_items_indexed += 1
-            await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
-        except Exception as e:
-            import openai
-            from qdrant_client.http.exceptions import ResponseHandlingException
-            from httpx import WriteTimeout, ReadTimeout, TimeoutException
-            if isinstance(e, openai.InternalServerError):
-                logger.warning(
-                    f"Upstream embedding service error for {attachment_key}: {e}"
-                )
-            elif isinstance(e, (WriteTimeout, ReadTimeout, TimeoutException)):
-                logger.warning(
-                    f"Qdrant write timed out while storing chunks for {attachment_key} "
-                    f"— batch may be too large or Qdrant is under load"
-                )
-            elif isinstance(e, ResponseHandlingException) and "timed out" in str(e).lower():
-                logger.warning(
-                    f"Qdrant request timed out while storing chunks for {attachment_key} "
-                    f"— batch may be too large or Qdrant is under load"
-                )
-            elif isinstance(e, RuntimeError) and "kreuzberg sidecar" in str(e):
-                logger.warning(f"Error processing upload for {attachment_key}: {e}")
-            else:
-                logger.error(
-                    f"Error processing upload for {attachment_key}: {e}", exc_info=True
-                )
-            return DocumentUploadResult(
-                library_id=library_id,
-                item_key=item_key,
-                attachment_key=attachment_key,
-                chunks_added=0,
-                status="error",
-                message=str(e),
-            )
-
-    api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
-    if proc_result.status in (
-        "indexed_fresh", "copied_cross_library",
-        "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
-    ):
-        _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
-    return DocumentUploadResult(
+    return await _execute_upload(
+        file_bytes=file_bytes,
+        content_hash=content_hash,
+        doc_metadata=doc_metadata,
         library_id=library_id,
+        library_type=library_type,
         item_key=item_key,
         attachment_key=attachment_key,
-        chunks_added=chunks_added,
-        status=api_status,
-        message=f"{api_status}: {chunks_added} chunks",
-        rate_limit_retries=embedding_service.rate_limit_retries,
-        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        mime_type=mime_type,
+        item_version=item_version,
+        attachment_version=attachment_version,
+        item_modified=item_modified,
+        library_name=meta_dict.get("library_name", ""),
+        vector_store=vector_store,
+        embedding_service=embedding_service,
     )
 
 
 @router.post(
-    "/index/abstract",
+    "/index/document/async",
+    response_model=AsyncUploadResponse,
+    summary="Upload and index a document in the background (async mode)",
+)
+async def upload_and_index_document_async(
+    http_request: Request,
+    file: UploadFile = File(..., description="Raw attachment bytes"),
+    metadata: str = Form(...),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """
+    Upload a document and start indexing in the background.
 
+    Returns immediately with a task_id.  Poll GET /api/index/tasks/{task_id}
+    until status is "done".  Use this endpoint for PDFs that require OCR or
+    other slow extraction — it avoids HTTP connection timeouts during processing.
+
+    For already-indexed documents (content-hash match), returns the result
+    immediately with status "skipped_duplicate" and no task_id.
+    """
+    meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
+        library_type, mime_type, item_version, attachment_version, item_modified, \
+        file_bytes = await _parse_upload_request(file, metadata)
+
+    logger.info(
+        f"Async upload request: library={library_id} user={user_id} "
+        f"item={item_key} attachment={attachment_key} mime={mime_type} "
+        f"size={format_file_size(len(file_bytes))}"
+    )
+
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # Fast-path: return immediately for duplicates (no background task needed)
+    if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
+        logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
+        result = DocumentUploadResult(
+            library_id=library_id,
+            item_key=item_key,
+            attachment_key=attachment_key,
+            chunks_added=0,
+            status="skipped_duplicate",
+            message="Document already indexed (content hash match)",
+        )
+        return AsyncUploadResponse(task_id=None, status="skipped_duplicate", result=result)
+
+    # Extract API keys from request NOW (before returning — request object won't be
+    # available inside the background task after the response is sent).
+    client_keys = get_client_api_keys(http_request)
+    embedding_service = make_embedding_service(client_keys)
+
+    task_id = str(uuid.uuid4())
+    with _upload_tasks_lock:
+        _upload_tasks[task_id] = _UploadTask(
+            status="processing", result=None, created_at=time.monotonic()
+        )
+
+    asyncio.create_task(_run_task(
+        task_id,
+        file_bytes=file_bytes,
+        content_hash=content_hash,
+        doc_metadata=doc_metadata,
+        library_id=library_id,
+        library_type=library_type,
+        item_key=item_key,
+        attachment_key=attachment_key,
+        mime_type=mime_type,
+        item_version=item_version,
+        attachment_version=attachment_version,
+        item_modified=item_modified,
+        library_name=meta_dict.get("library_name", ""),
+        vector_store=vector_store,
+        embedding_service=embedding_service,
+    ))
+    logger.info(f"Async upload task {task_id} created for {attachment_key}")
+    return AsyncUploadResponse(task_id=task_id, status="processing")
+
+
+@router.get(
+    "/index/tasks/{task_id}",
+    response_model=AsyncUploadResponse,
+    summary="Poll the status of an async document upload task",
+)
+async def get_upload_task_status(task_id: str):
+    """
+    Return the current status of a background upload task.
+
+    Returns status "processing" while the task is running, or "done" with the
+    full DocumentUploadResult once complete.  Returns 404 if the task_id is
+    unknown (task may have expired after 1 hour).
+    """
+    now = time.monotonic()
+    with _upload_tasks_lock:
+        # Prune tasks older than 1 hour to prevent unbounded memory growth
+        stale = [tid for tid, t in _upload_tasks.items() if now - t.created_at > 3600]
+        for tid in stale:
+            del _upload_tasks[tid]
+        task = _upload_tasks.get(task_id)
+
+    if task is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id!r} not found (may have expired or never existed)",
+        )
+
+    if task.status == "processing":
+        return AsyncUploadResponse(task_id=task_id, status="processing", progress_message=task.progress_message)
+    return AsyncUploadResponse(task_id=task_id, status="done", result=task.result)
+
+
+@router.post(
+    "/index/abstract",
     response_model=DocumentUploadResult,
     summary="Index an item via its abstractNote (remote mode, no attachment file)",
 )
@@ -667,6 +837,7 @@ async def upload_and_index_abstract(
             lib_meta = LibraryIndexMetadata(
                 library_id=request.library_id,
                 library_type=request.library_type,
+                library_name=request.library_name,
                 indexing_mode="incremental",
             )
         lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, request.item_version)
@@ -756,4 +927,62 @@ def batch_update_metadata(
         library_id=request.library_id,
         updated_items=updated_items,
         updated_chunks=updated_chunks,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+async def _parse_upload_request(file: UploadFile, metadata: str):
+    """Parse and validate the common multipart upload fields.
+
+    Returns a tuple of all parsed fields needed by both sync and async endpoints.
+    Raises HTTPException 400 on validation errors.
+    """
+    try:
+        meta_dict = json.loads(metadata)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid metadata JSON: {e}")
+
+    required = {"library_id", "item_key", "attachment_key"}
+    missing = required - meta_dict.keys()
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required metadata fields: {sorted(missing)}",
+        )
+
+    library_id: str = meta_dict["library_id"]
+    item_key: str = meta_dict["item_key"]
+    attachment_key: str = meta_dict["attachment_key"]
+    user_id: Optional[int] = meta_dict.get("user_id")
+    _check_registration(library_id, user_id, get_settings())
+    library_type: str = meta_dict.get("library_type", "user")
+    mime_type: str = meta_dict.get("mime_type", "application/pdf")
+    item_version: int = int(meta_dict.get("item_version", 0))
+    attachment_version: int = int(meta_dict.get("attachment_version", 0))
+    item_modified: str = meta_dict.get(
+        "zotero_modified", datetime.now(timezone.utc).isoformat()
+    )
+
+    doc_metadata = DocumentMetadata(
+        library_id=library_id,
+        item_key=item_key,
+        attachment_key=attachment_key,
+        title=meta_dict.get("title", "Untitled"),
+        authors=meta_dict.get("authors", []),
+        year=meta_dict.get("year"),
+        item_type=meta_dict.get("item_type"),
+    )
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    return (
+        meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id,
+        library_type, mime_type, item_version, attachment_version, item_modified,
+        file_bytes,
     )

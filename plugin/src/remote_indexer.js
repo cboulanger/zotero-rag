@@ -53,6 +53,18 @@ function formatFileSize(bytes) {
  */
 
 /**
+ * @typedef {Object} DocumentUploadResult
+ * @property {string} library_id
+ * @property {string} item_key
+ * @property {string} attachment_key
+ * @property {number} chunks_added
+ * @property {string} status
+ * @property {string} message
+ * @property {number} rate_limit_retries
+ * @property {Record<string,string>|null} rate_limit_headers
+ */
+
+/**
  * Remote-mode document upload coordinator.
  *
  * When the backend is not on localhost, this module replaces the
@@ -285,7 +297,10 @@ var RemoteIndexer = {
 			});
 
 			try {
-				const uploadResult = await this._uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal });
+				const uploadResult = await this._uploadAttachment({
+					att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal,
+					onStatusUpdate: msg => onProgress({ percentage: (i / total) * 100, message: `${label} — ${msg}`, current: i + 1, total }),
+				});
 				if (uploadResult.rateLimitHeaders) {
 					rateLimitHeaders = uploadResult.rateLimitHeaders;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
@@ -578,8 +593,10 @@ var RemoteIndexer = {
 	 */
 	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode) {
 		const BATCH_SIZE = 100;
-		// After this many consecutive failures, stop asking and mark all remaining
-		// batches as needs_indexing immediately — prevents flooding an overloaded server.
+		const MAX_BATCH_RETRIES = 2;
+		const RETRY_DELAY_MS = 3000;
+		// After this many consecutive batch failures (after retries), stop asking and
+		// mark all remaining batches as needs_indexing — prevents flooding an overloaded server.
 		const CIRCUIT_BREAKER_THRESHOLD = 3;
 
 		/** @type {Array<AttachmentIndexStatus>} */
@@ -604,44 +621,59 @@ var RemoteIndexer = {
 				break;
 			}
 
-			try {
-				const body = {
-					library_id: libraryId,
-					attachments: batch.map(a => ({
-						item_key: a.item_key,
-						attachment_key: a.attachment_key,
-						mime_type: a.mime_type,
-						item_version: a.item_version,
-						attachment_version: a.attachment_version,
-					})),
-					force_refresh: mode === 'reindex',
-				};
+			const batchNum = Math.floor(i / BATCH_SIZE) + 1;
+			const totalBatches = Math.ceil(attachments.length / BATCH_SIZE);
+			let batchSucceeded = false;
 
-				const response = await this._apiFetch(
-					'POST',
-					`${backendURL}/api/libraries/${libraryId}/check-indexed`,
-					{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 120 * 1000 },
-				);
+			for (let attempt = 0; attempt <= MAX_BATCH_RETRIES; attempt++) {
+				if (attempt > 0) {
+					log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches}: retry ${attempt}/${MAX_BATCH_RETRIES} after ${RETRY_DELAY_MS / 1000}s...`);
+					await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+				}
 
-				const data = await response.json();
-				const batchStatuses = data.statuses || [];
-				const needsIndexing = batchStatuses.filter(s => s.needs_indexing).length;
-				const upToDate = batchStatuses.length - needsIndexing;
-				const batchNum = Math.floor(i / BATCH_SIZE) + 1;
-				const totalBatches = Math.ceil(attachments.length / BATCH_SIZE);
-				log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches}: ${batchStatuses.length} checked, ${needsIndexing} need indexing, ${upToDate} up-to-date`);
-				allStatuses.push(...batchStatuses);
-				consecutiveFailures = 0;
-				if (onBatchComplete) await onBatchComplete(batchStatuses, batch);
-			} catch (err) {
-				consecutiveFailures++;
-				log(`[RemoteIndexer] check-indexed error: ${err} — marking batch as needs_indexing ${consecutiveFailures}`);
-				allStatuses.push(...batch.map(a => ({
-					item_key: a.item_key,
-					attachment_key: a.attachment_key,
-					needs_indexing: true,
-					reason: 'check_failed',
-				})));
+				try {
+					const body = {
+						library_id: libraryId,
+						attachments: batch.map(a => ({
+							item_key: a.item_key,
+							attachment_key: a.attachment_key,
+							mime_type: a.mime_type,
+							item_version: a.item_version,
+							attachment_version: a.attachment_version,
+						})),
+						force_refresh: mode === 'reindex',
+					};
+
+					const response = await this._apiFetch(
+						'POST',
+						`${backendURL}/api/libraries/${libraryId}/check-indexed`,
+						{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 120 * 1000 },
+					);
+
+					const data = await response.json();
+					const batchStatuses = data.statuses || [];
+					const needsIndexing = batchStatuses.filter(s => s.needs_indexing).length;
+					const upToDate = batchStatuses.length - needsIndexing;
+					log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches}: ${batchStatuses.length} checked, ${needsIndexing} need indexing, ${upToDate} up-to-date`);
+					allStatuses.push(...batchStatuses);
+					consecutiveFailures = 0;
+					batchSucceeded = true;
+					if (onBatchComplete) await onBatchComplete(batchStatuses, batch);
+					break;
+				} catch (err) {
+					if (attempt < MAX_BATCH_RETRIES) {
+						log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches} error (attempt ${attempt + 1}/${MAX_BATCH_RETRIES + 1}): ${err}`);
+					} else {
+						consecutiveFailures++;
+						log(`[RemoteIndexer] check-indexed batch ${batchNum}/${totalBatches} failed after ${MAX_BATCH_RETRIES + 1} attempts: ${err} — marking as needs_indexing (consecutive failures: ${consecutiveFailures})`);
+						allStatuses.push(...batch.map(a => ({
+							item_key: a.item_key,
+							attachment_key: a.attachment_key,
+							needs_indexing: true,
+							reason: 'check_failed',
+						})));
+					}
+				}
 			}
 
 			checked += batch.length;
@@ -670,9 +702,10 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
+	 * @param {function(string): void} [opts.onStatusUpdate]
 	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -709,6 +742,7 @@ var RemoteIndexer = {
 		formData.append('file', new Blob([bytes], { type: att.mime_type }), att.attachment_key);
 		formData.append('metadata', JSON.stringify(metadata));
 
+		// Overall deadline covers the upload + async processing + polling
 		const uploadTimeoutMs = 10 * 60 * 1000;
 		const MAX_UPLOAD_RETRIES = 3;
 		const RETRY_DELAY_MS = 3000;
@@ -717,11 +751,11 @@ var RemoteIndexer = {
 		let response;
 		for (let attempt = 1; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
 			try {
-				response = await this._apiFetch('POST', `${backendURL}/api/index/document`, {
+				response = await this._apiFetch('POST', `${backendURL}/api/index/document/async`, {
 					headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 					body: formData,
 					signal,
-					timeout: uploadTimeoutMs,
+					timeout: 60 * 1000,  // only for upload + dedup check; processing runs async
 				});
 				break; // success
 			} catch (err) {
@@ -741,14 +775,25 @@ var RemoteIndexer = {
 				}
 			}
 		}
-		debug(log, `${att.attachment_key}: response received in ${Date.now() - t0}ms`);
+		debug(log, `${att.attachment_key}: async response received in ${Date.now() - t0}ms`);
 
-		const result = await response.json();
+		const asyncData = await response.json();
+		/** @type {DocumentUploadResult} */
+		let result;
+		if (asyncData.status === 'processing' && asyncData.task_id) {
+			const sizeLabel = formatFileSize(bytes.length);
+			/** @type {function(string): void | null} */
+			const _onStatusUpdate = onStatusUpdate ? (msg) => onStatusUpdate(`${sizeLabel} — ${msg}`) : null;
+			result = await this._pollUploadTask(asyncData.task_id, backendURL, getAuthHeaders, signal, log, att.attachment_key, t0, _onStatusUpdate);
+		} else {
+			result = asyncData.result;
+		}
+
 		const rateLimitNote = result.rate_limit_retries > 0
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
-		
+
 		if (result.status === 'error') {
 			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
 		}
@@ -1071,6 +1116,51 @@ var RemoteIndexer = {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}
 		return { status: result.status, rateLimitHeaders: result.rate_limit_headers || null };
+	},
+
+	/**
+	 * Poll GET /api/index/tasks/{taskId} until the task is done. Polls indefinitely —
+	 * the user can cancel via the abort signal if something appears stuck.
+	 *
+	 * @param {string} taskId
+	 * @param {string} backendURL
+	 * @param {function(Record<string,string>=): Record<string,string>} getAuthHeaders
+	 * @param {AbortSignal} [signal]
+	 * @param {function(string): void} log
+	 * @param {string} [attachmentKey] - used in log messages only
+	 * @param {number} [t0] - upload start timestamp (Date.now()); used for elapsed display
+	 * @param {function(string): void | null} [onStatusUpdate] - called with progress message each poll
+	 * @returns {Promise<DocumentUploadResult>}
+	 */
+	async _pollUploadTask(taskId, backendURL, getAuthHeaders, signal = undefined, log = /** @type {function(string): void} */ (() => {}), attachmentKey = '', t0 = 0, onStatusUpdate = null) {
+		const POLL_INTERVAL_MS = 5000;
+		const POLL_TIMEOUT_MS = 30 * 1000;
+		let pollCount = 0;
+
+		while (true) {
+			await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+			pollCount++;
+			const elapsed = t0 > 0 ? Math.round((Date.now() - t0) / 1000) : 0;
+			debug(log, `${attachmentKey || taskId}: poll ${pollCount} (elapsed ~${elapsed}s)`);
+
+			const pollResponse = await this._apiFetch('GET', `${backendURL}/api/index/tasks/${taskId}`, {
+				headers: getAuthHeaders(),
+				signal,
+				timeout: POLL_TIMEOUT_MS,
+			});
+			const data = /** @type {{status: string, result: DocumentUploadResult|null, progress_message?: string}} */ (/** @type {unknown} */ (await pollResponse.json()));
+
+			if (onStatusUpdate) {
+				const progressMsg = data.progress_message || `Processing for ${elapsed}s`;
+				onStatusUpdate(progressMsg);
+			}
+
+			if (data.status === 'done') {
+				log(`[RemoteIndexer] ${attachmentKey || taskId}: background task done after ${pollCount} poll(s)`);
+				return data.result;
+			}
+			// status === 'processing' — keep polling
+		}
 	},
 
 	/**

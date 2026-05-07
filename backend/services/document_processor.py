@@ -5,9 +5,11 @@ This module handles document extraction, chunking, embedding generation,
 and vector database indexing with support for incremental indexing.
 """
 
+import asyncio
 import hashlib
 import logging
 import re
+import time
 from datetime import datetime, UTC
 from typing import Callable, Optional, Literal
 
@@ -456,6 +458,7 @@ class DocumentProcessor:
         item_version: int,
         attachment_version: int,
         item_modified: str,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> AttachmentProcessingResult:
         """
         Extract, embed, and store chunks for a single attachment.
@@ -481,33 +484,41 @@ class DocumentProcessor:
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
         # Step 1: same-library dedup (existing behaviour)
-        if self.vector_store.check_duplicate(content_hash, library_id=library_id):
+        if await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id):
             logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
             return AttachmentProcessingResult(chunks_written=0, status="skipped_duplicate")
 
         # Step 2: cross-library content-hash copy — reuse chunks from another library
-        cross_record = self.vector_store.find_cross_library_duplicate(content_hash, library_id)
+        cross_record = await asyncio.to_thread(
+            self.vector_store.find_cross_library_duplicate, content_hash, library_id
+        )
         if cross_record:
-            source_chunks = self.vector_store.get_item_chunks(cross_record.library_id, cross_record.item_key)
+            source_chunks = await asyncio.to_thread(
+                self.vector_store.get_item_chunks, cross_record.library_id, cross_record.item_key
+            )
             if source_chunks:
-                copied = self.vector_store.copy_chunks_cross_library(
-                    source_library_id=cross_record.library_id,
-                    source_item_key=cross_record.item_key,
-                    target_library_id=library_id,
-                    target_item_key=item_key,
-                    target_attachment_key=attachment_key,
-                    target_doc_metadata=doc_metadata,
-                    target_item_version=item_version,
-                    target_attachment_version=attachment_version,
-                    target_item_modified=item_modified,
+                copied = await asyncio.to_thread(
+                    self.vector_store.copy_chunks_cross_library,
+                    cross_record.library_id,
+                    cross_record.item_key,
+                    library_id,
+                    item_key,
+                    attachment_key,
+                    doc_metadata,
+                    item_version,
+                    attachment_version,
+                    item_modified,
                 )
                 if copied > 0:
-                    self.vector_store.add_deduplication_record(DeduplicationRecord(
-                        content_hash=content_hash,
-                        library_id=library_id,
-                        item_key=item_key,
-                        relation_uri=None,
-                    ))
+                    await asyncio.to_thread(
+                        self.vector_store.add_deduplication_record,
+                        DeduplicationRecord(
+                            content_hash=content_hash,
+                            library_id=library_id,
+                            item_key=item_key,
+                            relation_uri=None,
+                        ),
+                    )
                     logger.info(
                         f"Cross-library copy: {copied} chunks from "
                         f"{cross_record.library_id}/{cross_record.item_key} -> {attachment_key}"
@@ -522,15 +533,19 @@ class DocumentProcessor:
 
         # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
         settings = get_settings()
+        t_extract_start = time.monotonic()
         if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
             try:
                 chunks = await self._extract_pdf_in_parts(
-                    file_bytes, attachment_key, settings.pdf_split_target_part_size
+                    file_bytes, attachment_key, settings.pdf_split_target_part_size,
+                    on_progress=on_progress,
                 )
             except KreuzbergParsingError as e:
                 logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
                 return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
         else:
+            if on_progress:
+                on_progress("Extracting text...")
             try:
                 chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
             except KreuzbergTimeoutError as e:
@@ -543,13 +558,33 @@ class DocumentProcessor:
                 logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
                 raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
 
+        t_extract_done = time.monotonic()
+        logger.info(
+            f"[TIMING] {attachment_key}: extraction={t_extract_done - t_extract_start:.1f}s "
+            f"chunks={len(chunks)} size_bytes={len(file_bytes)}"
+        )
+
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")
             return AttachmentProcessingResult(chunks_written=0, status="skipped_empty")
 
         # Generate embeddings
         chunk_texts = [chunk.text for chunk in chunks]
-        embeddings = await self.embedding_service.embed_batch(chunk_texts)
+        total_chunks = len(chunk_texts)
+        if on_progress:
+            on_progress(f"Generating embeddings (0/{total_chunks})")
+        _on_embed_batch: Optional[Callable[[int, int], None]] = None
+        if on_progress:
+            def _on_embed_batch(done: int, total: int) -> None:
+                if on_progress:
+                    on_progress(f"Generating embeddings ({done}/{total})")
+        embeddings = await self.embedding_service.embed_batch(chunk_texts, on_batch=_on_embed_batch)
+
+        t_embed_done = time.monotonic()
+        logger.info(
+            f"[TIMING] {attachment_key}: embedding={t_embed_done - t_extract_done:.1f}s "
+            f"chunks={len(chunk_texts)}"
+        )
 
         # Build DocumentChunk objects with full metadata
         doc_chunks = []
@@ -577,8 +612,10 @@ class DocumentProcessor:
             )
             doc_chunks.append(doc_chunk)
 
-        # Store in vector database
-        self.vector_store.add_chunks_batch(doc_chunks)
+        # Store in vector database — run in thread pool to avoid blocking the event loop
+        if on_progress:
+            on_progress(f"Storing chunks (0/{len(doc_chunks)})")
+        await asyncio.to_thread(self.vector_store.add_chunks_batch, doc_chunks)
 
         # Record in deduplication table
         dedup_record = DeduplicationRecord(
@@ -587,7 +624,13 @@ class DocumentProcessor:
             item_key=item_key,
             relation_uri=None
         )
-        self.vector_store.add_deduplication_record(dedup_record)
+        await asyncio.to_thread(self.vector_store.add_deduplication_record, dedup_record)
+
+        t_store_done = time.monotonic()
+        logger.info(
+            f"[TIMING] {attachment_key}: store={t_store_done - t_embed_done:.1f}s "
+            f"total={t_store_done - t_extract_start:.1f}s"
+        )
 
         logger.info(f"Indexed {len(doc_chunks)} chunks for attachment {attachment_key}")
         return AttachmentProcessingResult(chunks_written=len(doc_chunks), status="indexed_fresh")
@@ -597,6 +640,7 @@ class DocumentProcessor:
         pdf_bytes: bytes,
         attachment_key: str,
         target_part_bytes: int,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> list[ExtractionChunk]:
         """Split a large PDF by target byte size and extract each part via kreuzberg.
 
@@ -606,11 +650,19 @@ class DocumentProcessor:
         """
         from backend.utils.pdf_splitter import split_pdf_bytes
 
+        size_mb = len(pdf_bytes) / (1024 * 1024)
+        if on_progress:
+            on_progress(f"Splitting PDF ({size_mb:.0f} MB)...")
+        t_split_start = time.monotonic()
         try:
-            parts = split_pdf_bytes(pdf_bytes, target_part_bytes)
+            parts = await asyncio.to_thread(split_pdf_bytes, pdf_bytes, target_part_bytes)
         except ValueError as e:
             logger.warning(f"Could not split {attachment_key}: {e} — sending whole file.")
             parts = [(pdf_bytes, 0)]
+        logger.info(
+            f"[TIMING] {attachment_key}: pdf_split={time.monotonic() - t_split_start:.1f}s "
+            f"parts={len(parts)}"
+        )
 
         mb = target_part_bytes // (1024 * 1024)
         logger.info(f"Split {attachment_key} into {len(parts)} parts (~{mb} MB target each)")
@@ -625,8 +677,11 @@ class DocumentProcessor:
                     "unsplittable shared resources and cannot be OCR-processed"
                 )
 
+        total_parts = len(parts)
         all_chunks: list[ExtractionChunk] = []
-        for part_bytes, page_offset in parts:
+        for part_num, (part_bytes, page_offset) in enumerate(parts, 1):
+            if on_progress:
+                on_progress(f"Extracting text (part {part_num}/{total_parts})...")
             try:
                 part_chunks = await self.document_extractor.extract_and_chunk(
                     part_bytes, "application/pdf"
@@ -683,7 +738,7 @@ class DocumentProcessor:
         item_key = meta.item_key
 
         content_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
-        if self.vector_store.check_duplicate(content_hash, library_id=library_id):
+        if await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id):
             logger.info(f"Skipping duplicate abstract for {item_key}")
             return 0
 
@@ -718,13 +773,16 @@ class DocumentProcessor:
                 embedding=embedding,
             ))
 
-        self.vector_store.add_chunks_batch(doc_chunks)
-        self.vector_store.add_deduplication_record(DeduplicationRecord(
-            content_hash=content_hash,
-            library_id=library_id,
-            item_key=item_key,
-            relation_uri=None,
-        ))
+        await asyncio.to_thread(self.vector_store.add_chunks_batch, doc_chunks)
+        await asyncio.to_thread(
+            self.vector_store.add_deduplication_record,
+            DeduplicationRecord(
+                content_hash=content_hash,
+                library_id=library_id,
+                item_key=item_key,
+                relation_uri=None,
+            ),
+        )
 
         logger.info(f"Indexed {len(doc_chunks)} abstract chunks for {item_key}")
         return len(doc_chunks)

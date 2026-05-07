@@ -58,7 +58,10 @@
     .progress-section { height: 100%; padding: 10px; background-color: #f5f5f5; border-radius: 4px; box-sizing: border-box; display: flex; flex-direction: column; }
     .progress-label { font-weight: 500; margin-bottom: 5px; }
     #progress-bar { width: 100%; height: 20px; margin-bottom: 8px; }
+    .progress-message-row { display: flex; align-items: center; gap: 6px; }
     .progress-message { font-size: 13px; color: #666; flex: 1; overflow-y: auto; }
+    .progress-spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid #ccc; border-top-color: #555; border-radius: 50%; flex-shrink: 0; animation: spin 0.75s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
     .status-section { height: 100%; padding: 10px; background-color: #fff5f5; border: 1px solid #ffcccc; border-radius: 4px; box-sizing: border-box; }
     .status-messages { max-height: 160px; overflow-y: auto; overflow-x: hidden; padding: 5px; background-color: #fafafa; border-radius: 3px; }
     .status-message { padding: 4px 0; font-size: 12px; overflow-wrap: anywhere; }
@@ -143,7 +146,10 @@
         <div id="progress-section" class="progress-section">
           <div id="progress-label" class="progress-label">Ready</div>
           <progress id="progress-bar" max="100" value="0"></progress>
-          <div id="progress-message" class="progress-message"></div>
+          <div class="progress-message-row">
+            <div id="progress-message" class="progress-message"></div>
+            <span id="progress-spinner" class="progress-spinner" style="display:none"></span>
+          </div>
         </div>
 
         <!-- Status messages (shown only on errors, replaces progress) -->

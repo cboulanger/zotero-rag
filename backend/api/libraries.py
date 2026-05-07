@@ -78,7 +78,7 @@ def _build_detail(
 
 
 @router.get("/libraries", response_model=list[LibraryDetailResponse])
-async def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
+def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
     """
     List all libraries known to the backend (indexed or registered).
 
@@ -104,7 +104,7 @@ async def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
 
 
 @router.get("/libraries/{library_id}/status", response_model=LibraryDetailResponse)
-async def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Get combined status for a single library: index metadata and registrations.
     """
@@ -125,7 +125,7 @@ async def get_library_status(library_id: str, vector_store: VectorStore = Depend
 
 
 @router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
-async def get_library_index_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def get_library_index_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Get detailed indexing metadata for a library (used by the plugin to track sync state).
 
@@ -150,7 +150,7 @@ async def get_library_index_status(library_id: str, vector_store: VectorStore = 
 
 
 @router.delete("/libraries/{library_id}/index")
-async def clear_library_index(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def clear_library_index(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Remove all indexed data for a library (chunks, dedup records, metadata).
     """
@@ -199,7 +199,7 @@ def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends
 
 
 @router.delete("/libraries/{library_id}/items/{item_key}/chunks")
-async def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
+def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
     """
     Remove all indexed chunks for a specific item within a library.
     """

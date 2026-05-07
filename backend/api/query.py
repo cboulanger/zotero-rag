@@ -2,6 +2,7 @@
 Query API endpoints for RAG queries.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -104,7 +105,8 @@ async def query_libraries(
         indexed_count = 0
         library_document_counts: dict[str, int] = {}
         for library_id in query.library_ids:
-            count = vector_store.client.count(
+            count = (await asyncio.to_thread(
+                vector_store.client.count,
                 collection_name=vector_store.CHUNKS_COLLECTION,
                 count_filter=Filter(
                     must=[
@@ -113,11 +115,11 @@ async def query_libraries(
                             match=MatchValue(value=library_id)
                         )
                     ]
-                )
-            ).count
+                ),
+            )).count
             if count > 0:
                 indexed_count += 1
-            meta = vector_store.get_library_metadata(library_id)
+            meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
             if meta and meta.total_items_indexed > 0:
                 library_document_counts[library_id] = meta.total_items_indexed
 

@@ -686,63 +686,48 @@ def start_server(dev_mode=True, with_plugin=False):
 
 
 def stop_server():
-    """Stop the running backend server, kreuzberg sidecar, and plugin server if running."""
-    # First stop the plugin server if running
+    """Stop the running backend server, kreuzberg sidecar, and plugin server if running.
+
+    Shutdown order matters: uvicorn is terminated first so in-flight requests
+    can finish (or be cleanly aborted) before Qdrant and kreuzberg disappear.
+    Stopping sidecars first causes ConnectError on any request that is mid-write
+    when the signal arrives.
+    """
+    # Stop the plugin dev server first (it has no dependency on the sidecars)
     plugin_proc = find_plugin_process()
     if plugin_proc:
         stop_plugin_server()
 
-    # Stop kreuzberg extraction sidecar
-    stop_kreuzberg()
-
-    # Stop Qdrant sidecar
-    stop_qdrant()
-
-    # Try to find backend server by process
+    # --- Step 1: stop uvicorn so no new requests arrive and in-flight ones drain ---
     proc = find_server_process()
-
     if proc:
         try:
             print(f"Stopping server (PID: {proc.pid})...")
 
-            # On Windows, we need to kill the entire process tree
-            # because uvicorn --reload creates child processes
             if sys.platform == 'win32':
-                # Get all child processes
                 try:
                     parent = psutil.Process(proc.pid)
                     children = parent.children(recursive=True)
-
-                    # Terminate parent first
                     parent.terminate()
-
-                    # Terminate all children
                     for child in children:
                         try:
                             child.terminate()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-
-                    # Wait for graceful shutdown
-                    gone, alive = psutil.wait_procs([parent] + children, timeout=5)
-
-                    # Force kill any remaining
+                    gone, alive = psutil.wait_procs([parent] + children, timeout=10)
                     for p in alive:
                         try:
                             print(f"Force killing PID {p.pid}...")
                             p.kill()
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
-
                     print("[OK] Server stopped successfully")
-
                 except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
                     print(f"[ERROR] Error stopping server: {e}")
             else:
-                # On Unix, terminate should handle the process group
                 proc.terminate()
                 try:
-                    proc.wait(timeout=5)
+                    proc.wait(timeout=10)
                     print("[OK] Server stopped successfully")
                 except psutil.TimeoutExpired:
                     print("Server didn't stop gracefully, forcing...")
@@ -753,6 +738,10 @@ def stop_server():
             print(f"[ERROR] Error stopping server: {e}")
     else:
         print("Server is not running")
+
+    # --- Step 2: stop sidecars only after uvicorn is gone ---
+    stop_kreuzberg()
+    stop_qdrant()
 
 
 def start_plugin_server():

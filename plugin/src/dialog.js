@@ -1256,9 +1256,10 @@ var ZoteroRAGDialog = {
 					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {
-						const detail = total > 0 ? `${libraryName}: ${message} ${current}/${total}` : `${libraryName}: ${message}`;
 						const phase = message.startsWith('Downloading') ? 'Downloading' : 'Indexing';
-						this.updateProgress(total === 0 ? null : percentage, phase, detail);
+						const label = total > 0 ? `${phase} (${current}/${total})` : phase;
+						const detail = `${libraryName}: ${message}`;
+						this.updateProgress(total === 0 ? null : percentage, label, detail);
 						this.updateLibraryProgressText(
 							libraryId,
 							total > 0 ? `${current}/${total}` : null
@@ -1483,6 +1484,7 @@ var ZoteroRAGDialog = {
 		const statusSection = document.getElementById('status-section');
 		const labelElement = document.getElementById('progress-label');
 		const messageElement = document.getElementById('progress-message');
+		const spinnerElement = document.getElementById('progress-spinner');
 
 		// Show progress, hide status
 		if (progressSection) progressSection.style.display = '';
@@ -1490,6 +1492,7 @@ var ZoteroRAGDialog = {
 
 		if (labelElement) labelElement.textContent = label;
 		if (messageElement) messageElement.textContent = message || '';
+		if (spinnerElement) spinnerElement.style.display = message ? '' : 'none';
 	},
 
 	/**

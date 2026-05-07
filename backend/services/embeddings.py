@@ -10,9 +10,10 @@ import datetime
 import hashlib
 import logging
 import os
+import time
 import random
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -66,8 +67,16 @@ class EmbeddingService(ABC):
         """Generate embedding for a single text."""
 
     @abstractmethod
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
+    async def embed_batch(
+        self,
+        texts: list[str],
+        on_batch: Optional[Callable[[int, int], None]] = None,
+    ) -> list[list[float]]:
+        """Generate embeddings for multiple texts.
+
+        on_batch, if provided, is called after each internal API batch with
+        (completed_count, total_count) so callers can report progress.
+        """
 
     @abstractmethod
     def get_embedding_dim(self) -> int:
@@ -161,7 +170,7 @@ class LocalEmbeddingService(EmbeddingService):
                 return self._embedding_cache[content_hash]
 
         self._load_model()
-        embedding = self._model.encode(text, convert_to_numpy=True)
+        embedding = await asyncio.to_thread(self._model.encode, text, convert_to_numpy=True)
         embedding_list = embedding.tolist()
 
         if self.config.cache_enabled:
@@ -170,7 +179,11 @@ class LocalEmbeddingService(EmbeddingService):
 
         return embedding_list
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(
+        self,
+        texts: list[str],
+        on_batch: Optional[Callable[[int, int], None]] = None,
+    ) -> list[list[float]]:
         """Generate embeddings for multiple texts."""
         if not texts:
             return []
@@ -194,7 +207,8 @@ class LocalEmbeddingService(EmbeddingService):
         if uncached_texts:
             self._load_model()
             logger.debug(f"Generating embeddings for {len(uncached_texts)} texts")
-            embeddings = self._model.encode(
+            embeddings = await asyncio.to_thread(
+                self._model.encode,
                 uncached_texts,
                 batch_size=self.config.batch_size,
                 convert_to_numpy=True,
@@ -207,6 +221,8 @@ class LocalEmbeddingService(EmbeddingService):
                     content_hash = self.compute_content_hash(texts[idx])
                     self._embedding_cache[content_hash] = embedding_list
 
+        if on_batch:
+            on_batch(len(texts), len(texts))
         return results  # type: ignore[return-value]
 
     def get_embedding_dim(self) -> int:
@@ -436,7 +452,11 @@ class RemoteEmbeddingService(EmbeddingService):
 
         return embedding
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(
+        self,
+        texts: list[str],
+        on_batch: Optional[Callable[[int, int], None]] = None,
+    ) -> list[list[float]]:
         """Generate embeddings for multiple texts in a single API call."""
         if not texts:
             return []
@@ -457,16 +477,27 @@ class RemoteEmbeddingService(EmbeddingService):
             uncached_texts = texts
             uncached_indices = list(range(len(texts)))
 
+        cached_count = len(texts) - len(uncached_texts)
+
         if uncached_texts:
-            logger.debug(
-                f"Requesting embeddings for {len(uncached_texts)} texts "
-                f"(model={self._resolve_model_name()})"
+            total_batches = (len(uncached_texts) + self.config.batch_size - 1) // self.config.batch_size
+            logger.info(
+                f"[TIMING] embed_batch: {len(uncached_texts)} texts → "
+                f"{total_batches} API call(s) (batch_size={self.config.batch_size}, "
+                f"model={self._resolve_model_name()})"
             )
+            t_embed_start = time.monotonic()
             # Send in batches respecting config.batch_size
             batch_size = self.config.batch_size
             for batch_start in range(0, len(uncached_texts), batch_size):
                 batch = uncached_texts[batch_start:batch_start + batch_size]
+                t_batch = time.monotonic()
                 response = await self._create_embeddings_with_backoff(batch)
+                logger.info(
+                    f"[TIMING] embed_batch: call {batch_start // batch_size + 1}/{total_batches} "
+                    f"= {time.monotonic() - t_batch:.1f}s for {len(batch)} texts "
+                    f"(elapsed={time.monotonic() - t_embed_start:.1f}s)"
+                )
                 for j, item in enumerate(response.data):
                     embedding = item.embedding
                     global_idx = uncached_indices[batch_start + j]
@@ -476,6 +507,12 @@ class RemoteEmbeddingService(EmbeddingService):
                         self._embedding_cache[content_hash] = embedding
                     if self._dim is None:
                         self._dim = len(embedding)
+                if on_batch:
+                    done = cached_count + min(batch_start + batch_size, len(uncached_texts))
+                    on_batch(done, len(texts))
+        elif on_batch:
+            # All texts were cache hits — report completion immediately
+            on_batch(len(texts), len(texts))
 
         return results  # type: ignore[return-value]
 
@@ -514,7 +551,13 @@ class MockEmbeddingService(EmbeddingService):
     async def embed_text(self, text: str) -> list[float]:
         return [0.0] * self._dim
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(
+        self,
+        texts: list[str],
+        on_batch: Optional[Callable[[int, int], None]] = None,
+    ) -> list[list[float]]:
+        if on_batch and texts:
+            on_batch(len(texts), len(texts))
         return [[0.0] * self._dim for _ in texts]
 
     def get_embedding_dim(self) -> int:
