@@ -1,3 +1,10 @@
+# [1.23.0](https://github.com/cboulanger/zotero-rag/compare/v1.22.0...v1.23.0) (2026-05-07)
+
+
+### Features
+
+* async document upload with live server-side progress reporting ([0f8a13d](https://github.com/cboulanger/zotero-rag/commit/0f8a13d59e8df0756dc3b28d6e3cb7473b205404))
+
 # [1.22.0](https://github.com/cboulanger/zotero-rag/compare/v1.21.1...v1.22.0) (2026-05-07)
 
 
