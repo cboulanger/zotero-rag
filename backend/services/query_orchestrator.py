@@ -136,7 +136,8 @@ class QueryOrchestrator:
 
         # 4. Synthesize or pass through
         agents_used = [a.name for a in selected]
-        llm_model = self._llm_service.model_name
+        _raw_model = self._llm_service.model_name
+        llm_model: Optional[str] = _raw_model if isinstance(_raw_model, str) else None
         if len(agent_results) == 1 and agent_results[0].agent_name == "rag":
             return _rag_passthrough(agent_results[0], question,
                                     model_name=llm_model, agents_used=agents_used)
