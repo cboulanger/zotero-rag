@@ -463,7 +463,7 @@ var RemoteIndexer = {
 		}
 
 		const search = new Zotero.Search();
-		search.libraryID = zoteroLibraryID;
+		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return { attachments: [], linkedUrls: 0 };
 
@@ -543,7 +543,7 @@ var RemoteIndexer = {
 		if (!zoteroLibraryID) return 0;
 
 		const search = new Zotero.Search();
-		search.libraryID = zoteroLibraryID;
+		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return 0;
 
@@ -650,7 +650,7 @@ var RemoteIndexer = {
 						{ headers: getAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body), signal, timeout: 120 * 1000 },
 					);
 
-					const data = await response.json();
+					const data = /** @type {{statuses?: Array<AttachmentIndexStatus>}} */ (/** @type {unknown} */ (await response.json()));
 					const batchStatuses = data.statuses || [];
 					const needsIndexing = batchStatuses.filter(s => s.needs_indexing).length;
 					const upToDate = batchStatuses.length - needsIndexing;
@@ -739,7 +739,7 @@ var RemoteIndexer = {
 		};
 
 		const formData = new FormData();
-		formData.append('file', new Blob([bytes], { type: att.mime_type }), att.attachment_key);
+		formData.append('file', new Blob([/** @type {any} */ (bytes)], { type: att.mime_type }), att.attachment_key);
 		formData.append('metadata', JSON.stringify(metadata));
 
 		// Overall deadline covers the upload + async processing + polling
@@ -777,7 +777,7 @@ var RemoteIndexer = {
 		}
 		debug(log, `${att.attachment_key}: async response received in ${Date.now() - t0}ms`);
 
-		const asyncData = await response.json();
+		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult}} */ (/** @type {unknown} */ (await response.json()));
 		/** @type {DocumentUploadResult} */
 		let result;
 		if (asyncData.status === 'processing' && asyncData.task_id) {
@@ -876,7 +876,7 @@ var RemoteIndexer = {
 			try {
 				const raw = Zotero.Prefs.get(prefKey, true);
 				if (raw) {
-					const cache = JSON.parse(raw);
+					const cache = JSON.parse(/** @type {string} */ (raw));
 					await this._saveVersionCache(libraryId, cache);
 					try { Zotero.Prefs.clear(prefKey, true); } catch (_2) {}
 					return cache;
@@ -921,7 +921,7 @@ var RemoteIndexer = {
 			let detail = '';
 			const ct = response.headers.get('content-type') || '';
 			if (ct.includes('application/json')) {
-				const body = await response.json().catch(() => ({}));
+				const body = /** @type {{detail?: string}} */ (/** @type {unknown} */ (await response.json().catch(() => ({}))));
 				detail = body.detail || JSON.stringify(body);
 			} else {
 				const text = await response.text().catch(() => '');
@@ -962,7 +962,7 @@ var RemoteIndexer = {
 		const keysWithAnyAttachment = new Set(existingAttachments.map(a => a.item_key));
 
 		const search = new Zotero.Search();
-		search.libraryID = zoteroLibraryID;
+		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return [];
 
@@ -1066,7 +1066,7 @@ var RemoteIndexer = {
 				body: JSON.stringify({ library_id: libraryId, items: batch }),
 				signal,
 			});
-			const result = await response.json();
+			const result = /** @type {{updated_items: number, updated_chunks: number}} */ (/** @type {unknown} */ (await response.json()));
 			totalUpdatedItems += result.updated_items;
 			totalUpdatedChunks += result.updated_chunks;
 			log(`[RemoteIndexer] Metadata batch ${batchNum}/${totalBatches}: ${result.updated_items} items, ${result.updated_chunks} chunks`);
@@ -1109,7 +1109,7 @@ var RemoteIndexer = {
 		}
 		debug(log, `${abstractItem.item_key} (abstract): response received in ${Date.now() - t0}ms`);
 
-		const result = await response.json();
+		const result = /** @type {{status: string, chunks_added: number, message?: string, rate_limit_headers?: Record<string, string>}} */ (/** @type {unknown} */ (await response.json()));
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
 
 		if (result.status === 'error') {
