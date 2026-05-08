@@ -1,3 +1,15 @@
+# [1.24.0](https://github.com/cboulanger/zotero-rag/compare/v1.23.0...v1.24.0) (2026-05-08)
+
+
+### Bug Fixes
+
+* Remove spinner after task ends ([1593ecf](https://github.com/cboulanger/zotero-rag/commit/1593ecf558d9629afae8dcc4c1068c96a5ddcc35))
+
+
+### Features
+
+* Add library visibility filter to settings ([46ac231](https://github.com/cboulanger/zotero-rag/commit/46ac231e391f725020b548d0dd8d70baf2dd2fba))
+
 # [1.23.0](https://github.com/cboulanger/zotero-rag/compare/v1.22.0...v1.23.0) (2026-05-07)
 
 
