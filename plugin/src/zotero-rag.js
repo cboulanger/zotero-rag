@@ -588,6 +588,52 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Create a base library checkbox row (checkbox + name span), without appending to any container.
+	 * Callers append children to label in the order they need.
+	 * @param {Document} doc
+	 * @param {Library} library
+	 * @param {boolean} checked
+	 * @param {function(string, boolean): void} onChange
+	 * @returns {{label: HTMLLabelElement, checkbox: HTMLInputElement, nameSpan: HTMLSpanElement}}
+	 */
+	createLibraryCheckboxRow(doc, library, checked, onChange) {
+		// Use createElementNS so these are always HTML elements — doc may be a XUL document
+		// (preferences pane) where plain createElement() produces inline XUL elements instead.
+		const ns = 'http://www.w3.org/1999/xhtml';
+		const label = /** @type {HTMLLabelElement} */ (doc.createElementNS(ns, 'label'));
+		label.className = 'library-checkbox';
+
+		const checkbox = /** @type {HTMLInputElement} */ (doc.createElementNS(ns, 'input'));
+		checkbox.type = 'checkbox';
+		checkbox.id = `library-${library.id}`;
+		checkbox.setAttribute('data-library-id', library.id);
+		checkbox.checked = checked;
+		checkbox.addEventListener('change', (e) => {
+			onChange(library.id, /** @type {HTMLInputElement} */ (e.target).checked);
+		});
+
+		const nameSpan = /** @type {HTMLSpanElement} */ (doc.createElementNS(ns, 'span'));
+		nameSpan.className = 'library-name';
+		nameSpan.textContent = library.name;
+
+		return { label, checkbox, nameSpan };
+	}
+
+	/**
+	 * Get the set of library IDs that should be shown in the search dialog.
+	 * Returns null when no filter is set (all libraries visible — the default).
+	 * @returns {Set<string>|null}
+	 */
+	getVisibleLibraryIds() {
+		try {
+			// @ts-ignore
+			const stored = Zotero.Prefs.get('extensions.zotero-rag.visibleLibraries', true);
+			if (stored) return new Set(JSON.parse(stored));
+		} catch (_) {}
+		return null;
+	}
+
+	/**
 	 * Get all available libraries.
 	 * @returns {Array<Library>} List of libraries
 	 */

@@ -67,6 +67,24 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Library Visibility -->
+  <html:fieldset class="settings-group">
+    <html:legend>Library Visibility</html:legend>
+
+    <html:div class="setting-description">
+      Select which libraries appear in the search dialog.
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">
+      <html:input type="checkbox" id="zotero-rag-library-select-all"/>
+      <html:label for="zotero-rag-library-select-all" style="margin-left:6px;cursor:pointer;">Select all / none</html:label>
+    </html:div>
+
+    <html:div id="zotero-rag-library-visibility-list" class="library-list" style="height:200px;overflow-y:scroll;">
+      <!-- Populated dynamically by preferences.js -->
+    </html:div>
+  </html:fieldset>
+
   <!-- Data Management -->
   <html:fieldset class="settings-group">
     <html:legend>Data</html:legend>

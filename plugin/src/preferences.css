@@ -71,3 +71,31 @@ body {
   margin-top: 5px;
   line-height: 1.4;
 }
+
+.library-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 8px 10px;
+  height: 200px;
+  overflow-y: scroll;
+  background: #fff;
+  margin-top: 8px;
+}
+
+.library-checkbox {
+  display: flex;
+  align-items: center;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.library-checkbox input[type="checkbox"] {
+  margin-right: 8px;
+  cursor: pointer;
+}
+
+.library-checkbox:hover {
+  background-color: rgba(0, 0, 0, 0.03);
+}

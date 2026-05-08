@@ -368,7 +368,7 @@ var ZoteroRAGDialog = {
 			return;
 		}
 
-		const libraries = this.plugin.getLibraries();
+		const allLibraries = this.plugin.getLibraries();
 		const currentLibrary = this.plugin.getCurrentLibrary();
 		const listContainer = document.getElementById('library-list');
 
@@ -376,46 +376,40 @@ var ZoteroRAGDialog = {
 			return;
 		}
 
-		// Build UI without metadata - metadata will be loaded on selection
+		// Filter by the visibility preference (null = show all)
+		const visibleIds = this.plugin.getVisibleLibraryIds();
+		let libraries = visibleIds ? allLibraries.filter(l => visibleIds.has(l.id)) : allLibraries;
+
+		// Always show the currently active library, pre-selected, even if hidden by the preference
+		if (currentLibrary && visibleIds && !visibleIds.has(currentLibrary)) {
+			const activeLib = allLibraries.find(l => l.id === currentLibrary);
+			if (activeLib) libraries = [activeLib, ...libraries];
+		}
+
+		// Build UI without metadata — metadata is loaded asynchronously below
 		for (let library of libraries) {
-
-			const checkboxLabel = document.createElement('label');
-			checkboxLabel.className = 'library-checkbox';
-
-			const checkbox = document.createElement('input');
-			checkbox.type = 'checkbox';
-			checkbox.id = `library-${library.id}`;
-			checkbox.setAttribute('data-library-id', library.id);
-
-			// Check current library by default
-			if (library.id === currentLibrary) {
-				checkbox.checked = true;
-				this.selectedLibraries.add(library.id);
-			}
-
-			checkbox.addEventListener('change', (e) => {
-				const target = /** @type {HTMLInputElement} */ (e.target);
-				const libraryId = target.getAttribute('data-library-id');
-				if (libraryId) {
-					if (target.checked) {
-						this.selectedLibraries.add(libraryId);
+			const isChecked = library.id === currentLibrary;
+			const { label: checkboxLabel, checkbox, nameSpan } = this.plugin.createLibraryCheckboxRow(
+				document, library, isChecked,
+				(libId, checked) => {
+					if (checked) {
+						this.selectedLibraries.add(libId);
 					} else {
-						this.selectedLibraries.delete(libraryId);
+						this.selectedLibraries.delete(libId);
 					}
 					this.updateSubmitButtonState();
 				}
-			});
+			);
+
+			if (isChecked) {
+				this.selectedLibraries.add(library.id);
+			}
 
 			// Status icon (hidden by CSS for now)
 			const statusIcon = document.createElement('span');
 			statusIcon.className = 'library-status-icon';
 			statusIcon.id = `status-icon-${library.id}`;
 			statusIcon.textContent = ''; // Filled in once metadata loads
-
-			// Library name
-			const nameSpan = document.createElement('span');
-			nameSpan.className = 'library-name';
-			nameSpan.textContent = library.name;
 
 			// Metadata info (initially empty, will be populated on selection)
 			const metaSpan = document.createElement('span');
@@ -437,6 +431,7 @@ var ZoteroRAGDialog = {
 				this.reindexLibrary(library.id, library.name);
 			});
 
+			// Append in display order: checkbox, status icon, name, meta, reindex button
 			checkboxLabel.appendChild(checkbox);
 			checkboxLabel.appendChild(statusIcon);
 			checkboxLabel.appendChild(nameSpan);

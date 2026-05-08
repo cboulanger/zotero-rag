@@ -109,6 +109,89 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	// Refresh from server in background and re-render if the list has changed
 	this.fetchRequiredApiKeys().then(() => renderApiKeyFields(this.requiredApiKeys));
 
+	// Library visibility section
+	const populateLibraryVisibilityList = () => {
+		const container = doc.getElementById('zotero-rag-library-visibility-list');
+		if (!container) return;
+		container.innerHTML = '';
+
+		const libraries = this.getLibraries();
+		// @ts-ignore
+		const storedRaw = /** @type {string|undefined} */ (Zotero.Prefs.get('extensions.zotero-rag.visibleLibraries', true) || undefined);
+		/** @type {Set<string>} */
+		let checkedIds;
+		try {
+			checkedIds = storedRaw ? new Set(JSON.parse(storedRaw)) : new Set(libraries.map(l => l.id));
+		} catch (_) {
+			checkedIds = new Set(libraries.map(l => l.id));
+		}
+
+		for (const library of libraries) {
+			// @ts-ignore - createLibraryCheckboxRow added at runtime
+			const { checkbox, nameSpan } = this.createLibraryCheckboxRow(
+				doc, library, checkedIds.has(library.id),
+				/** @param {string} libId @param {boolean} checked */
+				(libId, checked) => {
+					// @ts-ignore
+					const currentRaw = /** @type {string|undefined} */ (Zotero.Prefs.get('extensions.zotero-rag.visibleLibraries', true) || undefined);
+					/** @type {Set<string>} */
+					let current;
+					try {
+						current = currentRaw ? new Set(JSON.parse(currentRaw)) : new Set(libraries.map(l => l.id));
+					} catch (_) {
+						current = new Set(libraries.map(l => l.id));
+					}
+					if (checked) {
+						current.add(libId);
+					} else {
+						current.delete(libId);
+					}
+					// Clear the pref when all are selected (default state)
+					if (current.size === libraries.length) {
+						// @ts-ignore
+						Zotero.Prefs.clear('extensions.zotero-rag.visibleLibraries', true);
+					} else {
+						// @ts-ignore
+						Zotero.Prefs.set('extensions.zotero-rag.visibleLibraries', JSON.stringify([...current]), true);
+					}
+				}
+			);
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'library-checkbox';
+			row.appendChild(checkbox);
+			row.appendChild(nameSpan);
+			container.appendChild(row);
+		}
+
+		// Wire up the "Select all / none" checkbox
+		const selectAll = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-library-select-all'));
+		if (!selectAll) return;
+
+		const updateSelectAll = () => {
+			const boxes = /** @type {NodeListOf<HTMLInputElement>} */ (container.querySelectorAll('input[type="checkbox"]'));
+			const checkedCount = Array.from(boxes).filter(cb => cb.checked).length;
+			selectAll.indeterminate = checkedCount > 0 && checkedCount < boxes.length;
+			selectAll.checked = checkedCount === boxes.length;
+		};
+		updateSelectAll();
+
+		// Keep select-all in sync when individual rows change
+		container.addEventListener('change', updateSelectAll);
+
+		selectAll.addEventListener('change', () => {
+			const boxes = /** @type {NodeListOf<HTMLInputElement>} */ (container.querySelectorAll('input[type="checkbox"]'));
+			boxes.forEach(cb => { cb.checked = selectAll.checked; });
+			if (selectAll.checked) {
+				// @ts-ignore
+				Zotero.Prefs.clear('extensions.zotero-rag.visibleLibraries', true);
+			} else {
+				// @ts-ignore
+				Zotero.Prefs.set('extensions.zotero-rag.visibleLibraries', '[]', true);
+			}
+		});
+	};
+	populateLibraryVisibilityList();
+
 	doc.getElementById('zotero-rag-clear-cache').addEventListener('click', async () => {
 		// @ts-ignore - Services is a Zotero/Firefox global
 		const confirmed = Services.prompt.confirm(
