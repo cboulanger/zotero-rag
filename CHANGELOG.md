@@ -1,3 +1,10 @@
+# [1.25.0](https://github.com/cboulanger/zotero-rag/compare/v1.24.0...v1.25.0) (2026-05-12)
+
+
+### Features
+
+* Add indexing report note with doc-type breakdown and auto-open ([2aad88c](https://github.com/cboulanger/zotero-rag/commit/2aad88c76cccaff84d1aa0cf5f95b7b4de193f16))
+
 # [1.24.0](https://github.com/cboulanger/zotero-rag/compare/v1.23.0...v1.24.0) (2026-05-08)
 
 
