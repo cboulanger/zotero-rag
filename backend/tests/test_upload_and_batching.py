@@ -49,7 +49,7 @@ def _make_chunk(index: int) -> DocumentChunk:
 # ---------------------------------------------------------------------------
 
 class TestAddChunksBatching(unittest.TestCase):
-    """VectorStore.add_chunks_batch must split large payloads into ≤200-point calls."""
+    """VectorStore.add_chunks_batch must split large payloads into ≤100-point calls."""
 
     def _make_store_with_mock_client(self):
         """Return a VectorStore whose qdrant client is fully mocked."""
@@ -70,29 +70,29 @@ class TestAddChunksBatching(unittest.TestCase):
         vs.client = MagicMock()
         return vs
 
-    def test_single_batch_when_chunks_le_200(self):
+    def test_single_batch_when_chunks_le_100(self):
         vs = self._make_store_with_mock_client()
-        chunks = [_make_chunk(i) for i in range(150)]
+        chunks = [_make_chunk(i) for i in range(80)]
         vs.add_chunks_batch(chunks)
         self.assertEqual(vs.client.upsert.call_count, 1)
         args, kwargs = vs.client.upsert.call_args
-        self.assertEqual(len(kwargs.get("points", args[1] if len(args) > 1 else [])), 150)
+        self.assertEqual(len(kwargs.get("points", args[1] if len(args) > 1 else [])), 80)
 
     def test_splits_into_multiple_batches(self):
         vs = self._make_store_with_mock_client()
-        chunks = [_make_chunk(i) for i in range(450)]
+        chunks = [_make_chunk(i) for i in range(250)]
         vs.add_chunks_batch(chunks)
-        # 450 chunks → 3 calls: 200 + 200 + 50
+        # 250 chunks → 3 calls: 100 + 100 + 50
         self.assertEqual(vs.client.upsert.call_count, 3)
         sizes = [
             len(c.kwargs.get("points", c.args[1] if len(c.args) > 1 else []))
             for c in vs.client.upsert.call_args_list
         ]
-        self.assertEqual(sizes, [200, 200, 50])
+        self.assertEqual(sizes, [100, 100, 50])
 
     def test_exact_multiple_of_batch_size(self):
         vs = self._make_store_with_mock_client()
-        chunks = [_make_chunk(i) for i in range(400)]
+        chunks = [_make_chunk(i) for i in range(200)]
         vs.add_chunks_batch(chunks)
         self.assertEqual(vs.client.upsert.call_count, 2)
 
