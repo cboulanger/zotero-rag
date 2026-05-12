@@ -12,6 +12,9 @@ from typing import Optional
 from pathlib import Path
 import uuid
 
+from httpx import TimeoutException, ReadTimeout, WriteTimeout
+from qdrant_client.http.exceptions import ResponseHandlingException
+
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -316,12 +319,35 @@ class VectorStore:
             )
             points.append(point)
 
-        batch_size = 200
+        batch_size = 100
+        _UPSERT_MAX_RETRIES = 4
         for i in range(0, len(points), batch_size):
-            self.client.upsert(
-                collection_name=self.CHUNKS_COLLECTION,
-                points=points[i : i + batch_size],
-            )
+            batch = points[i : i + batch_size]
+            for attempt in range(1, _UPSERT_MAX_RETRIES + 1):
+                try:
+                    self.client.upsert(
+                        collection_name=self.CHUNKS_COLLECTION,
+                        points=batch,
+                    )
+                    break
+                except (TimeoutException, ReadTimeout, WriteTimeout) as exc:
+                    if attempt == _UPSERT_MAX_RETRIES:
+                        raise
+                    delay = 2 ** (attempt - 1)  # 1s, 2s, 4s
+                    logger.warning(
+                        f"Qdrant upsert timeout (attempt {attempt}/{_UPSERT_MAX_RETRIES},"
+                        f" batch {i // batch_size + 1}) — retrying in {delay}s: {exc}"
+                    )
+                    time.sleep(delay)
+                except ResponseHandlingException as exc:
+                    if "timed out" not in str(exc).lower() or attempt == _UPSERT_MAX_RETRIES:
+                        raise
+                    delay = 2 ** (attempt - 1)
+                    logger.warning(
+                        f"Qdrant upsert timeout (attempt {attempt}/{_UPSERT_MAX_RETRIES},"
+                        f" batch {i // batch_size + 1}) — retrying in {delay}s: {exc}"
+                    )
+                    time.sleep(delay)
 
         logger.debug(f"Added {len(points)} chunks in batch")
         return point_ids
