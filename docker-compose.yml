@@ -59,7 +59,9 @@ services:
       KISSKI_API_KEY: ${KISSKI_API_KEY:-}
       HF_TOKEN: ${HF_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
+      # Keep at 1: multiple workers each have their own in-memory task store and
+      # break async task polling (issue #30). asyncio handles I/O concurrency fine.
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
       # set a secret api key for a real deployment!
       API_KEY: ${API_KEY:-}
       DATA_PATH: /data

@@ -33,7 +33,10 @@ ENV LOG_FILE=/data/logs/server.log
 # Kreuzberg sidecar URL (set by docker-compose or container.mjs)
 ENV KREUZBERG_URL=http://kreuzberg:8100
 
-ENV UVICORN_WORKERS=4
+# 1 worker: the service is I/O-bound (kreuzberg, Qdrant, OpenAI are external),
+# so asyncio concurrency within one process is sufficient. Multiple workers would
+# each have their own in-memory async-task store and break task polling (issue #30).
+ENV UVICORN_WORKERS=1
 
 EXPOSE 8119
 CMD uvicorn backend.main:app --host 0.0.0.0 --port 8119 --workers ${UVICORN_WORKERS}
