@@ -6,16 +6,21 @@ capability_prompt, then parses the JSON response into a QueryPlan.
 Falls back to a RAG-only plan on any parse failure.
 """
 
+from __future__ import annotations
+
 import json
 import logging
-from typing import TYPE_CHECKING
+import time
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Optional
 
 from backend.models.filters import MetadataFilters
+from backend.models.trace import LLMCallTrace, RoutingTrace
 from backend.services.base_agent import BaseAgent, QueryPlan
 from backend.services.llm import LLMService
 
 if TYPE_CHECKING:
-    pass
+    from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +82,12 @@ class QueryRouter:
             guidance=_ROUTING_GUIDANCE,
         )
 
-    async def route(self, question: str, agents: list[BaseAgent]) -> QueryPlan:
+    async def route(
+        self,
+        question: str,
+        agents: list[BaseAgent],
+        trace: Optional[TraceCollector] = None,
+    ) -> QueryPlan:
         """
         Call the LLM to classify the question and extract filters.
 
@@ -89,16 +99,19 @@ class QueryRouter:
 
         prompt = self._build_prompt(agents, question)
         valid_names = {a.name for a in agents}
+        t0 = time.monotonic()
+        raw = ""
 
         try:
             raw = await self._llm.generate(prompt=prompt, max_tokens=256, temperature=0.0)
+            duration_ms = int((time.monotonic() - t0) * 1000)
             data = _parse_json(raw)
 
             selected = [n for n in data.get("agents", ["rag"]) if n in valid_names]
             if not selected:
                 selected = ["rag"]
 
-            return QueryPlan(
+            plan = QueryPlan(
                 agents_to_use=selected,
                 filters=MetadataFilters(
                     year_min=data.get("year_min"),
@@ -109,6 +122,26 @@ class QueryRouter:
                 ),
                 routing_description=data.get("routing_description"),
             )
+
+            if trace is not None:
+                trace.record(RoutingTrace(
+                    prompt=prompt,
+                    llm_response=raw,
+                    plan=plan.model_dump(),
+                    duration_ms=duration_ms,
+                ))
+                trace.record(LLMCallTrace(
+                    call_type="routing",
+                    model=self._llm.model_name,
+                    prompt=prompt,
+                    response=raw,
+                    temperature=0.0,
+                    max_tokens=256,
+                    duration_ms=duration_ms,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ))
+
+            return plan
 
         except Exception as exc:
             logger.warning("QueryRouter: routing failed (%s) — falling back to RAG", exc)

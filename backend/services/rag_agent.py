@@ -2,7 +2,10 @@
 RAG agent — wraps RAGEngine as a registered query agent.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING, Optional
 
 from backend.config.settings import Settings
 from backend.db.vector_store import VectorStore
@@ -11,6 +14,9 @@ from backend.services.base_agent import AgentResult, BaseAgent
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.services.rag_engine import RAGEngine
+
+if TYPE_CHECKING:
+    from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +54,7 @@ class RAGAgent(BaseAgent):
         question: str,
         library_ids: list[str],
         filters: MetadataFilters,
+        trace: Optional[TraceCollector] = None,
         **kwargs,
     ) -> AgentResult:
         top_k: int = kwargs.get("top_k", 5)
@@ -65,6 +72,7 @@ class RAGAgent(BaseAgent):
             top_k=top_k,
             min_score=min_score,
             filters=filters,
+            trace=trace,
         )
 
         sources = result.sources

@@ -4,16 +4,24 @@ RAG (Retrieval-Augmented Generation) query engine.
 Coordinates retrieval from vector database and generation with LLM.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import List, Optional
+import time
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, List, Optional
 from pydantic import BaseModel
 
 from backend.models.filters import MetadataFilters
+from backend.models.trace import AgentExecutionTrace, ChunkTrace, LLMCallTrace, RetrievalTrace
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore
 from backend.config.settings import Settings
+
+if TYPE_CHECKING:
+    from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +94,7 @@ class RAGEngine:
         top_k: int = 5,
         min_score: float = 0.3,  # Fallback default, should use preset value from API layer
         filters: Optional[MetadataFilters] = None,
+        trace: Optional[TraceCollector] = None,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -100,20 +109,23 @@ class RAGEngine:
             Query result with answer and source citations.
         """
         logger.info(f"Processing RAG query: {question}")
+        t_start = time.monotonic()
 
         # Step 1: Generate embedding for question
         logger.debug("Generating query embedding...")
         query_embedding = await self.embedding_service.embed_text(question)
+        embedding_model = getattr(self.embedding_service, "model_name", "unknown")
 
         # Step 2: Search vector database for relevant chunks
         logger.debug(f"Searching for top {top_k} chunks in libraries: {library_ids}")
+        active_filters = filters if filters and not filters.is_empty() else None
         search_results = await asyncio.to_thread(
             self.vector_store.search,
             query_vector=query_embedding,
             limit=top_k,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
-            filters=filters if filters and not filters.is_empty() else None,
+            filters=active_filters,
         )
 
         if not search_results:
@@ -176,6 +188,41 @@ class RAGEngine:
 
         context = "\n\n".join(context_parts)
 
+        # Record retrieval trace before calling the LLM
+        if trace is not None:
+            scores = [r.score for r in search_results]
+            chunk_traces = [
+                ChunkTrace(
+                    item_key=r.chunk.metadata.document_metadata.item_key or "",
+                    attachment_key=r.chunk.metadata.document_metadata.attachment_key,
+                    title=r.chunk.metadata.document_metadata.title or "",
+                    authors=r.chunk.metadata.document_metadata.authors or [],
+                    year=r.chunk.metadata.document_metadata.year,
+                    page_number=r.chunk.metadata.page_number,
+                    score=r.score,
+                    text_preview=r.chunk.metadata.text_preview,
+                )
+                for r in search_results
+            ]
+            retrieval_trace = RetrievalTrace(
+                embedding_model=embedding_model,
+                embedding_dims=len(query_embedding),
+                search_params={
+                    "top_k": top_k,
+                    "min_score": min_score,
+                    "library_ids": library_ids,
+                    "filters": active_filters.model_dump() if active_filters else None,
+                },
+                raw_results_count=len(search_results),
+                score_stats={
+                    "min": min(scores),
+                    "max": max(scores),
+                    "avg": sum(scores) / len(scores),
+                },
+                documents_grouped=len(sorted_doc_keys),
+                chunks=chunk_traces,
+            )
+
         # Step 4: Generate prompt with context
         prompt = f"""
 Based on the following context from academic documents, please answer the question.
@@ -208,11 +255,13 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
         max_tokens = preset.llm.max_answer_tokens
 
         logger.debug(f"Generating answer with LLM (max_tokens={max_tokens})...")
+        t_llm = time.monotonic()
         answer = await self.llm_service.generate(
             prompt=prompt,
             max_tokens=max_tokens,
             temperature=0.7
         )
+        llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 
         logger.info("Answer generated successfully")
 
@@ -239,6 +288,26 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                 score=result.score
             )
             sources.append(source)
+
+        if trace is not None:
+            trace.record(AgentExecutionTrace(
+                agent_name="rag",
+                retrieval=retrieval_trace,
+                catalog_results=None,
+                context_text=context,
+                sources_count=len(sources),
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+            ))
+            trace.record(LLMCallTrace(
+                call_type="rag_generation",
+                model=self.llm_service.model_name,
+                prompt=prompt,
+                response=answer,
+                temperature=0.7,
+                max_tokens=max_tokens,
+                duration_ms=llm_duration_ms,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            ))
 
         return QueryResult(
             question=question,

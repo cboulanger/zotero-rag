@@ -5,14 +5,21 @@ Searches the Qdrant payload index (no query vector / no semantic similarity)
 to return items matching author, year range, item type, or title keywords.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel
 
 from backend.db.vector_store import VectorStore
 from backend.models.filters import MetadataFilters
+from backend.models.trace import AgentExecutionTrace
 from backend.services.base_agent import AgentResult, BaseAgent
+
+if TYPE_CHECKING:
+    from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +84,11 @@ class MetadataAgent(BaseAgent):
         question: str,
         library_ids: list[str],
         filters: MetadataFilters,
+        trace: Optional[TraceCollector] = None,
         **kwargs,
     ) -> AgentResult:
         limit: int = kwargs.get("metadata_limit", 30)
+        t_start = time.monotonic()
 
         raw = await asyncio.to_thread(
             self._vector_store.get_items_by_metadata,
@@ -118,6 +127,17 @@ class MetadataAgent(BaseAgent):
 
         context_text = _results_to_context(results)
         logger.info(f"MetadataAgent returned {len(results)} items")
+
+        if trace is not None:
+            trace.record(AgentExecutionTrace(
+                agent_name=self.name,
+                retrieval=None,
+                catalog_results=[r.model_dump() for r in results],
+                context_text=context_text,
+                sources_count=len(results),
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+            ))
+
         return AgentResult(
             agent_name=self.name,
             context_text=context_text,

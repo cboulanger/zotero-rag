@@ -7,11 +7,16 @@ Each agent registers itself with the QueryOrchestrator and contributes:
 - an execute() method that returns a standardised AgentResult
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel
 
 from backend.models.filters import MetadataFilters
+
+if TYPE_CHECKING:
+    from backend.services.trace_collector import TraceCollector
 
 
 class AgentResult(BaseModel):
@@ -55,6 +60,7 @@ class BaseAgent(ABC):
         question: str,
         library_ids: list[str],
         filters: MetadataFilters,
+        trace: Optional[TraceCollector] = None,
         **kwargs,
     ) -> AgentResult:
         """
@@ -64,6 +70,7 @@ class BaseAgent(ABC):
             question: Original user question.
             library_ids: Libraries to search.
             filters: Extracted bibliographic filters from the routing step.
+            trace: Optional collector for recording intermediate trace events.
             **kwargs: Additional parameters (e.g. top_k, min_score for RAGAgent).
         """
         ...

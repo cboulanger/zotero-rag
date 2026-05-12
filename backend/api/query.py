@@ -10,7 +10,9 @@ from pydantic import BaseModel
 from typing import List, Optional
 from markdown_it import MarkdownIt
 
+from backend.models.trace import QueryTrace
 from backend.services.query_orchestrator import QueryOrchestrator
+from backend.services.trace_collector import TraceCollector
 from backend.db.vector_store import VectorStore
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service, make_llm_service
@@ -37,6 +39,7 @@ class QueryRequest(BaseModel):
     min_score: Optional[float] = None  # Minimum similarity score (uses preset default if not specified)
     enable_routing: bool = True  # False skips routing LLM call (backward-compatible pure-RAG mode)
     llm_model: Optional[str] = None  # Override preset default; must be in preset's model_names list
+    include_trace: bool = False  # When True, attach a full execution trace to the response
 
 
 class QueryResponse(BaseModel):
@@ -49,6 +52,7 @@ class QueryResponse(BaseModel):
     model_name: Optional[str] = None
     agents_used: List[str] = []
     library_document_counts: dict[str, int] = {}
+    trace: Optional[QueryTrace] = None  # Populated when include_trace=True
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -142,12 +146,24 @@ async def query_libraries(
             vector_store=vector_store,
             settings=settings,
         )
+        trace_collector = TraceCollector(
+            question=query.question,
+            library_ids=query.library_ids,
+            parameters={
+                "top_k": top_k,
+                "min_score": min_score,
+                "enable_routing": query.enable_routing,
+                "llm_model": query.llm_model,
+            },
+        ) if query.include_trace else None
+
         result = await orchestrator.query(
             question=query.question,
             library_ids=query.library_ids,
             top_k=top_k,
             min_score=min_score,
             enable_routing=query.enable_routing,
+            trace=trace_collector,
         )
 
         # Format citations
@@ -176,6 +192,7 @@ async def query_libraries(
             model_name=result.model_name,
             agents_used=result.agents_used,
             library_document_counts=library_document_counts,
+            trace=trace_collector.finalize() if trace_collector is not None else None,
         )
 
     except Exception as e:
