@@ -1,3 +1,13 @@
+## [1.25.1](https://github.com/cboulanger/zotero-rag/compare/v1.25.0...v1.25.1) (2026-05-12)
+
+
+### Bug Fixes
+
+* Batch cross-library chunk copy to prevent Qdrant timeout on large docs ([da7eebf](https://github.com/cboulanger/zotero-rag/commit/da7eebfc711b36e2a7e39c4e5f91d32382371c79))
+* Default to 1 uvicorn worker to fix async task polling (closes [#30](https://github.com/cboulanger/zotero-rag/issues/30)) ([24709b8](https://github.com/cboulanger/zotero-rag/commit/24709b8e00c0b5a93b84df9cae0f2566038aa00a))
+* Reduce Qdrant upsert batch size and add retry with exponential backoff ([a7bca14](https://github.com/cboulanger/zotero-rag/commit/a7bca14e1ecd61c7c1a1f9532239e5a8b797a131))
+* smaller check-indexed batches and per-phase progress labels (closes [#29](https://github.com/cboulanger/zotero-rag/issues/29)) ([c583711](https://github.com/cboulanger/zotero-rag/commit/c5837119122c564361ccdc504ce0c55e40c4c10b))
+
 # [1.25.0](https://github.com/cboulanger/zotero-rag/compare/v1.24.0...v1.25.0) (2026-05-12)
 
 
