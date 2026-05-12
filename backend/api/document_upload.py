@@ -356,13 +356,13 @@ async def _execute_upload(
             )
         elif isinstance(e, (WriteTimeout, ReadTimeout, TimeoutException)):
             logger.warning(
-                f"Qdrant write timed out while storing chunks for {attachment_key} "
-                f"— batch may be too large or Qdrant is under load"
+                f"Qdrant request timed out for {attachment_key} "
+                f"— {type(e).__name__}: {e}"
             )
         elif isinstance(e, ResponseHandlingException) and "timed out" in str(e).lower():
             logger.warning(
-                f"Qdrant request timed out while storing chunks for {attachment_key} "
-                f"— batch may be too large or Qdrant is under load"
+                f"Qdrant request timed out for {attachment_key} "
+                f"— {type(e).__name__}: {e}"
             )
         elif isinstance(e, ResponseHandlingException) and isinstance(e.__cause__, ConnectError):
             logger.warning(

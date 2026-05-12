@@ -319,38 +319,37 @@ class VectorStore:
             )
             points.append(point)
 
-        batch_size = 100
-        _UPSERT_MAX_RETRIES = 4
+        self._upsert_batched(points)
+        logger.debug(f"Added {len(points)} chunks in batch")
+        return point_ids
+
+    def _upsert_batched(self, points: list[PointStruct], batch_size: int = 100, max_retries: int = 4) -> None:
+        """Upsert points to CHUNKS_COLLECTION in batches with exponential-backoff retry on timeout."""
         for i in range(0, len(points), batch_size):
             batch = points[i : i + batch_size]
-            for attempt in range(1, _UPSERT_MAX_RETRIES + 1):
+            batch_num = i // batch_size + 1
+            for attempt in range(1, max_retries + 1):
                 try:
-                    self.client.upsert(
-                        collection_name=self.CHUNKS_COLLECTION,
-                        points=batch,
-                    )
+                    self.client.upsert(collection_name=self.CHUNKS_COLLECTION, points=batch)
                     break
                 except (TimeoutException, ReadTimeout, WriteTimeout) as exc:
-                    if attempt == _UPSERT_MAX_RETRIES:
-                        raise
-                    delay = 2 ** (attempt - 1)  # 1s, 2s, 4s
-                    logger.warning(
-                        f"Qdrant upsert timeout (attempt {attempt}/{_UPSERT_MAX_RETRIES},"
-                        f" batch {i // batch_size + 1}) — retrying in {delay}s: {exc}"
-                    )
-                    time.sleep(delay)
-                except ResponseHandlingException as exc:
-                    if "timed out" not in str(exc).lower() or attempt == _UPSERT_MAX_RETRIES:
+                    if attempt == max_retries:
                         raise
                     delay = 2 ** (attempt - 1)
                     logger.warning(
-                        f"Qdrant upsert timeout (attempt {attempt}/{_UPSERT_MAX_RETRIES},"
-                        f" batch {i // batch_size + 1}) — retrying in {delay}s: {exc}"
+                        f"Qdrant upsert timeout (attempt {attempt}/{max_retries},"
+                        f" batch {batch_num}) — retrying in {delay}s: {exc}"
                     )
                     time.sleep(delay)
-
-        logger.debug(f"Added {len(points)} chunks in batch")
-        return point_ids
+                except ResponseHandlingException as exc:
+                    if "timed out" not in str(exc).lower() or attempt == max_retries:
+                        raise
+                    delay = 2 ** (attempt - 1)
+                    logger.warning(
+                        f"Qdrant upsert timeout (attempt {attempt}/{max_retries},"
+                        f" batch {batch_num}) — retrying in {delay}s: {exc}"
+                    )
+                    time.sleep(delay)
 
     def _build_metadata_must_conditions(self, filters: MetadataFilters) -> list:
         """Return Qdrant FieldCondition list for the given MetadataFilters (AND semantics)."""
@@ -830,7 +829,7 @@ class VectorStore:
             if offset is None:
                 break
         if new_points:
-            self.client.upsert(collection_name=self.CHUNKS_COLLECTION, points=new_points)
+            self._upsert_batched(new_points)
         logger.info(
             f"Copied {len(new_points)} chunks "
             f"{source_library_id}/{source_item_key} -> "
