@@ -286,7 +286,7 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string}} */ (await response.json());
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[]}} */ (await response.json());
 				const defaultMinScore = config.default_min_score || 0.3;
 
 				// Update slider and display
@@ -311,8 +311,33 @@ var ZoteroRAGDialog = {
 					sourcesValue.textContent = defaultTopK.toString();
 				}
 
+				// Populate LLM model selector and restore persisted choice
+				const llmModels = Array.isArray(config.llm_models) ? config.llm_models : [];
+				const modelGroup = document.getElementById('llm-model-group');
+				const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
+				if (modelSelect) {
+					modelSelect.innerHTML = '';
+					llmModels.forEach(m => {
+						const opt = document.createElement('option');
+						opt.value = m;
+						opt.textContent = m;
+						modelSelect.appendChild(opt);
+					});
+					// Restore previously selected model from prefs
+					try {
+						// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+						const savedModel = Zotero.Prefs.get('extensions.zotero-rag.llmModel', true) || '';
+						if (savedModel && llmModels.includes(savedModel)) {
+							modelSelect.value = savedModel;
+						}
+					} catch (_) {}
+				}
+				if (modelGroup) {
+					modelGroup.style.display = llmModels.length > 1 ? '' : 'none';
+				}
+
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
-				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}`);
+				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
 					this.fetchRateLimitHeaders();
 				}
@@ -867,6 +892,16 @@ var ZoteroRAGDialog = {
 		);
 		const topK = sourcesSlider ? parseInt(sourcesSlider.value, 10) : 10;
 
+		// Get selected LLM model (only when multiple options are available)
+		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
+		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
+		if (llmModel) {
+			try {
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				Zotero.Prefs.set('extensions.zotero-rag.llmModel', llmModel, true);
+			} catch (_) {}
+		}
+
 		// Validate input
 		if (!question) {
 			// @ts-ignore - Services is a Zotero/Firefox global
@@ -880,6 +915,9 @@ var ZoteroRAGDialog = {
 		// Disable submit button and cancel button during operation
 		this.setSubmitEnabled(false);
 		this.setCancelMode('abort');
+		// Collapse advanced options so the progress widget is visible
+		const advancedDetails = /** @type {HTMLDetailsElement|null} */ (document.querySelector('.advanced-options'));
+		if (advancedDetails) advancedDetails.open = false;
 		this.showProgress('Processing request...', 'Submitting query...');
 
 		try {
@@ -911,7 +949,8 @@ var ZoteroRAGDialog = {
 
 			const result = await this.plugin.submitQuery(question, libraryIds, {
 				minScore: minScore,
-				topK: topK
+				topK: topK,
+				llmModel: llmModel
 			});
 
 			// Update progress for note creation phase

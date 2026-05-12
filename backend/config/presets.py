@@ -4,8 +4,8 @@ Configuration presets for different hardware scenarios.
 Each preset defines the optimal models and settings for different hardware configurations.
 """
 
-from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class EmbeddingConfig(BaseModel):
@@ -22,12 +22,35 @@ class LLMConfig(BaseModel):
     """Configuration for LLM models."""
 
     model_type: Literal["local", "remote"] = "local"
-    model_name: str = Field(..., description="Model identifier or API endpoint")
+    model_names: List[str] = Field(..., description="Model identifier(s) — first entry is the default")
     quantization: Optional[Literal["4bit", "8bit", "none"]] = None
     max_context_length: int = Field(default=4096, description="Maximum context window size")
     max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
+
+    @field_validator("model_names", mode="before")
+    @classmethod
+    def coerce_to_list(cls, v: object) -> list:
+        if isinstance(v, str):
+            return [m.strip() for m in v.split(",") if m.strip()]
+        return v  # type: ignore[return-value]
+
+    @property
+    def model_name(self) -> str:
+        """Backward-compatible alias: returns the first (default) model name."""
+        return self.model_names[0]
+
+
+# Best general-purpose models available on KISSKI for RAG answer generation.
+# First entry is the default. Order: quality × practicality.
+KISSKI_RAG_MODELS: List[str] = [
+    "llama-3.3-70b-instruct",               # proven RAG default, strong instruction following
+    "qwen3.5-122b-a10b",                    # large MoE, high quality
+    "gemma-4-31b-it",                       # efficient, multimodal-capable
+    "mistral-large-3-675b-instruct-2512",   # Mistral Large 3, excellent general-purpose
+    "qwen3-30b-a3b-instruct-2507",          # text-focused MoE, recent Qwen3
+]
 
 
 class RAGConfig(BaseModel):
@@ -62,7 +85,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="local",
-            model_name="mistralai/Mistral-7B-Instruct-v0.3",
+            model_names="mistralai/Mistral-7B-Instruct-v0.3",
             quantization="4bit",
             max_context_length=8192,
             max_answer_tokens=2048,
@@ -87,7 +110,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="local",
-            model_name="mistralai/Mistral-7B-Instruct-v0.3",
+            model_names="mistralai/Mistral-7B-Instruct-v0.3",
             quantization="8bit",
             max_context_length=8192,
             max_answer_tokens=2048,  # Larger model can handle more
@@ -112,7 +135,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="local",
-            model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            model_names="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
             quantization="4bit",
             max_context_length=2048,
             max_answer_tokens=512,  # Small model, limited capacity
@@ -137,7 +160,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="gpt-4o-mini",  # Or anthropic/claude-3-5-sonnet
+            model_names="gpt-4o-mini",  # Or anthropic/claude-3-5-sonnet
             max_context_length=128000,
             max_answer_tokens=4096,  # Large context window allows comprehensive answers
             temperature=0.7,
@@ -164,7 +187,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
+            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
             max_context_length=128000,
             max_answer_tokens=4096,
             temperature=0.7,
@@ -195,7 +218,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
+            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
             max_context_length=128000,
             max_answer_tokens=4096,
             temperature=0.7,
@@ -222,7 +245,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="llama-3.3-70b-instruct",  # KISSKI: high quality, 128k context
+            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
             max_context_length=128000,
             max_answer_tokens=4096,
             temperature=0.7,
@@ -253,7 +276,7 @@ PRESETS = {
         ),
         llm=LLMConfig(
             model_type="remote",
-            model_name="llama-3.3-70b-instruct",  # KISSKI LLM
+            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
             max_context_length=128000,
             max_answer_tokens=4096,
             temperature=0.7,

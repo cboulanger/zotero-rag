@@ -82,6 +82,11 @@
     .rate-limit-bar-track { flex: 1; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; min-width: 0; }
     .rate-limit-bar { height: 100%; border-radius: 3px; width: 0%; transition: width 0.3s, background-color 0.3s; }
     .rate-limit-text { width: 9em; flex-shrink: 0; color: #555; white-space: nowrap; }
+    .advanced-options { margin-bottom: 15px; }
+    .advanced-options > summary { cursor: pointer; font-weight: 500; margin-bottom: 8px; list-style: none; }
+    .advanced-options > summary::before { content: '\25B6  '; font-size: 10px; }
+    .advanced-options[open] > summary::before { content: '\25BC  '; font-size: 10px; }
+    .advanced-options .form-group:last-child { margin-bottom: 0; }
   </style>
 </head>
 
@@ -105,39 +110,51 @@
         </div>
       </div>
 
-      <!-- Similarity threshold -->
-      <div class="form-group">
-        <label for="similarity-threshold">
-          Similarity threshold: <span id="similarity-value">0.3</span>
-        </label>
-        <input type="range"
-               id="similarity-threshold"
-               min="0.0"
-               max="1.0"
-               step="0.1"
-               value="0.3"
-               style="width: 100%;" />
-        <div style="font-size: 11px; color: #666; margin-top: 3px;">
-          Lower values return more results but may be less relevant
-        </div>
-      </div>
+      <!-- Advanced options (collapsible) -->
+      <details class="advanced-options">
+        <summary>Advanced options</summary>
 
-      <!-- Number of sources to consider (top_k) -->
-      <div class="form-group">
-        <label for="sources-count">
-          Sources to consider: <span id="sources-count-value">10</span>
-        </label>
-        <input type="range"
-               id="sources-count"
-               min="3"
-               max="30"
-               step="1"
-               value="10"
-               style="width: 100%;" />
-        <div style="font-size: 11px; color: #666; margin-top: 3px;">
-          Higher values cast a wider net but may include less relevant passages
+        <!-- LLM model selector (hidden when only one model available) -->
+        <div class="form-group" id="llm-model-group" style="display:none;">
+          <label for="llm-model-select">LLM to use for RAG:</label>
+          <select id="llm-model-select"
+                  style="width:100%; padding:6px; border:1px solid #ccc; border-radius:4px; font-family:inherit; font-size:13px;"></select>
         </div>
-      </div>
+
+        <!-- Similarity threshold -->
+        <div class="form-group">
+          <label for="similarity-threshold">
+            Similarity threshold: <span id="similarity-value">0.3</span>
+          </label>
+          <input type="range"
+                 id="similarity-threshold"
+                 min="0.0"
+                 max="1.0"
+                 step="0.1"
+                 value="0.3"
+                 style="width: 100%;" />
+          <div style="font-size: 11px; color: #666; margin-top: 3px;">
+            Lower values return more results but may be less relevant
+          </div>
+        </div>
+
+        <!-- Number of sources to consider (top_k) -->
+        <div class="form-group">
+          <label for="sources-count">
+            Sources to consider: <span id="sources-count-value">10</span>
+          </label>
+          <input type="range"
+                 id="sources-count"
+                 min="3"
+                 max="30"
+                 step="1"
+                 value="10"
+                 style="width: 100%;" />
+          <div style="font-size: 11px; color: #666; margin-top: 3px;">
+            Higher values cast a wider net but may include less relevant passages
+          </div>
+        </div>
+      </details>
 
 
       <!-- Feedback container (fixed height) -->

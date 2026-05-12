@@ -57,7 +57,7 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
     )
 
 
-def make_llm_service(client_api_keys: dict[str, str] | None = None) -> LLMService:
+def make_llm_service(client_api_keys: dict[str, str] | None = None, model_name_override: str | None = None) -> LLMService:
     """Create an LLMService from current settings, overriding API key with client-supplied value."""
     settings = get_settings()
     if settings.testing:
@@ -66,7 +66,7 @@ def make_llm_service(client_api_keys: dict[str, str] | None = None) -> LLMServic
     preset = settings.get_hardware_preset()
     api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
     client_key = (client_api_keys or {}).get(api_key_env) or None
-    return create_llm_service(settings, api_key=client_key)
+    return create_llm_service(settings, api_key=client_key, model_name_override=model_name_override)
 
 
 def _model_slug(model_name: str) -> str:

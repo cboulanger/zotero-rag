@@ -67,6 +67,7 @@
  * @typedef {Object} QueryOptions
  * @property {number} [topK] - Number of chunks to retrieve (default: 5)
  * @property {number} [minScore] - Minimum similarity score (default: 0.5)
+ * @property {string} [llmModel] - LLM model override (must be in preset's model list)
  */
 
 
@@ -723,6 +724,9 @@ class ZoteroRAGPlugin {
 			}
 			if (options.minScore !== undefined) {
 				payload.min_score = options.minScore;
+			}
+			if (options.llmModel !== undefined) {
+				payload.llm_model = options.llmModel;
 			}
 
 			const response = await fetch(`${this.backendURL}/api/query`, {

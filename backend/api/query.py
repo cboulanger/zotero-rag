@@ -36,6 +36,7 @@ class QueryRequest(BaseModel):
     top_k: Optional[int] = None  # Number of chunks to retrieve (uses preset default if not specified)
     min_score: Optional[float] = None  # Minimum similarity score (uses preset default if not specified)
     enable_routing: bool = True  # False skips routing LLM call (backward-compatible pure-RAG mode)
+    llm_model: Optional[str] = None  # Override preset default; must be in preset's model_names list
 
 
 class QueryResponse(BaseModel):
@@ -93,7 +94,12 @@ async def query_libraries(
         client_keys = get_client_api_keys(http_request)
 
         embedding_service = make_embedding_service(client_keys)
-        llm_service = make_llm_service(client_keys)
+        if query.llm_model and query.llm_model not in preset.llm.model_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{query.llm_model}' not in preset model list: {preset.llm.model_names}"
+            )
+        llm_service = make_llm_service(client_keys, model_name_override=query.llm_model or None)
 
         # Use preset defaults if not specified in request
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k

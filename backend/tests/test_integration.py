@@ -52,7 +52,7 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="remote",
-                model_name="gpt-4o-mini",
+                model_names="gpt-4o-mini",
             ),
             rag=RAGConfig(),
             memory_budget_gb=2.0,

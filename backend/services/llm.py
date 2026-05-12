@@ -62,6 +62,7 @@ class LocalLLMService(LLMService):
         settings: Settings,
         cache_dir: Optional[str] = None,
         hf_token: Optional[str] = None,
+        model_name_override: Optional[str] = None,
     ):
         """
         Initialize local LLM service.
@@ -70,28 +71,30 @@ class LocalLLMService(LLMService):
             settings: Application settings.
             cache_dir: Directory to cache model weights.
             hf_token: HuggingFace token for model downloads.
+            model_name_override: Override the preset default model name.
         """
         self.settings = settings
         self.preset = settings.get_hardware_preset()
         self.llm_config = self.preset.llm
         self.cache_dir = cache_dir
         self.hf_token = hf_token
+        self._model_name = model_name_override or self.llm_config.model_name
 
         self._model = None
         self._tokenizer = None
 
-        logger.info(f"Initialized LocalLLMService with model: {self.llm_config.model_name}")
+        logger.info(f"Initialized LocalLLMService with model: {self._model_name}")
 
     @property
     def model_name(self) -> str:
-        return self.llm_config.model_name
+        return self._model_name
 
     def _load_model(self):
         """Lazy load the LLM model and tokenizer."""
         if self._model is not None:
             return
 
-        logger.info(f"Loading LLM model: {self.llm_config.model_name}")
+        logger.info(f"Loading LLM model: {self._model_name}")
 
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -132,7 +135,7 @@ class LocalLLMService(LLMService):
             # Load tokenizer
             logger.info("Loading tokenizer...")
             self._tokenizer = AutoTokenizer.from_pretrained(
-                self.llm_config.model_name,
+                self._model_name,
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
             )
@@ -140,7 +143,7 @@ class LocalLLMService(LLMService):
             # Load model
             logger.info("Loading model weights...")
             self._model = AutoModelForCausalLM.from_pretrained(
-                self.llm_config.model_name,
+                self._model_name,
                 token=self.hf_token,
                 **model_kwargs
             )
@@ -209,6 +212,7 @@ class RemoteLLMService(LLMService):
         self,
         settings: Settings,
         api_key: Optional[str] = None,
+        model_name_override: Optional[str] = None,
     ):
         """
         Initialize remote LLM service.
@@ -216,21 +220,23 @@ class RemoteLLMService(LLMService):
         Args:
             settings: Application settings.
             api_key: API key for the remote service.
+            model_name_override: Override the preset default model name.
         """
         self.settings = settings
         self.preset = settings.get_hardware_preset()
         self.llm_config = self.preset.llm
         self.api_key = api_key
+        self._model_name = model_name_override or self.llm_config.model_name
 
         # Initialize API clients
         self._openai_client = None
         self._anthropic_client = None
 
-        logger.info(f"Initialized RemoteLLMService with model: {self.llm_config.model_name}")
+        logger.info(f"Initialized RemoteLLMService with model: {self._model_name}")
 
     @property
     def model_name(self) -> str:
-        return self.llm_config.model_name
+        return self._model_name
 
     @staticmethod
     def required_api_keys(settings: Settings) -> list[dict]:
@@ -289,12 +295,14 @@ class RemoteLLMService(LLMService):
 
                 # Check for custom base URL (for OpenAI-compatible APIs)
                 base_url = self.llm_config.model_kwargs.get("base_url")
+                # Allow per-preset timeout override via model_kwargs; default 120 s
+                timeout = float(self.llm_config.model_kwargs.get("timeout", 120))
                 if base_url:
-                    self._openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-                    logger.info(f"Initialized OpenAI-compatible client with base_url: {base_url}")
+                    self._openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+                    logger.info(f"Initialized OpenAI-compatible client with base_url: {base_url}, timeout: {timeout}s")
                 else:
-                    self._openai_client = AsyncOpenAI(api_key=api_key)
-                    logger.info("Initialized OpenAI client")
+                    self._openai_client = AsyncOpenAI(api_key=api_key, timeout=timeout)
+                    logger.info(f"Initialized OpenAI client, timeout: {timeout}s")
 
             except ImportError:
                 logger.error("OpenAI package not installed. Install with: uv add openai")
@@ -334,7 +342,7 @@ class RemoteLLMService(LLMService):
         if temperature is None:
             temperature = self.llm_config.temperature
 
-        model_name = self.llm_config.model_name.lower()
+        model_name = self._model_name.lower()
 
         try:
             # Determine provider based on model name or base_url
@@ -346,7 +354,7 @@ class RemoteLLMService(LLMService):
             elif "claude" in model_name or "anthropic" in model_name:
                 return await self._generate_anthropic(prompt, max_tokens, temperature)
             else:
-                raise ValueError(f"Unsupported remote model: {self.llm_config.model_name}")
+                raise ValueError(f"Unsupported remote model: {self._model_name}")
 
         except Exception as e:
             logger.error(f"Error during remote generation: {e}", exc_info=True)
@@ -361,9 +369,9 @@ class RemoteLLMService(LLMService):
         """Generate using OpenAI API."""
         client = self._get_openai_client()
 
-        logger.info(f"Generating with OpenAI ({self.llm_config.model_name}), prompt={len(prompt)} chars")
+        logger.info(f"Generating with OpenAI ({self._model_name}), prompt={len(prompt)} chars")
         payload = {
-            "model": self.llm_config.model_name,
+            "model": self._model_name,
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": temperature,
@@ -386,9 +394,9 @@ class RemoteLLMService(LLMService):
         """Generate using Anthropic API."""
         client = self._get_anthropic_client()
 
-        logger.info(f"Generating with Anthropic ({self.llm_config.model_name}), prompt={len(prompt)} chars")
+        logger.info(f"Generating with Anthropic ({self._model_name}), prompt={len(prompt)} chars")
         payload = {
-            "model": self.llm_config.model_name,
+            "model": self._model_name,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
@@ -416,6 +424,7 @@ def create_llm_service(
     cache_dir: Optional[str] = None,
     api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
+    model_name_override: Optional[str] = None,
 ) -> LLMService:
     """
     Factory function to create the appropriate LLM service.
@@ -425,6 +434,7 @@ def create_llm_service(
         cache_dir: Directory to cache model weights (for local models).
         api_key: API key (for remote services).
         hf_token: HuggingFace token (for local models).
+        model_name_override: Override the preset default model name.
 
     Returns:
         LLM service instance (local or remote).
@@ -432,6 +442,6 @@ def create_llm_service(
     preset = settings.get_hardware_preset()
 
     if preset.llm.model_type == "local":
-        return LocalLLMService(settings, cache_dir=cache_dir, hf_token=hf_token)
+        return LocalLLMService(settings, cache_dir=cache_dir, hf_token=hf_token, model_name_override=model_name_override)
     else:
-        return RemoteLLMService(settings, api_key=api_key)
+        return RemoteLLMService(settings, api_key=api_key, model_name_override=model_name_override)

@@ -37,7 +37,7 @@ class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="local",
-                model_name="test-llm",
+                model_names="test-llm",
                 quantization="4bit",
             ),
             rag=RAGConfig(),
@@ -53,7 +53,7 @@ class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="remote",
-                model_name="gpt-4o-mini",
+                model_names="gpt-4o-mini",
             ),
             rag=RAGConfig(),
             memory_budget_gb=1.0,
@@ -95,7 +95,7 @@ class TestLocalLLMService(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="local",
-                model_name="test-model",
+                model_names="test-model",
                 quantization="4bit",
                 temperature=0.7,
             ),
@@ -184,7 +184,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="remote",
-                model_name="gpt-4o-mini",
+                model_names="gpt-4o-mini",
                 temperature=0.7,
             ),
             rag=RAGConfig(),
@@ -200,7 +200,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="remote",
-                model_name="claude-3-5-sonnet-20241022",
+                model_names="claude-3-5-sonnet-20241022",
                 temperature=0.7,
             ),
             rag=RAGConfig(),
@@ -269,7 +269,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             ),
             llm=LLMConfig(
                 model_type="remote",
-                model_name="unknown-model-xyz",
+                model_names="unknown-model-xyz",
                 temperature=0.7,
             ),
             rag=RAGConfig(),
