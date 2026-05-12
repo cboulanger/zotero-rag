@@ -651,7 +651,7 @@ var RemoteIndexer = {
 	 * @returns {Promise<Array<AttachmentIndexStatus>>}
 	 */
 	async _checkIndexed(libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress, onBatchComplete, mode) {
-		const BATCH_SIZE = 100;
+		const BATCH_SIZE = 25;
 		const MAX_BATCH_RETRIES = 2;
 		const RETRY_DELAY_MS = 3000;
 		// After this many consecutive batch failures (after retries), stop asking and

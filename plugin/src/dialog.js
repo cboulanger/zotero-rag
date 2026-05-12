@@ -1251,7 +1251,16 @@ var ZoteroRAGDialog = {
 					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {
-						const phase = message.startsWith('Downloading') ? 'Downloading' : 'Indexing';
+						/** @type {Array<[(m: string) => boolean, string]>} */
+						const PHASE_LABELS = [
+							[m => m.startsWith('Scanning'),         'Scanning library'],
+							[m => m.startsWith('Checking'),         'Checking indexing status'],
+							[m => m.startsWith('Downloading'),      'Downloading'],
+							[m => m.includes('(abstract)'),         'Indexing abstracts'],
+							[m => m.startsWith('Updating metadata'),'Updating metadata'],
+							[m => m.startsWith('Done'),             'Done'],
+						];
+						const phase = PHASE_LABELS.find(([test]) => test(message))?.[1] ?? 'Indexing documents';
 						const label = total > 0 ? `${phase} (${current}/${total})` : phase;
 						const detail = `${libraryName}: ${message}`;
 						this.updateProgress(total === 0 ? null : percentage, label, detail);
