@@ -1,3 +1,11 @@
+# [1.27.0](https://github.com/cboulanger/zotero-rag/compare/v1.26.0...v1.27.0) (2026-05-12)
+
+
+### Features
+
+* Add advanced query options and in-plugin trace debugging ([e5b2b99](https://github.com/cboulanger/zotero-rag/commit/e5b2b99bd05796b3ab81f8a4844ed103f47d46d7))
+* Add RAG query execution trace API and debugging script ([044ebf1](https://github.com/cboulanger/zotero-rag/commit/044ebf143219c47c0208536bdf3d7323e59bc79b))
+
 # [1.26.0](https://github.com/cboulanger/zotero-rag/compare/v1.25.1...v1.26.0) (2026-05-12)
 
 
