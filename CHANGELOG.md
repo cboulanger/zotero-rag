@@ -1,3 +1,16 @@
+# [1.26.0](https://github.com/cboulanger/zotero-rag/compare/v1.25.1...v1.26.0) (2026-05-12)
+
+
+### Bug Fixes
+
+* Correct metadata-only routing and add RAG fallback for content questions ([b11aa29](https://github.com/cboulanger/zotero-rag/commit/b11aa290aec3264cab76c9278ae2b422d2b8a152))
+* Tag generated notes with 'RAG' metadata tag ([9b2a09b](https://github.com/cboulanger/zotero-rag/commit/9b2a09b994da462f842b5c9357215f75f8ff7d9c))
+
+
+### Features
+
+* Multi-model LLM selection per preset with dialog picker ([0e18a36](https://github.com/cboulanger/zotero-rag/commit/0e18a360d7cedf19cf59371eb4ac394e15a2c9ea))
+
 ## [1.25.1](https://github.com/cboulanger/zotero-rag/compare/v1.25.0...v1.25.1) (2026-05-12)
 
 
