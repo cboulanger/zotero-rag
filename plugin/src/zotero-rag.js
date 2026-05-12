@@ -780,6 +780,7 @@ class ZoteroRAGPlugin {
 			note.addToCollection(collectionID);
 		}
 
+		note.addTag('RAG');
 		// Save note
 		await note.saveTx();
 
@@ -888,6 +889,7 @@ class ZoteroRAGPlugin {
 		const note = new Zotero.Item('note');
 		note.libraryID = zoteroLibraryID;
 		note.setNote(html);
+		note.addTag('RAG');
 		// No addToCollection() — place at top level of library
 		await note.saveTx();
 		this.log(`[createIndexingReportNote] Created indexing report note for library ${libraryId}`);
