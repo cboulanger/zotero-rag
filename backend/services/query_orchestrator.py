@@ -134,6 +134,27 @@ class QueryOrchestrator:
             for agent in selected
         ])
 
+        # 3b. RAG fallback — if no agent produced useful content and "rag" wasn't
+        # already selected, run the RAG agent so we don't return an empty answer.
+        if _all_empty(agent_results) and "rag" not in plan.agents_to_use:
+            rag_agent = self._agents.get("rag")
+            if rag_agent:
+                logger.info(
+                    "QueryOrchestrator: all agents returned empty — falling back to RAG"
+                )
+                fallback_result = await rag_agent.execute(
+                    question=question,
+                    library_ids=library_ids,
+                    filters=MetadataFilters(),  # clear filters for the fallback search
+                    top_k=top_k,
+                    min_score=min_score,
+                )
+                return _rag_passthrough(
+                    fallback_result, question,
+                    model_name=self._llm_service.model_name if isinstance(self._llm_service.model_name, str) else None,
+                    agents_used=plan.agents_to_use + ["rag"],
+                )
+
         # 4. Synthesize or pass through
         agents_used = [a.name for a in selected]
         _raw_model = self._llm_service.model_name
@@ -183,6 +204,26 @@ class QueryOrchestrator:
             model_name=model_name,
             agents_used=agents_used or [],
         )
+
+
+_EMPTY_MARKERS = frozenset([
+    "no items found",
+    "no relevant",
+    "no information",
+    "no results",
+    "could not find",
+])
+
+
+def _all_empty(results: list[AgentResult]) -> bool:
+    """Return True when every agent produced no sources and no meaningful content."""
+    for r in results:
+        if r.sources:
+            return False
+        text_lower = r.context_text.strip().lower()
+        if text_lower and not any(m in text_lower for m in _EMPTY_MARKERS):
+            return False
+    return True
 
 
 def _shift_source_refs(text: str, offset: int) -> str:

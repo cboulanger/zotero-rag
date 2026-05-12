@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.models.filters import MetadataFilters
 from backend.services.base_agent import AgentResult, BaseAgent, QueryPlan
-from backend.services.query_orchestrator import QueryOrchestrator, _merge_sources, _rag_passthrough
+from backend.services.query_orchestrator import (
+    QueryOrchestrator, _all_empty, _merge_sources, _rag_passthrough,
+)
 from backend.services.rag_engine import QueryResult, SourceInfo
 
 
@@ -256,6 +258,86 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         call_kwargs = rag_agent.execute.call_args.kwargs
         self.assertEqual(call_kwargs["filters"].year_min, 1970)
         self.assertIn("luhmann", call_kwargs["filters"].authors)
+
+
+# ---------------------------------------------------------------------------
+# _all_empty
+# ---------------------------------------------------------------------------
+
+class TestAllEmpty(unittest.TestCase):
+
+    def test_empty_results_list(self):
+        self.assertTrue(_all_empty([]))
+
+    def test_no_sources_and_empty_text(self):
+        ar = AgentResult(agent_name="metadata", context_text="", sources=[])
+        self.assertTrue(_all_empty([ar]))
+
+    def test_no_sources_and_no_items_found_text(self):
+        ar = AgentResult(agent_name="metadata", context_text="No items found matching the metadata criteria.", sources=[])
+        self.assertTrue(_all_empty([ar]))
+
+    def test_no_sources_but_meaningful_text(self):
+        ar = AgentResult(agent_name="rag", context_text="The association was founded in 1976.", sources=[])
+        self.assertFalse(_all_empty([ar]))
+
+    def test_has_sources(self):
+        src = _make_source(item_id="A")
+        ar = AgentResult(agent_name="metadata", context_text="No items found.", sources=[src])
+        self.assertFalse(_all_empty([ar]))
+
+    def test_mixed_results_one_has_sources(self):
+        empty = AgentResult(agent_name="metadata", context_text="No items found.", sources=[])
+        filled = AgentResult(agent_name="rag", context_text="answer", sources=[_make_source()])
+        self.assertFalse(_all_empty([empty, filled]))
+
+
+# ---------------------------------------------------------------------------
+# RAG fallback when metadata agent returns empty
+# ---------------------------------------------------------------------------
+
+class TestRagFallback(unittest.IsolatedAsyncioTestCase):
+
+    async def test_rag_fallback_runs_when_metadata_returns_empty(self):
+        orch = _make_orchestrator()
+
+        # Metadata agent returns empty
+        meta_result = AgentResult(
+            agent_name="metadata",
+            context_text="No items found matching the metadata criteria.",
+            sources=[],
+        )
+        meta_agent = _stub_agent("metadata", meta_result)
+
+        # RAG agent returns content
+        rag_result = AgentResult(
+            agent_name="rag",
+            context_text="The Vereinigung für Rechtssoziologie was founded in 1976.",
+            sources=[_make_source(item_id="A")],
+        )
+        rag_agent = _stub_agent("rag", rag_result)
+
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+        orch._llm_service.model_name = "test-model"
+
+        # Router selects metadata only (the mis-routing scenario)
+        mock_plan = QueryPlan(agents_to_use=["metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            result = await orch.query(
+                question="Which German associations exist?",
+                library_ids=["lib1"],
+                enable_routing=True,
+            )
+
+        # RAG fallback should have been invoked
+        rag_agent.execute.assert_called_once()
+        self.assertIn("Vereinigung", result.answer)
+        self.assertIn("rag", result.agents_used)
 
 
 if __name__ == "__main__":

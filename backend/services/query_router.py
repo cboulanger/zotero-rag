@@ -21,9 +21,13 @@ logger = logging.getLogger(__name__)
 
 _ROUTING_GUIDANCE = """
 General guidance:
-- Include "rag" for most questions; omit only when the answer is purely bibliographic (listing items)
-- Include "metadata" when the question asks what items exist (by author, year range, item type, or title keywords)
-- Prefer fewer agents over more when one agent can answer the question alone
+- Include "rag" for most questions — it reads document content to answer.
+- Use "metadata" ONLY when the question is about the library catalog itself:
+  e.g. "What papers by Smith are in my library?", "Show me books from 2010–2015."
+  DO NOT use "metadata" alone for questions about real-world topics, concepts,
+  organisations, events, or arguments — even if they use "listing" or "exist" language.
+  Those questions require "rag" to read document content.
+- Combine both agents only when the question BOTH lists catalog items AND asks about content.
 - Default when uncertain: {"agents": ["rag"], ...rest null/empty}
 """
 
@@ -51,7 +55,8 @@ Field explanations:
 - year_min / year_max: earliest/latest year mentioned (integer or null)
 - authors: author last names mentioned in the question (lowercase strings)
 - item_types: e.g. ["book", "journalArticle"] if item type is specified; empty otherwise
-- title_keywords: significant words from a title mentioned in the question
+- title_keywords: ONLY populate when the user explicitly names a specific document title
+  they want to find (e.g. "find the paper called 'X'"). Leave empty for topic/keyword searches.
 - routing_description: brief one-sentence note on why these agents were chosen
 {guidance}"""
 
