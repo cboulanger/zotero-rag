@@ -50,6 +50,7 @@
  * @property {string|null} [model_name] - LLM model used for answering
  * @property {Array<string>} [agents_used] - Agent(s) dispatched to answer
  * @property {Record<string, number>} [library_document_counts] - Indexed document count per library ID
+ * @property {Record<string, any>|null} [trace] - Full execution trace, populated when include_trace=true
  */
 
 
@@ -68,6 +69,8 @@
  * @property {number} [topK] - Number of chunks to retrieve (default: 5)
  * @property {number} [minScore] - Minimum similarity score (default: 0.5)
  * @property {string} [llmModel] - LLM model override (must be in preset's model list)
+ * @property {boolean} [enableRouting] - When false, skips routing and runs pure-RAG mode (default: true)
+ * @property {boolean} [includeTrace] - When true, request a full execution trace from the backend
  */
 
 
@@ -728,6 +731,12 @@ class ZoteroRAGPlugin {
 			if (options.llmModel !== undefined) {
 				payload.llm_model = options.llmModel;
 			}
+			if (options.enableRouting === false) {
+				payload.enable_routing = false;
+			}
+			if (options.includeTrace) {
+				payload.include_trace = true;
+			}
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
@@ -1349,6 +1358,13 @@ class ZoteroRAGPlugin {
 		}
 		html += `Plugin: v${this.escapeHTML(this.version)}`;
 		html += `</em></p>`;
+
+		if (result.trace) {
+			html += `<hr/>`;
+			html += `<p><strong>Debugging Trace</strong></p>`;
+			html += `<pre style="font-size:0.8em; white-space:pre-wrap; word-break:break-all; background:#f5f5f5; padding:8px; border-radius:4px;">${this.escapeHTML(JSON.stringify(result.trace, null, 2))}</pre>`;
+		}
+
 		html += `</div>`;
 
 		return html;

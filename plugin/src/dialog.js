@@ -215,6 +215,24 @@ var ZoteroRAGDialog = {
 			});
 		}
 
+		// Restore disable-routing checkbox from prefs
+		const disableRoutingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-routing'));
+		if (disableRoutingCheckbox) {
+			try {
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				disableRoutingCheckbox.checked = !!Zotero.Prefs.get('extensions.zotero-rag.disableRouting', true);
+			} catch (_) {}
+		}
+
+		// Restore include-trace checkbox from prefs
+		const includeTraceCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('include-trace'));
+		if (includeTraceCheckbox) {
+			try {
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				includeTraceCheckbox.checked = !!Zotero.Prefs.get('extensions.zotero-rag.includeTrace', true);
+			} catch (_) {}
+		}
+
 		// Show connecting state, check backend, then populate
 		this.connectAndInit();
 	},
@@ -902,6 +920,22 @@ var ZoteroRAGDialog = {
 			} catch (_) {}
 		}
 
+		// Get disable-routing checkbox and persist it
+		const disableRoutingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-routing'));
+		const enableRouting = disableRoutingCheckbox ? !disableRoutingCheckbox.checked : true;
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			Zotero.Prefs.set('extensions.zotero-rag.disableRouting', !enableRouting, true);
+		} catch (_) {}
+
+		// Get include-trace checkbox and persist it
+		const includeTraceCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('include-trace'));
+		const includeTrace = includeTraceCheckbox ? includeTraceCheckbox.checked : false;
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			Zotero.Prefs.set('extensions.zotero-rag.includeTrace', includeTrace, true);
+		} catch (_) {}
+
 		// Validate input
 		if (!question) {
 			// @ts-ignore - Services is a Zotero/Firefox global
@@ -950,7 +984,9 @@ var ZoteroRAGDialog = {
 			const result = await this.plugin.submitQuery(question, libraryIds, {
 				minScore: minScore,
 				topK: topK,
-				llmModel: llmModel
+				llmModel: llmModel,
+				enableRouting: enableRouting,
+				includeTrace: includeTrace
 			});
 
 			// Update progress for note creation phase

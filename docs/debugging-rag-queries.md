@@ -4,6 +4,14 @@ When a question returns an unexpected answer — wrong sources, an empty respons
 
 ## Capturing a trace
 
+### From the Zotero plugin
+
+Open the RAG query dialog, expand **Advanced options**, and tick **Include debugging information in note**. When you submit a query, the full execution trace is appended to the generated Zotero note as formatted JSON after a horizontal rule, under the heading **Debugging Trace**.
+
+The checkbox state is persisted across dialog sessions. Untick it to return to normal notes.
+
+### From the command line
+
 ```bash
 uv run python scripts/query_trace.py "Your question here" \
     --library-ids <library_id> \
