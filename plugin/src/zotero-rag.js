@@ -792,6 +792,116 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Create a Zotero note at the top level of the given library summarising an indexing run.
+	 * Only called when there is something meaningful to report (uploads, errors, or missing files).
+	 *
+	 * @param {string} libraryId - Backend library ID (e.g. "u12345" or group numeric string)
+	 * @param {string} libraryType - "user" | "group"
+	 * @param {string} libraryName - Human-readable library name
+	 * @param {Object} result - Return value of RemoteIndexer.indexLibrary
+	 * @param {number} result.uploaded
+	 * @param {number} result.skipped
+	 * @param {number} result.noFile
+	 * @param {number} result.errors
+	 * @param {number} result.parseErrors
+	 * @param {number} [result.skippedEmpty]
+	 * @param {number} [result.skippedTimeout]
+	 * @param {Array<{item_key: string, attachment_key: string, title: string, reason: string, detail: string}>} [result.failedItems]
+	 * @returns {Promise<void>}
+	 */
+	async createIndexingReportNote(libraryId, libraryType, libraryName, result) {
+		const zoteroLibraryID = this.getZoteroLibraryID(libraryId, libraryType);
+		if (!zoteroLibraryID) {
+			this.log(`[createIndexingReportNote] Could not resolve Zotero library ID for ${libraryId}`);
+			return;
+		}
+
+		const timestamp = new Date().toLocaleString();
+		const failedItems = result.failedItems || [];
+
+		/** @param {string} reason @returns {string} */
+		const reasonLabel = (reason) => {
+			switch (reason) {
+				case 'parse_error': return 'Parse error (binary/corrupted data)';
+				case 'timeout':     return 'Extraction timeout';
+				case 'empty':       return 'No text extracted';
+				case 'error':       return 'Indexing error';
+				case 'no_file':     return 'No local file';
+				default:            return reason;
+			}
+		};
+
+		/** @param {string} mime @returns {string} */
+		const mimeLabel = (mime) => ({
+			'application/pdf': 'PDF',
+			'text/html': 'HTML',
+			'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'Word',
+			'application/epub+zip': 'EPUB',
+			'text/plain': 'Plain text',
+			'abstract': 'Abstract only',
+		}[mime] ?? mime);
+
+		/** @param {string} item_key @returns {string} */
+		const selectURI = (item_key) => libraryType === 'group'
+			? `zotero://select/groups/${libraryId}/items/${item_key}`
+			: `zotero://select/library/items/${item_key}`;
+
+		let html = `<div>`;
+		html += `<h2>Indexing Report: ${this.escapeHTML(libraryName)} — ${this.escapeHTML(timestamp)}</h2>`;
+
+		const docTypeCounts = result.docTypeCounts || {};
+		const typeBreakdown = Object.entries(docTypeCounts)
+			.filter(([, n]) => n > 0)
+			.map(([m, n]) => `${n} ${mimeLabel(m)}`)
+			.join(', ');
+
+		html += `<p><strong>Summary</strong></p><ul>`;
+		html += `<li>Indexed: ${result.uploaded}${typeBreakdown ? ` (${typeBreakdown})` : ''}</li>`;
+		html += `<li>Already up to date (skipped): ${result.skipped}</li>`;
+		if (result.noFile > 0) html += `<li>Missing local files: ${result.noFile}</li>`;
+		if (result.errors > 0) html += `<li>Indexing errors: ${result.errors}</li>`;
+		if (result.parseErrors > 0) html += `<li>Parse / extraction errors: ${result.parseErrors}</li>`;
+		if ((result.skippedEmpty || 0) > 0) html += `<li>Empty (no text found): ${result.skippedEmpty}</li>`;
+		if ((result.skippedTimeout || 0) > 0) html += `<li>Extraction timeouts: ${result.skippedTimeout}</li>`;
+		html += `</ul>`;
+
+		if (failedItems.length > 0) {
+			html += `<p><strong>Failed items</strong></p>`;
+			html += `<table>`;
+			html += `<tr><th>Item</th><th>Reason</th><th>Detail</th></tr>`;
+			for (const item of failedItems) {
+				const uri = selectURI(item.item_key);
+				const title = this.escapeHTML(item.title || item.attachment_key);
+				const reason = this.escapeHTML(reasonLabel(item.reason));
+				const detail = this.escapeHTML(item.detail || '');
+				html += `<tr>`;
+				html += `<td><a href="${uri}">${title}</a></td>`;
+				html += `<td>${reason}</td>`;
+				html += `<td>${detail}</td>`;
+				html += `</tr>`;
+			}
+			html += `</table>`;
+		}
+
+		html += `</div>`;
+
+		const note = new Zotero.Item('note');
+		note.libraryID = zoteroLibraryID;
+		note.setNote(html);
+		// No addToCollection() — place at top level of library
+		await note.saveTx();
+		this.log(`[createIndexingReportNote] Created indexing report note for library ${libraryId}`);
+		try {
+			const zoteroPane = Zotero.getActiveZoteroPane();
+			zoteroPane.openNoteWindow(note.id);
+			const noteWin = zoteroPane.findNoteWindow(note.id);
+			if (noteWin) noteWin.resizeTo(900, 700);
+		} catch (e) {
+			this.log(`[createIndexingReportNote] Failed to open note window: ${e instanceof Error ? e.message : e}`);
+		}
+	}
+
+	/**
 	 * Get Zotero library ID from library/group ID used by backend.
 	 * @param {string} backendLibraryId - Library or group ID used by backend
 	 * @param {string} libraryType - Library type ('user' or 'group')

@@ -210,6 +210,7 @@ class DocumentUploadResult(BaseModel):
     message: str = ""
     rate_limit_retries: int = 0
     rate_limit_headers: dict[str, str] | None = None
+    error_detail: Optional[str] = None
 
 
 class AsyncUploadResponse(BaseModel):
@@ -398,6 +399,7 @@ async def _execute_upload(
         message=f"{api_status}: {chunks_added} chunks",
         rate_limit_retries=embedding_service.rate_limit_retries,
         rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        error_detail=proc_result.error_detail,
     )
 
 

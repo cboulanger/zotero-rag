@@ -26,6 +26,7 @@ class AttachmentProcessingResult:
     status: ProcessingStatus
     source_library_id: Optional[str] = None
     source_item_key: Optional[str] = None
+    error_detail: Optional[str] = None
 
 
 class DocumentMetadata(BaseModel):

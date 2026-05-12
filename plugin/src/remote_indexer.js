@@ -62,6 +62,16 @@ function formatFileSize(bytes) {
  * @property {string} message
  * @property {number} rate_limit_retries
  * @property {Record<string,string>|null} rate_limit_headers
+ * @property {string|null} [error_detail]
+ */
+
+/**
+ * @typedef {Object} FailedItem
+ * @property {string} item_key - Parent item key (for zotero://select links)
+ * @property {string} attachment_key
+ * @property {string} title - Item title for display
+ * @property {'parse_error'|'timeout'|'empty'|'error'|'no_file'} reason
+ * @property {string} detail - Human-readable error detail
  */
 
 /**
@@ -90,7 +100,7 @@ var RemoteIndexer = {
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
-	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], failedItems: FailedItem[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
 	 */
 	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
@@ -248,27 +258,45 @@ var RemoteIndexer = {
 		let firstError = null;
 		/** @type {Record<string,string>|null} */
 		let rateLimitHeaders = null;
+		/** @type {FailedItem[]} */
+		const failedItems = [];
+		/** @type {Record<string, number>} */
+		const docTypeCounts = {};
+
+		/** @param {typeof attachments[0]} att @returns {string} */
+		const _itemTitle = (att) => {
+			const src = att.parentItem || att.zoteroItem;
+			return (src && src.getField ? (src.getField('title') || '') : '') || att.attachment_key;
+		};
+
 		const uploadable = toUpload.filter(s => {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && att.filePath;
 		});
 		// Attachments with no local file are reported separately — not counted as errors.
 		// Includes linked files (linkMode=2) with broken paths; the fix dialog shows those too.
-		const noFile = toUpload.filter(s => {
+		const noFileItems = toUpload.filter(s => {
 			const att = attachments.find(a => a.attachment_key === s.attachment_key);
 			return att && !att.filePath;
-		}).length;
+		});
+		const noFile = noFileItems.length;
 		if (noFile > 0) {
 			log(`[RemoteIndexer] ${noFile} attachment(s) have no local file — skipping`);
 			const noFileLinkModes = { imported_file: 0, imported_url: 0, linked_file: 0, other: 0 };
-			for (const s of toUpload) {
+			for (const s of noFileItems) {
 				const att = attachments.find(a => a.attachment_key === s.attachment_key);
-				if (att && !att.filePath) {
-					if (att.linkMode === 0) noFileLinkModes.imported_file++;
-					else if (att.linkMode === 1) noFileLinkModes.imported_url++;
-					else if (att.linkMode === 2) noFileLinkModes.linked_file++;
-					else noFileLinkModes.other++;
-				}
+				if (!att) continue;
+				if (att.linkMode === 0) noFileLinkModes.imported_file++;
+				else if (att.linkMode === 1) noFileLinkModes.imported_url++;
+				else if (att.linkMode === 2) noFileLinkModes.linked_file++;
+				else noFileLinkModes.other++;
+				failedItems.push({
+					item_key: att.item_key,
+					attachment_key: att.attachment_key,
+					title: _itemTitle(att),
+					reason: 'no_file',
+					detail: att.linkMode === 2 ? 'Linked file not found at stored path' : 'File not downloaded to local storage',
+				});
 			}
 			log(`[RemoteIndexer] [DIAG] noFile=${noFile} by linkMode: ${JSON.stringify(noFileLinkModes)}`);
 		}
@@ -308,14 +336,37 @@ var RemoteIndexer = {
 				if (uploadResult.parseError) {
 					parseErrors++;
 					parseErrorKeys.push(att.attachment_key);
+					failedItems.push({
+						item_key: att.item_key,
+						attachment_key: att.attachment_key,
+						title: _itemTitle(att),
+						reason: 'parse_error',
+						detail: uploadResult.errorDetail || 'Binary or corrupted data',
+					});
 				} else if (uploadResult.skippedEmpty) {
 					skippedEmpty++;
 					skippedEmptyKeys.push(att.attachment_key);
+					failedItems.push({
+						item_key: att.item_key,
+						attachment_key: att.attachment_key,
+						title: _itemTitle(att),
+						reason: 'empty',
+						detail: uploadResult.errorDetail || 'No text could be extracted',
+					});
 				} else if (uploadResult.skippedTimeout) {
 					skippedTimeout++;
 					skippedTimeoutKeys.push(att.attachment_key);
+					failedItems.push({
+						item_key: att.item_key,
+						attachment_key: att.attachment_key,
+						title: _itemTitle(att),
+						reason: 'timeout',
+						detail: uploadResult.errorDetail || 'Extraction timed out',
+					});
 				} else {
 					uploaded++;
+					const mime = att.mime_type || 'unknown';
+					docTypeCounts[mime] = (docTypeCounts[mime] || 0) + 1;
 				}
 				// Write to versionCache for ALL outcomes (including skipped/errors) so the next
 				// incremental run skips these items.  A reindex (force_refresh) bypasses the cache
@@ -331,6 +382,13 @@ var RemoteIndexer = {
 				}
 				if (!firstError) firstError = msg;
 				errors++;
+				failedItems.push({
+					item_key: att.item_key,
+					attachment_key: att.attachment_key,
+					title: _itemTitle(att),
+					reason: 'error',
+					detail: msg,
+				});
 				versionCache[att.attachment_key] = att.item_version;
 				delete pendingCache[att.attachment_key];
 			}
@@ -371,6 +429,7 @@ var RemoteIndexer = {
 					skipped++;
 				} else {
 					uploaded++;
+					docTypeCounts['abstract'] = (docTypeCounts['abstract'] || 0) + 1;
 				}
 				versionCache[abstractItem.attachment_key] = abstractItem.item_version;
 			} catch (err) {
@@ -419,7 +478,7 @@ var RemoteIndexer = {
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}, skippedEmpty=${skippedEmpty}, skippedTimeout=${skippedTimeout}`);
 		log(`[RemoteIndexer] [DIAG] run end: versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
 		return { uploaded, skipped, noFile, linkedUrls, errors, parseErrors, parseErrorKeys,
-			skippedEmpty, skippedEmptyKeys, skippedTimeout, skippedTimeoutKeys, firstError, rateLimitHeaders };
+			skippedEmpty, skippedEmptyKeys, skippedTimeout, skippedTimeoutKeys, failedItems, firstError, rateLimitHeaders, docTypeCounts };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -799,15 +858,15 @@ var RemoteIndexer = {
 		}
 		if (result.status === 'skipped_parse_error') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true };
+			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true, errorDetail: result.error_detail || null };
 		}
 		if (result.status === 'skipped_empty') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (no text extracted)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true };
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true, errorDetail: result.error_detail || null };
 		}
 		if (result.status === 'skipped_timeout') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (Kreuzberg timeout)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true };
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true, errorDetail: result.error_detail || null };
 		}
 		return { rateLimitHeaders: result.rate_limit_headers || null };
 	},

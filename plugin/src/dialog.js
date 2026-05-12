@@ -1411,6 +1411,21 @@ var ZoteroRAGDialog = {
 					Zotero.Prefs.set(`extensions.zotero-rag.syncedVersion.${libraryId}`, currentLibVer, true);
 				}
 
+				// Create an indexing report note in the library when there is something to report.
+				const hasReport = indexResult.uploaded > 0
+					|| indexResult.errors > 0
+					|| (indexResult.parseErrors || 0) > 0
+					|| indexResult.noFile > 0
+					|| (indexResult.skippedEmpty || 0) > 0
+					|| (indexResult.skippedTimeout || 0) > 0;
+				if (hasReport) {
+					try {
+						await plugin.createIndexingReportNote(libraryId, libraryType, libraryName, indexResult);
+					} catch (e) {
+						plugin.log(`[dialog] Failed to create indexing report note: ${e instanceof Error ? e.message : e}`);
+					}
+				}
+
 				// Refresh the library row from the backend so the label shows the accurate
 				// timestamp and indexed count immediately after indexing finishes.
 				this.libraryMetadata.delete(libraryId);

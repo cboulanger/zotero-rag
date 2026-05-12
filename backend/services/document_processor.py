@@ -542,7 +542,7 @@ class DocumentProcessor:
                 )
             except KreuzbergParsingError as e:
                 logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
         else:
             if on_progress:
                 on_progress("Extracting text...")
@@ -550,10 +550,10 @@ class DocumentProcessor:
                 chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
             except KreuzbergTimeoutError as e:
                 logger.warning(f"Skipping attachment {attachment_key}: {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
             except KreuzbergParsingError as e:
                 logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
             except Exception as e:
                 logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
                 raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
