@@ -1,3 +1,10 @@
+# [1.28.0](https://github.com/cboulanger/zotero-rag/compare/v1.27.0...v1.28.0) (2026-05-13)
+
+
+### Features
+
+* Add RAG Results saved search and specific note tags ([6432749](https://github.com/cboulanger/zotero-rag/commit/643274973dff109147eefd61a07342e3a203a5fe))
+
 # [1.27.0](https://github.com/cboulanger/zotero-rag/compare/v1.26.0...v1.27.0) (2026-05-12)
 
 
