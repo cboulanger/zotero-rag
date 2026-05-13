@@ -109,16 +109,12 @@ plugin/
 
 ### Reference Documentation
 
-- **`docs/zotero-plugin-dev.md`** — "vanilla" Zotero plugin development: bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, and Zotero API patterns. The **"Useful Zotero APIs"** section at the bottom is a manually curated index of APIs found through source research — consult it before searching, and **add any newly discovered API methods there immediately** (with signature, return type, and a note on gotchas).
-- **`docs/zotero-plugin-toolkit.md`** — ready-made helper classes (`UITool`, `DialogHelper`, `KeyboardManager`, `PromptManager`, `VirtualizedTableHelper`, etc.) for more complex UI and plugin behavior. Check here before writing boilerplate. When implementing any table-like UI, read the **"VirtualizedTableHelper — Implementation Details"** section first — it covers required stylesheets, container CSS, column definitions, custom cell rendering, row refresh, and the checkbox selection pattern with its known limitations.
+Zotero plugin development knowledge (bootstrap lifecycle, chrome protocol, dialogs, menus, preferences, logging, Zotero API patterns, toolkit helpers, useful APIs) has been moved to Claude Skills at **<https://github.com/cboulanger/zotero-skills/>**.
 
-### Adding Toolkit APIs to the Bundle
+Available skills (invoke via `/skill-name` in Claude Code):
 
-When a needed toolkit class (e.g. `VirtualizedTableHelper`) is not yet available on the `ZoteroPluginToolkit` global, follow the **"Adding a New Toolkit API"** procedure in `docs/zotero-plugin-toolkit.md`: import the class in `plugin/src/toolkit.js`, rebuild with `node scripts/build_toolkit.js`, load the bundle in the target dialog window via `loadSubScript`, and commit both files.
-
-### Documenting New Zotero APIs
-
-Whenever you discover a Zotero API method or property that is undocumented or hard to find (e.g. found via source-code search in `/Users/cboulanger/Code/zotero`), **add it to the "Useful Zotero APIs" section of `docs/zotero-plugin-dev.md`** before finishing the task. Include: method signature, return type/value, and any non-obvious gotchas (e.g. "only populated by Zotero File Storage, not WebDAV"). Do this even for small findings.
+- **`zotero-plugin-dev`** — vanilla plugin development, Zotero APIs, and discovered API index
+- **`zotero-plugin-toolkit`** — `UITool`, `DialogHelper`, `VirtualizedTableHelper`, and other toolkit helpers
 
 ### Development Workflow
 

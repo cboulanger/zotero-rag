@@ -239,7 +239,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 - **[Application architecture](docs/architecture.md)**
 - **[Query routing & agent system](docs/query-routing.md)**
 - **[Debugging RAG queries](docs/debugging-rag-queries.md)**
-- **[Plugin development & hot reload](docs/zotero-plugin-dev.md)**
+- **[Plugin development & hot reload](https://github.com/cboulanger/zotero-skills/)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**
 - **[Setup CI/CD](docs/setup-ci-cd.md)**

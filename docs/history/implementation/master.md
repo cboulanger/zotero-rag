@@ -42,7 +42,7 @@ A Zotero-integrated RAG (Retrieval-Augmented Generation) system consisting of:
 - **Documentation**:
   - <https://www.zotero.org/support/dev/client_coding>
   - <https://www.zotero.org/support/dev/zotero_8_for_developers>
-  - IMPORTANT: `docs\zotero-plugin-dev.md` and `docs\zotero-local-api.md` contain documentation that is collected during development and cannot be found in official documentation
+  - IMPORTANT: Zotero plugin development documentation (APIs, patterns, toolkit helpers) is available as Claude Skills at <https://github.com/cboulanger/zotero-skills/>
 
 ### Backend RAG Stack
 

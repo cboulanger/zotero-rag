@@ -1,4 +1,4 @@
 # Resources for coding agents
 
-- docs/zotero-plugin-dev.md
-- https://github.com/introfini/mcp-server-zotero-dev
+- [zotero-skills](https://github.com/cboulanger/zotero-skills/) (Claude Skills for Zotero plugin development)
+- [mcp-server-zotero-dev](https://github.com/introfini/mcp-server-zotero-dev)
