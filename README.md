@@ -139,6 +139,8 @@ Routing is transparent and requires no extra configuration. To bypass routing an
 
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
+The plugin automatically creates a **RAG Results** saved search in your library the first time a result note or indexing report is generated. This search collects all notes whose tag starts with `RAG` followed by a space (query results tagged `RAG Query Result`, indexing reports tagged `RAG Indexing Report`) in one place for quick retrieval.
+
 #### Public Web Interface
 
 The backend can optionally expose a browser-accessible query UI at `/public/` that lets anyone query a publicly readable Zotero library **without** the Zotero plugin or an API key.

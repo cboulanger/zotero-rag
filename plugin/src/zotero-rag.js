@@ -793,9 +793,10 @@ class ZoteroRAGPlugin {
 			note.addToCollection(collectionID);
 		}
 
-		note.addTag('RAG');
+		note.addTag('RAG Query Result');
 		// Save note
 		await note.saveTx();
+		await this._ensureRAGResultsSearch(note.libraryID);
 
 		// Open the note in a separate window and resize it
 		zoteroPane.openNoteWindow(note.id);
@@ -902,9 +903,10 @@ class ZoteroRAGPlugin {
 		const note = new Zotero.Item('note');
 		note.libraryID = zoteroLibraryID;
 		note.setNote(html);
-		note.addTag('RAG');
+		note.addTag('RAG Indexing Report');
 		// No addToCollection() — place at top level of library
 		await note.saveTx();
+		await this._ensureRAGResultsSearch(zoteroLibraryID);
 		this.log(`[createIndexingReportNote] Created indexing report note for library ${libraryId}`);
 		try {
 			const zoteroPane = Zotero.getActiveZoteroPane();
@@ -913,6 +915,31 @@ class ZoteroRAGPlugin {
 			if (noteWin) noteWin.resizeTo(900, 700);
 		} catch (e) {
 			this.log(`[createIndexingReportNote] Failed to open note window: ${e instanceof Error ? e.message : e}`);
+		}
+	}
+
+	/**
+	 * Ensure the library has a saved search called "RAG Results" matching all RAG notes.
+	 * Creates it if absent; does nothing if it already exists.
+	 * @param {number} libraryID - Zotero library ID
+	 * @returns {Promise<void>}
+	 */
+	async _ensureRAGResultsSearch(libraryID) {
+		try {
+			const existing = Zotero.Searches.getByLibrary(libraryID)
+				.map(id => Zotero.Searches.get(id))
+				.find(s => s && s.name === 'RAG Results');
+			if (existing) return;
+
+			const search = new Zotero.Search();
+			search.libraryID = libraryID;
+			search.name = 'RAG Results';
+			search.addCondition('itemType', 'is', 'note');
+			search.addCondition('tag', 'contains', 'RAG ');
+			await search.saveTx();
+			this.log('[_ensureRAGResultsSearch] Created "RAG Results" saved search');
+		} catch (e) {
+			this.log(`[_ensureRAGResultsSearch] Failed: ${e instanceof Error ? e.message : e}`);
 		}
 	}
 
