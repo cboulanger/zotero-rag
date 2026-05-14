@@ -28,6 +28,10 @@ class LLMConfig(BaseModel):
     max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
+    models_status_url: Optional[str] = Field(
+        default=None,
+        description="URL to query for per-model availability metrics (KISSKI format: POST → data[].{id, demand, status})",
+    )
 
     @field_validator("model_names", mode="before")
     @classmethod
@@ -195,6 +199,7 @@ PRESETS = {
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
             },
+            models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
         rag=RAGConfig(
             top_k=10,
@@ -226,6 +231,7 @@ PRESETS = {
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
             },
+            models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
         rag=RAGConfig(
             top_k=10,
@@ -253,6 +259,7 @@ PRESETS = {
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
             },
+            models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
         rag=RAGConfig(
             top_k=10,
@@ -284,6 +291,7 @@ PRESETS = {
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
             },
+            models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
         rag=RAGConfig(
             top_k=10,

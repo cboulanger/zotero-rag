@@ -2,15 +2,16 @@
 Configuration API endpoints.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 import logging
 import os
+import httpx
 
 from backend.config.settings import get_settings
 from backend.config.presets import PRESETS
-from backend.services.embeddings import RemoteEmbeddingService
+from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header
 from backend.services.llm import RemoteLLMService
 
 router = APIRouter()
@@ -153,6 +154,63 @@ async def get_required_api_keys():
             seen[key_name] = ApiKeyRequirement(**key_info)
 
     return RequiredKeysResponse(keys=list(seen.values()))
+
+
+class ModelStatus(BaseModel):
+    """Availability status for a single remote model."""
+    model: str
+    demand: int
+    status: str
+
+
+class ModelsStatusResponse(BaseModel):
+    """Per-model availability metrics for the active preset."""
+    models: List[ModelStatus]
+
+
+@router.get("/models/status", response_model=ModelsStatusResponse)
+def get_models_status(request: Request):
+    """
+    Return per-model demand/availability metrics for the active preset.
+
+    Calls the configured `models_status_url` (KISSKI format) and filters the
+    result to models listed in the current preset.  Returns an empty list if
+    the preset has no `models_status_url` or if the upstream call fails.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    status_url = preset.llm.models_status_url
+
+    if not status_url:
+        return ModelsStatusResponse(models=[])
+
+    api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
+    header_name = env_var_to_header(api_key_env) if api_key_env else ""
+    api_key = (
+        (request.headers.get(header_name) if header_name else None)
+        or (os.environ.get(api_key_env) if api_key_env else None)
+        or ""
+    )
+
+    try:
+        resp = httpx.post(
+            status_url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+    except Exception as exc:
+        logger.warning("Could not fetch model status from %s: %s", status_url, exc)
+        return ModelsStatusResponse(models=[])
+
+    allowed = set(preset.llm.model_names)
+    models = [
+        ModelStatus(model=entry["id"], demand=int(entry.get("demand", 0)), status=entry.get("status", "unknown"))
+        for entry in data
+        if isinstance(entry, dict) and entry.get("id") in allowed
+    ]
+    return ModelsStatusResponse(models=models)
 
 
 @router.get("/version")

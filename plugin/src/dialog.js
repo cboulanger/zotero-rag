@@ -9,6 +9,17 @@
 /// <reference path='./remote_indexer.js' />
 
 /**
+ * @typedef {Object} ModelStatusEntry
+ * @property {string} model - Model identifier
+ * @property {number} demand - Current demand level (0 = free, 1-2 = moderate, 3+ = busy)
+ * @property {string} status - Server-reported status string
+ */
+
+/**
+ * @typedef {{ models: ModelStatusEntry[] }} ModelsStatusApiResponse
+ */
+
+/**
  * @typedef {Object} LibraryIndexMetadata
  * @property {string} library_id - Library ID
  * @property {string} library_type - Library type (user/group)
@@ -354,6 +365,11 @@ var ZoteroRAGDialog = {
 					modelGroup.style.display = llmModels.length > 1 ? '' : 'none';
 				}
 
+				// Fetch and display per-model demand indicators (best-effort, non-blocking)
+				if (llmModels.length > 1 && modelSelect) {
+					this._fetchModelStatus(modelSelect).catch(() => {});
+				}
+
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
@@ -364,6 +380,33 @@ var ZoteroRAGDialog = {
 			// Silently fail and use hardcoded default (0.3)
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			this.plugin.log(`Could not load preset config: ${errorMessage}`);
+		}
+	},
+
+	/**
+	 * Fetch per-model demand metrics and annotate the model selector options.
+	 * Demand suffixes: 0 → "(free)", 1-2 → "(~busy)", 3+ → "(busy)".
+	 * Silently no-ops if the endpoint returns an empty list or fails.
+	 * @param {HTMLSelectElement} modelSelect
+	 */
+	async _fetchModelStatus(modelSelect) {
+		if (!this.plugin) return;
+		const response = await fetch(`${this.plugin.backendURL}/api/models/status`, {
+			headers: this.plugin.getAuthHeaders()
+		});
+		if (!response.ok) return;
+		const data = /** @type {ModelsStatusApiResponse} */ (/** @type {unknown} */ (await response.json()));
+		if (!Array.isArray(data.models) || data.models.length === 0) return;
+		const GREEN  = '\uD83D\uDFE2'; // U+1F7E2 green circle
+		const YELLOW = '\uD83D\uDFE1'; // U+1F7E1 yellow circle
+		const RED    = '\uD83D\uDD34'; // U+1F534 red circle
+		for (const entry of data.models) {
+			const opt = /** @type {HTMLOptionElement|null} */ (
+				modelSelect.querySelector(`option[value="${CSS.escape(entry.model)}"]`)
+			);
+			if (!opt) continue;
+			const dot = entry.demand === 0 ? GREEN : entry.demand <= 2 ? YELLOW : RED;
+			opt.textContent = dot + ' ' + entry.model;
 		}
 	},
 
