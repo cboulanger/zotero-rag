@@ -1,3 +1,10 @@
+# [1.29.0](https://github.com/cboulanger/zotero-rag/compare/v1.28.0...v1.29.0) (2026-05-14)
+
+
+### Features
+
+* Add per-model demand indicator for KISSKI remote endpoints ([1694a1b](https://github.com/cboulanger/zotero-rag/commit/1694a1bc4fdeea311e595af8d71736128c851dbb))
+
 # [1.28.0](https://github.com/cboulanger/zotero-rag/compare/v1.27.0...v1.28.0) (2026-05-13)
 
 
