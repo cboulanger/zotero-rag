@@ -927,7 +927,6 @@ class ZoteroRAGPlugin {
 	async _ensureRAGResultsSearch(libraryID) {
 		try {
 			const existing = Zotero.Searches.getByLibrary(libraryID)
-				.map(id => Zotero.Searches.get(id))
 				.find(s => s && s.name === 'RAG Results');
 			if (existing) return;
 
