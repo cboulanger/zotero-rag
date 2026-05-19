@@ -1,3 +1,10 @@
+## [1.29.1](https://github.com/cboulanger/zotero-rag/compare/v1.29.0...v1.29.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* prevent duplicate "RAG Results" saved search creation ([ab0c265](https://github.com/cboulanger/zotero-rag/commit/ab0c2652c986b4731694666ec9de097e313cd75e)), closes [#32](https://github.com/cboulanger/zotero-rag/issues/32)
+
 # [1.29.0](https://github.com/cboulanger/zotero-rag/compare/v1.28.0...v1.29.0) (2026-05-14)
 
 
