@@ -92,10 +92,13 @@ class CollectionVectorService:
         clean_abstract = (abstract or "").strip()
         clean_title = (title or "").strip()
 
-        if clean_abstract and len(clean_abstract) >= self.min_abstract_chars:
+        has_full_abstract = bool(clean_abstract and len(clean_abstract) >= self.min_abstract_chars)
+        if has_full_abstract:
             embed_text = f"{clean_title} {clean_abstract}".strip()
+            a2_source = "abstract"
         else:
             embed_text = clean_title
+            a2_source = "title"
 
         vector: Optional[list[float]] = None
         source: Optional[str] = None
@@ -104,7 +107,7 @@ class CollectionVectorService:
             vector = await self.embedding_service.embed_text(embed_text)
             # Treat an all-zero or empty result as unusable
             if vector and any(v != 0.0 for v in vector):
-                source = "abstract"
+                source = a2_source
             else:
                 vector = None
 
@@ -312,6 +315,15 @@ class CollectionVectorService:
             ``True`` if the item vector was successfully computed and stored,
             ``False`` if no data was available (item was skipped).
         """
+        # Read the item's existing collection_ids before overwriting, so that
+        # centroids for collections the item is *leaving* are also refreshed.
+        old_collection_ids: list[str] = []
+        existing_item = await asyncio.to_thread(
+            self.vector_store.get_item_vector, library_id, item_key
+        )
+        if existing_item is not None:
+            old_collection_ids = existing_item[1].get("collection_ids", [])
+
         result = await self.compute_item_vector(
             library_id=library_id,
             item_key=item_key,
@@ -322,19 +334,19 @@ class CollectionVectorService:
         if result is None:
             return False
 
-        # Refresh centroids for all affected collections.
-        if collection_ids:
+        # Refresh centroids for all affected collections — union of old and new.
+        all_affected = list(set(collection_ids) | set(old_collection_ids))
+        if all_affected:
             all_item_vectors = await asyncio.to_thread(
                 self.vector_store.get_item_vectors_for_library, library_id
             )
-            for collection_id in collection_ids:
+            for collection_id in all_affected:
                 # Attempt to look up a stored name; fall back to the ID itself.
-                existing = await asyncio.to_thread(
+                existing_col = await asyncio.to_thread(
                     self.vector_store.get_collection_vector, library_id, collection_id
                 )
-                if existing is not None:
-                    _vec, payload = existing
-                    cname = payload.get("collection_name", collection_id)
+                if existing_col is not None:
+                    cname = existing_col[1].get("collection_name", collection_id)
                 else:
                     cname = collection_id
                 await asyncio.to_thread(

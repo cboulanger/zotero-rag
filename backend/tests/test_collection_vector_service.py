@@ -123,48 +123,6 @@ class ZeroEmbeddingService(EmbeddingService):
 
 
 # ---------------------------------------------------------------------------
-# Base test case with shared setup / teardown
-# ---------------------------------------------------------------------------
-
-class _BaseServiceTest(unittest.IsolatedAsyncioTestCase):
-    """Async test base: creates a temp Qdrant store and a service instance."""
-
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.store = _make_store(self.temp_dir)
-        self.embed_svc = DeterministicEmbeddingService(dim=DIM)
-        self.svc = CollectionVectorService(
-            vector_store=self.store,
-            embedding_service=self.embed_svc,
-            min_abstract_chars=50,
-        )
-
-    def tearDown(self):
-        self.store.close()
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def _add_chunk(self, item_key: str, chunk_index: int, vector: list[float]):
-        """Helper: insert a document chunk with a known vector."""
-        chunk = DocumentChunk(
-            text=f"Chunk text {chunk_index}",
-            metadata=ChunkMetadata(
-                chunk_id=f"{LIB}:{item_key}:{chunk_index}",
-                document_metadata=DocumentMetadata(
-                    library_id=LIB,
-                    item_key=item_key,
-                    title="Test Title",
-                ),
-                page_number=1,
-                text_preview="Chunk text",
-                chunk_index=chunk_index,
-                content_hash=f"hash-{item_key}-{chunk_index}",
-            ),
-            embedding=vector,
-        )
-        self.store.add_chunk(chunk)
-
-
-# ---------------------------------------------------------------------------
 # compute_item_vector — A2 path (title + abstract)
 # ---------------------------------------------------------------------------
 
@@ -234,6 +192,20 @@ class TestComputeItemVectorA2(unittest.IsolatedAsyncioTestCase):
                 collection_ids=[],
             )
         self.assertEqual(self.store.count_item_vectors(LIB), 1)
+
+    async def test_short_abstract_records_title_source(self):
+        """When the abstract is too short but the title is non-empty, source must be 'title'."""
+        await self.svc.compute_item_vector(
+            library_id=LIB,
+            item_key="TITLE_ONLY",
+            title="A paper with only a title",
+            abstract="short",  # < 50 chars → title-only embedding
+            collection_ids=[],
+        )
+        result = self.store.get_item_vector(LIB, "TITLE_ONLY")
+        self.assertIsNotNone(result)
+        _vec, payload = result
+        self.assertEqual(payload["source"], "title")
 
 
 # ---------------------------------------------------------------------------
@@ -714,6 +686,53 @@ class TestUpdateItem(unittest.IsolatedAsyncioTestCase):
         # The centroid must have been recomputed; if ITEM2's vector changed the mean differs
         # (We can't guarantee they differ because the mock is deterministic, but count of stored must be >= 1)
         self.assertIsNotNone(after_centroid)
+
+    async def test_old_collection_centroid_refreshed_when_item_moves(self):
+        """When an item moves from colOld to colNew, colOld's centroid must also be recomputed."""
+        # Seed item in colOld
+        await self.svc.compute_item_vector(
+            library_id=LIB,
+            item_key="MOVER",
+            title="Mover paper",
+            abstract="A" * 60,
+            collection_ids=["colOld"],
+        )
+        # Compute initial centroid for colOld
+        all_vecs = self.store.get_item_vectors_for_library(LIB)
+        self.svc.compute_collection_centroid(
+            library_id=LIB,
+            collection_id="colOld",
+            collection_name="Old Collection",
+            item_vectors=all_vecs,
+        )
+        # Seed a second item in colNew so its centroid can also be stored
+        await self.svc.compute_item_vector(
+            library_id=LIB,
+            item_key="STATIC",
+            title="Static paper",
+            abstract="B" * 60,
+            collection_ids=["colNew"],
+        )
+        all_vecs = self.store.get_item_vectors_for_library(LIB)
+        self.svc.compute_collection_centroid(
+            library_id=LIB,
+            collection_id="colNew",
+            collection_name="New Collection",
+            item_vectors=all_vecs,
+        )
+
+        # Move MOVER to colNew — update_item must refresh both colOld and colNew
+        await self.svc.update_item(
+            library_id=LIB,
+            item_key="MOVER",
+            title="Mover paper",
+            abstract="A" * 60,
+            collection_ids=["colNew"],
+        )
+
+        # Both centroids must still exist (colOld recomputed to reflect the item leaving)
+        self.assertIsNotNone(self.store.get_collection_vector(LIB, "colOld"))
+        self.assertIsNotNone(self.store.get_collection_vector(LIB, "colNew"))
 
 
 if __name__ == "__main__":

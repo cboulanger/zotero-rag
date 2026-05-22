@@ -1314,7 +1314,7 @@ class VectorStore:
         item_key: str,
         vector: list[float],
         collection_ids: list[str],
-        source: Literal["abstract", "chunks"],
+        source: Literal["abstract", "chunks", "title"],
         title: str,
     ) -> str:
         """
@@ -1328,7 +1328,7 @@ class VectorStore:
             item_key: Zotero item key.
             vector: Embedding vector (title+abstract or mean of chunk vectors).
             collection_ids: Zotero collection IDs the item belongs to.
-            source: ``"abstract"`` or ``"chunks"``.
+            source: ``"abstract"``, ``"title"``, or ``"chunks"``.
             title: Item title (for payload readability).
 
         Returns:
