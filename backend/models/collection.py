@@ -31,3 +31,12 @@ class CollectionVectorSyncRequest(BaseModel):
     collection_map: dict[str, list[str]]
     # Maps collection_id -> human-readable collection name
     collection_names: dict[str, str] = Field(default_factory=dict)
+
+
+class CollectionVectorSyncStats(BaseModel):
+    """Stats returned after syncing item/collection vectors."""
+
+    items_computed: int
+    items_skipped: int
+    collections_computed: int
+    collections_skipped: int

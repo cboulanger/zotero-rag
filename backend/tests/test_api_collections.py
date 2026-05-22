@@ -7,9 +7,8 @@ Covers:
 - GET  /api/collections/suggest
 """
 
-import asyncio
 import unittest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -131,7 +130,7 @@ class TestCollectionsAPI(unittest.TestCase):
         mock_vs.search_collection_vectors.assert_called_once_with(item_vec, "lib1", limit=5)
 
     def test_suggest_clamps_limit_to_20(self):
-        """limit parameter is clamped to a maximum of 20."""
+        """limit parameter above 20 is rejected with 422 (FastAPI Query validation)."""
         mock_vs = MagicMock()
         mock_vs.get_item_vector.return_value = ([0.0] * 8, {})
         mock_vs.search_collection_vectors.return_value = []
@@ -142,10 +141,7 @@ class TestCollectionsAPI(unittest.TestCase):
             params={"library_id": "lib1", "item_key": "KEY", "limit": "100"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        # Verify the actual limit passed to the store was clamped
-        _, call_kwargs = mock_vs.search_collection_vectors.call_args
-        self.assertEqual(call_kwargs.get("limit", None) or mock_vs.search_collection_vectors.call_args[0][2], 20)
+        self.assertEqual(response.status_code, 422)
 
     def test_suggest_503_when_no_store(self):
         """Returns 503 when vector store is unavailable."""
