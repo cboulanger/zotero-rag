@@ -9,7 +9,7 @@ import logging
 import time
 import warnings
 from datetime import datetime, UTC
-from typing import Optional
+from typing import Literal, Optional
 from pathlib import Path
 import uuid
 
@@ -71,6 +71,10 @@ class VectorStore:
     METADATA_COLLECTION = "library_metadata"
     ITEM_VECTORS_COLLECTION = "item_vectors"
     COLLECTION_VECTORS_COLLECTION = "collection_vectors"
+
+    # Stable namespaces for deterministic UUID5 point IDs
+    _ITEM_VECTOR_NS = uuid.UUID("abcdef12-1234-5678-abcd-abcdef123456")
+    _COLLECTION_VECTOR_NS = uuid.UUID("fedcba98-8765-4321-fedc-fedcba987654")
 
     _CONFIG_FILE = "embedding_config.json"
 
@@ -1310,7 +1314,7 @@ class VectorStore:
         item_key: str,
         vector: list[float],
         collection_ids: list[str],
-        source: str,
+        source: Literal["abstract", "chunks"],
         title: str,
     ) -> str:
         """
@@ -1330,8 +1334,7 @@ class VectorStore:
         Returns:
             UUID of the upserted point.
         """
-        namespace = uuid.UUID("abcdef12-1234-5678-abcd-abcdef123456")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{item_key}"))
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
         point = PointStruct(
             id=point_id,
             vector=vector,
@@ -1367,8 +1370,7 @@ class VectorStore:
         Returns:
             ``(vector, payload)`` tuple, or ``None`` if not found.
         """
-        namespace = uuid.UUID("abcdef12-1234-5678-abcd-abcdef123456")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{item_key}"))
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
         points = self.client.retrieve(
             collection_name=self.ITEM_VECTORS_COLLECTION,
             ids=[point_id],
@@ -1487,24 +1489,15 @@ class VectorStore:
         Returns:
             Number of points deleted (0 or 1).
         """
-        count_before = self.count_item_vectors(library_id)
-        namespace = uuid.UUID("abcdef12-1234-5678-abcd-abcdef123456")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{item_key}"))
-        points = self.client.retrieve(
-            collection_name=self.ITEM_VECTORS_COLLECTION,
-            ids=[point_id],
-            with_vectors=False,
-        )
-        if not points:
+        if self.get_item_vector(library_id, item_key) is None:
             return 0
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
         self.client.delete(
             collection_name=self.ITEM_VECTORS_COLLECTION,
             points_selector=[point_id],
         )
-        count_after = self.count_item_vectors(library_id)
-        deleted = count_before - count_after
-        logger.debug(f"Deleted {deleted} item vector(s) for {library_id}/{item_key}")
-        return deleted
+        logger.debug(f"Deleted item vector for {library_id}/{item_key}")
+        return 1
 
     # ---------------------------------------------------------------------------
     # Collection Vectors Methods (smart filing — one vector per Zotero collection)
@@ -1533,8 +1526,7 @@ class VectorStore:
         Returns:
             UUID of the upserted point.
         """
-        namespace = uuid.UUID("fedcba98-8765-4321-fedc-fedcba987654")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{collection_id}"))
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
         point = PointStruct(
             id=point_id,
             vector=vector,
@@ -1569,8 +1561,7 @@ class VectorStore:
         Returns:
             ``(vector, payload)`` tuple, or ``None`` if not found.
         """
-        namespace = uuid.UUID("fedcba98-8765-4321-fedc-fedcba987654")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{collection_id}"))
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
         points = self.client.retrieve(
             collection_name=self.COLLECTION_VECTORS_COLLECTION,
             ids=[point_id],
@@ -1678,8 +1669,7 @@ class VectorStore:
         Returns:
             Number of points deleted (0 or 1).
         """
-        namespace = uuid.UUID("fedcba98-8765-4321-fedc-fedcba987654")
-        point_id = str(uuid.uuid5(namespace, f"{library_id}:{collection_id}"))
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
         points = self.client.retrieve(
             collection_name=self.COLLECTION_VECTORS_COLLECTION,
             ids=[point_id],
@@ -1693,6 +1683,56 @@ class VectorStore:
         )
         logger.debug(f"Deleted collection vector for {library_id}/{collection_id}")
         return 1
+
+    def delete_library_item_vectors(self, library_id: str) -> int:
+        """
+        Delete all item vectors for a specific library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of item vectors deleted.
+        """
+        count_before = self.count_item_vectors(library_id)
+        self.client.delete(
+            collection_name=self.ITEM_VECTORS_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        )
+        logger.info(f"Deleted {count_before} item vectors for library {library_id}")
+        return count_before
+
+    def delete_library_collection_vectors(self, library_id: str) -> int:
+        """
+        Delete all collection vectors for a specific library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of collection vectors deleted.
+        """
+        count_before = self.count_collection_vectors(library_id)
+        self.client.delete(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        )
+        logger.info(f"Deleted {count_before} collection vectors for library {library_id}")
+        return count_before
 
     def close(self):
         """

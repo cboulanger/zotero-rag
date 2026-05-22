@@ -279,5 +279,63 @@ class TestCollectionVectorsCRUD(unittest.TestCase):
         self.assertEqual(deleted, 0)
 
 
+class TestDeleteLibraryItemVectors(unittest.TestCase):
+    """delete_library_item_vectors removes all item vectors for a library."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.store = _make_store(self.temp_dir)
+
+    def tearDown(self):
+        self.store.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_deletes_all_item_vectors_for_library(self):
+        for i in range(3):
+            self.store.upsert_item_vector(LIB, f"ITEM{i}", _unit_vec(i), [], "abstract", f"T{i}")
+        # Add item in a different library — must not be deleted
+        self.store.upsert_item_vector("lib2", "OTHER", _unit_vec(0), [], "abstract", "X")
+
+        deleted = self.store.delete_library_item_vectors(LIB)
+
+        self.assertEqual(deleted, 3)
+        self.assertEqual(self.store.count_item_vectors(LIB), 0)
+        # Other library untouched
+        self.assertEqual(self.store.count_item_vectors("lib2"), 1)
+
+    def test_returns_zero_when_library_has_no_vectors(self):
+        deleted = self.store.delete_library_item_vectors("empty_lib")
+        self.assertEqual(deleted, 0)
+
+
+class TestDeleteLibraryCollectionVectors(unittest.TestCase):
+    """delete_library_collection_vectors removes all collection vectors for a library."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.store = _make_store(self.temp_dir)
+
+    def tearDown(self):
+        self.store.close()
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_deletes_all_collection_vectors_for_library(self):
+        for i in range(4):
+            self.store.upsert_collection_vector(LIB, f"COL{i}", f"Col {i}", _unit_vec(i), i)
+        # Add collection in a different library — must not be deleted
+        self.store.upsert_collection_vector("lib2", "COL_OTHER", "Other", _unit_vec(0), 0)
+
+        deleted = self.store.delete_library_collection_vectors(LIB)
+
+        self.assertEqual(deleted, 4)
+        self.assertEqual(self.store.count_collection_vectors(LIB), 0)
+        # Other library untouched
+        self.assertEqual(self.store.count_collection_vectors("lib2"), 1)
+
+    def test_returns_zero_when_library_has_no_vectors(self):
+        deleted = self.store.delete_library_collection_vectors("empty_lib")
+        self.assertEqual(deleted, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
