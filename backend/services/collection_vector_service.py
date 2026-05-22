@@ -257,7 +257,8 @@ class CollectionVectorService:
         collections_skipped = 0
 
         for collection_id, cname in collection_names.items():
-            result = self.compute_collection_centroid(
+            result = await asyncio.to_thread(
+                self.compute_collection_centroid,
                 library_id=library_id,
                 collection_id=collection_id,
                 collection_name=cname,
@@ -328,13 +329,16 @@ class CollectionVectorService:
             )
             for collection_id in collection_ids:
                 # Attempt to look up a stored name; fall back to the ID itself.
-                existing = self.vector_store.get_collection_vector(library_id, collection_id)
+                existing = await asyncio.to_thread(
+                    self.vector_store.get_collection_vector, library_id, collection_id
+                )
                 if existing is not None:
                     _vec, payload = existing
                     cname = payload.get("collection_name", collection_id)
                 else:
                     cname = collection_id
-                self.compute_collection_centroid(
+                await asyncio.to_thread(
+                    self.compute_collection_centroid,
                     library_id=library_id,
                     collection_id=collection_id,
                     collection_name=cname,
