@@ -126,15 +126,10 @@ const CollectionsAPI = {
      */
     async suggestCollections(backendURL, libraryId, itemKey, getAuthHeaders, limit = 5) {
         const url = `${backendURL}/api/collections/suggest?library_id=${encodeURIComponent(libraryId)}&item_key=${encodeURIComponent(itemKey)}&limit=${encodeURIComponent(limit)}`;
-        let response;
-        try {
-            response = await _apiFetch('GET', url, {
-                headers: getAuthHeaders(),
-                statusAllowList: [404],
-            });
-        } catch (err) {
-            throw err;
-        }
+        const response = await _apiFetch('GET', url, {
+            headers: getAuthHeaders(),
+            statusAllowList: [404],
+        });
         if (response.status === 404) {
             return [];
         }
