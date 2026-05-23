@@ -35,10 +35,18 @@ async function startup({ id, version, rootURI }) {
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
+
+	// Load collections API client and filing suggestions UI
+	Services.scriptloader.loadSubScript(rootURI + 'api/collections.js');
+	Services.scriptloader.loadSubScript(rootURI + 'ui/collection_suggestions.js');
+
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;
 	ZoteroRAG.addToAllWindows();
 	await ZoteroRAG.main();
+
+	// Register the item pane section for filing suggestions
+	registerFilingSuggestionsPane();
 }
 
 function onMainWindowLoad({ window }) {
@@ -51,6 +59,9 @@ function onMainWindowUnload({ window }) {
 
 function shutdown() {
 	log("Shutting down");
+
+	// Unregister the filing suggestions item pane section
+	try { unregisterFilingSuggestionsPane(); } catch (_) {}
 
 	if (ZoteroRAG) {
 		ZoteroRAG.removeFromAllWindows();
