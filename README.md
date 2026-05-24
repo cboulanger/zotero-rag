@@ -200,6 +200,21 @@ For each missing file the tool tries the following strategies in order:
 
 When a file is found it is copied into the correct Zotero storage directory. Items that cannot be recovered can be deleted permanently from the dialog using the **Delete Selected** button.
 
+#### Filing Suggestions
+
+Once a library has been indexed, the backend also maintains a separate layer of *collection vectors* — one embedding per collection computed as the centroid of its member items' title+abstract embeddings. This is independent of the RAG pipeline and does not affect search or question answering.
+
+When you select an item in Zotero, a **Filing Suggestions** section appears in the item details panel (click the folder-with-plus icon in the sidenav). It shows the collections — across all your indexed libraries — whose centroid is most similar to the selected item's embedding, ranked by similarity score.
+
+Each suggestion row displays the full path of the collection (e.g. *My Library / Science / Astrophysics*) and a percentage score. Hovering over a row reveals two action buttons:
+
+- **Copy** — adds the item to the suggested collection while leaving it in its current collections.
+- **Move** — adds the item to the suggested collection and removes it from all existing collections.
+
+After an action the row disappears from the list. The collection vectors for the affected collections are recomputed in the background the next time the library is synced.
+
+Collection vectors are computed automatically as a non-blocking stage at the end of each indexing run. Items not assigned to any collection are excluded (they have no membership signal to learn from). The first time you index a library after upgrading to a version that includes this feature, the full sync runs automatically in the background.
+
 #### Import Open Access Articles from OpenAlex
 
 The script `scripts/openalex_import.py` bulk-imports all open-access articles of a journal (identified by ISSN) from [OpenAlex](https://openalex.org) into a Zotero group library, including PDF attachments.
