@@ -1,10 +1,8 @@
 """
-Collections API endpoints for smart filing features.
-
 Provides:
-- GET  /api/collections/vectors/status  — counts of item and collection vectors
-- POST /api/collections/vectors/sync    — full-library sync of item/collection vectors
-- GET  /api/collections/suggest         — suggest collections for an item via vector search
+- GET  /api/collections/vectors/status  - counts of item and collection vectors
+- POST /api/collections/vectors/sync    - full-library sync of item/collection vectors
+- GET  /api/collections/suggest         - suggest collections for an item via vector search
 """
 
 import logging
@@ -148,12 +146,12 @@ def suggest_collections(
             return []
 
         item_vector, _ = item_result
-        results = vector_store.search_collection_vectors(item_vector, library_id, limit=limit)
+        results = vector_store.search_collection_vectors(item_vector, limit=limit)
         return [
             CollectionSuggestion(
                 collection_id=coll_id,
                 collection_name=payload.get("collection_name", ""),
-                library_id=library_id,
+                library_id=payload.get("library_id", library_id),
                 score=score,
             )
             for coll_id, score, payload in results

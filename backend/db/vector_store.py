@@ -1610,7 +1610,7 @@ class VectorStore:
     def search_collection_vectors(
         self,
         query_vector: list[float],
-        library_id: str,
+        library_id: Optional[str] = None,
         limit: int = 5,
     ) -> list[tuple[str, float, dict]]:
         """
@@ -1618,15 +1618,18 @@ class VectorStore:
 
         Args:
             query_vector: Query embedding (e.g. title+abstract of an item).
-            library_id: Restrict search to this library.
+            library_id: If provided, restrict search to this library.
+                        If None, search across all libraries.
             limit: Maximum number of results to return.
 
         Returns:
             List of ``(collection_id, score, payload)`` tuples sorted by score descending.
         """
-        query_filter = Filter(must=[
-            FieldCondition(key="library_id", match=MatchValue(value=library_id)),
-        ])
+        query_filter = (
+            Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))])
+            if library_id is not None
+            else None
+        )
         hits = self.client.query_points(
             collection_name=self.COLLECTION_VECTORS_COLLECTION,
             query=query_vector,

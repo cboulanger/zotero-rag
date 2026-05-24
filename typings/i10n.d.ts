@@ -3,4 +3,6 @@
 /* eslint-disable */
 // @ts-nocheck
 export type FluentMessageId =
+  | 'pane-filing-suggestions'
+  | 'pane-filing-suggestions-empty'
   | 'zotero-rag-ask-question';

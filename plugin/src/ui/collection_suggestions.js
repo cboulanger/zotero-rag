@@ -53,7 +53,51 @@ function _injectStyles(doc) {
         .rag-suggestion-row:hover .rag-actions { display: flex; }
         .rag-suggestion-row .rag-actions button { font-size: 0.8em; padding: 1px 6px; }
     `;
-    doc.head.appendChild(style);
+    (doc.head || doc.documentElement).appendChild(style);
+}
+
+/**
+ * Convert a backend library ID string (e.g. "u12345" or "6297749") to Zotero's
+ * internal numeric libraryID.  Returns null when the library can't be resolved.
+ *
+ * @param {string} backendLibraryId
+ * @returns {number|null}
+ */
+function _resolveZoteroLibraryID(backendLibraryId) {
+    if (backendLibraryId.startsWith('u')) {
+        return Zotero.Libraries.userLibraryID;
+    }
+    const groupId = parseInt(backendLibraryId, 10);
+    if (!isNaN(groupId)) {
+        const group = Zotero.Groups.get(groupId);
+        return group ? group.libraryID : null;
+    }
+    return null;
+}
+
+/**
+ * Build the full breadcrumb path for a collection: "Library / Parent / Collection".
+ * Falls back to `fallbackName` if the collection can't be resolved in the local Zotero DB.
+ *
+ * @param {string} backendLibraryId - Backend library ID from the suggestion
+ * @param {string} collectionKey - Zotero collection key
+ * @param {string} fallbackName - Name to use when the collection isn't found locally
+ * @returns {string}
+ */
+function _buildCollectionPath(backendLibraryId, collectionKey, fallbackName) {
+    const zoteroLibraryID = _resolveZoteroLibraryID(backendLibraryId);
+    if (zoteroLibraryID === null) return fallbackName || collectionKey;
+    const parts = [];
+    let col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, collectionKey);
+    if (!col) return fallbackName || collectionKey;
+    while (col) {
+        parts.unshift(col.name);
+        if (!col.parentKey) break;
+        col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, col.parentKey);
+    }
+    const lib = Zotero.Libraries.get(zoteroLibraryID);
+    if (lib) parts.unshift(lib.name);
+    return parts.join(' / ');
 }
 
 /**
@@ -77,7 +121,7 @@ function _buildSuggestionRow(suggestion, item, doc) {
 
     const label = doc.createElement("span");
     label.className = "label";
-    label.textContent = suggestion.collection_name || suggestion.collection_id;
+    label.textContent = _buildCollectionPath(suggestion.library_id, suggestion.collection_id, suggestion.collection_name);
 
     const score = doc.createElement("span");
     score.className = "rag-score";
@@ -91,14 +135,14 @@ function _buildSuggestionRow(suggestion, item, doc) {
     const copyBtn = doc.createElement("button");
     copyBtn.textContent = "Copy";
     copyBtn.onclick = async () => {
-        await _copyItemToCollection(item, suggestion.collection_id);
+        await _copyItemToCollection(item, suggestion.library_id, suggestion.collection_id);
         row.remove();
     };
 
     const moveBtn = doc.createElement("button");
     moveBtn.textContent = "Move";
     moveBtn.onclick = async () => {
-        await _moveItemToCollection(item, suggestion.collection_id);
+        await _moveItemToCollection(item, suggestion.library_id, suggestion.collection_id);
         row.remove();
     };
 
@@ -111,11 +155,14 @@ function _buildSuggestionRow(suggestion, item, doc) {
  * Add the item to a collection without removing it from existing collections.
  *
  * @param {any} item - Zotero item
+ * @param {string} backendLibraryId - Backend library ID of the target collection
  * @param {string} collectionKey - Zotero collection key (e.g. "ABC12345")
  * @returns {Promise<void>}
  */
-async function _copyItemToCollection(item, collectionKey) {
-    const col = Zotero.Collections.getByLibraryAndKey(item.libraryID, collectionKey);
+async function _copyItemToCollection(item, backendLibraryId, collectionKey) {
+    const zoteroLibraryID = _resolveZoteroLibraryID(backendLibraryId);
+    if (zoteroLibraryID === null) return;
+    const col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, collectionKey);
     if (!col) return;
     item.addToCollection(col.id);
     await item.saveTx();
@@ -125,11 +172,14 @@ async function _copyItemToCollection(item, collectionKey) {
  * Move the item to a collection, removing it from all existing collections first.
  *
  * @param {any} item - Zotero item
+ * @param {string} backendLibraryId - Backend library ID of the target collection
  * @param {string} collectionKey - Zotero collection key (e.g. "ABC12345")
  * @returns {Promise<void>}
  */
-async function _moveItemToCollection(item, collectionKey) {
-    const col = Zotero.Collections.getByLibraryAndKey(item.libraryID, collectionKey);
+async function _moveItemToCollection(item, backendLibraryId, collectionKey) {
+    const zoteroLibraryID = _resolveZoteroLibraryID(backendLibraryId);
+    if (zoteroLibraryID === null) return;
+    const col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, collectionKey);
     if (!col) return;
     // Capture existing collection IDs before modifying
     const currentCollections = item.getCollections(); // returns array of internal IDs
@@ -147,16 +197,16 @@ async function _moveItemToCollection(item, collectionKey) {
  * Called from bootstrap.js after ZoteroRAG.main() completes.
  */
 function registerFilingSuggestionsPane() {
-    Zotero.ItemPaneManager.registerSection({
+    const result = Zotero.ItemPaneManager.registerSection({
         paneID: PANE_ID,
         pluginID: PLUGIN_ID,
         header: {
             l10nID: "pane-filing-suggestions",
-            icon: "chrome://zotero/skin/default/zotero/16/universal/copy-collection.svg",
+            icon: "chrome://zotero/skin/16/universal/copy-collection.svg",
         },
         sidenav: {
             l10nID: "pane-filing-suggestions",
-            icon: "chrome://zotero/skin/default/zotero/itempane/20/libraries-collections.svg",
+            icon: "chrome://zotero/skin/20/universal/add-collection.svg",
         },
 
         // onRender is required by Zotero.ItemPaneManager; async work goes in onAsyncRender.
@@ -168,15 +218,32 @@ function registerFilingSuggestionsPane() {
         onAsyncRender: async ({ body, item, doc }) => {
             body.innerHTML = "";
 
+            // BEGIN DEBUG
+            console.log("[FilingSuggestions] onAsyncRender called " + JSON.stringify({
+                hasItem: !!item,
+                isAttachment: item?.isAttachment?.(),
+                isNote: item?.isNote?.(),
+                hasRAG: !!/** @type {any} */ (Zotero).ZoteroRAG,
+                backendURL: /** @type {any} */ (Zotero).ZoteroRAG?.backendURL,
+                hasCollectionsAPI: typeof CollectionsAPI !== 'undefined',
+                itemKey: item?.key,
+            }));
+            // END DEBUG
+
             // Only show for regular (non-attachment, non-note) items
             if (!item || item.isAttachment() || item.isNote()) {
+                console.log("[FilingSuggestions] skipping: attachment or note"); // DEBUG
                 return;
             }
 
             const rag = Zotero.ZoteroRAG;
-            if (!rag?.backendURL) return;
+            if (!rag?.backendURL) {
+                console.log("[FilingSuggestions] skipping: no backendURL"); // DEBUG
+                return;
+            }
 
             const libraryId = _getBackendLibraryId(item);
+            console.log("[FilingSuggestions] fetching suggestions for", item.key, "library", libraryId); // DEBUG
 
             let suggestions;
             try {
@@ -187,7 +254,9 @@ function registerFilingSuggestionsPane() {
                     (...args) => rag.getAuthHeaders(...args),
                     5,
                 );
+                console.log("[FilingSuggestions] suggestions:", JSON.stringify(suggestions)); // DEBUG
             } catch (err) {
+                console.error("[FilingSuggestions] fetch error:", err); // DEBUG
                 // Show an inline error rather than crashing the pane
                 const errDiv = doc.createElement("div");
                 errDiv.className = "rag-suggestions-empty";
@@ -212,6 +281,7 @@ function registerFilingSuggestionsPane() {
             }
         },
     });
+    console.log("[FilingSuggestions] registerSection result:", result); // DEBUG
 }
 
 /**

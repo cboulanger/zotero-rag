@@ -127,7 +127,7 @@ class TestCollectionsAPI(unittest.TestCase):
         self.assertEqual(data[0]["library_id"], "lib1")
         self.assertEqual(data[1]["collection_id"], "col2")
 
-        mock_vs.search_collection_vectors.assert_called_once_with(item_vec, "lib1", limit=5)
+        mock_vs.search_collection_vectors.assert_called_once_with(item_vec, limit=5)
 
     def test_suggest_clamps_limit_to_20(self):
         """limit parameter above 20 is rejected with 422 (FastAPI Query validation)."""
