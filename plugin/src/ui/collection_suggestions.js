@@ -152,10 +152,15 @@ function registerFilingSuggestionsPane() {
         pluginID: PLUGIN_ID,
         header: {
             l10nID: "pane-filing-suggestions",
+            icon: "chrome://zotero/skin/default/zotero/16/universal/copy-collection.svg",
         },
         sidenav: {
             l10nID: "pane-filing-suggestions",
+            icon: "chrome://zotero/skin/default/zotero/itempane/20/libraries-collections.svg",
         },
+
+        // onRender is required by Zotero.ItemPaneManager; async work goes in onAsyncRender.
+        onRender: () => {},
 
         /**
          * @param {{ body: HTMLElement, item: any, doc: Document }} renderCtx
