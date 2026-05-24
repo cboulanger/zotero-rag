@@ -64,7 +64,7 @@ async function _apiFetch(method, url, init = {}) {
  * @property {number} score
  */
 
-const CollectionsAPI = {
+var CollectionsAPI = {
     /**
      * Get the status of collection vectors for a library.
      *
@@ -114,8 +114,8 @@ const CollectionsAPI = {
     /**
      * Get collection suggestions for a given item.
      *
-     * Returns an empty array if the item vector does not exist yet (HTTP 404).
-     * Throws on all other HTTP errors.
+     * Returns an empty array when no item vector exists yet.
+     * Throws on HTTP errors.
      *
      * @param {string} backendURL - Base URL of the backend server
      * @param {string} libraryId - Zotero library identifier
@@ -128,11 +128,7 @@ const CollectionsAPI = {
         const url = `${backendURL}/api/collections/suggest?library_id=${encodeURIComponent(libraryId)}&item_key=${encodeURIComponent(itemKey)}&limit=${encodeURIComponent(limit)}`;
         const response = await _apiFetch('GET', url, {
             headers: getAuthHeaders(),
-            statusAllowList: [404],
         });
-        if (response.status === 404) {
-            return [];
-        }
         return /** @type {Array<CollectionSuggestion>} */ (await response.json());
     },
 };

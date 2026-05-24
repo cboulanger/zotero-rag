@@ -204,7 +204,7 @@ class CollectionVectorService:
         collection_names: dict[str, str],
         item_metadata: Optional[dict[str, dict]] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
-    ) -> dict:
+    ) -> dict[str, int]:
         """
         Full sync: compute item vectors for all items, then collection centroids.
 

@@ -469,6 +469,9 @@ var RemoteIndexer = {
 		]);
 
 		// 7. Compute collection vectors (non-blocking — failure does not affect indexing result)
+		// TODO: Use item_vector_pending from upload responses to call the per-item update endpoint
+		//       (POST /api/collections/vectors/update-item) instead of a full sync, making
+		//       incremental runs O(new_items) instead of O(library_size).
 		if (!isCancelled() && typeof CollectionsAPI !== 'undefined') {
 			try {
 				onProgress({
@@ -1334,6 +1337,7 @@ var RemoteIndexer = {
 		for (const item of items) {
 			if (item.isAttachment() || item.isNote()) continue;
 			const colIDs = item.getCollections(); // returns array of internal integer IDs
+			// Unfiled items are intentionally excluded: no collection membership → no suggestion signal.
 			if (!colIDs.length) continue;
 			const colKeys = [];
 			for (const colID of colIDs) {

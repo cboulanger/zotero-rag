@@ -291,8 +291,8 @@ describe('CollectionsAPI', () => {
             assert.equal(JSON.stringify(result), JSON.stringify(expected));
         });
 
-        test('returns [] on 404 (item vector not yet computed)', async () => {
-            sandbox.fetch = async () => mockJsonResponse(404, { detail: 'Item not found' });
+        test('returns [] when no item vector exists (backend returns 200 + empty array)', async () => {
+            sandbox.fetch = async () => mockJsonResponse(200, []);
 
             const result = await CollectionsAPI.suggestCollections(
                 'http://localhost:8000',
@@ -301,9 +301,7 @@ describe('CollectionsAPI', () => {
                 getAuthHeaders
             );
 
-            // The array is from the vm context so deepStrictEqual fails on cross-realm array.
-            // Use length check and JSON comparison instead.
-            assert.equal(result.length, 0, 'expected empty array on 404');
+            assert.equal(result.length, 0, 'expected empty array when no vector exists');
         });
 
         test('throws on 500 error', async () => {
