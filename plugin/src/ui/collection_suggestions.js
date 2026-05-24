@@ -16,8 +16,8 @@
  * - If no suggestions are available, an empty-state message is shown
  */
 
-const PANE_ID = "zotero-rag-filing-suggestions";
-const PLUGIN_ID = "zotero-rag@cboulanger.github.io";
+var PANE_ID = "zotero-rag-filing-suggestions";
+var PLUGIN_ID = "zotero-rag@cboulanger.github.io";
 
 /**
  * Derive the backend library ID for a given Zotero item.
@@ -135,7 +135,9 @@ async function _moveItemToCollection(item, collectionKey) {
     const currentCollections = item.getCollections(); // returns array of internal IDs
     item.addToCollection(col.id);
     for (const existingId of currentCollections) {
-        item.removeFromCollection(existingId);
+        if (existingId !== col.id) {  // don't remove the collection we just added
+            item.removeFromCollection(existingId);
+        }
     }
     await item.saveTx();
 }
