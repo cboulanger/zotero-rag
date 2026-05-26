@@ -46,12 +46,18 @@ function _injectStyles(doc) {
     const style = doc.createElement("style");
     style.id = "rag-suggestions-style";
     style.textContent = `
-        .rag-suggestion-row { display: flex; align-items: center; padding: 2px 4px; }
-        .rag-suggestion-row .box { flex: 1; display: flex; align-items: center; gap: 4px; }
-        .rag-suggestion-row .rag-score { font-size: 0.85em; opacity: 0.7; margin-left: 4px; }
-        .rag-suggestion-row .rag-actions { display: none; gap: 4px; }
-        .rag-suggestion-row:hover .rag-actions { display: flex; }
-        .rag-suggestion-row .rag-actions button { font-size: 0.8em; padding: 1px 6px; }
+        .rag-suggestions-headline { font-size: 0.9em; font-weight: bold; margin: 4px 4px 2px; opacity: 0.8; }
+        .rag-suggestions-table { width: 100%; border-collapse: collapse; }
+        .rag-suggestion-row td { padding: 2px 4px; vertical-align: middle; }
+        .rag-path-cell { width: 100%; }
+        .rag-path-inner { display: flex; align-items: center; gap: 4px; }
+        .rag-path-label { cursor: pointer; flex: 1; }
+        .rag-path-label:hover { text-decoration: underline; }
+        .rag-score { font-size: 0.85em; opacity: 0.7; white-space: nowrap; }
+        .rag-actions-cell { white-space: nowrap; }
+        .rag-actions { visibility: hidden; display: flex; gap: 4px; align-items: center; }
+        .rag-suggestion-row:hover .rag-actions { visibility: visible; }
+        .rag-actions button { font-size: 0.8em; padding: 1px 6px; }
     `;
     (doc.head || doc.documentElement).appendChild(style);
 }
@@ -101,36 +107,68 @@ function _buildCollectionPath(backendLibraryId, collectionKey, fallbackName) {
 }
 
 /**
- * Build a single suggestion row element.
+ * Navigate the Zotero UI to the specified collection in the collections tree.
+ *
+ * @param {string} backendLibraryId
+ * @param {string} collectionKey
+ * @returns {Promise<void>}
+ */
+async function _selectCollection(backendLibraryId, collectionKey) {
+    const zoteroLibraryID = _resolveZoteroLibraryID(backendLibraryId);
+    if (zoteroLibraryID === null) return;
+    const col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, collectionKey);
+    if (!col) return;
+    const zp = Zotero.getActiveZoteroPane();
+    const cv = zp && zp.collectionsView;
+    if (cv && cv.selectCollection) {
+        await cv.selectCollection(col.id);
+    }
+}
+
+/**
+ * Build a single suggestion row as a table row element.
  *
  * @param {import('../api/collections.js').CollectionSuggestion} suggestion
  * @param {any} item - Zotero item
  * @param {Document} doc
- * @returns {HTMLElement}
+ * @returns {HTMLTableRowElement}
  */
 function _buildSuggestionRow(suggestion, item, doc) {
-    const row = /** @type {HTMLElement} */ (doc.createElement("div"));
+    const row = /** @type {HTMLTableRowElement} */ (doc.createElement("tr"));
     row.className = "rag-suggestion-row";
     row.dataset.collectionKey = suggestion.collection_id;
 
-    const box = doc.createElement("div");
-    box.className = "box";
+    // --- Path cell ---
+    const pathCell = doc.createElement("td");
+    pathCell.className = "rag-path-cell";
+
+    const pathInner = doc.createElement("div");
+    pathInner.className = "rag-path-inner";
 
     const icon = doc.createElement("span");
     icon.className = "icon icon-css icon-collection";
 
     const label = doc.createElement("span");
-    label.className = "label";
+    label.className = "rag-path-label";
     label.textContent = _buildCollectionPath(suggestion.library_id, suggestion.collection_id, suggestion.collection_name);
+    label.title = label.textContent;
+    label.addEventListener("click", () => _selectCollection(suggestion.library_id, suggestion.collection_id));
 
     const score = doc.createElement("span");
     score.className = "rag-score";
     score.textContent = `${Math.round(suggestion.score * 100)}%`;
 
-    box.append(icon, label, score);
+    pathInner.append(icon, label, score);
+    pathCell.appendChild(pathInner);
+
+    // --- Actions cell ---
+    const actionsCell = doc.createElement("td");
+    actionsCell.className = "rag-actions-cell";
 
     const actions = doc.createElement("div");
     actions.className = "rag-actions";
+
+    const isSameLibrary = _resolveZoteroLibraryID(suggestion.library_id) === item.libraryID;
 
     const copyBtn = doc.createElement("button");
     copyBtn.textContent = "Copy";
@@ -145,9 +183,16 @@ function _buildSuggestionRow(suggestion, item, doc) {
         await _moveItemToCollection(item, suggestion.library_id, suggestion.collection_id);
         row.remove();
     };
+    // Move across libraries is not possible (foreign-key constraint);
+    // use visibility:hidden so the cell always reserves the same width
+    if (!isSameLibrary) {
+        moveBtn.style.visibility = "hidden";
+        moveBtn.style.pointerEvents = "none";
+    }
 
     actions.append(copyBtn, moveBtn);
-    row.append(box, actions);
+    actionsCell.appendChild(actions);
+    row.append(pathCell, actionsCell);
     return row;
 }
 
@@ -164,8 +209,15 @@ async function _copyItemToCollection(item, backendLibraryId, collectionKey) {
     if (zoteroLibraryID === null) return;
     const col = Zotero.Collections.getByLibraryAndKey(zoteroLibraryID, collectionKey);
     if (!col) return;
-    item.addToCollection(col.id);
-    await item.saveTx();
+    if (item.libraryID === zoteroLibraryID) {
+        item.addToCollection(col.id);
+        await item.saveTx();
+    } else {
+        // Cross-library: clone the item's metadata into the target library
+        const newItem = item.clone(zoteroLibraryID);
+        newItem.addToCollection(col.id);
+        await newItem.saveTx();
+    }
 }
 
 /**
@@ -268,17 +320,39 @@ function registerFilingSuggestionsPane() {
             // Inject styles once per document (idempotent)
             _injectStyles(doc);
 
-            if (!suggestions.length) {
+            // Filter out collections the item is already in (same-library only)
+            const itemBackendLibraryId = _getBackendLibraryId(item);
+            const currentCollectionKeys = new Set(
+                item.getCollections()
+                    .map((/** @type {number} */ id) => Zotero.Collections.get(id)?.key)
+                    .filter(/** @param {string|undefined} k */ k => !!k)
+            );
+            const filteredSuggestions = suggestions.filter(
+                (/** @type {any} */ s) =>
+                    s.library_id !== itemBackendLibraryId || !currentCollectionKeys.has(s.collection_id)
+            );
+
+            if (!filteredSuggestions.length) {
                 const empty = doc.createElement("div");
                 empty.className = "rag-suggestions-empty";
-                empty.setAttribute("data-l10n-id", "pane-filing-suggestions-empty");
+                empty.textContent = "No suggestions yet. Index this item first.";
                 body.appendChild(empty);
                 return;
             }
 
-            for (const suggestion of suggestions) {
-                body.appendChild(_buildSuggestionRow(suggestion, item, doc));
+            const headline = doc.createElement("div");
+            headline.className = "rag-suggestions-headline";
+            headline.textContent = "Suggested collections";
+            body.appendChild(headline);
+
+            const table = doc.createElement("table");
+            table.className = "rag-suggestions-table";
+            const tbody = doc.createElement("tbody");
+            for (const suggestion of filteredSuggestions) {
+                tbody.appendChild(_buildSuggestionRow(suggestion, item, doc));
             }
+            table.appendChild(tbody);
+            body.appendChild(table);
         },
     });
     console.log("[FilingSuggestions] registerSection result:", result); // DEBUG
