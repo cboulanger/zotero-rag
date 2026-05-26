@@ -492,10 +492,21 @@ var RemoteIndexer = {
 				if (_zoteroLibraryID) {
 					// Build collection membership map from the local Zotero database
 					const { collectionMap, collectionNames } = await this._buildCollectionMap(_zoteroLibraryID);
-					await CollectionsAPI.syncCollectionVectors(
+					// BEGIN DEBUG
+					const collectionMapSize = Object.keys(collectionMap).length;
+					const uniqueCollections = new Set(Object.values(collectionMap).flat());
+					log(`[RemoteIndexer] [DIAG] collection sync: libraryId=${libraryId} zoteroLibraryID=${_zoteroLibraryID} items_in_map=${collectionMapSize} unique_collections=${uniqueCollections.size}`);
+					if (collectionMapSize === 0) {
+						log(`[RemoteIndexer] [DIAG] collection sync: collectionMap is empty — no items in collections? Skipping sync.`);
+					}
+					// END DEBUG
+					const syncStats = await CollectionsAPI.syncCollectionVectors(
 						backendURL, libraryId, collectionMap, collectionNames,
 						getAuthHeaders, signal,
 					);
+					// BEGIN DEBUG
+					log(`[RemoteIndexer] [DIAG] collection sync result: ${JSON.stringify(syncStats)}`);
+					// END DEBUG
 					log(`[RemoteIndexer] Collection vectors synced`);
 				}
 			} catch (err) {
@@ -1326,9 +1337,17 @@ var RemoteIndexer = {
 		const search = new Zotero.Search();
 		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
 		const itemIDs = await search.search();
+		// BEGIN DEBUG
+		console.log(`[RemoteIndexer] [DIAG] _buildCollectionMap: zoteroLibraryID=${zoteroLibraryID} search returned ${itemIDs.length} item IDs`);
+		// END DEBUG
 		if (!itemIDs.length) return { collectionMap: {}, collectionNames: {} };
 
 		const items = await Zotero.Items.getAsync(itemIDs);
+		// BEGIN DEBUG
+		const regularItems = items.filter((/** @type {any} */ i) => !i.isAttachment() && !i.isNote());
+		const unfiledItems = regularItems.filter((/** @type {any} */ i) => !i.getCollections().length);
+		console.log(`[RemoteIndexer] [DIAG] _buildCollectionMap: total=${items.length} regular=${regularItems.length} unfiled=${unfiledItems.length} (unfiled excluded from sync)`);
+		// END DEBUG
 		/** @type {Object.<string, string[]>} */
 		const collectionMap = {};
 		/** @type {Object.<string, string>} */

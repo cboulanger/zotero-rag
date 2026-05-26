@@ -103,6 +103,8 @@ class CollectionVectorService:
         vector: Optional[list[float]] = None
         source: Optional[str] = None
 
+        # DEBUG
+        logger.debug("compute_item_vector: %s/%s embed_text_len=%d has_full_abstract=%s", library_id, item_key, len(embed_text), has_full_abstract)
         if embed_text:
             vector = await self.embedding_service.embed_text(embed_text)
             # Treat an all-zero or empty result as unusable
@@ -117,8 +119,8 @@ class CollectionVectorService:
                 self.vector_store.get_chunk_vectors_for_item, library_id, item_key
             )
             if not chunk_vectors:
-                logger.debug(
-                    "No text or chunks available for item %s/%s — skipping.",
+                logger.debug(  # DEBUG
+                    "compute_item_vector: no text or chunks for %s/%s - skipping",
                     library_id,
                     item_key,
                 )

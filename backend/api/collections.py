@@ -1,4 +1,7 @@
 """
+
+
+
 Provides:
 - GET  /api/collections/vectors/status  - counts of item and collection vectors
 - POST /api/collections/vectors/sync    - full-library sync of item/collection vectors
@@ -90,6 +93,14 @@ async def sync_collection_vectors(
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
     try:
+        # DEBUG
+        logger.debug(
+            "sync_collection_vectors: library_id=%s items_in_map=%d unique_collections=%d",
+            request.library_id,
+            len(request.collection_map),
+            len({c for cols in request.collection_map.values() for c in cols}),
+        )
+        # END DEBUG
         client_keys = get_client_api_keys(http_request)
         try:
             embedding_service = make_embedding_service(client_keys)
@@ -142,11 +153,16 @@ def suggest_collections(
 
     try:
         item_result = vector_store.get_item_vector(library_id, item_key)
+        # DEBUG
+        logger.debug("suggest_collections: library_id=%s item_key=%s item_vector_found=%s", library_id, item_key, item_result is not None)  # DEBUG
         if item_result is None:
+            logger.debug("suggest_collections: no item vector for %s/%s - returning []", library_id, item_key)  # DEBUG
             return []
 
         item_vector, _ = item_result
         results = vector_store.search_collection_vectors(item_vector, limit=limit)
+        # DEBUG
+        logger.debug("suggest_collections: collection_vectors search returned %d result(s)", len(results))  # DEBUG
         return [
             CollectionSuggestion(
                 collection_id=coll_id,
