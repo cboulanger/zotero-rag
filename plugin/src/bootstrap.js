@@ -36,9 +36,10 @@ async function startup({ id, version, rootURI }) {
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 
-	// Load collections API client and filing suggestions UI
+	// Load collections API client, filing suggestions UI, and item navigation
 	Services.scriptloader.loadSubScript(rootURI + 'api/collections.js');
 	Services.scriptloader.loadSubScript(rootURI + 'ui/collection_suggestions.js');
+	Services.scriptloader.loadSubScript(rootURI + 'ui/item_navigation.js');
 
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;
@@ -47,6 +48,8 @@ async function startup({ id, version, rootURI }) {
 
 	// Register the item pane section for filing suggestions
 	registerFilingSuggestionsPane();
+	// Register item navigation (Back/Forward buttons)
+	registerItemNavigation();
 }
 
 function onMainWindowLoad({ window }) {
@@ -62,6 +65,8 @@ function shutdown() {
 
 	// Unregister the filing suggestions item pane section
 	try { unregisterFilingSuggestionsPane(); } catch (_) {}
+	// Unregister item navigation
+	try { unregisterItemNavigation(); } catch (_) {}
 
 	if (ZoteroRAG) {
 		ZoteroRAG.removeFromAllWindows();

@@ -5,4 +5,6 @@
 export type FluentMessageId =
   | 'pane-filing-suggestions'
   | 'pane-filing-suggestions-empty'
+  | 'pane-filing-suggestions-title'
+  | 'pane-item-navigation'
   | 'zotero-rag-ask-question';
