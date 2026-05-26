@@ -206,12 +206,16 @@ Once a library has been indexed, the backend also maintains a separate layer of 
 
 When you select an item in Zotero, a **Filing Suggestions** section appears in the item details panel (click the folder-with-plus icon in the sidenav). It shows the collections — across all your indexed libraries — whose centroid is most similar to the selected item's embedding, ranked by similarity score.
 
-Each suggestion row displays the full path of the collection (e.g. *My Library / Science / Astrophysics*) and a percentage score. Hovering over a row reveals two action buttons:
+Each suggestion row displays the full path of the collection (e.g. *My Library / Science / Astrophysics*) and a percentage score. Clicking the path navigates the collections tree to that collection so you can inspect its contents. Hovering over a row reveals two action buttons:
 
 - **Copy** — adds the item to the suggested collection while leaving it in its current collections.
 - **Move** — adds the item to the suggested collection and removes it from all existing collections.
 
 After an action the row disappears from the list. The collection vectors for the affected collections are recomputed in the background the next time the library is synced.
+
+##### Navigating back to the item
+
+Clicking a collection path switches the library view to that collection, which deselects the item and hides the Filing Suggestions pane. To return, use the **← Back** and **Forward →** buttons that appear in the footer of the item pane. These buttons maintain a history of recently viewed items across the entire session, so you can navigate back to the item you were reviewing and continue filing it into other collections.
 
 Collection vectors are computed automatically as a non-blocking stage at the end of each indexing run. Items not assigned to any collection are excluded (they have no membership signal to learn from). The first time you index a library after upgrading to a version that includes this feature, the full sync runs automatically in the background.
 
