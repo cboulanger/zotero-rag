@@ -1,3 +1,10 @@
+# [1.30.0](https://github.com/cboulanger/zotero-rag/compare/v1.29.1...v1.30.0) (2026-06-17)
+
+
+### Features
+
+* replace hardcoded KISSKI model list with dynamic API fetch ([306cd73](https://github.com/cboulanger/zotero-rag/commit/306cd733ebf23b28a665323027d2e678e22a45b6))
+
 ## [1.29.1](https://github.com/cboulanger/zotero-rag/compare/v1.29.0...v1.29.1) (2026-05-19)
 
 
