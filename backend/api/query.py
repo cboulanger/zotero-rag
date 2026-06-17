@@ -98,7 +98,8 @@ async def query_libraries(
         client_keys = get_client_api_keys(http_request)
 
         embedding_service = make_embedding_service(client_keys)
-        if query.llm_model and query.llm_model not in preset.llm.model_names:
+        # For presets with a live model endpoint the allowed set is dynamic; skip static validation.
+        if query.llm_model and not preset.llm.models_status_url and query.llm_model not in preset.llm.model_names:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model '{query.llm_model}' not in preset model list: {preset.llm.model_names}"

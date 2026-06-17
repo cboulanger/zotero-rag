@@ -7,12 +7,12 @@ from pydantic import BaseModel
 from typing import Dict, List, Optional
 import logging
 import os
-import httpx
 
 from backend.config.settings import get_settings
 from backend.config.presets import PRESETS
 from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header
 from backend.services.llm import RemoteLLMService
+from backend.utils.kisski import fetch_kisski_rag_models
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -58,9 +58,13 @@ class ConfigUpdateRequest(BaseModel):
 
 
 @router.get("/config", response_model=ConfigResponse)
-async def get_config():
+def get_config(request: Request):
     """
     Get current configuration and available presets.
+
+    For presets with a live models endpoint (e.g. KISSKI), the LLM model list is
+    fetched dynamically and ordered by availability. Falls back to the preset's
+    static model list if the live fetch fails.
 
     Returns:
         Current configuration including active preset and model settings.
@@ -68,13 +72,36 @@ async def get_config():
     settings = get_settings()
     preset = PRESETS[settings.model_preset]
 
+    # Try to fetch a live, ordered model list for presets that support it
+    llm_models = preset.llm.model_names
+    if preset.llm.models_status_url:
+        api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
+        base_url = preset.llm.model_kwargs.get("base_url", "")
+        if api_key_env and base_url:
+            header_name = env_var_to_header(api_key_env)
+            api_key = (
+                request.headers.get(header_name)
+                or os.environ.get(api_key_env)
+                or ""
+            )
+            if api_key:
+                try:
+                    live_models = fetch_kisski_rag_models(base_url, api_key)
+                    if live_models:
+                        llm_models = [m.id for m in live_models]
+                except Exception as exc:
+                    logger.warning(
+                        "Could not fetch live models from %s: %s — using preset fallback",
+                        base_url, exc,
+                    )
+
     return ConfigResponse(
         preset_name=settings.model_preset,
         api_version=settings.version,
         embedding_model=preset.embedding.model_name,
         embedding_model_type=preset.embedding.model_type,
-        llm_model=preset.llm.model_name,
-        llm_models=preset.llm.model_names,
+        llm_model=llm_models[0] if llm_models else preset.llm.model_name,
+        llm_models=llm_models,
         vector_db_path=str(settings.vector_db_path),
         model_cache_dir=str(settings.model_weights_path),
         available_presets=list(PRESETS.keys()),
@@ -86,7 +113,7 @@ async def get_config():
 
 
 @router.post("/config")
-async def update_config(request: ConfigUpdateRequest):
+def update_config(update: ConfigUpdateRequest, request: Request):
     """
     Update configuration settings.
 
@@ -94,7 +121,8 @@ async def update_config(request: ConfigUpdateRequest):
     To persist changes, update the .env file or environment variables.
 
     Args:
-        request: Configuration update request with optional fields.
+        update: Configuration update request with optional fields.
+        request: FastAPI request (forwarded to get_config for auth header resolution).
 
     Returns:
         Updated configuration.
@@ -104,10 +132,10 @@ async def update_config(request: ConfigUpdateRequest):
     """
     settings = get_settings()
 
-    if request.preset_name and request.preset_name not in PRESETS:
+    if update.preset_name and update.preset_name not in PRESETS:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid preset: {request.preset_name}. "
+            detail=f"Invalid preset: {update.preset_name}. "
                    f"Available presets: {list(PRESETS.keys())}"
         )
 
@@ -117,7 +145,7 @@ async def update_config(request: ConfigUpdateRequest):
     return {
         "message": "Configuration update received. "
                    "Note: Changes require server restart to take effect.",
-        "current_config": await get_config()
+        "current_config": get_config(request)
     }
 
 
@@ -173,18 +201,25 @@ def get_models_status(request: Request):
     """
     Return per-model demand/availability metrics for the active preset.
 
-    Calls the configured `models_status_url` (KISSKI format) and filters the
-    result to models listed in the current preset.  Returns an empty list if
-    the preset has no `models_status_url` or if the upstream call fails.
+    Fetches the live model list from the configured ``models_status_url``,
+    filters to RAG-suitable models, and returns them ordered by demand
+    (most available first).  Returns an empty list if the preset has no
+    ``models_status_url`` or if the upstream call fails.
+
+    The ``status`` field contains a human-readable availability label:
+    ``"available"`` (demand 0), ``"busy"`` (1–5), or ``"very busy"`` (6+).
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
-    status_url = preset.llm.models_status_url
 
-    if not status_url:
+    if not preset.llm.models_status_url:
         return ModelsStatusResponse(models=[])
 
     api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
+    base_url = preset.llm.model_kwargs.get("base_url", "")
+    if not base_url:
+        return ModelsStatusResponse(models=[])
+
     header_name = env_var_to_header(api_key_env) if api_key_env else ""
     api_key = (
         (request.headers.get(header_name) if header_name else None)
@@ -193,24 +228,15 @@ def get_models_status(request: Request):
     )
 
     try:
-        resp = httpx.post(
-            status_url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=5.0,
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
+        live_models = fetch_kisski_rag_models(base_url, api_key)
     except Exception as exc:
-        logger.warning("Could not fetch model status from %s: %s", status_url, exc)
+        logger.warning("Could not fetch model status from %s: %s", preset.llm.models_status_url, exc)
         return ModelsStatusResponse(models=[])
 
-    allowed = set(preset.llm.model_names)
-    models = [
-        ModelStatus(model=entry["id"], demand=int(entry.get("demand", 0)), status=entry.get("status", "unknown"))
-        for entry in data
-        if isinstance(entry, dict) and entry.get("id") in allowed
-    ]
-    return ModelsStatusResponse(models=models)
+    return ModelsStatusResponse(models=[
+        ModelStatus(model=m.id, demand=m.demand, status=m.availability)
+        for m in live_models
+    ])
 
 
 @router.get("/version")

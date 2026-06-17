@@ -46,13 +46,14 @@ class LLMConfig(BaseModel):
         return self.model_names[0]
 
 
-# Best general-purpose models available on KISSKI for RAG answer generation.
-# First entry is the default. Order: quality × practicality.
+# Fallback model list for KISSKI presets — used only when the live API is unreachable.
+# The active preset replaces this list at runtime via fetch_kisski_rag_models().
+# First entry is the default. Update when models are decommissioned on KISSKI.
 KISSKI_RAG_MODELS: List[str] = [
-    "llama-3.3-70b-instruct",               # proven RAG default, strong instruction following
+    "mistral-large-3-675b-instruct-2512",   # Mistral Large 3, excellent general-purpose
     "qwen3.5-122b-a10b",                    # large MoE, high quality
     "gemma-4-31b-it",                       # efficient, multimodal-capable
-    "mistral-large-3-675b-instruct-2512",   # Mistral Large 3, excellent general-purpose
+    "deepseek-r1-distill-llama-70b",        # reasoning model, strong instruction following
     "qwen3-30b-a3b-instruct-2507",          # text-focused MoE, recent Qwen3
 ]
 
