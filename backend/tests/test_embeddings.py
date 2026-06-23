@@ -3,11 +3,15 @@ Unit tests for embedding service.
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from datetime import datetime, timezone, timedelta
+from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import numpy as np
+
+from openai import RateLimitError as OpenAIRateLimitError
 
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
+    EmbeddingRateLimitExhaustedError,
     EmbeddingService,
     LocalEmbeddingService,
     RemoteEmbeddingService,
@@ -266,6 +270,88 @@ class TestCreateEmbeddingService(unittest.TestCase):
                 model_type="invalid",  # type: ignore
                 model_name="test",
             )
+
+
+class TestEmbeddingRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
+    """Verify that long retry-after values raise EmbeddingRateLimitExhaustedError."""
+
+    def _make_service(self) -> RemoteEmbeddingService:
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="text-embedding-3-small",
+            batch_size=10,
+            cache_enabled=False,
+        )
+        return RemoteEmbeddingService(config, api_key="test-key")
+
+    async def test_long_retry_after_header_raises_exhausted(self):
+        """retry-after > 60 s must raise EmbeddingRateLimitExhaustedError immediately."""
+        service = self._make_service()
+
+        mock_response = MagicMock()
+        mock_response.headers = {"retry-after": "3600"}  # 1 hour
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            before = datetime.now(timezone.utc)
+            with self.assertRaises(EmbeddingRateLimitExhaustedError) as ctx:
+                await service._create_embeddings_with_backoff(["hello"])
+            after = datetime.now(timezone.utc)
+
+        err = ctx.exception
+        self.assertIsInstance(err.available_at, datetime)
+        # available_at should be roughly now + 3600 s (allow 5 s tolerance)
+        expected_min = before + timedelta(seconds=3595)
+        expected_max = after + timedelta(seconds=3605)
+        self.assertGreater(err.available_at, expected_min)
+        self.assertLess(err.available_at, expected_max)
+
+    async def test_no_retry_after_header_raises_exhausted(self):
+        """Missing retry-after on a RateLimitError must raise EmbeddingRateLimitExhaustedError."""
+        service = self._make_service()
+
+        mock_response = MagicMock()
+        mock_response.headers = {}  # no header
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingRateLimitExhaustedError):
+                await service._create_embeddings_with_backoff(["hello"])
+
+    async def test_short_retry_after_retries_then_succeeds(self):
+        """retry-after <= 60 s should sleep and retry (not raise EmbeddingRateLimitExhaustedError)."""
+        service = self._make_service()
+
+        mock_response = MagicMock()
+        mock_response.headers = {"retry-after": "1"}  # 1 second — short
+        rate_exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        success_raw = MagicMock()
+        success_raw.headers = {}
+        success_raw.parse.return_value = MagicMock(data=[MagicMock(embedding=[0.1, 0.2])])
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(
+                side_effect=[rate_exc, success_raw]
+            )
+            result = await service._create_embeddings_with_backoff(["hello"])
+
+        mock_sleep.assert_awaited_once()
+        sleep_duration = mock_sleep.call_args[0][0]
+        self.assertGreater(sleep_duration, 0.9)  # at least the server-supplied 1 s
+        self.assertLess(sleep_duration, 3.0)     # plus small jitter only
+        self.assertIsNotNone(result)
 
 
 if __name__ == "__main__":

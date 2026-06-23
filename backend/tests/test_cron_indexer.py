@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -227,6 +228,84 @@ class TestIsProcessAlive(unittest.TestCase):
     def test_nonexistent_pid_is_not_alive(self):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
+
+
+class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):
+    """CronIndexer must store rate-limit expiry in status and exit early on next run."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    async def test_exhausted_error_writes_rate_limit_until_and_skips_remaining(self):
+        """When EmbeddingRateLimitExhaustedError is raised mid-run, remaining slugs are skipped."""
+        from datetime import timedelta
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+
+        available_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        exc = EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)
+
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp)
+
+        async def fail_on_first(slug_info, status):
+            if slug_info.slug == "users/1":
+                raise exc
+            return {"items_processed": 5, "chunks_added": 10}
+
+        indexer._index_slug = fail_on_first
+        await indexer.run()
+
+        status = json.loads((self.tmp / "cron_status.json").read_text())
+        self.assertIn("embedding_rate_limit_until", status)
+        stored = datetime.fromisoformat(status["embedding_rate_limit_until"])
+        self.assertAlmostEqual(
+            stored.timestamp(), available_at.timestamp(), delta=2
+        )
+        # The failing slug itself must also be marked skipped (not errored)
+        self.assertEqual(status["slugs"]["users/1"]["status"], "skipped")
+        # Second slug must be skipped, not errored
+        self.assertEqual(status["slugs"]["users/2"]["status"], "skipped")
+        self.assertEqual(
+            status["slugs"]["users/2"].get("skip_reason"), "embedding_rate_limit"
+        )
+
+    async def test_early_exit_when_rate_limit_still_active(self):
+        """run() exits immediately if cron_status.json has a future embedding_rate_limit_until."""
+        from datetime import timedelta
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        status_data = {"embedding_rate_limit_until": future}
+        (self.tmp / "cron_status.json").write_text(json.dumps(status_data))
+
+        indexer = _make_indexer(["users/1"], self.tmp)
+        _index_slug_called = []
+
+        async def track_call(slug_info, status):
+            _index_slug_called.append(slug_info.slug)
+            return {"items_processed": 0, "chunks_added": 0}
+
+        indexer._index_slug = track_call
+        result = await indexer.run()
+
+        self.assertEqual(_index_slug_called, [], "Should not index any slugs while rate-limited")
+        self.assertIn("skipped", result)
+
+    async def test_no_early_exit_when_rate_limit_expired(self):
+        """run() proceeds normally if embedding_rate_limit_until is in the past."""
+        from datetime import timedelta
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        status_data = {"embedding_rate_limit_until": past}
+        (self.tmp / "cron_status.json").write_text(json.dumps(status_data))
+
+        indexer = _make_indexer(["users/1"], self.tmp)
+        _index_slug_called = []
+
+        async def track_call(slug_info, status):
+            _index_slug_called.append(slug_info.slug)
+            return {"items_processed": 3, "chunks_added": 6}
+
+        indexer._index_slug = track_call
+        await indexer.run()
+
+        self.assertEqual(_index_slug_called, ["users/1"])
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ Includes content-hash based caching to avoid recomputing embeddings.
 """
 
 import asyncio
-import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import os
@@ -21,6 +21,19 @@ from backend.config.presets import EmbeddingConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingRateLimitExhaustedError(Exception):
+    """Raised when the embedding API rate limit cannot be resolved within the run.
+
+    ``available_at`` is the UTC datetime after which the service is expected
+    to accept requests again, derived from the ``retry-after`` response header.
+    """
+
+    def __init__(self, message: str, available_at: datetime):
+        super().__init__(message)
+        self.available_at = available_at
+
 
 # Module-level cache for rate-limit headers received from the last remote embedding call.
 # Updated by RemoteEmbeddingService after every API response (success or 429).
@@ -343,11 +356,17 @@ class RemoteEmbeddingService(EmbeddingService):
         return name
 
     async def _create_embeddings_with_backoff(self, input: Any) -> Any:
-        """Call the embeddings API with exponential backoff on rate-limit errors.
+        """Call the embeddings API, handling rate limits and transient errors.
 
-        Reads the ``retry-after`` / ``ratelimit-reset`` header when available to
-        wait the exact amount of time the server requests, falling back to
-        exponential backoff with jitter (max 8 attempts, cap 64 s).
+        For rate limit errors (HTTP 429):
+        - If the server supplies a short ``retry-after`` (≤ ``max_rate_limit_wait`` s),
+          waits exactly that duration and retries.
+        - If the server requests a longer wait, or provides no ``retry-after`` header,
+          raises ``EmbeddingRateLimitExhaustedError`` immediately with an ``available_at``
+          timestamp so the caller can skip future attempts until the quota resets.
+
+        For transient ``InternalServerError`` responses, uses exponential backoff
+        (max ``max_attempts`` attempts, base delay ``base_delay`` s).
         """
         from openai import BadRequestError, InternalServerError, RateLimitError
 
@@ -376,9 +395,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 await asyncio.sleep(retry_after)
             except RateLimitError as exc:
-                if attempt == max_attempts - 1:
-                    raise
-                # Try to honour the server's requested wait time.
+                # Extract the server-supplied retry-after (in seconds).
                 retry_after: Optional[float] = None
                 headers = getattr(exc, "response", None) and exc.response.headers
                 if headers:
@@ -391,23 +408,31 @@ class RemoteEmbeddingService(EmbeddingService):
                             except ValueError:
                                 pass
                             break
-                if retry_after is None:
-                    retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                else:
-                    # Add small jitter even to server-supplied values.
-                    retry_after += random.uniform(0, 1)
-                if retry_after > max_rate_limit_wait:
-                    wait_str = str(datetime.timedelta(seconds=int(retry_after)))
-                    raise RateLimitError(
-                        f"Rate limit exceeded and server requested a wait of {wait_str} "
-                        f"(max allowed: {max_rate_limit_wait:.0f}s). "
-                        "The API quota (daily or monthly) is likely exhausted.",
-                        response=exc.response,
-                        body=None,
-                    )
+
+                if retry_after is None or retry_after > max_rate_limit_wait:
+                    # No hint or long wait: quota is likely exhausted.
+                    if retry_after is not None:
+                        available_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+                        wait_str = str(timedelta(seconds=int(retry_after)))
+                        msg = (
+                            f"Embedding rate limit exhausted; server requests {wait_str} wait. "
+                            f"Available at {available_at.isoformat()} UTC."
+                        )
+                    else:
+                        available_at = datetime.now(timezone.utc) + timedelta(seconds=max_rate_limit_wait)
+                        wait_str = str(timedelta(seconds=int(max_rate_limit_wait)))
+                        msg = (
+                            f"Embedding rate limit exhausted; no retry-after header supplied. "
+                            f"Estimated available after {wait_str} "
+                            f"({available_at.isoformat()} UTC)."
+                        )
+                    raise EmbeddingRateLimitExhaustedError(msg, available_at=available_at) from exc
+
+                # Short wait supplied by server — honor it exactly (no exponential backoff).
+                retry_after += random.uniform(0, 1)  # small jitter to avoid thundering herd
                 logger.warning(
-                    f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
-                    f"Waiting {retry_after:.1f}s before retry."
+                    "Rate limit hit (attempt %d/%d). Waiting %.1fs (server-supplied).",
+                    attempt + 1, max_attempts, retry_after,
                 )
                 self.rate_limit_retries += 1
                 self.rate_limit_wait_seconds += retry_after

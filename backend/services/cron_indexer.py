@@ -26,7 +26,7 @@ from typing import Callable, Literal, Optional
 from backend.api.public_query import slug_to_backend_id
 from backend.db.vector_store import VectorStore
 from backend.services.document_processor import DocumentProcessor
-from backend.services.embeddings import EmbeddingService
+from backend.services.embeddings import EmbeddingService, EmbeddingRateLimitExhaustedError
 from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
@@ -186,6 +186,34 @@ class CronIndexer:
 
         Raises AlreadyRunningError if another instance is alive.
         """
+        # Read before acquiring the lock — only the indexer writes this file, so no race risk.
+        # Exit early if a previous run stored a future rate-limit expiry.
+        existing = self._read_status()
+        rate_limit_until_str = existing.get("embedding_rate_limit_until")
+        if rate_limit_until_str:
+            try:
+                rate_limit_until = datetime.fromisoformat(rate_limit_until_str)
+                if rate_limit_until.tzinfo is None:
+                    rate_limit_until = rate_limit_until.replace(tzinfo=timezone.utc)
+                if rate_limit_until > datetime.now(timezone.utc):
+                    remaining = (rate_limit_until - datetime.now(timezone.utc)).total_seconds()
+                    self.log.warning(
+                        "Embedding service rate-limited until %s (%.0f s remaining). "
+                        "Skipping this run.",
+                        rate_limit_until_str,
+                        remaining,
+                    )
+                    return {
+                        "items_processed": 0,
+                        "chunks_added": 0,
+                        "libraries": [],
+                        "skipped": "embedding_rate_limit",
+                    }
+            except ValueError:
+                self.log.warning(
+                    "Invalid embedding_rate_limit_until in status: %r", rate_limit_until_str
+                )
+
         slug_infos = [self.parse_slug(s) for s in self.slugs]
 
         self._acquire_lock()
@@ -229,6 +257,19 @@ class CronIndexer:
                 total_stats["items_processed"] += slug_stats.get("items_processed", 0)
                 total_stats["chunks_added"] += slug_stats.get("chunks_added", 0)
                 total_stats["libraries"].append(slug_info.slug)
+
+        except EmbeddingRateLimitExhaustedError as exc:
+            self.log.error(
+                "Embedding quota exhausted: %s. Service available again at %s.",
+                exc,
+                exc.available_at.isoformat(),
+            )
+            status["embedding_rate_limit_until"] = exc.available_at.isoformat()
+            for si in slug_infos:
+                if status["slugs"][si.slug].get("status") in ("pending", "indexing"):
+                    status["slugs"][si.slug]["status"] = "skipped"
+                    status["slugs"][si.slug]["skip_reason"] = "embedding_rate_limit"
+            # Do not re-raise — quota exhaustion is an expected operational condition.
 
         except Exception as exc:
             self.log.error("Fatal error during cron indexing: %s", exc, exc_info=True)
@@ -288,6 +329,8 @@ class CronIndexer:
                 "chunks_added": stats.get("chunks_added", 0),
                 "last_update": datetime.now(timezone.utc).isoformat(),
             }
+        except EmbeddingRateLimitExhaustedError:
+            raise  # let run() handle quota exhaustion centrally
         except Exception as exc:
             self.log.error("Error indexing %s: %s", slug_info.slug, exc, exc_info=True)
             status["slugs"][slug_info.slug]["status"] = "error"
