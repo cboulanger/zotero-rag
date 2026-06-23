@@ -1,3 +1,10 @@
+## [1.32.1](https://github.com/cboulanger/zotero-rag/compare/v1.32.0...v1.32.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* persist rate-limit headers to cron_status.json for cross-process visibility ([68fbd73](https://github.com/cboulanger/zotero-rag/commit/68fbd739583633bdc3ed9cde66293687a6766532))
+
 # [1.32.0](https://github.com/cboulanger/zotero-rag/compare/v1.31.2...v1.32.0) (2026-06-23)
 
 
