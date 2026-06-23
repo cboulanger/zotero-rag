@@ -1,3 +1,10 @@
+## [1.31.1](https://github.com/cboulanger/zotero-rag/compare/v1.31.0...v1.31.1) (2026-06-23)
+
+
+### Bug Fixes
+
+* copy bin/ into container image and set DATA_PATH=/data ([864b294](https://github.com/cboulanger/zotero-rag/commit/864b2940c5b2a8169ca8d35cca3bc8fa31f088c1))
+
 # [1.31.0](https://github.com/cboulanger/zotero-rag/compare/v1.30.0...v1.31.0) (2026-06-23)
 
 
