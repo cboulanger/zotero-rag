@@ -150,6 +150,12 @@ class Settings(BaseSettings):
         description="Path to log file. Defaults to <data_path>/logs/server.log."
     )
 
+    zotero_api_key: Optional[str] = Field(
+        default=None,
+        description="Zotero API key for cron indexing via api.zotero.org. "
+                    "Create at https://www.zotero.org/settings/keys"
+    )
+
     require_registration: bool = Field(
         default=True,
         description="Require users to register before indexing. "

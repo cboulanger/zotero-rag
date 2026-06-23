@@ -108,7 +108,7 @@ def backend_id_to_slug(backend_id: str) -> str:
 # Zotero web API helpers
 # ---------------------------------------------------------------------------
 
-ZOTERO_API_BASE = "https://api.zotero.org"
+from backend.zotero.web_api import ZOTERO_API_BASE  # canonical definition lives there
 ZOTERO_WEB_BASE = "https://www.zotero.org"
 _META_FETCH_TIMEOUT = 5.0
 

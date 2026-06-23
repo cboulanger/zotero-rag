@@ -189,7 +189,7 @@ app.include_router(public_query.router, tags=["public"])
 
 
 @app.get("/")
-async def root(request: Request):
+def root(request: Request):
     """Root endpoint — service info, preset config, and vector store statistics."""
     preset = settings.get_hardware_preset()
     vector_store: VectorStore = request.app.state.vector_store
@@ -203,7 +203,7 @@ async def root(request: Request):
     except Exception as exc:
         db_stats = {"error": str(exc)}
 
-    return {
+    response = {
         "service": "Zotero RAG API",
         "version": __version__,
         "status": "running",
@@ -238,6 +238,24 @@ async def root(request: Request):
             "libraries": db_stats.get("metadata_count"),
         },
     }
+
+    # Attach cron indexing status if the status file exists
+    cron_status_path = settings.data_path / "system" / "cron_status.json"
+    if cron_status_path.exists():
+        try:
+            import json as _json
+            from backend.services.cron_indexer import is_process_alive
+            cron_data = _json.loads(cron_status_path.read_text(encoding="utf-8"))
+            # If the file says running=True but the PID is dead, mark as crashed
+            if cron_data.get("running") and cron_data.get("pid"):
+                if not is_process_alive(int(cron_data["pid"])):
+                    cron_data["running"] = False
+                    cron_data["crashed"] = True
+            response["cron_indexing"] = cron_data
+        except Exception as exc:
+            logger.warning("Failed to read cron status file: %s", exc)
+
+    return response
 
 
 async def _check_http(client: httpx.AsyncClient, url: str) -> tuple[str, str | None]:

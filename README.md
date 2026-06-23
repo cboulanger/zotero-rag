@@ -24,6 +24,7 @@ Most document-chat tools require you to manually upload PDFs to a cloud service.
 - **Rich source citations** — answers include page numbers and text anchors (first words of the source passage), not just titles, making it easy to locate the original passage.
 - **Multi-format** — indexes PDFs, HTML snapshots, EPUB, and DOCX attachments — not PDFs only.
 - **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin.
+- **Headless / cron indexing** — index libraries directly via the Zotero web API without Zotero running, using a standalone script suitable for scheduled server-side jobs.
 - **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code.
 
 ## Quick Start
@@ -230,6 +231,22 @@ This reads the CSV, creates a `journalArticle` item in the Zotero group library 
 
 Both env vars can be set in `.env` (see `.env.dist` for the template entries). Only group libraries are supported.
 
+#### Headless / Cron Indexing
+
+Libraries can be indexed without the Zotero desktop app or the plugin by calling the Zotero web API directly. This is useful for automated nightly jobs on headless servers.
+
+```bash
+# Index a user library and a group library
+uv run python bin/index_libraries.py users/12345 groups/678
+
+# Force a full re-index
+uv run python bin/index_libraries.py users/12345 --mode full
+```
+
+Requires `ZOTERO_API_KEY` in `.env`. Indexing progress is exposed on the `/` root endpoint under the `cron_indexing` key while a run is active.
+
+See [docs/cron-indexing.md](docs/cron-indexing.md) for cron job setup, all CLI options, and troubleshooting.
+
 ## Versioning and Release Policy
 
 The project uses [Semantic Release](https://github.com/semantic-release/semantic-release) workflow, which relies on [Semantic Versioning](https://semver.org/) principles. This determines the version number. The major version increases each time a backwards-incompatible change is being merged in terms of the frontend (plugin client) and backend (server) communication. All backend and frontend instances with the same major version number should be compatible and will handle missing new features gracefully.
@@ -246,6 +263,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 - **[CLI commands](docs/cli.md)**
 - **[Setup CI/CD](docs/setup-ci-cd.md)**
 - **[Resources for coding agents](docs/agents.md)**
+- **[Cron / headless indexing](docs/cron-indexing.md)**
 
 ## License
 
