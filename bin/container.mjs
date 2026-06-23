@@ -196,7 +196,28 @@ function confirm(question) {
 // ============================================================================
 
 /**
+ * Return the MTU of the host's default outbound interface, or null if it can't be determined.
+ * Used to match the container bridge MTU to the host, preventing TLS handshake failures on
+ * cloud VMs where the host interface MTU is lower than the default 1500 (e.g. 1450 with tunnels).
+ * @returns {number|null}
+ */
+function getHostMTU() {
+  try {
+    const route = execSync('ip route show default', { encoding: 'utf8' }).trim();
+    const iface = route.match(/dev\s+(\S+)/)?.[1];
+    if (!iface) return null;
+    const link = execSync(`ip link show ${iface}`, { encoding: 'utf8' });
+    const mtu = link.match(/mtu\s+(\d+)/)?.[1];
+    return mtu ? parseInt(mtu, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ensure the shared Docker network exists; create it if absent.
+ * Matches the bridge MTU to the host's default interface to avoid TLS failures on
+ * cloud VMs with tunnel-reduced MTU (e.g. ens3 at 1450 vs bridge default 1500).
  * @param {string} name
  */
 function ensureNetwork(name) {
@@ -205,7 +226,10 @@ function ensureNetwork(name) {
     return; // already exists
   } catch {}
   try {
-    execSync(`${containerCmd} network create ${name}`, { stdio: 'inherit' });
+    const mtu = getHostMTU();
+    const mtuArg = mtu && mtu < 1500 ? `--opt mtu=${mtu} ` : '';
+    if (mtu && mtu < 1500) console.log(`[INFO] Host MTU is ${mtu} — setting network MTU to match`);
+    execSync(`${containerCmd} network create ${mtuArg}${name}`, { stdio: 'inherit' });
     console.log(`[INFO] Created network ${name}`);
   } catch (e) {
     console.log(`[ERROR] Failed to create network ${name}: ${e.message}`);
