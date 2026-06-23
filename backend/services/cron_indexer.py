@@ -247,6 +247,9 @@ class CronIndexer:
 
                 slug_stats = await self._index_slug(slug_info, status)
 
+                rate_limit_headers = await self.embedding_service.get_rate_limit_info()
+                if rate_limit_headers:
+                    status["last_rate_limit_headers"] = rate_limit_headers
                 status["slugs"][slug_info.slug].update({
                     "status": "done",
                     "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -265,6 +268,9 @@ class CronIndexer:
                 exc.available_at.isoformat(),
             )
             status["embedding_rate_limit_until"] = exc.available_at.isoformat()
+            rate_limit_headers = await self.embedding_service.get_rate_limit_info()
+            if rate_limit_headers:
+                status["last_rate_limit_headers"] = rate_limit_headers
             for si in slug_infos:
                 if status["slugs"][si.slug].get("status") in ("pending", "indexing"):
                     status["slugs"][si.slug]["status"] = "skipped"

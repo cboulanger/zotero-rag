@@ -21,15 +21,18 @@ def _make_indexer(
     tmp_dir: Path,
     mode: str = "auto",
     max_items: int | None = None,
+    rate_limit_headers: dict | None = None,
 ) -> CronIndexer:
     """Construct a CronIndexer with mocked services and temp files."""
     import logging
     log = logging.getLogger("test_cron_indexer")
+    embedding_service = MagicMock()
+    embedding_service.get_rate_limit_info = AsyncMock(return_value=rate_limit_headers)
     return CronIndexer(
         slugs=slugs,
         api_key="test-api-key",
         vector_store=MagicMock(),
-        embedding_service=MagicMock(),
+        embedding_service=embedding_service,
         lock_file=tmp_dir / "cron.lock",
         status_file=tmp_dir / "cron_status.json",
         log=log,
@@ -267,6 +270,40 @@ class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             status["slugs"]["users/2"].get("skip_reason"), "embedding_rate_limit"
         )
+
+    async def test_rate_limit_headers_persisted_to_status_after_successful_slug(self):
+        """Rate-limit headers returned by the embedding service are saved to cron_status.json."""
+        headers = {"x-ratelimit-remaining-requests": "42", "x-ratelimit-limit-requests": "100"}
+        indexer = _make_indexer(["users/1"], self.tmp, rate_limit_headers=headers)
+
+        async def dummy_index(slug_info, status):
+            return {"items_processed": 1, "chunks_added": 2}
+
+        indexer._index_slug = dummy_index
+        await indexer.run()
+
+        status = json.loads((self.tmp / "cron_status.json").read_text())
+        self.assertEqual(status.get("last_rate_limit_headers"), headers)
+
+    async def test_rate_limit_headers_persisted_to_status_on_exhausted_error(self):
+        """Rate-limit headers are saved to cron_status.json even when quota is exhausted."""
+        from datetime import timedelta
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+
+        available_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        exc = EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)
+        headers = {"x-ratelimit-remaining-requests": "0", "x-ratelimit-limit-requests": "100"}
+        indexer = _make_indexer(["users/1"], self.tmp, rate_limit_headers=headers)
+
+        async def raise_exc(slug_info, status):
+            raise exc
+
+        indexer._index_slug = raise_exc
+        await indexer.run()
+
+        status = json.loads((self.tmp / "cron_status.json").read_text())
+        self.assertIn("embedding_rate_limit_until", status)
+        self.assertEqual(status.get("last_rate_limit_headers"), headers)
 
     async def test_early_exit_when_rate_limit_still_active(self):
         """run() exits immediately if cron_status.json has a future embedding_rate_limit_until."""
