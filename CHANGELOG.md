@@ -1,3 +1,10 @@
+# [1.31.0](https://github.com/cboulanger/zotero-rag/compare/v1.30.0...v1.31.0) (2026-06-23)
+
+
+### Features
+
+* add headless cron indexing via Zotero web API ([04ac305](https://github.com/cboulanger/zotero-rag/commit/04ac305f00cab669085ef51c39200b39e46317bb))
+
 # [1.30.0](https://github.com/cboulanger/zotero-rag/compare/v1.29.1...v1.30.0) (2026-06-17)
 
 
