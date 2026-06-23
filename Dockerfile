@@ -21,11 +21,13 @@ FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY backend/ ./backend/
+COPY bin/ ./bin/
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONPATH=/app
 
 # Data directory for persistent storage
 VOLUME /data
+ENV DATA_PATH=/data
 ENV VECTOR_DB_PATH=/data/qdrant
 ENV MODEL_WEIGHTS_PATH=/data/models
 ENV LOG_FILE=/data/logs/server.log

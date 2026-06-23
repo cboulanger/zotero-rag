@@ -26,7 +26,7 @@ Useful for:
 
 3. The backend dependencies must be installed (`uv sync`).
 
-## Running Manually
+## Running Manually (local installation)
 
 ```bash
 # Index one user library and one group library
@@ -66,7 +66,58 @@ groups/678
 groups/999
 ```
 
-## Setting Up a Scheduled Job
+## Running Inside a Container
+
+When the backend runs as a container (via `container.mjs`), run the script
+with `podman exec` against the `zotero-rag` container:
+
+```bash
+podman exec zotero-rag uv run python bin/index_libraries.py users/12345 groups/678
+```
+
+The container already has the right data path (`DATA_PATH=/data`) and all
+backend dependencies. No host Python or `uv` installation is needed.
+
+### Passing ZOTERO_API_KEY to the container
+
+Add the key to your `.env.deploy-<target>` file so it is injected at
+container start:
+
+```env
+# .env.deploy-myserver  (or .env.deploy-localhost)
+ZOTERO_API_KEY=your_key_here
+```
+
+Then re-deploy or restart the container:
+
+```bash
+node bin/deploy.mjs .env.deploy-myserver
+# or just restart if the env file already has the key:
+node bin/container.mjs restart
+```
+
+Alternatively, pass it once at exec time (no restart required):
+
+```bash
+podman exec -e ZOTERO_API_KEY=your_key_here zotero-rag \
+  uv run python bin/index_libraries.py users/12345
+```
+
+### Scheduling inside the container host
+
+Add a cron entry on the host that calls `podman exec`:
+
+```cron
+# /etc/cron.d/zotero-rag-index  (or crontab -e)
+0 2 * * * podman exec zotero-rag uv run python bin/index_libraries.py users/12345 groups/678
+```
+
+Log output goes to `/data/logs/cron_indexer.log` inside the container
+(i.e. `<DATA_DIR>/logs/cron_indexer.log` on the host).
+
+---
+
+## Setting Up a Scheduled Job (local installation)
 
 ### Linux / macOS (cron)
 
