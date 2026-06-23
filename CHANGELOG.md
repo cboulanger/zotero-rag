@@ -1,3 +1,15 @@
+# [1.32.0](https://github.com/cboulanger/zotero-rag/compare/v1.31.2...v1.32.0) (2026-06-23)
+
+
+### Bug Fixes
+
+* live-update chunks_added in cron indexer status during indexing ([152a9dd](https://github.com/cboulanger/zotero-rag/commit/152a9dd71bb76eff84fe9a6e63f10678429ebd01))
+
+
+### Features
+
+* replace exponential backoff with quota-aware rate-limit handling in cron indexer ([433593b](https://github.com/cboulanger/zotero-rag/commit/433593b4f0f6b43ce81eb92b9bc2e137ee7855f6))
+
 ## [1.31.2](https://github.com/cboulanger/zotero-rag/compare/v1.31.1...v1.31.2) (2026-06-23)
 
 
