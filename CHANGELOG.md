@@ -1,3 +1,10 @@
+## [1.31.2](https://github.com/cboulanger/zotero-rag/compare/v1.31.1...v1.31.2) (2026-06-23)
+
+
+### Bug Fixes
+
+* match container network MTU to host interface on creation ([8cdc86e](https://github.com/cboulanger/zotero-rag/commit/8cdc86ebae3af9ccf2e00c161e799410b7c02a0e))
+
 ## [1.31.1](https://github.com/cboulanger/zotero-rag/compare/v1.31.0...v1.31.1) (2026-06-23)
 
 
