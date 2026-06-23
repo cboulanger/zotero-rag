@@ -286,8 +286,8 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         progress_calls = []
 
-        def progress_callback(current, total):
-            progress_calls.append((current, total))
+        def progress_callback(current, total, chunks_added):
+            progress_calls.append((current, total, chunks_added))
 
         result = await self.processor.index_library(
             "test_lib",
@@ -296,9 +296,13 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         # Should have initial + one call per item
         self.assertGreaterEqual(len(progress_calls), 3)
-        self.assertEqual(progress_calls[0], (0, 2))  # Initial
-        self.assertEqual(progress_calls[1], (1, 2))  # After first item
-        self.assertEqual(progress_calls[2], (2, 2))  # After second item
+        self.assertEqual(progress_calls[0][:2], (0, 2))  # Initial
+        self.assertEqual(progress_calls[1][:2], (1, 2))  # After first item
+        self.assertEqual(progress_calls[2][:2], (2, 2))  # After second item
+        # chunks_added must be non-negative and non-decreasing
+        chunk_counts = [c for _, _, c in progress_calls]
+        self.assertTrue(all(c >= 0 for c in chunk_counts))
+        self.assertEqual(chunk_counts, sorted(chunk_counts))
 
     async def test_index_library_fatal_error(self):
         """Test handling of fatal errors during indexing."""

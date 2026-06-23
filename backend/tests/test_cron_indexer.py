@@ -200,7 +200,7 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         async def fake_index_library(**kwargs):
             cb = kwargs.get("progress_callback")
             if cb:
-                cb(5, 20)   # simulate progress at item 5 of 20
+                cb(5, 20, 50)   # simulate progress at item 5 of 20, 50 chunks so far
             return {"items_processed": 20, "chunks_added": 100}
 
         with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \

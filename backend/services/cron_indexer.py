@@ -295,11 +295,12 @@ class CronIndexer:
         web_api = ZoteroWebAPI(api_key=self.api_key)
         counter = {"n": 0}  # mutable counter for closure
 
-        def progress_callback(current: int, total: int) -> None:
+        def progress_callback(current: int, total: int, chunks_added: int) -> None:
             counter["n"] += 1
             entry = status["slugs"][slug_info.slug]
             entry["items_processed"] = current
             entry["items_total"] = total
+            entry["chunks_added"] = chunks_added
             if counter["n"] % self.progress_update_interval == 0:
                 self._write_status(status)
 

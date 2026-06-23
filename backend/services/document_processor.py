@@ -95,7 +95,7 @@ class DocumentProcessor:
         library_type: str = "user",
         library_name: str = "Unknown",
         mode: Literal["auto", "incremental", "full"] = "auto",
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
         cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
@@ -110,7 +110,7 @@ class DocumentProcessor:
                 - "auto": Automatically choose best mode (recommended)
                 - "incremental": Only index new/modified items
                 - "full": Reindex entire library
-            progress_callback: Optional callback for progress updates (current, total).
+            progress_callback: Optional callback for progress updates (current, total, chunks_added).
             cancellation_check: Optional callback that returns True if cancellation requested.
             max_items: Optional maximum number of items to process (for testing).
 
@@ -182,7 +182,7 @@ class DocumentProcessor:
         library_id: str,
         library_type: str,
         metadata: LibraryIndexMetadata,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
         cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
@@ -225,7 +225,7 @@ class DocumentProcessor:
 
         # Report initial progress
         if progress_callback:
-            progress_callback(0, total_items)
+            progress_callback(0, total_items, 0)
 
         for idx, item in enumerate(items_with_attachments):
             # Check for cancellation
@@ -264,7 +264,7 @@ class DocumentProcessor:
             finally:
                 # Always report progress
                 if progress_callback:
-                    progress_callback(idx + 1, total_items)
+                    progress_callback(idx + 1, total_items, chunks_added)
 
         # Update metadata with new version
         metadata.last_indexed_version = max_version_seen
@@ -284,7 +284,7 @@ class DocumentProcessor:
         library_id: str,
         library_type: str,
         metadata: LibraryIndexMetadata,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
         cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
@@ -327,7 +327,7 @@ class DocumentProcessor:
 
         # Report initial progress
         if progress_callback:
-            progress_callback(0, total_items)
+            progress_callback(0, total_items, 0)
 
         for idx, item in enumerate(items_with_attachments):
             # Check for cancellation
@@ -349,7 +349,7 @@ class DocumentProcessor:
             finally:
                 # Always report progress
                 if progress_callback:
-                    progress_callback(idx + 1, total_items)
+                    progress_callback(idx + 1, total_items, chunks_added)
 
         # Update metadata
         metadata.last_indexed_version = max_version_seen

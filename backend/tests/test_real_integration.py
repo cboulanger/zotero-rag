@@ -268,7 +268,7 @@ async def test_index_real_library(
 
     # Track progress
     progress_updates = []
-    def track_progress(current: int, total: int):
+    def track_progress(current: int, total: int, chunks_added: int = 0):
         progress_updates.append((current, total))
         print(f"  Progress: {current}/{total} items processed")
 
@@ -325,7 +325,7 @@ async def test_incremental_indexing(
     )
 
     # Track progress
-    def track_progress(current: int, total: int):
+    def track_progress(current: int, total: int, chunks_added: int = 0):
         print(f"  Progress: {current}/{total} items processed")
 
     # First indexing
@@ -395,7 +395,7 @@ async def test_rag_query_end_to_end(
     )
 
     # Track progress
-    def track_progress(current: int, total: int):
+    def track_progress(current: int, total: int, chunks_added: int = 0):
         print(f"  Progress: {current}/{total} items processed")
 
     print(f"\nIndexing library {TEST_LIBRARY_ID} for RAG test...")
@@ -477,7 +477,7 @@ async def test_multi_query_consistency(
     )
 
     # Track progress
-    def track_progress(current: int, total: int):
+    def track_progress(current: int, total: int, chunks_added: int = 0):
         print(f"  Progress: {current}/{total} items processed")
 
     print(f"\nIndexing library {TEST_LIBRARY_ID}...")
