@@ -18,10 +18,12 @@ class RateLimitResponse(BaseModel):
 
 @router.get("/rate-limits", response_model=RateLimitResponse)
 async def get_rate_limits(http_request: Request):
-    """Return cached rate-limit headers from the last embedding API call.
+    """Return current rate-limit headers for the configured embedding API.
 
-    Checks the in-process cache first (populated during same-process indexing),
-    then falls back to cron_status.json (populated by the cron indexer process).
+    Resolution order:
+    1. In-process cache (populated during same-process indexing/upload).
+    2. cron_status.json written by the cron indexer (separate process).
+    3. Live probe: a minimal single-item embedding call to fetch fresh headers.
     """
     client_keys = get_client_api_keys(http_request)
     embedding_service = make_embedding_service(client_keys)
@@ -37,5 +39,12 @@ async def get_rate_limits(http_request: Request):
                 info = cron_data.get("last_rate_limit_headers") or None
         except Exception as exc:
             logger.debug("Could not read rate-limit headers from cron status: %s", exc)
+
+    if info is None:
+        # Last resort: make a live probe call to the embedding API.
+        try:
+            info = await embedding_service.probe_rate_limits()
+        except Exception as exc:
+            logger.debug("Rate-limit probe call failed: %s", exc)
 
     return RateLimitResponse(available=info is not None, limits=info)

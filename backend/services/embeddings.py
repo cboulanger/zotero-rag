@@ -109,6 +109,14 @@ class EmbeddingService(ABC):
         """Return cached rate-limit headers from the last API call, or None if not applicable."""
         ...
 
+    async def probe_rate_limits(self) -> dict[str, str] | None:
+        """Make a minimal live API call to fetch current rate-limit headers.
+
+        Default returns None (no rate limits for local services). Override in
+        remote services to make a cheap single-item embedding call.
+        """
+        return None
+
     @staticmethod
     def compute_content_hash(text: str) -> str:
         """Compute SHA256 hash of text content for caching."""
@@ -346,6 +354,21 @@ class RemoteEmbeddingService(EmbeddingService):
             _last_rate_limit_headers = extracted
 
     async def get_rate_limit_info(self) -> dict[str, str] | None:
+        return _last_rate_limit_headers
+
+    async def probe_rate_limits(self) -> dict[str, str] | None:
+        """Embed a single short string to fetch fresh rate-limit headers from the API."""
+        client = self._get_client()
+        model = self._resolve_model_name()
+        try:
+            raw = await client.embeddings.with_raw_response.create(
+                model=model,
+                input=[""],
+                encoding_format="float",
+            )
+            self._capture_rate_limit_headers(raw.headers)
+        except Exception:
+            pass
         return _last_rate_limit_headers
 
     def _resolve_model_name(self) -> str:
