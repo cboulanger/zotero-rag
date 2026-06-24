@@ -6,6 +6,111 @@
 - The deploy commands in `bin/container.mjs` only support podman
 - For compose operations use `podman compose` (not `docker-compose`)
 
+## Debugging and Hotfixing a Production Container
+
+### Deployment overview
+
+Production instances are deployed with:
+```bash
+sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .local/.env.deploy.<target>
+```
+This requires a CI-built image in the registry (`DEPLOY_PULL=true`). For hotfixes without CI, see below.
+
+The deploy env file (`.local/.env.deploy.<target>`) contains `DEPLOY_*` keys that map to `container.mjs deploy` flags, plus container env vars. The critical keys for identifying containers:
+
+```
+DEPLOY_FQDN=rag.example.com   # determines container names
+DEPLOY_TAG=latest              # image tag
+DEPLOY_PORT=9119               # host port
+```
+
+### Deriving container names
+
+Container names are derived deterministically from `DEPLOY_FQDN` (dots replaced with hyphens):
+
+```
+APP_NAME = "zotero-rag"   (constant, defined in bin/container.mjs)
+FQDN     = "rag.example.com"
+
+Main container:      zotero-rag-rag-example-com
+Qdrant sidecar:      zotero-rag-rag-example-com-qdrant
+Kreuzberg sidecar:   zotero-rag-rag-example-com-kreuzberg
+Systemd service:     zotero-rag  (or the value of DEPLOY_SYSTEMD_SERVICE)
+Image name:          zotero-rag:latest
+```
+
+To confirm names at any time: `sudo podman ps | grep zotero-rag`
+
+### Two separate podman image stores
+
+`podman` (no sudo) and `sudo podman` use **different image stores**:
+- User store: `~/.local/share/containers/storage` — used by `node bin/container.mjs build`
+- Root store: `/var/lib/containers/storage` — used by systemd / `sudo podman run`
+
+**`node bin/container.mjs build` is useless for production.** Always build with `sudo podman build` when the service runs under systemd as root.
+
+### How the systemd service works
+
+The service definition uses `ExecStartPre=-/usr/bin/podman rm -f <container-name>`, so **every restart creates a fresh container from the current image**. This means:
+- `sudo podman cp` file changes into a running container **are lost on the next restart**
+- Sending SIGHUP to the container (via `sudo podman kill --signal HUP`) signals PID 1 (the shell wrapper), which kills it; systemd then restarts from the unchanged image
+- The only way to make changes survive restarts is to rebuild the image
+
+### Hotfix workflow (no CI required)
+
+For small changes (1–few files), use a thin patch image. Full rebuilds re-download all dependencies and often time out on slow connections.
+
+**1. Edit the source files** normally with Edit/Write tools.
+
+**2. Build a thin patch image** (seconds, no network):
+```bash
+# Create a temporary patch Dockerfile listing only the changed files
+cat > /tmp/Dockerfile.patch << 'EOF'
+FROM localhost/zotero-rag:latest
+COPY backend/path/to/changed.py /app/backend/path/to/changed.py
+EOF
+
+sudo podman build -f /tmp/Dockerfile.patch -t zotero-rag:latest /home/cloud/zotero-rag
+```
+
+**3. Verify the new image has the change:**
+```bash
+sudo podman run --rm zotero-rag:latest grep -c "new_symbol" /app/backend/path/to/changed.py
+```
+
+**4. Restart the service:**
+```bash
+sudo systemctl restart zotero-rag.service   # or the value of DEPLOY_SYSTEMD_SERVICE
+```
+
+**5. Verify** (allow ~8s for startup):
+```bash
+sleep 8 && sudo systemctl status zotero-rag.service | head -5
+```
+
+### Inspecting the running container
+
+```bash
+# Check logs
+sudo podman logs -f zotero-rag-rag-example-com
+
+# Run a one-off command inside the container
+sudo podman exec zotero-rag-rag-example-com python3 -c "..."
+
+# Check which image the container is running from
+sudo podman inspect zotero-rag-rag-example-com --format '{{.Image}}'
+
+# List env vars (includes API keys — handle carefully)
+sudo podman exec zotero-rag-rag-example-com env
+```
+
+### Cleanup
+
+After hotfixing, remove non-root (user-space) images to free space:
+```bash
+podman rmi --all
+```
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
