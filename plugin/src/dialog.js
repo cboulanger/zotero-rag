@@ -748,9 +748,9 @@ var ZoteroRAGDialog = {
 			&& effectiveTotal !== undefined
 			&& indexed < effectiveTotal;
 
-		// Warning icon when there is a count gap OR unavailable items the user can fix.
-		// Green checkmark appears only when both conditions are clear.
-		const isPartial = isCountGap || (metadata !== null && missingFiles > 0);
+		// Warning icon only when there is a count gap (available items not yet indexed).
+		// Unavailable items are shown via the clickable link but don't affect the status icon.
+		const isPartial = isCountGap;
 
 		if (statusIcon) {
 			if (!metadata) {
