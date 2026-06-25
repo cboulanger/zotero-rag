@@ -1,3 +1,10 @@
+## [1.33.2](https://github.com/cboulanger/zotero-rag/compare/v1.33.1...v1.33.2) (2026-06-25)
+
+
+### Bug Fixes
+
+* update test_incremental_indexing for smart-sync full mode ([973defd](https://github.com/cboulanger/zotero-rag/commit/973defde378cbf30a0c0069a4ba3169e4000f2b4))
+
 ## [1.33.1](https://github.com/cboulanger/zotero-rag/compare/v1.33.0...v1.33.1) (2026-06-25)
 
 
