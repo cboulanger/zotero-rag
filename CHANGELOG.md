@@ -1,3 +1,16 @@
+# [1.33.0](https://github.com/cboulanger/zotero-rag/compare/v1.32.1...v1.33.0) (2026-06-25)
+
+
+### Bug Fixes
+
+* probe embedding API live when no cached rate-limit headers exist ([6dc7662](https://github.com/cboulanger/zotero-rag/commit/6dc76624b30856009eaacfe557c744953e754f7c))
+* show green checkmark for libraries with all available items indexed ([3828d3a](https://github.com/cboulanger/zotero-rag/commit/3828d3ab58428b7257fc88f7dc55bbe459cb9b23))
+
+
+### Features
+
+* **cron:** force full re-index on interrupted runs and under-indexed libraries ([80ebbbe](https://github.com/cboulanger/zotero-rag/commit/80ebbbe33aa21258b9ccc466b9713fd466f8c7d8))
+
 ## [1.32.1](https://github.com/cboulanger/zotero-rag/compare/v1.32.0...v1.32.1) (2026-06-23)
 
 
