@@ -1,3 +1,10 @@
+## [1.33.1](https://github.com/cboulanger/zotero-rag/compare/v1.33.0...v1.33.1) (2026-06-25)
+
+
+### Bug Fixes
+
+* replace wipe-and-rebuild full indexing with safe smart sync ([4dcc438](https://github.com/cboulanger/zotero-rag/commit/4dcc438d187b75736f47b7dcf53cc762bd1710e7))
+
 # [1.33.0](https://github.com/cboulanger/zotero-rag/compare/v1.32.1...v1.33.0) (2026-06-25)
 
 
