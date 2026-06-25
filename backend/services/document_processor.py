@@ -199,17 +199,11 @@ class DocumentProcessor:
 
         logger.debug(f"Found {len(items)} items modified since version {since_version}")
 
-        if not items:
-            return {
-                "items_processed": 0,
-                "items_added": 0,
-                "items_updated": 0,
-                "chunks_added": 0,
-                "chunks_deleted": 0
-            }
-
         # Filter to items with indexable attachments
-        items_with_attachments = await self._filter_indexed_attachments(items, library_id, library_type)
+        items_with_attachments = (
+            await self._filter_indexed_attachments(items, library_id, library_type)
+            if items else []
+        )
 
         # Limit items if max_items is specified
         if max_items is not None and max_items > 0:
@@ -266,6 +260,28 @@ class DocumentProcessor:
                 if progress_callback:
                     progress_callback(idx + 1, total_items, chunks_added)
 
+        # Purge chunks for items deleted from Zotero since the last indexed version
+        try:
+            deleted_keys = await self.zotero_client.get_deleted_item_keys(
+                library_id=library_id,
+                library_type=library_type,
+                since_version=since_version,
+            )
+            if deleted_keys:
+                logger.info(
+                    "Incremental: removing %d deleted Zotero item(s): %s%s",
+                    len(deleted_keys),
+                    deleted_keys[:5],
+                    "..." if len(deleted_keys) > 5 else "",
+                )
+                for key in deleted_keys:
+                    deleted = self.vector_store.delete_item_chunks(library_id, key)
+                    chunks_deleted += deleted
+                    if deleted:
+                        self.vector_store.delete_item_deduplication_records(library_id, key)
+        except Exception as exc:
+            logger.warning("Could not fetch deleted item keys: %s", exc)
+
         # Update metadata with new version
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = metadata.total_items_indexed + items_added
@@ -288,51 +304,67 @@ class DocumentProcessor:
         cancellation_check: Optional[Callable[[], bool]] = None,
         max_items: Optional[int] = None
     ) -> dict:
-        """Full indexing: delete all chunks and reindex entire library."""
-        logger.info(f"Full reindex for library {library_id}")
+        """Full sync: add new items, update changed items, delete orphaned chunks.
 
-        # Delete all existing chunks for this library
-        logger.debug("Deleting all existing chunks...")
-        chunks_deleted = self.vector_store.delete_library_chunks(library_id)
-        logger.debug(f"Deleted {chunks_deleted} existing chunks")
+        Unlike the previous "wipe and rebuild" approach, chunks are never deleted
+        upfront.  Existing chunks survive unless the parent Zotero item has been
+        deleted or updated.  This makes interrupted runs safe: already-indexed items
+        remain searchable while the sync continues.
+        """
+        logger.info(f"Full sync for library {library_id}")
 
-        # Also delete deduplication records to allow reprocessing of PDFs
-        logger.debug("Deleting deduplication records...")
-        dedup_deleted = self.vector_store.delete_library_deduplication_records(library_id)
-        logger.debug(f"Deleted {dedup_deleted} deduplication records")
-
-        # Fetch all items
+        # Fetch all items from Zotero
         items = await self.zotero_client.get_library_items_since(
             library_id=library_id,
             library_type=library_type,
-            since_version=None  # Get all items
+            since_version=None  # all items
         )
+        logger.debug(f"Retrieved {len(items)} total items from Zotero")
 
-        logger.debug(f"Retrieved {len(items)} total items")
-
-        # Filter to items with indexable attachments
+        # Filter to items with indexable attachments or substantial abstracts
         items_with_attachments = await self._filter_indexed_attachments(items, library_id, library_type)
+        logger.debug(f"Found {len(items_with_attachments)} indexable items")
 
-        logger.debug(f"Found {len(items_with_attachments)} items with indexable attachments")
-
-        # Limit items if max_items is specified
+        # Limit if max_items is set (test / partial run)
         if max_items is not None and max_items > 0:
             items_with_attachments = items_with_attachments[:max_items]
             logger.debug(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
 
-        # Index all items
+        # Build a set of item keys currently in Zotero
+        current_item_keys = {item["data"]["key"] for item in items_with_attachments}
+
+        # Single scroll to get all indexed item versions — avoids N+1 DB lookups
+        indexed_versions = self.vector_store.get_all_indexed_item_versions(library_id)
+
+        # Delete chunks for items no longer in Zotero (only when we have the full picture)
+        chunks_deleted = 0
+        orphaned_item_count = 0
+        if max_items is None:
+            orphaned_keys = set(indexed_versions) - current_item_keys
+            if orphaned_keys:
+                logger.info(
+                    f"Removing {len(orphaned_keys)} orphaned item(s) from {library_id}: "
+                    f"{list(orphaned_keys)[:5]}{'...' if len(orphaned_keys) > 5 else ''}"
+                )
+                for key in orphaned_keys:
+                    chunks_deleted += self.vector_store.delete_item_chunks(library_id, key)
+                    self.vector_store.delete_item_deduplication_records(library_id, key)
+                orphaned_item_count = len(orphaned_keys)
+
+        # Index items: skip unchanged, update outdated, add new
         chunks_added = 0
+        items_added = 0
+        items_updated = 0
+        items_skipped = 0
         max_version_seen = 0
         total_items = len(items_with_attachments)
 
-        # Report initial progress
         if progress_callback:
             progress_callback(0, total_items, 0)
 
         for idx, item in enumerate(items_with_attachments):
-            # Check for cancellation
             if cancellation_check and cancellation_check():
-                logger.info(f"Cancellation requested during full indexing of library {library_id}")
+                logger.info(f"Cancellation requested during full sync of library {library_id}")
                 raise RuntimeError("Indexing cancelled by user")
 
             try:
@@ -340,26 +372,40 @@ class DocumentProcessor:
                 item_version = item["version"]
                 max_version_seen = max(max_version_seen, item_version)
 
-                # Index item
-                chunk_count = await self._index_item(item, library_id, library_type)
-                chunks_added += chunk_count
+                existing_version = indexed_versions.get(item_key)
+
+                if existing_version is None:
+                    logger.debug(f"New item {item_key} (version {item_version})")
+                    chunk_count = await self._index_item(item, library_id, library_type)
+                    items_added += 1
+                    chunks_added += chunk_count
+                elif existing_version < item_version:
+                    logger.debug(
+                        f"Updated item {item_key} ({existing_version} -> {item_version})"
+                    )
+                    self.vector_store.delete_item_chunks(library_id, item_key)
+                    chunk_count = await self._index_item(item, library_id, library_type)
+                    items_updated += 1
+                    chunks_added += chunk_count
+                else:
+                    items_skipped += 1
 
             except Exception as e:
-                logger.error(f"Error processing item in full mode: {e}", exc_info=True)
+                logger.error(f"Error processing item in full sync mode: {e}", exc_info=True)
             finally:
-                # Always report progress
                 if progress_callback:
                     progress_callback(idx + 1, total_items, chunks_added)
 
-        # Update metadata
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = len(items_with_attachments)
         metadata.last_full_scan_indexable = len(items_with_attachments)
 
         return {
             "items_processed": len(items_with_attachments),
-            "items_added": len(items_with_attachments),
-            "items_updated": 0,
+            "items_added": items_added,
+            "items_updated": items_updated,
+            "items_skipped": items_skipped,
+            "orphaned_items": orphaned_item_count,
             "chunks_added": chunks_added,
             "chunks_deleted": chunks_deleted,
             "last_version": max_version_seen

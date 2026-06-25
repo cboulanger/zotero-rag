@@ -198,6 +198,56 @@ def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends
     return meta
 
 
+class SyncDeletionsRequest(BaseModel):
+    """List of item keys currently present in the Zotero library."""
+    current_item_keys: list[str]
+
+
+class SyncDeletionsResponse(BaseModel):
+    """Result of a sync-deletions call."""
+    deleted_items: int
+    deleted_chunks: int
+
+
+@router.post("/libraries/{library_id}/sync-deletions", response_model=SyncDeletionsResponse)
+def sync_library_deletions(
+    library_id: str,
+    request: SyncDeletionsRequest,
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """Remove chunks for indexed items no longer present in the Zotero library.
+
+    Called by the plugin after it has collected the complete set of current Zotero
+    item keys (parent items only, not attachment keys).  Any indexed item whose key
+    is absent from *current_item_keys* is treated as deleted and its chunks and
+    deduplication records are purged.
+    """
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    try:
+        indexed = vector_store.get_all_indexed_item_versions(library_id)
+        current_keys = set(request.current_item_keys)
+        orphaned = set(indexed) - current_keys
+
+        deleted_chunks = 0
+        for key in orphaned:
+            deleted_chunks += vector_store.delete_item_chunks(library_id, key)
+            vector_store.delete_item_deduplication_records(library_id, key)
+
+        if orphaned:
+            logger.info(
+                "sync-deletions: removed %d orphaned item(s) (%d chunks) from library %s",
+                len(orphaned),
+                deleted_chunks,
+                library_id,
+            )
+
+        return SyncDeletionsResponse(deleted_items=len(orphaned), deleted_chunks=deleted_chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"sync-deletions failed: {str(e)}")
+
+
 @router.delete("/libraries/{library_id}/items/{item_key}/chunks")
 def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
     """

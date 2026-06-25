@@ -163,6 +163,27 @@ class ZoteroWebAPI:
             children = await resp.json()
             return children if isinstance(children, list) else []
 
+    async def get_deleted_item_keys(
+        self,
+        library_id: str,
+        library_type: str = "user",
+        since_version: int = 0,
+    ) -> list[str]:
+        """Return item keys deleted from Zotero since *since_version*.
+
+        Calls GET /{kind}/{id}/deleted?since=version and returns the "items" list.
+        Returns an empty list on error so callers can treat this as best-effort.
+        """
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/deleted"
+        async with self.session.get(url, params={"since": since_version}) as resp:
+            await self._handle_rate_limit(resp)
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("items", [])
+            logger.warning("get_deleted_item_keys failed: HTTP %s", resp.status)
+            return []
+
     async def get_attachment_file(
         self,
         library_id: str,

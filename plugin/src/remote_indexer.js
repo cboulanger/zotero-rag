@@ -463,6 +463,38 @@ var RemoteIndexer = {
 			}
 		}
 
+		// Sync deletions: remove backend chunks for items no longer in Zotero.
+		// abstractItems is always defined above; attachments always contains the full
+		// current attachment list.  This runs in all modes since _collectAttachments
+		// always produces the complete item set for the library.
+		if (!isCancelled()) {
+			const allCurrentItemKeys = [
+				...new Set([
+					...attachments.map(a => a.item_key),
+					...abstractItems.map(a => a.item_key),
+				]),
+			];
+			try {
+				const resp = await this._apiFetch(
+					'POST',
+					`${backendURL}/api/libraries/${libraryId}/sync-deletions`,
+					{
+						headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+						body: JSON.stringify({ current_item_keys: allCurrentItemKeys }),
+						signal,
+						timeout: 60 * 1000,
+					},
+				);
+				const syncResult = /** @type {{deleted_items: number, deleted_chunks: number}} */ (/** @type {unknown} */ (await resp.json()));
+				if (syncResult.deleted_items > 0) {
+					log(`[RemoteIndexer] sync-deletions: removed ${syncResult.deleted_items} item(s) (${syncResult.deleted_chunks} chunks) no longer in Zotero`);
+				}
+			} catch (err) {
+				// Non-fatal: log and continue
+				log(`[RemoteIndexer] sync-deletions failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+
 		await Promise.all([
 			this._saveVersionCache(libraryId, versionCache),
 			this._savePendingCache(libraryId, pendingCache),

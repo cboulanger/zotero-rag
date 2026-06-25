@@ -45,6 +45,10 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             document_extractor=self.mock_extractor,
         )
 
+        # Default stubs for new methods added by the sync-deletion changes
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+        self.mock_zotero_client.get_deleted_item_keys.return_value = []
+
     async def test_init(self):
         """Test initialization."""
         self.assertIsNotNone(self.processor.document_extractor)
@@ -226,7 +230,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["chunks_added"], 0)
 
     async def test_index_library_force_reindex(self):
-        """Test force reindex deletes existing chunks."""
+        """Test force_reindex triggers full sync (smart sync, not a wipe-and-rebuild)."""
         from backend.models.library import LibraryIndexMetadata
         metadata = LibraryIndexMetadata(
             library_id="test_lib",
@@ -237,12 +241,14 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.get_library_metadata.return_value = metadata
 
         self.mock_zotero_client.get_library_items_since.return_value = []
-        self.mock_vector_store.delete_library_chunks.return_value = 42
 
         result = await self.processor.index_library("test_lib", mode="auto")
 
-        # Verify deletion was called (full mode due to force_reindex flag)
-        self.mock_vector_store.delete_library_chunks.assert_called_once_with("test_lib")
+        # Smart sync: upfront wipe must NOT happen
+        self.mock_vector_store.delete_library_chunks.assert_not_called()
+        # Full sync path: get_all_indexed_item_versions must be called
+        self.mock_vector_store.get_all_indexed_item_versions.assert_called_once_with("test_lib")
+        self.assertEqual(result["mode"], "full")
 
     async def test_index_library_progress_callback(self):
         """Test that progress callback is invoked."""
@@ -476,6 +482,86 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_extractor.extract_and_chunk.assert_called_once_with(
             b"<html><body>Hello</body></html>", "text/html"
         )
+
+
+    async def test_full_mode_deletes_orphaned_items(self):
+        """Chunks for items no longer in Zotero are removed during a full sync."""
+        mock_item = {
+            "version": 3,
+            "data": {
+                "key": "CURRENT",
+                "itemType": "journalArticle",
+                "title": "Still here",
+            },
+        }
+        mock_pdf = {
+            "data": {
+                "key": "PDF1",
+                "itemType": "attachment",
+                "contentType": "application/pdf",
+            }
+        }
+
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Content", 1)
+        )
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        # Indexed state: CURRENT + ORPHAN both have chunks
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {
+            "CURRENT": 3,
+            "ORPHAN": 1,
+        }
+        self.mock_vector_store.delete_item_chunks.return_value = 5
+
+        result = await self.processor.index_library("test_lib")
+
+        # Orphaned item must have its chunks deleted
+        self.mock_vector_store.delete_item_chunks.assert_any_call("test_lib", "ORPHAN")
+        self.mock_vector_store.delete_item_deduplication_records.assert_any_call(
+            "test_lib", "ORPHAN"
+        )
+        # CURRENT item has same version → skipped, no second delete_item_chunks call for it
+        self.assertEqual(result["orphaned_items"], 1)
+        self.assertEqual(result["items_skipped"], 1)
+
+    async def test_incremental_mode_handles_deleted_items(self):
+        """Chunks for items deleted from Zotero are purged in incremental mode."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib",
+            library_type="user",
+            library_name="Test Library",
+            last_indexed_version=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+
+        # No modified items, but one key was deleted from Zotero
+        self.mock_zotero_client.get_library_items_since.return_value = []
+        self.mock_zotero_client.get_deleted_item_keys.return_value = ["DELETED_KEY"]
+        self.mock_vector_store.delete_item_chunks.return_value = 3
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        # Must have called get_deleted_item_keys with the version we had
+        self.mock_zotero_client.get_deleted_item_keys.assert_called_once_with(
+            library_id="test_lib",
+            library_type="user",
+            since_version=5,
+        )
+        # Chunks for the deleted item must be removed
+        self.mock_vector_store.delete_item_chunks.assert_called_once_with(
+            "test_lib", "DELETED_KEY"
+        )
+        self.mock_vector_store.delete_item_deduplication_records.assert_called_once_with(
+            "test_lib", "DELETED_KEY"
+        )
+        self.assertEqual(result["chunks_deleted"], 3)
 
 
 if __name__ == "__main__":

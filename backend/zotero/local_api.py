@@ -409,6 +409,18 @@ class ZoteroLocalAPI:
             logger.error(f"Failed to get item: {e}")
             return None
 
+    async def get_deleted_item_keys(
+        self,
+        library_id: str,
+        library_type: str = "user",
+        since_version: int = 0,
+    ) -> list[str]:
+        """Zotero local API has no /deleted endpoint.
+
+        Deletions are handled client-side by the plugin's sync-deletions endpoint.
+        """
+        return []
+
     async def get_item_children(
         self,
         library_id: str,

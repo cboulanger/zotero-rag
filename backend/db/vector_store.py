@@ -679,17 +679,18 @@ class VectorStore:
         logger.debug(f"Added deduplication record for {record.item_key}")
 
     def _ensure_dedup_indexes(self):
-        """Create payload index on content_hash in DEDUP_COLLECTION (idempotent)."""
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                self.client.create_payload_index(
-                    collection_name=self.DEDUP_COLLECTION,
-                    field_name="content_hash",
-                    field_schema="keyword",
-                )
-        except Exception:
-            pass  # already exists or local in-memory instance
+        """Create payload indexes on DEDUP_COLLECTION (idempotent)."""
+        for field in ("content_hash", "library_id", "item_key"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.client.create_payload_index(
+                        collection_name=self.DEDUP_COLLECTION,
+                        field_name=field,
+                        field_schema="keyword",
+                    )
+            except Exception:
+                pass  # already exists or local in-memory instance
 
     def _ensure_chunks_indexes(self):
         """
@@ -874,6 +875,35 @@ class VectorStore:
         )
 
         logger.info(f"Deleted {count_before} deduplication records for library {library_id}")
+        return count_before
+
+    def delete_item_deduplication_records(self, library_id: str, item_key: str) -> int:
+        """Delete deduplication records for a specific item within a library.
+
+        Used when an item is removed from Zotero so the same content can be
+        re-registered by a different item in the same library.
+
+        Returns:
+            Number of deduplication records deleted.
+        """
+        count_before = self.client.count(
+            collection_name=self.DEDUP_COLLECTION,
+            count_filter=Filter(must=[
+                FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                FieldCondition(key="item_key", match=MatchValue(value=item_key)),
+            ]),
+        ).count
+
+        if count_before > 0:
+            self.client.delete(
+                collection_name=self.DEDUP_COLLECTION,
+                points_selector=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="item_key", match=MatchValue(value=item_key)),
+                ]),
+            )
+            logger.debug(f"Deleted {count_before} dedup record(s) for {library_id}/{item_key}")
+
         return count_before
 
     def delete_library_chunks(self, library_id: str) -> int:
@@ -1209,6 +1239,37 @@ class VectorStore:
                 break
             offset = next_offset
         return len(item_keys)
+
+    def get_all_indexed_item_versions(self, library_id: str) -> dict[str, int]:
+        """Return {item_key: item_version} for every item with at least one chunk in this library.
+
+        Single full scroll — avoids N+1 get_item_version calls when comparing against
+        the live Zotero item list during a full-sync run.  Items whose chunks lack an
+        item_version field (legacy data) are omitted.
+        """
+        versions: dict[str, int] = {}
+        offset = None
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id))
+                ]),
+                limit=1000,
+                offset=offset,
+                with_payload=["item_key", "item_version"],
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
+            for point in results:
+                ik = point.payload.get("item_key")
+                iv = point.payload.get("item_version")
+                if ik and iv is not None and ik not in versions:
+                    versions[ik] = iv
+            if next_offset is None:
+                break
+            offset = next_offset
+        return versions
 
     def get_library_size_bytes(self, library_id: str) -> int:
         """
