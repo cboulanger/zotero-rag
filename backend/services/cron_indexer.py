@@ -31,6 +31,14 @@ from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
 
+# If fewer than this fraction of the library's total Zotero items are indexed,
+# the cron indexer forces a full re-index even in auto mode.  The threshold is
+# deliberately conservative: most academic libraries have ≥ 25 % of items with
+# indexable content, so falling below this almost always means something went wrong.
+# The check is skipped when last_full_scan_indexable already proves the library
+# legitimately has a low indexable-content ratio (see _index_slug).
+_COMPLETENESS_THRESHOLD = 0.25
+
 
 class AlreadyRunningError(Exception):
     """Raised when another cron indexer process is already running."""
@@ -94,6 +102,8 @@ class CronIndexer:
         self.mode = mode
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
+        # Slugs whose previous run was interrupted (stale lock takeover); set in run().
+        self._interrupted_slugs: set[str] = set()
 
     # ------------------------------------------------------------------
     # Slug parsing
@@ -123,10 +133,14 @@ class CronIndexer:
     # Lock file
     # ------------------------------------------------------------------
 
-    def _acquire_lock(self) -> None:
+    def _acquire_lock(self) -> bool:
         """Write the current PID to the lock file, raising AlreadyRunningError
-        if another live process holds the lock."""
+        if another live process holds the lock.
+
+        Returns True if a stale lock was taken over (previous run was interrupted).
+        """
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        stale = False
         if self.lock_file.exists():
             try:
                 existing_pid = int(self.lock_file.read_text(encoding="utf-8").strip())
@@ -137,12 +151,16 @@ class CronIndexer:
                         f"Cron indexer already running with PID {existing_pid}"
                     )
                 self.log.warning(
-                    "Stale lock file found (PID %s dead); taking over.", existing_pid
+                    "Stale lock file found (PID %s dead); previous run was interrupted.",
+                    existing_pid,
                 )
+                stale = True
             except (ValueError, OSError):
                 self.log.warning("Lock file unreadable or invalid; taking over.")
+                stale = True
         self.lock_file.write_text(str(os.getpid()), encoding="utf-8")
         self.log.debug("Lock acquired (PID %s)", os.getpid())
+        return stale
 
     def _release_lock(self) -> None:
         try:
@@ -216,7 +234,20 @@ class CronIndexer:
 
         slug_infos = [self.parse_slug(s) for s in self.slugs]
 
-        self._acquire_lock()
+        stale = self._acquire_lock()
+        if stale and self.mode == "auto":
+            # Identify slugs that were mid-index when the previous process died.
+            # Force a full re-index for those: an interrupted full run may have
+            # deleted existing chunks without finishing, and an interrupted
+            # incremental run may have left partially-updated items.
+            for slug, slug_status in existing.get("slugs", {}).items():
+                if slug_status.get("status") == "indexing":
+                    self._interrupted_slugs.add(slug)
+                    self.log.warning(
+                        "Previous run interrupted while indexing %s; forcing full re-index.",
+                        slug,
+                    )
+
         started_at = datetime.now(timezone.utc).isoformat()
         status: dict = {
             "running": True,
@@ -296,6 +327,52 @@ class CronIndexer:
 
         return total_stats
 
+    async def _resolve_mode(self, slug_info: SlugInfo, web_api: ZoteroWebAPI) -> str:
+        """Return the indexing mode to use for this slug.
+
+        Starts from self.mode and upgrades to "full" when either:
+        - the previous run was interrupted (stale lock takeover), or
+        - the library is under-indexed relative to its live Zotero item count.
+        """
+        if slug_info.slug in self._interrupted_slugs:
+            self.log.info("Using full mode for %s (previous run was interrupted)", slug_info.slug)
+            return "full"
+
+        if self.mode != "auto":
+            return self.mode
+
+        # Only run the completeness check when the library has been indexed before
+        # (last_indexed_version > 0); a brand-new library will get "full" from
+        # DocumentProcessor's own auto logic.
+        meta = self.vector_store.get_library_metadata(slug_info.library_id)
+        if not meta or meta.last_indexed_version == 0:
+            return "auto"
+
+        zotero_total = await web_api.get_library_item_count(
+            slug_info.numeric_id, slug_info.library_type
+        )
+        if zotero_total == 0:
+            return "auto"
+
+        indexed = meta.total_items_indexed
+        ratio = indexed / zotero_total
+        if ratio >= _COMPLETENESS_THRESHOLD:
+            return "auto"
+
+        # Ratio is below threshold — but only force full if this isn't explained by a
+        # previous full scan that already established a low indexable-content ratio.
+        scan_floor = meta.last_full_scan_indexable
+        if scan_floor > 0 and indexed >= scan_floor * 0.9:
+            # Library legitimately has few indexable items; current count is expected.
+            return "auto"
+
+        self.log.warning(
+            "Library %s under-indexed: %d/%d items (%.0f%% < %.0f%%); forcing full re-index",
+            slug_info.slug, indexed, zotero_total,
+            ratio * 100, _COMPLETENESS_THRESHOLD * 100,
+        )
+        return "full"
+
     async def _index_slug(self, slug_info: SlugInfo, status: dict) -> dict:
         """Index a single library slug. Returns stats dict."""
         web_api = ZoteroWebAPI(api_key=self.api_key)
@@ -312,6 +389,7 @@ class CronIndexer:
 
         try:
             async with web_api:
+                mode = await self._resolve_mode(slug_info, web_api)
                 processor = DocumentProcessor(
                     zotero_client=web_api,  # type: ignore[arg-type]  # duck-typed
                     embedding_service=self.embedding_service,
@@ -321,7 +399,7 @@ class CronIndexer:
                     library_id=slug_info.library_id,
                     library_type=slug_info.library_type,
                     library_name=slug_info.slug,
-                    mode=self.mode,
+                    mode=mode,
                     progress_callback=progress_callback,
                     max_items=self.max_items,
                 )

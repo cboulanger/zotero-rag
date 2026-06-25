@@ -56,4 +56,9 @@ class LibraryIndexMetadata(BaseModel):
         description="If True, next index will be full reindex (hard reset)"
     )
 
+    last_full_scan_indexable: int = Field(
+        default=0,
+        description="Items with indexable content found in the last completed full scan"
+    )
+
     schema_version: int = Field(default=1)

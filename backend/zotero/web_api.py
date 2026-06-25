@@ -89,6 +89,17 @@ class ZoteroWebAPI:
                 return 0
             return int(resp.headers.get("Last-Modified-Version", 0))
 
+    async def get_library_item_count(self, library_id: str, library_type: str = "user") -> int:
+        """Return the total item count for the library from Total-Results header (lightweight)."""
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/items"
+        async with self.session.get(url, params={"limit": 0, "format": "json"}) as resp:
+            await self._handle_rate_limit(resp)
+            if resp.status != 200:
+                logger.warning("get_library_item_count failed: HTTP %s", resp.status)
+                return 0
+            return int(resp.headers.get("Total-Results", 0))
+
     async def get_library_items_since(
         self,
         library_id: str,

@@ -7,7 +7,7 @@ Usage:
     uv run python bin/index_libraries.py users/12345 --mode full --max-items 500
 
 Reads ZOTERO_API_KEY from the environment (or .env at project root).
-Writes a separate log file at data/logs/cron_indexer.log (overridable with --log-file).
+All log output goes to data/logs/cron_indexer.log (overridable with --log-file).
 """
 
 import argparse
@@ -30,13 +30,9 @@ def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(fmt)
 
-    stream_handler = logging.StreamHandler(sys.stdout)
-    stream_handler.setFormatter(fmt)
-
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level.upper())
     root_logger.addHandler(file_handler)
-    root_logger.addHandler(stream_handler)
 
     return logging.getLogger("cron_indexer")
 

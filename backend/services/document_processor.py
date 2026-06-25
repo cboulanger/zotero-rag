@@ -354,6 +354,7 @@ class DocumentProcessor:
         # Update metadata
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = len(items_with_attachments)
+        metadata.last_full_scan_indexable = len(items_with_attachments)
 
         return {
             "items_processed": len(items_with_attachments),

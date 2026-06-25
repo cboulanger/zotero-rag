@@ -28,10 +28,13 @@ def _make_indexer(
     log = logging.getLogger("test_cron_indexer")
     embedding_service = MagicMock()
     embedding_service.get_rate_limit_info = AsyncMock(return_value=rate_limit_headers)
+    vector_store = MagicMock()
+    # Return None by default so _resolve_mode skips the completeness check cleanly.
+    vector_store.get_library_metadata.return_value = None
     return CronIndexer(
         slugs=slugs,
         api_key="test-api-key",
-        vector_store=MagicMock(),
+        vector_store=vector_store,
         embedding_service=embedding_service,
         lock_file=tmp_dir / "cron.lock",
         status_file=tmp_dir / "cron_status.json",
@@ -93,8 +96,15 @@ class TestLockFile(unittest.TestCase):
         # Write a PID that definitely does not exist
         indexer.lock_file.write_text("99999999")
         with patch("backend.services.cron_indexer.is_process_alive", return_value=False):
-            indexer._acquire_lock()  # should not raise
+            stale = indexer._acquire_lock()  # should not raise
+        self.assertTrue(stale)
         self.assertTrue(indexer.lock_file.exists())
+        indexer._release_lock()
+
+    def test_acquire_lock_fresh_returns_false(self):
+        indexer = _make_indexer([], self.tmp)
+        stale = indexer._acquire_lock()
+        self.assertFalse(stale)
         indexer._release_lock()
 
     def test_release_lock_deletes_file(self):
@@ -192,6 +202,46 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         status = indexer._read_status()
         self.assertFalse(status["running"])
         self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+
+    async def test_stale_lock_forces_full_reindex_for_interrupted_slug(self):
+        """When a stale lock is taken over, slugs that were 'indexing' get mode='full'."""
+        indexer = _make_indexer(["users/1", "groups/2"], self.tmp)
+
+        # Simulate a previous run's status: users/1 was mid-index, groups/2 was done
+        indexer._write_status({
+            "running": True,
+            "pid": 99999999,
+            "slugs": {
+                "users/1":  {"status": "indexing"},
+                "groups/2": {"status": "done"},
+            },
+        })
+        indexer.lock_file.write_text("99999999")
+
+        captured_modes: list[str] = []
+
+        async def fake_index_library(**kwargs):
+            captured_modes.append(kwargs.get("mode", ""))
+            return {"items_processed": 5, "chunks_added": 10}
+
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=False), \
+             patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor:
+
+            mock_api_instance = AsyncMock()
+            mock_api_instance.get_library_item_count = AsyncMock(return_value=0)
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
+        # users/1 was interrupted → must be "full"; groups/2 was not → stays "auto"
+        self.assertEqual(captured_modes[0], "full",  "interrupted slug must use full mode")
+        self.assertEqual(captured_modes[1], "auto",  "non-interrupted slug keeps auto mode")
 
     async def test_progress_callback_updates_status(self):
         """The progress callback writes items_processed into the status file."""
@@ -343,6 +393,137 @@ class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):
         await indexer.run()
 
         self.assertEqual(_index_slug_called, ["users/1"])
+
+
+class TestResolveMode(unittest.IsolatedAsyncioTestCase):
+    """Unit tests for CronIndexer._resolve_mode()."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _make_meta(self, last_indexed_version=1, total_items_indexed=10, last_full_scan_indexable=0):
+        from backend.models.library import LibraryIndexMetadata
+        return LibraryIndexMetadata(
+            library_id="u1",
+            library_type="user",
+            library_name="Test Library",
+            last_indexed_version=last_indexed_version,
+            total_items_indexed=total_items_indexed,
+            last_full_scan_indexable=last_full_scan_indexable,
+        )
+
+    async def test_interrupted_slug_returns_full(self):
+        """A slug in _interrupted_slugs always returns 'full', ignoring everything else."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        indexer._interrupted_slugs.add("users/1")
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "full")
+        mock_api.get_library_item_count.assert_not_called()
+
+    async def test_explicit_full_mode_returned_directly(self):
+        """When mode='full', _resolve_mode returns 'full' without touching the API."""
+        indexer = _make_indexer(["users/1"], self.tmp, mode="full")
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "full")
+        mock_api.get_library_item_count.assert_not_called()
+
+    async def test_explicit_incremental_mode_returned_directly(self):
+        """When mode='incremental', _resolve_mode returns it without touching the API."""
+        indexer = _make_indexer(["users/1"], self.tmp, mode="incremental")
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "incremental")
+        mock_api.get_library_item_count.assert_not_called()
+
+    async def test_never_indexed_returns_auto(self):
+        """A library with last_indexed_version=0 returns 'auto' (not yet indexed)."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=0
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "auto")
+        mock_api.get_library_item_count.assert_not_called()
+
+    async def test_no_metadata_returns_auto(self):
+        """A library with no stored metadata returns 'auto'."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        indexer.vector_store.get_library_metadata.return_value = None
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "auto")
+
+    async def test_zotero_total_zero_returns_auto(self):
+        """When Zotero API returns 0 total items, returns 'auto' (can't compute ratio)."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=5, total_items_indexed=10
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        mock_api.get_library_item_count = AsyncMock(return_value=0)
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "auto")
+
+    async def test_above_threshold_returns_auto(self):
+        """Indexed ratio >= 25% → returns 'auto' (no forced full re-index)."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        # 300/1000 = 30% >= 25%
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=5, total_items_indexed=300
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        mock_api.get_library_item_count = AsyncMock(return_value=1000)
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "auto")
+
+    async def test_below_threshold_no_floor_returns_full(self):
+        """Indexed ratio < 25% with no scan floor → forces 'full' re-index."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        # 100/1000 = 10% < 25%, no scan floor
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=5, total_items_indexed=100, last_full_scan_indexable=0
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        mock_api.get_library_item_count = AsyncMock(return_value=1000)
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "full")
+
+    async def test_below_threshold_but_floor_explains_count_returns_auto(self):
+        """If count is explained by scan_floor (library has few indexable items), returns 'auto'."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        # 100/1000 = 10% < 25%, but scan_floor=105 → indexed (100) >= floor*0.9 (94.5)
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=5, total_items_indexed=100, last_full_scan_indexable=105
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        mock_api.get_library_item_count = AsyncMock(return_value=1000)
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "auto")
+
+    async def test_below_threshold_floor_but_count_dropped_returns_full(self):
+        """If count is well below scan_floor (items were deleted/lost), forces 'full'."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        # 50/1000 = 5% < 25%, scan_floor=105, but indexed (50) < floor*0.9 (94.5) → not explained
+        indexer.vector_store.get_library_metadata.return_value = self._make_meta(
+            last_indexed_version=5, total_items_indexed=50, last_full_scan_indexable=105
+        )
+        slug_info = indexer.parse_slug("users/1")
+        mock_api = AsyncMock()
+        mock_api.get_library_item_count = AsyncMock(return_value=1000)
+        result = await indexer._resolve_mode(slug_info, mock_api)
+        self.assertEqual(result, "full")
 
 
 if __name__ == "__main__":
