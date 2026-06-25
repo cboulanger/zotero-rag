@@ -8,7 +8,8 @@ import json
 import logging
 import time
 import warnings
-from typing import Optional
+from datetime import datetime, UTC
+from typing import Literal, Optional
 from pathlib import Path
 import uuid
 
@@ -68,6 +69,12 @@ class VectorStore:
     CHUNKS_COLLECTION = "document_chunks"
     DEDUP_COLLECTION = "deduplication"
     METADATA_COLLECTION = "library_metadata"
+    ITEM_VECTORS_COLLECTION = "item_vectors"
+    COLLECTION_VECTORS_COLLECTION = "collection_vectors"
+
+    # Stable namespaces for deterministic UUID5 point IDs
+    _ITEM_VECTOR_NS = uuid.UUID("abcdef12-1234-5678-abcd-abcdef123456")
+    _COLLECTION_VECTOR_NS = uuid.UUID("fedcba98-8765-4321-fedc-fedcba987654")
 
     _CONFIG_FILE = "embedding_config.json"
 
@@ -201,6 +208,30 @@ class VectorStore:
                     field_name="library_id",
                     field_schema="keyword"
                 )
+
+        if self.ITEM_VECTORS_COLLECTION not in collection_names:
+            logger.info(f"Creating collection: {self.ITEM_VECTORS_COLLECTION}")
+            self.client.create_collection(
+                collection_name=self.ITEM_VECTORS_COLLECTION,
+                vectors_config=VectorParams(
+                    size=self.embedding_dim,
+                    distance=self.distance,
+                ),
+            )
+
+        if self.COLLECTION_VECTORS_COLLECTION not in collection_names:
+            logger.info(f"Creating collection: {self.COLLECTION_VECTORS_COLLECTION}")
+            self.client.create_collection(
+                collection_name=self.COLLECTION_VECTORS_COLLECTION,
+                vectors_config=VectorParams(
+                    size=self.embedding_dim,
+                    distance=self.distance,
+                ),
+            )
+
+        # Ensure payload indexes on the new smart-filing collections (idempotent)
+        self._ensure_item_vectors_indexes()
+        self._ensure_collection_vectors_indexes()
 
         # Ensure payload indexes on DEDUP_COLLECTION (idempotent)
         self._ensure_dedup_indexes()
@@ -677,6 +708,34 @@ class VectorStore:
         )
 
         logger.debug(f"Added deduplication record for {record.item_key}")
+
+    def _ensure_item_vectors_indexes(self):
+        """Create keyword payload indexes on ITEM_VECTORS_COLLECTION (idempotent)."""
+        for field in ("item_key", "library_id", "collection_ids"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.client.create_payload_index(
+                        collection_name=self.ITEM_VECTORS_COLLECTION,
+                        field_name=field,
+                        field_schema="keyword",
+                    )
+            except Exception:
+                pass  # already exists or local in-memory instance
+
+    def _ensure_collection_vectors_indexes(self):
+        """Create keyword payload indexes on COLLECTION_VECTORS_COLLECTION (idempotent)."""
+        for field in ("collection_id", "library_id"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.client.create_payload_index(
+                        collection_name=self.COLLECTION_VECTORS_COLLECTION,
+                        field_name=field,
+                        field_schema="keyword",
+                    )
+            except Exception:
+                pass  # already exists or local in-memory instance
 
     def _ensure_dedup_indexes(self):
         """Create payload indexes on DEDUP_COLLECTION (idempotent)."""
@@ -1305,6 +1364,439 @@ class VectorStore:
         except Exception as e:
             logger.warning(f"Error computing size for library {library_id}: {e}")
         return total
+
+    # ---------------------------------------------------------------------------
+    # Item Vectors Methods (smart filing — one vector per Zotero item)
+    # ---------------------------------------------------------------------------
+
+    def upsert_item_vector(
+        self,
+        library_id: str,
+        item_key: str,
+        vector: list[float],
+        collection_ids: list[str],
+        source: Literal["abstract", "chunks", "title"],
+        title: str,
+    ) -> str:
+        """
+        Upsert a single item vector.
+
+        Uses a deterministic UUID derived from (library_id, item_key) so that
+        repeated calls overwrite the existing point rather than duplicating it.
+
+        Args:
+            library_id: Zotero library ID.
+            item_key: Zotero item key.
+            vector: Embedding vector (title+abstract or mean of chunk vectors).
+            collection_ids: Zotero collection IDs the item belongs to.
+            source: ``"abstract"``, ``"title"``, or ``"chunks"``.
+            title: Item title (for payload readability).
+
+        Returns:
+            UUID of the upserted point.
+        """
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
+        point = PointStruct(
+            id=point_id,
+            vector=vector,
+            payload={
+                "item_key": item_key,
+                "library_id": library_id,
+                "collection_ids": collection_ids,
+                "source": source,
+                "title": title,
+                "computed_at": datetime.now(UTC).isoformat(),
+                "schema_version": 1,
+            },
+        )
+        self.client.upsert(
+            collection_name=self.ITEM_VECTORS_COLLECTION,
+            points=[point],
+        )
+        logger.debug(f"Upserted item vector for {library_id}/{item_key}")
+        return point_id
+
+    def get_item_vector(
+        self,
+        library_id: str,
+        item_key: str,
+    ) -> Optional[tuple[list[float], dict]]:
+        """
+        Retrieve the item vector and payload for a single item.
+
+        Args:
+            library_id: Zotero library ID.
+            item_key: Zotero item key.
+
+        Returns:
+            ``(vector, payload)`` tuple, or ``None`` if not found.
+        """
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
+        points = self.client.retrieve(
+            collection_name=self.ITEM_VECTORS_COLLECTION,
+            ids=[point_id],
+            with_vectors=True,
+        )
+        if not points:
+            return None
+        p = points[0]
+        vector = p.vector if isinstance(p.vector, list) else list(p.vector)
+        return vector, p.payload
+
+    def get_item_vectors_for_library(
+        self,
+        library_id: str,
+    ) -> list[tuple[str, list[float], list[str]]]:
+        """
+        Return all item vectors for a library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            List of ``(item_key, vector, collection_ids)`` tuples.
+        """
+        results: list[tuple[str, list[float], list[str]]] = []
+        offset = None
+        while True:
+            batch, next_offset = self.client.scroll(
+                collection_name=self.ITEM_VECTORS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                ]),
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in batch:
+                p = point.payload
+                vec = point.vector if isinstance(point.vector, list) else list(point.vector)
+                results.append((p["item_key"], vec, p.get("collection_ids", [])))
+            if next_offset is None:
+                break
+            offset = next_offset
+        return results
+
+    def get_chunk_vectors_for_item(
+        self,
+        library_id: str,
+        item_key: str,
+    ) -> list[list[float]]:
+        """
+        Return all chunk vectors for an item from the ``document_chunks`` collection.
+
+        Used as an A1 fallback when no title+abstract embedding is available.
+
+        Args:
+            library_id: Zotero library ID.
+            item_key: Zotero item key.
+
+        Returns:
+            List of embedding vectors (one per chunk).
+        """
+        vectors: list[list[float]] = []
+        offset = None
+        while True:
+            batch, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="item_key", match=MatchValue(value=item_key)),
+                ]),
+                limit=500,
+                offset=offset,
+                with_payload=False,
+                with_vectors=True,
+            )
+            for point in batch:
+                vec = point.vector if isinstance(point.vector, list) else list(point.vector)
+                vectors.append(vec)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return vectors
+
+    def count_item_vectors(self, library_id: str) -> int:
+        """
+        Count item vectors for a library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of item vector points.
+        """
+        try:
+            result = self.client.count(
+                collection_name=self.ITEM_VECTORS_COLLECTION,
+                count_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                ]),
+            )
+            return result.count
+        except Exception as e:
+            logger.warning(f"Error counting item vectors for library {library_id}: {e}")
+            return 0
+
+    def delete_item_vector(self, library_id: str, item_key: str) -> int:
+        """
+        Delete the item vector for a single item.
+
+        Args:
+            library_id: Zotero library ID.
+            item_key: Zotero item key.
+
+        Returns:
+            Number of points deleted (0 or 1).
+        """
+        if self.get_item_vector(library_id, item_key) is None:
+            return 0
+        point_id = str(uuid.uuid5(self._ITEM_VECTOR_NS, f"{library_id}:{item_key}"))
+        self.client.delete(
+            collection_name=self.ITEM_VECTORS_COLLECTION,
+            points_selector=[point_id],
+        )
+        logger.debug(f"Deleted item vector for {library_id}/{item_key}")
+        return 1
+
+    # ---------------------------------------------------------------------------
+    # Collection Vectors Methods (smart filing — one vector per Zotero collection)
+    # ---------------------------------------------------------------------------
+
+    def upsert_collection_vector(
+        self,
+        library_id: str,
+        collection_id: str,
+        collection_name: str,
+        vector: list[float],
+        item_count: int,
+    ) -> str:
+        """
+        Upsert a collection vector (mean of member item vectors).
+
+        Uses a deterministic UUID derived from (library_id, collection_id).
+
+        Args:
+            library_id: Zotero library ID.
+            collection_id: Zotero collection ID.
+            collection_name: Human-readable collection name.
+            vector: Mean embedding of member items.
+            item_count: Number of items in the collection.
+
+        Returns:
+            UUID of the upserted point.
+        """
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
+        point = PointStruct(
+            id=point_id,
+            vector=vector,
+            payload={
+                "collection_id": collection_id,
+                "library_id": library_id,
+                "collection_name": collection_name,
+                "item_count": item_count,
+                "computed_at": datetime.now(UTC).isoformat(),
+                "schema_version": 1,
+            },
+        )
+        self.client.upsert(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            points=[point],
+        )
+        logger.debug(f"Upserted collection vector for {library_id}/{collection_id}")
+        return point_id
+
+    def get_collection_vector(
+        self,
+        library_id: str,
+        collection_id: str,
+    ) -> Optional[tuple[list[float], dict]]:
+        """
+        Retrieve the vector and payload for a single collection.
+
+        Args:
+            library_id: Zotero library ID.
+            collection_id: Zotero collection ID.
+
+        Returns:
+            ``(vector, payload)`` tuple, or ``None`` if not found.
+        """
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
+        points = self.client.retrieve(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            ids=[point_id],
+            with_vectors=True,
+        )
+        if not points:
+            return None
+        p = points[0]
+        vector = p.vector if isinstance(p.vector, list) else list(p.vector)
+        return vector, p.payload
+
+    def get_all_collection_vectors(
+        self,
+        library_id: str,
+    ) -> list[tuple[str, list[float], dict]]:
+        """
+        Return all collection vectors for a library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            List of ``(collection_id, vector, payload)`` tuples.
+        """
+        results: list[tuple[str, list[float], dict]] = []
+        offset = None
+        while True:
+            batch, next_offset = self.client.scroll(
+                collection_name=self.COLLECTION_VECTORS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                ]),
+                limit=500,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            for point in batch:
+                vec = point.vector if isinstance(point.vector, list) else list(point.vector)
+                results.append((point.payload["collection_id"], vec, point.payload))
+            if next_offset is None:
+                break
+            offset = next_offset
+        return results
+
+    def search_collection_vectors(
+        self,
+        query_vector: list[float],
+        library_id: Optional[str] = None,
+        limit: int = 5,
+    ) -> list[tuple[str, float, dict]]:
+        """
+        Find the most similar collections to a query vector.
+
+        Args:
+            query_vector: Query embedding (e.g. title+abstract of an item).
+            library_id: If provided, restrict search to this library.
+                        If None, search across all libraries.
+            limit: Maximum number of results to return.
+
+        Returns:
+            List of ``(collection_id, score, payload)`` tuples sorted by score descending.
+        """
+        query_filter = (
+            Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))])
+            if library_id is not None
+            else None
+        )
+        hits = self.client.query_points(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            query=query_vector,
+            limit=limit,
+            query_filter=query_filter,
+            with_payload=True,
+        ).points
+        return [(h.payload["collection_id"], h.score, h.payload) for h in hits]
+
+    def count_collection_vectors(self, library_id: str) -> int:
+        """
+        Count collection vectors for a library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of collection vector points.
+        """
+        try:
+            result = self.client.count(
+                collection_name=self.COLLECTION_VECTORS_COLLECTION,
+                count_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                ]),
+            )
+            return result.count
+        except Exception as e:
+            logger.warning(f"Error counting collection vectors for library {library_id}: {e}")
+            return 0
+
+    def delete_collection_vector(self, library_id: str, collection_id: str) -> int:
+        """
+        Delete the vector for a single collection.
+
+        Args:
+            library_id: Zotero library ID.
+            collection_id: Zotero collection ID.
+
+        Returns:
+            Number of points deleted (0 or 1).
+        """
+        point_id = str(uuid.uuid5(self._COLLECTION_VECTOR_NS, f"{library_id}:{collection_id}"))
+        points = self.client.retrieve(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            ids=[point_id],
+            with_vectors=False,
+        )
+        if not points:
+            return 0
+        self.client.delete(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            points_selector=[point_id],
+        )
+        logger.debug(f"Deleted collection vector for {library_id}/{collection_id}")
+        return 1
+
+    def delete_library_item_vectors(self, library_id: str) -> int:
+        """
+        Delete all item vectors for a specific library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of item vectors deleted.
+        """
+        count_before = self.count_item_vectors(library_id)
+        self.client.delete(
+            collection_name=self.ITEM_VECTORS_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        )
+        logger.info(f"Deleted {count_before} item vectors for library {library_id}")
+        return count_before
+
+    def delete_library_collection_vectors(self, library_id: str) -> int:
+        """
+        Delete all collection vectors for a specific library.
+
+        Args:
+            library_id: Zotero library ID.
+
+        Returns:
+            Number of collection vectors deleted.
+        """
+        count_before = self.count_collection_vectors(library_id)
+        self.client.delete(
+            collection_name=self.COLLECTION_VECTORS_COLLECTION,
+            points_selector=Filter(
+                must=[
+                    FieldCondition(
+                        key="library_id",
+                        match=MatchValue(value=library_id),
+                    )
+                ]
+            ),
+        )
+        logger.info(f"Deleted {count_before} collection vectors for library {library_id}")
+        return count_before
 
     def close(self):
         """

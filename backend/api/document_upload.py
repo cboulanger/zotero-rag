@@ -27,7 +27,7 @@ from threading import Lock
 from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.db.vector_store import VectorStore, _extract_lastnames
 from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service
@@ -211,6 +211,10 @@ class DocumentUploadResult(BaseModel):
     rate_limit_retries: int = 0
     rate_limit_headers: dict[str, str] | None = None
     error_detail: Optional[str] = None
+    item_vector_pending: bool = Field(
+        default=False,
+        description="True when the item was freshly indexed and its collection vector needs recomputing",
+    )
 
 
 class AsyncUploadResponse(BaseModel):
@@ -400,6 +404,7 @@ async def _execute_upload(
         rate_limit_retries=embedding_service.rate_limit_retries,
         rate_limit_headers=await embedding_service.get_rate_limit_info(),
         error_detail=proc_result.error_detail,
+        item_vector_pending=(api_status == "indexed"),
     )
 
 
@@ -871,6 +876,7 @@ async def upload_and_index_abstract(
         message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
         rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        item_vector_pending=(status == "indexed"),
     )
 
 

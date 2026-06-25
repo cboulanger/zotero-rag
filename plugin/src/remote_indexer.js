@@ -500,6 +500,52 @@ var RemoteIndexer = {
 			this._savePendingCache(libraryId, pendingCache),
 		]);
 
+		// 7. Compute collection vectors (non-blocking — failure does not affect indexing result)
+		// TODO: Use item_vector_pending from upload responses to call the per-item update endpoint
+		//       (POST /api/collections/vectors/update-item) instead of a full sync, making
+		//       incremental runs O(new_items) instead of O(library_size).
+		if (!isCancelled() && typeof CollectionsAPI !== 'undefined') {
+			try {
+				onProgress({
+					percentage: 100,
+					message: 'Computing filing suggestions...',
+					current: total,
+					total,
+				});
+				// Resolve Zotero-internal library ID (same logic as _collectAbstractItems)
+				let _zoteroLibraryID;
+				if (libraryType === 'group') {
+					const _group = Zotero.Groups.get(parseInt(libraryId, 10));
+					_zoteroLibraryID = _group ? _group.libraryID : null;
+				} else {
+					_zoteroLibraryID = Zotero.Libraries.userLibraryID;
+				}
+
+				if (_zoteroLibraryID) {
+					// Build collection membership map from the local Zotero database
+					const { collectionMap, collectionNames } = await this._buildCollectionMap(_zoteroLibraryID);
+					// BEGIN DEBUG
+					const collectionMapSize = Object.keys(collectionMap).length;
+					const uniqueCollections = new Set(Object.values(collectionMap).flat());
+					log(`[RemoteIndexer] [DIAG] collection sync: libraryId=${libraryId} zoteroLibraryID=${_zoteroLibraryID} items_in_map=${collectionMapSize} unique_collections=${uniqueCollections.size}`);
+					if (collectionMapSize === 0) {
+						log(`[RemoteIndexer] [DIAG] collection sync: collectionMap is empty — no items in collections? Skipping sync.`);
+					}
+					// END DEBUG
+					const syncStats = await CollectionsAPI.syncCollectionVectors(
+						backendURL, libraryId, collectionMap, collectionNames,
+						getAuthHeaders, signal,
+					);
+					// BEGIN DEBUG
+					log(`[RemoteIndexer] [DIAG] collection sync result: ${JSON.stringify(syncStats)}`);
+					// END DEBUG
+					log(`[RemoteIndexer] Collection vectors synced`);
+				}
+			} catch (err) {
+				log(`[RemoteIndexer] Collection vector sync failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+			}
+		}
+
 		const unreadable = skippedEmpty + skippedTimeout + parseErrors;
 		onProgress({
 			percentage: 100,
@@ -1310,5 +1356,52 @@ var RemoteIndexer = {
 		} catch (_) {
 			return null;
 		}
+	},
+
+	/**
+	 * Build a collection membership map for all regular items in a Zotero library.
+	 * Used by stage 7 to sync collection vectors to the backend after indexing.
+	 *
+	 * @param {number} zoteroLibraryID - Internal Zotero library ID
+	 * @returns {Promise<{collectionMap: Object.<string, string[]>, collectionNames: Object.<string, string>}>}
+	 */
+	async _buildCollectionMap(zoteroLibraryID) {
+		const search = new Zotero.Search();
+		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
+		const itemIDs = await search.search();
+		// BEGIN DEBUG
+		console.log(`[RemoteIndexer] [DIAG] _buildCollectionMap: zoteroLibraryID=${zoteroLibraryID} search returned ${itemIDs.length} item IDs`);
+		// END DEBUG
+		if (!itemIDs.length) return { collectionMap: {}, collectionNames: {} };
+
+		const items = await Zotero.Items.getAsync(itemIDs);
+		// BEGIN DEBUG
+		const regularItems = items.filter((/** @type {any} */ i) => !i.isAttachment() && !i.isNote());
+		const unfiledItems = regularItems.filter((/** @type {any} */ i) => !i.getCollections().length);
+		console.log(`[RemoteIndexer] [DIAG] _buildCollectionMap: total=${items.length} regular=${regularItems.length} unfiled=${unfiledItems.length} (unfiled excluded from sync)`);
+		// END DEBUG
+		/** @type {Object.<string, string[]>} */
+		const collectionMap = {};
+		/** @type {Object.<string, string>} */
+		const collectionNames = {};
+
+		for (const item of items) {
+			if (item.isAttachment() || item.isNote()) continue;
+			const colIDs = item.getCollections(); // returns array of internal integer IDs
+			// Unfiled items are intentionally excluded: no collection membership → no suggestion signal.
+			if (!colIDs.length) continue;
+			const colKeys = [];
+			for (const colID of colIDs) {
+				const col = Zotero.Collections.get(colID);
+				if (col) {
+					colKeys.push(col.key);
+					collectionNames[col.key] = col.name;
+				}
+			}
+			if (colKeys.length) {
+				collectionMap[item.key] = colKeys;
+			}
+		}
+		return { collectionMap, collectionNames };
 	},
 };
