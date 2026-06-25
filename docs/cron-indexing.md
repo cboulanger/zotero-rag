@@ -32,7 +32,7 @@ Useful for:
 # Index one user library and one group library
 uv run python bin/index_libraries.py users/12345 groups/678
 
-# Force a full re-index (ignore incremental state)
+# Force a full sync (ignore incremental state)
 uv run python bin/index_libraries.py users/12345 --mode full
 
 # Index from a file listing slugs
@@ -51,7 +51,7 @@ uv run python bin/index_libraries.py users/12345 --log-file /var/log/zotero_inde
 |---|---|---|
 | `slugs` (positional) | — | One or more `users/{id}` or `groups/{id}` slugs |
 | `--slugs-file FILE` | — | Text file with slugs, one per line or whitespace-separated |
-| `--mode auto\|incremental\|full` | `auto` | Indexing mode |
+| `--mode auto\|incremental\|full` | `auto` | Indexing mode (see below) |
 | `--max-items N` | unlimited | Cap items per library (for testing) |
 | `--log-file PATH` | `data/logs/cron_indexer.log` | Log file path |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
@@ -65,6 +65,55 @@ users/12345
 groups/678  
 groups/999
 ```
+
+## Indexing Modes
+
+### `auto` (default)
+
+Selects the best mode automatically for each library:
+
+- **First run** (library has never been indexed): runs a full sync.
+- **Subsequent runs**: runs an incremental sync.
+- **Under-indexed library**: if fewer than 25 % of the library's Zotero items
+  are reflected in the index, a full sync is forced to repair the gap.
+- **Interrupted previous run**: if the lock file shows the previous process
+  died mid-run, a full sync is forced to ensure consistency.
+
+### `incremental`
+
+Fetches only items modified since the last indexed version (using Zotero's
+`?since=version` parameter). For each modified item:
+
+- **New item**: indexed.
+- **Updated item** (higher Zotero version number): old chunks are deleted and
+  the item is re-indexed.
+- **Unchanged item**: skipped.
+
+After processing modified items, the script calls the Zotero `/deleted`
+endpoint to fetch item keys that have been removed from the library since the
+last indexed version.  Chunks for those deleted items are purged from the
+vector store, along with their deduplication records.
+
+### `full`
+
+Performs a complete sync of the entire library against the vector store:
+
+1. **Fetches all current items** from Zotero.
+2. **Compares against the index**: items present in the vector store but absent
+   from the Zotero response are treated as deleted — their chunks and
+   deduplication records are removed.
+3. **Processes each current item**:
+   - Already indexed at the current Zotero version → skipped.
+   - Indexed at an older version → old chunks deleted, item re-indexed.
+   - Not yet indexed → indexed.
+
+Existing chunks are never deleted upfront.  An interrupted full run leaves
+already-indexed items intact and searchable; the next run picks up where it
+left off.
+
+When `--max-items` is set the orphan-deletion step is skipped, because only
+a subset of items is fetched so missing keys cannot reliably be classified as
+deleted.
 
 ## Running Inside a Container
 
@@ -171,7 +220,8 @@ Override with `--log-file`.
 
 The script uses a PID-based lock at `data/system/cron_indexer.lock`.  If the
 previous run crashed without cleaning up, the next run automatically detects
-the dead PID and takes over.
+the dead PID and takes over.  Any library that was mid-index when the previous
+run died is forced to run a full sync on the next invocation.
 
 To force-clear a lock manually (e.g. if PID wrap-around caused a false
 positive):
