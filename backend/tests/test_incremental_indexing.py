@@ -30,6 +30,9 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
             vector_store=self.mock_vector_store
         )
 
+        # Default stubs required by the smart-sync full mode
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+
     async def test_first_time_indexing_uses_full_mode(self):
         """First-time indexing should use full mode."""
         # Mock: No existing metadata
@@ -134,8 +137,9 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
         # Assert: Full mode was used despite auto mode
         self.assertEqual(stats["mode"], "full")
 
-        # Assert: Chunks were deleted
-        self.mock_vector_store.delete_library_chunks.assert_called_once_with("1")
+        # Assert: Smart sync path — no upfront wipe; get_all_indexed_item_versions is called instead
+        self.mock_vector_store.delete_library_chunks.assert_not_called()
+        self.mock_vector_store.get_all_indexed_item_versions.assert_called_once_with("1")
 
         # Assert: Reset flag was cleared in metadata
         update_call = self.mock_vector_store.update_library_metadata.call_args[0][0]
