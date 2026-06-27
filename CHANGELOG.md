@@ -1,3 +1,11 @@
+## [1.33.4](https://github.com/cboulanger/zotero-rag/compare/v1.33.3...v1.33.4) (2026-06-27)
+
+
+### Bug Fixes
+
+* **cron:** surface embedding auth failures instead of indexing zero chunks silently ([dd5b637](https://github.com/cboulanger/zotero-rag/commit/dd5b6377818e17526b704c9301079221afe230d8))
+* **deploy:** write systemd service secrets to a root-only env file, not inline ([b1d8b7b](https://github.com/cboulanger/zotero-rag/commit/b1d8b7b49062fda3fb4beaf5c2a270812000af1f))
+
 ## [1.33.3](https://github.com/cboulanger/zotero-rag/compare/v1.33.2...v1.33.3) (2026-06-27)
 
 
