@@ -23,6 +23,24 @@ def _make_extraction_chunks(*texts_and_pages) -> list[ExtractionChunk]:
     ]
 
 
+def _attachment(key: str, parent_key: str, content_type: str = "application/pdf") -> dict:
+    """Build an attachment item as Zotero's full /items fetch returns it.
+
+    The real Zotero API returns attachments as top-level items carrying a
+    ``parentItem`` link — not only via /items/{key}/children.  Full-sync builds
+    its parent→children map from this list, so test fixtures must include
+    attachments here with ``parentItem`` set.
+    """
+    return {
+        "data": {
+            "key": key,
+            "itemType": "attachment",
+            "contentType": content_type,
+            "parentItem": parent_key,
+        }
+    }
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 
@@ -110,16 +128,10 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        mock_pdf_attachment = {
-            "data": {
-                "key": "PDF123",
-                "itemType": "attachment",
-                "contentType": "application/pdf",
-            }
-        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
 
-        # Mock Zotero API responses
-        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        # Full /items fetch returns the attachment as a top-level item too.
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
 
@@ -271,16 +283,17 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             },
         ]
 
-        mock_pdf_attachment = {
-            "data": {
-                "key": "PDF1",
-                "itemType": "attachment",
-                "contentType": "application/pdf",
-            }
-        }
+        mock_items = mock_items + [
+            _attachment("PDF1", "ITEM123"),
+            _attachment("PDF2", "ITEM456"),
+        ]
 
         self.mock_zotero_client.get_library_items_since.return_value = mock_items
-        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.side_effect = (
+            lambda library_id, item_key, library_type: [
+                a for a in mock_items if a["data"].get("parentItem") == item_key
+            ]
+        )
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf"
         self.mock_vector_store.check_duplicate.return_value = None
         self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
@@ -381,23 +394,11 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         }
 
         mock_pdf_attachments = [
-            {
-                "data": {
-                    "key": "PDF1",
-                    "itemType": "attachment",
-                    "contentType": "application/pdf",
-                }
-            },
-            {
-                "data": {
-                    "key": "PDF2",
-                    "itemType": "attachment",
-                    "contentType": "application/pdf",
-                }
-            },
+            _attachment("PDF1", "ITEM123"),
+            _attachment("PDF2", "ITEM123"),
         ]
 
-        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item] + mock_pdf_attachments
         self.mock_zotero_client.get_item_children.return_value = mock_pdf_attachments
         # Return different bytes so dedup doesn't kick in
         self.mock_zotero_client.get_attachment_file.side_effect = [b"fake pdf 1", b"fake pdf 2"]
@@ -455,15 +456,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        mock_html_attachment = {
-            "data": {
-                "key": "HTML1",
-                "itemType": "attachment",
-                "contentType": "text/html",
-            }
-        }
+        mock_html_attachment = _attachment("HTML1", "ITEM123", content_type="text/html")
 
-        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_html_attachment]
         self.mock_zotero_client.get_item_children.return_value = [mock_html_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"<html><body>Hello</body></html>"
 
@@ -494,16 +489,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
                 "title": "Still here",
             },
         }
-        mock_pdf = {
-            "data": {
-                "key": "PDF1",
-                "itemType": "attachment",
-                "contentType": "application/pdf",
-            }
-        }
+        mock_pdf = _attachment("PDF1", "CURRENT")
 
-        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
-        self.mock_zotero_client.get_item_children.return_value = [mock_pdf]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf]
         self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
         self.mock_vector_store.check_duplicate.return_value = None
         self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
@@ -573,8 +561,8 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         from backend.services.embeddings import EmbeddingAuthenticationError
 
         item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
-        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
-        self.mock_zotero_client.get_library_items_since.return_value = [item]
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
         self.mock_zotero_client.get_item_children.return_value = [pdf]
         self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
         self.mock_vector_store.check_duplicate.return_value = None
@@ -608,6 +596,40 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(EmbeddingAuthenticationError):
             await self.processor.index_library("test_lib", mode="incremental")
 
+    async def test_full_sync_filter_does_not_call_get_item_children_per_item(self):
+        """Full sync must derive attachments from the item list, not probe each item.
+
+        Pins the N+1 fix: _filter_indexed_attachments builds its parent->children map
+        from the full /items fetch.  get_item_children is only called while *processing*
+        the items that actually have indexable attachments — never once per library item
+        during filtering (the OOM regression for library 2829873).
+        """
+        items = [
+            {"version": 1, "data": {"key": "WITHPDF", "itemType": "journalArticle", "title": "A"}},
+            {"version": 1, "data": {"key": "PLAIN1", "itemType": "book", "title": "B"}},
+            {"version": 1, "data": {"key": "PLAIN2", "itemType": "book", "title": "C"}},
+            {"version": 1, "data": {"key": "PLAIN3", "itemType": "book", "title": "D"}},
+            _attachment("PDF", "WITHPDF"),
+        ]
+        self.mock_zotero_client.get_library_items_since.return_value = items
+        self.mock_zotero_client.get_item_children.side_effect = (
+            lambda library_id, item_key, library_type: [
+                a for a in items if a["data"].get("parentItem") == item_key
+            ]
+        )
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        # Only the one item with an indexable attachment is processed...
+        self.assertEqual(result["items_processed"], 1)
+        # ...and get_item_children is called only for that item (processing), not for
+        # the 3 plain items during filtering.  Pre-fix this was 4 (one per library item).
+        self.assertEqual(self.mock_zotero_client.get_item_children.call_count, 1)
+
     async def test_full_sync_total_items_indexed_counts_only_successes(self):
         """total_items_indexed must reflect items actually indexed, not merely attempted.
 
@@ -617,10 +639,14 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         """
         item_a = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
         item_b = {"version": 1, "data": {"key": "BBB", "itemType": "journalArticle", "title": "B"}}
-        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
 
-        self.mock_zotero_client.get_library_items_since.return_value = [item_a, item_b]
-        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        all_items = [item_a, item_b, _attachment("PDFA", "AAA"), _attachment("PDFB", "BBB")]
+        self.mock_zotero_client.get_library_items_since.return_value = all_items
+        self.mock_zotero_client.get_item_children.side_effect = (
+            lambda library_id, item_key, library_type: [
+                a for a in all_items if a["data"].get("parentItem") == item_key
+            ]
+        )
         self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
         self.mock_vector_store.check_duplicate.return_value = None
         # First item extracts fine; second fails extraction (non-fatal, swallowed per-item).

@@ -144,7 +144,9 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        # Mock PDF attachment
+        # Mock PDF attachment.  The real Zotero /items fetch returns attachments as
+        # top-level items carrying a parentItem link, so include it in the item list
+        # (full-sync builds its parent->children map from there).
         mock_attachments = [
             {
                 "key": "ATT1",
@@ -153,12 +155,15 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
                     "itemType": "attachment",
                     "contentType": "application/pdf",
                     "title": "PDF",
+                    "parentItem": "ITEM1",
                 },
             }
         ]
 
         # Configure mocks
-        self.mock_zotero_client.get_library_items_since = AsyncMock(return_value=mock_items)
+        self.mock_zotero_client.get_library_items_since = AsyncMock(
+            return_value=mock_items + mock_attachments
+        )
         self.mock_zotero_client.get_item_children = AsyncMock(
             return_value=mock_attachments
         )
