@@ -14,7 +14,11 @@ from datetime import datetime, UTC
 from typing import Callable, Optional, Literal
 
 from backend.zotero.local_api import ZoteroLocalAPI
-from backend.services.embeddings import EmbeddingService
+from backend.services.embeddings import (
+    EmbeddingService,
+    EmbeddingAuthenticationError,
+    EmbeddingRateLimitExhaustedError,
+)
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
@@ -31,6 +35,15 @@ from backend.models.document import (
 from backend.models.library import LibraryIndexMetadata
 
 logger = logging.getLogger(__name__)
+
+# Fatal embedding errors abort the whole indexing run — they are never swallowed
+# per-item. An expired/invalid API key or an exhausted quota affects every item
+# equally, so continuing the loop only produces a stream of identical failures and
+# a run that "completes" with zero chunks while reporting success.
+_FATAL_EMBEDDING_ERRORS = (
+    EmbeddingAuthenticationError,
+    EmbeddingRateLimitExhaustedError,
+)
 
 # MIME types that will be downloaded and indexed
 INDEXABLE_MIME_TYPES = {
@@ -261,6 +274,10 @@ class DocumentProcessor:
                     # Already up-to-date (shouldn't happen with ?since, but defensive)
                     logger.debug(f"Item {item_key} already up-to-date (version {item_version})")
 
+            except _FATAL_EMBEDDING_ERRORS:
+                # Embedding key/quota failure affects every item — abort the run so
+                # the caller surfaces an error instead of silently skipping everything.
+                raise
             except Exception as e:
                 logger.error(f"Error processing item in incremental mode: {e}", exc_info=True)
             finally:
@@ -398,6 +415,10 @@ class DocumentProcessor:
                 else:
                     items_skipped += 1
 
+            except _FATAL_EMBEDDING_ERRORS:
+                # Embedding key/quota failure affects every item — abort the run so
+                # the caller surfaces an error instead of silently skipping everything.
+                raise
             except Exception as e:
                 logger.error(f"Error processing item in full sync mode: {e}", exc_info=True)
             finally:
@@ -405,7 +426,14 @@ class DocumentProcessor:
                     progress_callback(idx + 1, total_items, chunks_added)
 
         metadata.last_indexed_version = max_version_seen
-        metadata.total_items_indexed = len(items_with_attachments)
+        # Count only items that are actually indexed (newly added, updated, or already
+        # current) — NOT len(items_with_attachments), which includes items that failed
+        # to process.  Otherwise a scan that fails to embed everything records a full
+        # count and masks an un-indexed library, defeating the cron under-indexed
+        # auto-recovery in CronIndexer._resolve_mode.
+        metadata.total_items_indexed = items_added + items_updated + items_skipped
+        # last_full_scan_indexable is the scan floor: how many items had indexable
+        # content this scan, used to detect legitimately low indexable ratios.
         metadata.last_full_scan_indexable = len(items_with_attachments)
 
         return {

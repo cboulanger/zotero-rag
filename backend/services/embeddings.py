@@ -35,6 +35,17 @@ class EmbeddingRateLimitExhaustedError(Exception):
         self.available_at = available_at
 
 
+class EmbeddingAuthenticationError(Exception):
+    """Raised when the embedding API rejects the credentials (HTTP 401/403).
+
+    This is a fatal, non-recoverable condition for the run: retrying will not
+    help until the API key is fixed.  Callers (e.g. the indexing loops) must let
+    this propagate and abort, rather than swallowing it per-item — otherwise an
+    expired key turns every embedding call into a silent failure and the run
+    completes with zero chunks while reporting success.
+    """
+
+
 # Module-level cache for rate-limit headers received from the last remote embedding call.
 # Updated by RemoteEmbeddingService after every API response (success or 429).
 _last_rate_limit_headers: dict[str, str] | None = None
@@ -391,7 +402,13 @@ class RemoteEmbeddingService(EmbeddingService):
         For transient ``InternalServerError`` responses, uses exponential backoff
         (max ``max_attempts`` attempts, base delay ``base_delay`` s).
         """
-        from openai import BadRequestError, InternalServerError, RateLimitError
+        from openai import (
+            AuthenticationError,
+            BadRequestError,
+            InternalServerError,
+            PermissionDeniedError,
+            RateLimitError,
+        )
 
         client = self._get_client()
         model = self._resolve_model_name()
@@ -408,6 +425,15 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 self._capture_rate_limit_headers(raw.headers)
                 return raw.parse()
+            except (AuthenticationError, PermissionDeniedError) as exc:
+                # Invalid/expired API key (401) or forbidden (403): not recoverable
+                # by retrying. Raise a fatal error so the caller aborts the run and
+                # reports it, instead of silently producing zero chunks.
+                status_code = getattr(exc, "status_code", None)
+                raise EmbeddingAuthenticationError(
+                    f"Embedding API rejected credentials "
+                    f"(HTTP {status_code or '401/403'}): {exc}"
+                ) from exc
             except InternalServerError as exc:
                 if attempt == max_attempts - 1 or "try again" not in str(exc).lower():
                     raise

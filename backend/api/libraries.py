@@ -192,6 +192,28 @@ def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to count indexed items: {e}")
 
+    # Guard against a buggy/partial count wiping a well-indexed library's counter.
+    # count_indexed_items scrolls the chunk collection and can undercount if called
+    # while a scan is concurrently writing.  If the result collapses to under half of
+    # the established scan floor, refuse the update — overwriting total_items_indexed
+    # with a too-low value makes the cron under-indexed check force an unnecessary full
+    # rescan (the June 2026 cascade that wiped 217k chunks).
+    if meta.last_full_scan_indexable > 0 and actual_count < meta.last_full_scan_indexable * 0.5:
+        logger.warning(
+            "reconcile-count: computed count %d is < 50%% of scan_floor %d for "
+            "library %s — refusing update",
+            actual_count, meta.last_full_scan_indexable, library_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Computed count {actual_count} is implausibly low relative to the "
+                f"scan floor {meta.last_full_scan_indexable}. Not updating "
+                "total_items_indexed. If the library was intentionally reduced to "
+                "fewer items, run a full scan first to reset the scan floor."
+            ),
+        )
+
     meta.total_items_indexed = actual_count
     vector_store.update_library_metadata(meta)
     logger.info(f"Reconciled total_items_indexed for library={library_id}: {actual_count}")

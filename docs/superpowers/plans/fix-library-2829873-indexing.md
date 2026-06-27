@@ -1,6 +1,65 @@
 # Fix: Library 2829873 Indexing Failures
 
 **Date**: 2026-06-27  
+**Status**: Hotfix built and ready; dev-machine code fixes implemented (see "Resolution" below)
+
+---
+
+## Resolution (dev-machine code fixes — 2026-06-27)
+
+The core failure was that **an invalid/expired embedding key produced no error**: every
+embedding call failed with HTTP 401, but the per-item `except Exception` in both indexing
+loops swallowed it, so the scan "completed" with 0 chunks, marked the slug `done`, and the
+cron reported success. Fixes:
+
+1. **Fatal embedding errors are now surfaced, not swallowed** (primary fix for the reported
+   problem):
+   - `backend/services/embeddings.py`: new `EmbeddingAuthenticationError`, raised by
+     `RemoteEmbeddingService._create_embeddings_with_backoff` when the API returns HTTP
+     401 (`AuthenticationError`) or 403 (`PermissionDeniedError`). Unlike 429/500, this is
+     non-recoverable by retrying.
+   - `backend/services/document_processor.py`: both `_index_library_full` and
+     `_index_library_incremental` now re-raise `_FATAL_EMBEDDING_ERRORS`
+     (`EmbeddingAuthenticationError`, `EmbeddingRateLimitExhaustedError`) instead of
+     swallowing them per-item, aborting the run. (This also closes a latent hole where a
+     rate-limit-exhausted error raised mid-loop would have been swallowed.)
+   - `backend/services/cron_indexer.py`: `run()` now handles `EmbeddingAuthenticationError`
+     — marks affected slugs `status="error"` with a descriptive message and records a
+     top-level `embedding_auth_error` in `cron_status.json` (visible cross-process via the
+     FastAPI root endpoint). `_index_slug` re-raises it so `run()` handles it centrally.
+
+2. **Bug 3 — `total_items_indexed` counts successes, not attempts**
+   (`_index_library_full`): now `items_added + items_updated + items_skipped` (items
+   actually indexed), not `len(items_with_attachments)`. NOTE: the plan's literal
+   suggestion `= items_added` is wrong for the *new* smart-sync `_index_library_full`,
+   because a healthy re-scan **skips** already-current items (`items_added≈0`); the correct
+   value includes `items_skipped`. `last_full_scan_indexable` stays
+   `len(items_with_attachments)` (the scan floor).
+
+3. **Bug 4 — `reconcile-count` sanity guard** (`backend/api/libraries.py`): refuses (HTTP
+   409) to overwrite `total_items_indexed` when the recomputed count is < 50% of
+   `last_full_scan_indexable`, preventing a concurrent-scroll undercount from triggering a
+   destructive forced rescan.
+
+4. **Bug 1 — `count_indexed_items`**: investigated and *not* changed. The plan's "wrong
+   item_key stored" hypothesis is **not supported by the code** — both current and the
+   container-era commit `da7eebf` store the correct parent `item_key` in `add_chunks_batch`
+   (and `copy_chunks_cross_library` writes `target_item_key`). The 195-vs-6010 discrepancy
+   was most consistent with a `scroll()` undercount while a scan was concurrently writing.
+   The Bug 4 guard mitigates the *consequence* regardless of the precise cause.
+
+**Tests** (all green; new tests verified red→green via `git stash`):
+`test_embeddings.py::TestEmbeddingAuthenticationError`,
+`test_document_processor.py` (auth-error propagation in full + incremental;
+`total_items_indexed` counts successes), `test_cron_indexer.py::TestEmbeddingAuthErrorHandling`,
+`test_reconcile_count.py`.
+
+**Still deployment-only (not code):** Bug 2 (old wipe-and-rebuild image in production) needs
+the CI rebuild + `DEPLOY_PULL=true` deploy; KISSKI key rotation in the systemd unit.
+
+---
+
+**Date**: 2026-06-27  
 **Status**: Hotfix built and ready; remaining bugs identified for dev-machine work
 
 ---

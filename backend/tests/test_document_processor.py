@@ -563,6 +563,82 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["chunks_deleted"], 3)
 
+    async def test_full_sync_propagates_embedding_auth_error(self):
+        """A fatal embedding auth error must abort the run, not be swallowed per-item.
+
+        Regression for the June 2026 incident: an expired KISSKI key made every
+        embedding call fail, but the per-item ``except Exception`` swallowed it and
+        the scan reported success with zero chunks.
+        """
+        from backend.services.embeddings import EmbeddingAuthenticationError
+
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
+        self.mock_zotero_client.get_library_items_since.return_value = [item]
+        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.side_effect = EmbeddingAuthenticationError("bad key")
+
+        with self.assertRaises(EmbeddingAuthenticationError):
+            await self.processor.index_library("test_lib", mode="full")
+
+    async def test_incremental_propagates_embedding_auth_error(self):
+        """Incremental mode must also abort on a fatal embedding auth error."""
+        from backend.models.library import LibraryIndexMetadata
+        from backend.services.embeddings import EmbeddingAuthenticationError
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib", library_type="user", library_name="t",
+            last_indexed_version=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        item = {"version": 6, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
+        self.mock_zotero_client.get_library_items_since.return_value = [item]
+        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.side_effect = EmbeddingAuthenticationError("bad key")
+
+        with self.assertRaises(EmbeddingAuthenticationError):
+            await self.processor.index_library("test_lib", mode="incremental")
+
+    async def test_full_sync_total_items_indexed_counts_only_successes(self):
+        """total_items_indexed must reflect items actually indexed, not merely attempted.
+
+        A full scan where some items fail to process must record only the successes,
+        otherwise a run that fails to embed everything looks complete and blocks the
+        cron under-indexed auto-recovery.
+        """
+        item_a = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        item_b = {"version": 1, "data": {"key": "BBB", "itemType": "journalArticle", "title": "B"}}
+        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
+
+        self.mock_zotero_client.get_library_items_since.return_value = [item_a, item_b]
+        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        # First item extracts fine; second fails extraction (non-fatal, swallowed per-item).
+        self.mock_extractor.extract_and_chunk.side_effect = [
+            _make_extraction_chunks(("content", 1)),
+            ValueError("boom"),
+        ]
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        self.assertEqual(result["items_added"], 1)
+        saved = self.mock_vector_store.update_library_metadata.call_args[0][0]
+        # Persisted count is successes (1), not attempts (2).
+        self.assertEqual(saved.total_items_indexed, 1)
+        # last_full_scan_indexable still records how many items had indexable content.
+        self.assertEqual(saved.last_full_scan_indexable, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

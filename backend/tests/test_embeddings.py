@@ -7,10 +7,15 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import numpy as np
 
-from openai import RateLimitError as OpenAIRateLimitError
+from openai import (
+    AuthenticationError as OpenAIAuthenticationError,
+    PermissionDeniedError as OpenAIPermissionDeniedError,
+    RateLimitError as OpenAIRateLimitError,
+)
 
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
+    EmbeddingAuthenticationError,
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
     LocalEmbeddingService,
@@ -352,6 +357,55 @@ class TestEmbeddingRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(sleep_duration, 0.9)  # at least the server-supplied 1 s
         self.assertLess(sleep_duration, 3.0)     # plus small jitter only
         self.assertIsNotNone(result)
+
+
+class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
+    """An invalid API key (HTTP 401/403) must raise a fatal EmbeddingAuthenticationError.
+
+    Without this, a single expired key turns every embedding call into a swallowed
+    per-item error and the indexing run silently completes with zero chunks.
+    """
+
+    def _make_service(self) -> RemoteEmbeddingService:
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="text-embedding-3-small",
+            batch_size=10,
+            cache_enabled=False,
+        )
+        return RemoteEmbeddingService(config, api_key="bad-key")
+
+    async def test_401_raises_authentication_error(self):
+        service = self._make_service()
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        exc = OpenAIAuthenticationError(
+            "invalid api key", response=mock_response, body=None
+        )
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingAuthenticationError):
+                await service._create_embeddings_with_backoff(["hello"])
+
+    async def test_403_raises_authentication_error(self):
+        service = self._make_service()
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        exc = OpenAIPermissionDeniedError(
+            "forbidden", response=mock_response, body=None
+        )
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingAuthenticationError):
+                await service._create_embeddings_with_backoff(["hello"])
 
 
 if __name__ == "__main__":
