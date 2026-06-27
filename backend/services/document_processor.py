@@ -329,8 +329,17 @@ class DocumentProcessor:
         )
         logger.debug(f"Retrieved {len(items)} total items from Zotero")
 
+        # Build children lookup from the full item list (avoids N+1 API calls during full sync)
+        children_by_parent: dict[str, list[dict]] = {}
+        for _item in items:
+            _parent = _item.get("data", {}).get("parentItem")
+            if _parent and _item.get("data", {}).get("itemType") == "attachment":
+                children_by_parent.setdefault(_parent, []).append(_item)
+
         # Filter to items with indexable attachments or substantial abstracts
-        items_with_attachments = await self._filter_indexed_attachments(items, library_id, library_type)
+        items_with_attachments = await self._filter_indexed_attachments(
+            items, library_id, library_type, children_by_parent=children_by_parent
+        )
         logger.debug(f"Found {len(items_with_attachments)} indexable items")
 
         # Limit if max_items is set (test / partial run)
@@ -846,9 +855,15 @@ class DocumentProcessor:
         self,
         items: list[dict],
         library_id: str,
-        library_type: str
+        library_type: str,
+        children_by_parent: Optional[dict[str, list[dict]]] = None,
     ) -> list[dict]:
-        """Filter items to those with at least one indexable attachment or a substantial abstract."""
+        """Filter items to those with at least one indexable attachment or a substantial abstract.
+
+        When *children_by_parent* is provided (pre-built from a full item fetch), no
+        additional Zotero API calls are made.  Without it, each parent item triggers one
+        get_item_children() call (legacy path used by incremental sync).
+        """
         min_words = get_settings().min_abstract_words
         items_with_content = []
 
@@ -863,11 +878,14 @@ class DocumentProcessor:
 
             # Check if item has any indexable attachments
             item_key = item["data"]["key"]
-            attachments = await self.zotero_client.get_item_children(
-                library_id=library_id,
-                item_key=item_key,
-                library_type=library_type
-            )
+            if children_by_parent is not None:
+                attachments = children_by_parent.get(item_key, [])
+            else:
+                attachments = await self.zotero_client.get_item_children(
+                    library_id=library_id,
+                    item_key=item_key,
+                    library_type=library_type
+                )
 
             has_indexable = any(
                 att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
