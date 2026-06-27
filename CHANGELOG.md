@@ -1,3 +1,10 @@
+## [1.33.3](https://github.com/cboulanger/zotero-rag/compare/v1.33.2...v1.33.3) (2026-06-27)
+
+
+### Bug Fixes
+
+* advance last_indexed_version over non-indexable items in incremental mode ([98e93c3](https://github.com/cboulanger/zotero-rag/commit/98e93c3f48bbbf60106d239ae6c5194e5ff50370))
+
 ## [1.33.2](https://github.com/cboulanger/zotero-rag/compare/v1.33.1...v1.33.2) (2026-06-25)
 
 
