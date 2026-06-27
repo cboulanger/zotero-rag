@@ -6,7 +6,10 @@ and vector database indexing with support for incremental indexing.
 """
 
 import asyncio
+import ctypes
+import gc
 import hashlib
+import sys
 import logging
 import re
 import time
@@ -433,6 +436,12 @@ class DocumentProcessor:
             finally:
                 if progress_callback:
                     progress_callback(idx + 1, total_items, chunks_added)
+                # Return memory to OS after each item — PDF extraction allocates
+                # several MB of text/parse data that CPython won't release otherwise.
+                if idx % 10 == 9:
+                    gc.collect()
+                    if sys.platform == "linux":
+                        ctypes.CDLL("libc.so.6").malloc_trim(0)
 
         metadata.last_indexed_version = max_version_seen
         # Count only items that are actually indexed (newly added, updated, or already
