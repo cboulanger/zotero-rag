@@ -199,6 +199,15 @@ class DocumentProcessor:
 
         logger.debug(f"Found {len(items)} items modified since version {since_version}")
 
+        # Advance the version checkpoint over ALL fetched items, including non-indexable ones.
+        # Without this, items that are fetched but filtered out (e.g. no attachments, no
+        # abstract) would cause the same items to be re-fetched on every subsequent run,
+        # and any new library items added after their version would never be seen.
+        max_version_seen = max(
+            (item.get("version", 0) for item in items),
+            default=metadata.last_indexed_version,
+        )
+
         # Filter to items with indexable attachments
         items_with_attachments = (
             await self._filter_indexed_attachments(items, library_id, library_type)
@@ -214,7 +223,6 @@ class DocumentProcessor:
         items_updated = 0
         chunks_added = 0
         chunks_deleted = 0
-        max_version_seen = metadata.last_indexed_version
         total_items = len(items_with_attachments)
 
         # Report initial progress
