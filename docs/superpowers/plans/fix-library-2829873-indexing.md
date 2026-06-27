@@ -14,46 +14,161 @@ The plugin shows `6013/6027 items (incomplete)` based on stale metadata; the act
 
 ---
 
+## Event Timeline (all times UTC+2 / CEST, June 2026)
+
+| Time | Event |
+|------|-------|
+| Jun 24 18:59 | Container image built and deployed (pre-`4dcc438`, old wipe-and-rebuild code) |
+| Jun 25 15:00 | Full scan started for library 2829873 (old code, deleted 0 existing chunks) |
+| Jun 26 06:59 | Server log entry: KISSKI `/models` health check returned 401 (possible brief key hiccup, embeddings still worked) |
+| Jun 26 18:58 | Full scan completed: `items=6010 added=6010 chunks=215399 elapsed=100709s`; metadata set to `total_items_indexed=6010, last_full_scan_indexable=6010, last_indexed_version=46693` |
+| Jun 26 19:00–Jun 27 08:00 | Hourly incremental cron runs: 3 items fetched (v46694–46696), 0 indexable, 0 processed, version stays at 46693 |
+| Jun 27 06:54 | First embedding 401 in server log (`Error processing upload for IYB3QM2V`) — KISSKI key now reliably expired |
+| Jun 27 07:00–07:14 | Several async upload embedding calls succeed briefly |
+| Jun 27 07:14–07:18 | Cascade of 401 errors on async uploads |
+| Jun 27 07:20–07:53 | 43 async upload requests queued (pending, not yet processed) |
+| Jun 27 ~07:53 | **`POST /libraries/2829873/reconcile-count` called** (during diagnostic session); `count_indexed_items("2829873")` returned **195**; metadata updated: `total_items_indexed=195` |
+| Jun 27 09:00:10 | `_resolve_mode` detects `195/24127 items (1% < 25%)`; scan_floor check fails (`195 < 5409`); forces full rescan |
+| Jun 27 09:00:15 | Old wipe-and-rebuild code **deletes 217,318 chunks** and 241 dedup records for library 2829873 |
+| Jun 27 09:12 | New full scan starts; fetches 24,127 items from Zotero |
+| Jun 27 09:12+ | All embedding calls fail (401); scan will complete with 0 chunks stored |
+
+---
+
 ## Root Cause Chain
 
-### 1. Reconcile-count returned wrong value (triggering the cascade)
+### 1. Reconcile-count returned wrong value — triggering the cascade
 
-During a diagnostic session, the `/libraries/2829873/reconcile-count` API endpoint was called.  
-`count_indexed_items("2829873")` returned **195** when there were actually **217,318 chunks** with `library_id = "2829873"` — the correct number of unique item keys should have been ~6,010.
+**What happened**: `POST /libraries/2829873/reconcile-count` → `count_indexed_items("2829873")` returned **195** when the correct answer was ~**6,010 unique item keys** across 217,318 chunks.
 
-The cause of this incorrect count is **unexplained** (see open question below).
+**Code path** (`backend/api/libraries.py:175`, `backend/db/vector_store.py:1218`):
+```python
+# reconcile_library_count handler:
+actual_count = vector_store.count_indexed_items(library_id)  # returned 195
+meta.total_items_indexed = actual_count                       # overwrote 6010 with 195
+vector_store.update_library_metadata(meta)
 
-Setting `total_items_indexed = 195` caused `_resolve_mode` to detect under-indexing:
-- `indexed = 195`, `zotero_total = 24,127` → ratio = 1% < 25% threshold
-- `scan_floor = 6,010` (from prior full scan), `195 >= 6,010 * 0.9 = 5,409` → **false** → protection did not kick in
+# count_indexed_items implementation:
+def count_indexed_items(self, library_id: str) -> int:
+    item_keys: set[str] = set()
+    offset = None
+    while True:
+        results, next_offset = self.client.scroll(
+            collection_name=self.CHUNKS_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="library_id", match=MatchValue(value=library_id))
+            ]),
+            limit=1000,
+            offset=offset,
+            with_payload=["item_key"],
+            with_vectors=False,
+            timeout=self.qdrant_timeout,
+        )
+        for point in results:
+            ik = point.payload.get("item_key")
+            if ik:
+                item_keys.add(ik)
+        if next_offset is None:
+            break
+        offset = next_offset
+    return len(item_keys)
+```
+
+**Evidence** (see `fix-library-2829873-indexing-logs.md` for full excerpts):
+
+At **Jun 27 06:14** — 11 hours after the full scan stored 215,399 chunks — the plugin's
+`check-indexed` calls showed **all 25 items per batch as `not_indexed`**. Only items being
+concurrently processed by async uploads transitioned to `up_to_date`, and only after their
+upload completed. Items supposedly covered by the full scan never appeared.
+
+At **Jun 27 08:20** — not 07:53 as previously noted — `count_indexed_items("2829873")` returned
+**195**. This 195 corresponds precisely to the items successfully async-uploaded before KISSKI
+expired at 06:54 (about 15 minutes of successful uploads during the 06:14 session).
+
+At **Jun 27 09:00:15**, `delete_library_chunks("2829873")` deleted **217,318 chunks** — confirming
+those chunks existed with `library_id = "2829873"`.
+
+**Definitive conclusion**: The 215,399 chunks from the June 25-26 full scan had the correct
+`library_id = "2829873"` (found by DELETE) but **item_key values that do not match parent Zotero
+item keys** (invisible to check-indexed and count_indexed_items, both of which filter by item_key).
+Only the 195 items indexed via async upload had correct parent item_keys and were counted.
+
+**Root cause to confirm**: check commit `da7eebf` — the vector_store.py version in the container
+(built Jun 24, the most recent commit to that file before the container build). Either
+`add_chunks_batch` / `store_item_chunks` at that commit stored wrong item_key values, or
+`_process_attachment_bytes` at that commit passed the wrong value for `doc_metadata.item_key`.
+
+```bash
+# Check what item_key value the container's add_chunks_batch stored:
+git show da7eebf:backend/db/vector_store.py | grep -A 50 "def add_chunks_batch"
+
+# Check what the container's _process_attachment_bytes passed as item_key:
+git show 4dcc438^:backend/services/document_processor.py | grep -B5 -A5 "item_key"
+
+# Cross-library copy: did copy_chunks_cross_library use the right target item_key?
+git show da7eebf:backend/db/vector_store.py | grep -A 60 "def copy_chunks_cross_library"
+```
+
+Specific things to look for:
+- Is `"item_key"` present in the payload dict in `add_chunks_batch` at `da7eebf`?
+- If yes, is it `chunk.metadata.document_metadata.item_key` (parent key) or `attachment_key`?
+- In `copy_chunks_cross_library` at `da7eebf`: is `"item_key": target_item_key` in the new payload, or is the source item_key preserved?
 
 ### 2. Wipe-and-rebuild code deleted 217,318 good chunks (09:00:15, June 27)
 
-The container image was built 2026-06-24 18:59, before commit `4dcc438` (safe smart sync, 2026-06-25 15:56). It still runs the old wipe-and-rebuild `_index_library_full`. The under-indexed detection triggered a full rescan which deleted all chunks before re-indexing:
+The running container image predates commit `4dcc438` (`fix: replace wipe-and-rebuild full indexing with safe smart sync`, Jun 25 15:56). The old `_index_library_full` in the container:
+
+```python
+# OLD code (pre-4dcc438) — container version:
+async def _index_library_full(self, library_id, library_type, metadata, ...):
+    chunks_deleted = self.vector_store.delete_library_chunks(library_id)   # WIPES ALL CHUNKS FIRST
+    dedup_deleted  = self.vector_store.delete_library_deduplication_records(library_id)
+    items = await self.zotero_client.get_library_items_since(library_id, library_type, since_version=None)
+    items_with_attachments = await self._filter_indexed_attachments(items, library_id, library_type)
+    for item in items_with_attachments:
+        chunk_count = await self._index_item(item, library_id, library_type)
+        ...
+    metadata.total_items_indexed = len(items_with_attachments)   # set regardless of embedding success
+    metadata.last_full_scan_indexable = len(items_with_attachments)
 ```
-INFO Deleted 217318 chunks for library 2829873
-INFO Deleted 241 deduplication records for library 2829873
-```
+
+The new code (`_index_library_full` post-`4dcc438`, already in current repo) never deletes chunks upfront — it does a smart diff (add new, update changed, delete orphaned). An interrupted or failed scan leaves existing chunks intact.
 
 ### 3. KISSKI API key expired (~06:54, June 27)
 
-The container has `KISSKI_API_KEY=0c7b1a01e614faa4d5c04879d352f99b` (expired).  
-The current `.env` and deploy file (`dev machine`) have the correct key: `d1569768d3c8ae5634b9f134ead87a46`.
-
-The new full scan (started 09:12 June 27) fails to embed anything → will complete with 0 chunks stored.
+The container env var `KISSKI_API_KEY=0c7b1a01e614faa4d5c04879d352f99b` expired. The correct key `d1569768d3c8ae5634b9f134ead87a46` is in the repo's `.env` file and has been updated in `.local/.env.deploy.zotero-rag.panya.de`. The systemd service file at `/etc/systemd/system/zotero-rag.service` still has the old key hardcoded in the `ExecStart` line.
 
 ### 4. Incremental mode never advances `last_indexed_version` past 46693
 
-After the last full scan, incremental mode fetches 3 items since v46693 (versions 46694–46696: all parent items with no indexable attachments and no substantial abstract). Since none pass `_filter_indexed_attachments`, `items_with_attachments` is empty, the inner loop never runs, and `max_version_seen` stays at `metadata.last_indexed_version`.
+**The 3 stuck items**: Zotero library 2829873 has exactly 3 items modified after v46693:
+- v46694: journalArticle "A Marxist Analysis of American Law"
+- v46695: book "The Ideology of Advocacy..."  
+- v46696: journalArticle "Commodity Form and Legal Form..."
 
-Result: the same 3 items are re-fetched every hour forever, and any new items added after v46693 are never picked up.
+All 3 are parent items with no attached PDF and (presumably) abstracts shorter than the 100-word threshold in `_filter_indexed_attachments`. They pass neither the attachment filter nor the abstract filter, so `items_with_attachments = []`.
 
-**Bug location**: `backend/services/document_processor.py`, `_index_library_incremental`, line ~217:
+**The bug** (`backend/services/document_processor.py`, `_index_library_incremental`):
 ```python
-max_version_seen = metadata.last_indexed_version  # initialized here
-for idx, item in enumerate(items_with_attachments):  # empty → loop never runs
-    max_version_seen = max(max_version_seen, item_version)  # never executes
-metadata.last_indexed_version = max_version_seen  # stays unchanged
+# Bug: max_version_seen only advances inside the loop over items_with_attachments
+max_version_seen = metadata.last_indexed_version   # = 46693
+
+for idx, item in enumerate(items_with_attachments):  # [] → loop body never runs
+    item_version = item["version"]
+    max_version_seen = max(max_version_seen, item_version)  # never called
+
+metadata.last_indexed_version = max_version_seen   # still 46693 — no progress
+```
+
+**Effect**: Every cron hour, the same 3 items are fetched from Zotero (`since=46693`), filtered to zero, and the version is written back unchanged. Any new items added to the library after v46693 will never be discovered by incremental mode.
+
+**Fix already committed** (this session, commit `98e93c3`): compute `max_version_seen` from all fetched items before filtering:
+```python
+max_version_seen = max(
+    (item.get("version", 0) for item in items),
+    default=metadata.last_indexed_version,
+)
+# Then filter:
+items_with_attachments = await self._filter_indexed_attachments(...)
 ```
 
 ---
@@ -62,27 +177,16 @@ metadata.last_indexed_version = max_version_seen  # stays unchanged
 
 ### Patch image built
 
-`document_processor.py` was patched to fix the incremental version tracking bug (fix #4 above).  
-The fix initializes `max_version_seen` from **all** fetched items before filtering:
-
-```python
-# After fetching items, before filtering:
-max_version_seen = max(
-    (item.get("version", 0) for item in items),
-    default=metadata.last_indexed_version,
-)
-```
-
-Patch image built with:
 ```bash
 cat > /tmp/Dockerfile.patch << 'EOF'
 FROM localhost/zotero-rag:latest
 COPY backend/services/document_processor.py /app/backend/services/document_processor.py
 EOF
 sudo podman build -f /tmp/Dockerfile.patch -t zotero-rag:latest /home/cloud/zotero-rag
+# Verified: sudo podman run --rm zotero-rag:latest grep -c "max_version_seen = max(" /app/backend/services/document_processor.py  → 3
 ```
 
-The incremental version tracking fix is already committed to the dev branch (in `document_processor.py`).
+The incremental version fix is in the image. The image does NOT yet contain the safe smart sync `_index_library_full` (that requires a full image rebuild via CI).
 
 ### Steps to apply hotfix on server (requires sudo)
 
@@ -98,109 +202,147 @@ sleep 10 && sudo systemctl status zotero-rag.service | head -5
 ```
 
 **What happens after restart:**
-- Current failing scan is killed
+- Current failing scan is killed (0 chunks would have been stored anyway)
 - New container starts with patched image + correct KISSKI key
-- Next cron run detects `195/24127` under-indexed → triggers new full scan
-- Full scan now uses **old wipe-and-rebuild code** (safe smart sync not yet in image) but with the correct key
-- All ~6,010 items will be successfully embedded and stored (~28 hours)
+- Next cron run (~within the hour) detects `total_items_indexed=195`, `zotero_total=24127` → under-indexed → triggers full scan
+- Full scan uses **old wipe-and-rebuild code** (no chunks exist to wipe, so no risk) with working KISSKI key
+- ~6,010 items indexed over ~28 hours
 
 ---
 
 ## Remaining Bugs to Fix on Development Machine
 
-These fixes should be merged and deployed via CI after the hotfix stabilizes the server.
+### Bug 1: `count_indexed_items` may return wrong count [INVESTIGATE FIRST]
 
-### Bug 1: `count_indexed_items` returns wrong count [INVESTIGATE]
+**Risk**: Every call to `POST /libraries/{library_id}/reconcile-count` (triggered by the plugin after an upload batch) can corrupt `total_items_indexed` if `count_indexed_items` returns an incorrect value, which then triggers an unnecessary full rescan that wipes all chunks.
 
-`count_indexed_items("2829873")` returned 195 when 217,318 chunks existed with 6,010 unique item keys. The function scrolls all chunks matching `library_id` and collects unique `item_key` values. Both `store_item_chunks` and `copy_chunks_cross_library` correctly set `item_key` in the payload.
+**What to investigate** (see detailed hypotheses in Root Cause section above):
 
-**Possible causes to investigate:**
-- Qdrant scroll pagination skipping results during large collection modifications (concurrent writes during scroll)
-- Qdrant payload index inconsistency after a large upsert batch
-- A timing issue where the scroll ran against an in-progress Qdrant index rebuild
+1. Check `item_key` presence in payload at container-era commit `da7eebf`:
+   ```bash
+   git show da7eebf:backend/db/vector_store.py | grep -A 50 "def add_chunks_batch"
+   git show da7eebf:backend/db/vector_store.py | grep -A 30 "def store_item_chunks"
+   ```
 
-**Suggested investigation:**
-1. After the new full scan completes, call `reconcile-count` and verify it returns ~6,010
-2. If it returns a wrong value, add logging to `count_indexed_items` to print the raw scroll batch sizes
-3. Check Qdrant's consistency mode settings (WAL, indexing threshold)
+2. Check whether `_process_attachment_bytes` at `da7eebf` set `doc_metadata.item_key` correctly:
+   ```bash
+   git show da7eebf:backend/services/document_processor.py | grep -B5 -A5 "item_key"
+   ```
 
-**Risk if not fixed:** A future `reconcile-count` call (e.g., triggered by the plugin after an upload batch) could again set `total_items_indexed` to a wrong value and trigger an unnecessary full rescan that wipes good chunks.
+3. Write a unit test that indexes a mock item with 3 chunks, then calls `count_indexed_items` and asserts the return value is 1 (one unique item_key). Run it against both the current code and, if possible, the `da7eebf` version of vector_store.
 
-### Bug 2: Old wipe-and-rebuild code still in production image [DEPLOY]
+4. Check the Qdrant client version used at container time to understand scroll-under-concurrent-writes behaviour:
+   ```bash
+   git show da7eebf:backend/pyproject.toml | grep qdrant
+   ```
 
-The container image (built 2026-06-24) predates the safe smart sync commit `4dcc438`. The next CI build and deploy will include this fix automatically. Until then, a failed or interrupted full scan will wipe all existing chunks before re-indexing.
+### Bug 2: Old wipe-and-rebuild code still in production image [DEPLOY via CI]
 
-**Fix**: CI rebuild and `DEPLOY_PULL=true` deploy, or local rebuild:
-```bash
-sudo podman build -t zotero-rag:latest /home/cloud/zotero-rag
-sudo systemctl restart zotero-rag.service
-```
+Commit `4dcc438` is in the current repo but not in the deployed image (built Jun 24). The new `_index_library_full` does a smart diff — never wipes chunks upfront. Trigger a CI build and `DEPLOY_PULL=true` deploy.
+
+Until CI deploys: the hotfix image has the incremental fix but NOT the safe smart sync. Any new forced full scan will still wipe-and-rebuild (acceptable while there are 0 chunks to wipe).
 
 ### Bug 3: `total_items_indexed` counts attempted items, not successful ones
 
-In `_index_library_full` (both old and new code), line 400:
+**Location**: `backend/services/document_processor.py`, `_index_library_full`, near the end of both old and new versions:
 ```python
-metadata.total_items_indexed = len(items_with_attachments)
-```
-This is set to the count of items that had indexable content, regardless of whether embedding succeeded. If the KISSKI key is expired during a full scan, this will be set to 6,010 even though 0 chunks were stored. The `_resolve_mode` scan_floor protection then prevents a corrective rescan.
+# WRONG — set even when all items failed to embed:
+metadata.total_items_indexed = len(items_with_attachments)   # e.g. 6010 even if 0 chunks stored
 
-**Risk**: Library appears "indexed" (count = 6,010) but has 0 searchable chunks.
-
-**Fix location**: `backend/services/document_processor.py`, `_index_library_full` (both old and new):
-```python
-# Change:
-metadata.total_items_indexed = len(items_with_attachments)
-# To (counts items that successfully contributed at least one chunk):
+# CORRECT — count only items that contributed at least one chunk:
 metadata.total_items_indexed = items_added
 ```
-Note: `items_added` is already tracked in the loop. This requires also verifying the `_resolve_mode` thresholds still make sense with a "successful" count rather than "attempted" count.
+
+`items_added` is already tracked in the loop (incremented when `_index_item` returns > 0 chunks). No new counter needed.
+
+**Consequence of the bug**: If a full scan runs with an expired embedding key, it completes with `total_items_indexed = 6010` and `last_full_scan_indexable = 6010` but 0 actual chunks. The `_resolve_mode` scan_floor protection then keeps `_resolve_mode` returning "auto" indefinitely (`6010 >= 5409`), so the library is silently un-indexed with no automatic recovery.
+
+**Current code reference**: `backend/services/document_processor.py:400` (new safe-sync `_index_library_full`):
+```python
+metadata.total_items_indexed = len(items_with_attachments)   # line 400
+metadata.last_full_scan_indexable = len(items_with_attachments)  # line 401
+```
+
+**Note on threshold impact**: After the fix, `total_items_indexed` reflects successfully-embedded items. If most items embed successfully (typical case), the value is ~6,010. If the key expires mid-scan and 3,000 items are processed before failure, the value is 3,000. `_resolve_mode` would then see `3000/24127 = 12% < 25%` but `scan_floor = 6010`, `3000 >= 5409 → false` → would force another full scan. This is the correct behaviour.
 
 ### Bug 4: `reconcile-count` can silently corrupt metadata [DEFENSIVE]
 
-The `POST /libraries/{library_id}/reconcile-count` endpoint overwrites `total_items_indexed` with the result of `count_indexed_items`. If `count_indexed_items` returns a wrong value (Bug 1), this will corrupt the metadata and may trigger unnecessary full rescans.
+**Location**: `backend/api/libraries.py:175`, `reconcile_library_count`
 
-**Fix**: Before overwriting, sanity-check the new value:
+**Fix**: add a sanity check before overwriting `total_items_indexed`:
+
 ```python
-# In reconcile_library_count (backend/api/libraries.py):
-actual_count = vector_store.count_indexed_items(library_id)
-# Only update if the count is plausible (not a large drop from a populated library)
-if meta.last_full_scan_indexable > 0 and actual_count < meta.last_full_scan_indexable * 0.5:
-    logger.warning(
-        f"reconcile-count: suspiciously low count {actual_count} "
-        f"(scan_floor={meta.last_full_scan_indexable}) — skipping update"
-    )
-    raise HTTPException(status_code=409, detail=f"Computed count {actual_count} is implausibly low; not updating")
-meta.total_items_indexed = actual_count
+@router.post("/libraries/{library_id}/reconcile-count", response_model=LibraryIndexMetadata)
+def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+    meta = vector_store.get_library_metadata(library_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Library not indexed")
+
+    actual_count = vector_store.count_indexed_items(library_id)
+
+    # Guard against a buggy/partial count wiping a well-indexed library.
+    # If the computed count drops by more than 50% from the established scan floor,
+    # refuse the update and let the caller decide (prevents cascade wipe like June 27 incident).
+    if meta.last_full_scan_indexable > 0 and actual_count < meta.last_full_scan_indexable * 0.5:
+        logger.warning(
+            "reconcile-count: computed count %d is < 50%% of scan_floor %d for library %s — refusing update",
+            actual_count, meta.last_full_scan_indexable, library_id,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Computed count {actual_count} is implausibly low relative to "
+                f"scan_floor {meta.last_full_scan_indexable}. Not updating. "
+                "If the library was intentionally re-indexed to fewer items, "
+                "run a full scan first to reset last_full_scan_indexable."
+            ),
+        )
+
+    meta.total_items_indexed = actual_count
+    vector_store.update_library_metadata(meta)
+    logger.info("Reconciled total_items_indexed for library=%s: %d", library_id, actual_count)
+    return meta
 ```
 
 ---
 
-## Open Questions
+## Key Code Locations for Dev-Machine Work
 
-1. **Why did `count_indexed_items` return 195?**  
-   At the time of the call, `delete_library_chunks` later confirmed 217,318 chunks existed (it reported "Deleted 217318 chunks"). If `count_indexed_items` used the same `library_id = "2829873"` filter, it should have found ~6,010 unique item keys, not 195.  
-   One hypothesis: Qdrant scroll pagination returned a partial result set during concurrent write activity (the async upload subsystem was queuing 43 jobs at the same time). Another hypothesis: the scroll hit the Qdrant timeout and returned a partial page.
-
-2. **Why were there 3 items at versions 46694–46696 with no indexable content?**  
-   The 3 items are: `journalArticle "A Marxist Analysis of American Law"`, `book "The Ideology of Advocacy..."`, `journalArticle "Commodity Form and Legal Form..."`. They may be records with no attached PDF and an abstract shorter than the 100-word threshold. These will be re-fetched every hour by the incremental cron until fix #4 (version tracking) is deployed — after which `last_indexed_version` will advance past 46696.
-
----
-
-## Files Changed in This Session
-
-| File | Change | Status |
-|------|--------|--------|
-| `backend/services/document_processor.py` | Fixed incremental version tracking (Bug 4 above) | Committed to dev |
-| `.local/.env.deploy.zotero-rag.panya.de` | Updated KISSKI key | Not committed (secrets) |
+| Symbol | File | Notes |
+|--------|------|-------|
+| `count_indexed_items` | `backend/db/vector_store.py:1218` | Scroll-based unique-item-key count; suspected source of Bug 1 |
+| `reconcile_library_count` | `backend/api/libraries.py:175` | Calls above; needs sanity check (Bug 4) |
+| `_index_library_incremental` | `backend/services/document_processor.py:180` | Version tracking bug fixed in commit `98e93c3` |
+| `_index_library_full` (new) | `backend/services/document_processor.py:298` | `total_items_indexed = len(items_with_attachments)` at line 400 (Bug 3) |
+| `_resolve_mode` | `backend/services/cron_indexer.py:330` | Under-indexed detection; uses `total_items_indexed` and `last_full_scan_indexable` |
+| `add_chunks_batch` | `backend/db/vector_store.py:~270` | Check `item_key` in payload dict (Bug 1 investigation) |
 
 ---
 
 ## Deployment Checklist After Hotfix
 
-- [ ] Apply KISSKI key + restart on server (see commands above)
-- [ ] Verify new full scan starts in cron log: `sudo podman logs -f zotero-rag-zotero-rag-panya-de`
-- [ ] After ~28h, verify chunk count: `sudo podman exec zotero-rag-zotero-rag-panya-de python3 -c "from qdrant_client import QdrantClient; from qdrant_client.models import Filter, FieldCondition, MatchValue; c = QdrantClient('http://qdrant:6333'); print(c.count('document_chunks', count_filter=Filter(must=[FieldCondition(key='library_id', match=MatchValue(value='2829873'))]), exact=True).count)"`
-- [ ] Investigate Bug 1 (count_indexed_items returning wrong value)
-- [ ] Fix Bug 3 (total_items_indexed counts attempted not successful)
-- [ ] Fix Bug 4 (reconcile-count sanity check)
-- [ ] CI rebuild with safe smart sync + all fixes → deploy
+- [ ] Apply KISSKI key + restart on server (commands in hotfix section above)
+- [ ] Verify new full scan starts: `sudo podman logs -f zotero-rag-zotero-rag-panya-de | grep 2829873`
+- [ ] After ~28h, verify chunk count reaches ~215,000:
+  ```bash
+  sudo podman exec zotero-rag-zotero-rag-panya-de python3 -c "
+  from qdrant_client import QdrantClient
+  from qdrant_client.models import Filter, FieldCondition, MatchValue
+  c = QdrantClient('http://qdrant:6333')
+  r = c.count('document_chunks', count_filter=Filter(must=[FieldCondition(key='library_id', match=MatchValue(value='2829873'))]), exact=True)
+  print('chunks:', r.count)
+  "
+  ```
+- [ ] Investigate Bug 1 (`count_indexed_items` root cause) — do this before next `reconcile-count` call
+- [ ] Fix Bug 3 (`total_items_indexed = items_added`) + tests
+- [ ] Fix Bug 4 (`reconcile-count` sanity check)
+- [ ] CI rebuild (includes safe smart sync) → `DEPLOY_PULL=true` deploy
+
+---
+
+## Files Changed in This Session
+
+| File | Change | Committed |
+|------|--------|-----------|
+| `backend/services/document_processor.py` | Fixed incremental version tracking (Bug 4 root cause fix) | Yes — `98e93c3` |
+| `.local/.env.deploy.zotero-rag.panya.de` | Updated KISSKI key (secrets — not committed) | No |
