@@ -320,6 +320,32 @@ For `--systemd-service zotero-rag`:
 
 The main service declares `Requires=zotero-rag-kreuzberg.service` and `Requires=zotero-rag-qdrant.service` so systemd starts all three in the correct order.
 
+### Secrets and key rotation
+
+User-provided env vars (everything passed as `--env KEY` / loaded from the deploy env
+file — including API keys such as `KISSKI_API_KEY`) are **not** inlined into the systemd
+unit. They are written to a root-only file:
+
+| File | Mode | Referenced by |
+| ---- | ---- | ------------- |
+| `/etc/zotero-rag/<service>.env` | `0600` | podman `--env-file` (legacy unit) / `EnvironmentFile=` (Quadlet, Podman 4.6+) |
+
+The unit therefore contains only the *path*, never the secret values (so `systemctl cat`
+and process listings don't leak keys). Internal, non-secret config (e.g. `QDRANT_URL`)
+stays inline.
+
+**Rotating a key without a full redeploy:** edit the value in
+`/etc/zotero-rag/<service>.env`, then restart — podman re-reads the file on each start:
+
+```bash
+sudo nano /etc/zotero-rag/zotero-rag.env      # update KISSKI_API_KEY=...
+sudo systemctl restart zotero-rag
+```
+
+> Existing deployments created before this change have the key inlined in their
+> `ExecStart` line. Re-running `deploy --systemd-service` regenerates the unit in the new
+> form and writes the env file.
+
 ### Shared kreuzberg
 
 If you run multiple backend instances on the same host, they can share one kreuzberg sidecar. Deploy the first instance normally, then use `--shared-kreuzberg` for subsequent ones:

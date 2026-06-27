@@ -26,7 +26,11 @@ from typing import Callable, Literal, Optional
 from backend.api.public_query import slug_to_backend_id
 from backend.db.vector_store import VectorStore
 from backend.services.document_processor import DocumentProcessor
-from backend.services.embeddings import EmbeddingService, EmbeddingRateLimitExhaustedError
+from backend.services.embeddings import (
+    EmbeddingService,
+    EmbeddingAuthenticationError,
+    EmbeddingRateLimitExhaustedError,
+)
 from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
@@ -292,6 +296,25 @@ class CronIndexer:
                 total_stats["chunks_added"] += slug_stats.get("chunks_added", 0)
                 total_stats["libraries"].append(slug_info.slug)
 
+        except EmbeddingAuthenticationError as exc:
+            # Invalid/expired embedding API key. Affects every slug, and retrying
+            # won't help until the key is fixed — surface it as an error rather than
+            # letting the run silently "complete" with zero chunks.
+            self.log.error(
+                "Embedding API authentication failed: %s. "
+                "Check the embedding API key; no items can be indexed until it is fixed.",
+                exc,
+            )
+            status["embedding_auth_error"] = str(exc)
+            for si in slug_infos:
+                if status["slugs"][si.slug].get("status") in ("pending", "indexing"):
+                    status["slugs"][si.slug]["status"] = "error"
+                    status["slugs"][si.slug]["error"] = (
+                        f"Embedding API authentication failed: {exc}"
+                    )
+            # Do not re-raise — the error is surfaced via the status file; retrying
+            # within this process would only repeat the failure.
+
         except EmbeddingRateLimitExhaustedError as exc:
             self.log.error(
                 "Embedding quota exhausted: %s. Service available again at %s.",
@@ -414,8 +437,8 @@ class CronIndexer:
                 "chunks_added": stats.get("chunks_added", 0),
                 "last_update": datetime.now(timezone.utc).isoformat(),
             }
-        except EmbeddingRateLimitExhaustedError:
-            raise  # let run() handle quota exhaustion centrally
+        except (EmbeddingRateLimitExhaustedError, EmbeddingAuthenticationError):
+            raise  # let run() handle quota exhaustion / auth failure centrally
         except Exception as exc:
             self.log.error("Error indexing %s: %s", slug_info.slug, exc, exc_info=True)
             status["slugs"][slug_info.slug]["status"] = "error"

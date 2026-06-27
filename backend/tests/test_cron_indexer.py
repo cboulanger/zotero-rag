@@ -395,6 +395,37 @@ class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_index_slug_called, ["users/1"])
 
 
+class TestEmbeddingAuthErrorHandling(unittest.IsolatedAsyncioTestCase):
+    """An invalid embedding API key must surface as an error in cron status, not a silent success."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    async def test_auth_error_marks_slugs_errored(self):
+        """When EmbeddingAuthenticationError is raised, the slug is marked errored in status."""
+        from backend.services.embeddings import EmbeddingAuthenticationError
+
+        exc = EmbeddingAuthenticationError("embedding API rejected credentials (HTTP 401)")
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp)
+
+        async def fail_on_first(slug_info, status):
+            if slug_info.slug == "users/1":
+                raise exc
+            return {"items_processed": 5, "chunks_added": 10}
+
+        indexer._index_slug = fail_on_first
+        await indexer.run()
+
+        status = json.loads((self.tmp / "cron_status.json").read_text())
+        self.assertIn("embedding_auth_error", status)
+        # The failing slug and any not-yet-started slug must be marked errored.
+        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+        self.assertEqual(status["slugs"]["users/2"]["status"], "error")
+        self.assertIn("authentication", status["slugs"]["users/1"]["error"].lower())
+        # The whole run must not be marked as still running.
+        self.assertFalse(status["running"])
+
+
 class TestResolveMode(unittest.IsolatedAsyncioTestCase):
     """Unit tests for CronIndexer._resolve_mode()."""
 

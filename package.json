@@ -1,6 +1,6 @@
 {
   "name": "zotero-rag",
-  "version": "1.33.2",
+  "version": "1.33.4",
   "description": "A RAG system based on Zotero metadata and attachments",
   "license": "ISC",
   "author": "",
@@ -31,6 +31,7 @@
   "scripts": {
     "start": "uv run python scripts/server.py start",
     "test": "npm run test:backend",
+    "test:node": "node --test test/*.test.mjs",
     "test:backend": "uv run pytest backend/tests/ -v",
     "test:backend:watch": "uv run pytest backend/tests/ -v --looponfail",
     "test:backend:coverage": "uv run pytest backend/tests/ --cov=backend --cov-report=html --cov-report=term",
