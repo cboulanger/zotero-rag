@@ -280,6 +280,10 @@ def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore 
 
     try:
         chunks_deleted = vector_store.delete_item_chunks(library_id, item_key)
+        # Also purge the dedup record so the item can be re-indexed.  A surviving
+        # dedup record without chunks makes check_duplicate match an item that has
+        # no chunks, leaving it permanently un-reindexable.
+        vector_store.delete_item_deduplication_records(library_id, item_key)
         return {
             "library_id": library_id,
             "item_key": item_key,

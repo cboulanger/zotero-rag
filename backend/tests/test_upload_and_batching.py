@@ -9,7 +9,7 @@ import json
 import logging
 import unittest
 from io import BytesIO
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch, call
 
 from fastapi.testclient import TestClient
 from httpx import WriteTimeout
@@ -222,6 +222,110 @@ class TestUploadTimeoutWarning(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         levels = [r.split(":")[0] for r in cm.output]
         self.assertIn("ERROR", levels)
+
+
+# ---------------------------------------------------------------------------
+# Orphaned deduplication-record self-healing
+#
+# A dedup record can outlive its chunks (e.g. a chunk-collection wipe leaves the
+# separate `deduplication` collection intact).  When that happens, check_duplicate
+# matches but check-indexed / count_indexed_items see no chunks, so the item is
+# both "already indexed" (dedup hit) and "not indexed" (no chunks) — permanently
+# un-reindexable.  The upload path must detect this, purge the stale record, and
+# proceed to index instead of returning skipped_duplicate.
+# ---------------------------------------------------------------------------
+
+class TestOrphanedDedupSelfHeal(unittest.TestCase):
+    _METADATA = json.dumps({
+        "library_id": "lib1",
+        "item_key": "ITEM001",
+        "attachment_key": "ATT001",
+        "mime_type": "application/pdf",
+        "item_version": 5,
+        "attachment_version": 1,
+    })
+
+    def setUp(self):
+        from backend.main import app
+        from backend.dependencies import get_vector_store
+        self.app = app
+        self.get_vector_store = get_vector_store
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def tearDown(self):
+        self.app.dependency_overrides.clear()
+
+    def _dedup_record(self, item_key="ITEM001"):
+        from backend.models.document import DeduplicationRecord
+        return DeduplicationRecord(
+            content_hash="hash123",
+            library_id="lib1",
+            item_key=item_key,
+            relation_uri=None,
+        )
+
+    def _post(self, pdf_bytes=b"%PDF fake"):
+        return self.client.post(
+            "/api/index/document",
+            files={"file": ("test.pdf", BytesIO(pdf_bytes), "application/pdf")},
+            data={"metadata": self._METADATA},
+        )
+
+    def _run(self, mock_vs):
+        from backend.services.document_processor import AttachmentProcessingResult
+        self.app.dependency_overrides[self.get_vector_store] = lambda: mock_vs
+        with (
+            patch("backend.api.document_upload.make_embedding_service") as mock_emb_factory,
+            patch("backend.api.document_upload.DocumentProcessor") as mock_proc_cls,
+            patch("backend.api.document_upload._check_registration"),
+        ):
+            mock_emb = MagicMock()
+            mock_emb.rate_limit_retries = 0
+            mock_emb.get_rate_limit_info = AsyncMock(return_value=None)
+            mock_emb_factory.return_value = mock_emb
+
+            mock_proc = MagicMock()
+            mock_proc_cls.return_value = mock_proc
+            mock_proc._process_attachment_bytes = AsyncMock(
+                return_value=AttachmentProcessingResult(chunks_written=7, status="indexed_fresh")
+            )
+            self._mock_proc = mock_proc
+            return self._post()
+
+    def test_orphaned_dedup_record_is_purged_and_item_reindexed(self):
+        """Dedup hit but no chunks for the item → purge stale record, index fresh."""
+        mock_vs = MagicMock()
+        mock_vs.check_duplicate.return_value = self._dedup_record()
+        # No chunks exist for the dedup record's item → orphaned record.
+        mock_vs.get_item_version.return_value = None
+        mock_vs.get_library_metadata.return_value = None
+        mock_vs.count_library_chunks.return_value = 7
+
+        resp = self._run(mock_vs)
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "indexed")
+        self.assertEqual(data["chunks_added"], 7)
+        # The stale dedup record must have been purged for the orphaned item.
+        mock_vs.delete_item_deduplication_records.assert_called_once_with("lib1", "ITEM001")
+        # The document must actually have been processed (not short-circuited).
+        self._mock_proc._process_attachment_bytes.assert_called_once()
+
+    def test_genuine_duplicate_is_still_skipped(self):
+        """Dedup hit AND chunks present for the item → keep skipping, don't reprocess."""
+        mock_vs = MagicMock()
+        mock_vs.check_duplicate.return_value = self._dedup_record()
+        # Chunks exist for the item → genuine duplicate.
+        mock_vs.get_item_version.return_value = 5
+
+        resp = self._run(mock_vs)
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "skipped_duplicate")
+        mock_vs.delete_item_deduplication_records.assert_not_called()
+        self._mock_proc._process_attachment_bytes.assert_not_called()
 
 
 if __name__ == "__main__":
