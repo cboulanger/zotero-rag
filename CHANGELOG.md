@@ -1,3 +1,15 @@
+## [1.33.5](https://github.com/cboulanger/zotero-rag/compare/v1.33.4...v1.33.5) (2026-06-27)
+
+
+### Bug Fixes
+
+* **dedup:** self-heal orphaned dedup records so chunkless items can re-index ([cdcf9bf](https://github.com/cboulanger/zotero-rag/commit/cdcf9bf24fc1abf216f78fb1dfa726fa624ed1b3))
+
+
+### Performance Improvements
+
+* eliminate N+1 Zotero API calls in full-sync attachment filtering [skip ci] ([7ea9b68](https://github.com/cboulanger/zotero-rag/commit/7ea9b68a0b48fc7c452c834e8119c596cfd2bab1))
+
 ## [1.33.4](https://github.com/cboulanger/zotero-rag/compare/v1.33.3...v1.33.4) (2026-06-27)
 
 
