@@ -286,16 +286,34 @@ async def _execute_upload(
 
     Called by both the synchronous and async upload endpoints.
     """
-    # Duplicate check
-    if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
-        logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
-        return DocumentUploadResult(
-            library_id=library_id,
-            item_key=item_key,
-            attachment_key=attachment_key,
-            chunks_added=0,
-            status="skipped_duplicate",
-            message="Document already indexed (content hash match)",
+    # Duplicate check.  A dedup record can outlive its chunks (a chunk-collection
+    # wipe leaves the separate `deduplication` collection intact), which would make
+    # the item permanently un-reindexable: check_duplicate matches, but check-indexed
+    # and count_indexed_items see no chunks.  So before honouring the dedup hit,
+    # verify the record's item still has chunks; if not, the record is orphaned —
+    # purge it and fall through to re-index.
+    dup = await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id)
+    if dup is not None:
+        dup_has_chunks = await asyncio.to_thread(
+            vector_store.get_item_version, library_id, dup.item_key
+        ) is not None
+        if dup_has_chunks:
+            logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
+            return DocumentUploadResult(
+                library_id=library_id,
+                item_key=item_key,
+                attachment_key=attachment_key,
+                chunks_added=0,
+                status="skipped_duplicate",
+                message="Document already indexed (content hash match)",
+            )
+        logger.warning(
+            f"Orphaned dedup record for item {dup.item_key} in library {library_id} "
+            f"(hash {content_hash[:8]}): record exists but no chunks remain — "
+            f"purging and re-indexing {attachment_key}"
+        )
+        await asyncio.to_thread(
+            vector_store.delete_item_deduplication_records, library_id, dup.item_key
         )
 
     # Delete stale chunks for this item before re-indexing
