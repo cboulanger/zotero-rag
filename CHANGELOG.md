@@ -1,3 +1,10 @@
+## [1.33.8](https://github.com/cboulanger/zotero-rag/compare/v1.33.7...v1.33.8) (2026-06-28)
+
+
+### Performance Improvements
+
+* adaptive gc/malloc_trim triggered by RSS threshold instead of item count [skip ci] ([a6c63f2](https://github.com/cboulanger/zotero-rag/commit/a6c63f20ab53ca03dd24e602ef188494c566d4af))
+
 ## [1.33.7](https://github.com/cboulanger/zotero-rag/compare/v1.33.6...v1.33.7) (2026-06-28)
 
 
