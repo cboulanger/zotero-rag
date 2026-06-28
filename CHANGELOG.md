@@ -1,3 +1,10 @@
+## [1.33.6](https://github.com/cboulanger/zotero-rag/compare/v1.33.5...v1.33.6) (2026-06-27)
+
+
+### Performance Improvements
+
+* call gc.collect + malloc_trim every 10 items during full sync [skip ci] ([237d26b](https://github.com/cboulanger/zotero-rag/commit/237d26ba72408fa13a5950e499a9713ca17aeb97))
+
 ## [1.33.5](https://github.com/cboulanger/zotero-rag/compare/v1.33.4...v1.33.5) (2026-06-27)
 
 
