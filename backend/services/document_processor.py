@@ -9,9 +9,12 @@ import asyncio
 import ctypes
 import gc
 import hashlib
-import sys
+import json
 import logging
+import os
 import re
+import sys
+import tempfile
 import time
 from datetime import datetime, UTC
 from typing import Callable, Optional, Literal
@@ -349,18 +352,60 @@ class DocumentProcessor:
         )
         logger.debug(f"Retrieved {len(items)} total items from Zotero")
 
-        # Build children lookup from the full item list (avoids N+1 API calls during full sync)
-        children_by_parent: dict[str, list[dict]] = {}
-        for _item in items:
-            _parent = _item.get("data", {}).get("parentItem")
-            if _parent and _item.get("data", {}).get("itemType") == "attachment":
-                children_by_parent.setdefault(_parent, []).append(_item)
+        # Spill the full item list to a temp JSONL file and build a minimal
+        # children lookup (only contentType) in one pass, then free the list.
+        # This drops the ~3-4 GB in-memory list before the processing loop.
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="zotero_items_")
+        try:
+            children_by_parent: dict[str, list[dict]] = {}
+            with os.fdopen(tmp_fd, "w") as f:
+                for _item in items:
+                    f.write(json.dumps(_item) + "\n")
+                    _parent = _item.get("data", {}).get("parentItem")
+                    if _parent and _item.get("data", {}).get("itemType") == "attachment":
+                        # Keep only contentType — avoids referencing full item dicts
+                        children_by_parent.setdefault(_parent, []).append(
+                            {"data": {"contentType": _item["data"].get("contentType")}}
+                        )
+            del items
+            gc.collect()
+            if sys.platform == "linux":
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            logger.debug("Spilled items to JSONL; freed in-memory list")
 
-        # Filter to items with indexable attachments or substantial abstracts
-        items_with_attachments = await self._filter_indexed_attachments(
-            items, library_id, library_type, children_by_parent=children_by_parent
-        )
-        logger.debug(f"Found {len(items_with_attachments)} indexable items")
+            # Stream JSONL to filter to indexable parent items
+            min_words = get_settings().min_abstract_words
+            items_with_attachments: list[dict] = []
+            with open(tmp_path) as f:
+                for line in f:
+                    _item = json.loads(line)
+                    if "data" not in _item:
+                        continue
+                    if _item["data"].get("itemType") in ("attachment", "note"):
+                        continue
+                    _key = _item["data"]["key"]
+                    _atts = children_by_parent.get(_key, [])
+                    _has_indexable = any(
+                        a.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                        for a in _atts
+                    )
+                    if _has_indexable:
+                        items_with_attachments.append(_item)
+                    elif _item["data"].get("abstractNote", "") and \
+                            len(_item["data"]["abstractNote"].split()) >= min_words:
+                        items_with_attachments.append(_item)
+
+            del children_by_parent
+            gc.collect()
+            if sys.platform == "linux":
+                ctypes.CDLL("libc.so.6").malloc_trim(0)
+            logger.debug(f"Found {len(items_with_attachments)} indexable items")
+
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
         # Limit if max_items is set (test / partial run)
         if max_items is not None and max_items > 0:
