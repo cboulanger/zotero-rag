@@ -59,6 +59,34 @@ INDEXABLE_MIME_TYPES = {
     "application/epub+zip",
 }
 
+# Trigger gc + malloc_trim when process RSS exceeds this (MB). Keeps long
+# full-sync runs from hitting the OOM killer on memory-constrained hosts.
+_GC_RSS_THRESHOLD_MB = 3000
+
+_libc = ctypes.CDLL("libc.so.6") if sys.platform == "linux" else None
+
+
+def _rss_mb() -> int:
+    """Return current process RSS in MB (Linux only, 0 elsewhere)."""
+    if sys.platform != "linux":
+        return 0
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _trim_memory_if_needed() -> None:
+    """Run gc + malloc_trim when RSS exceeds the threshold."""
+    if _rss_mb() >= _GC_RSS_THRESHOLD_MB:
+        gc.collect()
+        if _libc is not None:
+            _libc.malloc_trim(0)
+
 
 class DocumentProcessor:
     """
@@ -481,12 +509,7 @@ class DocumentProcessor:
             finally:
                 if progress_callback:
                     progress_callback(idx + 1, total_items, chunks_added)
-                # Return memory to OS after each item — PDF extraction allocates
-                # several MB of text/parse data that CPython won't release otherwise.
-                if idx % 10 == 9:
-                    gc.collect()
-                    if sys.platform == "linux":
-                        ctypes.CDLL("libc.so.6").malloc_trim(0)
+                _trim_memory_if_needed()
 
         metadata.last_indexed_version = max_version_seen
         # Count only items that are actually indexed (newly added, updated, or already
