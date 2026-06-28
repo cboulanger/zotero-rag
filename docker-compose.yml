@@ -20,6 +20,9 @@ services:
   kreuzberg:
     image: ghcr.io/kreuzberg-dev/kreuzberg:4.9.5
     restart: unless-stopped
+    command: ["serve", "--host", "0.0.0.0", "--port", "8100", "--config", "/config/kreuzberg.toml"]
+    volumes:
+      - "./config/kreuzberg.toml:/config/kreuzberg.toml:ro"
     # No ports exposed to host — only the app service needs to reach it
     networks:
       - internal

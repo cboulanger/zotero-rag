@@ -49,8 +49,9 @@
 
 import { execSync, spawn } from 'child_process';
 import fs from 'fs';
+import path from 'path';
 import readline from 'readline';
-import { pathToFileURL } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { Command } from 'commander';
 
 // ============================================================================
@@ -61,6 +62,8 @@ const APP_NAME = 'zotero-rag';
 const REGISTRY = 'docker.io/cboulanger/zotero-rag';
 const KREUZBERG_IMAGE = 'ghcr.io/kreuzberg-dev/kreuzberg:latest';
 const KREUZBERG_PORT = 8000;
+const _defaultKreuzbergConfig = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..', 'config', 'kreuzberg.toml');
+const KREUZBERG_CONFIG_PATH = process.env.KREUZBERG_CONFIG || (fs.existsSync(_defaultKreuzbergConfig) ? _defaultKreuzbergConfig : null);
 const QDRANT_IMAGE = 'docker.io/qdrant/qdrant:v1.15';
 const QDRANT_PORT = 6333;
 const DEFAULT_PORT = 8119;
@@ -283,7 +286,9 @@ async function startKreuzberg(kreuzbergName, networkName) {
     '--network-alias', 'kreuzberg',
     '--restart', 'unless-stopped',
     '--memory', kreuzbergMemory,
+    ...(KREUZBERG_CONFIG_PATH ? ['-v', `${KREUZBERG_CONFIG_PATH}:/config/kreuzberg.toml:ro`] : []),
     KREUZBERG_IMAGE,
+    ...(KREUZBERG_CONFIG_PATH ? ['serve', '--host', '0.0.0.0', '--port', `${KREUZBERG_PORT}`, '--config', '/config/kreuzberg.toml'] : []),
   ];
 
   return new Promise((resolve, reject) => {
@@ -1213,6 +1218,10 @@ function buildKreuzbergQuadletContent(containerName, networkName) {
     'NetworkAlias=kreuzberg',
     'AutoUpdate=registry',
     `Memory=${kreuzbergMemory}`,
+    ...(KREUZBERG_CONFIG_PATH ? [
+      `Volume=${KREUZBERG_CONFIG_PATH}:/config/kreuzberg.toml:ro`,
+      `Exec=serve --host 0.0.0.0 --port ${KREUZBERG_PORT} --config /config/kreuzberg.toml`,
+    ] : []),
     '',
     '[Service]',
     'Restart=always',
@@ -1315,7 +1324,7 @@ function buildKreuzbergLegacyUnitContent(containerName, networkName) {
     'Restart=always',
     'RestartSec=5',
     `ExecStartPre=-/usr/bin/podman rm -f ${containerName}`,
-    `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias kreuzberg --memory ${kreuzbergMemory} --label io.containers.autoupdate=registry ${KREUZBERG_IMAGE}`,
+    `ExecStart=/usr/bin/podman run --rm --name ${containerName} --network ${networkName} --network-alias kreuzberg --memory ${kreuzbergMemory} --label io.containers.autoupdate=registry${KREUZBERG_CONFIG_PATH ? ` -v ${KREUZBERG_CONFIG_PATH}:/config/kreuzberg.toml:ro` : ''} ${KREUZBERG_IMAGE}${KREUZBERG_CONFIG_PATH ? ` serve --host 0.0.0.0 --port ${KREUZBERG_PORT} --config /config/kreuzberg.toml` : ''}`,
     `ExecStop=/usr/bin/podman stop ${containerName}`,
     '',
     '[Install]',

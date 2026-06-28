@@ -1,0 +1,5 @@
+max_concurrent_extractions = 1
+
+[ocr]
+backend = "tesseract"
+language = "eng+deu+fra+spa"
