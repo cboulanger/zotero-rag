@@ -1,3 +1,10 @@
+## [1.33.7](https://github.com/cboulanger/zotero-rag/compare/v1.33.6...v1.33.7) (2026-06-28)
+
+
+### Performance Improvements
+
+* spill full item list to JSONL to avoid holding 3-4 GB in memory [skip ci] ([f112969](https://github.com/cboulanger/zotero-rag/commit/f1129699de60cd6b0151ccb0207409fdb9eea74d))
+
 ## [1.33.6](https://github.com/cboulanger/zotero-rag/compare/v1.33.5...v1.33.6) (2026-06-27)
 
 
