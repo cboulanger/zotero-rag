@@ -1,3 +1,10 @@
+## [1.33.9](https://github.com/cboulanger/zotero-rag/compare/v1.33.8...v1.33.9) (2026-06-28)
+
+
+### Performance Improvements
+
+* configure kreuzberg to use Tesseract-only OCR with eng/deu/fra/spa ([eeadacc](https://github.com/cboulanger/zotero-rag/commit/eeadacc0eda610662da271c25bf9367e456ea32a))
+
 ## [1.33.8](https://github.com/cboulanger/zotero-rag/compare/v1.33.7...v1.33.8) (2026-06-28)
 
 
