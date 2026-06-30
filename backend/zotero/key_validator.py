@@ -24,6 +24,7 @@ class KeyValidation:
     targets: list[str] = field(default_factory=list)
     read_only: bool = False
     reason: str | None = None
+    transient: bool = False
 
 
 def _has_write(access: dict) -> bool:
@@ -48,10 +49,10 @@ async def validate_key(api_key: str, base_url: str = ZOTERO_API_BASE) -> KeyVali
                 if resp.status == 404:
                     return KeyValidation(None, None, read_only=False, reason="Key not found (revoked or expired).")
                 if resp.status != 200:
-                    return KeyValidation(None, None, read_only=False, reason=f"Zotero key lookup failed (HTTP {resp.status}).")
+                    return KeyValidation(None, None, read_only=False, reason=f"Zotero key lookup failed (HTTP {resp.status}).", transient=True)
                 data = await resp.json()
         except aiohttp.ClientError as exc:
-            return KeyValidation(None, None, read_only=False, reason=f"Could not reach Zotero API: {exc}")
+            return KeyValidation(None, None, read_only=False, reason=f"Could not reach Zotero API: {exc}", transient=True)
 
         user_id = data.get("userID")
         username = data.get("username")

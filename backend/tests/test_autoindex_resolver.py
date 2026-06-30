@@ -41,7 +41,22 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(targets, {})
         self.assertEqual(len(issues), 1)
         self.assertIn("revoked", issues[0]["reason"].lower())
+        self.assertTrue(issues[0]["pruned"])
         self.assertEqual(store.list_metadata(), [])
+
+    async def test_transient_error_keeps_key(self):
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1", "groups/5"], read_only=True)
+        store.add("KA", v1)
+        transient = KeyValidation(1, "a", read_only=False, reason="Could not reach Zotero API: boom", transient=True)
+        with patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(return_value=transient)):
+            targets, issues = await resolve_targets(store)
+        # Key NOT pruned; stored targets reused so indexing still attempts
+        self.assertEqual(set(targets), {"users/1", "groups/5"})
+        self.assertEqual(len(issues), 1)
+        self.assertFalse(issues[0]["pruned"])
+        self.assertEqual(len(store.list_metadata()), 1)
 
 
 if __name__ == "__main__":

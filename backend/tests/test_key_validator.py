@@ -71,6 +71,14 @@ class KeyValidatorTest(unittest.IsolatedAsyncioTestCase):
             res = await validate_key("GONE")
         self.assertFalse(res.read_only)
         self.assertIn("revoked", res.reason.lower())
+        self.assertFalse(res.transient)
+
+    async def test_http_500_is_transient(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/X", status=500)
+            res = await validate_key("X")
+        self.assertFalse(res.read_only)
+        self.assertTrue(res.transient)
 
     async def test_network_error(self):
         with aioresponses() as m:
@@ -79,6 +87,14 @@ class KeyValidatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(res.read_only)
         self.assertIn("zotero", res.reason.lower())
         self.assertEqual(res.targets, [])
+        self.assertTrue(res.transient)
+
+    async def test_network_error_is_transient(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/X", exception=aiohttp.ClientError("boom"))
+            res = await validate_key("X")
+        self.assertFalse(res.read_only)
+        self.assertTrue(res.transient)
 
     async def test_no_readable_library(self):
         with aioresponses() as m:
