@@ -2,6 +2,7 @@
 
 import unittest
 
+import aiohttp
 from aioresponses import aioresponses
 
 from backend.zotero.key_validator import validate_key, ZOTERO_API_BASE
@@ -70,6 +71,25 @@ class KeyValidatorTest(unittest.IsolatedAsyncioTestCase):
             res = await validate_key("GONE")
         self.assertFalse(res.read_only)
         self.assertIn("revoked", res.reason.lower())
+
+    async def test_network_error(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/NET", exception=aiohttp.ClientError("boom"))
+            res = await validate_key("NET")
+        self.assertFalse(res.read_only)
+        self.assertIn("zotero", res.reason.lower())
+        self.assertEqual(res.targets, [])
+
+    async def test_no_readable_library(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/NONE", payload={
+                "key": "NONE", "userID": 39226, "username": "cboulanger",
+                "access": {"user": {}},
+            })
+            res = await validate_key("NONE")
+        self.assertFalse(res.read_only)
+        self.assertIn("no readable library", res.reason.lower())
+        self.assertEqual(res.targets, [])
 
 
 if __name__ == "__main__":

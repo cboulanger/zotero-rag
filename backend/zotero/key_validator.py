@@ -42,16 +42,16 @@ async def validate_key(api_key: str, base_url: str = ZOTERO_API_BASE) -> KeyVali
     Returns a KeyValidation. On any failure (revoked, write scope, network),
     `read_only` is False and `reason` explains why; `targets` is empty.
     """
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers={"Zotero-API-Version": "3"}) as session:
         try:
             async with session.get(f"{base_url}/keys/{api_key}") as resp:
                 if resp.status == 404:
-                    return KeyValidation(None, None, reason="Key not found (revoked or expired).")
+                    return KeyValidation(None, None, read_only=False, reason="Key not found (revoked or expired).")
                 if resp.status != 200:
-                    return KeyValidation(None, None, reason=f"Zotero key lookup failed (HTTP {resp.status}).")
+                    return KeyValidation(None, None, read_only=False, reason=f"Zotero key lookup failed (HTTP {resp.status}).")
                 data = await resp.json()
         except aiohttp.ClientError as exc:
-            return KeyValidation(None, None, reason=f"Could not reach Zotero API: {exc}")
+            return KeyValidation(None, None, read_only=False, reason=f"Could not reach Zotero API: {exc}")
 
         user_id = data.get("userID")
         username = data.get("username")
@@ -65,17 +65,19 @@ async def validate_key(api_key: str, base_url: str = ZOTERO_API_BASE) -> KeyVali
             )
 
         targets: list[str] = []
-        if access.get("user", {}).get("library"):
+        if user_id and access.get("user", {}).get("library"):
             targets.append(f"users/{user_id}")
 
         groups = access.get("groups", {})
-        if groups.get("all", {}).get("library"):
+        if user_id and groups.get("all", {}).get("library"):
             # Key can read all groups the user belongs to — enumerate them.
             try:
                 async with session.get(f"{base_url}/users/{user_id}/groups") as gresp:
                     if gresp.status == 200:
                         for grp in await gresp.json():
-                            targets.append(f"groups/{grp['id']}")
+                            gid = grp.get("id")
+                            if gid is not None:
+                                targets.append(f"groups/{gid}")
             except aiohttp.ClientError as exc:
                 logger.warning("Failed to enumerate groups for user %s: %s", user_id, exc)
         for gid, grp in groups.items():
