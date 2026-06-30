@@ -111,6 +111,63 @@ After hotfixing, remove non-root (user-space) images to free space:
 podman rmi --all
 ```
 
+### Debugging the cron indexer
+
+The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `index_libraries.py` inside the main container via `podman exec` and appends **stderr** to the log file.
+
+**Log file location (on the host):**
+```
+/home/cloud/data/zotero-rag/logs/cron_indexer.log
+```
+
+**Important:** Timestamps in the log are **UTC**, not local time (CEST = UTC+2).
+
+**Watch live progress (filter out noisy HTTP lines):**
+```bash
+tail -f /home/cloud/data/zotero-rag/logs/cron_indexer.log | grep -v "HTTP Request"
+```
+
+**Check recent meaningful events:**
+```bash
+grep -v "HTTP Request" /home/cloud/data/zotero-rag/logs/cron_indexer.log | tail -20
+```
+
+**Run manually (writes to log file, matches what cron does):**
+```bash
+sudo podman exec zotero-rag-zotero-rag-panya-de python bin/index_libraries.py \
+  --slugs-file /data/system/cron-indexing-slugs.conf \
+  > /dev/null 2>> /home/cloud/data/zotero-rag/logs/cron_indexer.log &
+```
+
+Running without `2>>` redirects output to the terminal/background and nothing appears in the log.
+
+**Enable/disable the cron job:**
+```bash
+# Disable (comment out)
+sudo sed -i 's|^0 \* \* \* \* root /usr/bin/podman exec|#DISABLED 0 * * * * root /usr/bin/podman exec|' /etc/cron.d/zotero-rag-indexer
+
+# Re-enable
+sudo sed -i 's|^#DISABLED 0 \* \* \* \* root|0 * * * * root|' /etc/cron.d/zotero-rag-indexer
+
+# Verify
+sudo cat /etc/cron.d/zotero-rag-indexer
+```
+
+**Monitor memory and process RSS during a run** (`ps --sort` flag not available on this Debian system — use `sort` pipe):
+```bash
+free -h
+ps -eo pid,rss,pcpu,comm | sort -k2 -rn | grep -E "python|qdrant|uvicorn" | head -8
+```
+
+**Check for OOM kills:**
+```bash
+sudo dmesg --since "1 hour ago" | grep -i "oom\|killed process"
+```
+
+**Note on Qdrant RSS:** Qdrant shows a very large RSS (e.g. 13 GB) in `ps` because it uses memory-mapped files for its vector store. This is normal — those pages are file-backed and the kernel can evict them. Check `free -h`'s **available** column (not `free`) to assess actual memory pressure.
+
+**Host swap:** An 8 GB swapfile lives at `/swapfile` (persistent via `/etc/fstab`). It must be set up manually on each new server — it is intentionally not in the deploy scripts because disk capacity varies per host.
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
