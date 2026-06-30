@@ -115,8 +115,34 @@ podman rmi --all
 
 The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `index_libraries.py` inside the main container via `podman exec` and appends **stderr** to the log file.
 
-**Log file location (on the host):**
+**Key flow — auto-index keys (not `--slugs-file` / `ZOTERO_API_KEY`):**
+
+The cron job no longer uses a static slugs file or a global `ZOTERO_API_KEY`. Instead, indexing targets come from the encrypted auto-index key store at `<data_path>/system/autoindex_keys.json`. Keys are added by users via the plugin (Preferences → Automatic indexing) or on the server with:
+
+```bash
+uv run python bin/autoindex_add_key.py <read-only-zotero-api-key>
 ```
+
+Only **read-only** Zotero API keys are accepted; write-scoped keys are rejected at submission time.
+
+**`AUTOINDEX_SECRET` env var (required):**
+
+`AUTOINDEX_SECRET` must be set in the deploy env file. It is a Fernet symmetric key used to encrypt/decrypt the key store. Without it the cron job exits immediately with "AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index." and the auto-index API endpoints return 503.
+
+Generate a new secret with:
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Add the output as `AUTOINDEX_SECRET=<value>` in `.local/.env.deploy.<target>`.
+
+**Key validation and pruning:**
+
+Each run re-validates all stored keys against `api.zotero.org/keys`. Keys that are permanently invalid (revoked, expired, or write-scoped) are pruned from the store. Keys that fail due to transient errors (network issues, 5xx responses) are kept and their previously-stored targets are reused for that run. Pruned keys appear in `cron_status.json` under `key_issues` and in the plugin Preferences.
+
+**Log file location (on the host):**
+
+```text
 /home/cloud/data/zotero-rag/logs/cron_indexer.log
 ```
 
@@ -135,7 +161,6 @@ grep -v "HTTP Request" /home/cloud/data/zotero-rag/logs/cron_indexer.log | tail 
 **Run manually (writes to log file, matches what cron does):**
 ```bash
 sudo podman exec zotero-rag-zotero-rag-panya-de python bin/index_libraries.py \
-  --slugs-file /data/system/cron-indexing-slugs.conf \
   > /dev/null 2>> /home/cloud/data/zotero-rag/logs/cron_indexer.log &
 ```
 
