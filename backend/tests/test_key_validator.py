@@ -1,0 +1,76 @@
+"""Unit tests for backend.zotero.key_validator."""
+
+import unittest
+
+from aioresponses import aioresponses
+
+from backend.zotero.key_validator import validate_key, ZOTERO_API_BASE
+
+
+class KeyValidatorTest(unittest.IsolatedAsyncioTestCase):
+    async def test_read_only_user_library(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/RO", payload={
+                "key": "RO", "userID": 39226, "username": "cboulanger",
+                "access": {"user": {"library": True, "files": True, "notes": True}},
+            })
+            res = await validate_key("RO")
+        self.assertTrue(res.read_only)
+        self.assertEqual(res.user_id, 39226)
+        self.assertEqual(res.targets, ["users/39226"])
+
+    async def test_write_scope_rejected(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/RW", payload={
+                "key": "RW", "userID": 39226, "username": "cboulanger",
+                "access": {"user": {"library": True, "write": True}},
+            })
+            res = await validate_key("RW")
+        self.assertFalse(res.read_only)
+        self.assertIsNotNone(res.reason)
+        self.assertEqual(res.targets, [])
+
+    async def test_group_write_scope_rejected(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/GW", payload={
+                "key": "GW", "userID": 1, "username": "u",
+                "access": {"user": {"library": True},
+                           "groups": {"all": {"library": True, "write": True}}},
+            })
+            res = await validate_key("GW")
+        self.assertFalse(res.read_only)
+
+    async def test_groups_all_enumerated(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/GA", payload={
+                "key": "GA", "userID": 39226, "username": "cboulanger",
+                "access": {"user": {"library": True},
+                           "groups": {"all": {"library": True}}},
+            })
+            m.get(f"{ZOTERO_API_BASE}/users/39226/groups", payload=[
+                {"id": 456}, {"id": 789},
+            ])
+            res = await validate_key("GA")
+        self.assertTrue(res.read_only)
+        self.assertEqual(set(res.targets), {"users/39226", "groups/456", "groups/789"})
+
+    async def test_specific_group(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/SG", payload={
+                "key": "SG", "userID": 1, "username": "u",
+                "access": {"groups": {"123": {"library": True}}},
+            })
+            res = await validate_key("SG")
+        self.assertTrue(res.read_only)
+        self.assertEqual(res.targets, ["groups/123"])
+
+    async def test_revoked_key_404(self):
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/GONE", status=404)
+            res = await validate_key("GONE")
+        self.assertFalse(res.read_only)
+        self.assertIn("revoked", res.reason.lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

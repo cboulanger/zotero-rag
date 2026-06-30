@@ -65,3 +65,8 @@ packages = ["backend"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[dependency-groups]
+dev = [
+    "aioresponses>=0.7.9",
+]
+
