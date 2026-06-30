@@ -3,7 +3,7 @@ Unit tests for document processor.
 """
 
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from backend.services.document_processor import DocumentProcessor
 from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
@@ -664,6 +664,104 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.total_items_indexed, 1)
         # last_full_scan_indexable still records how many items had indexable content.
         self.assertEqual(saved.last_full_scan_indexable, 2)
+
+
+class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
+    """Tests for the subprocess-isolated batch processing path in _index_library_full."""
+
+    def setUp(self):
+        self.mock_zotero_client = AsyncMock()
+        self.mock_embedding_service = AsyncMock()
+        self.mock_vector_store = Mock()
+        self.mock_vector_store.find_cross_library_duplicate.return_value = None
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+        self.mock_zotero_client.get_deleted_item_keys.return_value = []
+        self.mock_extractor = AsyncMock(spec=DocumentExtractor)
+        self.processor = DocumentProcessor(
+            zotero_client=self.mock_zotero_client,
+            embedding_service=self.mock_embedding_service,
+            vector_store=self.mock_vector_store,
+            document_extractor=self.mock_extractor,
+        )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_batch_fatal_error_aborts_run(self, mock_queue_cls, mock_process_cls):
+        """A fatal embedding error reported by a subprocess must abort _index_library_full."""
+        from backend.services.embeddings import EmbeddingAuthenticationError
+
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": True,
+            "error": "bad key",
+            "error_type": "EmbeddingAuthenticationError",
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            with self.assertRaises(EmbeddingAuthenticationError):
+                await self.processor._index_library_full(
+                    library_id="test_lib",
+                    library_type="user",
+                    metadata=MagicMock(last_indexed_version=0),
+                )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_oom_kill_skips_batch_and_continues(self, mock_queue_cls, mock_process_cls):
+        """An OOM-killed subprocess (exitcode -9) must be logged and skipped, not abort the run."""
+        item1 = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        item2 = {"version": 1, "data": {"key": "BBB", "itemType": "journalArticle", "title": "B"}}
+        pdf1 = _attachment("PDF1", "AAA")
+        pdf2 = _attachment("PDF2", "BBB")
+        self.mock_zotero_client.get_library_items_since.return_value = [item1, item2, pdf1, pdf2]
+
+        # First batch OOM-killed (empty queue, exitcode -9); second succeeds
+        mock_q1 = MagicMock()
+        mock_q1.empty.return_value = True
+        mock_q2 = MagicMock()
+        mock_q2.empty.return_value = False
+        mock_q2.get_nowait.return_value = {
+            "fatal": False, "chunks_added": 3, "items_added": 1,
+            "items_updated": 0, "items_skipped": 0,
+        }
+        mock_queue_cls.side_effect = [mock_q1, mock_q2]
+
+        mock_proc1 = MagicMock()
+        mock_proc1.exitcode = -9
+        mock_proc2 = MagicMock()
+        mock_proc2.exitcode = 0
+        mock_process_cls.side_effect = [mock_proc1, mock_proc2]
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            result = await self.processor._index_library_full(
+                library_id="test_lib",
+                library_type="user",
+                metadata=MagicMock(last_indexed_version=0),
+            )
+
+        self.assertEqual(result["chunks_added"], 3)
 
 
 if __name__ == "__main__":
