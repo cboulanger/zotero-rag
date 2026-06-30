@@ -171,5 +171,14 @@ class TestSettings(unittest.TestCase):
         self.assertIsNot(settings1, settings2)
 
 
+def test_autoindex_settings_defaults(monkeypatch):
+    monkeypatch.delenv("AUTOINDEX_SECRET", raising=False)
+    from backend.config.settings import Settings
+    s = Settings()
+    assert s.autoindex_secret is None
+    # Defaults under data_path/system
+    assert str(s.autoindex_keys_path).endswith("system/autoindex_keys.json")
+
+
 if __name__ == "__main__":
     unittest.main()
