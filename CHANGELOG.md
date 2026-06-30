@@ -1,3 +1,15 @@
+# [1.34.0](https://github.com/cboulanger/zotero-rag/compare/v1.33.9...v1.34.0) (2026-06-30)
+
+
+### Bug Fixes
+
+* prevent test-triggered OOM and isolate indexing memory via subprocesses ([37b9c12](https://github.com/cboulanger/zotero-rag/commit/37b9c12ea06ad69f80a7338a3ee6d760234b4f8d))
+
+
+### Features
+
+* make embedding batch size configurable + document INDEX_BATCH_SIZE ([04ab848](https://github.com/cboulanger/zotero-rag/commit/04ab848fe9f78b9a500c2235b562c3e548f7cb96))
+
 ## [1.33.9](https://github.com/cboulanger/zotero-rag/compare/v1.33.8...v1.33.9) (2026-06-28)
 
 
