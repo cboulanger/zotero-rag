@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, UTC
+from multiprocessing import Process, Queue as MPQueue
 from typing import Callable, Optional, Literal
 
 from backend.zotero.local_api import ZoteroLocalAPI
@@ -64,6 +65,96 @@ INDEXABLE_MIME_TYPES = {
 _GC_RSS_THRESHOLD_MB = 3000
 
 _libc = ctypes.CDLL("libc.so.6") if sys.platform == "linux" else None
+
+SUBPROCESS_BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "300"))
+
+
+def _subprocess_index_batch(
+    items: list[dict],
+    library_id: str,
+    library_type: str,
+    indexed_versions: dict[str, int],
+) -> dict:
+    """Process a batch of items in an isolated subprocess.
+
+    Re-initialises all clients from env vars so the subprocess is completely
+    independent of the parent's heap. Called via multiprocessing.Process on Linux
+    (fork context) — inherits all env vars from the parent process.
+
+    Returns a stats dict: chunks_added, items_added, items_updated, items_skipped.
+    Raises EmbeddingAuthenticationError / EmbeddingRateLimitExhaustedError on fatal
+    embedding failures so the main process can abort the full run.
+    """
+    import asyncio as _asyncio
+
+    from backend.dependencies import make_embedding_service, make_vector_store
+    from backend.zotero.web_api import ZoteroWebAPI
+
+    async def _run() -> dict:
+        settings = get_settings()
+        if not settings.zotero_api_key:
+            raise RuntimeError("ZOTERO_API_KEY is not set — cannot initialise ZoteroWebAPI in subprocess")
+
+        embedding_service = make_embedding_service()
+        vector_store = make_vector_store()
+        web_api = ZoteroWebAPI(api_key=settings.zotero_api_key)
+
+        chunks_added = items_added = items_updated = items_skipped = 0
+        async with web_api:
+            processor = DocumentProcessor(
+                zotero_client=web_api,
+                embedding_service=embedding_service,
+                vector_store=vector_store,
+            )
+            for item in items:
+                item_key = item["data"]["key"]
+                item_version = item.get("version", 0)
+                existing = indexed_versions.get(item_key)
+                try:
+                    if existing is None:
+                        n = await processor._index_item(item, library_id, library_type)
+                        chunks_added += n
+                        items_added += 1
+                    elif existing < item_version:
+                        vector_store.delete_item_chunks(library_id, item_key)
+                        n = await processor._index_item(item, library_id, library_type)
+                        chunks_added += n
+                        items_updated += 1
+                    else:
+                        items_skipped += 1
+                except _FATAL_EMBEDDING_ERRORS:
+                    raise
+                except Exception as e:
+                    logger.error("Error processing item %s in subprocess batch: %s", item_key, e, exc_info=True)
+
+        return {
+            "chunks_added": chunks_added,
+            "items_added": items_added,
+            "items_updated": items_updated,
+            "items_skipped": items_skipped,
+        }
+
+    return _asyncio.run(_run())
+
+
+def _run_subprocess_batch(
+    items: list[dict],
+    library_id: str,
+    library_type: str,
+    indexed_versions: dict[str, int],
+    result_queue,  # multiprocessing.Queue
+) -> None:
+    """Target for multiprocessing.Process. Runs _subprocess_index_batch and puts
+    result on result_queue. On fatal embedding error puts {'fatal': True, ...}."""
+    try:
+        result = _subprocess_index_batch(items, library_id, library_type, indexed_versions)
+        result_queue.put({"fatal": False, **result})
+    except _FATAL_EMBEDDING_ERRORS as e:
+        result_queue.put({"fatal": True, "error": repr(e), "error_type": type(e).__name__})
+    except Exception as e:
+        logger.error("Subprocess batch worker raised unexpected error: %s", e, exc_info=True)
+        result_queue.put({"fatal": False, "chunks_added": 0, "items_added": 0,
+                          "items_updated": 0, "items_skipped": 0})
 
 
 def _rss_mb() -> int:
@@ -461,55 +552,114 @@ class DocumentProcessor:
                     self.vector_store.delete_item_deduplication_records(library_id, key)
                 orphaned_item_count = len(orphaned_keys)
 
+        # Pre-compute max_version_seen from the full item list — the subprocess
+        # worker processes a slice and cannot update this value in the parent.
+        max_version_seen = max(
+            (item.get("version", 0) for item in items_with_attachments),
+            default=0,
+        )
+
         # Index items: skip unchanged, update outdated, add new
         chunks_added = 0
         items_added = 0
         items_updated = 0
         items_skipped = 0
-        max_version_seen = 0
         total_items = len(items_with_attachments)
 
         if progress_callback:
             progress_callback(0, total_items, 0)
 
-        for idx, item in enumerate(items_with_attachments):
-            if cancellation_check and cancellation_check():
-                logger.info(f"Cancellation requested during full sync of library {library_id}")
-                raise RuntimeError("Indexing cancelled by user")
+        use_subprocess = not get_settings().testing and SUBPROCESS_BATCH_SIZE > 0
 
-            try:
-                item_key = item["data"]["key"]
-                item_version = item["version"]
-                max_version_seen = max(max_version_seen, item_version)
+        if use_subprocess:
+            # --- Subprocess-isolated batch processing ---
+            # Each batch runs in a fresh OS process; when it exits the OS reclaims
+            # all memory unconditionally, bounding heap growth to one batch at a time.
+            items_processed_so_far = 0
+            for batch_start in range(0, total_items, SUBPROCESS_BATCH_SIZE):
+                if cancellation_check and cancellation_check():
+                    logger.info("Cancellation requested during full sync of library %s", library_id)
+                    raise RuntimeError("Indexing cancelled by user")
 
-                existing_version = indexed_versions.get(item_key)
+                batch = items_with_attachments[batch_start: batch_start + SUBPROCESS_BATCH_SIZE]
+                batch_keys = {item["data"]["key"] for item in batch}
+                batch_indexed = {k: v for k, v in indexed_versions.items() if k in batch_keys}
 
-                if existing_version is None:
-                    logger.debug(f"New item {item_key} (version {item_version})")
-                    chunk_count = await self._index_item(item, library_id, library_type)
-                    items_added += 1
-                    chunks_added += chunk_count
-                elif existing_version < item_version:
-                    logger.debug(
-                        f"Updated item {item_key} ({existing_version} -> {item_version})"
+                result_q: MPQueue = MPQueue()
+                proc = Process(
+                    target=_run_subprocess_batch,
+                    args=(batch, library_id, library_type, batch_indexed, result_q),
+                    daemon=True,
+                )
+                proc.start()
+                proc.join()
+
+                if not result_q.empty():
+                    result = result_q.get_nowait()
+                    if result.get("fatal"):
+                        # Re-raise fatal embedding error to abort the full run
+                        from backend.services.embeddings import (
+                            EmbeddingAuthenticationError,
+                            EmbeddingRateLimitExhaustedError,
+                        )
+                        error_type = result.get("error_type", "")
+                        if error_type == "EmbeddingAuthenticationError":
+                            raise EmbeddingAuthenticationError(result.get("error", ""))
+                        raise EmbeddingRateLimitExhaustedError(result.get("error", ""))
+                    chunks_added += result.get("chunks_added", 0)
+                    items_added += result.get("items_added", 0)
+                    items_updated += result.get("items_updated", 0)
+                    items_skipped += result.get("items_skipped", 0)
+                elif proc.exitcode is not None and proc.exitcode < 0:
+                    logger.warning(
+                        "Batch %d–%d killed by signal %d (likely OOM); "
+                        "items will be retried on next run",
+                        batch_start, batch_start + len(batch), -proc.exitcode,
                     )
-                    self.vector_store.delete_item_chunks(library_id, item_key)
-                    chunk_count = await self._index_item(item, library_id, library_type)
-                    items_updated += 1
-                    chunks_added += chunk_count
                 else:
-                    items_skipped += 1
+                    logger.warning(
+                        "Batch %d–%d produced no result (exit code %s)",
+                        batch_start, batch_start + len(batch), proc.exitcode,
+                    )
 
-            except _FATAL_EMBEDDING_ERRORS:
-                # Embedding key/quota failure affects every item — abort the run so
-                # the caller surfaces an error instead of silently skipping everything.
-                raise
-            except Exception as e:
-                logger.error(f"Error processing item in full sync mode: {e}", exc_info=True)
-            finally:
+                items_processed_so_far += len(batch)
                 if progress_callback:
-                    progress_callback(idx + 1, total_items, chunks_added)
-                _trim_memory_if_needed()
+                    progress_callback(items_processed_so_far, total_items, chunks_added)
+
+        else:
+            # --- Inline processing (used when settings.testing=True) ---
+            for idx, item in enumerate(items_with_attachments):
+                if cancellation_check and cancellation_check():
+                    logger.info("Cancellation requested during full sync of library %s", library_id)
+                    raise RuntimeError("Indexing cancelled by user")
+
+                try:
+                    item_key = item["data"]["key"]
+                    item_version = item.get("version", 0)
+                    existing_version = indexed_versions.get(item_key)
+
+                    if existing_version is None:
+                        logger.debug("New item %s (version %s)", item_key, item_version)
+                        chunk_count = await self._index_item(item, library_id, library_type)
+                        items_added += 1
+                        chunks_added += chunk_count
+                    elif existing_version < item_version:
+                        logger.debug("Updated item %s (%s -> %s)", item_key, existing_version, item_version)
+                        self.vector_store.delete_item_chunks(library_id, item_key)
+                        chunk_count = await self._index_item(item, library_id, library_type)
+                        items_updated += 1
+                        chunks_added += chunk_count
+                    else:
+                        items_skipped += 1
+
+                except _FATAL_EMBEDDING_ERRORS:
+                    raise
+                except Exception as e:
+                    logger.error("Error processing item in full sync mode: %s", e, exc_info=True)
+                finally:
+                    if progress_callback:
+                        progress_callback(idx + 1, total_items, chunks_added)
+                    _trim_memory_if_needed()
 
         metadata.last_indexed_version = max_version_seen
         # Count only items that are actually indexed (newly added, updated, or already

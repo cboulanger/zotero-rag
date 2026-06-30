@@ -514,6 +514,78 @@ git commit -m "docs: document INDEX_BATCH_SIZE env var for subprocess batch inde
 
 ---
 
+### Task 4: Make embedding batch size configurable via env var
+
+**Background:** During the Jun 29 outages, the cron indexer hit OOM twice while the embedding service was sending 215 chunks in a single API call. The `remote-kisski` preset has `batch_size=256` hardcoded — reducing this breaks the embedding payload into smaller calls, lowering peak RSS at the cost of extra round-trips.
+
+**Files:**
+- Modify: `backend/config/presets.py`
+- Modify: `.env.dist`
+
+**Context:** `EmbeddingConfig.batch_size` (default 32, defined in `presets.py` line 17) controls how many texts are sent per embedding API call. The `remote-kisski` preset overrides this to 256 (`presets.py` line 219). This is the preset used in production (`INFO - Using preset: remote-kisski`).
+
+- [ ] **Step 1: Make the batch_size in remote-kisski read from an env var**
+
+In `backend/config/presets.py`, find the `remote-kisski` embedding config block:
+
+```python
+        embedding=EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
+            batch_size=256,  # Send more texts per API call to reduce round-trips
+```
+
+Replace the `batch_size` line with:
+
+```python
+            batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", "256")),  # tunable; lower to reduce peak RSS
+```
+
+Confirm `import os` is already present at the top of `presets.py`. If not, add it.
+
+- [ ] **Step 2: Document the env var in `.env.dist`**
+
+Find the `INDEX_BATCH_SIZE` block added by Task 3 and append immediately after it:
+
+```bash
+# Maximum number of texts sent per embedding API call.
+# Lower values reduce peak RSS when indexing large documents (fewer texts held in
+# memory simultaneously) at the cost of more round-trips to the embedding service.
+# The remote-kisski preset defaults to 256; for the current 16 GB host, 64 is safer.
+# Default: 256 (remote-kisski preset value)
+#EMBEDDING_BATCH_SIZE=64
+```
+
+- [ ] **Step 3: Smoke-test**
+
+```bash
+uv run python -c "
+import os; os.environ['EMBEDDING_BATCH_SIZE'] = '64'
+from backend.config.presets import PRESETS
+p = PRESETS['remote-kisski']
+assert p.embedding.batch_size == 64, f'Expected 64, got {p.embedding.batch_size}'
+print('OK: batch_size overridden to', p.embedding.batch_size)
+"
+```
+
+Expected output: `OK: batch_size overridden to 64`
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add backend/config/presets.py .env.dist
+git commit -m "feat: make embedding batch size configurable via EMBEDDING_BATCH_SIZE env var
+
+The remote-kisski preset sent up to 256 texts per API call, holding all
+embeddings in memory simultaneously. On the 16 GB production host this
+contributed to OOM crashes during cron indexing runs. EMBEDDING_BATCH_SIZE
+lets operators cap this without changing presets.
+
+[skip ci]"
+```
+
+---
+
 ## Self-Review
 
 **Spec coverage:**
@@ -524,6 +596,7 @@ git commit -m "docs: document INDEX_BATCH_SIZE env var for subprocess batch inde
 - `INDEX_BATCH_SIZE` env var ✓ (Tasks 1, 3)
 - `max_version_seen` pre-computed before loop ✓ (Task 1)
 - Cancellation check at batch boundary ✓ (Task 1)
+- `EMBEDDING_BATCH_SIZE` env var to cap per-call memory ✓ (Task 4)
 
 **Placeholder scan:** No TBDs. All code blocks are complete.
 

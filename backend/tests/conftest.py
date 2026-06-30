@@ -14,6 +14,12 @@ import pytest
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Ensure testing mode is active before any backend code is imported.
+# This prevents the subprocess dispatch path in document_processor from
+# spawning real multiprocessing.Process workers during unit tests, which
+# would consume 10+ GB RAM and crash the host.
+os.environ.setdefault("TESTING", "true")
+
 # Add backend to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
