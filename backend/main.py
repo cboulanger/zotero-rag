@@ -14,7 +14,7 @@ from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
-from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query
+from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex
 from backend.api.document_upload import load_item_cache, save_item_cache
 
 # Get settings to access log configuration
@@ -186,6 +186,7 @@ app.include_router(document_upload.router, prefix="/api", tags=["document-upload
 app.include_router(registration.router, prefix="/api", tags=["registration"])
 app.include_router(rate_limits.router, prefix="/api", tags=["rate-limits"])
 app.include_router(public_query.router, tags=["public"])
+app.include_router(autoindex.router, prefix="/api", tags=["autoindex"])
 
 
 @app.get("/")
