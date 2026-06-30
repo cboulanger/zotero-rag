@@ -8,6 +8,7 @@ All endpoints are protected by the global X-API-Key middleware. When
 AUTOINDEX_SECRET is unset the feature is disabled and endpoints return 503.
 """
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, HTTPException
@@ -42,7 +43,7 @@ async def add_key(request: KeyRequest) -> dict:
     validation = await validate_key(request.api_key)
     if not validation.read_only:
         raise HTTPException(status_code=400, detail=validation.reason or "Key is not read-only.")
-    store.add(request.api_key, validation)
+    await asyncio.to_thread(store.add, request.api_key, validation)
     return {
         "user_id": validation.user_id,
         "username": validation.username,
@@ -51,13 +52,13 @@ async def add_key(request: KeyRequest) -> dict:
 
 
 @router.delete("/autoindex/keys", summary="Remove an auto-index key")
-async def delete_key(request: KeyRequest) -> dict:
+def delete_key(request: KeyRequest) -> dict:
     store = _store()
     removed = store.remove_by_key(request.api_key)
     return {"removed": removed}
 
 
 @router.get("/autoindex/keys", summary="List auto-index key metadata (admin)")
-async def list_keys() -> dict:
+def list_keys() -> dict:
     store = _store()
     return {"keys": store.list_metadata()}
