@@ -460,14 +460,14 @@ class ZoteroRAGPlugin {
 	async logServerInfo() {
 		const response = await fetch(`${this.backendURL}/`, { headers: this.getAuthHeaders() });
 		if (!response.ok) return;
-		/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, embedding:{model_type:string,model_name:string,base_url:string|null,embedding_dim:number,distance:string}, llm:{model_type:string,model_name:string,base_url:string|null,max_context_length:number,temperature:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string,chunks:number,indexed_documents:number,libraries:number}}} */
+		/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, embedding:{model_type:string,model_name:string,base_url:string|null,embedding_dim:number,distance:string}, llm:{model_type:string,model_name:string,base_url:string|null,max_context_length:number,temperature:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string,chunks:number,indexed_documents:number,libraries_count:number}}} */
 		const info = await response.json();
 		const { preset, embedding, llm, rag, vector_db } = info;
 		this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
 		this.log(`Embedding: [${embedding.model_type}] ${embedding.model_name}${embedding.base_url ? ` @ ${embedding.base_url}` : ''} (${embedding.embedding_dim}-dim, ${embedding.distance})`);
 		this.log(`LLM: [${llm.model_type}] ${llm.model_name}${llm.base_url ? ` @ ${llm.base_url}` : ''} (ctx ${llm.max_context_length}, temp ${llm.temperature})`);
 		this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
-		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries} libraries (${vector_db.path})`);
+		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
 	}
 
 	/**

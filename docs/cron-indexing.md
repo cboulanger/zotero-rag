@@ -227,6 +227,8 @@ a `cron_indexing` key:
   "service": "Zotero RAG API",
   ...
   "cron_indexing": {
+    "enabled": true,
+    "keys_registered": 3,
     "running": true,
     "started_at": "2026-06-23T02:00:01Z",
     "pid": 12345,
@@ -251,6 +253,18 @@ a `cron_indexing` key:
   }
 }
 ```
+
+`enabled` reflects whether `AUTOINDEX_SECRET` is configured; when `false` the key
+exposes `disabled_reason` instead and no keys can be decrypted. `keys_registered`
+is the number of read-only keys currently in the store. These two fields are
+present even before the first cron run (when no status file exists yet); the
+run-specific fields (`running`, `slugs`, `key_issues`, …) are merged in once a
+run has produced a status file.
+
+Per-library totals for the vector store (items and chunks currently indexed,
+across **all** libraries, not just cron targets) live under `vector_db.libraries`;
+`vector_db.libraries_count` is the scalar library count (formerly
+`vector_db.libraries`).
 
 Slug statuses: `pending` → `indexing` → `done` (or `error`).
 

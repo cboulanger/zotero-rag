@@ -204,6 +204,24 @@ def root(request: Request):
     except Exception as exc:
         db_stats = {"error": str(exc)}
 
+    # Per-library totals (items + chunks currently in the vector store), read from
+    # the maintained library metadata — cheap (single scroll), covers all indexed
+    # libraries, not just cron targets.
+    try:
+        libraries_breakdown = [
+            {
+                "library_id": meta.library_id,
+                "name": meta.library_name,
+                "total_items": meta.total_items_indexed,
+                "total_chunks": meta.total_chunks,
+                "last_indexed_at": meta.last_indexed_at,
+            }
+            for meta in vector_store.get_all_library_metadata()
+        ]
+    except Exception as exc:
+        libraries_breakdown = []
+        logger.warning("Failed to read per-library metadata: %s", exc)
+
     response = {
         "service": "Zotero RAG API",
         "version": __version__,
@@ -236,11 +254,30 @@ def root(request: Request):
             "path": str(vector_store.storage_path) if vector_store is not None else None,
             "chunks": db_stats.get("chunks_count"),
             "indexed_documents": db_stats.get("dedup_count"),
-            "libraries": db_stats.get("metadata_count"),
+            "libraries_count": db_stats.get("metadata_count"),
+            "libraries": libraries_breakdown,
         },
     }
 
-    # Attach cron indexing status if the status file exists
+    # Auto-index registry state — reported regardless of whether a cron run has
+    # happened yet. `enabled` is False when AUTOINDEX_SECRET is unset (the feature
+    # is disabled and no keys can be decrypted); `keys_registered` is the number of
+    # read-only keys submitted via the plugin/CLI.
+    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    cron_indexing: dict = {}
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        cron_indexing["enabled"] = store.enabled
+        if store.enabled:
+            cron_indexing["keys_registered"] = len(store.list_metadata())
+        else:
+            cron_indexing["disabled_reason"] = "AUTOINDEX_SECRET is not set"
+    except Exception as exc:
+        logger.warning("Failed to read auto-index key store: %s", exc)
+        cron_indexing["enabled"] = False
+        cron_indexing["disabled_reason"] = f"key store error: {exc}"
+
+    # Merge in the last cron run's status if a status file exists.
     cron_status_path = settings.data_path / "system" / "cron_status.json"
     if cron_status_path.exists():
         try:
@@ -252,9 +289,11 @@ def root(request: Request):
                 if not is_process_alive(int(cron_data["pid"])):
                     cron_data["running"] = False
                     cron_data["crashed"] = True
-            response["cron_indexing"] = cron_data
+            cron_indexing.update(cron_data)
         except Exception as exc:
             logger.warning("Failed to read cron status file: %s", exc)
+
+    response["cron_indexing"] = cron_indexing
 
     return response
 
