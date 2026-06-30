@@ -157,6 +157,7 @@ async def test_my_integration(zotero_client, integration_config):
 
 **File:** [backend/tests/conftest.py](../backend/tests/conftest.py)
 
+- Sets `TESTING=true` before any backend import, preventing subprocess dispatch from spawning real `multiprocessing.Process` workers (which would consume 10+ GB RSS and OOM-kill the host)
 - Session-level fixtures for integration tests
 - Environment validation with pre-flight checks
 - Automatic test skipping with helpful error messages
@@ -236,6 +237,10 @@ If any validation fails, all integration/API tests are **automatically skipped**
 **`.env.test`** (optional, for test-specific overrides):
 
 ```bash
+# Prevents subprocess dispatch path from spawning real worker processes during tests.
+# conftest.py sets this automatically, but having it here is a belt-and-suspenders guard.
+TESTING=true
+
 # Test configuration (lowest priority)
 MODEL_PRESET=remote-kisski
 LOG_LEVEL=INFO

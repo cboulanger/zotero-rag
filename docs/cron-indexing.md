@@ -121,7 +121,7 @@ When the backend runs as a container (via `container.mjs`), run the script
 with `podman exec` against the `zotero-rag` container:
 
 ```bash
-podman exec zotero-rag uv run python bin/index_libraries.py users/12345 groups/678
+podman exec zotero-rag python bin/index_libraries.py users/12345 groups/678
 ```
 
 The container already has the right data path (`DATA_PATH=/data`) and all
@@ -149,7 +149,7 @@ Alternatively, pass it once at exec time (no restart required):
 
 ```bash
 podman exec -e ZOTERO_API_KEY=your_key_here zotero-rag \
-  uv run python bin/index_libraries.py users/12345
+  python bin/index_libraries.py users/12345
 ```
 
 ### Scheduling inside the container host
@@ -158,11 +158,28 @@ Add a cron entry on the host that calls `podman exec`:
 
 ```cron
 # /etc/cron.d/zotero-rag-index  (or crontab -e)
-0 2 * * * podman exec zotero-rag uv run python bin/index_libraries.py users/12345 groups/678
+0 2 * * * root podman exec zotero-rag python bin/index_libraries.py users/12345 groups/678 > /dev/null 2>> /path/to/data/logs/cron_indexer.log
 ```
 
 Log output goes to `/data/logs/cron_indexer.log` inside the container
-(i.e. `<DATA_DIR>/logs/cron_indexer.log` on the host).
+(i.e. `<DATA_DIR>/logs/cron_indexer.log` on the host). Timestamps in the log
+are **UTC** regardless of the host timezone.
+
+### Memory and performance tuning
+
+Two container environment variables control memory use during indexing:
+
+| Variable | Default | Description |
+|---|---|---|
+| `INDEX_BATCH_SIZE` | `300` | Items per subprocess batch during full sync. Each batch runs in an isolated process; memory is freed when it exits. Set to `0` to disable subprocess isolation. |
+| `EMBEDDING_BATCH_SIZE` | `256` | Texts sent per embedding API call. Lower values reduce peak RSS at the cost of more round-trips. |
+
+Set these in your deploy env file (`.local/.env.deploy.<target>`):
+
+```env
+INDEX_BATCH_SIZE=300
+EMBEDDING_BATCH_SIZE=64   # recommended for hosts with ≤16 GB RAM
+```
 
 ---
 

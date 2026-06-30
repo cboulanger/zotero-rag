@@ -151,6 +151,7 @@ The backend is organized into a layered architecture with clear separation of co
 - Handles deduplication via content hashing
 - `_process_attachment_bytes(file_bytes, mime_type, doc_metadata, ...)` — core processing entry point called by the document upload endpoint
 - Provides progress callbacks and cancellation support
+- `_index_library_full()` dispatches work in subprocess-isolated batches (`INDEX_BATCH_SIZE` items each); each batch runs in a fresh `multiprocessing.Process` so all memory is reclaimed when it exits, bounding peak RSS on long indexing runs
 
 **Document Extraction:** [backend/services/extraction/](../backend/services/extraction/)
 

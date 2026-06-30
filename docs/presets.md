@@ -147,6 +147,10 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 - High-quality 70B LLM answers with 128k context window
 - Single API key for both embedding and LLM
 
+**Memory tuning:** The embedding batch size defaults to 256 texts per API call.
+On hosts with limited RAM (≤16 GB) set `EMBEDDING_BATCH_SIZE=64` in your environment
+to reduce peak RSS during indexing.
+
 **Requires:** `KISSKI_API_KEY` environment variable
 
 ---
