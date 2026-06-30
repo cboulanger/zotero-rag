@@ -1,5 +1,8 @@
 """Unit tests for backend.services.autoindex_key_store."""
 
+import os
+import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -57,6 +60,12 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         self.assertFalse(store.enabled)
         with self.assertRaises(RuntimeError):
             store.add("K", _validation())
+
+    @unittest.skipIf(sys.platform == "win32", "POSIX permissions not enforced on Windows")
+    def test_keys_file_is_0600(self):
+        self.store.add("SECRETKEY", _validation())
+        mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(mode, 0o600)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ class AutoIndexKeyStore:
     def _save(self, data: dict) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self._path.chmod(0o600)
 
     def add(self, api_key: str, validation: KeyValidation) -> str:
         """Encrypt and store a validated key. Returns its fingerprint."""
@@ -91,8 +92,9 @@ class AutoIndexKeyStore:
         with self._lock:
             data = self._load()
             existed = fp in data
-            data.pop(fp, None)
-            self._save(data)
+            if existed:
+                data.pop(fp, None)
+                self._save(data)
         return existed
 
     def remove_by_key(self, api_key: str) -> bool:
