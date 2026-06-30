@@ -33,11 +33,13 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, str], lis
     for fp, api_key, entry in list(store.iter_decrypted()):
         validation = await validate_key(api_key)
         if validation.read_only:
+            store.set_status(fp, "ok")
             for slug in validation.targets:
                 targets.setdefault(slug, api_key)
         elif validation.transient:
             # Transient failure (outage/network/5xx): keep the key and reuse its
             # previously stored targets so indexing still attempts this run.
+            store.set_status(fp, "transient_error")
             for slug in entry.get("targets", []):
                 targets.setdefault(slug, api_key)
             issues.append({

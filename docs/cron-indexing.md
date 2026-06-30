@@ -14,57 +14,79 @@ Useful for:
 - Initial bulk indexing before deploying the plugin to end users
 - Incremental sync jobs triggered by CI or task schedulers
 
-## Prerequisites
+## How keys are supplied
 
-1. **Zotero API key** — create one at <https://www.zotero.org/settings/keys>.
-   The key must have read access to the libraries you want to index.
+`index_libraries.py` does **not** take a single global `ZOTERO_API_KEY` or a list
+of slugs. Instead it reads read-only Zotero keys from an **encrypted key store**
+and resolves the libraries to index from those keys automatically.
 
-2. **`.env` configuration** — add the key to `.env` in the project root:
+1. **`AUTOINDEX_SECRET`** — a Fernet key that encrypts the store. It is required;
+   without it the cron run exits early ("AUTOINDEX_SECRET is not set; nothing to
+   index") and the auto-index API returns HTTP 503. Generate one with:
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
    ```
-   ZOTERO_API_KEY=your_key_here
-   ```
+   Set it in your `.env` (local) or deploy env file (container) as
+   `AUTOINDEX_SECRET=...`.
+
+2. **Read-only Zotero keys** — users add their own keys (each created at
+   <https://www.zotero.org/settings/keys> with **read-only** access) either:
+   - via the plugin's Preferences pane ("Automatic indexing"), or
+   - on the host with:
+     ```bash
+     uv run python bin/autoindex_add_key.py <read-only-key>
+     ```
+   Each key is validated (must be read-only), its target libraries are resolved,
+   and it is stored encrypted.
 
 3. The backend dependencies must be installed (`uv sync`).
 
+The store lives at `<data_path>/system/autoindex_keys.json` (i.e.
+`data/system/autoindex_keys.json` for a local install, or `/data/system/...`
+inside a container).
+
+### Key re-validation and pruning
+
+Every run re-validates each stored key against `api.zotero.org` and:
+
+- **Confirms** keys that are still read-only (their `last_status` becomes `ok`).
+- **Prunes** keys that are permanently invalid — revoked, expired, or downgraded
+  to write scope — removing them from the store.
+- **Keeps** keys through transient outages (network errors, HTTP 429/500/503),
+  reusing their previously stored targets so indexing still attempts them this
+  run (their `last_status` becomes `transient_error`).
+- **Deduplicates** targets, so a library shared by several keys is indexed once.
+
+Pruned- and kept-key details are surfaced under `key_issues` in
+`cron_status.json` (see [Reading Progress](#reading-progress)).
+
 ## Running Manually (local installation)
 
+Keys and targets come from the store, so no slugs are passed on the command line:
+
 ```bash
-# Index one user library and one group library
-uv run python bin/index_libraries.py users/12345 groups/678
+# Index everything resolvable from the stored keys (auto mode)
+uv run python bin/index_libraries.py
 
 # Force a full sync (ignore incremental state)
-uv run python bin/index_libraries.py users/12345 --mode full
-
-# Index from a file listing slugs
-uv run python bin/index_libraries.py --slugs-file my_libraries.txt
+uv run python bin/index_libraries.py --mode full
 
 # Limit to 100 items per library (useful for testing)
-uv run python bin/index_libraries.py users/12345 --max-items 100
+uv run python bin/index_libraries.py --max-items 100
 
 # Override the log file location
-uv run python bin/index_libraries.py users/12345 --log-file /var/log/zotero_index.log
+uv run python bin/index_libraries.py --log-file /var/log/zotero_index.log
 ```
 
 ### All Options
 
 | Flag | Default | Description |
 |---|---|---|
-| `slugs` (positional) | — | One or more `users/{id}` or `groups/{id}` slugs |
-| `--slugs-file FILE` | — | Text file with slugs, one per line or whitespace-separated |
 | `--mode auto\|incremental\|full` | `auto` | Indexing mode (see below) |
 | `--max-items N` | unlimited | Cap items per library (for testing) |
 | `--log-file PATH` | `data/logs/cron_indexer.log` | Log file path |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `--force` | off | Remove a stale lock file and proceed |
-
-### Slugs File Format
-
-```
-# One per line, comments are ignored
-users/12345
-groups/678  
-groups/999
-```
 
 ## Indexing Modes
 
@@ -121,44 +143,46 @@ When the backend runs as a container (via `container.mjs`), run the script
 with `podman exec` against the `zotero-rag` container:
 
 ```bash
-podman exec zotero-rag python bin/index_libraries.py users/12345 groups/678
+podman exec zotero-rag python bin/index_libraries.py
 ```
 
 The container already has the right data path (`DATA_PATH=/data`) and all
 backend dependencies. No host Python or `uv` installation is needed.
 
-### Passing ZOTERO_API_KEY to the container
+### Configuring AUTOINDEX_SECRET for the container
 
-Add the key to your `.env.deploy-<target>` file so it is injected at
-container start:
+Add the Fernet secret to your `.env.deploy-<target>` file so it is injected at
+container start (the encrypted key store lives under the mounted data volume at
+`/data/system/autoindex_keys.json`):
 
 ```env
 # .env.deploy-myserver  (or .env.deploy-localhost)
-ZOTERO_API_KEY=your_key_here
+AUTOINDEX_SECRET=your_generated_fernet_key
 ```
 
 Then re-deploy or restart the container:
 
 ```bash
 node bin/deploy.mjs .env.deploy-myserver
-# or just restart if the env file already has the key:
+# or just restart if the env file already has the secret:
 node bin/container.mjs restart
 ```
 
-Alternatively, pass it once at exec time (no restart required):
+Users then add their read-only keys via the plugin's "Automatic indexing"
+preferences, or you can add one directly inside the container:
 
 ```bash
-podman exec -e ZOTERO_API_KEY=your_key_here zotero-rag \
-  python bin/index_libraries.py users/12345
+podman exec zotero-rag python bin/autoindex_add_key.py <read-only-key>
 ```
 
 ### Scheduling inside the container host
 
-Add a cron entry on the host that calls `podman exec`:
+Add a cron entry on the host that calls `podman exec` (no slugs — targets come
+from the stored keys):
 
 ```cron
-# /etc/cron.d/zotero-rag-index  (or crontab -e)
-0 2 * * * root podman exec zotero-rag python bin/index_libraries.py users/12345 groups/678 > /dev/null 2>> /path/to/data/logs/cron_indexer.log
+# /etc/cron.d/zotero-rag-indexer  (or crontab -e)
+0 * * * * root podman exec zotero-rag python bin/index_libraries.py > /dev/null 2>> /path/to/data/logs/cron_indexer.log
 ```
 
 Log output goes to `/data/logs/cron_indexer.log` inside the container
@@ -189,8 +213,8 @@ EMBEDDING_BATCH_SIZE=64   # recommended for hosts with ≤16 GB RAM
 
 ```cron
 # Edit with: crontab -e
-# Index every night at 2 AM
-0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py users/12345 groups/678 >> data/logs/cron_indexer.log 2>&1
+# Index every night at 2 AM (targets come from the stored keys)
+0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py >> data/logs/cron_indexer.log 2>&1
 ```
 
 ## Reading Progress
@@ -215,12 +239,25 @@ a `cron_indexing` key:
         "started_at": "2026-06-23T02:00:02Z"
       },
       "groups/678": { "status": "pending" }
-    }
+    },
+    "key_issues": [
+      {
+        "fingerprint": "ab12cd34",
+        "user": "alice",
+        "reason": "Key not found (revoked or expired).",
+        "pruned": true
+      }
+    ]
   }
 }
 ```
 
 Slug statuses: `pending` → `indexing` → `done` (or `error`).
+
+`key_issues` lists keys that failed re-validation this run. `pruned: true` means
+the key was permanently invalid and removed from the store; `pruned: false` means
+it failed transiently and was kept for retry. The list is empty when all keys
+validated cleanly.
 
 The status file persists at `data/system/cron_status.json` between runs, so
 `cron_indexing` shows the result of the last run even when nothing is currently
@@ -243,16 +280,26 @@ run died is forced to run a full sync on the next invocation.
 To force-clear a lock manually (e.g. if PID wrap-around caused a false
 positive):
 ```bash
-uv run python bin/index_libraries.py users/12345 --force
+uv run python bin/index_libraries.py --force
 ```
 
-### "ZOTERO_API_KEY is not set"
+### "AUTOINDEX_SECRET is not set; nothing to index"
 
-Check that `.env` in the project root contains `ZOTERO_API_KEY=...` and that
-`uv run` is being used (it loads `.env` via pydantic-settings).
+The key store cannot be decrypted without the Fernet secret. Set
+`AUTOINDEX_SECRET` in your `.env` (local) or deploy env file (container) and
+ensure `uv run` is used (it loads `.env` via pydantic-settings). Without it the
+cron run exits early and the auto-index API returns HTTP 503. Generate a secret
+with:
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
 
-### "Invalid slug"
+### "Nothing to index" (no targets resolved)
 
-Slugs must be exactly `users/{numericId}` or `groups/{numericId}`.  The
-numeric Zotero user ID can be found at <https://www.zotero.org/settings/keys>
-(shown as "Your userID for use in API calls").
+The store has no usable keys. Add at least one read-only Zotero key via the
+plugin's "Automatic indexing" preferences or:
+```bash
+uv run python bin/autoindex_add_key.py <read-only-key>
+```
+If keys were recently pruned, check `key_issues` in `cron_status.json` for the
+reason (revoked, expired, or downgraded to write scope).

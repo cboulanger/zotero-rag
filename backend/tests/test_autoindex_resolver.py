@@ -22,13 +22,19 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1", "groups/99"], read_only=True)
         v2 = KeyValidation(2, "b", ["users/2", "groups/99"], read_only=True)
-        store.add("KA", v1)
+        fp1 = store.add("KA", v1)
         store.add("KB", v2)
+        # Pre-set one fingerprint to a non-"ok" status so the assertion that
+        # resolve refreshes it back to "ok" is meaningful.
+        store.set_status(fp1, "stale")
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(side_effect=[v1, v2])):
             targets, issues = await resolve_targets(store)
         self.assertEqual(set(targets), {"users/1", "users/2", "groups/99"})
         self.assertEqual(issues, [])
+        # Valid keys have their status refreshed/confirmed to "ok" after resolve.
+        for meta in store.list_metadata():
+            self.assertEqual(meta["last_status"], "ok")
 
     async def test_prunes_revoked_key(self):
         store = self._store()
@@ -57,6 +63,8 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(issues), 1)
         self.assertFalse(issues[0]["pruned"])
         self.assertEqual(len(store.list_metadata()), 1)
+        # Surviving (kept) key has its status updated to reflect the failure.
+        self.assertEqual(store.list_metadata()[0]["last_status"], "transient_error")
 
 
 if __name__ == "__main__":
