@@ -107,6 +107,8 @@ class CronIndexer:
         self.mode = mode
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
+        # Pruned-key issues from re-validation; set by the caller before run().
+        self.key_issues: list[dict] = []
         # Slugs whose previous run was interrupted (stale lock takeover); set in run().
         self._interrupted_slugs: set[str] = set()
 
@@ -259,6 +261,7 @@ class CronIndexer:
             "started_at": started_at,
             "pid": os.getpid(),
             "slugs": {s.slug: {"status": "pending"} for s in slug_infos},
+            "key_issues": getattr(self, "key_issues", []),
         }
 
         total_stats: dict = {
