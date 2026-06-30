@@ -604,3 +604,18 @@ lets operators cap this without changing presets.
 - `_subprocess_index_batch` returns `dict` → `_run_subprocess_batch` puts same `dict` on queue → main loop reads `.get("chunks_added", 0)` etc. ✓
 - `result_queue` typed as `MPQueue` in the call — matches the `MPQueue()` instantiation ✓
 - `EmbeddingAuthenticationError` re-raised by class name lookup — matches `_FATAL_EMBEDDING_ERRORS` tuple ✓
+
+---
+
+## Implementation Summary (completed 2026-06-30)
+
+All four tasks implemented and committed.
+
+**Root cause discovered during implementation:** `settings.testing` defaulted to `False` because no test environment set the `TESTING` env var. This caused pytest to spawn real `multiprocessing.Process` workers, each consuming 13+ GB RSS, which triggered the kernel OOM killer and crashed the host VM twice on 2026-06-30 (confirmed via `journalctl -b -2`). Fix: `conftest.py` now calls `os.environ.setdefault("TESTING", "true")` at the top, and `.env.test` also sets `TESTING=true`.
+
+**Host protection:** An 8 GB swapfile was created at `/swapfile` and made persistent via `/etc/fstab`. This is a one-time per-server action — not in deployment scripts because disk capacity is server-specific.
+
+**Commits:**
+1. `fix: prevent test-triggered OOM and isolate indexing memory via subprocesses` — Task 1 + testing guard
+2. `test: add subprocess batch error path tests` — Task 2
+3. `feat: make embedding batch size configurable + document INDEX_BATCH_SIZE` — Tasks 3 & 4

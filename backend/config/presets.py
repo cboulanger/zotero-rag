@@ -4,6 +4,7 @@ Configuration presets for different hardware scenarios.
 Each preset defines the optimal models and settings for different hardware configurations.
 """
 
+import os
 from typing import List, Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -216,7 +217,7 @@ PRESETS = {
         embedding=EmbeddingConfig(
             model_type="remote",
             model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
-            batch_size=256,  # Send more texts per API call to reduce round-trips
+            batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", "256")),  # tunable; lower to reduce peak RSS
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
