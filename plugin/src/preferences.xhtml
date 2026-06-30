@@ -49,6 +49,34 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Automatic indexing -->
+  <html:fieldset class="settings-group">
+    <html:legend>Automatic indexing</html:legend>
+
+    <html:div class="setting-description">
+      Submit a <html:strong>read-only</html:strong> Zotero API key
+      (create one at <html:a href="https://www.zotero.org/settings/keys"
+                            target="_blank">zotero.org/settings/keys</html:a>)
+      to have your library automatically indexed by the backend on a schedule.
+      Only read-only keys are accepted.
+    </html:div>
+
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-autoindex-key">Read-only API key:</html:label>
+      <html:input id="zotero-rag-autoindex-key"
+                  type="password"
+                  placeholder="Zotero read-only API key"
+                  class="setting-input"/>
+    </html:div>
+
+    <html:div class="setting-row">
+      <html:button id="zotero-rag-autoindex-enable">Enable auto-indexing</html:button>
+      <html:button id="zotero-rag-autoindex-remove">Remove</html:button>
+    </html:div>
+
+    <html:div class="setting-description" id="zotero-rag-autoindex-status"></html:div>
+  </html:fieldset>
+
   <!-- Performance Settings -->
   <html:fieldset class="settings-group">
     <html:legend>Performance</html:legend>

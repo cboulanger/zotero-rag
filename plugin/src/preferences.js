@@ -225,4 +225,96 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			Services.prompt.alert(_window, 'Error', `Failed to clear cache: ${e}`);
 		}
 	});
+
+	// Automatic indexing section: submit/remove a read-only Zotero API key
+	// so the backend can auto-index the user's library on a schedule.
+	const autoindexKeyInput = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-autoindex-key'));
+	const autoindexStatus = doc.getElementById('zotero-rag-autoindex-status');
+	const autoindexEnableBtn = doc.getElementById('zotero-rag-autoindex-enable');
+	const autoindexRemoveBtn = doc.getElementById('zotero-rag-autoindex-remove');
+
+	/**
+	 * Show a status message in the auto-indexing section.
+	 * @param {string} message
+	 * @returns {void}
+	 */
+	const setAutoindexStatus = (message) => {
+		if (autoindexStatus) autoindexStatus.textContent = message;
+	};
+
+	if (autoindexEnableBtn) {
+		autoindexEnableBtn.addEventListener('click', async () => {
+			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
+			if (!apiKey) {
+				setAutoindexStatus('Please enter a read-only Zotero API key.');
+				return;
+			}
+			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			setAutoindexStatus('Enabling auto-indexing...');
+			try {
+				const response = await fetch(requestURL, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ api_key: apiKey })
+				});
+				if (!response.ok) {
+					// A 301 redirect from HTTP to HTTPS silently converts POST→GET, causing 405.
+					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+						setAutoindexStatus(
+							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+							'Please update the Backend URL to start with "https://".'
+						);
+						return;
+					}
+					const err = await response.json().catch(() => ({}));
+					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					return;
+				}
+				/** @type {{user_id: string, username: string, targets: string[]}} */
+				const data = await response.json();
+				const targets = Array.isArray(data.targets) ? data.targets.join(', ') : '';
+				setAutoindexStatus(`Auto-indexing enabled for: ${targets}`);
+				if (autoindexKeyInput) autoindexKeyInput.value = '';
+			} catch (e) {
+				setAutoindexStatus(`Error: ${e}`);
+			}
+		});
+	}
+
+	if (autoindexRemoveBtn) {
+		autoindexRemoveBtn.addEventListener('click', async () => {
+			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
+			if (!apiKey) {
+				setAutoindexStatus('Please enter the read-only Zotero API key to remove.');
+				return;
+			}
+			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			setAutoindexStatus('Removing auto-indexing key...');
+			try {
+				const response = await fetch(requestURL, {
+					method: 'DELETE',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ api_key: apiKey })
+				});
+				if (!response.ok) {
+					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+						setAutoindexStatus(
+							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+							'Please update the Backend URL to start with "https://".'
+						);
+						return;
+					}
+					const err = await response.json().catch(() => ({}));
+					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					return;
+				}
+				/** @type {{removed: boolean}} */
+				const data = await response.json();
+				setAutoindexStatus(data.removed ? 'Auto-indexing key removed.' : 'No matching key found.');
+				if (autoindexKeyInput) autoindexKeyInput.value = '';
+			} catch (e) {
+				setAutoindexStatus(`Error: ${e}`);
+			}
+		});
+	}
 };
