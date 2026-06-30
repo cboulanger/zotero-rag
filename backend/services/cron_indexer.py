@@ -85,8 +85,7 @@ class CronIndexer:
 
     def __init__(
         self,
-        slugs: list[str],
-        api_key: str,
+        targets: dict[str, str],
         vector_store: VectorStore,
         embedding_service: EmbeddingService,
         lock_file: Path,
@@ -96,8 +95,10 @@ class CronIndexer:
         max_items: Optional[int] = None,
         progress_update_interval: int = 10,
     ):
-        self.slugs = slugs
-        self.api_key = api_key
+        # targets maps each slug ("users/12345" or "groups/678") to the
+        # read-only Zotero web API key used to index that specific library.
+        self.targets = targets
+        self.slugs = list(targets.keys())
         self.vector_store = vector_store
         self.embedding_service = embedding_service
         self.lock_file = lock_file
@@ -398,7 +399,7 @@ class CronIndexer:
 
     async def _index_slug(self, slug_info: SlugInfo, status: dict) -> dict:
         """Index a single library slug. Returns stats dict."""
-        web_api = ZoteroWebAPI(api_key=self.api_key)
+        web_api = ZoteroWebAPI(api_key=self.targets[slug_info.slug])
         counter = {"n": 0}  # mutable counter for closure
 
         def progress_callback(current: int, total: int, chunks_added: int) -> None:
