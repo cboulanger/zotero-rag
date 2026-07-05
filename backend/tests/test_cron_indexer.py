@@ -13,6 +13,7 @@ from backend.services.cron_indexer import (
     CronIndexer,
     SlugInfo,
     is_process_alive,
+    read_live_status,
 )
 
 
@@ -299,6 +300,39 @@ class TestIsProcessAlive(unittest.TestCase):
     def test_nonexistent_pid_is_not_alive(self):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
+
+
+class TestReadLiveStatus(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "system").mkdir()
+
+    def _write_status(self, data: dict) -> None:
+        (self.tmp / "system" / "cron_status.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(read_live_status(self.tmp), {})
+
+    def test_returns_status_verbatim_when_not_running(self):
+        self._write_status({"running": False, "slugs": {"users/1": {"status": "done"}}})
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertIn("users/1", result["slugs"])
+        self.assertNotIn("crashed", result)
+
+    def test_running_with_dead_pid_marked_crashed(self):
+        self._write_status({"running": True, "pid": 99999999})
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertTrue(result["crashed"])
+
+    def test_running_with_live_pid_stays_running(self):
+        self._write_status({"running": True, "pid": os.getpid()})
+        result = read_live_status(self.tmp)
+        self.assertTrue(result["running"])
+        self.assertNotIn("crashed", result)
 
 
 class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):

@@ -1,5 +1,6 @@
-"""Endpoint tests for /api/autoindex/keys."""
+"""Endpoint tests for /api/autoindex/keys and /api/autoindex/status."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +22,7 @@ class AutoIndexApiTest(unittest.TestCase):
         s.api_key = None  # disable auth middleware for the test
         s.autoindex_secret = Fernet.generate_key().decode()
         s.autoindex_keys_path = Path(self.tmp.name) / "autoindex_keys.json"
+        s.data_path = Path(self.tmp.name)
         self.client = TestClient(app)
 
     def tearDown(self):
@@ -56,6 +58,40 @@ class AutoIndexApiTest(unittest.TestCase):
         get_settings().autoindex_secret = None
         r = self.client.get("/api/autoindex/keys")
         self.assertEqual(r.status_code, 503)
+
+    def test_status_reports_registry_state_with_no_run(self):
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
+        with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)):
+            self.client.post("/api/autoindex/keys", json={"api_key": "RO"})
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertTrue(data["enabled"])
+        self.assertEqual(data["keys_registered"], 1)
+        # No cron run yet -> no live-status fields merged in.
+        self.assertNotIn("running", data)
+
+    def test_status_merges_live_run(self):
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir()
+        (system_dir / "cron_status.json").write_text(
+            json.dumps({"running": False, "slugs": {"users/1": {"status": "done"}}}),
+            encoding="utf-8",
+        )
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertFalse(data["running"])
+        self.assertIn("users/1", data["slugs"])
+
+    def test_status_available_when_disabled(self):
+        get_settings().autoindex_secret = None
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertFalse(data["enabled"])
+        self.assertEqual(data["keys_registered"], 0)
+        self.assertIn("disabled_reason", data)
 
 
 if __name__ == "__main__":

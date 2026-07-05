@@ -219,52 +219,64 @@ EMBEDDING_BATCH_SIZE=64   # recommended for hosts with ≤16 GB RAM
 
 ## Reading Progress
 
-While indexing is running (or after it finishes), the `/` root endpoint includes
-a `cron_indexing` key:
+The `/` root endpoint carries only whether the feature is enabled — the single
+unauthenticated auto-index detail:
 
 ```json
 {
   "service": "Zotero RAG API",
   ...
   "cron_indexing": {
-    "enabled": true,
-    "keys_registered": 3,
-    "running": true,
-    "started_at": "2026-06-23T02:00:01Z",
-    "pid": 12345,
-    "slugs": {
-      "users/12345": {
-        "status": "indexing",
-        "items_processed": 150,
-        "items_total": 500,
-        "chunks_added": 1200,
-        "started_at": "2026-06-23T02:00:02Z"
-      },
-      "groups/678": { "status": "pending" }
-    },
-    "key_issues": [
-      {
-        "fingerprint": "ab12cd34",
-        "user": "alice",
-        "reason": "Key not found (revoked or expired).",
-        "pruned": true
-      }
-    ]
+    "enabled": true
   }
 }
 ```
 
-`enabled` reflects whether `AUTOINDEX_SECRET` is configured; when `false` the key
-exposes `disabled_reason` instead and no keys can be decrypted. `keys_registered`
-is the number of read-only keys currently in the store. These two fields are
-present even before the first cron run (when no status file exists yet); the
-run-specific fields (`running`, `slugs`, `key_issues`, …) are merged in once a
-run has produced a status file.
+`enabled` reflects whether `AUTOINDEX_SECRET` is configured (when `false` no keys
+can be decrypted).
+
+Everything else — the registered-key count and live per-run progress — is served
+by the **authenticated** `GET /api/autoindex/status` endpoint (requires
+`X-API-Key`). It returns `keys_registered` (the number of read-only keys in the
+store, `0` when disabled), a `disabled_reason` when `enabled` is `false`, plus the
+last run's full status once a run has produced a status file:
+
+```json
+{
+  "enabled": true,
+  "keys_registered": 3,
+  "running": true,
+  "started_at": "2026-06-23T02:00:01Z",
+  "pid": 12345,
+  "slugs": {
+    "users/12345": {
+      "status": "indexing",
+      "items_processed": 150,
+      "items_total": 500,
+      "chunks_added": 1200,
+      "started_at": "2026-06-23T02:00:02Z"
+    },
+    "groups/678": { "status": "pending" }
+  },
+  "key_issues": [
+    {
+      "fingerprint": "ab12cd34",
+      "user": "alice",
+      "reason": "Key not found (revoked or expired).",
+      "pruned": true
+    }
+  ]
+}
+```
+
+The run-specific fields (`running`, `slugs`, `key_issues`, …) are absent until a
+run has produced a status file. If a run recorded `running: true` but its process
+is no longer alive, the endpoint reports `running: false` with `crashed: true`.
 
 Per-library totals for the vector store (items and chunks currently indexed,
-across **all** libraries, not just cron targets) live under `vector_db.libraries`;
-`vector_db.libraries_count` is the scalar library count (formerly
-`vector_db.libraries`).
+across **all** libraries, not just cron targets) are available at
+`GET /api/libraries`; `vector_db.libraries_count` on `/` is the scalar library
+count.
 
 Slug statuses: `pending` → `indexing` → `done` (or `error`).
 
@@ -274,8 +286,8 @@ it failed transiently and was kept for retry. The list is empty when all keys
 validated cleanly.
 
 The status file persists at `data/system/cron_status.json` between runs, so
-`cron_indexing` shows the result of the last run even when nothing is currently
-running.
+`GET /api/autoindex/status` shows the result of the last run even when nothing is
+currently running.
 
 ## Troubleshooting
 

@@ -7,8 +7,8 @@ without requiring the Zotero desktop app or the plugin to be running.
 Key behaviours:
 - PID-based lock file prevents concurrent runs; a stale lock (dead PID) is
   automatically taken over.
-- A JSON status file tracks per-slug progress and is consumed by the FastAPI
-  root endpoint to surface cron state in /
+- A JSON status file tracks per-slug progress and is surfaced by the
+  authenticated GET /api/autoindex/status endpoint (see read_live_status).
 - Atomic status writes use os.replace() for Windows compatibility.
 """
 
@@ -78,6 +78,24 @@ def is_process_alive(pid: int) -> bool:
             return False
         except PermissionError:
             return True  # alive, insufficient permission
+
+
+def read_live_status(data_path: Path) -> dict:
+    """Return the last cron run's live status from ``system/cron_status.json``.
+
+    Applies a liveness check: if the status file claims ``running=True`` but the
+    recorded PID is no longer alive, the run is reported as crashed. Returns an
+    empty dict when no status file exists yet (no cron run has happened).
+    """
+    status_path = data_path / "system" / "cron_status.json"
+    if not status_path.exists():
+        return {}
+    cron_data = json.loads(status_path.read_text(encoding="utf-8"))
+    if cron_data.get("running") and cron_data.get("pid"):
+        if not is_process_alive(int(cron_data["pid"])):
+            cron_data["running"] = False
+            cron_data["crashed"] = True
+    return cron_data
 
 
 class CronIndexer:

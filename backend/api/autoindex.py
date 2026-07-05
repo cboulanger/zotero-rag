@@ -1,11 +1,12 @@
 """Auto-index key endpoints.
 
-POST   /api/autoindex/keys  — submit a read-only key (validated, stored encrypted)
-DELETE /api/autoindex/keys  — remove a key
-GET    /api/autoindex/keys  — list key metadata (admin; no plaintext)
+POST   /api/autoindex/keys    — submit a read-only key (validated, stored encrypted)
+DELETE /api/autoindex/keys    — remove a key
+GET    /api/autoindex/keys    — list key metadata (admin; no plaintext)
+GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
 
 All endpoints are protected by the global X-API-Key middleware. When
-AUTOINDEX_SECRET is unset the feature is disabled and endpoints return 503.
+AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ from pydantic import BaseModel
 
 from backend.config.settings import get_settings
 from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.cron_indexer import read_live_status
 from backend.zotero.key_validator import validate_key
 
 router = APIRouter()
@@ -62,3 +64,38 @@ def delete_key(request: KeyRequest) -> dict:
 def list_keys() -> dict:
     store = _store()
     return {"keys": store.list_metadata()}
+
+
+@router.get("/autoindex/status", summary="Live auto-index cron-run progress")
+def status() -> dict:
+    """Return the live status of the auto-index cron run.
+
+    Unlike the ``/`` root endpoint (which exposes only ``enabled``), this
+    authenticated endpoint surfaces the number of registered keys and the last
+    run's full progress: whether a run is currently ``running`` (or ``crashed``),
+    per-slug counts, timestamps and any ``key_issues`` recorded during the run.
+    When the feature is disabled (``AUTOINDEX_SECRET`` unset) ``keys_registered``
+    is ``0`` and ``disabled_reason`` explains why. Run-specific fields are absent
+    until the first cron run writes a status file.
+    """
+    settings = get_settings()
+    result: dict = {}
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        result["enabled"] = store.enabled
+        if store.enabled:
+            result["keys_registered"] = len(store.list_metadata())
+        else:
+            result["keys_registered"] = 0
+            result["disabled_reason"] = "AUTOINDEX_SECRET is not set"
+    except Exception as exc:
+        logger.warning("Failed to read auto-index key store: %s", exc)
+        result["enabled"] = False
+        result["keys_registered"] = 0
+        result["disabled_reason"] = f"key store error: {exc}"
+
+    try:
+        result.update(read_live_status(settings.data_path))
+    except Exception as exc:
+        logger.warning("Failed to read cron status file: %s", exc)
+    return result
