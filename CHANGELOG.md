@@ -1,3 +1,29 @@
+# [1.35.0](https://github.com/cboulanger/zotero-rag/compare/v1.34.0...v1.35.0) (2026-07-05)
+
+
+### Bug Fixes
+
+* add Zotero-API-Version header and harden key validator robustness ([cbe4f08](https://github.com/cboulanger/zotero-rag/commit/cbe4f086ecfebdd4483a4e7ab3873019873983ed))
+* comply with event-loop rule in autoindex handlers ([9bda47a](https://github.com/cboulanger/zotero-rag/commit/9bda47aaed9a337b894fb55a48e3658e6565c06b))
+* enforce 0600 perms on autoindex keys file and skip no-op remove write ([9e38eea](https://github.com/cboulanger/zotero-rag/commit/9e38eea31c7e1da590ff74a2a4785d9b6ac6d505))
+* keep auto-index keys on transient validation failures (avoid wiping store on outage) ([50b4998](https://github.com/cboulanger/zotero-rag/commit/50b499860221fef4e5652895fd4794d76b49de1a))
+* open pref-pane links in browser, add key-portal links, simplify server help text ([fa6afc6](https://github.com/cboulanger/zotero-rag/commit/fa6afc61324e6378fd2e5ef439570073d8a52616))
+* skip env-dependent tests instead of failing when environment is unavailable ([cb013d3](https://github.com/cboulanger/zotero-rag/commit/cb013d369f6bfbda08ab1b37bbaa578bfd34b452))
+* wire key last_status updates and refresh stale cron-indexing doc ([28b8edf](https://github.com/cboulanger/zotero-rag/commit/28b8edf481e6399c56ae18b781fcde6b19460ebf))
+
+
+### Features
+
+* add /api/autoindex/keys endpoints ([bcf643b](https://github.com/cboulanger/zotero-rag/commit/bcf643b5436e1aef221fdbe969218082ef8fd77e))
+* add CLI to onboard a read-only auto-index key ([4a633f0](https://github.com/cboulanger/zotero-rag/commit/4a633f0f23e3360f66f68c8db50c8903997f1330))
+* add cryptography dep and autoindex settings ([c4555e1](https://github.com/cboulanger/zotero-rag/commit/c4555e13865e16628a9ddf4489df2f5d23577140))
+* add Fernet-encrypted auto-index key store ([464a42f](https://github.com/cboulanger/zotero-rag/commit/464a42f9dd64a08ad0be4cde5ac3b5175edae039))
+* add read-only Zotero key validator with target resolution ([a33b04b](https://github.com/cboulanger/zotero-rag/commit/a33b04b12687c3d15c1804cb366c9f5f10de8f0c))
+* cron indexer resolves per-library keys with re-validation and dedup ([ba8a83b](https://github.com/cboulanger/zotero-rag/commit/ba8a83b3b2b0accca05a5582c20518e77536bf84))
+* expose auto-index registry + per-library totals on root endpoint ([7c965a6](https://github.com/cboulanger/zotero-rag/commit/7c965a6ea67895e6d8eae4da77924e72d14a24a1))
+* plugin UI to submit read-only auto-index keys ([9fb2e63](https://github.com/cboulanger/zotero-rag/commit/9fb2e6359ce80a8b7273c9f87a76f5a0a0a3603c))
+* show cron-indexing status in library lists ([baf663c](https://github.com/cboulanger/zotero-rag/commit/baf663c7bf774d8195b07ad93c56f8718238b3b4))
+
 # [1.34.0](https://github.com/cboulanger/zotero-rag/compare/v1.33.9...v1.34.0) (2026-06-30)
 
 
