@@ -1,0 +1,101 @@
+"""Auto-index key endpoints.
+
+POST   /api/autoindex/keys    — submit a read-only key (validated, stored encrypted)
+DELETE /api/autoindex/keys    — remove a key
+GET    /api/autoindex/keys    — list key metadata (admin; no plaintext)
+GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
+
+All endpoints are protected by the global X-API-Key middleware. When
+AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503.
+"""
+
+import asyncio
+import logging
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from backend.config.settings import get_settings
+from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.cron_indexer import read_live_status
+from backend.zotero.key_validator import validate_key
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+class KeyRequest(BaseModel):
+    api_key: str
+
+
+def _store() -> AutoIndexKeyStore:
+    settings = get_settings()
+    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    if not store.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
+        )
+    return store
+
+
+@router.post("/autoindex/keys", summary="Submit a read-only auto-index key")
+async def add_key(request: KeyRequest) -> dict:
+    store = _store()
+    validation = await validate_key(request.api_key)
+    if not validation.read_only:
+        raise HTTPException(status_code=400, detail=validation.reason or "Key is not read-only.")
+    await asyncio.to_thread(store.add, request.api_key, validation)
+    return {
+        "user_id": validation.user_id,
+        "username": validation.username,
+        "targets": validation.targets,
+    }
+
+
+@router.delete("/autoindex/keys", summary="Remove an auto-index key")
+def delete_key(request: KeyRequest) -> dict:
+    store = _store()
+    removed = store.remove_by_key(request.api_key)
+    return {"removed": removed}
+
+
+@router.get("/autoindex/keys", summary="List auto-index key metadata (admin)")
+def list_keys() -> dict:
+    store = _store()
+    return {"keys": store.list_metadata()}
+
+
+@router.get("/autoindex/status", summary="Live auto-index cron-run progress")
+def status() -> dict:
+    """Return the live status of the auto-index cron run.
+
+    Unlike the ``/`` root endpoint (which exposes only ``enabled``), this
+    authenticated endpoint surfaces the number of registered keys and the last
+    run's full progress: whether a run is currently ``running`` (or ``crashed``),
+    per-slug counts, timestamps and any ``key_issues`` recorded during the run.
+    When the feature is disabled (``AUTOINDEX_SECRET`` unset) ``keys_registered``
+    is ``0`` and ``disabled_reason`` explains why. Run-specific fields are absent
+    until the first cron run writes a status file.
+    """
+    settings = get_settings()
+    result: dict = {}
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        result["enabled"] = store.enabled
+        if store.enabled:
+            result["keys_registered"] = len(store.list_metadata())
+        else:
+            result["keys_registered"] = 0
+            result["disabled_reason"] = "AUTOINDEX_SECRET is not set"
+    except Exception as exc:
+        logger.warning("Failed to read auto-index key store: %s", exc)
+        result["enabled"] = False
+        result["keys_registered"] = 0
+        result["disabled_reason"] = f"key store error: {exc}"
+
+    try:
+        result.update(read_live_status(settings.data_path))
+    except Exception as exc:
+        logger.warning("Failed to read cron status file: %s", exc)
+    return result

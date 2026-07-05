@@ -168,6 +168,12 @@ class TestRootEndpoints(unittest.TestCase):
         self.assertIn("preset", data)
         self.assertIn("embedding", data)
         self.assertIn("vector_db", data)
+        # Scalar library count (per-library breakdown lives at /api/libraries)
+        self.assertIn("libraries_count", data["vector_db"])
+        # Auto-index registry state is always reported. With no AUTOINDEX_SECRET
+        # configured in the test environment the feature is disabled.
+        self.assertIn("cron_indexing", data)
+        self.assertIn("enabled", data["cron_indexing"])
 
     def test_health_check(self):
         """Test GET /health endpoint."""

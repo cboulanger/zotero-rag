@@ -2,11 +2,13 @@
 CLI script for cron-driven Zotero library indexing via the web API.
 
 Usage:
-    uv run python bin/index_libraries.py users/12345 groups/678
-    uv run python bin/index_libraries.py --slugs-file my_libraries.txt
-    uv run python bin/index_libraries.py users/12345 --mode full --max-items 500
+    uv run python bin/index_libraries.py
+    uv run python bin/index_libraries.py --mode full --max-items 500
 
-Reads ZOTERO_API_KEY from the environment (or .env at project root).
+Libraries and keys are resolved from the encrypted auto-index key store: every
+stored read-only key is re-validated against api.zotero.org each run, revoked
+keys are pruned, and the surviving keys are deduplicated into a {slug: key} map.
+Requires AUTOINDEX_SECRET to decrypt the store; keys are submitted via the plugin.
 All log output goes to data/logs/cron_indexer.log (overridable with --log-file).
 """
 
@@ -40,18 +42,6 @@ def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Index Zotero libraries via the web API (cron-friendly)."
-    )
-    parser.add_argument(
-        "slugs",
-        nargs="*",
-        metavar="SLUG",
-        help="Library slugs to index, e.g. users/12345 groups/678",
-    )
-    parser.add_argument(
-        "--slugs-file",
-        metavar="FILE",
-        help="Text file with one slug per line (or whitespace-separated). "
-             "Combined with positional slugs.",
     )
     parser.add_argument(
         "--log-file",
@@ -100,30 +90,23 @@ async def _main(argv: list[str] | None = None) -> int:
     log_file = Path(args.log_file) if args.log_file else settings.data_path / "logs" / "cron_indexer.log"
     log = _setup_logging(log_file, args.log_level)
 
-    # Collect slugs
-    slugs = list(args.slugs)
-    if args.slugs_file:
-        try:
-            text = Path(args.slugs_file).read_text(encoding="utf-8")
-            slugs.extend(text.split())
-        except OSError as exc:
-            log.error("Cannot read slugs file %s: %s", args.slugs_file, exc)
-            return 1
+    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.autoindex_resolver import resolve_targets
 
-    slugs = [s.strip() for s in slugs if s.strip()]
-    if not slugs:
-        log.error("No library slugs provided. Pass slugs as arguments or use --slugs-file.")
+    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    if not store.enabled:
+        log.error("AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index.")
         return 1
 
-    # API key
-    api_key = settings.zotero_api_key
-    if not api_key:
-        log.error(
-            "ZOTERO_API_KEY is not set. Add it to .env or set the environment variable."
-        )
+    targets, key_issues = await resolve_targets(store)
+    for issue in key_issues:
+        log.warning("Key pruned for user %s: %s", issue.get("user"), issue.get("reason"))
+
+    if not targets:
+        log.error("No valid auto-index keys found. Submit a read-only key via the plugin.")
         return 1
 
-    log.info("Starting cron indexer for: %s", ", ".join(slugs))
+    log.info("Starting cron indexer for: %s", ", ".join(sorted(targets)))
 
     lock_file = settings.data_path / "system" / "cron_indexer.lock"
     status_file = settings.data_path / "system" / "cron_status.json"
@@ -137,8 +120,7 @@ async def _main(argv: list[str] | None = None) -> int:
         embedding_service = make_embedding_service()
 
         indexer = CronIndexer(
-            slugs=slugs,
-            api_key=api_key,
+            targets=targets,
             vector_store=vector_store,
             embedding_service=embedding_service,
             lock_file=lock_file,
@@ -147,6 +129,7 @@ async def _main(argv: list[str] | None = None) -> int:
             mode=args.mode,
             max_items=args.max_items,
         )
+        indexer.key_issues = key_issues
         stats = await indexer.run()
         log.info(
             "Done. Total items processed: %s, chunks added: %s",

@@ -13,6 +13,7 @@ from backend.services.cron_indexer import (
     CronIndexer,
     SlugInfo,
     is_process_alive,
+    read_live_status,
 )
 
 
@@ -32,8 +33,7 @@ def _make_indexer(
     # Return None by default so _resolve_mode skips the completeness check cleanly.
     vector_store.get_library_metadata.return_value = None
     return CronIndexer(
-        slugs=slugs,
-        api_key="test-api-key",
+        targets={s: "test-api-key" for s in slugs},
         vector_store=vector_store,
         embedding_service=embedding_service,
         lock_file=tmp_dir / "cron.lock",
@@ -42,6 +42,25 @@ def _make_indexer(
         mode=mode,
         max_items=max_items,
     )
+
+
+def test_index_slug_uses_per_slug_key():
+    import tempfile, logging
+    from unittest.mock import MagicMock, AsyncMock
+    from pathlib import Path
+    from backend.services.cron_indexer import CronIndexer
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        emb = MagicMock(); emb.get_rate_limit_info = AsyncMock(return_value=None)
+        vs = MagicMock(); vs.get_library_metadata.return_value = None
+        indexer = CronIndexer(
+            targets={"users/12345": "KEY_A", "groups/678": "KEY_B"},
+            vector_store=vs, embedding_service=emb,
+            lock_file=tmp / "l", status_file=tmp / "s.json",
+            log=logging.getLogger("t"),
+        )
+        assert sorted(indexer.slugs) == ["groups/678", "users/12345"]
+        assert indexer.targets["groups/678"] == "KEY_B"
 
 
 class TestParseSlug(unittest.TestCase):
@@ -281,6 +300,39 @@ class TestIsProcessAlive(unittest.TestCase):
     def test_nonexistent_pid_is_not_alive(self):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
+
+
+class TestReadLiveStatus(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "system").mkdir()
+
+    def _write_status(self, data: dict) -> None:
+        (self.tmp / "system" / "cron_status.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(read_live_status(self.tmp), {})
+
+    def test_returns_status_verbatim_when_not_running(self):
+        self._write_status({"running": False, "slugs": {"users/1": {"status": "done"}}})
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertIn("users/1", result["slugs"])
+        self.assertNotIn("crashed", result)
+
+    def test_running_with_dead_pid_marked_crashed(self):
+        self._write_status({"running": True, "pid": 99999999})
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertTrue(result["crashed"])
+
+    def test_running_with_live_pid_stays_running(self):
+        self._write_status({"running": True, "pid": os.getpid()})
+        result = read_live_status(self.tmp)
+        self.assertTrue(result["running"])
+        self.assertNotIn("crashed", result)
 
 
 class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):

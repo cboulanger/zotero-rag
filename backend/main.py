@@ -14,7 +14,7 @@ from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store
-from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query
+from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex
 from backend.api.document_upload import load_item_cache, save_item_cache
 
 # Get settings to access log configuration
@@ -186,6 +186,7 @@ app.include_router(document_upload.router, prefix="/api", tags=["document-upload
 app.include_router(registration.router, prefix="/api", tags=["registration"])
 app.include_router(rate_limits.router, prefix="/api", tags=["rate-limits"])
 app.include_router(public_query.router, tags=["public"])
+app.include_router(autoindex.router, prefix="/api", tags=["autoindex"])
 
 
 @app.get("/")
@@ -235,25 +236,23 @@ def root(request: Request):
             "path": str(vector_store.storage_path) if vector_store is not None else None,
             "chunks": db_stats.get("chunks_count"),
             "indexed_documents": db_stats.get("dedup_count"),
-            "libraries": db_stats.get("metadata_count"),
+            "libraries_count": db_stats.get("metadata_count"),
         },
     }
 
-    # Attach cron indexing status if the status file exists
-    cron_status_path = settings.data_path / "system" / "cron_status.json"
-    if cron_status_path.exists():
-        try:
-            import json as _json
-            from backend.services.cron_indexer import is_process_alive
-            cron_data = _json.loads(cron_status_path.read_text(encoding="utf-8"))
-            # If the file says running=True but the PID is dead, mark as crashed
-            if cron_data.get("running") and cron_data.get("pid"):
-                if not is_process_alive(int(cron_data["pid"])):
-                    cron_data["running"] = False
-                    cron_data["crashed"] = True
-            response["cron_indexing"] = cron_data
-        except Exception as exc:
-            logger.warning("Failed to read cron status file: %s", exc)
+    # Whether auto-indexing is enabled — the only auto-index detail exposed on
+    # this unauthenticated endpoint. `enabled` is False when AUTOINDEX_SECRET is
+    # unset (the feature is disabled and no keys can be decrypted). Key counts and
+    # live per-run progress live on the authenticated GET /api/autoindex/status.
+    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        enabled = store.enabled
+    except Exception as exc:
+        logger.warning("Failed to read auto-index key store: %s", exc)
+        enabled = False
+
+    response["cron_indexing"] = {"enabled": enabled}
 
     return response
 

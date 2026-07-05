@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
-from backend.services.embeddings import env_var_to_header
+from backend.services.embeddings import env_var_to_header, docs_url_for_key
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,7 @@ class RemoteLLMService(LLMService):
             "key_name": api_key_env,
             "header_name": env_var_to_header(api_key_env),
             "description": f"API key for remote LLM ({config.model_name})",
+            "docs_url": docs_url_for_key(api_key_env),
             "required_for": ["querying"],
         }]
 

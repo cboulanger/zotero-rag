@@ -65,6 +65,21 @@ def env_var_to_header(env_var: str) -> str:
     return "X-" + "-".join(p.capitalize() for p in env_var.split("_"))
 
 
+# Provider portal where users can create/manage the API key for a given env var.
+# Surfaced in the plugin preferences so users can reach the right dashboard.
+_KNOWN_DOCS_URLS: dict[str, str] = {
+    "KISSKI_API_KEY": "https://saia.gwdg.de/dashboard",
+    "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
+    "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
+    "HF_TOKEN": "https://huggingface.co/settings/tokens",
+}
+
+
+def docs_url_for_key(env_var: str) -> str | None:
+    """Return the provider portal URL for an API key env var, or None if unknown."""
+    return _KNOWN_DOCS_URLS.get(env_var)
+
+
 # Known embedding dimensions for common remote models.
 # Used by get_embedding_dim() to avoid an extra API round-trip.
 _KNOWN_DIMS: dict[str, int] = {
@@ -326,6 +341,7 @@ class RemoteEmbeddingService(EmbeddingService):
             "key_name": api_key_env,
             "header_name": env_var_to_header(api_key_env),
             "description": f"API key for remote embeddings ({config.model_name})",
+            "docs_url": docs_url_for_key(api_key_env),
             "required_for": ["indexing"],
         }]
 

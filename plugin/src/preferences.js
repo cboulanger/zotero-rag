@@ -48,9 +48,22 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
+	// External links inside the preferences pane don't open in the system browser
+	// on their own (target="_blank" is a no-op here). Route http(s) links through
+	// Zotero.launchURL so they open in the user's default browser.
+	doc.getElementById('zotero-rag-prefs-container').addEventListener('click', (e) => {
+		const anchor = /** @type {Element} */ (e.target)?.closest?.('a[href]');
+		if (!anchor) return;
+		const href = anchor.getAttribute('href');
+		if (href && /^https?:\/\//i.test(href)) {
+			e.preventDefault();
+			Zotero.launchURL(href);
+		}
+	});
+
 	/**
 	 * Render service API key input fields from the given list.
-	 * @param {Array<{key_name: string, header_name: string, description: string, required_for: string[]}>} requiredKeys
+	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
 	 */
 	const renderApiKeyFields = (requiredKeys) => {
 		const container = doc.getElementById('zotero-rag-service-keys-container');
@@ -95,6 +108,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 				desc.className = 'setting-description service-key-desc';
 				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				// Link to the provider portal where the key can be created/managed.
+				// Clicks are routed to the system browser by the pane-wide handler above.
+				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
+					desc.appendChild(doc.createTextNode(' '));
+					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');
+					link.setAttribute('href', keyInfo.docs_url);
+					link.setAttribute('target', '_blank');
+					link.textContent = 'Get key';
+					desc.appendChild(link);
+				}
 				container.appendChild(desc);
 			}
 		}
@@ -163,6 +186,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			container.appendChild(row);
 		}
 
+		// Mark libraries that are auto-indexed on the server with a clock icon
+		// (fire-and-forget — fetches the server registry, adds icons when it resolves)
+		this.decorateAutoIndexedLibraries(doc, container);
+
 		// Wire up the "Select all / none" checkbox
 		const selectAll = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-library-select-all'));
 		if (!selectAll) return;
@@ -225,4 +252,106 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			Services.prompt.alert(_window, 'Error', `Failed to clear cache: ${e}`);
 		}
 	});
+
+	// Automatic indexing section: submit/remove a read-only Zotero API key
+	// so the backend can auto-index the user's library on a schedule.
+	const autoindexKeyInput = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-autoindex-key'));
+	const autoindexStatus = doc.getElementById('zotero-rag-autoindex-status');
+	const autoindexEnableBtn = doc.getElementById('zotero-rag-autoindex-enable');
+	const autoindexRemoveBtn = doc.getElementById('zotero-rag-autoindex-remove');
+
+	/**
+	 * Show a status message in the auto-indexing section.
+	 * @param {string} message
+	 * @returns {void}
+	 */
+	const setAutoindexStatus = (message) => {
+		if (autoindexStatus) autoindexStatus.textContent = message;
+	};
+
+	if (autoindexEnableBtn) {
+		autoindexEnableBtn.addEventListener('click', async () => {
+			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
+			if (!apiKey) {
+				setAutoindexStatus('Please enter a read-only Zotero API key.');
+				return;
+			}
+			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			setAutoindexStatus('Enabling auto-indexing...');
+			try {
+				const response = await fetch(requestURL, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ api_key: apiKey })
+				});
+				if (!response.ok) {
+					// A 301 redirect from HTTP to HTTPS silently converts POST→GET, causing 405.
+					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+						setAutoindexStatus(
+							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+							'Please update the Backend URL to start with "https://".'
+						);
+						return;
+					}
+					const err = await response.json().catch(() => ({}));
+					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					return;
+				}
+				/** @type {{user_id: string, username: string, targets: string[]}} */
+				const data = await response.json();
+				const count = Array.isArray(data.targets) ? data.targets.length : 0;
+				setAutoindexStatus(
+					count === 1
+						? 'Auto-indexing enabled for 1 library.'
+						: `Auto-indexing enabled for ${count} libraries.`
+				);
+				if (autoindexKeyInput) autoindexKeyInput.value = '';
+				// Refresh the visibility list so the newly auto-indexed libraries get the clock icon
+				this.invalidateAutoIndexedLibraryIds();
+				populateLibraryVisibilityList();
+			} catch (e) {
+				setAutoindexStatus(`Error: ${e}`);
+			}
+		});
+	}
+
+	if (autoindexRemoveBtn) {
+		autoindexRemoveBtn.addEventListener('click', async () => {
+			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
+			if (!apiKey) {
+				setAutoindexStatus('Please enter the read-only Zotero API key to remove.');
+				return;
+			}
+			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			setAutoindexStatus('Removing auto-indexing key...');
+			try {
+				const response = await fetch(requestURL, {
+					method: 'DELETE',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ api_key: apiKey })
+				});
+				if (!response.ok) {
+					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
+						setAutoindexStatus(
+							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
+							'Please update the Backend URL to start with "https://".'
+						);
+						return;
+					}
+					const err = await response.json().catch(() => ({}));
+					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					return;
+				}
+				/** @type {{removed: boolean}} */
+				const data = await response.json();
+				setAutoindexStatus(data.removed ? 'Auto-indexing key removed.' : 'No matching key found.');
+				if (autoindexKeyInput) autoindexKeyInput.value = '';
+				// Refresh the visibility list so removed libraries lose the clock icon
+				this.invalidateAutoIndexedLibraryIds();
+				populateLibraryVisibilityList();
+			} catch (e) {
+				setAutoindexStatus(`Error: ${e}`);
+			}
+		});
+	}
 };

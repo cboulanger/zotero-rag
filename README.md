@@ -243,7 +243,7 @@ uv run python bin/index_libraries.py users/12345 groups/678
 uv run python bin/index_libraries.py users/12345 --mode full
 ```
 
-Requires `ZOTERO_API_KEY` in `.env`. Indexing progress is exposed on the `/` root endpoint under the `cron_indexing` key while a run is active.
+Requires `ZOTERO_API_KEY` in `.env`. The `/` root endpoint reports a compact `cron_indexing` summary (`enabled`, `keys_registered`); live per-run progress is served by the authenticated `GET /api/autoindex/status` endpoint.
 
 See [docs/cron-indexing.md](docs/cron-indexing.md) for cron job setup, all CLI options, and troubleshooting.
 

@@ -132,6 +132,16 @@ class Settings(BaseSettings):
         default=None,
         description="Path to the library/user registrations JSON file. Defaults to <data_path>/system/registrations.json."
     )
+    autoindex_secret: Optional[str] = Field(
+        default=None,
+        description="Fernet secret (urlsafe base64, 32 bytes) for encrypting auto-index keys. "
+                    "If unset, the auto-indexing key feature is disabled.",
+    )
+    autoindex_keys_path: Optional[Path] = Field(
+        default=None,
+        description="Path to the encrypted auto-index keys JSON. Defaults to "
+                    "<data_path>/system/autoindex_keys.json.",
+    )
 
     qdrant_url: Optional[str] = Field(
         default=None,
@@ -170,7 +180,7 @@ class Settings(BaseSettings):
     # Application version
     version: str = Field(default=__version__, description="Backend version")
 
-    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", mode="before")
+    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", "autoindex_keys_path", mode="before")
     @classmethod
     def expand_path(cls, v):
         """Expand user home directory in paths."""
@@ -192,6 +202,8 @@ class Settings(BaseSettings):
             self.log_file = self.data_path / "logs" / "server.log"
         if self.registrations_path is None:
             self.registrations_path = self.data_path / "system" / "registrations.json"
+        if self.autoindex_keys_path is None:
+            self.autoindex_keys_path = self.data_path / "system" / "autoindex_keys.json"
         return self
 
     @field_validator("log_level")
@@ -217,6 +229,8 @@ class Settings(BaseSettings):
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
         if self.registrations_path:
             self.registrations_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.autoindex_keys_path:
+            self.autoindex_keys_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_api_key(self, env_var_name: str) -> Optional[str]:
         """

@@ -40,6 +40,7 @@ class ApiKeyRequirement(BaseModel):
     key_name: str
     header_name: str
     description: str
+    docs_url: Optional[str] = None
     required_for: List[str]
 
 

@@ -7,8 +7,8 @@ without requiring the Zotero desktop app or the plugin to be running.
 Key behaviours:
 - PID-based lock file prevents concurrent runs; a stale lock (dead PID) is
   automatically taken over.
-- A JSON status file tracks per-slug progress and is consumed by the FastAPI
-  root endpoint to surface cron state in /
+- A JSON status file tracks per-slug progress and is surfaced by the
+  authenticated GET /api/autoindex/status endpoint (see read_live_status).
 - Atomic status writes use os.replace() for Windows compatibility.
 """
 
@@ -80,13 +80,30 @@ def is_process_alive(pid: int) -> bool:
             return True  # alive, insufficient permission
 
 
+def read_live_status(data_path: Path) -> dict:
+    """Return the last cron run's live status from ``system/cron_status.json``.
+
+    Applies a liveness check: if the status file claims ``running=True`` but the
+    recorded PID is no longer alive, the run is reported as crashed. Returns an
+    empty dict when no status file exists yet (no cron run has happened).
+    """
+    status_path = data_path / "system" / "cron_status.json"
+    if not status_path.exists():
+        return {}
+    cron_data = json.loads(status_path.read_text(encoding="utf-8"))
+    if cron_data.get("running") and cron_data.get("pid"):
+        if not is_process_alive(int(cron_data["pid"])):
+            cron_data["running"] = False
+            cron_data["crashed"] = True
+    return cron_data
+
+
 class CronIndexer:
     """Orchestrates web-API-based indexing for one or more Zotero library slugs."""
 
     def __init__(
         self,
-        slugs: list[str],
-        api_key: str,
+        targets: dict[str, str],
         vector_store: VectorStore,
         embedding_service: EmbeddingService,
         lock_file: Path,
@@ -96,8 +113,10 @@ class CronIndexer:
         max_items: Optional[int] = None,
         progress_update_interval: int = 10,
     ):
-        self.slugs = slugs
-        self.api_key = api_key
+        # targets maps each slug ("users/12345" or "groups/678") to the
+        # read-only Zotero web API key used to index that specific library.
+        self.targets = targets
+        self.slugs = list(targets.keys())
         self.vector_store = vector_store
         self.embedding_service = embedding_service
         self.lock_file = lock_file
@@ -106,6 +125,8 @@ class CronIndexer:
         self.mode = mode
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
+        # Pruned-key issues from re-validation; set by the caller before run().
+        self.key_issues: list[dict] = []
         # Slugs whose previous run was interrupted (stale lock takeover); set in run().
         self._interrupted_slugs: set[str] = set()
 
@@ -258,6 +279,7 @@ class CronIndexer:
             "started_at": started_at,
             "pid": os.getpid(),
             "slugs": {s.slug: {"status": "pending"} for s in slug_infos},
+            "key_issues": getattr(self, "key_issues", []),
         }
 
         total_stats: dict = {
@@ -398,7 +420,7 @@ class CronIndexer:
 
     async def _index_slug(self, slug_info: SlugInfo, status: dict) -> dict:
         """Index a single library slug. Returns stats dict."""
-        web_api = ZoteroWebAPI(api_key=self.api_key)
+        web_api = ZoteroWebAPI(api_key=self.targets[slug_info.slug])
         counter = {"n": 0}  # mutable counter for closure
 
         def progress_callback(current: int, total: int, chunks_added: int) -> None:
