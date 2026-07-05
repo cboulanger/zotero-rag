@@ -55,8 +55,10 @@ markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "container: marks tests that require a container runtime (podman or docker)",
 ]
-# Default: skip integration, API, and container tests unless explicitly requested
-addopts = "-m 'not integration and not api and not container'"
+# Default: skip integration, API, and container tests unless explicitly requested.
+# -rs prints the reason for every skipped test in the summary, so environment-driven
+# skips (e.g. missing spaCy model) are visible rather than silently counted.
+addopts = "-rs -m 'not integration and not api and not container'"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]

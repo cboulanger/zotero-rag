@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from backend.config.presets import get_preset, list_presets, PRESETS
 from backend.config.settings import Settings, get_settings, reset_settings
 
@@ -175,6 +177,11 @@ def test_autoindex_settings_defaults(monkeypatch):
     monkeypatch.delenv("AUTOINDEX_SECRET", raising=False)
     from backend.config.settings import Settings
     s = Settings()
+    # A local .env file (present in dev environments) may define AUTOINDEX_SECRET,
+    # which pydantic reads regardless of the process environment. In that case the
+    # "unset default" cannot be observed, so skip rather than fail.
+    if s.autoindex_secret is not None:
+        pytest.skip("AUTOINDEX_SECRET is provided via a .env file; cannot test unset default")
     assert s.autoindex_secret is None
     # Defaults under data_path/system
     assert str(s.autoindex_keys_path).endswith("system/autoindex_keys.json")

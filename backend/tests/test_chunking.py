@@ -13,6 +13,24 @@ from backend.services.chunking import (
 from backend.services.pdf_extractor import PDFExtractor
 
 
+def _spacy_model_available(model_name: str = "en_core_web_sm") -> bool:
+    """Check whether the spaCy model needed for semantic chunking is installed."""
+    try:
+        import spacy
+
+        return spacy.util.is_package(model_name)
+    except Exception:
+        return False
+
+
+# Semantic chunking (TextChunker) requires the spaCy model. In offline environments
+# it cannot be downloaded on demand, so skip those tests rather than fail.
+requires_spacy_model = pytest.mark.skipif(
+    not _spacy_model_available(),
+    reason="spaCy model 'en_core_web_sm' not installed; skipping semantic chunking tests",
+)
+
+
 class TestTextChunk:
     """Tests for TextChunk dataclass."""
 
@@ -133,6 +151,7 @@ class TestSimpleChunking:
         assert all(chunk.page_number == 5 for chunk in chunks)
 
 
+@requires_spacy_model
 class TestTextChunker:
     """Tests for semantic text chunker using spaCy."""
 
@@ -251,6 +270,7 @@ class TestTextChunker:
             assert chunk.chunk_index == i
 
 
+@requires_spacy_model
 class TestChunkingWithRealPDF:
     """Tests using real PDF content."""
 
