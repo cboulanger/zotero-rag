@@ -78,6 +78,16 @@ body {
   background-color: rgba(0, 0, 0, 0.03);
 }
 
+.library-autoindex-icon {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 3px 0 6px;
+  color: #888;
+  cursor: help;
+  position: relative;
+  top: 3px;
+}
+
 .library-reindex-btn {
   background: none;
   border: none;

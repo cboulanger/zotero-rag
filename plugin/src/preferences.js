@@ -186,6 +186,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			container.appendChild(row);
 		}
 
+		// Mark libraries that are auto-indexed on the server with a clock icon
+		// (fire-and-forget — fetches the server registry, adds icons when it resolves)
+		this.decorateAutoIndexedLibraries(doc, container);
+
 		// Wire up the "Select all / none" checkbox
 		const selectAll = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-library-select-all'));
 		if (!selectAll) return;
@@ -295,9 +299,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				}
 				/** @type {{user_id: string, username: string, targets: string[]}} */
 				const data = await response.json();
-				const targets = Array.isArray(data.targets) ? data.targets.join(', ') : '';
-				setAutoindexStatus(`Auto-indexing enabled for: ${targets}`);
+				const count = Array.isArray(data.targets) ? data.targets.length : 0;
+				setAutoindexStatus(
+					count === 1
+						? 'Auto-indexing enabled for 1 library.'
+						: `Auto-indexing enabled for ${count} libraries.`
+				);
 				if (autoindexKeyInput) autoindexKeyInput.value = '';
+				// Refresh the visibility list so the newly auto-indexed libraries get the clock icon
+				this.invalidateAutoIndexedLibraryIds();
+				populateLibraryVisibilityList();
 			} catch (e) {
 				setAutoindexStatus(`Error: ${e}`);
 			}
@@ -335,6 +346,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				const data = await response.json();
 				setAutoindexStatus(data.removed ? 'Auto-indexing key removed.' : 'No matching key found.');
 				if (autoindexKeyInput) autoindexKeyInput.value = '';
+				// Refresh the visibility list so removed libraries lose the clock icon
+				this.invalidateAutoIndexedLibraryIds();
+				populateLibraryVisibilityList();
 			} catch (e) {
 				setAutoindexStatus(`Error: ${e}`);
 			}

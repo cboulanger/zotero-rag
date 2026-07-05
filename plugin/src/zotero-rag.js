@@ -118,6 +118,16 @@ class ZoteroRAGPlugin {
 		 */
 		this.requiredApiKeys = [];
 
+		/**
+		 * Cached set of library IDs that are auto-indexed on the server (derived from
+		 * the registered read-only auto-index keys). Null until first fetched.
+		 * @type {Set<string>|null}
+		 */
+		this._autoIndexedIds = null;
+
+		/** @type {number} Timestamp (ms) of the last auto-index registry fetch. */
+		this._autoIndexedIdsFetchedAt = 0;
+
 		/** @type {Window|null} */
 		this._dialogWindow = null;
 
@@ -621,6 +631,145 @@ class ZoteroRAGPlugin {
 		nameSpan.textContent = library.name;
 
 		return { label, checkbox, nameSpan };
+	}
+
+	/**
+	 * Convert a Zotero.org library slug to the backend/plugin library ID format.
+	 *   users/12345 -> u12345
+	 *   groups/678  -> 678
+	 * @param {string} slug
+	 * @returns {string|null} Library ID, or null if the slug is malformed.
+	 */
+	slugToLibraryId(slug) {
+		const m = /^(users|groups)\/(\d+)$/.exec(String(slug).trim());
+		if (!m) return null;
+		return m[1] === 'users' ? `u${m[2]}` : m[2];
+	}
+
+	/**
+	 * Fetch the set of library IDs that are auto-indexed on a schedule by the
+	 * server, derived from the registered read-only auto-index keys. Cached for a
+	 * short time so opening the search dialog / preferences repeatedly doesn't
+	 * hammer the backend. Returns an empty set when auto-indexing is disabled
+	 * (HTTP 503) or the server is unreachable.
+	 * @returns {Promise<Set<string>>}
+	 */
+	async getAutoIndexedLibraryIds() {
+		const TTL_MS = 5 * 60 * 1000;
+		const now = Date.now();
+		if (this._autoIndexedIds && (now - this._autoIndexedIdsFetchedAt) < TTL_MS) {
+			return this._autoIndexedIds;
+		}
+		/** @type {Set<string>} */
+		const ids = new Set();
+		try {
+			const resp = await fetch(`${this.backendURL}/api/autoindex/keys`, {
+				headers: this.getAuthHeaders(),
+			});
+			if (resp.ok) {
+				const data = /** @type {any} */ (await resp.json());
+				/** @type {Array<{targets?: string[]}>} */
+				const keys = data.keys || [];
+				for (const entry of keys) {
+					for (const slug of (entry.targets || [])) {
+						const libId = this.slugToLibraryId(slug);
+						if (libId) ids.add(libId);
+					}
+				}
+			}
+			// A non-ok response (e.g. 503 when AUTOINDEX_SECRET is unset) means
+			// no libraries are auto-indexed — leave `ids` empty.
+		} catch (e) {
+			this.log('Could not fetch auto-index registry: ' + e);
+		}
+		this._autoIndexedIds = ids;
+		this._autoIndexedIdsFetchedAt = now;
+		return ids;
+	}
+
+	/**
+	 * Drop the cached auto-index registry so the next read re-fetches. Call after
+	 * the user adds or removes an auto-index key.
+	 * @returns {void}
+	 */
+	invalidateAutoIndexedLibraryIds() {
+		this._autoIndexedIds = null;
+		this._autoIndexedIdsFetchedAt = 0;
+	}
+
+	/**
+	 * Create the "auto-indexed on the server" clock icon element. Uses an inline
+	 * SVG (stroke = currentColor) so it renders as a crisp monochrome glyph at a
+	 * controllable size, rather than a system emoji.
+	 * @param {Document} doc
+	 * @returns {HTMLSpanElement}
+	 */
+	createAutoIndexIcon(doc) {
+		const xhtmlNS = 'http://www.w3.org/1999/xhtml';
+		const svgNS = 'http://www.w3.org/2000/svg';
+		const icon = /** @type {HTMLSpanElement} */ (doc.createElementNS(xhtmlNS, 'span'));
+		icon.className = 'library-autoindex-icon';
+		icon.title = 'This library is automatically re-indexed on a schedule on the server.';
+		icon.setAttribute('aria-label', 'Auto-indexed on a schedule on the server');
+		// Styling is set inline (not only via CSS) because the dialog stylesheet is
+		// cached across dialog re-opens; inline styles always ship with the reloaded
+		// plugin. `top` optically drops the glyph onto the text's centre line.
+		icon.style.cssText =
+			'display:inline-flex;align-items:center;margin:0 3px 0 6px;' +
+			'color:#888;cursor:help;position:relative;top:3px;';
+
+		const svg = doc.createElementNS(svgNS, 'svg');
+		svg.setAttribute('viewBox', '0 0 24 24');
+		svg.setAttribute('width', '15');
+		svg.setAttribute('height', '15');
+		svg.setAttribute('fill', 'none');
+		svg.setAttribute('stroke', 'currentColor');
+		svg.setAttribute('stroke-width', '2');
+		svg.setAttribute('stroke-linecap', 'round');
+		svg.setAttribute('stroke-linejoin', 'round');
+		svg.setAttribute('aria-hidden', 'true');
+
+		const circle = doc.createElementNS(svgNS, 'circle');
+		circle.setAttribute('cx', '12');
+		circle.setAttribute('cy', '12');
+		circle.setAttribute('r', '9');
+
+		const hands = doc.createElementNS(svgNS, 'path');
+		hands.setAttribute('d', 'M12 7.5 V12 l3 2');
+
+		svg.appendChild(circle);
+		svg.appendChild(hands);
+		icon.appendChild(svg);
+		return icon;
+	}
+
+	/**
+	 * Add the auto-index clock icon to any library rows in `container` whose
+	 * library is registered for scheduled server-side indexing. Fire-and-forget;
+	 * safe to call repeatedly (won't add duplicate icons).
+	 * @param {Document} doc
+	 * @param {Element} container
+	 * @returns {Promise<void>}
+	 */
+	async decorateAutoIndexedLibraries(doc, container) {
+		const ids = await this.getAutoIndexedLibraryIds();
+		if (!ids || ids.size === 0) return;
+		const checkboxes = /** @type {NodeListOf<HTMLInputElement>} */ (
+			container.querySelectorAll('input[type="checkbox"][data-library-id]')
+		);
+		for (const cb of checkboxes) {
+			const libId = cb.getAttribute('data-library-id');
+			if (!libId || !ids.has(libId)) continue;
+			const row = cb.closest('.library-checkbox') || cb.parentElement;
+			if (!row || row.querySelector('.library-autoindex-icon')) continue;
+			const icon = this.createAutoIndexIcon(doc);
+			const nameSpan = row.querySelector('.library-name');
+			if (nameSpan) {
+				nameSpan.insertAdjacentElement('afterend', icon);
+			} else {
+				row.appendChild(icon);
+			}
+		}
 	}
 
 	/**

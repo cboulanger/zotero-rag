@@ -526,6 +526,10 @@ var ZoteroRAGDialog = {
 			listContainer.appendChild(checkboxLabel);
 		}
 
+		// Mark libraries that are auto-indexed on the server with a clock icon
+		// (fire-and-forget — resolves against the server-side auto-index registry)
+		this.plugin.decorateAutoIndexedLibraries(document, listContainer);
+
 		// Scroll the first selected library into view
 		const firstChecked = listContainer.querySelector('input[type="checkbox"]:checked');
 		if (firstChecked) {
