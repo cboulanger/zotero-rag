@@ -48,9 +48,22 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
+	// External links inside the preferences pane don't open in the system browser
+	// on their own (target="_blank" is a no-op here). Route http(s) links through
+	// Zotero.launchURL so they open in the user's default browser.
+	doc.getElementById('zotero-rag-prefs-container').addEventListener('click', (e) => {
+		const anchor = /** @type {Element} */ (e.target)?.closest?.('a[href]');
+		if (!anchor) return;
+		const href = anchor.getAttribute('href');
+		if (href && /^https?:\/\//i.test(href)) {
+			e.preventDefault();
+			Zotero.launchURL(href);
+		}
+	});
+
 	/**
 	 * Render service API key input fields from the given list.
-	 * @param {Array<{key_name: string, header_name: string, description: string, required_for: string[]}>} requiredKeys
+	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
 	 */
 	const renderApiKeyFields = (requiredKeys) => {
 		const container = doc.getElementById('zotero-rag-service-keys-container');
@@ -95,6 +108,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 				desc.className = 'setting-description service-key-desc';
 				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				// Link to the provider portal where the key can be created/managed.
+				// Clicks are routed to the system browser by the pane-wide handler above.
+				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
+					desc.appendChild(doc.createTextNode(' '));
+					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');
+					link.setAttribute('href', keyInfo.docs_url);
+					link.setAttribute('target', '_blank');
+					link.textContent = 'Get key';
+					desc.appendChild(link);
+				}
 				container.appendChild(desc);
 			}
 		}

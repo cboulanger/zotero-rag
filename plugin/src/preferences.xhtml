@@ -22,20 +22,20 @@
     </html:div>
 
     <html:div class="setting-description">
-      Enter the URL of your FastAPI backend server (default: http://localhost:8119).
-      Use a remote URL (e.g. http://myserver:8119) to connect to a server on another machine.
+      Connects the plugin to the indexing and search service. Your administrator
+      will provide you with the server URL and an API key to enter here.
     </html:div>
 
     <html:div class="setting-row" id="zotero-rag-api-key-row">
       <html:label for="zotero-rag-api-key">API Key:</html:label>
       <html:input id="zotero-rag-api-key"
                   type="password"
-                  placeholder="Leave empty if not required"
+                  placeholder="Enter API Key"
                   class="setting-input"/>
     </html:div>
 
     <html:div class="setting-description" id="zotero-rag-api-key-desc">
-      API key for authenticating with the backend (set API_KEY in the server's .env file).
+      Needed to access the RAG server.
     </html:div>
   </html:fieldset>
 
