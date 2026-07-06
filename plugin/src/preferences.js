@@ -257,7 +257,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	 */
 	const refreshAutoindexToggle = async () => {
 		if (!autoindexToggle) return;
-		if (!this.zoteroApiKey && !this.isLoopbackBackend()) {
+		// Auto-indexing always needs a real Zotero key (it drives a cron job that
+		// hits api.zotero.org), even when the backend connection itself is loopback
+		// and needs no key for plugin auth — so this check is unconditional.
+		if (!this.zoteroApiKey) {
 			autoindexToggle.checked = false;
 			autoindexToggle.disabled = true;
 			setAutoindexStatus('Configure your Zotero API key above first.');
