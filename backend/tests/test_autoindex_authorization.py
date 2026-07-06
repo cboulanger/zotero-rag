@@ -1,6 +1,7 @@
 """Endpoint tests for GET /api/autoindex/keys: results are filtered to the
 caller's own submitted key(s), not every user's."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -55,6 +56,50 @@ class AutoIndexKeysAuthorizationTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         user_ids = {k["user_id"] for k in r.json()["keys"]}
         self.assertEqual(user_ids, {1, 2})
+
+    def test_status_filters_slugs_and_key_issues_to_own_identity(self):
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({
+            "running": False,
+            "slugs": {
+                "users/1": {"status": "done", "items_indexed": 10},
+                "users/2": {"status": "done", "items_indexed": 20},
+            },
+            "key_issues": [
+                {"fingerprint": "abc", "user": "u", "reason": "revoked", "pruned": True},
+                {"fingerprint": "def", "user": "other", "reason": "revoked", "pruned": True},
+            ],
+        }), encoding="utf-8")
+
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(set(data["slugs"].keys()), {"users/1"})
+        self.assertEqual([i["user"] for i in data["key_issues"]], ["u"])
+
+    def test_status_unrestricted_when_no_identity(self):
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({
+            "running": False,
+            "slugs": {
+                "users/1": {"status": "done"},
+                "users/2": {"status": "done"},
+            },
+            "key_issues": [
+                {"fingerprint": "abc", "user": "u", "reason": "revoked", "pruned": True},
+                {"fingerprint": "def", "user": "other", "reason": "revoked", "pruned": True},
+            ],
+        }), encoding="utf-8")
+
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(set(data["slugs"].keys()), {"users/1", "users/2"})
+        self.assertEqual(len(data["key_issues"]), 2)
 
 
 if __name__ == "__main__":

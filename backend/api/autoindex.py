@@ -82,7 +82,7 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
 
 
 @router.get("/autoindex/status", summary="Live auto-index cron-run progress")
-def status() -> dict:
+def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) -> dict:
     """Return the live status of the auto-index cron run.
 
     Unlike the ``/`` root endpoint (which exposes only ``enabled``), this
@@ -92,6 +92,14 @@ def status() -> dict:
     When the feature is disabled (``AUTOINDEX_SECRET`` unset) ``keys_registered``
     is ``0`` and ``disabled_reason`` explains why. Run-specific fields are absent
     until the first cron run writes a status file.
+
+    On loopback deployments (identity=None) returns full detail unfiltered,
+    matching the single-trusted-local-user model used throughout this
+    backend's Zotero-key auth. On a gated remote deployment, ``slugs`` is
+    filtered to the caller's own readable targets and ``key_issues`` to
+    entries matching the caller's own username — this endpoint previously
+    leaked every user's real username and every library's slug/stats to any
+    caller who merely passed the instance-wide access gate.
     """
     settings = get_settings()
     result: dict = {}
@@ -113,4 +121,17 @@ def status() -> dict:
         result.update(read_live_status(settings.data_path))
     except Exception as exc:
         logger.warning("Failed to read cron status file: %s", exc)
+
+    if identity is not None:
+        if "slugs" in result:
+            result["slugs"] = {
+                slug: info for slug, info in result["slugs"].items()
+                if slug in identity.targets
+            }
+        if "key_issues" in result:
+            result["key_issues"] = [
+                issue for issue in result["key_issues"]
+                if issue.get("user") == identity.username
+            ]
+
     return result
