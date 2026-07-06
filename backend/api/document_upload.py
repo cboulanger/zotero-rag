@@ -439,6 +439,7 @@ async def _run_task(task_id: str, **kwargs: object) -> None:
 async def check_indexed(
     library_id: str,
     request: CheckIndexedRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -464,6 +465,8 @@ async def check_indexed(
             status_code=400,
             detail="library_id in URL must match library_id in request body",
         )
+
+    assert_can_access(identity, library_id)
 
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")

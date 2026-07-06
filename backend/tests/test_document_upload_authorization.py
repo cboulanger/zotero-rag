@@ -85,6 +85,22 @@ class DocumentUploadAuthorizationTest(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 403)
 
+    def test_check_indexed_outside_targets_is_403(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.post(
+            "/api/libraries/u2/check-indexed",
+            json={"library_id": "u2", "attachments": []},
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_check_indexed_within_targets_succeeds(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.post(
+            "/api/libraries/u1/check-indexed",
+            json={"library_id": "u1", "attachments": []},
+        )
+        self.assertEqual(r.status_code, 200)
+
     def test_upload_document_body_user_id_is_ignored_in_favor_of_identity(self):
         self._set_identity(ZoteroIdentity(user_id=42, username="real", targets=["users/1"]))
         metadata = json.dumps({
