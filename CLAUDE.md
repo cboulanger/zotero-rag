@@ -117,11 +117,7 @@ The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `ind
 
 **Key flow — auto-index keys (not `--slugs-file` / `ZOTERO_API_KEY`):**
 
-The cron job no longer uses a static slugs file or a global `ZOTERO_API_KEY`. Instead, indexing targets come from the encrypted auto-index key store at `<data_path>/system/autoindex_keys.json`. Keys are added by users via the plugin (Preferences → Automatic indexing) or on the server with:
-
-As of the zotero-key-auth migration, the same personal Zotero API key a user enters in the
-plugin's setup wizard (or Preferences) also authenticates their normal plugin use — auto-indexing
-is just an on/off toggle reusing that key, not a separate credential.
+The cron job no longer uses a static slugs file or a global `ZOTERO_API_KEY`. Instead, indexing targets come from the encrypted auto-index key store at `<data_path>/system/autoindex_keys.json`. The same personal Zotero API key a user enters in the plugin's setup wizard (or Preferences) also authenticates their normal plugin use — auto-indexing is just an on/off toggle reusing that key, not a separate credential. Keys are added by users via the plugin (Preferences → Automatic indexing) or on the server with:
 
 ```bash
 uv run python bin/autoindex_add_key.py <read-only-zotero-api-key>
@@ -372,6 +368,7 @@ For creating dialog windows in Zotero plugins:
 - Keep inline comments focused on "why" rather than "what"
 - In Javascript files, use TypeScript-compatible JSDOC annotations throughout for typing variables and documenting function parameters. Use the full power or typescript embedded in JSDoc, don't use generic types. Remember this is plain javascript, don't use Typescript directly.
 - **Never fix markdown lint issues (formatting, table style, etc.) in files under `docs/history/`** (including `docs/history/implementation/`). These are historical/implementation-progress records written for agent consumption when resuming work, not published documentation — don't spend edits polishing their formatting.
+- **User-facing documentation (README, CLAUDE.md's operational sections, `docs/*.md` architecture/setup guides, `.env.dist` comments, plugin UI/help text) must describe only the current status-quo behavior — do not reference prior behavior a feature migrated from ("previously X, now Y", "as of the Z migration", etc.).** The software is not yet publicly released, so there is no installed base that needs migration context; mentioning a superseded behavior only confuses a reader who never saw it. This rule applies for any `1.*` release; it no longer applies once the project reaches `2.0` or later (at that point documenting migrations for upgrading users becomes appropriate). This does **not** apply to `docs/history/` and `docs/superpowers/` records, which are explicitly historical/planning documents for agent consumption, not user-facing docs.
 
 ## Implementation progress documentation
 
