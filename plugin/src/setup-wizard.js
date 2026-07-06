@@ -165,6 +165,17 @@ var ZoteroSetupWizard = {
 
 		const identityIntro = document.getElementById('wizard-identity-intro');
 		const autoindexRow = document.getElementById('wizard-autoindex-row');
+
+		// Reset Step 2 identity UI to its default (non-loopback) state before deciding
+		// again below. Without this, a prior confirmServer() call against a loopback URL
+		// would leave the Zotero API key inputs hidden and identityValidated stuck at
+		// true even after the user goes Back and re-confirms a non-loopback URL.
+		identityIntro.textContent = 'This server requires your personal Zotero API key to authenticate you and determine which libraries you can access.';
+		document.getElementById('wizard-create-key-btn').removeAttribute('hidden');
+		document.getElementById('wizard-zotero-key').removeAttribute('hidden');
+		document.getElementById('wizard-validate-btn').removeAttribute('hidden');
+		this.identityValidated = false;
+
 		if (this.plugin.isLoopbackBackend()) {
 			identityIntro.textContent = 'This server runs on your own machine — no Zotero API key is required.';
 			document.getElementById('wizard-create-key-btn').setAttribute('hidden', 'true');
