@@ -32,10 +32,10 @@ async def resolve_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
     an otherwise-valid identity, 503 if zotero.org is unreachable with no
     cached validation to fall back on.
 
-    Called once per request by the auth middleware (added in a later task),
-    which stashes the result on request.state.zotero_identity. Route
-    handlers should depend on get_zotero_identity instead, not this
-    function directly, to avoid re-validating the key a second time.
+    Called once per request by the auth middleware in backend/main.py, which
+    stashes the result on request.state.zotero_identity for every /api/*
+    request. Route handlers should depend on get_zotero_identity instead,
+    not this function directly, to avoid re-validating the key a second time.
     """
     settings = get_settings()
     if is_loopback(settings):
@@ -66,10 +66,11 @@ def get_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
     Route handlers should depend on this — not resolve_zotero_identity
     directly — to avoid re-validating the key a second time per request.
 
-    NOTE: no middleware currently sets request.state.zotero_identity (that
-    wiring lands in a later task); until then this always returns None,
-    which access_gate.assert_can_access() correctly treats as "skip
-    per-library enforcement" — the same as today's pre-this-plan behavior.
+    The auth middleware in backend/main.py sets request.state.zotero_identity
+    on every /api/* request (calling resolve_zotero_identity once), so this
+    simply reads back that live value. It returns None on loopback deployments
+    and for the transitional legacy-shared-key path, both of which
+    access_gate.assert_can_access() treats as "skip per-library enforcement".
     """
     return getattr(request.state, "zotero_identity", None)
 

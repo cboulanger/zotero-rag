@@ -194,12 +194,6 @@ class Settings(BaseSettings):
             return [int(x.strip()) for x in v.split(",") if x.strip()]
         return v
 
-    require_registration: bool = Field(
-        default=True,
-        description="Require users to register before indexing. "
-                    "Automatically skipped when api_host is localhost or 127.0.0.1."
-    )
-
     testing: bool = Field(
         default=False,
         description="Testing mode: use mock embedding/LLM services (no API keys or model downloads required)"
