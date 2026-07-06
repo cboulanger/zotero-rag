@@ -367,6 +367,7 @@ For creating dialog windows in Zotero plugins:
 - Document configuration options and environment variables
 - Keep inline comments focused on "why" rather than "what"
 - In Javascript files, use TypeScript-compatible JSDOC annotations throughout for typing variables and documenting function parameters. Use the full power or typescript embedded in JSDoc, don't use generic types. Remember this is plain javascript, don't use Typescript directly.
+- **Never fix markdown lint issues (formatting, table style, etc.) in files under `docs/history/`** (including `docs/history/implementation/`). These are historical/implementation-progress records written for agent consumption when resuming work, not published documentation — don't spend edits polishing their formatting.
 
 ## Implementation progress documentation
 
