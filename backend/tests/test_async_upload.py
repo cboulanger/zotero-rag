@@ -74,8 +74,7 @@ class TestAsyncUploadEndpoint(unittest.TestCase):
     def test_duplicate_returns_immediately_no_task_id(self):
         """Content-hash duplicate resolves instantly; no background task is created."""
         self.app.dependency_overrides[self.get_vector_store] = lambda: _mock_vector_store(is_duplicate=True)
-        with patch("backend.api.document_upload._check_registration"):
-            resp = self._post()
+        resp = self._post()
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
         self.assertEqual(data["status"], "skipped_duplicate")
@@ -92,7 +91,6 @@ class TestAsyncUploadEndpoint(unittest.TestCase):
 
         with (
             patch("backend.api.document_upload.make_embedding_service"),
-            patch("backend.api.document_upload._check_registration"),
             patch("backend.api.document_upload.asyncio.create_task", side_effect=_discard_task),
         ):
             resp = self._post()

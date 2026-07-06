@@ -156,7 +156,6 @@ class TestUploadTimeoutWarning(unittest.TestCase):
         with (
             patch("backend.api.document_upload.make_embedding_service") as mock_emb,
             patch("backend.api.document_upload.DocumentProcessor") as mock_proc_cls,
-            patch("backend.api.document_upload._check_registration"),
         ):
             mock_proc = MagicMock()
             mock_proc_cls.return_value = mock_proc
@@ -185,7 +184,6 @@ class TestUploadTimeoutWarning(unittest.TestCase):
         with (
             patch("backend.api.document_upload.make_embedding_service"),
             patch("backend.api.document_upload.DocumentProcessor") as mock_proc_cls,
-            patch("backend.api.document_upload._check_registration"),
         ):
             mock_proc = MagicMock()
             mock_proc_cls.return_value = mock_proc
@@ -208,7 +206,6 @@ class TestUploadTimeoutWarning(unittest.TestCase):
         with (
             patch("backend.api.document_upload.make_embedding_service"),
             patch("backend.api.document_upload.DocumentProcessor") as mock_proc_cls,
-            patch("backend.api.document_upload._check_registration"),
         ):
             mock_proc = MagicMock()
             mock_proc_cls.return_value = mock_proc
@@ -277,7 +274,6 @@ class TestOrphanedDedupSelfHeal(unittest.TestCase):
         with (
             patch("backend.api.document_upload.make_embedding_service") as mock_emb_factory,
             patch("backend.api.document_upload.DocumentProcessor") as mock_proc_cls,
-            patch("backend.api.document_upload._check_registration"),
         ):
             mock_emb = MagicMock()
             mock_emb.rate_limit_retries = 0
