@@ -121,18 +121,22 @@ def find_plugin_process():
     return None
 
 
-def extract_error_from_log():
-    """Extract user-friendly error message from log file.
+def extract_error_from_log(log_file=None):
+    """Extract user-friendly error message from a log file.
+
+    Args:
+        log_file: Path to the log file to search. Defaults to the backend LOG_FILE.
 
     Returns:
         Error message string if found, None otherwise
     """
-    if not LOG_FILE.exists():
+    log_file = log_file or LOG_FILE
+    if not log_file.exists():
         return None
 
     try:
         # Read the last 100 lines of the log
-        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+        with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
             recent_lines = lines[-100:] if len(lines) > 100 else lines
 
@@ -164,6 +168,19 @@ def extract_error_from_log():
                     if lines_in_block and '=' in lines_in_block[0]:
                         lines_in_block = lines_in_block[1:]
                     return '\n'.join(lines_in_block).strip()
+
+        # Fallback: our own scripts print "[ERROR] ..." followed by "[INFO] ..."
+        # lines explaining the cause/fix (e.g. missing dependency, missing binary).
+        # Grab that contiguous block starting at the last such [ERROR] line.
+        for i in range(len(recent_lines) - 1, -1, -1):
+            if '[ERROR]' in recent_lines[i]:
+                block = recent_lines[i:i + 10]
+                trimmed = []
+                for bline in block:
+                    if not bline.strip() and trimmed:
+                        break
+                    trimmed.append(bline.rstrip('\n'))
+                return '\n'.join(trimmed).strip()
 
         # Fallback: look for ERROR: messages in recent lines
         for line in reversed(recent_lines):
@@ -513,7 +530,11 @@ def _start_plugin_server_and_wait():
     print("Waiting for plugin server to start...")
     if not wait_for_plugin_startup(timeout=60):
         print("[ERROR] Plugin server failed to start within timeout")
-        print(f"[INFO] Check logs at: {PLUGIN_LOG_FILE}")
+        error_msg = extract_error_from_log(PLUGIN_LOG_FILE)
+        if error_msg:
+            print("\n" + error_msg)
+        else:
+            print(f"[INFO] Check logs at: {PLUGIN_LOG_FILE}")
         stop_plugin_server()
         sys.exit(1)
 
@@ -677,7 +698,11 @@ def start_server(dev_mode=True, with_plugin=False):
                     sys.exit(1)
             else:
                 print("[ERROR] Server failed to start")
-                print(f"Check logs at: {LOG_FILE}")
+                error_msg = extract_error_from_log()
+                if error_msg:
+                    print("\n" + error_msg)
+                else:
+                    print(f"Check logs at: {LOG_FILE}")
                 sys.exit(1)
 
     except Exception as e:
@@ -812,7 +837,11 @@ def start_plugin_server():
             return _plugin_process
         else:
             print("[ERROR] Plugin server failed to start")
-            print(f"Check logs at: {PLUGIN_LOG_FILE}")
+            error_msg = extract_error_from_log(PLUGIN_LOG_FILE)
+            if error_msg:
+                print("\n" + error_msg)
+            else:
+                print(f"Check logs at: {PLUGIN_LOG_FILE}")
             cleanup_plugin_processes()
             return None
 
