@@ -1,3 +1,10 @@
+# [1.36.0](https://github.com/cboulanger/zotero-rag/compare/v1.35.0...v1.36.0) (2026-07-06)
+
+
+### Features
+
+* Zotero-key authentication: per-user identity, access gate, plugin wizard ([#39](https://github.com/cboulanger/zotero-rag/issues/39)) ([7499215](https://github.com/cboulanger/zotero-rag/commit/74992154fd07d7aa2347a55f862ff0bd1e5e80cc))
+
 # [1.35.0](https://github.com/cboulanger/zotero-rag/compare/v1.34.0...v1.35.0) (2026-07-05)
 
 
