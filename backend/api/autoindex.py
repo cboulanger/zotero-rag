@@ -2,7 +2,7 @@
 
 POST   /api/autoindex/keys    — submit a read-only key (validated, stored encrypted)
 DELETE /api/autoindex/keys    — remove a key
-GET    /api/autoindex/keys    — list key metadata (admin; no plaintext)
+GET    /api/autoindex/keys    — list the caller's own key metadata (no plaintext)
 GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
 
 All endpoints are protected by the global X-API-Key middleware. When
@@ -11,13 +11,16 @@ AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 5
 
 import asyncio
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from backend.config.settings import get_settings
+from backend.dependencies import get_zotero_identity
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.cron_indexer import read_live_status
+from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
 
 router = APIRouter()
@@ -60,10 +63,22 @@ def delete_key(request: KeyRequest) -> dict:
     return {"removed": removed}
 
 
-@router.get("/autoindex/keys", summary="List auto-index key metadata (admin)")
-def list_keys() -> dict:
+@router.get("/autoindex/keys", summary="List the caller's own auto-index key metadata")
+def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) -> dict:
+    """List auto-index key metadata.
+
+    On loopback deployments (identity=None) returns every submitted key's
+    metadata unfiltered, matching the single-trusted-local-user model used
+    throughout this backend's Zotero-key auth. On a gated remote deployment,
+    each caller sees only their own submitted key's metadata, not other
+    users' — this endpoint previously leaked every user's real username and
+    user_id to any caller who merely passed the instance-wide access gate.
+    """
     store = _store()
-    return {"keys": store.list_metadata()}
+    all_keys = store.list_metadata()
+    if identity is None:
+        return {"keys": all_keys}
+    return {"keys": [k for k in all_keys if k.get("user_id") == identity.user_id]}
 
 
 @router.get("/autoindex/status", summary="Live auto-index cron-run progress")
