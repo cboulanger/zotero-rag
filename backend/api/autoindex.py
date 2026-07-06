@@ -5,7 +5,7 @@ DELETE /api/autoindex/keys    — remove a key
 GET    /api/autoindex/keys    — list the caller's own key metadata (no plaintext)
 GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
 
-All endpoints are protected by the global X-API-Key middleware. When
+All endpoints are protected by the global Zotero-key auth middleware (X-Zotero-API-Key). When
 AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503.
 """
 
