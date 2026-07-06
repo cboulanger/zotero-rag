@@ -10,9 +10,11 @@ from typing import Optional
 
 from backend.models.library import LibraryIndexMetadata
 from backend.db.vector_store import VectorStore
-from backend.dependencies import get_vector_store
+from backend.dependencies import get_vector_store, get_zotero_identity
 from backend.config.settings import get_settings
+from backend.services.access_gate import assert_can_access
 from backend.services.registration_service import RegistrationService
+from backend.services.zotero_identity import ZoteroIdentity
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -78,11 +80,13 @@ def _build_detail(
 
 
 @router.get("/libraries", response_model=list[LibraryDetailResponse])
-def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
+def list_libraries(
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
-    List all libraries known to the backend (indexed or registered).
-
-    Returns combined index metadata, registration info, and storage stats for each.
+    List libraries known to the backend (indexed or registered), filtered to
+    the caller's own readable targets when authenticated via a Zotero key.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
@@ -96,6 +100,8 @@ def list_libraries(vector_store: VectorStore = Depends(get_vector_store)):
 
     # Union of all known library IDs (indexed + registered)
     all_ids = set(metadata_by_id.keys()) | set(registrations.keys())
+    if identity is not None:
+        all_ids &= set(identity.targets)
 
     return [
         _build_detail(lid, metadata_by_id.get(lid), registrations.get(lid))
@@ -149,13 +155,18 @@ def get_library_index_status(library_id: str, vector_store: VectorStore = Depend
         raise HTTPException(status_code=500, detail=f"Failed to retrieve library index status: {str(e)}")
 
 
-@router.delete("/libraries/{library_id}/index")
-def clear_library_index(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+@router.delete("/libraries/{library_id:path}/index")
+def clear_library_index(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Remove all indexed data for a library (chunks, dedup records, metadata).
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     try:
         chunks_deleted = vector_store.delete_library_chunks(library_id)
@@ -231,10 +242,11 @@ class SyncDeletionsResponse(BaseModel):
     deleted_chunks: int
 
 
-@router.post("/libraries/{library_id}/sync-deletions", response_model=SyncDeletionsResponse)
+@router.post("/libraries/{library_id:path}/sync-deletions", response_model=SyncDeletionsResponse)
 def sync_library_deletions(
     library_id: str,
     request: SyncDeletionsRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """Remove chunks for indexed items no longer present in the Zotero library.
@@ -246,6 +258,7 @@ def sync_library_deletions(
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     try:
         indexed = vector_store.get_all_indexed_item_versions(library_id)
@@ -270,13 +283,19 @@ def sync_library_deletions(
         raise HTTPException(status_code=500, detail=f"sync-deletions failed: {str(e)}")
 
 
-@router.delete("/libraries/{library_id}/items/{item_key}/chunks")
-def clear_item_chunks(library_id: str, item_key: str, vector_store: VectorStore = Depends(get_vector_store)):
+@router.delete("/libraries/{library_id:path}/items/{item_key}/chunks")
+def clear_item_chunks(
+    library_id: str,
+    item_key: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Remove all indexed chunks for a specific item within a library.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     try:
         chunks_deleted = vector_store.delete_item_chunks(library_id, item_key)

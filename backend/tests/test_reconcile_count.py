@@ -83,7 +83,7 @@ class TestClearItemChunksCascadesDedup(unittest.TestCase):
         vs = MagicMock()
         vs.delete_item_chunks.return_value = 4
 
-        result = clear_item_chunks("6297749", "ITEM001", vector_store=vs)
+        result = clear_item_chunks("6297749", "ITEM001", identity=None, vector_store=vs)
 
         vs.delete_item_chunks.assert_called_once_with("6297749", "ITEM001")
         vs.delete_item_deduplication_records.assert_called_once_with("6297749", "ITEM001")
