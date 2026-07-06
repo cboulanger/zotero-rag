@@ -115,7 +115,8 @@ var ZoteroSetupWizard = {
 				status.className = 'wizard-status status-error';
 				return;
 			}
-			await this.enterKeysStep();
+			const enteredKeysStep = await this.enterKeysStep();
+			if (!enteredKeysStep) return;
 			this.goToStep(2);
 			return;
 		}
@@ -225,19 +226,30 @@ var ZoteroSetupWizard = {
 	/**
 	 * Populate Step 3 (Service API Keys) and, if requested, submit the
 	 * auto-indexing checkbox state before moving on.
-	 * @returns {Promise<void>}
+	 * @returns {Promise<boolean>} False if the auto-indexing submission failed — the
+	 *   caller should stay on the current step and let the user see the error rather
+	 *   than silently proceeding as if it had succeeded.
 	 */
 	async enterKeysStep() {
 		const autoindexCheckbox = /** @type {HTMLInputElement} */ (document.getElementById('wizard-autoindex-checkbox'));
 		if (autoindexCheckbox && autoindexCheckbox.checked && this.plugin.zoteroApiKey) {
+			const status = document.getElementById('wizard-identity-status');
 			try {
-				await fetch(`${this.plugin.backendURL}/api/autoindex/keys`, {
+				const response = await fetch(`${this.plugin.backendURL}/api/autoindex/keys`, {
 					method: 'POST',
 					headers: this.plugin.getAuthHeaders({ 'Content-Type': 'application/json' }),
 					body: JSON.stringify({ api_key: this.plugin.zoteroApiKey }),
 				});
+				if (!response.ok) {
+					const err = await response.json().catch(() => ({}));
+					status.textContent = `Could not enable automatic indexing: ${err.detail || response.status}`;
+					status.className = 'wizard-status status-error';
+					return false;
+				}
 			} catch (e) {
-				console.warn('Failed to enable auto-indexing from wizard: ' + e);
+				status.textContent = `Could not enable automatic indexing: ${e instanceof Error ? e.message : String(e)}`;
+				status.className = 'wizard-status status-error';
+				return false;
 			}
 		}
 
@@ -245,6 +257,7 @@ var ZoteroSetupWizard = {
 		const container = document.getElementById('wizard-service-keys-container');
 		const placeholder = document.getElementById('wizard-service-keys-placeholder');
 		this.plugin.renderServiceApiKeyFields(document, container, placeholder, this.plugin.requiredApiKeys);
+		return true;
 	},
 };
 
