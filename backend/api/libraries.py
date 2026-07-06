@@ -12,7 +12,7 @@ from backend.models.library import LibraryIndexMetadata
 from backend.db.vector_store import VectorStore
 from backend.dependencies import get_vector_store, get_zotero_identity
 from backend.config.settings import get_settings
-from backend.services.access_gate import assert_can_access
+from backend.services.access_gate import assert_can_access, is_authorized_for_library
 from backend.services.registration_service import RegistrationService
 from backend.services.zotero_identity import ZoteroIdentity
 
@@ -101,7 +101,7 @@ def list_libraries(
     # Union of all known library IDs (indexed + registered)
     all_ids = set(metadata_by_id.keys()) | set(registrations.keys())
     if identity is not None:
-        all_ids &= set(identity.targets)
+        all_ids = {lid for lid in all_ids if is_authorized_for_library(identity, lid)}
 
     return [
         _build_detail(lid, metadata_by_id.get(lid), registrations.get(lid))

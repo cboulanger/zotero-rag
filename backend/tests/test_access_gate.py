@@ -81,12 +81,32 @@ class AssertCanAccessTest(unittest.TestCase):
 
     def test_identity_with_target_allowed(self):
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
-        assert_can_access(identity, "users/1")  # must not raise
+        assert_can_access(identity, "u1")  # must not raise
 
     def test_identity_without_target_rejected(self):
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
         with self.assertRaises(HTTPException) as ctx:
-            assert_can_access(identity, "users/2")
+            assert_can_access(identity, "u2")
+        self.assertEqual(ctx.exception.status_code, 403)
+
+
+class RealisticIdFormatTest(unittest.TestCase):
+    """Regression tests: library_id arrives in backend format ('u12345',
+    '678'); identity.targets are in Zotero slug format ('users/12345',
+    'groups/678'). assert_can_access must convert before comparing."""
+
+    def test_backend_user_id_matches_slug_target(self):
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["users/12345"])
+        assert_can_access(identity, "u12345")  # must not raise
+
+    def test_backend_group_id_matches_slug_target(self):
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["groups/678"])
+        assert_can_access(identity, "678")  # must not raise
+
+    def test_mismatched_backend_user_id_still_rejected(self):
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["users/12345"])
+        with self.assertRaises(HTTPException) as ctx:
+            assert_can_access(identity, "u99999")
         self.assertEqual(ctx.exception.status_code, 403)
 
 

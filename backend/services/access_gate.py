@@ -55,6 +55,35 @@ def assert_safe_to_start(settings: Settings) -> None:
         )
 
 
+def _backend_id_to_slug(backend_id: str) -> str:
+    """Convert a backend library ID to a Zotero.org slug for target comparison.
+
+    u12345 -> users/12345
+    678    -> groups/678
+
+    Duplicated from backend.api.public_query.backend_id_to_slug (not imported
+    from there) to avoid a circular import: backend/dependencies.py already
+    imports from this module, and public_query.py imports from dependencies.py.
+    """
+    if backend_id.startswith("u"):
+        return "users/" + backend_id[1:]
+    return "groups/" + backend_id
+
+
+def is_authorized_for_library(identity: Optional[ZoteroIdentity], library_id: str) -> bool:
+    """True if identity may access library_id.
+
+    identity=None means the loopback (Part 4) or legacy-shared-key (Part 5)
+    bypass path — always authorized. Otherwise library_id (backend format,
+    e.g. "u12345" or "678") is converted to Zotero slug format (e.g.
+    "users/12345" or "groups/678") before checking identity.targets, since
+    the two use different ID formats — see _backend_id_to_slug.
+    """
+    if identity is None:
+        return True
+    return _backend_id_to_slug(library_id) in identity.targets
+
+
 def assert_can_access(identity: Optional[ZoteroIdentity], library_id: str) -> None:
     """Raise 403 unless library_id is within identity's readable targets.
 
@@ -63,9 +92,7 @@ def assert_can_access(identity: Optional[ZoteroIdentity], library_id: str) -> No
     per-library enforcement (loopback because there is only one trusted
     user; legacy because un-migrated plugins predate per-library targets).
     """
-    if identity is None:
-        return
-    if library_id not in identity.targets:
+    if not is_authorized_for_library(identity, library_id):
         raise HTTPException(
             status_code=403,
             detail=f"Your Zotero key does not grant read access to library {library_id!r}.",

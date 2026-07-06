@@ -41,19 +41,19 @@ class QueryAuthorizationTest(unittest.TestCase):
 
     def test_loopback_query_with_no_identity_is_unrestricted(self):
         self._set_identity(None)
-        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["users/1"]})
+        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["u1"]})
         self.assertNotEqual(r.status_code, 403)
 
     def test_query_outside_targets_is_403(self):
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
         self._set_identity(identity)
-        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["users/2"]})
+        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["u2"]})
         self.assertEqual(r.status_code, 403)
 
     def test_query_within_targets_is_not_403(self):
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
         self._set_identity(identity)
-        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["users/1"]})
+        r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["u1"]})
         self.assertNotEqual(r.status_code, 403)
 
     def test_query_with_one_target_outside_is_403_even_if_another_is_inside(self):
@@ -61,7 +61,7 @@ class QueryAuthorizationTest(unittest.TestCase):
         self._set_identity(identity)
         r = self.client.post(
             "/api/query",
-            json={"question": "q?", "library_ids": ["users/1", "users/2"]},
+            json={"question": "q?", "library_ids": ["u1", "u2"]},
         )
         self.assertEqual(r.status_code, 403)
 
