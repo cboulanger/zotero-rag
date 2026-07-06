@@ -63,9 +63,9 @@ def get_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
 
     The auth middleware in backend/main.py sets request.state.zotero_identity
     on every /api/* request (calling resolve_zotero_identity once), so this
-    simply reads back that live value. It returns None on loopback deployments
-    and for the transitional legacy-shared-key path, both of which
-    access_gate.assert_can_access() treats as "skip per-library enforcement".
+    simply reads back that live value. It returns None on loopback
+    deployments, which access_gate.assert_can_access() treats as "skip
+    per-library enforcement".
     """
     return getattr(request.state, "zotero_identity", None)
 
