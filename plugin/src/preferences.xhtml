@@ -22,20 +22,28 @@
     </html:div>
 
     <html:div class="setting-description">
-      Connects the plugin to the indexing and search service. Your administrator
-      will provide you with the server URL and an API key to enter here.
+      Connects the plugin to the indexing and search service.
     </html:div>
 
-    <html:div class="setting-row" id="zotero-rag-api-key-row">
-      <html:label for="zotero-rag-api-key">API Key:</html:label>
-      <html:input id="zotero-rag-api-key"
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-zotero-api-key">Zotero API Key:</html:label>
+      <html:input id="zotero-rag-zotero-api-key"
                   type="password"
-                  placeholder="Enter API Key"
+                  placeholder="Your personal Zotero API key"
                   class="setting-input"/>
     </html:div>
 
-    <html:div class="setting-description" id="zotero-rag-api-key-desc">
-      Needed to access the RAG server.
+    <html:div class="setting-description">
+      Your personal <html:a href="https://www.zotero.org/settings/keys"
+                            target="_blank">Zotero API key</html:a>
+      — used to authenticate you to the server and determine which libraries you can access.
+      Not required when the server runs on your own machine (localhost).
+    </html:div>
+
+    <html:div class="setting-description" id="zotero-rag-zotero-api-key-status"></html:div>
+
+    <html:div class="setting-row">
+      <html:button id="zotero-rag-run-wizard">Run Setup Wizard…</html:button>
     </html:div>
   </html:fieldset>
 
@@ -54,24 +62,13 @@
     <html:legend>Automatic indexing</html:legend>
 
     <html:div class="setting-description">
-      Submit a <html:strong>read-only</html:strong> Zotero API key
-      (create one at <html:a href="https://www.zotero.org/settings/keys"
-                            target="_blank">zotero.org/settings/keys</html:a>)
-      to have your library automatically indexed by the backend on a schedule.
-      Only read-only keys are accepted.
+      Have the backend automatically index your libraries on a schedule, using the Zotero API
+      key configured above.
     </html:div>
 
-    <html:div class="setting-row">
-      <html:label for="zotero-rag-autoindex-key">Read-only API key:</html:label>
-      <html:input id="zotero-rag-autoindex-key"
-                  type="password"
-                  placeholder="Zotero read-only API key"
-                  class="setting-input"/>
-    </html:div>
-
-    <html:div class="setting-row">
-      <html:button id="zotero-rag-autoindex-enable">Enable auto-indexing</html:button>
-      <html:button id="zotero-rag-autoindex-remove">Remove</html:button>
+    <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">
+      <html:input type="checkbox" id="zotero-rag-autoindex-toggle"/>
+      <html:label for="zotero-rag-autoindex-toggle" style="margin-left:6px;cursor:pointer;">Enable automatic indexing of my libraries</html:label>
     </html:div>
 
     <html:div class="setting-description" id="zotero-rag-autoindex-status"></html:div>

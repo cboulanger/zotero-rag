@@ -109,3 +109,11 @@ body {
   position: relative;
   top: 3px;
 }
+
+.status-ok {
+  color: #006600;
+}
+
+.status-error {
+  color: #cc0000;
+}
