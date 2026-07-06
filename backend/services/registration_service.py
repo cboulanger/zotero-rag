@@ -73,16 +73,6 @@ class RegistrationService:
             self._save(data)
         return existed
 
-    def is_registered(self, library_id: str, user_id: int | None) -> bool:
-        """Return True if user_id is in the registered users list for library_id."""
-        if user_id is None:
-            return False
-        data = self._load()
-        entry = data.get(library_id)
-        if entry is None:
-            return False
-        return any(u["user_id"] == user_id for u in entry.get("users", []))
-
     def get_all(self) -> dict:
         """Return the full registrations dict."""
         return self._load()
