@@ -134,6 +134,9 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._dialogWindow = null;
 
+		/** @type {Window|null} */
+		this._setupWizardWindow = null;
+
 		/** @type {string|null} */
 		this._notifierID = null;
 
@@ -1701,6 +1704,26 @@ class ZoteroRAGPlugin {
 			'zotero-rag-fix-unavailable',
 			'chrome,centerscreen,resizable=yes,width=720,height=560',
 			{ plugin: this, libraryID: zoteroLibraryID, backendLibraryId }
+		);
+	}
+
+	/**
+	 * Open the setup wizard (Server -> Zotero identity -> Service API keys).
+	 * Focuses the existing dialog instead of opening a second one if already open.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openSetupWizard(win) {
+		if (this._setupWizardWindow && !this._setupWizardWindow.closed) {
+			this._setupWizardWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._setupWizardWindow = win.openDialog(
+			'chrome://zotero-rag/content/setup-wizard.xhtml',
+			'zotero-rag-setup-wizard',
+			'chrome,centerscreen,resizable=yes,width=520,height=480',
+			{ plugin: this }
 		);
 	}
 
