@@ -451,6 +451,13 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			this.log(`Backend not available: ${errorMessage}`);
+			// @ts-ignore
+			const status = e && e.status;
+			if ((status === 401 || status === 403) && !this.isLoopbackBackend() && !this._wizardAutoLaunchedThisSession) {
+				this._wizardAutoLaunchedThisSession = true;
+				const win = Zotero.getMainWindow();
+				if (win) this.openSetupWizard(win);
+			}
 			return;
 		}
 
