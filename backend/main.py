@@ -4,7 +4,7 @@ FastAPI application entry point for Zotero RAG backend.
 
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import httpx
@@ -13,12 +13,14 @@ import logging
 from backend.__version__ import __version__
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
-from backend.dependencies import make_vector_store
+from backend.dependencies import make_vector_store, resolve_zotero_identity
+from backend.services.access_gate import assert_safe_to_start
 from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex
 from backend.api.document_upload import load_item_cache, save_item_cache
 
 # Get settings to access log configuration
 settings = get_settings()
+assert_safe_to_start(settings)
 
 # Configure logging with both console and file output
 # Use UTF-8 encoding to handle Unicode characters in document titles/metadata
@@ -137,34 +139,41 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
 
 
-# API key authentication middleware
-# Exempt health-check / version endpoints so the plugin can discover the backend
-# without needing credentials first.
+# Zotero-key identity middleware
+# Resolves and gates the caller's identity for every /api/* request — see
+# docs/history/plan-zotero-key-auth.md for the design. Exempt health-check /
+# version endpoints so the plugin can discover the backend without needing
+# credentials first, and /public/* which is intentionally unauthenticated.
 _AUTH_EXEMPT_PATHS = {"/", "/health", "/api/version"}
 
 
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
-    """Validate X-API-Key when api_key is configured.
+    """Resolve and gate the caller's Zotero identity for every /api/* request.
 
-    Accepts the key via:
-    - X-API-Key request header  (all endpoints)
-    - ?api_key= query parameter (SSE endpoints where EventSource cannot set headers)
+    Loopback deployments (api_host in {localhost, 127.0.0.1}) skip this
+    entirely (Part 4) — there is exactly one trusted local user. Everywhere
+    else the caller must present either a valid, gate-approved Zotero API
+    key (X-Zotero-API-Key) or, during the transitional migration window, the
+    legacy shared secret (X-API-Key header / ?api_key= query param — the
+    latter for SSE endpoints where EventSource cannot set headers). The
+    resolved identity (or None for loopback/legacy) is stashed on
+    request.state.zotero_identity so downstream route dependencies
+    (backend.dependencies.get_zotero_identity) don't re-validate.
 
-    OPTIONS requests (CORS preflight) and health/version endpoints are always
-    allowed so the browser can complete the preflight handshake and the plugin
-    can discover the backend without credentials.
+    OPTIONS requests (CORS preflight) are always allowed so the browser can
+    complete the preflight handshake.
     """
+    request.state.zotero_identity = None
     if (
-        settings.api_key
-        and request.method != "OPTIONS"
+        request.method != "OPTIONS"
+        and request.url.path.startswith("/api/")
         and request.url.path not in _AUTH_EXEMPT_PATHS
-        and not request.url.path.startswith("/public")
     ):
-        header_key = request.headers.get("X-API-Key")
-        query_key = request.query_params.get("api_key")
-        if header_key != settings.api_key and query_key != settings.api_key:
-            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+        try:
+            request.state.zotero_identity = await resolve_zotero_identity(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
 
 
