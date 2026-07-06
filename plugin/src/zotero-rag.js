@@ -534,6 +534,69 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Render service API key input fields into `container`, one row + description
+	 * per required key, each bound to `extensions.zotero-rag.serviceApiKey.<key_name>`.
+	 * Shared between the Preferences pane and the setup wizard so both stay in sync.
+	 * @param {Document} doc
+	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
+	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
+	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
+	 * @returns {void}
+	 */
+	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys) {
+		if (!container) return;
+
+		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
+
+		if (!requiredKeys || requiredKeys.length === 0) {
+			if (placeholder) placeholder.style.display = '';
+			return;
+		}
+		if (placeholder) placeholder.style.display = 'none';
+
+		for (const keyInfo of requiredKeys) {
+			const prefKey = `extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`;
+			const storedValue = Zotero.Prefs.get(prefKey, true) || '';
+
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'setting-row service-key-row';
+
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.textContent = `${keyInfo.key_name}:`;
+			label.setAttribute('for', `zotero-rag-key-${keyInfo.key_name}`);
+
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.type = 'password';
+			input.id = `zotero-rag-key-${keyInfo.key_name}`;
+			input.className = 'setting-input';
+			input.value = storedValue;
+			input.placeholder = 'Enter API key';
+			input.addEventListener('change', (e) => {
+				Zotero.Prefs.set(prefKey, /** @type {HTMLInputElement} */ (e.target).value, true);
+			});
+
+			row.appendChild(label);
+			row.appendChild(input);
+			container.appendChild(row);
+
+			if (keyInfo.description) {
+				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+				desc.className = 'setting-description service-key-desc';
+				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
+					desc.appendChild(doc.createTextNode(' '));
+					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');
+					link.setAttribute('href', keyInfo.docs_url);
+					link.setAttribute('target', '_blank');
+					link.textContent = 'Get key';
+					desc.appendChild(link);
+				}
+				container.appendChild(desc);
+			}
+		}
+	}
+
+	/**
 	 * Open the query dialog.
 	 * @param {Window} window - Parent window
 	 * @returns {Promise<void>}
