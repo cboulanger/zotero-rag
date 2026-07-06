@@ -94,6 +94,21 @@ class LibrariesAuthorizationTest(unittest.TestCase):
         r = self.client.delete("/api/libraries/u2/items/ITEM1/chunks")
         self.assertEqual(r.status_code, 403)
 
+    def test_get_library_status_outside_targets_is_403(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/libraries/u2/status")
+        self.assertEqual(r.status_code, 403)
+
+    def test_get_library_index_status_outside_targets_is_403(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/libraries/u2/index-status")
+        self.assertEqual(r.status_code, 403)
+
+    def test_reconcile_count_outside_targets_is_403(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.post("/api/libraries/u2/reconcile-count")
+        self.assertEqual(r.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

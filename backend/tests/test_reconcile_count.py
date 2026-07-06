@@ -38,7 +38,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.count_indexed_items.return_value = 195  # implausibly low
 
         with self.assertRaises(HTTPException) as ctx:
-            reconcile_library_count("2829873", vector_store=vs)
+            reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         self.assertEqual(ctx.exception.status_code, 409)
         # The counter must not have been overwritten.
@@ -52,7 +52,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.get_library_metadata.return_value = meta
         vs.count_indexed_items.return_value = 5900  # small, legitimate drop
 
-        result = reconcile_library_count("2829873", vector_store=vs)
+        result = reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         vs.update_library_metadata.assert_called_once()
         self.assertEqual(result.total_items_indexed, 5900)
@@ -64,7 +64,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.get_library_metadata.return_value = meta
         vs.count_indexed_items.return_value = 3
 
-        result = reconcile_library_count("2829873", vector_store=vs)
+        result = reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         vs.update_library_metadata.assert_called_once()
         self.assertEqual(result.total_items_indexed, 3)

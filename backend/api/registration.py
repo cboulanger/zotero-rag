@@ -47,16 +47,21 @@ async def register_library(
     """Associate a zotero.org user with a library on this backend.
 
     Returns ``exists: true`` if this library was already registered by any
-    user before this call.
+    user before this call. The registered user_id/username are taken from
+    the caller's validated Zotero identity when present, never trusted from
+    the request body — only the loopback/legacy no-identity path falls back
+    to the body-supplied values.
     """
     assert_can_access(identity, request.library_id)
     settings = get_settings()
     service = RegistrationService(settings.registrations_path)
+    user_id = identity.user_id if identity else request.user_id
+    username = identity.username if identity else request.username
     existed = service.register(
         library_id=request.library_id,
         library_name=request.library_name,
-        user_id=request.user_id,
-        username=request.username,
+        user_id=user_id,
+        username=username,
     )
     return RegisterResponse(exists=existed)
 

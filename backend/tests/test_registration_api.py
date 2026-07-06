@@ -65,6 +65,26 @@ class RegistrationAuthorizationTest(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 200)
 
+    def test_register_ignores_body_user_id_uses_identity(self):
+        # setUp already registered user_id=1/"u" for library "u1"; RegistrationService.register()
+        # dedups new entries by user_id, so this identity must use a user_id not already present
+        # on "u1" for the new-entry path (and thus the body-vs-identity divergence) to be exercised.
+        self._set_identity(ZoteroIdentity(user_id=7, username="real_owner", targets=["users/1"]))
+        r = self.client.post(
+            "/api/register",
+            json={"library_id": "u1", "library_name": "Mine", "user_id": 999999, "username": "spoofed_victim"},
+        )
+        self.assertEqual(r.status_code, 200)
+        # Fetch back via the (already-fixed, identity-filtered) GET /api/registrations
+        r2 = self.client.get("/api/registrations")
+        entry = r2.json()["u1"]
+        usernames = {u["username"] for u in entry["users"]}
+        user_ids = {u["user_id"] for u in entry["users"]}
+        self.assertIn("real_owner", usernames)
+        self.assertNotIn("spoofed_victim", usernames)
+        self.assertIn(7, user_ids)
+        self.assertNotIn(999999, user_ids)
+
 
 if __name__ == "__main__":
     unittest.main()

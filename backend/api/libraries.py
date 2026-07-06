@@ -110,12 +110,17 @@ def list_libraries(
 
 
 @router.get("/libraries/{library_id}/status", response_model=LibraryDetailResponse)
-def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def get_library_status(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Get combined status for a single library: index metadata and registrations.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     settings = get_settings()
     reg_service = RegistrationService(settings.registrations_path)
@@ -131,15 +136,21 @@ def get_library_status(library_id: str, vector_store: VectorStore = Depends(get_
 
 
 @router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
-def get_library_index_status(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def get_library_index_status(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Get detailed indexing metadata for a library (used by the plugin to track sync state).
 
     Raises:
-        HTTPException: 404 if library has never been indexed, 503 if store unavailable.
+        HTTPException: 403 if the caller's Zotero key doesn't grant access to
+        this library, 404 if library has never been indexed, 503 if store unavailable.
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     try:
         metadata = vector_store.get_library_metadata(library_id)
@@ -184,7 +195,11 @@ def clear_library_index(
 
 
 @router.post("/libraries/{library_id}/reconcile-count", response_model=LibraryIndexMetadata)
-def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends(get_vector_store)):
+def reconcile_library_count(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
     """
     Recompute total_items_indexed from actual vector store data and persist it.
 
@@ -193,6 +208,7 @@ def reconcile_library_count(library_id: str, vector_store: VectorStore = Depends
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, library_id)
 
     meta = vector_store.get_library_metadata(library_id)
     if meta is None:
