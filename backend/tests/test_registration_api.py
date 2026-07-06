@@ -23,6 +23,7 @@ class RegistrationAuthorizationTest(unittest.TestCase):
         reset_identity_cache()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
+        s.registrations_path = Path(self.tmp.name) / "system" / "registrations.json"
         self.client = TestClient(app)
         RegistrationService(s.registrations_path).register("u1", "Mine", 1, "u")
         RegistrationService(s.registrations_path).register("u2", "Someone Else's", 2, "other")
