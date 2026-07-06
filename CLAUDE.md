@@ -119,6 +119,10 @@ The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `ind
 
 The cron job no longer uses a static slugs file or a global `ZOTERO_API_KEY`. Instead, indexing targets come from the encrypted auto-index key store at `<data_path>/system/autoindex_keys.json`. Keys are added by users via the plugin (Preferences → Automatic indexing) or on the server with:
 
+As of the zotero-key-auth migration, the same personal Zotero API key a user enters in the
+plugin's setup wizard (or Preferences) also authenticates their normal plugin use — auto-indexing
+is just an on/off toggle reusing that key, not a separate credential.
+
 ```bash
 uv run python bin/autoindex_add_key.py <read-only-zotero-api-key>
 ```
