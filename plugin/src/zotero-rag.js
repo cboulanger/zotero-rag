@@ -537,7 +537,13 @@ class ZoteroRAGPlugin {
 	 * Render service API key input fields into `container`, one row + description
 	 * per required key, each bound to `extensions.zotero-rag.serviceApiKey.<key_name>`.
 	 * Shared between the Preferences pane and the setup wizard so both stay in sync.
-	 * @param {Document} doc
+	 *
+	 * Note: generated "Get key" links use `target="_blank"`, which is a no-op in a
+	 * privileged Zotero document. The caller must provide its own delegated
+	 * `a[href]` → `Zotero.launchURL` click handler over (or containing) `container`
+	 * so these links actually open in the system browser — see the click handler
+	 * on `#zotero-rag-prefs-container` in `preferences.js` for the pattern.
+	 * @param {Document} doc - Document to create elements in (the Preferences pane document, or a dialog document)
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
 	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
