@@ -9,13 +9,47 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const doc = _window.document;
 
 	const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || '';
-	const apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+	const zoteroApiKey = Zotero.Prefs.get('extensions.zotero-rag.zoteroApiKey', true) || '';
 	const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
 
 	// Show stored value; leave blank so the placeholder shows when nothing is saved
 	doc.getElementById('zotero-rag-backend-url').value = backendURL;
-	doc.getElementById('zotero-rag-api-key').value = apiKey;
+	doc.getElementById('zotero-rag-zotero-api-key').value = zoteroApiKey;
 	doc.getElementById('zotero-rag-max-queries').value = maxQueries;
+
+	const zoteroApiKeyStatus = doc.getElementById('zotero-rag-zotero-api-key-status');
+
+	/**
+	 * Validate the currently-configured Zotero API key against the backend
+	 * and show the result in the status line below the field. Also refreshes
+	 * the auto-indexing checkbox, since its availability depends on this key.
+	 * @returns {Promise<void>}
+	 */
+	const refreshZoteroIdentityStatus = async () => {
+		if (!zoteroApiKeyStatus) return;
+		if (this.isLoopbackBackend()) {
+			zoteroApiKeyStatus.textContent = 'Not required for a local server.';
+			zoteroApiKeyStatus.className = 'setting-description';
+			await refreshAutoindexToggle();
+			return;
+		}
+		if (!this.zoteroApiKey) {
+			zoteroApiKeyStatus.textContent = '';
+			zoteroApiKeyStatus.className = 'setting-description';
+			await refreshAutoindexToggle();
+			return;
+		}
+		try {
+			const result = await this.checkZoteroIdentity(this.zoteroApiKey);
+			const count = Array.isArray(result.targets) ? result.targets.length : 0;
+			zoteroApiKeyStatus.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+			zoteroApiKeyStatus.className = 'setting-description status-ok';
+		} catch (e) {
+			zoteroApiKeyStatus.textContent = `✗ ${e instanceof Error ? e.message : String(e)}`;
+			zoteroApiKeyStatus.className = 'setting-description status-error';
+		}
+		await refreshAutoindexToggle();
+	};
 
 	doc.getElementById('zotero-rag-backend-url').addEventListener('change', (e) => {
 		const value = /** @type {HTMLInputElement} */ (e.target).value.trim();
@@ -32,12 +66,18 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				Zotero.debug('Zotero RAG: Invalid URL: ' + value);
 			}
 		}
+		refreshZoteroIdentityStatus();
 	});
 
-	doc.getElementById('zotero-rag-api-key').addEventListener('change', (e) => {
+	doc.getElementById('zotero-rag-zotero-api-key').addEventListener('change', (e) => {
 		const key = /** @type {HTMLInputElement} */ (e.target).value;
-		Zotero.Prefs.set('extensions.zotero-rag.apiKey', key, true);
-		this.apiKey = key;
+		Zotero.Prefs.set('extensions.zotero-rag.zoteroApiKey', key, true);
+		this.zoteroApiKey = key;
+		refreshZoteroIdentityStatus();
+	});
+
+	doc.getElementById('zotero-rag-run-wizard').addEventListener('click', () => {
+		this.openSetupWizard(_window);
 	});
 
 	doc.getElementById('zotero-rag-max-queries').addEventListener('change', (e) => {
@@ -196,15 +236,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
-	// Automatic indexing section: submit/remove a read-only Zotero API key
-	// so the backend can auto-index the user's library on a schedule.
-	const autoindexKeyInput = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-autoindex-key'));
+	// Automatic indexing section: a single on/off toggle reusing the same
+	// Zotero API key already configured above (no separate key entry).
+	const autoindexToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-autoindex-toggle'));
 	const autoindexStatus = doc.getElementById('zotero-rag-autoindex-status');
-	const autoindexEnableBtn = doc.getElementById('zotero-rag-autoindex-enable');
-	const autoindexRemoveBtn = doc.getElementById('zotero-rag-autoindex-remove');
 
 	/**
-	 * Show a status message in the auto-indexing section.
 	 * @param {string} message
 	 * @returns {void}
 	 */
@@ -212,89 +249,75 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		if (autoindexStatus) autoindexStatus.textContent = message;
 	};
 
-	if (autoindexEnableBtn) {
-		autoindexEnableBtn.addEventListener('click', async () => {
-			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
-			if (!apiKey) {
-				setAutoindexStatus('Please enter a read-only Zotero API key.');
+	/**
+	 * Reflect current auto-indexing state in the checkbox: checked if a key
+	 * matching the caller's identity is already registered; disabled if no
+	 * Zotero API key is configured yet (nothing to submit).
+	 * @returns {Promise<void>}
+	 */
+	const refreshAutoindexToggle = async () => {
+		if (!autoindexToggle) return;
+		if (!this.zoteroApiKey && !this.isLoopbackBackend()) {
+			autoindexToggle.checked = false;
+			autoindexToggle.disabled = true;
+			setAutoindexStatus('Configure your Zotero API key above first.');
+			return;
+		}
+		try {
+			const response = await fetch(`${this.backendURL}/api/autoindex/keys`, {
+				headers: this.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				autoindexToggle.disabled = true;
+				const err = await response.json().catch(() => ({}));
+				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.');
 				return;
 			}
+			/** @type {{keys: Array<unknown>}} */
+			const data = await response.json();
+			autoindexToggle.disabled = false;
+			autoindexToggle.checked = Array.isArray(data.keys) && data.keys.length > 0;
+			setAutoindexStatus(autoindexToggle.checked ? 'Automatic indexing is enabled.' : '');
+		} catch (e) {
+			autoindexToggle.disabled = true;
+			setAutoindexStatus(`Error: ${e}`);
+		}
+	};
+
+	if (autoindexToggle) {
+		autoindexToggle.addEventListener('change', async () => {
+			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
-			setAutoindexStatus('Enabling auto-indexing...');
+			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
 				const response = await fetch(requestURL, {
-					method: 'POST',
+					method: enabling ? 'POST' : 'DELETE',
 					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ api_key: apiKey })
+					body: JSON.stringify({ api_key: this.zoteroApiKey }),
 				});
 				if (!response.ok) {
-					// A 301 redirect from HTTP to HTTPS silently converts POST→GET, causing 405.
-					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
-						setAutoindexStatus(
-							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
-							'Please update the Backend URL to start with "https://".'
-						);
-						return;
-					}
 					const err = await response.json().catch(() => ({}));
 					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					autoindexToggle.checked = !enabling;
 					return;
 				}
-				/** @type {{user_id: string, username: string, targets: string[]}} */
-				const data = await response.json();
-				const count = Array.isArray(data.targets) ? data.targets.length : 0;
-				setAutoindexStatus(
-					count === 1
-						? 'Auto-indexing enabled for 1 library.'
-						: `Auto-indexing enabled for ${count} libraries.`
-				);
-				if (autoindexKeyInput) autoindexKeyInput.value = '';
-				// Refresh the visibility list so the newly auto-indexed libraries get the clock icon
+				if (enabling) {
+					/** @type {{targets: string[]}} */
+					const data = await response.json();
+					const count = Array.isArray(data.targets) ? data.targets.length : 0;
+					setAutoindexStatus(count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`);
+				} else {
+					setAutoindexStatus('Auto-indexing disabled.');
+				}
 				this.invalidateAutoIndexedLibraryIds();
 				populateLibraryVisibilityList();
 			} catch (e) {
 				setAutoindexStatus(`Error: ${e}`);
+				autoindexToggle.checked = !enabling;
 			}
 		});
 	}
 
-	if (autoindexRemoveBtn) {
-		autoindexRemoveBtn.addEventListener('click', async () => {
-			const apiKey = autoindexKeyInput ? autoindexKeyInput.value.trim() : '';
-			if (!apiKey) {
-				setAutoindexStatus('Please enter the read-only Zotero API key to remove.');
-				return;
-			}
-			const requestURL = `${this.backendURL}/api/autoindex/keys`;
-			setAutoindexStatus('Removing auto-indexing key...');
-			try {
-				const response = await fetch(requestURL, {
-					method: 'DELETE',
-					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ api_key: apiKey })
-				});
-				if (!response.ok) {
-					if (requestURL.startsWith('http://') && response.url && response.url.startsWith('https://')) {
-						setAutoindexStatus(
-							'Backend URL is configured as HTTP but the server requires HTTPS. ' +
-							'Please update the Backend URL to start with "https://".'
-						);
-						return;
-					}
-					const err = await response.json().catch(() => ({}));
-					setAutoindexStatus(`Error: ${err.detail || response.status}`);
-					return;
-				}
-				/** @type {{removed: boolean}} */
-				const data = await response.json();
-				setAutoindexStatus(data.removed ? 'Auto-indexing key removed.' : 'No matching key found.');
-				if (autoindexKeyInput) autoindexKeyInput.value = '';
-				// Refresh the visibility list so removed libraries lose the clock icon
-				this.invalidateAutoIndexedLibraryIds();
-				populateLibraryVisibilityList();
-			} catch (e) {
-				setAutoindexStatus(`Error: ${e}`);
-			}
-		});
-	}
+	// Initial population, now that both closures above exist
+	refreshZoteroIdentityStatus();
 };
