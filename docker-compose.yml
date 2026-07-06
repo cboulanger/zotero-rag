@@ -65,8 +65,6 @@ services:
       # Keep at 1: multiple workers each have their own in-memory task store and
       # break async task polling (issue #30). asyncio handles I/O concurrency fine.
       UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
-      # set a secret api key for a real deployment!
-      API_KEY: ${API_KEY:-}
       DATA_PATH: /data
       # Path to public libraries config inside the container (e.g. /data/public-libraries.json)
       PUBLIC_LIBRARIES_CONFIG: ${PUBLIC_LIBRARIES_CONFIG:-}

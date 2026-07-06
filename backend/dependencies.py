@@ -25,12 +25,11 @@ logger = logging.getLogger(__name__)
 async def resolve_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
     """Resolve and gate the caller's Zotero identity for the current request.
 
-    Returns None for the loopback no-auth path (Part 4) and for the
-    transitional legacy-shared-key path (Part 5) — both skip per-library
-    enforcement in access_gate.assert_can_access(). Raises HTTPException:
-    401 for a missing/invalid/revoked key, 403 if the Part 2 gate rejects
-    an otherwise-valid identity, 503 if zotero.org is unreachable with no
-    cached validation to fall back on.
+    Returns None for the loopback no-auth path (Part 4) — single trusted local
+    user, no per-library enforcement needed (see access_gate.assert_can_access()).
+    Raises HTTPException: 401 for a missing/invalid/revoked key, 403 if the
+    Part 2 gate rejects an otherwise-valid identity, 503 if zotero.org is
+    unreachable with no cached validation to fall back on.
 
     Called once per request by the auth middleware in backend/main.py, which
     stashes the result on request.state.zotero_identity for every /api/*
@@ -43,10 +42,6 @@ async def resolve_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
 
     zotero_key = request.headers.get("X-Zotero-API-Key")
     if not zotero_key:
-        legacy_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
-        if settings.api_key and legacy_key == settings.api_key:
-            logger.warning("Request authenticated via legacy shared API_KEY (transitional path)")
-            return None
         raise HTTPException(status_code=401, detail="Missing X-Zotero-API-Key header.")
 
     validation = await get_identity_cache().resolve(zotero_key)

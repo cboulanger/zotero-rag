@@ -48,6 +48,13 @@ class ResolveZoteroIdentityTest(unittest.TestCase):
         r = self.client.get("/probe")
         self.assertEqual(r.status_code, 401)
 
+    def test_legacy_shared_key_no_longer_accepted(self):
+        s = get_settings()
+        s.api_host = "rag.example.com"
+        s.authorized_group_id = 999
+        r = self.client.get("/probe", headers={"X-API-Key": "SHARED"})
+        self.assertEqual(r.status_code, 401)
+
     def test_remote_valid_gated_key_returns_identity(self):
         s = get_settings()
         s.api_host = "rag.example.com"
@@ -84,31 +91,6 @@ class ResolveZoteroIdentityTest(unittest.TestCase):
         with patch("backend.services.zotero_identity.validate_key", new=AsyncMock(return_value=validation)):
             r = self.client.get("/probe", headers={"X-Zotero-API-Key": "KEY"})
         self.assertEqual(r.status_code, 503)
-
-    def test_legacy_shared_key_accepted_as_transitional_fallback(self):
-        s = get_settings()
-        s.api_host = "rag.example.com"
-        s.authorized_group_id = 999
-        s.api_key = "SHARED"
-        r = self.client.get("/probe", headers={"X-API-Key": "SHARED"})
-        self.assertEqual(r.status_code, 200)
-        self.assertIsNone(r.json()["identity"])
-
-    def test_legacy_key_via_query_param_accepted(self):
-        s = get_settings()
-        s.api_host = "rag.example.com"
-        s.authorized_group_id = 999
-        s.api_key = "SHARED"
-        r = self.client.get("/probe?api_key=SHARED")
-        self.assertEqual(r.status_code, 200)
-
-    def test_wrong_legacy_key_rejected(self):
-        s = get_settings()
-        s.api_host = "rag.example.com"
-        s.authorized_group_id = 999
-        s.api_key = "SHARED"
-        r = self.client.get("/probe", headers={"X-API-Key": "WRONG"})
-        self.assertEqual(r.status_code, 401)
 
 
 if __name__ == "__main__":

@@ -34,12 +34,6 @@ class Settings(BaseSettings):
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
     api_port: int = Field(default=8119, description="API server port")
-    api_key: Optional[str] = Field(
-        default=None,
-        description="API key for remote access (X-API-Key header). "
-                    "When set, all requests must include this key. "
-                    "Leave unset for local-only deployments."
-    )
     public_libraries_config: Optional[str] = Field(
         default=None,
         description="Path to JSON file listing publicly exposed library slugs "

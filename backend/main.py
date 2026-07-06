@@ -153,12 +153,9 @@ async def api_key_middleware(request: Request, call_next):
 
     Loopback deployments (api_host in {localhost, 127.0.0.1}) skip this
     entirely (Part 4) — there is exactly one trusted local user. Everywhere
-    else the caller must present either a valid, gate-approved Zotero API
-    key (X-Zotero-API-Key) or, during the transitional migration window, the
-    legacy shared secret (X-API-Key header / ?api_key= query param — the
-    latter for SSE endpoints where EventSource cannot set headers). The
-    resolved identity (or None for loopback/legacy) is stashed on
-    request.state.zotero_identity so downstream route dependencies
+    else the caller must present a valid, gate-approved Zotero API key
+    (X-Zotero-API-Key). The resolved identity (or None for loopback) is
+    stashed on request.state.zotero_identity so downstream route dependencies
     (backend.dependencies.get_zotero_identity) don't re-validate.
 
     OPTIONS requests (CORS preflight) are always allowed so the browser can

@@ -61,14 +61,6 @@ class AuthMiddlewareTest(unittest.TestCase):
             r = self.client.get("/api/libraries", headers={"X-Zotero-API-Key": "KEY"})
         self.assertEqual(r.status_code, 200)
 
-    def test_remote_with_legacy_shared_key_still_works(self):
-        s = get_settings()
-        s.api_host = "rag.example.com"
-        s.authorized_group_id = 999
-        s.api_key = "SHARED"
-        r = self.client.get("/api/libraries", headers={"X-API-Key": "SHARED"})
-        self.assertEqual(r.status_code, 200)
-
     def test_health_and_version_exempt_even_on_remote_host(self):
         s = get_settings()
         s.api_host = "rag.example.com"
