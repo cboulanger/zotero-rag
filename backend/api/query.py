@@ -11,11 +11,13 @@ from typing import List, Optional
 from markdown_it import MarkdownIt
 
 from backend.models.trace import QueryTrace
+from backend.services.access_gate import assert_can_access
 from backend.services.query_orchestrator import QueryOrchestrator
 from backend.services.trace_collector import TraceCollector
+from backend.services.zotero_identity import ZoteroIdentity
 from backend.db.vector_store import VectorStore
 from backend.config.settings import get_settings
-from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service, make_llm_service
+from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ class QueryResponse(BaseModel):
 async def query_libraries(
     query: QueryRequest,
     http_request: Request,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -81,6 +84,9 @@ async def query_libraries(
             status_code=400,
             detail="At least one library ID must be provided"
         )
+
+    for library_id in query.library_ids:
+        assert_can_access(identity, library_id)
 
     if not query.question.strip():
         raise HTTPException(
