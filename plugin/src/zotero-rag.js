@@ -104,7 +104,10 @@ class ZoteroRAGPlugin {
 		this.backendURL = null;
 
 		/** @type {string} */
-		this.apiKey = '';
+		this.zoteroApiKey = '';
+
+		/** @type {boolean} */
+		this._wizardAutoLaunchedThisSession = false;
 
 		/** @type {Set<string>} */
 		this.activeQueries = new Set();
@@ -168,8 +171,8 @@ class ZoteroRAGPlugin {
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = (Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119').replace(/\/+$/, '');
 
-		// Load optional API key (required when backend is on a remote host)
-		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+		// Load the personal Zotero API key (required when backend is on a remote host)
+		this.zoteroApiKey = Zotero.Prefs.get('extensions.zotero-rag.zoteroApiKey', true) || '';
 
 		// Load cached required API keys list (refreshed on each successful backend connection)
 		try {
@@ -199,15 +202,15 @@ class ZoteroRAGPlugin {
 
 	/**
 	 * Return HTTP headers to include in all backend requests.
-	 * Adds X-API-Key when an API key is configured.
+	 * Adds X-Zotero-API-Key when a personal Zotero API key is configured.
 	 * @param {Record<string, string>} [extra] - Additional headers to merge
 	 * @returns {Record<string, string>}
 	 */
 	getAuthHeaders(extra = {}) {
 		/** @type {Record<string, string>} */
 		const headers = { ...extra };
-		if (this.apiKey) {
-			headers['X-API-Key'] = this.apiKey;
+		if (this.zoteroApiKey) {
+			headers['X-Zotero-API-Key'] = this.zoteroApiKey;
 		}
 		// Include any service API keys the user has configured
 		for (const keyInfo of this.requiredApiKeys) {
@@ -218,15 +221,39 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Append the API key as a query parameter to a URL.
-	 * Used for SSE (EventSource) endpoints that cannot set request headers.
-	 * @param {string} url - Base URL
-	 * @returns {string} URL with api_key appended when configured
+	 * True if the configured backend URL points at a loopback address, where
+	 * the backend skips Zotero-key auth entirely (single trusted local user).
+	 * @returns {boolean}
 	 */
-	addApiKeyParam(url) {
-		if (!this.apiKey) return url;
-		const sep = url.includes('?') ? '&' : '?';
-		return `${url}${sep}api_key=${encodeURIComponent(this.apiKey)}`;
+	isLoopbackBackend() {
+		try {
+			const host = new URL(this.backendURL).hostname;
+			return host === 'localhost' || host === '127.0.0.1';
+		} catch (_) {
+			return false;
+		}
+	}
+
+	/**
+	 * Validate a Zotero API key against the backend and return the caller's
+	 * identity. Does not read or write any pref — callers pass the candidate
+	 * key explicitly so it can be checked before being saved.
+	 * @param {string} candidateKey
+	 * @returns {Promise<{authorized: true, loopback: boolean, user_id?: number, username?: string, targets?: string[]}>}
+	 * @throws {Error} with a `status` property set to the HTTP status code, and
+	 *   a message taken from the response's `detail` field, on 401/403/503.
+	 */
+	async checkZoteroIdentity(candidateKey) {
+		const response = await fetch(`${this.backendURL}/api/auth/whoami`, {
+			headers: candidateKey ? { 'X-Zotero-API-Key': candidateKey } : {},
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			const err = /** @type {Error & {status?: number}} */ (new Error(body.detail || `HTTP ${response.status}`));
+			err.status = response.status;
+			throw err;
+		}
+		return response.json();
 	}
 
 	/**
@@ -435,32 +462,39 @@ class ZoteroRAGPlugin {
 	/**
 	 * Check backend version for compatibility.
 	 * @returns {Promise<string>} Backend version string
-	 * @throws {Error} If backend is not reachable or returns error
+	 * @throws {Error & {status?: number}} If backend is not reachable or returns error.
+	 *   `status` is set to the HTTP status code when the server responded (e.g. 401/403),
+	 *   and left undefined for network-level failures (server unreachable).
 	 */
 	async checkBackendVersion() {
 		if (!this.backendURL) {
 			throw new Error('Backend URL not configured');
 		}
 
+		let response;
 		try {
-			const response = await fetch(`${this.backendURL}/api/version`, {
+			response = await fetch(`${this.backendURL}/api/version`, {
 				headers: this.getAuthHeaders()
 			});
-			if (!response.ok) {
-				const body = await response.json().catch(() => ({}));
-				throw new Error(`GET /api/version: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`);
-			}
-			const data = /** @type {BackendVersion} */ (await response.json());
-			this.log(`Backend version: ${data.api_version}`);
-
-			// TODO: Add version compatibility checking
-			// Refresh the list of required API keys from the server
-			await this.fetchRequiredApiKeys();
-			return data.api_version;
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to check backend version: ${errorMessage}`);
 		}
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			const err = /** @type {Error & {status?: number}} */ (
+				new Error(`GET /api/version: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`)
+			);
+			err.status = response.status;
+			throw err;
+		}
+		const data = /** @type {BackendVersion} */ (await response.json());
+		this.log(`Backend version: ${data.api_version}`);
+
+		// TODO: Add version compatibility checking
+		// Refresh the list of required API keys from the server
+		await this.fetchRequiredApiKeys();
+		return data.api_version;
 	}
 
 	/**
@@ -488,10 +522,7 @@ class ZoteroRAGPlugin {
 	async fetchRequiredApiKeys() {
 		try {
 			const resp = await fetch(`${this.backendURL}/api/required-keys`, {
-				headers: {
-					'Content-Type': 'application/json',
-					...(this.apiKey ? { 'X-API-Key': this.apiKey } : {}),
-				},
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 			});
 			if (!resp.ok) return;
 			const data = await resp.json();
