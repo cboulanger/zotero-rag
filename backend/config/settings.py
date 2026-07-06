@@ -7,9 +7,10 @@ hardware presets and storage paths.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import NoDecode
 
 from backend.__version__ import __version__
 from .presets import HardwarePreset, get_preset
@@ -33,12 +34,6 @@ class Settings(BaseSettings):
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
     api_port: int = Field(default=8119, description="API server port")
-    api_key: Optional[str] = Field(
-        default=None,
-        description="API key for remote access (X-API-Key header). "
-                    "When set, all requests must include this key. "
-                    "Leave unset for local-only deployments."
-    )
     public_libraries_config: Optional[str] = Field(
         default=None,
         description="Path to JSON file listing publicly exposed library slugs "
@@ -166,11 +161,32 @@ class Settings(BaseSettings):
                     "Create at https://www.zotero.org/settings/keys"
     )
 
-    require_registration: bool = Field(
-        default=True,
-        description="Require users to register before indexing. "
-                    "Automatically skipped when api_host is localhost or 127.0.0.1."
+    authorized_group_id: Optional[int] = Field(
+        default=None,
+        description="Zotero group ID that gates access to this instance in remote mode. "
+                    "A caller's validated Zotero key must grant read access to "
+                    "groups/<id> (i.e. the caller is a member of this group) to be "
+                    "authorized. Combines with AUTHORIZED_USER_IDS via OR. "
+                    "Ignored on loopback deployments (api_host=localhost/127.0.0.1)."
     )
+    authorized_user_ids: Annotated[list[int], NoDecode] = Field(
+        default=[],
+        description="Explicit allowlist of Zotero user IDs authorized to use this "
+                    "instance in remote mode, in addition to AUTHORIZED_GROUP_ID "
+                    "membership (OR semantics). Comma-separated list of integers "
+                    "in the environment. At least one of AUTHORIZED_GROUP_ID / "
+                    "AUTHORIZED_USER_IDS must be set for the server to start in "
+                    "remote mode — see backend.services.access_gate.assert_safe_to_start."
+    )
+
+    @field_validator("authorized_user_ids", mode="before")
+    @classmethod
+    def parse_authorized_user_ids(cls, v):
+        if isinstance(v, list):
+            return [int(x) for x in v]
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        return v
 
     testing: bool = Field(
         default=False,

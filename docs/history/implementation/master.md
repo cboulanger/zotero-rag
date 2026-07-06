@@ -693,3 +693,20 @@ npm run plugin:build
 - Source: `plugin/src/`
 - Build output: `plugin/build/` (temporary)
 - XPI archive: `plugin/dist/zotero-rag-{version}.xpi`
+
+## Zotero-Key Authentication Migration (2026-07)
+
+Replaced the single shared `X-API-Key` secret with per-user Zotero.org authentication, closing an
+IDOR where any user with the shared key could read/delete any other user's library.
+
+- **Backend (Parts 1–2):** identity-derived authorization — every request's Zotero API key
+  resolves to `(user_id, username, targets)` via `api.zotero.org`, cached with a TTL; every
+  library-scoped endpoint checks `library_id ∈ targets`. A Part 2 access gate (group membership
+  and/or an explicit user-id allowlist) controls who may use the instance at all. See
+  `docs/history/plan-zotero-key-auth.md`.
+- **Plugin + cutover (Part 3 + Part 5):** the plugin now sends `X-Zotero-API-Key` instead of the
+  shared secret; a 3-step setup wizard (Server → Zotero identity → Service API keys) obtains and
+  validates the key via the new `GET /api/auth/whoami`; auto-indexing collapsed to a single on/off
+  toggle reusing that same key. The backend's transitional shared-secret fallback was removed in
+  the same change (no staged migration window — single-operator deployment). See
+  `docs/superpowers/specs/2026-07-06-zotero-key-auth-plugin-wizard-design.md`.

@@ -19,7 +19,6 @@ class AutoIndexApiTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         reset_settings()
         s = get_settings()
-        s.api_key = None  # disable auth middleware for the test
         s.autoindex_secret = Fernet.generate_key().decode()
         s.autoindex_keys_path = Path(self.tmp.name) / "autoindex_keys.json"
         s.data_path = Path(self.tmp.name)

@@ -1,0 +1,105 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+  <title>Zotero RAG Setup Wizard</title>
+  <meta charset="utf-8"/>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      try {
+        Services.scriptloader.loadSubScript("chrome://zotero/content/include.js", window);
+      } catch (e) {
+        console.error("Failed to load include.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript("chrome://zotero-rag/content/setup-wizard.js", window);
+      } catch (e) {
+        console.error("Failed to load setup-wizard.js:", e);
+      }
+    });
+  </script>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
+    .wizard-container { display: flex; flex-direction: column; padding: 16px; box-sizing: border-box; }
+    .wizard-step { display: none; }
+    .wizard-step.active { display: block; }
+    .wizard-step p { color: #444; line-height: 1.5; }
+    .wizard-row { display: flex; align-items: center; margin: 10px 0; gap: 8px; }
+    .wizard-row label { min-width: 140px; font-weight: 500; }
+    .wizard-input { flex: 1; padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }
+    .wizard-status { font-size: 12px; margin: 6px 0; min-height: 15px; }
+    .status-ok { color: #006600; }
+    .status-error { color: #cc0000; }
+    .wizard-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; border-top: 1px solid #ddd; padding-top: 12px; }
+    .wizard-button { padding: 6px 16px; min-height: 30px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; }
+    .wizard-button:hover { background: #e5e5e5; }
+    .wizard-button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .wizard-button.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
+    .wizard-button.primary:hover { background: #0052a3; }
+    .wizard-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background: #0066cc; }
+    #wizard-service-keys-container .setting-row { display: flex; align-items: center; margin: 8px 0; gap: 8px; }
+    #wizard-service-keys-container .setting-row label { min-width: 140px; font-weight: 500; }
+    #wizard-service-keys-container .setting-input { flex: 1; padding: 6px 10px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; font-family: inherit; }
+    #wizard-service-keys-container .setting-description { font-size: 12px; color: #666; margin: 4px 0 8px; }
+  </style>
+</head>
+
+<body>
+  <div class="wizard-container">
+
+    <!-- Step 1: Server -->
+    <div class="wizard-step active" id="wizard-step-server">
+      <h3>Server</h3>
+      <p>Enter the address of your Zotero RAG backend server.</p>
+      <div class="wizard-row">
+        <label for="wizard-server-url">Server URL:</label>
+        <input id="wizard-server-url" type="text" class="wizard-input" placeholder="http://localhost:8119"/>
+      </div>
+      <div class="wizard-status" id="wizard-server-status"></div>
+    </div>
+
+    <!-- Step 2: Zotero identity -->
+    <div class="wizard-step" id="wizard-step-identity">
+      <h3>Zotero Account</h3>
+      <p id="wizard-identity-intro">
+        This server requires your personal Zotero API key to authenticate you and determine
+        which libraries you can access.
+      </p>
+      <div class="wizard-row">
+        <button type="button" class="wizard-button" id="wizard-create-key-btn">Create key on zotero.org</button>
+      </div>
+      <div class="wizard-row">
+        <label for="wizard-zotero-key">Zotero API Key:</label>
+        <input id="wizard-zotero-key" type="password" class="wizard-input" placeholder="Paste your key here"/>
+        <button type="button" class="wizard-button" id="wizard-validate-btn">Validate</button>
+      </div>
+      <div class="wizard-status" id="wizard-identity-status"></div>
+      <div class="wizard-row" id="wizard-autoindex-row" style="display:none;">
+        <input type="checkbox" id="wizard-autoindex-checkbox"/>
+        <label for="wizard-autoindex-checkbox" style="min-width:auto;cursor:pointer;">Also enable automatic indexing of these libraries</label>
+      </div>
+    </div>
+
+    <!-- Step 3: Service API Keys -->
+    <div class="wizard-step" id="wizard-step-keys">
+      <h3>Service API Keys</h3>
+      <p id="wizard-keys-intro">These API keys are required by the backend's current configuration.</p>
+      <div id="wizard-service-keys-container">
+        <div class="setting-description" id="wizard-service-keys-placeholder">
+          No API keys required for this backend configuration.
+        </div>
+      </div>
+    </div>
+
+    <div class="wizard-buttons">
+      <button type="button" class="wizard-button" id="wizard-cancel-btn">Cancel</button>
+      <button type="button" class="wizard-button" id="wizard-back-btn" disabled="true">Back</button>
+      <button type="button" class="wizard-button primary" id="wizard-next-btn">Next</button>
+    </div>
+
+  </div>
+</body>
+</html>

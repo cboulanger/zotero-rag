@@ -30,15 +30,16 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from pydantic import BaseModel
 
 from backend.db.vector_store import VectorStore, _extract_lastnames
-from backend.dependencies import get_client_api_keys, get_vector_store, make_embedding_service
+from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service
 from backend.models.document import (
     CURRENT_SCHEMA_VERSION,
     DocumentMetadata,
 )
 from backend.models.library import LibraryIndexMetadata
+from backend.services.access_gate import assert_can_access
 from backend.services.document_processor import DocumentProcessor
-from backend.services.registration_service import RegistrationService
-from backend.config.settings import Settings, get_settings
+from backend.services.zotero_identity import ZoteroIdentity
+from backend.config.settings import get_settings
 from backend.utils import format_file_size
 
 router = APIRouter()
@@ -236,32 +237,11 @@ class AbstractIndexRequest(BaseModel):
     zotero_modified: str = ""
     abstract_text: str
     library_name: str = ""
-    user_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _check_registration(library_id: str, user_id: Optional[int], settings: Settings) -> None:
-    """Raise 403 if registration is required and the user is not registered.
-
-    Skipped when api_host is localhost/127.0.0.1 or REQUIRE_REGISTRATION=false.
-    """
-    if not settings.require_registration:
-        return
-    if settings.api_host in ("localhost", "127.0.0.1"):
-        return
-    service = RegistrationService(settings.registrations_path)
-    if not service.is_registered(library_id, user_id):
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Library not registered for this user. "
-                "Please update the plugin to the newest version."
-            ),
-        )
 
 
 async def _execute_upload(
@@ -459,6 +439,7 @@ async def _run_task(task_id: str, **kwargs: object) -> None:
 async def check_indexed(
     library_id: str,
     request: CheckIndexedRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -484,6 +465,8 @@ async def check_indexed(
             status_code=400,
             detail="library_id in URL must match library_id in request body",
         )
+
+    assert_can_access(identity, library_id)
 
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
@@ -605,6 +588,7 @@ async def upload_and_index_document(
             "zotero_modified (ISO 8601 string)"
         ),
     ),
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -634,7 +618,7 @@ async def upload_and_index_document(
     """
     meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
         library_type, mime_type, item_version, attachment_version, item_modified, \
-        file_bytes = await _parse_upload_request(file, metadata)
+        file_bytes = await _parse_upload_request(file, metadata, identity)
 
     logger.info(
         f"Upload request: library={library_id} user={user_id} "
@@ -676,6 +660,7 @@ async def upload_and_index_document_async(
     http_request: Request,
     file: UploadFile = File(..., description="Raw attachment bytes"),
     metadata: str = Form(...),
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -690,7 +675,7 @@ async def upload_and_index_document_async(
     """
     meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
         library_type, mime_type, item_version, attachment_version, item_modified, \
-        file_bytes = await _parse_upload_request(file, metadata)
+        file_bytes = await _parse_upload_request(file, metadata, identity)
 
     logger.info(
         f"Async upload request: library={library_id} user={user_id} "
@@ -788,6 +773,7 @@ async def get_upload_task_status(task_id: str):
 async def upload_and_index_abstract(
     http_request: Request,
     request: AbstractIndexRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -798,10 +784,11 @@ async def upload_and_index_abstract(
     The abstract must meet the configured minimum word count (MIN_ABSTRACT_WORDS).
     """
     settings = get_settings()
-    _check_registration(request.library_id, request.user_id, settings)
+    assert_can_access(identity, request.library_id)
+    user_id = identity.user_id if identity else None
     word_count = len(request.abstract_text.split())
     logger.info(
-        f"Abstract index: library={request.library_id} user={request.user_id} "
+        f"Abstract index: library={request.library_id} user={user_id} "
         f"item={request.item_key} words={word_count}"
     )
     if word_count < settings.min_abstract_words:
@@ -899,6 +886,7 @@ async def upload_and_index_abstract(
 )
 def batch_update_metadata(
     request: BatchMetadataUpdateRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
     """
@@ -911,6 +899,7 @@ def batch_update_metadata(
     """
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
+    assert_can_access(identity, request.library_id)
 
     updated_items = 0
     updated_chunks = 0
@@ -955,11 +944,12 @@ def batch_update_metadata(
 # ---------------------------------------------------------------------------
 
 
-async def _parse_upload_request(file: UploadFile, metadata: str):
+async def _parse_upload_request(file: UploadFile, metadata: str, identity: Optional[ZoteroIdentity]):
     """Parse and validate the common multipart upload fields.
 
     Returns a tuple of all parsed fields needed by both sync and async endpoints.
-    Raises HTTPException 400 on validation errors.
+    Raises HTTPException 400 on validation errors, or 403 if the caller's identity
+    is not authorized for the requested library_id.
     """
     try:
         meta_dict = json.loads(metadata)
@@ -977,8 +967,8 @@ async def _parse_upload_request(file: UploadFile, metadata: str):
     library_id: str = meta_dict["library_id"]
     item_key: str = meta_dict["item_key"]
     attachment_key: str = meta_dict["attachment_key"]
-    user_id: Optional[int] = meta_dict.get("user_id")
-    _check_registration(library_id, user_id, get_settings())
+    assert_can_access(identity, library_id)
+    user_id: Optional[int] = identity.user_id if identity else meta_dict.get("user_id")
     library_type: str = meta_dict.get("library_type", "user")
     mime_type: str = meta_dict.get("mime_type", "application/pdf")
     item_version: int = int(meta_dict.get("item_version", 0))

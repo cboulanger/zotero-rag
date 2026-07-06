@@ -9,14 +9,65 @@ import json
 import logging
 import re
 from pathlib import Path
-from fastapi import Request
+from typing import Optional
+from fastapi import HTTPException, Request
 
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
+from backend.services.access_gate import is_loopback, passes_gate
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
 from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
+from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
 
 logger = logging.getLogger(__name__)
+
+
+async def resolve_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
+    """Resolve and gate the caller's Zotero identity for the current request.
+
+    Returns None for the loopback no-auth path (Part 4) — single trusted local
+    user, no per-library enforcement needed (see access_gate.assert_can_access()).
+    Raises HTTPException: 401 for a missing/invalid/revoked key, 403 if the
+    Part 2 gate rejects an otherwise-valid identity, 503 if zotero.org is
+    unreachable with no cached validation to fall back on.
+
+    Called once per request by the auth middleware in backend/main.py, which
+    stashes the result on request.state.zotero_identity for every /api/*
+    request. Route handlers should depend on get_zotero_identity instead,
+    not this function directly, to avoid re-validating the key a second time.
+    """
+    settings = get_settings()
+    if is_loopback(settings):
+        return None
+
+    zotero_key = request.headers.get("X-Zotero-API-Key")
+    if not zotero_key:
+        raise HTTPException(status_code=401, detail="Missing X-Zotero-API-Key header.")
+
+    validation = await get_identity_cache().resolve(zotero_key)
+    if not validation.read_only:
+        status_code = 503 if validation.transient else 401
+        raise HTTPException(status_code=status_code, detail=validation.reason or "Invalid Zotero API key.")
+
+    identity = ZoteroIdentity(user_id=validation.user_id, username=validation.username, targets=validation.targets)
+    if not passes_gate(identity, settings):
+        raise HTTPException(status_code=403, detail="This Zotero account is not authorized to use this server.")
+    return identity
+
+
+def get_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
+    """FastAPI dependency: read back the identity the auth middleware resolved.
+
+    Route handlers should depend on this — not resolve_zotero_identity
+    directly — to avoid re-validating the key a second time per request.
+
+    The auth middleware in backend/main.py sets request.state.zotero_identity
+    on every /api/* request (calling resolve_zotero_identity once), so this
+    simply reads back that live value. It returns None on loopback
+    deployments, which access_gate.assert_can_access() treats as "skip
+    per-library enforcement".
+    """
+    return getattr(request.state, "zotero_identity", None)
 
 
 def get_client_api_keys(request: Request) -> dict[str, str]:

@@ -104,7 +104,10 @@ class ZoteroRAGPlugin {
 		this.backendURL = null;
 
 		/** @type {string} */
-		this.apiKey = '';
+		this.zoteroApiKey = '';
+
+		/** @type {boolean} */
+		this._wizardAutoLaunchedThisSession = false;
 
 		/** @type {Set<string>} */
 		this.activeQueries = new Set();
@@ -130,6 +133,9 @@ class ZoteroRAGPlugin {
 
 		/** @type {Window|null} */
 		this._dialogWindow = null;
+
+		/** @type {Window|null} */
+		this._setupWizardWindow = null;
 
 		/** @type {string|null} */
 		this._notifierID = null;
@@ -168,8 +174,8 @@ class ZoteroRAGPlugin {
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = (Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119').replace(/\/+$/, '');
 
-		// Load optional API key (required when backend is on a remote host)
-		this.apiKey = Zotero.Prefs.get('extensions.zotero-rag.apiKey', true) || '';
+		// Load the personal Zotero API key (required when backend is on a remote host)
+		this.zoteroApiKey = Zotero.Prefs.get('extensions.zotero-rag.zoteroApiKey', true) || '';
 
 		// Load cached required API keys list (refreshed on each successful backend connection)
 		try {
@@ -199,15 +205,15 @@ class ZoteroRAGPlugin {
 
 	/**
 	 * Return HTTP headers to include in all backend requests.
-	 * Adds X-API-Key when an API key is configured.
+	 * Adds X-Zotero-API-Key when a personal Zotero API key is configured.
 	 * @param {Record<string, string>} [extra] - Additional headers to merge
 	 * @returns {Record<string, string>}
 	 */
 	getAuthHeaders(extra = {}) {
 		/** @type {Record<string, string>} */
 		const headers = { ...extra };
-		if (this.apiKey) {
-			headers['X-API-Key'] = this.apiKey;
+		if (this.zoteroApiKey) {
+			headers['X-Zotero-API-Key'] = this.zoteroApiKey;
 		}
 		// Include any service API keys the user has configured
 		for (const keyInfo of this.requiredApiKeys) {
@@ -218,15 +224,39 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Append the API key as a query parameter to a URL.
-	 * Used for SSE (EventSource) endpoints that cannot set request headers.
-	 * @param {string} url - Base URL
-	 * @returns {string} URL with api_key appended when configured
+	 * True if the configured backend URL points at a loopback address, where
+	 * the backend skips Zotero-key auth entirely (single trusted local user).
+	 * @returns {boolean}
 	 */
-	addApiKeyParam(url) {
-		if (!this.apiKey) return url;
-		const sep = url.includes('?') ? '&' : '?';
-		return `${url}${sep}api_key=${encodeURIComponent(this.apiKey)}`;
+	isLoopbackBackend() {
+		try {
+			const host = new URL(this.backendURL).hostname;
+			return host === 'localhost' || host === '127.0.0.1';
+		} catch (_) {
+			return false;
+		}
+	}
+
+	/**
+	 * Validate a Zotero API key against the backend and return the caller's
+	 * identity. Does not read or write any pref — callers pass the candidate
+	 * key explicitly so it can be checked before being saved.
+	 * @param {string} candidateKey
+	 * @returns {Promise<{authorized: true, loopback: boolean, user_id?: number, username?: string, targets?: string[]}>}
+	 * @throws {Error} with a `status` property set to the HTTP status code, and
+	 *   a message taken from the response's `detail` field, on 401/403/503.
+	 */
+	async checkZoteroIdentity(candidateKey) {
+		const response = await fetch(`${this.backendURL}/api/auth/whoami`, {
+			headers: candidateKey ? { 'X-Zotero-API-Key': candidateKey } : {},
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			const err = /** @type {Error & {status?: number}} */ (new Error(body.detail || `HTTP ${response.status}`));
+			err.status = response.status;
+			throw err;
+		}
+		return response.json();
 	}
 
 	/**
@@ -421,6 +451,13 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			this.log(`Backend not available: ${errorMessage}`);
+			// @ts-ignore
+			const status = e && e.status;
+			if ((status === 401 || status === 403) && !this.isLoopbackBackend() && !this._wizardAutoLaunchedThisSession) {
+				this._wizardAutoLaunchedThisSession = true;
+				const win = Zotero.getMainWindow();
+				if (win) this.openSetupWizard(win);
+			}
 			return;
 		}
 
@@ -435,32 +472,39 @@ class ZoteroRAGPlugin {
 	/**
 	 * Check backend version for compatibility.
 	 * @returns {Promise<string>} Backend version string
-	 * @throws {Error} If backend is not reachable or returns error
+	 * @throws {Error & {status?: number}} If backend is not reachable or returns error.
+	 *   `status` is set to the HTTP status code when the server responded (e.g. 401/403),
+	 *   and left undefined for network-level failures (server unreachable).
 	 */
 	async checkBackendVersion() {
 		if (!this.backendURL) {
 			throw new Error('Backend URL not configured');
 		}
 
+		let response;
 		try {
-			const response = await fetch(`${this.backendURL}/api/version`, {
+			response = await fetch(`${this.backendURL}/api/version`, {
 				headers: this.getAuthHeaders()
 			});
-			if (!response.ok) {
-				const body = await response.json().catch(() => ({}));
-				throw new Error(`GET /api/version: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`);
-			}
-			const data = /** @type {BackendVersion} */ (await response.json());
-			this.log(`Backend version: ${data.api_version}`);
-
-			// TODO: Add version compatibility checking
-			// Refresh the list of required API keys from the server
-			await this.fetchRequiredApiKeys();
-			return data.api_version;
 		} catch (e) {
 			const errorMessage = e instanceof Error ? e.message : String(e);
 			throw new Error(`Failed to check backend version: ${errorMessage}`);
 		}
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			const err = /** @type {Error & {status?: number}} */ (
+				new Error(`GET /api/version: HTTP ${response.status}${body.detail ? ` — ${body.detail}` : ''}`)
+			);
+			err.status = response.status;
+			throw err;
+		}
+		const data = /** @type {BackendVersion} */ (await response.json());
+		this.log(`Backend version: ${data.api_version}`);
+
+		// TODO: Add version compatibility checking
+		// Refresh the list of required API keys from the server
+		await this.fetchRequiredApiKeys();
+		return data.api_version;
 	}
 
 	/**
@@ -488,10 +532,7 @@ class ZoteroRAGPlugin {
 	async fetchRequiredApiKeys() {
 		try {
 			const resp = await fetch(`${this.backendURL}/api/required-keys`, {
-				headers: {
-					'Content-Type': 'application/json',
-					...(this.apiKey ? { 'X-API-Key': this.apiKey } : {}),
-				},
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
 			});
 			if (!resp.ok) return;
 			const data = await resp.json();
@@ -499,6 +540,75 @@ class ZoteroRAGPlugin {
 			Zotero.Prefs.set('extensions.zotero-rag.requiredApiKeys', JSON.stringify(this.requiredApiKeys), true);
 		} catch (e) {
 			this.log('Could not fetch required API keys: ' + e);
+		}
+	}
+
+	/**
+	 * Render service API key input fields into `container`, one row + description
+	 * per required key, each bound to `extensions.zotero-rag.serviceApiKey.<key_name>`.
+	 * Shared between the Preferences pane and the setup wizard so both stay in sync.
+	 *
+	 * Note: generated "Get key" links use `target="_blank"`, which is a no-op in a
+	 * privileged Zotero document. The caller must provide its own delegated
+	 * `a[href]` → `Zotero.launchURL` click handler over (or containing) `container`
+	 * so these links actually open in the system browser — see the click handler
+	 * on `#zotero-rag-prefs-container` in `preferences.js` for the pattern.
+	 * @param {Document} doc - Document to create elements in (the Preferences pane document, or a dialog document)
+	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
+	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
+	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
+	 * @returns {void}
+	 */
+	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys) {
+		if (!container) return;
+
+		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
+
+		if (!requiredKeys || requiredKeys.length === 0) {
+			if (placeholder) placeholder.style.display = '';
+			return;
+		}
+		if (placeholder) placeholder.style.display = 'none';
+
+		for (const keyInfo of requiredKeys) {
+			const prefKey = `extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`;
+			const storedValue = Zotero.Prefs.get(prefKey, true) || '';
+
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'setting-row service-key-row';
+
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.textContent = `${keyInfo.key_name}:`;
+			label.setAttribute('for', `zotero-rag-key-${keyInfo.key_name}`);
+
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.type = 'password';
+			input.id = `zotero-rag-key-${keyInfo.key_name}`;
+			input.className = 'setting-input';
+			input.value = storedValue;
+			input.placeholder = 'Enter API key';
+			input.addEventListener('change', (e) => {
+				Zotero.Prefs.set(prefKey, /** @type {HTMLInputElement} */ (e.target).value, true);
+			});
+
+			row.appendChild(label);
+			row.appendChild(input);
+			container.appendChild(row);
+
+			if (keyInfo.description) {
+				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+				desc.className = 'setting-description service-key-desc';
+				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
+					desc.appendChild(doc.createTextNode(' '));
+					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');
+					link.setAttribute('href', keyInfo.docs_url);
+					link.setAttribute('target', '_blank');
+					link.textContent = 'Get key';
+					desc.appendChild(link);
+				}
+				container.appendChild(desc);
+			}
 		}
 	}
 
@@ -1601,6 +1711,26 @@ class ZoteroRAGPlugin {
 			'zotero-rag-fix-unavailable',
 			'chrome,centerscreen,resizable=yes,width=720,height=560',
 			{ plugin: this, libraryID: zoteroLibraryID, backendLibraryId }
+		);
+	}
+
+	/**
+	 * Open the setup wizard (Server -> Zotero identity -> Service API keys).
+	 * Focuses the existing dialog instead of opening a second one if already open.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openSetupWizard(win) {
+		if (this._setupWizardWindow && !this._setupWizardWindow.closed) {
+			this._setupWizardWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._setupWizardWindow = win.openDialog(
+			'chrome://zotero-rag/content/setup-wizard.xhtml',
+			'zotero-rag-setup-wizard',
+			'chrome,centerscreen,resizable=yes,width=520,height=480',
+			{ plugin: this }
 		);
 	}
 

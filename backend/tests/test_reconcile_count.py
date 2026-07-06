@@ -38,7 +38,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.count_indexed_items.return_value = 195  # implausibly low
 
         with self.assertRaises(HTTPException) as ctx:
-            reconcile_library_count("2829873", vector_store=vs)
+            reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         self.assertEqual(ctx.exception.status_code, 409)
         # The counter must not have been overwritten.
@@ -52,7 +52,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.get_library_metadata.return_value = meta
         vs.count_indexed_items.return_value = 5900  # small, legitimate drop
 
-        result = reconcile_library_count("2829873", vector_store=vs)
+        result = reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         vs.update_library_metadata.assert_called_once()
         self.assertEqual(result.total_items_indexed, 5900)
@@ -64,7 +64,7 @@ class TestReconcileCountGuard(unittest.TestCase):
         vs.get_library_metadata.return_value = meta
         vs.count_indexed_items.return_value = 3
 
-        result = reconcile_library_count("2829873", vector_store=vs)
+        result = reconcile_library_count("2829873", identity=None, vector_store=vs)
 
         vs.update_library_metadata.assert_called_once()
         self.assertEqual(result.total_items_indexed, 3)
@@ -83,7 +83,7 @@ class TestClearItemChunksCascadesDedup(unittest.TestCase):
         vs = MagicMock()
         vs.delete_item_chunks.return_value = 4
 
-        result = clear_item_chunks("6297749", "ITEM001", vector_store=vs)
+        result = clear_item_chunks("6297749", "ITEM001", identity=None, vector_store=vs)
 
         vs.delete_item_chunks.assert_called_once_with("6297749", "ITEM001")
         vs.delete_item_deduplication_records.assert_called_once_with("6297749", "ITEM001")
