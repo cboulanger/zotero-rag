@@ -34,6 +34,9 @@ infrastructure to also hold each user's embedding API key.
   entry has no valid embedding key, that user's libraries are skipped for
   the run and the gap is recorded, not silently paid for by someone else's
   credential.
+- A user can see their own cron run's live progress and any problems
+  (missing/invalid keys, per-library errors) from within the plugin,
+  without reading server-side logs.
 
 ## Non-goals
 
@@ -208,9 +211,46 @@ For each stored entry (via the extended `iter_decrypted()`):
   also reads `has_embedding_key` / `embedding_key_status` from that
   response to set the correct initial status text (e.g. flagging a
   missing/invalid embedding key) without waiting for a toggle interaction.
-- No new `/api/autoindex/status` polling is added — `key_issues` remains a
-  diagnostic surface, consistent with today (nothing in the plugin
-  currently reads that endpoint's `key_issues`).
+
+## 7. Cron monitoring UI (`plugin/src/preferences.xhtml`, new `autoindex-status.xhtml`/`.js`)
+
+A "View indexing status" button is added to the "Automatic indexing"
+fieldset (`preferences.xhtml:60-75`). Clicking it opens a new chrome dialog
+window — matching this plugin's existing convention for anything more
+substantial than a toggle (`dialog.xhtml`, `setup-wizard.xhtml`,
+`fix-unavailable.xhtml`, all opened via `window.openDialog(...)` with
+`{plugin: this}` as dialog data) — rather than growing the Preferences
+pane inline.
+
+**New files**: `plugin/src/autoindex-status.xhtml` + `.js`. The per-library
+progress bar reuses the existing native `<progress>` + label + message-row
+markup/CSS pattern already defined inline in `dialog.xhtml:175-182` (and
+its accompanying `<style>` block), copied into the new file for visual
+consistency rather than introducing a new visual style.
+
+**Data source**: `GET /api/autoindex/status`, using the plugin's existing
+`getAuthHeaders()`. This endpoint is already identity-filtered server-side
+(§3), so the dialog renders whatever it receives with no extra
+client-side filtering.
+
+**Content**:
+
+- An overall run banner: idle / "Running since \<time\>" / crashed, derived
+  from `running`, `crashed`, `started_at`, `finished_at`.
+- One row per library in the response's `slugs` map: slug/library name, a
+  status badge (`pending`/`indexing`/`done`/`error`/`skipped`), a
+  `<progress value=items_processed max=items_total>` bar (rendered
+  indeterminate/hidden while `items_total` is falsy, i.e. before that
+  slug's first progress callback fires), `chunks_added` as secondary text,
+  and any `error` / `skip_reason` shown inline on that row.
+- A "Problems" list rendering the response's `key_issues` array (reason
+  text), covering both the existing pruned-Zotero-key issues and the new
+  `"kind": "embedding_key"` issues introduced in §4.
+
+**Refresh**: the dialog polls `GET /api/autoindex/status` every 5 seconds
+via `setInterval` while open, clearing the interval on the window's
+`unload` event — giving live-updating progress bars during an active run
+without requiring a manual refresh action.
 
 ## Testing
 
@@ -225,3 +265,7 @@ For each stored entry (via the extended `iter_decrypted()`):
 - Plugin: `plugin/test/` coverage for the bundled POST body on toggle-on,
   the re-sync-on-edit callback wiring, and the initial status text derived
   from `has_embedding_key`/`embedding_key_status`.
+- Plugin: `plugin/test/` coverage for the monitoring dialog's rendering of
+  `slugs`/`key_issues` responses (idle/running/crashed banner, per-slug
+  progress values, problems list) and that its refresh interval is cleared
+  on `unload`.
