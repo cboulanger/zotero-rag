@@ -23,10 +23,15 @@ async function startup({ id, version, rootURI }) {
 	]);
 
 	// Register preferences pane
+	// stylesheets must be listed explicitly here — Zotero.PreferencePanes.register()
+	// does not process the <linkset> inside preferences.xhtml itself (that's an
+	// inert legacy XUL pattern this pane's markup happened to include), so without
+	// this, none of preferences.css ever actually loads in the pane's document.
 	Zotero.PreferencePanes.register({
 		pluginID: 'zotero-rag@cboulanger.github.io',
 		src: rootURI + 'preferences.xhtml',
-		image: rootURI + 'icons/ask-rag.svg'
+		image: rootURI + 'icons/ask-rag.svg',
+		stylesheets: [rootURI + 'preferences.css']
 	});
 
 	// Load Zotero Plugin Toolkit bundle

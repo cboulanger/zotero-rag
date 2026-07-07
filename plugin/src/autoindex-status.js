@@ -162,7 +162,12 @@ var ZoteroRAGAutoIndexStatus = {
 	async runNow() {
 		if (!this.plugin) return;
 		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
-		if (button) button.disabled = true;
+		// Give immediate feedback rather than waiting for the next 5s poll tick.
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Indexing in progress…';
+		}
+		this.renderBanner('Starting indexing…', 'running');
 		try {
 			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/run`, {
 				method: 'POST',
@@ -171,14 +176,21 @@ var ZoteroRAGAutoIndexStatus = {
 			if (!response.ok) {
 				const body = await response.json().catch(() => ({}));
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
-				if (button) button.disabled = false;
+				if (button) {
+					button.disabled = false;
+					button.textContent = 'Run indexing now';
+				}
 				return;
 			}
-			// Success: the next poll tick (within 5s) picks up running:true and
-			// re-disables the button via updateRunNowButtonState().
+			// Sync with the server's actual state right away instead of waiting
+			// for the next 5s poll tick.
+			await this.fetchAndRender();
 		} catch (e) {
 			this.renderBanner(`Error: ${e}`, 'crashed');
-			if (button) button.disabled = false;
+			if (button) {
+				button.disabled = false;
+				button.textContent = 'Run indexing now';
+			}
 		}
 	},
 

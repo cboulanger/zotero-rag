@@ -20,6 +20,33 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const zoteroApiKeyStatus = doc.getElementById('zotero-rag-zotero-api-key-status');
 
 	/**
+	 * Render `el`'s content as a bold, colored icon (✓/✗/⚠) followed by a text
+	 * message. A plain "✓ "/"✗ " text prefix at 12px is easy to miss, so the
+	 * icon itself is rendered larger/bolder via a dedicated .status-icon span
+	 * instead of relying on the character alone for visibility.
+	 * @param {HTMLElement|null} el
+	 * @param {string|null} symbol - icon character, or null/empty to clear with no message
+	 * @param {string} iconClass - e.g. 'status-icon-ok'
+	 * @param {string} text
+	 * @param {string} className - full className to apply to el (caller controls all classes)
+	 * @returns {void}
+	 */
+	const setIconStatus = (el, symbol, iconClass, text, className) => {
+		if (!el) return;
+		el.textContent = '';
+		if (symbol) {
+			const icon = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			icon.className = `status-icon ${iconClass}`;
+			icon.textContent = symbol;
+			el.appendChild(icon);
+			el.appendChild(doc.createTextNode(` ${text}`));
+		} else if (text) {
+			el.textContent = text;
+		}
+		el.className = className;
+	};
+
+	/**
 	 * Validate the currently-configured Zotero API key against the backend
 	 * and show the result in the status line below the field. Also refreshes
 	 * the auto-indexing checkbox, since its availability depends on this key.
@@ -41,16 +68,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 		try {
 			const result = await this.checkZoteroIdentity(this.zoteroApiKey);
-			if (result.loopback) {
-				zoteroApiKeyStatus.textContent = '✓ Key accepted (this server does not require Zotero-key authentication).';
-			} else {
-				const count = Array.isArray(result.targets) ? result.targets.length : 0;
-				zoteroApiKeyStatus.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
-			}
-			zoteroApiKeyStatus.className = 'setting-description status-ok';
+			const text = result.loopback
+				? 'Key accepted (this server does not require Zotero-key authentication).'
+				: (() => {
+					const count = Array.isArray(result.targets) ? result.targets.length : 0;
+					return `Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+				})();
+			setIconStatus(zoteroApiKeyStatus, '✓', 'status-icon-ok', text, 'setting-description status-ok');
 		} catch (e) {
-			zoteroApiKeyStatus.textContent = `✗ ${e instanceof Error ? e.message : String(e)}`;
-			zoteroApiKeyStatus.className = 'setting-description status-error';
+			setIconStatus(zoteroApiKeyStatus, '✗', 'status-icon-error',
+				e instanceof Error ? e.message : String(e), 'setting-description status-error');
 		}
 		await refreshAutoindexToggle();
 	};
@@ -122,17 +149,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		const el = doc.getElementById(`zotero-rag-key-status-${keyName}`);
 		if (!el) return;
 		if (status === 'invalid') {
-			el.textContent = `✗ Rejected: ${errorMessage || 'invalid credentials'}`;
-			el.className = 'setting-description service-key-status status-error';
+			setIconStatus(el, '✗', 'status-icon-error', `Rejected: ${errorMessage || 'invalid credentials'}`,
+				'service-key-status status-error');
 		} else if (status === 'unverified') {
-			el.textContent = '⚠ Could not be verified right now; will be retried automatically.';
-			el.className = 'setting-description service-key-status status-warn';
+			setIconStatus(el, '⚠', 'status-icon-warn', 'Could not be verified right now; will be retried automatically.',
+				'service-key-status status-warn');
 		} else if (status === 'ok') {
-			el.textContent = '✓ Key accepted.';
-			el.className = 'setting-description service-key-status status-ok';
+			setIconStatus(el, '✓', 'status-icon-ok', 'Key accepted.',
+				'service-key-status status-ok');
 		} else {
-			el.textContent = '';
-			el.className = 'setting-description service-key-status';
+			setIconStatus(el, null, '', '', 'service-key-status');
 		}
 	};
 

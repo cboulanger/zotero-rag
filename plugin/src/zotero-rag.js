@@ -607,15 +607,17 @@ class ZoteroRAGPlugin {
 
 			row.appendChild(label);
 			row.appendChild(input);
-			container.appendChild(row);
 
 			// Populated by callers (e.g. preferences.js) when the server reports this
 			// key's validation status (ok/invalid/unverified), so a rejected key is
-			// flagged right here — not only in a separate summary section elsewhere.
-			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
-			status.className = 'setting-description service-key-status';
+			// flagged right here, right next to the field — not only in a separate
+			// summary section elsewhere.
+			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			status.className = 'service-key-status';
 			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
-			container.appendChild(status);
+			row.appendChild(status);
+
+			container.appendChild(row);
 
 			if (keyInfo.description) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
