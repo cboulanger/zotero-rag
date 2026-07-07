@@ -137,6 +137,9 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._setupWizardWindow = null;
 
+		/** @type {Window|null} */
+		this._autoindexStatusWindow = null;
+
 		/** @type {string|null} */
 		this._notifierID = null;
 
@@ -1735,6 +1738,26 @@ class ZoteroRAGPlugin {
 			'chrome://zotero-rag/content/setup-wizard.xhtml',
 			'zotero-rag-setup-wizard',
 			'chrome,centerscreen,resizable=yes,width=520,height=480',
+			{ plugin: this }
+		);
+	}
+
+	/**
+	 * Open the auto-indexing status monitoring dialog, focusing an existing
+	 * instance instead of opening a duplicate if one is already open.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openAutoindexStatusDialog(win) {
+		if (this._autoindexStatusWindow && !this._autoindexStatusWindow.closed) {
+			this._autoindexStatusWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._autoindexStatusWindow = win.openDialog(
+			'chrome://zotero-rag/content/autoindex-status.xhtml',
+			'zotero-rag-autoindex-status-dialog',
+			'chrome,centerscreen,resizable=yes,width=520,height=520',
 			{ plugin: this }
 		);
 	}

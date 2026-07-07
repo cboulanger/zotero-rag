@@ -1,0 +1,69 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+
+<head>
+  <title>Automatic Indexing Status - Zotero RAG</title>
+  <meta charset="utf-8"/>
+  <script>
+    document.addEventListener("DOMContentLoaded", (ev) => {
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero/content/include.js",
+          this
+        );
+      } catch (e) {
+        console.error("Failed to load include.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/autoindex-status.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load autoindex-status.js:", e);
+      }
+    });
+  </script>
+  <style>
+    body { margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; box-sizing: border-box; }
+    #run-banner { padding: 8px 10px; border-radius: 4px; margin-bottom: 12px; font-size: 13px; background-color: #f5f5f5; }
+    #run-banner.running { background-color: #eef6ff; color: #0052a3; }
+    #run-banner.crashed { background-color: #fff5f5; color: #cc0000; }
+    .library-row { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
+    .library-row-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .library-name { font-weight: 500; font-size: 13px; }
+    .library-status-badge { font-size: 11px; padding: 1px 6px; border-radius: 3px; background-color: #e0e0e0; }
+    .library-status-badge.done { background-color: #e0f2e0; color: #1a6b1a; }
+    .library-status-badge.error { background-color: #fde0e0; color: #b30000; }
+    .library-status-badge.skipped { background-color: #fff3d6; color: #8a6400; }
+    .library-status-badge.indexing { background-color: #e0ecfd; color: #0052a3; }
+    progress.library-progress { width: 100%; height: 12px; }
+    .library-meta { font-size: 11px; color: #666; margin-top: 4px; }
+    .library-error { font-size: 11px; color: #b30000; margin-top: 4px; }
+    #problems-section { margin-top: 12px; }
+    #problems-section h3 { font-size: 13px; margin: 0 0 6px 0; }
+    .problem-row { font-size: 12px; color: #b30000; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
+    #empty-state { font-size: 13px; color: #666; padding: 8px 0; }
+    .dialog-buttons { display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid #ddd; margin-top: 12px; }
+    .dialog-button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background-color: #f5f5f5; color: #333; cursor: pointer; }
+    .dialog-button:hover { background-color: #e5e5e5; }
+  </style>
+</head>
+
+<body>
+  <div id="run-banner">Loading status…</div>
+  <div id="libraries-container"></div>
+  <div id="empty-state" style="display:none;">No libraries are registered for automatic indexing yet.</div>
+  <div id="problems-section" style="display:none;">
+    <h3>Problems</h3>
+    <div id="problems-list"></div>
+  </div>
+  <div class="dialog-buttons">
+    <button id="close-button" type="button" class="dialog-button">Close</button>
+  </div>
+</body>
+</html>

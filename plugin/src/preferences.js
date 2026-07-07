@@ -413,12 +413,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const autoindexMonitorButton = doc.getElementById('zotero-rag-autoindex-monitor');
 	if (autoindexMonitorButton) {
 		autoindexMonitorButton.addEventListener('click', () => {
-			_window.openDialog(
-				'chrome://zotero-rag/content/autoindex-status.xhtml',
-				'zotero-rag-autoindex-status-dialog',
-				'chrome,centerscreen,resizable=yes,width=520,height=520',
-				{ plugin: this }
-			);
+			this.openAutoindexStatusDialog(_window);
 		});
 	}
 
