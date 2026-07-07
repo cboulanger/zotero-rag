@@ -140,6 +140,12 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._autoindexStatusWindow = null;
 
+		// Set by dialog.js's init() to the live ZoteroRAGDialog object (not just its
+		// window), so other windows (e.g. the autoindex-status dialog) can read its
+		// isOperationInProgress flag without reaching into window internals themselves.
+		/** @type {any|null} */
+		this._dialogInstance = null;
+
 		/** @type {string|null} */
 		this._notifierID = null;
 
@@ -1760,6 +1766,17 @@ class ZoteroRAGPlugin {
 			'chrome,centerscreen,resizable=yes,width=520,height=520',
 			{ plugin: this }
 		);
+	}
+
+	/**
+	 * Whether the search dialog currently has a client-side indexing operation
+	 * in progress. Used by the auto-indexing status dialog's "Run now" button
+	 * and the search dialog's own "Index" button to avoid starting a second,
+	 * conflicting indexing operation.
+	 * @returns {boolean}
+	 */
+	isClientIndexingActive() {
+		return !!(this._dialogInstance && this._dialogInstance.isOperationInProgress);
 	}
 
 	/**
