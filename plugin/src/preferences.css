@@ -114,6 +114,10 @@ body {
   color: #006600;
 }
 
+.status-warn {
+  color: #cc7a00;
+}
+
 .status-error {
   color: #cc0000;
 }

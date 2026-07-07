@@ -247,10 +247,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 
 	/**
 	 * @param {string} message
+	 * @param {'ok'|'warn'|'error'} [level='ok']
 	 * @returns {void}
 	 */
-	const setAutoindexStatus = (message) => {
-		if (autoindexStatus) autoindexStatus.textContent = message;
+	const setAutoindexStatus = (message, level = 'ok') => {
+		if (!autoindexStatus) return;
+		autoindexStatus.textContent = message;
+		autoindexStatus.className = `setting-description status-${level}`;
 	};
 
 	/**
@@ -267,7 +270,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		if (!this.zoteroApiKey) {
 			autoindexToggle.checked = false;
 			autoindexToggle.disabled = true;
-			setAutoindexStatus('Configure your Zotero API key above first.');
+			setAutoindexStatus('Configure your Zotero API key above first.', 'warn');
 			return;
 		}
 		try {
@@ -277,17 +280,17 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			if (!response.ok) {
 				autoindexToggle.disabled = true;
 				const err = await response.json().catch(() => ({}));
-				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.');
+				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.', 'error');
 				return;
 			}
 			/** @type {{keys: Array<unknown>}} */
 			const data = await response.json();
 			autoindexToggle.disabled = false;
 			autoindexToggle.checked = Array.isArray(data.keys) && data.keys.length > 0;
-			setAutoindexStatus(autoindexToggle.checked ? 'Automatic indexing is enabled.' : '');
+			setAutoindexStatus(autoindexToggle.checked ? 'Automatic indexing is enabled.' : '', 'ok');
 		} catch (e) {
 			autoindexToggle.disabled = true;
-			setAutoindexStatus(`Error: ${e}`);
+			setAutoindexStatus(`Error: ${e}`, 'error');
 		}
 	};
 
@@ -313,7 +316,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				});
 				if (!response.ok) {
 					const err = await response.json().catch(() => ({}));
-					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					setAutoindexStatus(`Error: ${err.detail || response.status}`, 'error');
 					autoindexToggle.checked = !enabling;
 					return;
 				}
@@ -322,22 +325,28 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					const data = await response.json();
 					const count = Array.isArray(data.targets) ? data.targets.length : 0;
 					const libraryText = count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`;
+					// Fail closed: only 'ok' (or an absent status, e.g. no key was submitted)
+					// gets plain success messaging. Any other truthy value — known
+					// (invalid/unverified) or a status this plugin doesn't recognize yet —
+					// must surface a warning rather than silently imply success.
 					if (data.embedding_key_status === 'invalid') {
-						setAutoindexStatus(`${libraryText} Warning: your embedding API key was rejected (${data.embedding_key_error || 'invalid credentials'}) — indexing will be skipped until you add a valid key.`);
+						setAutoindexStatus(`${libraryText} Warning: your embedding API key was rejected (${data.embedding_key_error || 'invalid credentials'}) — indexing will be skipped until you add a valid key.`, 'warn');
 					} else if (data.embedding_key_status === 'unverified') {
-						setAutoindexStatus(`${libraryText} Your embedding API key could not be verified right now but was saved; it will be retried on the next run.`);
+						setAutoindexStatus(`${libraryText} Your embedding API key could not be verified right now but was saved; it will be retried on the next run.`, 'warn');
 					} else if (!data.embedding_key_status) {
-						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured above — indexing will be skipped until you add one.`);
+						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured above — indexing will be skipped until you add one.`, 'warn');
+					} else if (data.embedding_key_status === 'ok') {
+						setAutoindexStatus(libraryText, 'ok');
 					} else {
-						setAutoindexStatus(libraryText);
+						setAutoindexStatus(`${libraryText} Warning: unexpected embedding key status "${data.embedding_key_status}" — check your embedding API key configuration.`, 'warn');
 					}
 				} else {
-					setAutoindexStatus('Auto-indexing disabled.');
+					setAutoindexStatus('Auto-indexing disabled.', 'ok');
 				}
 				this.invalidateAutoIndexedLibraryIds();
 				populateLibraryVisibilityList();
 			} catch (e) {
-				setAutoindexStatus(`Error: ${e}`);
+				setAutoindexStatus(`Error: ${e}`, 'error');
 				autoindexToggle.checked = !enabling;
 			}
 		});
