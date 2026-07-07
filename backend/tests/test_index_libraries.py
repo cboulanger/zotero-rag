@@ -1,6 +1,8 @@
 """Unit tests for bin/index_libraries.py's argument parsing and target scoping."""
 
 import importlib.util
+import logging
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -38,6 +40,30 @@ class FilterTargetsTest(unittest.TestCase):
     def test_unmatched_fingerprint_returns_empty(self):
         result = index_libraries._filter_targets(self.targets, "fp-does-not-exist")
         self.assertEqual(result, {})
+
+
+class ClearLockFilesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lock_file = Path(self.tmp.name) / "cron.lock"
+        self.flock_file = Path(self.tmp.name) / "cron.lock.flock"
+        self.log = logging.getLogger("test_index_libraries")
+
+    def test_removes_both_lock_and_flock_files(self):
+        self.lock_file.write_text("123")
+        self.flock_file.write_text("")
+        index_libraries._clear_lock_files(self.lock_file, self.log)
+        self.assertFalse(self.lock_file.exists())
+        self.assertFalse(self.flock_file.exists())
+
+    def test_removes_flock_file_even_if_lock_file_absent(self):
+        self.flock_file.write_text("")
+        index_libraries._clear_lock_files(self.lock_file, self.log)
+        self.assertFalse(self.flock_file.exists())
+
+    def test_noop_when_neither_file_exists(self):
+        index_libraries._clear_lock_files(self.lock_file, self.log)  # must not raise
 
 
 if __name__ == "__main__":

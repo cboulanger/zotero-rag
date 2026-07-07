@@ -90,6 +90,20 @@ def _filter_targets(targets: dict, fp: str | None) -> dict:
     return {slug: t for slug, t in targets.items() if t["fingerprint"] == fp}
 
 
+def _clear_lock_files(lock_file: Path, log: logging.Logger) -> None:
+    """Remove lock_file and its OS-lock companion (see CronIndexer._acquire_lock).
+
+    The real mutual-exclusion lock lives on the ".flock" companion, not
+    lock_file itself — removing only lock_file would leave a held lock
+    untouched, so --force would no longer actually override a stuck one.
+    """
+    flock_path = lock_file.with_name(lock_file.name + ".flock")
+    for path in (lock_file, flock_path):
+        if path.exists():
+            log.warning("--force: removing existing lock file %s.", path)
+            path.unlink(missing_ok=True)
+
+
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
@@ -130,9 +144,8 @@ async def _main(argv: list[str] | None = None) -> int:
     lock_file = settings.data_path / "system" / "cron_indexer.lock"
     status_file = settings.data_path / "system" / "cron_status.json"
 
-    if args.force and lock_file.exists():
-        log.warning("--force: removing existing lock file.")
-        lock_file.unlink(missing_ok=True)
+    if args.force:
+        _clear_lock_files(lock_file, log)
 
     try:
         vector_store = make_vector_store()
