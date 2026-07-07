@@ -68,12 +68,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip lock check (manual override for stuck processes).",
     )
     parser.add_argument(
+        "--fingerprint",
+        metavar="FP",
+        default=None,
+        help="Restrict indexing to the auto-index entry with this fingerprint "
+             "(used by the on-demand /api/autoindex/run trigger).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Log verbosity (default: INFO).",
     )
     return parser.parse_args(argv)
+
+
+def _filter_targets(targets: dict, fp: str | None) -> dict:
+    """Restrict targets to those owned by fp, if given; otherwise return them unchanged."""
+    if not fp:
+        return targets
+    return {slug: t for slug, t in targets.items() if t["fingerprint"] == fp}
 
 
 async def _main(argv: list[str] | None = None) -> int:
@@ -101,6 +115,11 @@ async def _main(argv: list[str] | None = None) -> int:
     targets, key_issues = await resolve_targets(store)
     for issue in key_issues:
         log.warning("Key pruned for user %s: %s", issue.get("user"), issue.get("reason"))
+
+    targets = _filter_targets(targets, args.fingerprint)
+    if args.fingerprint and not targets:
+        log.error("No targets for fingerprint %s; nothing to index for this user.", args.fingerprint)
+        return 1
 
     if not targets:
         log.error("No valid auto-index keys found. Submit a read-only key via the plugin.")
