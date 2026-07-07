@@ -1,3 +1,10 @@
+## [1.36.2](https://github.com/cboulanger/zotero-rag/compare/v1.36.1...v1.36.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* index items sharing duplicate attachment content instead of skipping them ([1f91d7c](https://github.com/cboulanger/zotero-rag/commit/1f91d7c254ef668747929bc729c9b6e5220b2707))
+
 ## [1.36.1](https://github.com/cboulanger/zotero-rag/compare/v1.36.0...v1.36.1) (2026-07-07)
 
 
