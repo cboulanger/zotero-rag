@@ -179,6 +179,11 @@ var ZoteroRAGDialog = {
 			// @ts-ignore
 			this.plugin = window.arguments[0].plugin;
 			this.plugin._dialogInstance = this;
+			window.addEventListener('unload', () => {
+				if (this.plugin._dialogInstance === this) {
+					this.plugin._dialogInstance = null;
+				}
+			});
 		} else {
 			console.error('No plugin reference passed to dialog');
 			return;
