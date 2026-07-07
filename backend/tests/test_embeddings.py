@@ -19,6 +19,7 @@ from backend.services.embeddings import (
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
     LocalEmbeddingService,
+    MockEmbeddingService,
     RemoteEmbeddingService,
     create_embedding_service,
 )
@@ -48,6 +49,16 @@ class TestEmbeddingService(unittest.TestCase):
         hash2 = EmbeddingService.compute_content_hash("text2")
 
         self.assertNotEqual(hash1, hash2)
+
+    def test_mock_service_has_rate_limit_retries_default(self):
+        """Every concrete subclass must have rate_limit_retries even if it never
+        sets it itself — backend/api/document_upload.py reads it unconditionally
+        regardless of which embedding service is active (e.g. MockEmbeddingService
+        under TESTING=true, or LocalEmbeddingService), so a missing default here
+        crashes every document upload for those configurations."""
+        service = MockEmbeddingService()
+        self.assertEqual(service.rate_limit_retries, 0)
+        self.assertEqual(service.rate_limit_wait_seconds, 0.0)
 
 
 @unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")

@@ -101,6 +101,13 @@ _KNOWN_DIMS: dict[str, int] = {
 class EmbeddingService(ABC):
     """Abstract base class for embedding services."""
 
+    # Class-level defaults so every subclass has these even if it doesn't set
+    # them in __init__ (only RemoteEmbeddingService currently increments them) —
+    # backend/api/document_upload.py reads embedding_service.rate_limit_retries
+    # unconditionally regardless of which concrete service is in use.
+    rate_limit_retries: int = 0
+    rate_limit_wait_seconds: float = 0.0
+
     @abstractmethod
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
