@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
+from filelock import FileLock, Timeout
+
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
@@ -130,6 +132,8 @@ class CronIndexer:
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
         self.key_store = key_store
+        # Atomic OS-level lock acquired in _acquire_lock(); None until then.
+        self._file_lock: Optional[FileLock] = None
         # Pruned-key issues from re-validation; set by the caller before run().
         self.key_issues: list[dict] = []
         # Slugs whose previous run was interrupted (stale lock takeover); set in run().
@@ -164,35 +168,33 @@ class CronIndexer:
     # ------------------------------------------------------------------
 
     def _acquire_lock(self) -> bool:
-        """Write the current PID to the lock file, raising AlreadyRunningError
-        if another live process holds the lock.
+        """Atomically acquire the indexer's exclusive run lock via a non-blocking
+        OS-level file lock (flock on POSIX, msvcrt on Windows) — atomic by
+        construction, and automatically released by the kernel if the holding
+        process crashes, so no PID/liveness bookkeeping is needed here.
 
-        Returns True if a stale lock was taken over (previous run was interrupted).
+        Returns True if a stale lock file (left behind by a process that
+        crashed mid-run, without a live holder) was found and taken over.
         """
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        stale = False
-        if self.lock_file.exists():
-            try:
-                existing_pid = int(self.lock_file.read_text(encoding="utf-8").strip())
-                if existing_pid <= 0:
-                    raise ValueError(f"Invalid PID {existing_pid} in lock file")
-                if is_process_alive(existing_pid):
-                    raise AlreadyRunningError(
-                        f"Cron indexer already running with PID {existing_pid}"
-                    )
-                self.log.warning(
-                    "Stale lock file found (PID %s dead); previous run was interrupted.",
-                    existing_pid,
-                )
-                stale = True
-            except (ValueError, OSError):
-                self.log.warning("Lock file unreadable or invalid; taking over.")
-                stale = True
+        stale = self.lock_file.exists()  # check BEFORE FileLock touches the path
+        self._file_lock = FileLock(str(self.lock_file))
+        try:
+            self._file_lock.acquire(timeout=0)
+        except Timeout:
+            raise AlreadyRunningError("Cron indexer already running (lock held by another process)")
+        if stale:
+            self.log.warning("Stale lock file found; previous run was interrupted.")
         self.lock_file.write_text(str(os.getpid()), encoding="utf-8")
         self.log.debug("Lock acquired (PID %s)", os.getpid())
         return stale
 
     def _release_lock(self) -> None:
+        try:
+            if self._file_lock is not None:
+                self._file_lock.release()
+        except Exception as exc:
+            self.log.warning("Could not release file lock: %s", exc)
         try:
             self.lock_file.unlink(missing_ok=True)
         except OSError as exc:

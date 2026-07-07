@@ -121,17 +121,27 @@ class TestLockFile(unittest.TestCase):
         self.assertEqual(pid_in_file, os.getpid())
         indexer._release_lock()
 
-    def test_acquire_lock_fails_if_alive(self):
+    def test_acquire_lock_fails_while_another_holder_has_it(self):
+        """Two independent lock acquisitions on the same path must not both succeed —
+        this is what protects two near-simultaneous manual triggers from both indexing
+        at once."""
+        from filelock import FileLock
         indexer = _make_indexer([], self.tmp)
-        indexer.lock_file.write_text(str(os.getpid()))
-        with self.assertRaises(AlreadyRunningError):
-            indexer._acquire_lock()
+        other_holder = FileLock(str(indexer.lock_file))
+        other_holder.acquire(timeout=0)
+        try:
+            with self.assertRaises(AlreadyRunningError):
+                indexer._acquire_lock()
+        finally:
+            other_holder.release()
 
-    def test_acquire_lock_takes_over_dead_process(self):
+    def test_acquire_lock_takes_over_stale_file(self):
+        """A lock file left behind by a crashed process (no live holder) is taken
+        over and reported as stale, without needing any PID/liveness check —
+        the OS-level lock itself is the authoritative signal that no one holds it."""
         indexer = _make_indexer([], self.tmp)
-        indexer.lock_file.write_text("99999999")
-        with patch("backend.services.cron_indexer.is_process_alive", return_value=False):
-            stale = indexer._acquire_lock()  # should not raise
+        indexer.lock_file.write_text("99999999")  # leftover content, no live flock
+        stale = indexer._acquire_lock()
         self.assertTrue(stale)
         self.assertTrue(indexer.lock_file.exists())
         indexer._release_lock()
@@ -208,12 +218,16 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["slugs"]["groups/2"]["status"], "done")
 
     async def test_run_already_running(self):
-        """AlreadyRunningError propagates when lock is held by a live process."""
+        """AlreadyRunningError propagates when lock is held by another process."""
+        from filelock import FileLock
         indexer = _make_indexer(["users/1"], self.tmp)
-        indexer.lock_file.write_text(str(os.getpid()))
-
-        with self.assertRaises(AlreadyRunningError):
-            await indexer.run()
+        other_holder = FileLock(str(indexer.lock_file))
+        other_holder.acquire(timeout=0)
+        try:
+            with self.assertRaises(AlreadyRunningError):
+                await indexer.run()
+        finally:
+            other_holder.release()
 
     async def test_run_marks_error_on_exception(self):
         """When index_library raises, the slug is marked as error."""
