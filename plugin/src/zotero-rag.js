@@ -557,9 +557,10 @@ class ZoteroRAGPlugin {
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
 	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
+	 * @param {(keyInfo: {key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}, value: string) => void} [onKeyChange] - Optional callback invoked after a key's pref is set, e.g. to re-sync a server-stored copy
 	 * @returns {void}
 	 */
-	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys) {
+	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
 		if (!container) return;
 
 		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
@@ -588,7 +589,11 @@ class ZoteroRAGPlugin {
 			input.value = storedValue;
 			input.placeholder = 'Enter API key';
 			input.addEventListener('change', (e) => {
-				Zotero.Prefs.set(prefKey, /** @type {HTMLInputElement} */ (e.target).value, true);
+				const value = /** @type {HTMLInputElement} */ (e.target).value;
+				Zotero.Prefs.set(prefKey, value, true);
+				if (typeof onKeyChange === 'function') {
+					onKeyChange(keyInfo, value);
+				}
 			});
 
 			row.appendChild(label);
