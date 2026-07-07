@@ -326,11 +326,26 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.', 'error');
 				return;
 			}
-			/** @type {{keys: Array<unknown>}} */
+			/** @type {{keys: Array<{has_embedding_key?: boolean, embedding_key_status?: string}>}} */
 			const data = await response.json();
 			autoindexToggle.disabled = false;
 			autoindexToggle.checked = Array.isArray(data.keys) && data.keys.length > 0;
-			setAutoindexStatus(autoindexToggle.checked ? 'Automatic indexing is enabled.' : '', 'ok');
+			if (!autoindexToggle.checked) {
+				setAutoindexStatus('', 'ok');
+			} else {
+				const own = data.keys[0];
+				if (!own.has_embedding_key) {
+					setAutoindexStatus('Automatic indexing is enabled, but no embedding API key is configured — indexing will be skipped until you add one above.', 'warn');
+				} else if (own.embedding_key_status === 'invalid') {
+					setAutoindexStatus('Automatic indexing is enabled, but your embedding API key was rejected — indexing will be skipped until you add a valid key above.', 'warn');
+				} else if (own.embedding_key_status === 'unverified') {
+					setAutoindexStatus('Automatic indexing is enabled. Your embedding API key could not be verified yet; it will be retried on the next run.', 'warn');
+				} else if (own.embedding_key_status === 'ok') {
+					setAutoindexStatus('Automatic indexing is enabled.', 'ok');
+				} else {
+					setAutoindexStatus(`Automatic indexing is enabled, but your embedding key has an unexpected status "${own.embedding_key_status}".`, 'warn');
+				}
+			}
 		} catch (e) {
 			autoindexToggle.disabled = true;
 			setAutoindexStatus(`Error: ${e}`, 'error');
