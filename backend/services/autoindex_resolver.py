@@ -11,12 +11,16 @@ A slug is only included in the returned targets if its owning entry also has a
 usable embedding API key (status "ok" or "unverified", and not currently inside
 its own rate-limit window) — auto-indexing never falls back to a server-wide
 embedding key, so a slug whose owner has no valid embedding key is skipped and
-reported as an issue instead.
+reported as an issue instead. This gating only applies when the server is
+configured with a remote embedding provider; a local model has no API key at
+all, so per-user key gating is skipped entirely in that case (matching the
+pre-per-user-key behavior for local deployments).
 """
 
 import logging
 from datetime import datetime, timezone
 
+from backend.config.settings import get_settings
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.zotero.key_validator import validate_key
 
@@ -34,6 +38,11 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
     """
     targets: dict[str, dict] = {}
     issues: list[dict] = []
+
+    # Per-user embedding keys only make sense for a remote provider (the whole
+    # point is per-user billing/quota); a local model has no API key at all,
+    # so gating on one here would make auto-indexing a permanent no-op.
+    requires_embedding_key = get_settings().get_hardware_preset().embedding.model_type == "remote"
 
     for fp, api_key, entry in list(store.iter_decrypted()):
         validation = await validate_key(api_key)
@@ -65,6 +74,16 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
             })
             logger.warning("Pruned auto-index key %s (%s): %s",
                            fp, entry.get("username"), validation.reason)
+            continue
+
+        if not requires_embedding_key:
+            for slug in slugs:
+                targets.setdefault(slug, {
+                    "zotero_key": api_key,
+                    "embedding_key": None,
+                    "embedding_key_name": None,
+                    "fingerprint": fp,
+                })
             continue
 
         embedding_info = store.get_decrypted_embedding_key(fp)

@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from cryptography.fernet import Fernet
 
@@ -13,7 +13,24 @@ from backend.services.autoindex_resolver import resolve_targets
 from backend.zotero.key_validator import KeyValidation
 
 
+def _mock_settings(model_type: str = "remote") -> MagicMock:
+    """A fake get_settings() return value with a controllable embedding model_type,
+    so tests don't depend on whatever preset this machine's real .env configures."""
+    settings = MagicMock()
+    settings.get_hardware_preset.return_value.embedding.model_type = model_type
+    return settings
+
+
 class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # All existing tests assume a remote embedding provider (the only
+        # config for which per-user embedding-key gating applies); override
+        # per-test with another patch.object(...) call for local-preset cases.
+        patcher = patch("backend.services.autoindex_resolver.get_settings",
+                         return_value=_mock_settings("remote"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _store(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -159,6 +176,22 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["kind"], "embedding_key")
         self.assertEqual(issues[0]["fingerprint"], fp2)
+
+    async def test_local_model_type_bypasses_embedding_key_gating(self):
+        """A local (non-remote) embedding preset has no API key at all, so
+        per-user gating must not exclude slugs for lacking one."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        store.add("KA", v1)  # no embedding key configured
+        with patch("backend.services.autoindex_resolver.get_settings",
+                   return_value=_mock_settings("local")), \
+             patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(return_value=v1)):
+            targets, issues = await resolve_targets(store)
+        self.assertEqual(set(targets), {"users/1"})
+        self.assertIsNone(targets["users/1"]["embedding_key"])
+        self.assertIsNone(targets["users/1"]["embedding_key_name"])
+        self.assertEqual(issues, [])
 
 
 if __name__ == "__main__":
