@@ -88,7 +88,8 @@ function main() {
   // Auto-add --no-nginx --no-ssl when no FQDN or FQDN is localhost
   const fqdnIdx = deployOptions.findIndex(o => o === '--fqdn');
   const fqdn = fqdnIdx !== -1 ? deployOptions[fqdnIdx + 1] : null;
-  if (!fqdn || fqdn === 'localhost' || fqdn === '127.0.0.1') {
+  const fqdnIsLocal = !fqdn || fqdn === 'localhost' || fqdn === '127.0.0.1';
+  if (fqdnIsLocal) {
     if (!fqdn) console.log('[INFO] No DEPLOY_FQDN set — adding --no-nginx --no-ssl');
     else console.log(`[INFO] DEPLOY_FQDN=${fqdn} is local — adding --no-nginx --no-ssl`);
     if (!deployOptions.includes('--no-nginx')) deployOptions.push('--no-nginx');
@@ -97,6 +98,17 @@ function main() {
 
   // Load env file values into process.env so --env KEY picks them up in container.mjs
   dotenvConfig({ path: resolvedPath });
+
+  // Default API_HOST to the public FQDN when the deployer didn't set it explicitly.
+  // backend.services.access_gate.is_loopback() treats api_host=="localhost" (the
+  // Settings default) as "single trusted local user, no auth needed". Without this,
+  // every real deployment that omits API_HOST silently runs with the Zotero-key
+  // access gate disabled, even with a real public FQDN and nginx/SSL configured.
+  if (!process.env.API_HOST && !fqdnIsLocal) {
+    console.log(`[INFO] No API_HOST set — defaulting to DEPLOY_FQDN (${fqdn}) so the access gate activates`);
+    process.env.API_HOST = fqdn;
+    containerEnv.push('--env', 'API_HOST');
+  }
 
   const cmdParts = ['node', 'bin/container.mjs', 'deploy', ...deployOptions, ...containerEnv];
   const cmd = cmdParts.join(' ');

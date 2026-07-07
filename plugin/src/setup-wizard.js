@@ -212,8 +212,12 @@ var ZoteroSetupWizard = {
 			Zotero.Prefs.set('extensions.zotero-rag.zoteroApiKey', key, true);
 			this.plugin.zoteroApiKey = key;
 			this.identityValidated = true;
-			const count = Array.isArray(result.targets) ? result.targets.length : 0;
-			status.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+			if (result.loopback) {
+				status.textContent = '✓ Key accepted (this server does not require Zotero-key authentication).';
+			} else {
+				const count = Array.isArray(result.targets) ? result.targets.length : 0;
+				status.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+			}
 			status.className = 'wizard-status status-ok';
 			document.getElementById('wizard-autoindex-row').style.display = 'flex';
 		} catch (e) {

@@ -41,8 +41,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 		try {
 			const result = await this.checkZoteroIdentity(this.zoteroApiKey);
-			const count = Array.isArray(result.targets) ? result.targets.length : 0;
-			zoteroApiKeyStatus.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+			if (result.loopback) {
+				zoteroApiKeyStatus.textContent = '✓ Key accepted (this server does not require Zotero-key authentication).';
+			} else {
+				const count = Array.isArray(result.targets) ? result.targets.length : 0;
+				zoteroApiKeyStatus.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+			}
 			zoteroApiKeyStatus.className = 'setting-description status-ok';
 		} catch (e) {
 			zoteroApiKeyStatus.textContent = `✗ ${e instanceof Error ? e.message : String(e)}`;
