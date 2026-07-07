@@ -66,6 +66,20 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         fp = self.store.add("ZOTKEY", _validation())
         self.assertIsNone(self.store.get_decrypted_embedding_key(fp))
 
+    def test_re_adding_zotero_key_preserves_embedding_key(self):
+        """Re-registering the same Zotero key (e.g. to refresh validation)
+        must not wipe an already-stored embedding key on that entry."""
+        fp = self.store.add("ZOTKEY", _validation())
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        fp2 = self.store.add("ZOTKEY", _validation())
+        self.assertEqual(fp2, fp)
+        key_name, key = self.store.get_decrypted_embedding_key(fp)
+        self.assertEqual(key_name, "KISSKI_API_KEY")
+        self.assertEqual(key, "EMBKEY")
+        meta = self.store.list_metadata()[0]
+        self.assertTrue(meta["has_embedding_key"])
+        self.assertEqual(meta["embedding_key_status"], "ok")
+
     def test_list_metadata_reports_embedding_key_presence(self):
         fp = self.store.add("ZOTKEY", _validation())
         meta = self.store.list_metadata()[0]

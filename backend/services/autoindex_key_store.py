@@ -60,13 +60,21 @@ class AutoIndexKeyStore:
         self._path.chmod(0o600)
 
     def add(self, api_key: str, validation: KeyValidation) -> str:
-        """Encrypt and store a validated key. Returns its fingerprint."""
+        """Encrypt and store a validated key. Returns its fingerprint.
+
+        Re-adding an already-registered fingerprint (e.g. re-submitting the
+        same Zotero key to refresh its validation) must not wipe an
+        unrelated embedding key already stored on that entry — only the
+        Zotero-key fields are refreshed here; any embedding_key_* fields
+        already present are carried over unchanged.
+        """
         self._require_enabled()
         fp = fingerprint(api_key)
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             data = self._load()
-            data[fp] = {
+            existing = data.get(fp, {})
+            entry = {
                 "ciphertext": self._fernet.encrypt(api_key.encode()).decode(),
                 "user_id": validation.user_id,
                 "username": validation.username,
@@ -74,6 +82,13 @@ class AutoIndexKeyStore:
                 "validated_at": now,
                 "last_status": "ok",
             }
+            for key in (
+                "embedding_key_ciphertext", "embedding_key_name",
+                "embedding_key_status", "embedding_key_rate_limit_until",
+            ):
+                if key in existing:
+                    entry[key] = existing[key]
+            data[fp] = entry
             self._save(data)
         return fp
 
