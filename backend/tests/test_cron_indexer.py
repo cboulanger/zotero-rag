@@ -127,7 +127,7 @@ class TestLockFile(unittest.TestCase):
         at once."""
         from filelock import FileLock
         indexer = _make_indexer([], self.tmp)
-        other_holder = FileLock(str(indexer.lock_file))
+        other_holder = FileLock(str(indexer._flock_path))
         other_holder.acquire(timeout=0)
         try:
             with self.assertRaises(AlreadyRunningError):
@@ -221,7 +221,7 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         """AlreadyRunningError propagates when lock is held by another process."""
         from filelock import FileLock
         indexer = _make_indexer(["users/1"], self.tmp)
-        other_holder = FileLock(str(indexer.lock_file))
+        other_holder = FileLock(str(indexer._flock_path))
         other_holder.acquire(timeout=0)
         try:
             with self.assertRaises(AlreadyRunningError):

@@ -132,6 +132,11 @@ class CronIndexer:
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
         self.key_store = key_store
+        # Dedicated flock target, separate from self.lock_file (the latter is
+        # just a human-readable PID marker and is safe to delete on release —
+        # deleting the flock's own target while another process holds a lock
+        # on it would reopen the exact TOCTOU race this class is meant to close).
+        self._flock_path = Path(str(self.lock_file) + ".flock")
         # Atomic OS-level lock acquired in _acquire_lock(); None until then.
         self._file_lock: Optional[FileLock] = None
         # Pruned-key issues from re-validation; set by the caller before run().
@@ -169,16 +174,20 @@ class CronIndexer:
 
     def _acquire_lock(self) -> bool:
         """Atomically acquire the indexer's exclusive run lock via a non-blocking
-        OS-level file lock (flock on POSIX, msvcrt on Windows) — atomic by
-        construction, and automatically released by the kernel if the holding
-        process crashes, so no PID/liveness bookkeeping is needed here.
+        OS-level file lock (flock on POSIX, msvcrt on Windows) on a dedicated,
+        never-deleted lock target (self._flock_path) — atomic by construction,
+        and automatically released by the kernel if the holding process
+        crashes, so no PID/liveness bookkeeping is needed for exclusion itself.
+        self.lock_file is written with the current PID purely for operator
+        visibility (e.g. inspecting it during an incident) and is safe to
+        delete on release since it is not the lock's own target.
 
         Returns True if a stale lock file (left behind by a process that
         crashed mid-run, without a live holder) was found and taken over.
         """
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        stale = self.lock_file.exists()  # check BEFORE FileLock touches the path
-        self._file_lock = FileLock(str(self.lock_file))
+        stale = self.lock_file.exists()  # check BEFORE writing the fresh marker
+        self._file_lock = FileLock(str(self._flock_path))
         try:
             self._file_lock.acquire(timeout=0)
         except Timeout:
@@ -193,7 +202,7 @@ class CronIndexer:
         try:
             if self._file_lock is not None:
                 self._file_lock.release()
-        except Exception as exc:
+        except OSError as exc:
             self.log.warning("Could not release file lock: %s", exc)
         try:
             self.lock_file.unlink(missing_ok=True)
