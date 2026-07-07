@@ -1155,12 +1155,36 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Check whether a server-side auto-indexing run is currently active.
+	 * Fails open (returns false) on any network/parse error — a backend
+	 * hiccup should not block the user's own client-side indexing.
+	 * @returns {Promise<boolean>}
+	 */
+	async isServerIndexingRunning() {
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) return false;
+			const data = await response.json();
+			return data.running === true;
+		} catch (e) {
+			return false;
+		}
+	},
+
+	/**
 	 * Index-only submit: triggered when at least one selected library is unindexed.
 	 * Indexes all unindexed/partial libraries, then refreshes metadata and switches to Submit mode.
 	 * @returns {Promise<void>}
 	 */
 	async submitIndexOnly() {
 		if (!this.plugin) return;
+
+		if (this.plugin.backendURL && await this.isServerIndexingRunning()) {
+			this.plugin.openAutoindexStatusDialog(window);
+			return;
+		}
 
 		// Only index libraries that actually need it (unindexed or partially indexed)
 		const libraryIds = Array.from(this.selectedLibraries).filter(id => {
