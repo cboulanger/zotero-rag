@@ -297,10 +297,19 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
+				/** @type {{api_key: string, embedding_api_key?: string}} */
+				const body = { api_key: this.zoteroApiKey };
+				if (enabling) {
+					const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+					if (embeddingKeyInfo) {
+						const embeddingKeyValue = Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${embeddingKeyInfo.key_name}`, true) || '';
+						if (embeddingKeyValue) body.embedding_api_key = embeddingKeyValue;
+					}
+				}
 				const response = await fetch(requestURL, {
 					method: enabling ? 'POST' : 'DELETE',
 					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ api_key: this.zoteroApiKey }),
+					body: JSON.stringify(body),
 				});
 				if (!response.ok) {
 					const err = await response.json().catch(() => ({}));
@@ -309,10 +318,19 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					return;
 				}
 				if (enabling) {
-					/** @type {{targets: string[]}} */
+					/** @type {{targets: string[], embedding_key_status?: string, embedding_key_error?: string}} */
 					const data = await response.json();
 					const count = Array.isArray(data.targets) ? data.targets.length : 0;
-					setAutoindexStatus(count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`);
+					const libraryText = count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`;
+					if (data.embedding_key_status === 'invalid') {
+						setAutoindexStatus(`${libraryText} Warning: your embedding API key was rejected (${data.embedding_key_error || 'invalid credentials'}) — indexing will be skipped until you add a valid key.`);
+					} else if (data.embedding_key_status === 'unverified') {
+						setAutoindexStatus(`${libraryText} Your embedding API key could not be verified right now but was saved; it will be retried on the next run.`);
+					} else if (!data.embedding_key_status) {
+						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured above — indexing will be skipped until you add one.`);
+					} else {
+						setAutoindexStatus(libraryText);
+					}
 				} else {
 					setAutoindexStatus('Auto-indexing disabled.');
 				}
