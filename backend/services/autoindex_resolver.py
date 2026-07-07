@@ -79,19 +79,25 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
                 still_rate_limited = rate_limit_until > datetime.now(timezone.utc)
             except ValueError:
                 still_rate_limited = False
+                logger.warning(
+                    "Invalid embedding_key_rate_limit_until for %s: %r", fp, rate_limit_until_str
+                )
 
-        blocked = (
-            not embedding_info
-            or embedding_status == "invalid"
-            or (embedding_status == "rate_limited" and still_rate_limited)
+        # Fail closed: only explicitly recognized "good" statuses let the slug
+        # through. An unrecognized/typo'd/future status string is treated as
+        # blocked rather than silently permitted.
+        usable = embedding_status in ("ok", "unverified") or (
+            embedding_status == "rate_limited" and not still_rate_limited
         )
-        if blocked:
+        if not embedding_info or not usable:
             if not embedding_info:
                 reason = "No embedding API key configured; auto-indexing skipped."
             elif embedding_status == "invalid":
                 reason = "Embedding API key was rejected; auto-indexing skipped."
-            else:
+            elif embedding_status == "rate_limited":
                 reason = f"Embedding API key is rate-limited until {rate_limit_until_str}; auto-indexing skipped."
+            else:
+                reason = f"Embedding API key has unrecognized status {embedding_status!r}; auto-indexing skipped."
             issues.append({
                 "fingerprint": fp,
                 "user": entry.get("username"),

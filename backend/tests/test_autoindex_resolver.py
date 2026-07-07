@@ -127,6 +127,39 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(targets["users/1"]["fingerprint"], fp1)
         self.assertEqual(issues, [])
 
+    async def test_unverified_embedding_key_is_allowed(self):
+        """An embedding key that hasn't been actively verified yet is usable."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp1 = store.add("KA", v1)
+        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY", status="unverified")
+        with patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(return_value=v1)):
+            targets, issues = await resolve_targets(store)
+        self.assertEqual(set(targets), {"users/1"})
+        self.assertEqual(targets["users/1"]["embedding_key"], "EMB1")
+        self.assertEqual(issues, [])
+
+    async def test_dedup_shared_group_survives_one_blocked_owner(self):
+        """A shared slug still resolves via the owner with a valid embedding key,
+        even when the other owner's embedding key is blocked."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1", "groups/99"], read_only=True)
+        v2 = KeyValidation(2, "b", ["users/2", "groups/99"], read_only=True)
+        fp1 = store.add("KA", v1)
+        fp2 = store.add("KB", v2)
+        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp2, "BADEMB", "KISSKI_API_KEY", status="invalid")
+        with patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(side_effect=[v1, v2])):
+            targets, issues = await resolve_targets(store)
+        self.assertEqual(set(targets), {"users/1", "groups/99"})
+        self.assertEqual(targets["groups/99"]["fingerprint"], fp1)
+        self.assertNotIn("users/2", targets)
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]["kind"], "embedding_key")
+        self.assertEqual(issues[0]["fingerprint"], fp2)
+
 
 if __name__ == "__main__":
     unittest.main()
