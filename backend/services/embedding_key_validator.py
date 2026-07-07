@@ -28,6 +28,12 @@ class EmbeddingKeyValidation:
 async def validate_embedding_key(api_key: str, config: EmbeddingConfig) -> EmbeddingKeyValidation:
     """Validate `api_key` against the configured remote embedding provider."""
     key_name = config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+    if config.model_type != "remote":
+        return EmbeddingKeyValidation(
+            status="unverified",
+            key_name=key_name,
+            reason="Cannot validate an embedding key against a non-remote model config.",
+        )
     service = create_embedding_service(config, api_key=api_key)
     try:
         await service.embed_text("test")

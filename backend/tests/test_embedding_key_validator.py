@@ -43,6 +43,13 @@ class ValidateEmbeddingKeyTest(unittest.IsolatedAsyncioTestCase):
             result = await validate_embedding_key("SOMEKEY", _config())
         self.assertEqual(result.status, "unverified")
 
+    async def test_local_model_type_returns_unverified_without_testing(self):
+        local_config = EmbeddingConfig(model_type="local", model_name="some-local-model")
+        with patch("backend.services.embedding_key_validator.create_embedding_service") as mock_create:
+            result = await validate_embedding_key("IRRELEVANT", local_config)
+        mock_create.assert_not_called()
+        self.assertEqual(result.status, "unverified")
+
 
 if __name__ == "__main__":
     unittest.main()
