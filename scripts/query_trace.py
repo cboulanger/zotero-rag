@@ -44,7 +44,7 @@ def parse_args() -> argparse.Namespace:
         "--api-key",
         default=os.environ.get("ZOTERO_RAG_API_KEY", ""),
         metavar="KEY",
-        help="API key (default: $ZOTERO_RAG_API_KEY)",
+        help="Zotero API key, required for non-loopback deployments (default: $ZOTERO_RAG_API_KEY)",
     )
     parser.add_argument(
         "--top-k",
@@ -103,7 +103,7 @@ def main() -> None:
 
     headers: dict = {"Content-Type": "application/json"}
     if args.api_key:
-        headers["X-API-Key"] = args.api_key
+        headers["X-Zotero-API-Key"] = args.api_key
 
     url = args.url.rstrip("/") + "/api/query"
     print(f"POST {url}", file=sys.stderr)

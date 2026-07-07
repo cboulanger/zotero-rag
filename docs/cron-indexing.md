@@ -237,7 +237,7 @@ can be decrypted).
 
 Everything else — the registered-key count and live per-run progress — is served
 by the **authenticated** `GET /api/autoindex/status` endpoint (requires
-`X-API-Key`). It returns `keys_registered` (the number of read-only keys in the
+`X-Zotero-API-Key` on non-loopback deployments). It returns `keys_registered` (the number of read-only keys in the
 store, `0` when disabled), a `disabled_reason` when `enabled` is `false`, plus the
 last run's full status once a run has produced a status file:
 

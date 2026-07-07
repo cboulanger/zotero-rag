@@ -24,7 +24,7 @@ Full options:
 --library-ids ID [ID ...]   One or more library IDs to search (required)
 --output FILE               Write JSON to FILE instead of stdout
 --url URL                   Backend base URL (default: $ZOTERO_RAG_URL or http://localhost:8119)
---api-key KEY               API key (default: $ZOTERO_RAG_API_KEY)
+--api-key KEY               Zotero API key, required for non-loopback deployments (default: $ZOTERO_RAG_API_KEY)
 --top-k N                   Number of chunks to retrieve (default: preset value)
 --min-score F               Minimum similarity score threshold (default: preset value)
 --no-routing                Skip the routing step and go straight to semantic search

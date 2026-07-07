@@ -39,7 +39,7 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 **Backend:**
 
 - Python 3.12 with `uv` package manager
-- FastAPI for REST API and Server-Sent Events (SSE)
+- FastAPI for REST API
 - Qdrant for vector database
 - sentence-transformers for embeddings
 - transformers + bitsandbytes for local LLM inference
@@ -51,7 +51,6 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 - JavaScript (Firefox extension environment)
 - Zotero 7/8 plugin architecture
 - HTML5 + CSS3 for UI (no XUL dependency)
-- EventSource API for SSE streaming
 - IOUtils API for local file reading (remote mode upload)
 
 ---
@@ -73,13 +72,13 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 │     3. POST /api/index/document  (multipart: bytes + metadata) │
 │     4. Show progress per document                              │
 └────────────────────────────────────────────────────────────────┘
-              │  HTTP/HTTPS (configurable URL, X-API-Key auth)
+              │  HTTP/HTTPS (configurable URL, X-Zotero-API-Key auth)
               ▼
 ┌────────────────────────────────────────────────────────────────┐
 │           FastAPI Backend (local or remote server)             │
 │                                                                │
 │  POST /api/index/document                                      │
-│     → validate API key                                         │
+│     → resolve + gate caller's Zotero identity                  │
 │     → DocumentProcessor._process_attachment_bytes()            │
 │        (dedup check → extract → embed → store)                 │
 │                                                                │
@@ -92,7 +91,7 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Backend URL:** stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the Preferences pane, default `http://localhost:8119`). An API key can be configured on the backend (`API_KEY` env var) and entered in the plugin preferences.
+**Backend URL:** stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the Preferences pane, default `http://localhost:8119`). Remote (non-loopback) backends require every caller to authenticate with a personal Zotero API key, entered in the plugin preferences and stored as `extensions.zotero-rag.zoteroApiKey` — see [Security & Privacy](#security--privacy).
 
 ---
 
@@ -107,7 +106,7 @@ The backend is organized into a layered architecture with clear separation of co
 **Entry Point:** [backend/main.py](../backend/main.py)
 
 - FastAPI application setup
-- Optional API key middleware (all endpoints except `/`, `/health`, `/api/version`)
+- Zotero-key identity middleware on every `/api/*` request except `/`, `/health`, `/api/version` — see [Security & Privacy](#security--privacy)
 - Configurable CORS (`ALLOWED_ORIGINS` env var)
 - Lifespan context management
 
@@ -115,7 +114,7 @@ The backend is organized into a layered architecture with clear separation of co
 
 - `GET /api/config` - Get available presets and current configuration
 - `POST /api/config` - Update configuration settings
-- `GET /api/version` - Version compatibility checking (exempt from API key auth)
+- `GET /api/version` - Version compatibility checking (exempt from identity check)
 
 **Libraries API:** [backend/api/libraries.py](../backend/api/libraries.py)
 
@@ -134,7 +133,7 @@ The backend is organized into a layered architecture with clear separation of co
 **Document Upload API:** [backend/api/document_upload.py](../backend/api/document_upload.py)
 
 - `POST /api/libraries/{library_id}/check-indexed` — accepts a list of attachment descriptors (key, versions, MIME type); returns `needs_indexing: bool` and `reason` (`"not_indexed"` | `"version_changed"` | `"up_to_date"`) per attachment. Results are cached server-side for 5 minutes (keyed by library + attachment set). Pass `force_refresh: true` to skip reading from the cache for that batch while still writing the fresh result back (sent automatically by the plugin when `mode === "full"`). The entire library cache is invalidated after each successful document or abstract upload.
-- `POST /api/index/document` — accepts multipart form data (`file`: raw bytes, `metadata`: JSON string); validates API key, runs `DocumentProcessor._process_attachment_bytes()`, returns `DocumentUploadResult`
+- `POST /api/index/document` — accepts multipart form data (`file`: raw bytes, `metadata`: JSON string); runs `DocumentProcessor._process_attachment_bytes()`, returns `DocumentUploadResult`
 
 **Query API:** [backend/api/query.py](../backend/api/query.py)
 
@@ -232,7 +231,7 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
   - Environment variable configuration
   - Path expansion for model weights and vector DB
   - Dynamic API key handling
-  - Remote deployment settings (`api_key`, `allowed_origins`)
+  - Remote deployment settings (`authorized_group_id`, `authorized_user_ids`, `allowed_origins`)
 
 ### Zotero Plugin
 
@@ -250,11 +249,10 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 
 - Global `ZoteroRAG` object
 - Menu integration (Tools → "Ask Question")
-- Backend communication (HTTP + SSE)
+- Backend communication over HTTP, with polling for long-running async uploads
 - `backendURL` loaded from `extensions.zotero-rag.backendURL` preference
-- `apiKey` loaded from `extensions.zotero-rag.apiKey` preference
-- `getAuthHeaders(extra)` — builds `{"X-API-Key": ...}` header map when key is set
-- `addApiKeyParam(url)` — appends `?api_key=` to SSE URLs (EventSource can't set headers)
+- `zoteroApiKey` loaded from `extensions.zotero-rag.zoteroApiKey` preference (the user's personal Zotero API key)
+- `getAuthHeaders(extra)` — builds `{"X-Zotero-API-Key": ...}` header map when a key is configured
 - Library selection logic
 - Note creation with HTML formatting
 - Version compatibility checking
@@ -266,9 +264,8 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 - Question input, library selection, progress display
 - Indexing mode selection (auto/incremental/full)
 - Library metadata display (last indexed, item counts, chunk counts)
-- SSE streaming for indexing progress (API key appended as query param)
 - Operation cancellation support (abort button)
-- All `fetch()` calls include `X-API-Key` header via `plugin.getAuthHeaders()`
+- All `fetch()` calls include the `X-Zotero-API-Key` header via `plugin.getAuthHeaders()`
 - Status messages and error handling
 
 **Remote Indexer:** [plugin/src/remote_indexer.js](../plugin/src/remote_indexer.js)
@@ -287,7 +284,7 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
 - Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
-- API key configuration (`extensions.zotero-rag.apiKey`)
+- Zotero API key configuration (`extensions.zotero-rag.zoteroApiKey`), with live identity status (username + accessible library count)
 - Max concurrent queries setting
 - HTML-based preferences pane
 - Custom CSS styling: [plugin/src/preferences.css](../plugin/src/preferences.css)
@@ -325,8 +322,8 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 6. For each attachment needing upload:
    a. IOUtils.read(localFilePath) → bytes
    b. Build FormData: file bytes + JSON metadata (title, authors, year, DOI, etc.)
-   c. POST /api/index/document with X-API-Key header
-   d. Backend: validate → dedup check → _process_attachment_bytes() → store
+   c. POST /api/index/document with X-Zotero-API-Key header
+   d. Backend: resolve identity → dedup check → _process_attachment_bytes() → store
    e. Plugin updates progress display
    ↓
 7. When all attachments processed, plugin submits query
@@ -444,17 +441,19 @@ KISSKI_API_KEY=your-kisski-key
 # Qdrant vector database (optional — omit for local embedded mode)
 QDRANT_URL=http://qdrant:6333    # Set when running Qdrant as a sidecar container
 
-# Remote server deployment (optional)
-API_KEY=your-secret-key          # Required X-API-Key header when set
-ALLOWED_ORIGINS=https://myhost   # CORS allowed origins (default: *)
+# Remote server deployment (required for any non-loopback API_HOST — see
+# "Security & Privacy" below)
+AUTHORIZED_GROUP_ID=998877        # Zotero group whose members may use this server
+AUTHORIZED_USER_IDS=39226,123456  # explicit allowlist, comma-separated (OR semantics)
+ALLOWED_ORIGINS=https://myhost    # CORS allowed origins (default: *)
 ```
 
 **Plugin Preferences:**
 
 ```text
-extensions.zotero-rag.backendURL = http://localhost:8119
-extensions.zotero-rag.apiKey     = (empty for local, set for remote)
-extensions.zotero-rag.maxQueries = 5
+extensions.zotero-rag.backendURL   = http://localhost:8119
+extensions.zotero-rag.zoteroApiKey = (empty for local, set for remote)
+extensions.zotero-rag.maxQueries   = 5
 ```
 
 The `backendURL` preference is the single configuration point for server location.
@@ -532,18 +531,16 @@ The `backendURL` preference is the single configuration point for server locatio
 - Easier maintenance than legacy XUL
 - Better styling control with CSS
 
-### 7. Progress Streaming
+### 7. Progress Reporting
 
-**Decision:** Server-Sent Events (SSE)
+**Decision:** Per-document synchronous upload, with polling for long-running documents
 
 **Rationale:**
 
-- Simple unidirectional streaming
-- Native browser support (EventSource)
-- No WebSocket complexity
-- Perfect for progress updates
-
-EventSource limitation: cannot set custom headers. Worked around by supporting `?api_key=` query parameter in the SSE endpoint alongside the `X-API-Key` header.
+- Most attachments process well within a normal HTTP request/response cycle, so `POST /api/index/document` simply blocks until done and the plugin updates its progress display after each document — no persistent connection needed
+- Large or OCR-heavy documents can exceed reasonable request timeouts; `POST /api/index/document/async` returns a `task_id` immediately instead of blocking, and the plugin polls `GET /api/index/tasks/{task_id}` (every 5s) until `status: "done"`
+- Avoids the custom-header limitations of `EventSource`/SSE (which can't send request headers, forcing auth into a query string) — polling is a plain authenticated `GET` like any other endpoint
+- No WebSocket complexity for what is fundamentally one-way status reporting
 
 ### 8. Incremental Indexing
 
@@ -574,13 +571,13 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 - Enables remote server deployment without any access to the user's Zotero installation
 - Document extraction and embedding are bytes-based throughout — no filesystem assumptions
 - `_process_attachment_bytes()` core keeps the processing path uniform regardless of who delivers the bytes
-- API key is optional: local deployments work without authentication; remote deployments set `API_KEY`
+- Authentication is optional only for loopback deployments; every remote deployment requires a gated Zotero identity (see [Security & Privacy](#security--privacy))
 
 **Implementation:**
 
 - Plugin reads files via Firefox `IOUtils.read()` — available in Zotero's JS environment
 - `check-indexed` batch endpoint minimises unnecessary uploads (only changed/new attachments)
-- `X-API-Key` header for all endpoints; `?api_key=` query param for SSE (EventSource limitation)
+- `X-Zotero-API-Key` header required on all `/api/*` endpoints for non-loopback deployments
 
 ### 10. Operation Cancellation
 
@@ -677,11 +674,15 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 
 ### API Authentication
 
-- **Local mode (default):** No authentication required; backend only reachable on localhost
-- **Remote mode:** Set `API_KEY` env var on the backend to require `X-API-Key: <key>` on all requests
-  - Health check (`/`, `/health`, `/api/version`) is exempt from API key check
-  - SSE endpoint accepts key as `?api_key=` query param (EventSource API limitation)
-  - Plugin stores key in `extensions.zotero-rag.apiKey` preference
+Authentication is per-caller Zotero identity, not a single shared secret.
+
+- **Loopback mode (default):** if `API_HOST` is `localhost`/`127.0.0.1`, the server assumes a single trusted local user and skips authentication entirely — no key needed anywhere.
+- **Remote mode:** any other `API_HOST` requires every `/api/*` request (except `/`, `/health`, `/api/version`) to carry an `X-Zotero-API-Key` header with the caller's personal Zotero API key.
+  - The key must be **read-only** (the plugin's own auth to the backend never needs write access) and is validated against `api.zotero.org/keys/<key>`, with results cached per key fingerprint for a TTL to survive transient zotero.org outages.
+  - A valid key alone is not enough: the resolved identity must also pass an **access gate** — membership in the Zotero group configured via `AUTHORIZED_GROUP_ID`, and/or presence in the `AUTHORIZED_USER_IDS` allowlist (OR semantics). Otherwise the request gets 403.
+  - At least one of `AUTHORIZED_GROUP_ID` / `AUTHORIZED_USER_IDS` is **required** for a remote deployment — the server refuses to start without one.
+  - Each caller's identity also scopes which libraries they can query or index: a request is 403'd if the target library isn't among the libraries their key can read.
+  - The plugin stores the key in the `extensions.zotero-rag.zoteroApiKey` preference (set via the setup wizard or Preferences pane) and sends it as `X-Zotero-API-Key` on every request via `getAuthHeaders()`.
 
 ### CORS Configuration
 
@@ -696,7 +697,7 @@ EventSource limitation: cannot set custom headers. Worked around by supporting `
 
 ### Deployment Recommendation
 
-For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or nginx) with TLS termination. Set `API_KEY` and restrict `ALLOWED_ORIGINS`.
+For remote deployments, run the backend behind a reverse proxy (e.g., Caddy or nginx) with TLS termination. Set `AUTHORIZED_GROUP_ID` and/or `AUTHORIZED_USER_IDS` and restrict `ALLOWED_ORIGINS`.
 
 ---
 

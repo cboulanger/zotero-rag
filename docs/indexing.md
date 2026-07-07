@@ -136,7 +136,7 @@ Indexing mode is chosen by the plugin's `RemoteIndexer` and influences what it u
 
 ```text
 For each POST /api/index/document:
-1. Validate API key (if API_KEY is configured)
+1. Resolve and gate caller's Zotero identity (skipped on loopback deployments)
 2. Parse multipart form: file bytes + metadata JSON
 3. Compute SHA256 content hash
 4. Check same-library deduplication table (skip if already indexed with same hash)
@@ -350,7 +350,7 @@ Response:
 }
 ```
 
-Requires `X-API-Key` header when `API_KEY` is set on the backend.
+Requires `X-Zotero-API-Key` header on non-loopback deployments (see [architecture.md](architecture.md#api-authentication)).
 
 ## Text Processing
 

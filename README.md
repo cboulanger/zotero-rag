@@ -107,10 +107,10 @@ See [docs/container-deployment.md](docs/container-deployment.md) for full Docker
 
 ### 5. Configure the Plugin for a Remote Server
 
-If the backend runs on a remote host, open **Zotero → Settings → Zotero RAG** and set:
+The first time the plugin connects to a backend it isn't already configured for, a setup wizard walks you through three steps. You can also revisit these settings any time in **Zotero → Settings → Zotero RAG**:
 
 - **Server URL** — the full URL of the remote server (e.g. `https://rag.example.com`)
-- **API Key** — the server-side API key set during deployment (leave blank if the server has no key configured)
+- **Zotero API Key** — your own personal key from <https://www.zotero.org/settings/keys> (read-only is sufficient). A local server (`localhost`) needs none of this and skips straight past it; a remote server uses this key to identify you and check that you're authorized to use that instance (e.g. membership in a designated Zotero group). The Preferences pane shows a live status (username + accessible library count) once a valid key is entered.
 - **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI), enter the corresponding API key here so the plugin can pass it to the server
 
 ### 6. Using the Plugin
@@ -227,7 +227,7 @@ This reads the CSV, creates a `journalArticle` item in the Zotero group library 
 **Requirements:**
 
 - `OPENALEX_EMAIL` / `--email` — recommended for the OpenAlex [polite pool](https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication) (higher rate limits; no sign-up needed)
-- `ZOTERO_API_KEY` / `--api-key` — required for the `import` command; must have read+write access to the group library. Create one at <https://www.zotero.org/settings/keys>.
+- `ZOTERO_API_KEY` / `--api-key` — required for the `import` command; must have read+write access to the group library. Create one at <https://www.zotero.org/settings/keys>. This key is used only by this script — the server, cron indexing, and the plugin all use separate, read-only keys (see below).
 
 Both env vars can be set in `.env` (see `.env.dist` for the template entries). Only group libraries are supported.
 
@@ -236,14 +236,13 @@ Both env vars can be set in `.env` (see `.env.dist` for the template entries). O
 Libraries can be indexed without the Zotero desktop app or the plugin by calling the Zotero web API directly. This is useful for automated nightly jobs on headless servers.
 
 ```bash
-# Index a user library and a group library
-uv run python bin/index_libraries.py users/12345 groups/678
+uv run python bin/index_libraries.py
 
 # Force a full re-index
-uv run python bin/index_libraries.py users/12345 --mode full
+uv run python bin/index_libraries.py --mode full
 ```
 
-Requires `ZOTERO_API_KEY` in `.env`. The `/` root endpoint reports a compact `cron_indexing` summary (`enabled`, `keys_registered`); live per-run progress is served by the authenticated `GET /api/autoindex/status` endpoint.
+Indexing targets aren't passed on the command line — they come from an encrypted store of read-only Zotero API keys that users register via the plugin (Preferences → Automatic indexing) or with `uv run python bin/autoindex_add_key.py <read-only-key>`. The `/` root endpoint reports a compact `cron_indexing` summary (`enabled`, `keys_registered`); live per-run progress is served by the authenticated `GET /api/autoindex/status` endpoint.
 
 See [docs/cron-indexing.md](docs/cron-indexing.md) for cron job setup, all CLI options, and troubleshooting.
 

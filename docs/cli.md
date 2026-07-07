@@ -123,8 +123,9 @@ MODEL_PRESET=apple-silicon-kisski  # Or: see presets below
 OPENAI_API_KEY=sk-...              # Optional: for remote-openai / windows-test
 KISSKI_API_KEY=...                 # Optional: for KISSKI presets
 
-# Remote server deployments (optional)
-API_KEY=your-secret-key            # Require X-API-Key header from plugin
+# Remote server deployments (required when API_HOST is not localhost/127.0.0.1)
+AUTHORIZED_GROUP_ID=998877         # Zotero group whose members may use this server
+AUTHORIZED_USER_IDS=39226,123456   # explicit allowlist, comma-separated (OR semantics)
 ALLOWED_ORIGINS=https://myhost     # Restrict CORS (default: *)
 REQUIRE_ZOTERO=false               # Skip Zotero connectivity check
 ```
