@@ -67,6 +67,13 @@ class AutoIndexKeyStore:
         unrelated embedding key already stored on that entry — only the
         Zotero-key fields are refreshed here; any embedding_key_* fields
         already present are carried over unchanged.
+
+        A user may only have one registered Zotero key at a time: if this
+        api_key rotates them onto a new fingerprint (a different key value —
+        e.g. after regenerating their Zotero API key), any other entry
+        already registered under the same user_id is removed, after carrying
+        its embedding_key_* fields forward — the embedding key isn't tied to
+        the Zotero key and shouldn't be lost just because the Zotero key changed.
         """
         self._require_enabled()
         fp = fingerprint(api_key)
@@ -74,6 +81,16 @@ class AutoIndexKeyStore:
         with self._lock:
             data = self._load()
             existing = data.get(fp, {})
+            for other_fp, other_entry in list(data.items()):
+                if other_fp == fp or other_entry.get("user_id") != validation.user_id:
+                    continue
+                for key in (
+                    "embedding_key_ciphertext", "embedding_key_name",
+                    "embedding_key_status", "embedding_key_rate_limit_until",
+                ):
+                    if key in other_entry and key not in existing:
+                        existing[key] = other_entry[key]
+                del data[other_fp]
             entry = {
                 "ciphertext": self._fernet.encrypt(api_key.encode()).decode(),
                 "user_id": validation.user_id,
