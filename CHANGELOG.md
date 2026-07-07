@@ -1,3 +1,10 @@
+# [1.37.0](https://github.com/cboulanger/zotero-rag/compare/v1.36.2...v1.37.0) (2026-07-07)
+
+
+### Features
+
+* trigger release for auto-indexing per-user embedding keys and on-demand runs ([9a76efa](https://github.com/cboulanger/zotero-rag/commit/9a76efa2b3c60567c6f64ccb008a8f713702d605)), closes [#40](https://github.com/cboulanger/zotero-rag/issues/40)
+
 ## [1.36.2](https://github.com/cboulanger/zotero-rag/compare/v1.36.1...v1.36.2) (2026-07-07)
 
 

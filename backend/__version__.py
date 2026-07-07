@@ -1,3 +1,3 @@
 """Version information for zotero-rag backend."""
 
-__version__ = "1.36.2"
+__version__ = "1.37.0"
