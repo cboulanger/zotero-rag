@@ -572,7 +572,7 @@ class ZoteroRAGPlugin {
 	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
 		if (!container) return;
 
-		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
+		container.querySelectorAll('.service-key-row, .service-key-desc, .service-key-status').forEach(el => el.remove());
 
 		if (!requiredKeys || requiredKeys.length === 0) {
 			if (placeholder) placeholder.style.display = '';
@@ -608,6 +608,14 @@ class ZoteroRAGPlugin {
 			row.appendChild(label);
 			row.appendChild(input);
 			container.appendChild(row);
+
+			// Populated by callers (e.g. preferences.js) when the server reports this
+			// key's validation status (ok/invalid/unverified), so a rejected key is
+			// flagged right here — not only in a separate summary section elsewhere.
+			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			status.className = 'setting-description service-key-status';
+			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
+			container.appendChild(status);
 
 			if (keyInfo.description) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');

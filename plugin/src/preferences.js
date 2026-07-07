@@ -109,6 +109,34 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const serviceKeysPlaceholder = doc.getElementById('zotero-rag-service-keys-placeholder');
 
 	/**
+	 * Show a per-field validation status message directly under a service API
+	 * key's own input field — in addition to the broader Automatic Indexing
+	 * status banner — so a rejected/unverified key is visible right where the
+	 * user would look to fix it, not only in a separate section.
+	 * @param {string} keyName
+	 * @param {string|undefined} status - 'ok' | 'invalid' | 'unverified' | undefined
+	 * @param {string} [errorMessage]
+	 * @returns {void}
+	 */
+	const setServiceKeyStatus = (keyName, status, errorMessage) => {
+		const el = doc.getElementById(`zotero-rag-key-status-${keyName}`);
+		if (!el) return;
+		if (status === 'invalid') {
+			el.textContent = `✗ Rejected: ${errorMessage || 'invalid credentials'}`;
+			el.className = 'setting-description service-key-status status-error';
+		} else if (status === 'unverified') {
+			el.textContent = '⚠ Could not be verified right now; will be retried automatically.';
+			el.className = 'setting-description service-key-status status-warn';
+		} else if (status === 'ok') {
+			el.textContent = '✓ Key accepted.';
+			el.className = 'setting-description service-key-status status-ok';
+		} else {
+			el.textContent = '';
+			el.className = 'setting-description service-key-status';
+		}
+	};
+
+	/**
 	 * Re-sync the server-stored embedding key when the user edits it locally,
 	 * so the cron auto-indexer's copy stays in sync without needing to toggle
 	 * auto-indexing off and on again. autoindexToggle/setAutoindexStatus are
@@ -135,6 +163,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			}
 			/** @type {{embedding_key_status?: string, embedding_key_error?: string}} */
 			const data = await response.json();
+			setServiceKeyStatus(keyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
 			if (data.embedding_key_status === 'invalid') {
 				setAutoindexStatus(`Embedding API key rejected: ${data.embedding_key_error || 'invalid credentials'}.`, 'warn');
 			} else if (data.embedding_key_status === 'unverified') {
@@ -334,6 +363,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus('', 'ok');
 			} else {
 				const own = data.keys[0];
+				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+				if (embeddingKeyInfo) {
+					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
+				}
 				if (!own.has_embedding_key) {
 					setAutoindexStatus('Automatic indexing is enabled, but no embedding API key is configured — indexing will be skipped until you add one above.', 'warn');
 				} else if (own.embedding_key_status === 'invalid') {
@@ -356,16 +389,14 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		autoindexToggle.addEventListener('change', async () => {
 			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
 				/** @type {{api_key: string, embedding_api_key?: string}} */
 				const body = { api_key: this.zoteroApiKey };
-				if (enabling) {
-					const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
-					if (embeddingKeyInfo) {
-						const embeddingKeyValue = Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${embeddingKeyInfo.key_name}`, true) || '';
-						if (embeddingKeyValue) body.embedding_api_key = embeddingKeyValue;
-					}
+				if (enabling && embeddingKeyInfo) {
+					const embeddingKeyValue = Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${embeddingKeyInfo.key_name}`, true) || '';
+					if (embeddingKeyValue) body.embedding_api_key = embeddingKeyValue;
 				}
 				const response = await fetch(requestURL, {
 					method: enabling ? 'POST' : 'DELETE',
@@ -383,6 +414,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					const data = await response.json();
 					const count = Array.isArray(data.targets) ? data.targets.length : 0;
 					const libraryText = count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`;
+					if (embeddingKeyInfo) {
+						setServiceKeyStatus(embeddingKeyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
+					}
 					// Fail closed: only 'ok' (or an absent status, e.g. no key was submitted)
 					// gets plain success messaging. Any other truthy value — known
 					// (invalid/unverified) or a status this plugin doesn't recognize yet —
