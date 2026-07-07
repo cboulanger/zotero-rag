@@ -139,6 +139,8 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus(`Embedding API key rejected: ${data.embedding_key_error || 'invalid credentials'}.`, 'warn');
 			} else if (data.embedding_key_status === 'unverified') {
 				setAutoindexStatus('Embedding API key could not be verified right now but was saved; it will be retried on the next run.', 'warn');
+			} else if (!data.embedding_key_status) {
+				setAutoindexStatus('Embedding key field cleared; nothing was synced to the server.', 'warn');
 			} else if (data.embedding_key_status === 'ok') {
 				setAutoindexStatus('Embedding API key updated.', 'ok');
 			} else {
