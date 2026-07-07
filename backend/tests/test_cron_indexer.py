@@ -17,50 +17,68 @@ from backend.services.cron_indexer import (
 )
 
 
+def _make_target(zotero_key: str = "test-api-key", embedding_key: str = "test-emb-key",
+                  embedding_key_name: str = "TEST_API_KEY", fingerprint: str = "fp-test") -> dict:
+    return {
+        "zotero_key": zotero_key,
+        "embedding_key": embedding_key,
+        "embedding_key_name": embedding_key_name,
+        "fingerprint": fingerprint,
+    }
+
+
 def _make_indexer(
     slugs: list[str],
     tmp_dir: Path,
     mode: str = "auto",
     max_items: int | None = None,
-    rate_limit_headers: dict | None = None,
+    key_store=None,
 ) -> CronIndexer:
     """Construct a CronIndexer with mocked services and temp files."""
     import logging
     log = logging.getLogger("test_cron_indexer")
-    embedding_service = MagicMock()
-    embedding_service.get_rate_limit_info = AsyncMock(return_value=rate_limit_headers)
     vector_store = MagicMock()
     # Return None by default so _resolve_mode skips the completeness check cleanly.
     vector_store.get_library_metadata.return_value = None
     return CronIndexer(
-        targets={s: "test-api-key" for s in slugs},
+        targets={s: _make_target(fingerprint=f"fp-{s}") for s in slugs},
         vector_store=vector_store,
-        embedding_service=embedding_service,
         lock_file=tmp_dir / "cron.lock",
         status_file=tmp_dir / "cron_status.json",
         log=log,
         mode=mode,
         max_items=max_items,
+        key_store=key_store,
     )
+
+
+def _patch_embedding_service():
+    """Patch create_embedding_service to return a mock with no rate-limit info."""
+    mock_embedding = MagicMock()
+    mock_embedding.get_rate_limit_info = AsyncMock(return_value=None)
+    patcher = patch("backend.services.cron_indexer.create_embedding_service", return_value=mock_embedding)
+    return patcher
 
 
 def test_index_slug_uses_per_slug_key():
     import tempfile, logging
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import MagicMock
     from pathlib import Path
     from backend.services.cron_indexer import CronIndexer
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        emb = MagicMock(); emb.get_rate_limit_info = AsyncMock(return_value=None)
         vs = MagicMock(); vs.get_library_metadata.return_value = None
         indexer = CronIndexer(
-            targets={"users/12345": "KEY_A", "groups/678": "KEY_B"},
-            vector_store=vs, embedding_service=emb,
+            targets={
+                "users/12345": _make_target(zotero_key="KEY_A", fingerprint="fp-a"),
+                "groups/678": _make_target(zotero_key="KEY_B", fingerprint="fp-b"),
+            },
+            vector_store=vs,
             lock_file=tmp / "l", status_file=tmp / "s.json",
             log=logging.getLogger("t"),
         )
         assert sorted(indexer.slugs) == ["groups/678", "users/12345"]
-        assert indexer.targets["groups/678"] == "KEY_B"
+        assert indexer.targets["groups/678"]["zotero_key"] == "KEY_B"
 
 
 class TestParseSlug(unittest.TestCase):
@@ -105,14 +123,12 @@ class TestLockFile(unittest.TestCase):
 
     def test_acquire_lock_fails_if_alive(self):
         indexer = _make_indexer([], self.tmp)
-        # Write our own PID as a "running" process
         indexer.lock_file.write_text(str(os.getpid()))
         with self.assertRaises(AlreadyRunningError):
             indexer._acquire_lock()
 
     def test_acquire_lock_takes_over_dead_process(self):
         indexer = _make_indexer([], self.tmp)
-        # Write a PID that definitely does not exist
         indexer.lock_file.write_text("99999999")
         with patch("backend.services.cron_indexer.is_process_alive", return_value=False):
             stale = indexer._acquire_lock()  # should not raise
@@ -168,14 +184,13 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         fake_stats = {"items_processed": 10, "chunks_added": 50, "mode": "full"}
 
         with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
-             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor:
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
 
-            # Set up the web API context manager mock
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
             MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            # Set up DocumentProcessor.index_library
             mock_proc_instance = MagicMock()
             mock_proc_instance.index_library = AsyncMock(return_value=fake_stats)
             MockProcessor.return_value = mock_proc_instance
@@ -205,7 +220,8 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         indexer = _make_indexer(["users/1"], self.tmp)
 
         with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
-             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor:
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -245,7 +261,8 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
 
         with patch("backend.services.cron_indexer.is_process_alive", return_value=False), \
              patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
-             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor:
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
 
             mock_api_instance = AsyncMock()
             mock_api_instance.get_library_item_count = AsyncMock(return_value=0)
@@ -267,8 +284,6 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         indexer = _make_indexer(["users/1"], self.tmp)
         indexer.progress_update_interval = 1  # write on every item
 
-        progress_calls: list[tuple] = []
-
         async def fake_index_library(**kwargs):
             cb = kwargs.get("progress_callback")
             if cb:
@@ -276,7 +291,8 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
             return {"items_processed": 20, "chunks_added": 100}
 
         with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
-             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor:
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -335,147 +351,98 @@ class TestReadLiveStatus(unittest.TestCase):
         self.assertNotIn("crashed", result)
 
 
-class TestRateLimitExhaustedHandling(unittest.IsolatedAsyncioTestCase):
-    """CronIndexer must store rate-limit expiry in status and exit early on next run."""
+class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
+    """A single user's invalid/rate-limited embedding key must not affect other users."""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
-    async def test_exhausted_error_writes_rate_limit_until_and_skips_remaining(self):
-        """When EmbeddingRateLimitExhaustedError is raised mid-run, remaining slugs are skipped."""
+    async def test_auth_error_isolated_to_one_slug(self):
+        """An EmbeddingAuthenticationError for one slug only errors that slug."""
+        from backend.services.embeddings import EmbeddingAuthenticationError
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+
+            async def fake_index_library(**kwargs):
+                if kwargs.get("library_name") == "users/1":
+                    raise EmbeddingAuthenticationError("embedding API rejected credentials (HTTP 401)")
+                return {"items_processed": 5, "chunks_added": 10}
+
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            result = await indexer.run()
+
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+        self.assertIn("authentication", status["slugs"]["users/1"]["error"].lower())
+        # The other user's slug must still succeed, not be aborted.
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        self.assertEqual(result["libraries"], ["users/1", "users/2"])
+        key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid")
+
+    async def test_rate_limit_exhausted_isolated_to_one_slug(self):
+        """An EmbeddingRateLimitExhaustedError for one slug only skips that slug."""
         from datetime import timedelta
         from backend.services.embeddings import EmbeddingRateLimitExhaustedError
-
         available_at = datetime.now(timezone.utc) + timedelta(hours=2)
-        exc = EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
 
-        indexer = _make_indexer(["users/1", "users/2"], self.tmp)
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
 
-        async def fail_on_first(slug_info, status):
-            if slug_info.slug == "users/1":
-                raise exc
-            return {"items_processed": 5, "chunks_added": 10}
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        indexer._index_slug = fail_on_first
-        await indexer.run()
+            mock_proc_instance = MagicMock()
 
-        status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertIn("embedding_rate_limit_until", status)
-        stored = datetime.fromisoformat(status["embedding_rate_limit_until"])
-        self.assertAlmostEqual(
-            stored.timestamp(), available_at.timestamp(), delta=2
-        )
-        # The failing slug itself must also be marked skipped (not errored)
+            async def fake_index_library(**kwargs):
+                if kwargs.get("library_name") == "users/1":
+                    raise EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)
+                return {"items_processed": 5, "chunks_added": 10}
+
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
+        status = indexer._read_status()
         self.assertEqual(status["slugs"]["users/1"]["status"], "skipped")
-        # Second slug must be skipped, not errored
-        self.assertEqual(status["slugs"]["users/2"]["status"], "skipped")
-        self.assertEqual(
-            status["slugs"]["users/2"].get("skip_reason"), "embedding_rate_limit"
+        self.assertEqual(status["slugs"]["users/1"]["skip_reason"], "embedding_rate_limit")
+        # The other user's slug must still succeed, not be skipped.
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        key_store.set_embedding_key_status.assert_called_once_with(
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
         )
 
-    async def test_rate_limit_headers_persisted_to_status_after_successful_slug(self):
-        """Rate-limit headers returned by the embedding service are saved to cron_status.json."""
-        headers = {"x-ratelimit-remaining-requests": "42", "x-ratelimit-limit-requests": "100"}
-        indexer = _make_indexer(["users/1"], self.tmp, rate_limit_headers=headers)
+    async def test_rate_limit_headers_persisted_per_slug(self):
+        """Rate-limit headers from a slug's own embedding service are saved to status."""
+        headers = {"x-ratelimit-remaining-requests": "42"}
+        indexer = _make_indexer(["users/1"], self.tmp)
 
         async def dummy_index(slug_info, status):
-            return {"items_processed": 1, "chunks_added": 2}
+            return {"items_processed": 1, "chunks_added": 2, "rate_limit_headers": headers}
 
         indexer._index_slug = dummy_index
         await indexer.run()
 
         status = json.loads((self.tmp / "cron_status.json").read_text())
         self.assertEqual(status.get("last_rate_limit_headers"), headers)
-
-    async def test_rate_limit_headers_persisted_to_status_on_exhausted_error(self):
-        """Rate-limit headers are saved to cron_status.json even when quota is exhausted."""
-        from datetime import timedelta
-        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
-
-        available_at = datetime.now(timezone.utc) + timedelta(hours=2)
-        exc = EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)
-        headers = {"x-ratelimit-remaining-requests": "0", "x-ratelimit-limit-requests": "100"}
-        indexer = _make_indexer(["users/1"], self.tmp, rate_limit_headers=headers)
-
-        async def raise_exc(slug_info, status):
-            raise exc
-
-        indexer._index_slug = raise_exc
-        await indexer.run()
-
-        status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertIn("embedding_rate_limit_until", status)
-        self.assertEqual(status.get("last_rate_limit_headers"), headers)
-
-    async def test_early_exit_when_rate_limit_still_active(self):
-        """run() exits immediately if cron_status.json has a future embedding_rate_limit_until."""
-        from datetime import timedelta
-        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        status_data = {"embedding_rate_limit_until": future}
-        (self.tmp / "cron_status.json").write_text(json.dumps(status_data))
-
-        indexer = _make_indexer(["users/1"], self.tmp)
-        _index_slug_called = []
-
-        async def track_call(slug_info, status):
-            _index_slug_called.append(slug_info.slug)
-            return {"items_processed": 0, "chunks_added": 0}
-
-        indexer._index_slug = track_call
-        result = await indexer.run()
-
-        self.assertEqual(_index_slug_called, [], "Should not index any slugs while rate-limited")
-        self.assertIn("skipped", result)
-
-    async def test_no_early_exit_when_rate_limit_expired(self):
-        """run() proceeds normally if embedding_rate_limit_until is in the past."""
-        from datetime import timedelta
-        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        status_data = {"embedding_rate_limit_until": past}
-        (self.tmp / "cron_status.json").write_text(json.dumps(status_data))
-
-        indexer = _make_indexer(["users/1"], self.tmp)
-        _index_slug_called = []
-
-        async def track_call(slug_info, status):
-            _index_slug_called.append(slug_info.slug)
-            return {"items_processed": 3, "chunks_added": 6}
-
-        indexer._index_slug = track_call
-        await indexer.run()
-
-        self.assertEqual(_index_slug_called, ["users/1"])
-
-
-class TestEmbeddingAuthErrorHandling(unittest.IsolatedAsyncioTestCase):
-    """An invalid embedding API key must surface as an error in cron status, not a silent success."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
-
-    async def test_auth_error_marks_slugs_errored(self):
-        """When EmbeddingAuthenticationError is raised, the slug is marked errored in status."""
-        from backend.services.embeddings import EmbeddingAuthenticationError
-
-        exc = EmbeddingAuthenticationError("embedding API rejected credentials (HTTP 401)")
-        indexer = _make_indexer(["users/1", "users/2"], self.tmp)
-
-        async def fail_on_first(slug_info, status):
-            if slug_info.slug == "users/1":
-                raise exc
-            return {"items_processed": 5, "chunks_added": 10}
-
-        indexer._index_slug = fail_on_first
-        await indexer.run()
-
-        status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertIn("embedding_auth_error", status)
-        # The failing slug and any not-yet-started slug must be marked errored.
-        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
-        self.assertEqual(status["slugs"]["users/2"]["status"], "error")
-        self.assertIn("authentication", status["slugs"]["users/1"]["error"].lower())
-        # The whole run must not be marked as still running.
-        self.assertFalse(status["running"])
+        # The synthetic key must not leak into the per-slug status entry.
+        self.assertNotIn("rate_limit_headers", status["slugs"]["users/1"])
 
 
 class TestResolveMode(unittest.IsolatedAsyncioTestCase):

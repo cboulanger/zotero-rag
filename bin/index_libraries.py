@@ -81,7 +81,7 @@ async def _main(argv: list[str] | None = None) -> int:
 
     # Import after path setup
     from backend.config.settings import get_settings
-    from backend.dependencies import make_embedding_service, make_vector_store
+    from backend.dependencies import make_vector_store
     from backend.services.cron_indexer import AlreadyRunningError, CronIndexer
 
     settings = get_settings()
@@ -117,17 +117,16 @@ async def _main(argv: list[str] | None = None) -> int:
 
     try:
         vector_store = make_vector_store()
-        embedding_service = make_embedding_service()
 
         indexer = CronIndexer(
             targets=targets,
             vector_store=vector_store,
-            embedding_service=embedding_service,
             lock_file=lock_file,
             status_file=status_file,
             log=log,
             mode=args.mode,
             max_items=args.max_items,
+            key_store=store,
         )
         indexer.key_issues = key_issues
         stats = await indexer.run()

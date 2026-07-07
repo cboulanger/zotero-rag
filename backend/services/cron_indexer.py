@@ -24,12 +24,14 @@ from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from backend.api.public_query import slug_to_backend_id
+from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
+from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
-    EmbeddingService,
     EmbeddingAuthenticationError,
     EmbeddingRateLimitExhaustedError,
+    create_embedding_service,
 )
 from backend.zotero.web_api import ZoteroWebAPI
 
@@ -103,28 +105,31 @@ class CronIndexer:
 
     def __init__(
         self,
-        targets: dict[str, str],
+        targets: dict[str, dict],
         vector_store: VectorStore,
-        embedding_service: EmbeddingService,
         lock_file: Path,
         status_file: Path,
         log: logging.Logger,
         mode: Literal["auto", "incremental", "full"] = "auto",
         max_items: Optional[int] = None,
         progress_update_interval: int = 10,
+        key_store: Optional[AutoIndexKeyStore] = None,
     ):
-        # targets maps each slug ("users/12345" or "groups/678") to the
-        # read-only Zotero web API key used to index that specific library.
+        # targets maps each slug ("users/12345" or "groups/678") to a dict
+        # {"zotero_key", "embedding_key", "embedding_key_name", "fingerprint"} —
+        # the fingerprint identifies which stored auto-index entry owns this
+        # slug, so a per-user embedding key failure can be recorded back onto
+        # that entry via key_store.
         self.targets = targets
         self.slugs = list(targets.keys())
         self.vector_store = vector_store
-        self.embedding_service = embedding_service
         self.lock_file = lock_file
         self.status_file = status_file
         self.log = log
         self.mode = mode
         self.max_items = max_items
         self.progress_update_interval = progress_update_interval
+        self.key_store = key_store
         # Pruned-key issues from re-validation; set by the caller before run().
         self.key_issues: list[dict] = []
         # Slugs whose previous run was interrupted (stale lock takeover); set in run().
@@ -230,32 +235,7 @@ class CronIndexer:
         Raises AlreadyRunningError if another instance is alive.
         """
         # Read before acquiring the lock — only the indexer writes this file, so no race risk.
-        # Exit early if a previous run stored a future rate-limit expiry.
         existing = self._read_status()
-        rate_limit_until_str = existing.get("embedding_rate_limit_until")
-        if rate_limit_until_str:
-            try:
-                rate_limit_until = datetime.fromisoformat(rate_limit_until_str)
-                if rate_limit_until.tzinfo is None:
-                    rate_limit_until = rate_limit_until.replace(tzinfo=timezone.utc)
-                if rate_limit_until > datetime.now(timezone.utc):
-                    remaining = (rate_limit_until - datetime.now(timezone.utc)).total_seconds()
-                    self.log.warning(
-                        "Embedding service rate-limited until %s (%.0f s remaining). "
-                        "Skipping this run.",
-                        rate_limit_until_str,
-                        remaining,
-                    )
-                    return {
-                        "items_processed": 0,
-                        "chunks_added": 0,
-                        "libraries": [],
-                        "skipped": "embedding_rate_limit",
-                    }
-            except ValueError:
-                self.log.warning(
-                    "Invalid embedding_rate_limit_until in status: %r", rate_limit_until_str
-                )
 
         slug_infos = [self.parse_slug(s) for s in self.slugs]
 
@@ -304,7 +284,7 @@ class CronIndexer:
 
                 slug_stats = await self._index_slug(slug_info, status)
 
-                rate_limit_headers = await self.embedding_service.get_rate_limit_info()
+                rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:
                     status["last_rate_limit_headers"] = rate_limit_headers
                 status["slugs"][slug_info.slug].update({
@@ -317,41 +297,6 @@ class CronIndexer:
                 total_stats["items_processed"] += slug_stats.get("items_processed", 0)
                 total_stats["chunks_added"] += slug_stats.get("chunks_added", 0)
                 total_stats["libraries"].append(slug_info.slug)
-
-        except EmbeddingAuthenticationError as exc:
-            # Invalid/expired embedding API key. Affects every slug, and retrying
-            # won't help until the key is fixed — surface it as an error rather than
-            # letting the run silently "complete" with zero chunks.
-            self.log.error(
-                "Embedding API authentication failed: %s. "
-                "Check the embedding API key; no items can be indexed until it is fixed.",
-                exc,
-            )
-            status["embedding_auth_error"] = str(exc)
-            for si in slug_infos:
-                if status["slugs"][si.slug].get("status") in ("pending", "indexing"):
-                    status["slugs"][si.slug]["status"] = "error"
-                    status["slugs"][si.slug]["error"] = (
-                        f"Embedding API authentication failed: {exc}"
-                    )
-            # Do not re-raise — the error is surfaced via the status file; retrying
-            # within this process would only repeat the failure.
-
-        except EmbeddingRateLimitExhaustedError as exc:
-            self.log.error(
-                "Embedding quota exhausted: %s. Service available again at %s.",
-                exc,
-                exc.available_at.isoformat(),
-            )
-            status["embedding_rate_limit_until"] = exc.available_at.isoformat()
-            rate_limit_headers = await self.embedding_service.get_rate_limit_info()
-            if rate_limit_headers:
-                status["last_rate_limit_headers"] = rate_limit_headers
-            for si in slug_infos:
-                if status["slugs"][si.slug].get("status") in ("pending", "indexing"):
-                    status["slugs"][si.slug]["status"] = "skipped"
-                    status["slugs"][si.slug]["skip_reason"] = "embedding_rate_limit"
-            # Do not re-raise — quota exhaustion is an expected operational condition.
 
         except Exception as exc:
             self.log.error("Fatal error during cron indexing: %s", exc, exc_info=True)
@@ -420,7 +365,8 @@ class CronIndexer:
 
     async def _index_slug(self, slug_info: SlugInfo, status: dict) -> dict:
         """Index a single library slug. Returns stats dict."""
-        web_api = ZoteroWebAPI(api_key=self.targets[slug_info.slug])
+        target = self.targets[slug_info.slug]
+        web_api = ZoteroWebAPI(api_key=target["zotero_key"])
         counter = {"n": 0}  # mutable counter for closure
 
         def progress_callback(current: int, total: int, chunks_added: int) -> None:
@@ -432,12 +378,15 @@ class CronIndexer:
             if counter["n"] % self.progress_update_interval == 0:
                 self._write_status(status)
 
+        preset = get_settings().get_hardware_preset()
+        embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
+
         try:
             async with web_api:
                 mode = await self._resolve_mode(slug_info, web_api)
                 processor = DocumentProcessor(
                     zotero_client=web_api,  # type: ignore[arg-type]  # duck-typed
-                    embedding_service=self.embedding_service,
+                    embedding_service=embedding_service,
                     vector_store=self.vector_store,
                 )
                 stats = await processor.index_library(
@@ -458,9 +407,31 @@ class CronIndexer:
                 "items_processed": stats.get("items_processed", 0),
                 "chunks_added": stats.get("chunks_added", 0),
                 "last_update": datetime.now(timezone.utc).isoformat(),
+                "rate_limit_headers": await embedding_service.get_rate_limit_info(),
             }
-        except (EmbeddingRateLimitExhaustedError, EmbeddingAuthenticationError):
-            raise  # let run() handle quota exhaustion / auth failure centrally
+        except EmbeddingAuthenticationError as exc:
+            fp = target.get("fingerprint")
+            if fp and self.key_store:
+                self.key_store.set_embedding_key_status(fp, "invalid")
+            self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
+            error_message = f"Embedding API authentication failed: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except EmbeddingRateLimitExhaustedError as exc:
+            fp = target.get("fingerprint")
+            if fp and self.key_store:
+                self.key_store.set_embedding_key_status(
+                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat()
+                )
+            self.log.warning(
+                "Embedding quota exhausted for %s: available again at %s", slug_info.slug, exc.available_at
+            )
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = "embedding_rate_limit"
+            self._write_status(status)
+            return {"status": "skipped", "skip_reason": "embedding_rate_limit"}
         except Exception as exc:
             self.log.error("Error indexing %s: %s", slug_info.slug, exc, exc_info=True)
             status["slugs"][slug_info.slug]["status"] = "error"
