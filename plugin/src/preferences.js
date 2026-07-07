@@ -20,6 +20,33 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const zoteroApiKeyStatus = doc.getElementById('zotero-rag-zotero-api-key-status');
 
 	/**
+	 * Render `el`'s content as a bold, colored icon (✓/✗/⚠) followed by a text
+	 * message. A plain "✓ "/"✗ " text prefix at 12px is easy to miss, so the
+	 * icon itself is rendered larger/bolder via a dedicated .status-icon span
+	 * instead of relying on the character alone for visibility.
+	 * @param {HTMLElement|null} el
+	 * @param {string|null} symbol - icon character, or null/empty to clear with no message
+	 * @param {string} iconClass - e.g. 'status-icon-ok'
+	 * @param {string} text
+	 * @param {string} className - full className to apply to el (caller controls all classes)
+	 * @returns {void}
+	 */
+	const setIconStatus = (el, symbol, iconClass, text, className) => {
+		if (!el) return;
+		el.textContent = '';
+		if (symbol) {
+			const icon = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			icon.className = `status-icon ${iconClass}`;
+			icon.textContent = symbol;
+			el.appendChild(icon);
+			el.appendChild(doc.createTextNode(` ${text}`));
+		} else if (text) {
+			el.textContent = text;
+		}
+		el.className = className;
+	};
+
+	/**
 	 * Validate the currently-configured Zotero API key against the backend
 	 * and show the result in the status line below the field. Also refreshes
 	 * the auto-indexing checkbox, since its availability depends on this key.
@@ -41,16 +68,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 		try {
 			const result = await this.checkZoteroIdentity(this.zoteroApiKey);
-			if (result.loopback) {
-				zoteroApiKeyStatus.textContent = '✓ Key accepted (this server does not require Zotero-key authentication).';
-			} else {
-				const count = Array.isArray(result.targets) ? result.targets.length : 0;
-				zoteroApiKeyStatus.textContent = `✓ Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
-			}
-			zoteroApiKeyStatus.className = 'setting-description status-ok';
+			const text = result.loopback
+				? 'Key accepted (this server does not require Zotero-key authentication).'
+				: (() => {
+					const count = Array.isArray(result.targets) ? result.targets.length : 0;
+					return `Authenticated as ${result.username} — ${count} librar${count === 1 ? 'y' : 'ies'} accessible.`;
+				})();
+			setIconStatus(zoteroApiKeyStatus, '✓', 'status-icon-ok', text, 'setting-description status-ok');
 		} catch (e) {
-			zoteroApiKeyStatus.textContent = `✗ ${e instanceof Error ? e.message : String(e)}`;
-			zoteroApiKeyStatus.className = 'setting-description status-error';
+			setIconStatus(zoteroApiKeyStatus, '✗', 'status-icon-error',
+				e instanceof Error ? e.message : String(e), 'setting-description status-error');
 		}
 		await refreshAutoindexToggle();
 	};
@@ -108,15 +135,86 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const serviceKeysContainer = doc.getElementById('zotero-rag-service-keys-container');
 	const serviceKeysPlaceholder = doc.getElementById('zotero-rag-service-keys-placeholder');
 
+	/**
+	 * Show a per-field validation status message directly under a service API
+	 * key's own input field — in addition to the broader Automatic Indexing
+	 * status banner — so a rejected/unverified key is visible right where the
+	 * user would look to fix it, not only in a separate section.
+	 * @param {string} keyName
+	 * @param {string|undefined} status - 'ok' | 'invalid' | 'unverified' | undefined
+	 * @param {string} [errorMessage]
+	 * @returns {void}
+	 */
+	const setServiceKeyStatus = (keyName, status, errorMessage) => {
+		const el = doc.getElementById(`zotero-rag-key-status-${keyName}`);
+		if (!el) return;
+		if (status === 'invalid') {
+			setIconStatus(el, '✗', 'status-icon-error', `Rejected: ${errorMessage || 'invalid credentials'}`,
+				'service-key-status status-error');
+		} else if (status === 'unverified') {
+			setIconStatus(el, '⚠', 'status-icon-warn', 'Could not be verified right now; will be retried automatically.',
+				'service-key-status status-warn');
+		} else if (status === 'ok') {
+			setIconStatus(el, '✓', 'status-icon-ok', 'Key accepted.',
+				'service-key-status status-ok');
+		} else {
+			setIconStatus(el, null, '', '', 'service-key-status');
+		}
+	};
+
+	/**
+	 * Re-sync the server-stored embedding key when the user edits it locally,
+	 * so the cron auto-indexer's copy stays in sync without needing to toggle
+	 * auto-indexing off and on again. autoindexToggle/setAutoindexStatus are
+	 * declared further down in this same function but are safe to reference
+	 * here since this callback only runs later, after user interaction.
+	 * @param {{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}} keyInfo
+	 * @param {string} value
+	 * @returns {Promise<void>}
+	 */
+	const onServiceKeyChange = async (keyInfo, value) => {
+		if (!keyInfo.required_for.includes('indexing')) return;
+		if (!autoindexToggle || !autoindexToggle.checked) return;
+		setAutoindexStatus('Updating embedding API key...', 'ok');
+		try {
+			const response = await fetch(`${this.backendURL}/api/autoindex/keys`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ api_key: this.zoteroApiKey, embedding_api_key: value }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				setAutoindexStatus(`Error updating embedding API key: ${err.detail || response.status}`, 'error');
+				return;
+			}
+			/** @type {{embedding_key_status?: string, embedding_key_error?: string}} */
+			const data = await response.json();
+			setServiceKeyStatus(keyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
+			if (data.embedding_key_status === 'invalid') {
+				setAutoindexStatus(`Embedding API key rejected: ${data.embedding_key_error || 'invalid credentials'}.`, 'warn');
+			} else if (data.embedding_key_status === 'unverified') {
+				setAutoindexStatus('Embedding API key could not be verified right now but was saved; it will be retried on the next run.', 'warn');
+			} else if (!data.embedding_key_status) {
+				setAutoindexStatus('Embedding key field cleared; nothing was synced to the server.', 'warn');
+			} else if (data.embedding_key_status === 'ok') {
+				setAutoindexStatus('Embedding API key updated.', 'ok');
+			} else {
+				setAutoindexStatus(`Embedding API key updated, but returned an unexpected status "${data.embedding_key_status}".`, 'warn');
+			}
+		} catch (e) {
+			setAutoindexStatus(`Error updating embedding API key: ${e}`, 'error');
+		}
+	};
+
 	// Render from cache immediately so fields appear without needing a server round-trip
 	try {
 		const cached = Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]';
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, JSON.parse(cached));
+		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, JSON.parse(cached), onServiceKeyChange);
 	} catch (_) {}
 
 	// Refresh from server in background and re-render if the list has changed
 	this.fetchRequiredApiKeys().then(() =>
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys)
+		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange)
 	);
 
 	// Library visibility section
@@ -247,10 +345,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 
 	/**
 	 * @param {string} message
+	 * @param {'ok'|'warn'|'error'} [level='ok']
 	 * @returns {void}
 	 */
-	const setAutoindexStatus = (message) => {
-		if (autoindexStatus) autoindexStatus.textContent = message;
+	const setAutoindexStatus = (message, level = 'ok') => {
+		if (!autoindexStatus) return;
+		autoindexStatus.textContent = message;
+		autoindexStatus.className = `setting-description status-${level}`;
 	};
 
 	/**
@@ -267,7 +368,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		if (!this.zoteroApiKey) {
 			autoindexToggle.checked = false;
 			autoindexToggle.disabled = true;
-			setAutoindexStatus('Configure your Zotero API key above first.');
+			setAutoindexStatus('Configure your Zotero API key above first.', 'warn');
 			return;
 		}
 		try {
@@ -277,17 +378,36 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			if (!response.ok) {
 				autoindexToggle.disabled = true;
 				const err = await response.json().catch(() => ({}));
-				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.');
+				setAutoindexStatus(err.detail || 'Auto-indexing is not available on this server.', 'error');
 				return;
 			}
-			/** @type {{keys: Array<unknown>}} */
+			/** @type {{keys: Array<{has_embedding_key?: boolean, embedding_key_status?: string}>}} */
 			const data = await response.json();
 			autoindexToggle.disabled = false;
 			autoindexToggle.checked = Array.isArray(data.keys) && data.keys.length > 0;
-			setAutoindexStatus(autoindexToggle.checked ? 'Automatic indexing is enabled.' : '');
+			if (!autoindexToggle.checked) {
+				setAutoindexStatus('', 'ok');
+			} else {
+				const own = data.keys[0];
+				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+				if (embeddingKeyInfo) {
+					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
+				}
+				if (!own.has_embedding_key) {
+					setAutoindexStatus('Automatic indexing is enabled, but no embedding API key is configured — indexing will be skipped until you add one above.', 'warn');
+				} else if (own.embedding_key_status === 'invalid') {
+					setAutoindexStatus('Automatic indexing is enabled, but your embedding API key was rejected — indexing will be skipped until you add a valid key above.', 'warn');
+				} else if (own.embedding_key_status === 'unverified') {
+					setAutoindexStatus('Automatic indexing is enabled. Your embedding API key could not be verified yet; it will be retried on the next run.', 'warn');
+				} else if (own.embedding_key_status === 'ok') {
+					setAutoindexStatus('Automatic indexing is enabled.', 'ok');
+				} else {
+					setAutoindexStatus(`Automatic indexing is enabled, but your embedding key has an unexpected status "${own.embedding_key_status}".`, 'warn');
+				}
+			}
 		} catch (e) {
 			autoindexToggle.disabled = true;
-			setAutoindexStatus(`Error: ${e}`);
+			setAutoindexStatus(`Error: ${e}`, 'error');
 		}
 	};
 
@@ -295,33 +415,65 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		autoindexToggle.addEventListener('change', async () => {
 			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
+			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
+				/** @type {{api_key: string, embedding_api_key?: string}} */
+				const body = { api_key: this.zoteroApiKey };
+				if (enabling && embeddingKeyInfo) {
+					const embeddingKeyValue = Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${embeddingKeyInfo.key_name}`, true) || '';
+					if (embeddingKeyValue) body.embedding_api_key = embeddingKeyValue;
+				}
 				const response = await fetch(requestURL, {
 					method: enabling ? 'POST' : 'DELETE',
 					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ api_key: this.zoteroApiKey }),
+					body: JSON.stringify(body),
 				});
 				if (!response.ok) {
 					const err = await response.json().catch(() => ({}));
-					setAutoindexStatus(`Error: ${err.detail || response.status}`);
+					setAutoindexStatus(`Error: ${err.detail || response.status}`, 'error');
 					autoindexToggle.checked = !enabling;
 					return;
 				}
 				if (enabling) {
-					/** @type {{targets: string[]}} */
+					/** @type {{targets: string[], embedding_key_status?: string, embedding_key_error?: string}} */
 					const data = await response.json();
 					const count = Array.isArray(data.targets) ? data.targets.length : 0;
-					setAutoindexStatus(count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`);
+					const libraryText = count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`;
+					if (embeddingKeyInfo) {
+						setServiceKeyStatus(embeddingKeyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
+					}
+					// Fail closed: only 'ok' (or an absent status, e.g. no key was submitted)
+					// gets plain success messaging. Any other truthy value — known
+					// (invalid/unverified) or a status this plugin doesn't recognize yet —
+					// must surface a warning rather than silently imply success.
+					if (data.embedding_key_status === 'invalid') {
+						setAutoindexStatus(`${libraryText} Warning: your embedding API key was rejected (${data.embedding_key_error || 'invalid credentials'}) — indexing will be skipped until you add a valid key.`, 'warn');
+					} else if (data.embedding_key_status === 'unverified') {
+						setAutoindexStatus(`${libraryText} Your embedding API key could not be verified right now but was saved; it will be retried on the next run.`, 'warn');
+					} else if (!data.embedding_key_status) {
+						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured above — indexing will be skipped until you add one.`, 'warn');
+					} else if (data.embedding_key_status === 'ok') {
+						setAutoindexStatus(libraryText, 'ok');
+					} else {
+						setAutoindexStatus(`${libraryText} Warning: unexpected embedding key status "${data.embedding_key_status}" — check your embedding API key configuration.`, 'warn');
+					}
 				} else {
-					setAutoindexStatus('Auto-indexing disabled.');
+					setAutoindexStatus('Auto-indexing disabled.', 'ok');
 				}
 				this.invalidateAutoIndexedLibraryIds();
 				populateLibraryVisibilityList();
 			} catch (e) {
-				setAutoindexStatus(`Error: ${e}`);
+				setAutoindexStatus(`Error: ${e}`, 'error');
 				autoindexToggle.checked = !enabling;
 			}
+		});
+	}
+
+	const autoindexMonitorButton = doc.getElementById('zotero-rag-autoindex-monitor');
+	if (autoindexMonitorButton) {
+		autoindexMonitorButton.addEventListener('click', () => {
+			this.openAutoindexStatusDialog(_window);
 		});
 	}
 

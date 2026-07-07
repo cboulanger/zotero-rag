@@ -68,6 +68,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Skip lock check (manual override for stuck processes).",
     )
     parser.add_argument(
+        "--fingerprint",
+        metavar="FP",
+        default=None,
+        help="Restrict indexing to the auto-index entry with this fingerprint "
+             "(used by the on-demand /api/autoindex/run trigger).",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -76,12 +83,33 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _filter_targets(targets: dict, fp: str | None) -> dict:
+    """Restrict targets to those owned by fp, if given; otherwise return them unchanged."""
+    if not fp:
+        return targets
+    return {slug: t for slug, t in targets.items() if t["fingerprint"] == fp}
+
+
+def _clear_lock_files(lock_file: Path, log: logging.Logger) -> None:
+    """Remove lock_file and its OS-lock companion (see CronIndexer._acquire_lock).
+
+    The real mutual-exclusion lock lives on the ".flock" companion, not
+    lock_file itself — removing only lock_file would leave a held lock
+    untouched, so --force would no longer actually override a stuck one.
+    """
+    flock_path = lock_file.with_name(lock_file.name + ".flock")
+    for path in (lock_file, flock_path):
+        if path.exists():
+            log.warning("--force: removing existing lock file %s.", path)
+            path.unlink(missing_ok=True)
+
+
 async def _main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     # Import after path setup
     from backend.config.settings import get_settings
-    from backend.dependencies import make_embedding_service, make_vector_store
+    from backend.dependencies import make_vector_store
     from backend.services.cron_indexer import AlreadyRunningError, CronIndexer
 
     settings = get_settings()
@@ -102,6 +130,11 @@ async def _main(argv: list[str] | None = None) -> int:
     for issue in key_issues:
         log.warning("Key pruned for user %s: %s", issue.get("user"), issue.get("reason"))
 
+    targets = _filter_targets(targets, args.fingerprint)
+    if args.fingerprint and not targets:
+        log.error("No targets for fingerprint %s; nothing to index for this user.", args.fingerprint)
+        return 1
+
     if not targets:
         log.error("No valid auto-index keys found. Submit a read-only key via the plugin.")
         return 1
@@ -111,23 +144,21 @@ async def _main(argv: list[str] | None = None) -> int:
     lock_file = settings.data_path / "system" / "cron_indexer.lock"
     status_file = settings.data_path / "system" / "cron_status.json"
 
-    if args.force and lock_file.exists():
-        log.warning("--force: removing existing lock file.")
-        lock_file.unlink(missing_ok=True)
+    if args.force:
+        _clear_lock_files(lock_file, log)
 
     try:
         vector_store = make_vector_store()
-        embedding_service = make_embedding_service()
 
         indexer = CronIndexer(
             targets=targets,
             vector_store=vector_store,
-            embedding_service=embedding_service,
             lock_file=lock_file,
             status_file=status_file,
             log=log,
             mode=args.mode,
             max_items=args.max_items,
+            key_store=store,
         )
         indexer.key_issues = key_issues
         stats = await indexer.run()

@@ -4,6 +4,7 @@ POST   /api/autoindex/keys    — submit a read-only key (validated, stored encr
 DELETE /api/autoindex/keys    — remove a key
 GET    /api/autoindex/keys    — list the caller's own key metadata (no plaintext)
 GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
+POST   /api/autoindex/run     — trigger an on-demand run scoped to the caller's own libraries
 
 All endpoints are protected by the global Zotero-key auth middleware (X-Zotero-API-Key). When
 AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503.
@@ -11,24 +12,31 @@ AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 5
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity
-from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
+from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.cron_indexer import read_live_status
+from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 
 class KeyRequest(BaseModel):
     api_key: str
+    embedding_api_key: Optional[str] = None
 
 
 def _store() -> AutoIndexKeyStore:
@@ -48,12 +56,29 @@ async def add_key(request: KeyRequest) -> dict:
     validation = await validate_key(request.api_key)
     if not validation.read_only:
         raise HTTPException(status_code=400, detail=validation.reason or "Key is not read-only.")
-    await asyncio.to_thread(store.add, request.api_key, validation)
-    return {
+    fp = await asyncio.to_thread(store.add, request.api_key, validation)
+
+    response: dict = {
         "user_id": validation.user_id,
         "username": validation.username,
         "targets": validation.targets,
     }
+
+    if request.embedding_api_key:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+        emb_validation = await validate_embedding_key(request.embedding_api_key, preset.embedding)
+        if emb_validation.status == "invalid":
+            response["embedding_key_status"] = "invalid"
+            response["embedding_key_error"] = emb_validation.reason
+        else:
+            await asyncio.to_thread(
+                store.set_embedding_key, fp, request.embedding_api_key,
+                emb_validation.key_name, emb_validation.status,
+            )
+            response["embedding_key_status"] = emb_validation.status
+
+    return response
 
 
 @router.delete("/autoindex/keys", summary="Remove an auto-index key")
@@ -135,3 +160,76 @@ def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) ->
             ]
 
     return result
+
+
+@router.post("/autoindex/run", summary="Trigger an on-demand indexing run for the caller's own libraries")
+async def run_now(request: Request) -> dict:
+    """Start a server-side indexing run scoped to the caller's own libraries.
+
+    Spawns bin/index_libraries.py --fingerprint <fp> as a detached subprocess —
+    the same script the hourly cron runs — so the caller's own registered
+    entry is indexed without waiting for the next cron tick. Refuses to start
+    if the caller isn't registered, is missing a usable embedding key (when
+    the configured preset requires one), or a run is already in progress.
+    """
+    store = _store()
+    api_key = request.headers.get("X-Zotero-API-Key")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="Missing X-Zotero-API-Key header.")
+    fp = fingerprint(api_key)
+
+    own = await asyncio.to_thread(_find_own_entry, store, fp)
+    if own is None:
+        raise HTTPException(
+            status_code=400,
+            detail="You have not registered for automatic indexing yet. Set it up in Preferences first.",
+        )
+
+    settings = get_settings()
+    if settings.get_hardware_preset().embedding.model_type == "remote":
+        reason = _embedding_key_block_reason(own)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
+
+    live_status = await asyncio.to_thread(read_live_status, settings.data_path)
+    if live_status.get("running"):
+        raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
+
+    await _spawn_index_run(settings, fp)
+    return {"started": True}
+
+
+def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
+    return next((k for k in store.list_metadata() if k["fingerprint"] == fp), None)
+
+
+def _embedding_key_block_reason(own: dict) -> Optional[str]:
+    status = own.get("embedding_key_status")
+    rate_limit_until = own.get("embedding_key_rate_limit_until")
+    if is_embedding_key_usable(status, rate_limit_until):
+        return None
+    if not own.get("has_embedding_key"):
+        return "No embedding API key configured; set one up in Preferences before running indexing."
+    if status == "invalid":
+        return "Embedding API key was rejected; update it in Preferences."
+    if status == "rate_limited":
+        return f"Embedding API key is rate-limited until {rate_limit_until}; try again later."
+    return f"Embedding API key has unrecognized status {status!r}."
+
+
+async def _spawn_index_run(settings, fp: str) -> None:
+    log_path = settings.data_path / "logs" / "cron_indexer.log"
+    script_path = _PROJECT_ROOT / "bin" / "index_libraries.py"
+
+    def _open_log():
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        return open(log_path, "ab")
+
+    logf = await asyncio.to_thread(_open_log)
+    try:
+        await asyncio.create_subprocess_exec(
+            sys.executable, str(script_path), "--fingerprint", fp,
+            stdout=logf, stderr=logf, cwd=str(_PROJECT_ROOT),
+        )
+    finally:
+        await asyncio.to_thread(logf.close)

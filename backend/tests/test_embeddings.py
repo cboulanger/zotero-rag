@@ -19,7 +19,9 @@ from backend.services.embeddings import (
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
     LocalEmbeddingService,
+    MockEmbeddingService,
     RemoteEmbeddingService,
+    _extract_error_detail,
     create_embedding_service,
 )
 
@@ -48,6 +50,42 @@ class TestEmbeddingService(unittest.TestCase):
         hash2 = EmbeddingService.compute_content_hash("text2")
 
         self.assertNotEqual(hash1, hash2)
+
+    def test_mock_service_has_rate_limit_retries_default(self):
+        """Every concrete subclass must have rate_limit_retries even if it never
+        sets it itself — backend/api/document_upload.py reads it unconditionally
+        regardless of which embedding service is active (e.g. MockEmbeddingService
+        under TESTING=true, or LocalEmbeddingService), so a missing default here
+        crashes every document upload for those configurations."""
+        service = MockEmbeddingService()
+        self.assertEqual(service.rate_limit_retries, 0)
+        self.assertEqual(service.rate_limit_wait_seconds, 0.0)
+
+
+class TestExtractErrorDetail(unittest.TestCase):
+    def test_flat_message_body(self):
+        exc = Exception("Error code: 401 - {'message': 'Unauthorized', 'request_id': 'x'}")
+        exc.body = {"message": "Unauthorized", "request_id": "x"}
+        self.assertEqual(_extract_error_detail(exc), "Unauthorized")
+
+    def test_nested_error_message_body(self):
+        exc = Exception("Error code: 401 - {'error': {'message': 'Invalid API key', 'type': 'invalid_request_error'}}")
+        exc.body = {"error": {"message": "Invalid API key", "type": "invalid_request_error"}}
+        self.assertEqual(_extract_error_detail(exc), "Invalid API key")
+
+    def test_falls_back_to_str_when_body_missing(self):
+        exc = Exception("plain message, no body attribute")
+        self.assertEqual(_extract_error_detail(exc), "plain message, no body attribute")
+
+    def test_falls_back_to_str_when_body_not_a_dict(self):
+        exc = Exception("raw text body")
+        exc.body = "not a dict"
+        self.assertEqual(_extract_error_detail(exc), "raw text body")
+
+    def test_falls_back_to_str_when_dict_has_no_message_key(self):
+        exc = Exception("Error code: 500 - {'code': 'boom'}")
+        exc.body = {"code": "boom"}
+        self.assertEqual(_extract_error_detail(exc), str(exc))
 
 
 @unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
@@ -390,6 +428,32 @@ class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(EmbeddingAuthenticationError):
                 await service._create_embeddings_with_backoff(["hello"])
+
+    async def test_401_message_omits_raw_dict_repr(self):
+        """Regression: the SDK's default str(exc) is literally
+        "Error code: 401 - {'message': 'Unauthorized', 'request_id': '...'}" —
+        the raised EmbeddingAuthenticationError must surface the clean inner
+        message instead of that raw dict repr."""
+        service = self._make_service()
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        exc = OpenAIAuthenticationError(
+            "Error code: 401 - {'message': 'Unauthorized', 'request_id': 'req-1'}",
+            response=mock_response,
+            body={"message": "Unauthorized", "request_id": "req-1"},
+        )
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingAuthenticationError) as ctx:
+                await service._create_embeddings_with_backoff(["hello"])
+
+        message = str(ctx.exception)
+        self.assertIn("Unauthorized", message)
+        self.assertNotIn("{'message'", message)
 
     async def test_403_raises_authentication_error(self):
         service = self._make_service()

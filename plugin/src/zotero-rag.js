@@ -137,6 +137,15 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._setupWizardWindow = null;
 
+		/** @type {Window|null} */
+		this._autoindexStatusWindow = null;
+
+		// Set by dialog.js's init() to the live ZoteroRAGDialog object (not just its
+		// window), so other windows (e.g. the autoindex-status dialog) can read its
+		// isOperationInProgress flag without reaching into window internals themselves.
+		/** @type {any|null} */
+		this._dialogInstance = null;
+
 		/** @type {string|null} */
 		this._notifierID = null;
 
@@ -557,12 +566,13 @@ class ZoteroRAGPlugin {
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
 	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
+	 * @param {(keyInfo: {key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}, value: string) => void} [onKeyChange] - Optional callback invoked after a key's pref is set, e.g. to re-sync a server-stored copy
 	 * @returns {void}
 	 */
-	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys) {
+	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
 		if (!container) return;
 
-		container.querySelectorAll('.service-key-row, .service-key-desc').forEach(el => el.remove());
+		container.querySelectorAll('.service-key-row, .service-key-desc, .service-key-status').forEach(el => el.remove());
 
 		if (!requiredKeys || requiredKeys.length === 0) {
 			if (placeholder) placeholder.style.display = '';
@@ -588,11 +598,25 @@ class ZoteroRAGPlugin {
 			input.value = storedValue;
 			input.placeholder = 'Enter API key';
 			input.addEventListener('change', (e) => {
-				Zotero.Prefs.set(prefKey, /** @type {HTMLInputElement} */ (e.target).value, true);
+				const value = /** @type {HTMLInputElement} */ (e.target).value;
+				Zotero.Prefs.set(prefKey, value, true);
+				if (typeof onKeyChange === 'function') {
+					onKeyChange(keyInfo, value);
+				}
 			});
 
 			row.appendChild(label);
 			row.appendChild(input);
+
+			// Populated by callers (e.g. preferences.js) when the server reports this
+			// key's validation status (ok/invalid/unverified), so a rejected key is
+			// flagged right here, right next to the field — not only in a separate
+			// summary section elsewhere.
+			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			status.className = 'service-key-status';
+			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
+			row.appendChild(status);
+
 			container.appendChild(row);
 
 			if (keyInfo.description) {
@@ -1732,6 +1756,37 @@ class ZoteroRAGPlugin {
 			'chrome,centerscreen,resizable=yes,width=520,height=480',
 			{ plugin: this }
 		);
+	}
+
+	/**
+	 * Open the auto-indexing status monitoring dialog, focusing an existing
+	 * instance instead of opening a duplicate if one is already open.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openAutoindexStatusDialog(win) {
+		if (this._autoindexStatusWindow && !this._autoindexStatusWindow.closed) {
+			this._autoindexStatusWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._autoindexStatusWindow = win.openDialog(
+			'chrome://zotero-rag/content/autoindex-status.xhtml',
+			'zotero-rag-autoindex-status-dialog',
+			'chrome,centerscreen,resizable=yes,width=520,height=520',
+			{ plugin: this }
+		);
+	}
+
+	/**
+	 * Whether the search dialog currently has a client-side indexing operation
+	 * in progress. Used by the auto-indexing status dialog's "Run now" button
+	 * and the search dialog's own "Index" button to avoid starting a second,
+	 * conflicting indexing operation.
+	 * @returns {boolean}
+	 */
+	isClientIndexingActive() {
+		return !!(this._dialogInstance && this._dialogInstance.isOperationInProgress);
 	}
 
 	/**
