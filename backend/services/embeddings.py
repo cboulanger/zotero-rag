@@ -46,6 +46,24 @@ class EmbeddingAuthenticationError(Exception):
     """
 
 
+def _extract_error_detail(exc: Exception) -> str:
+    """Pull a short human-readable message out of an OpenAI SDK error's response
+    body, instead of the SDK's default str(exc) — which is literally
+    f"Error code: {status} - {body}" and renders the raw Python dict repr of
+    the JSON error body (e.g. "{'message': 'Unauthorized', 'request_id': '...'}"),
+    not something meant for end users. Falls back to str(exc) if the body isn't
+    in a recognized shape.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if body.get("message"):
+            return str(body["message"])
+    return str(exc)
+
+
 # Module-level cache for rate-limit headers received from the last remote embedding call.
 # Updated by RemoteEmbeddingService after every API response (success or 429).
 _last_rate_limit_headers: dict[str, str] | None = None
@@ -455,7 +473,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 status_code = getattr(exc, "status_code", None)
                 raise EmbeddingAuthenticationError(
                     f"Embedding API rejected credentials "
-                    f"(HTTP {status_code or '401/403'}): {exc}"
+                    f"(HTTP {status_code or '401/403'}): {_extract_error_detail(exc)}"
                 ) from exc
             except InternalServerError as exc:
                 if attempt == max_attempts - 1 or "try again" not in str(exc).lower():
