@@ -60,6 +60,11 @@ var ZoteroRAGAutoIndexStatus = {
 			closeButton.addEventListener('click', () => window.close());
 		}
 
+		const runNowButton = document.getElementById('run-now-button');
+		if (runNowButton) {
+			runNowButton.addEventListener('click', () => this.runNow());
+		}
+
 		window.addEventListener('unload', () => {
 			if (this.refreshTimer !== null) {
 				clearInterval(this.refreshTimer);
@@ -116,8 +121,13 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner(data.disabled_reason || 'Automatic indexing is not configured on this server.', 'crashed');
 			return;
 		}
+		const ownSlugCount = Object.keys(data.slugs || {}).length;
 		if (data.crashed) {
 			this.renderBanner('The last automatic indexing run crashed unexpectedly.', 'crashed');
+		} else if (data.running && ownSlugCount === 0) {
+			// A run is active, but none of it is this caller's own libraries —
+			// most likely another user's manual trigger or a shared-lock cron tick.
+			this.renderBanner('Indexing server currently busy, please wait and try again later.', 'running');
 		} else if (data.running) {
 			this.renderBanner(`Running since ${this.formatTime(data.started_at)}…`, 'running');
 		} else if (data.finished_at) {
@@ -128,6 +138,48 @@ var ZoteroRAGAutoIndexStatus = {
 
 		this.renderLibraries(data.slugs || {});
 		this.renderProblems(data.key_issues || []);
+		this.updateRunNowButtonState(data);
+	},
+
+	/**
+	 * Enable/disable the "Run now" button based on server- and client-side
+	 * indexing state.
+	 * @param {AutoIndexStatusResponse} data
+	 * @returns {void}
+	 */
+	updateRunNowButtonState(data) {
+		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
+		if (!button) return;
+		const busy = data.running === true || (this.plugin && this.plugin.isClientIndexingActive());
+		button.disabled = busy;
+		button.textContent = busy ? 'Indexing in progress…' : 'Run indexing now';
+	},
+
+	/**
+	 * Trigger an on-demand server-side indexing run for the caller's own libraries.
+	 * @returns {Promise<void>}
+	 */
+	async runNow() {
+		if (!this.plugin) return;
+		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
+		if (button) button.disabled = true;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/run`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
+				if (button) button.disabled = false;
+				return;
+			}
+			// Success: the next poll tick (within 5s) picks up running:true and
+			// re-disables the button via updateRunNowButtonState().
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+			if (button) button.disabled = false;
+		}
 	},
 
 	/**
