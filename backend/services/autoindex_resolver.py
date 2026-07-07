@@ -19,12 +19,36 @@ pre-per-user-key behavior for local deployments).
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from backend.config.settings import get_settings
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.zotero.key_validator import validate_key
 
 logger = logging.getLogger(__name__)
+
+
+def is_embedding_key_usable(status: Optional[str], rate_limit_until_str: Optional[str]) -> bool:
+    """Fail closed: only explicitly recognized "good" statuses let a key through.
+
+    An unrecognized/typo'd/future status string is treated as blocked rather
+    than silently permitted. A "rate_limited" status becomes usable again once
+    its recorded window has passed.
+    """
+    if status in ("ok", "unverified"):
+        return True
+    if status != "rate_limited":
+        return False
+    if not rate_limit_until_str:
+        return False
+    try:
+        rate_limit_until = datetime.fromisoformat(rate_limit_until_str)
+        if rate_limit_until.tzinfo is None:
+            rate_limit_until = rate_limit_until.replace(tzinfo=timezone.utc)
+        return rate_limit_until <= datetime.now(timezone.utc)
+    except ValueError:
+        logger.warning("Invalid embedding_key_rate_limit_until: %r", rate_limit_until_str)
+        return False
 
 
 async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], list[dict]]:
@@ -89,25 +113,7 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
         embedding_info = store.get_decrypted_embedding_key(fp)
         embedding_status = entry.get("embedding_key_status")
         rate_limit_until_str = entry.get("embedding_key_rate_limit_until")
-        still_rate_limited = False
-        if rate_limit_until_str:
-            try:
-                rate_limit_until = datetime.fromisoformat(rate_limit_until_str)
-                if rate_limit_until.tzinfo is None:
-                    rate_limit_until = rate_limit_until.replace(tzinfo=timezone.utc)
-                still_rate_limited = rate_limit_until > datetime.now(timezone.utc)
-            except ValueError:
-                still_rate_limited = False
-                logger.warning(
-                    "Invalid embedding_key_rate_limit_until for %s: %r", fp, rate_limit_until_str
-                )
-
-        # Fail closed: only explicitly recognized "good" statuses let the slug
-        # through. An unrecognized/typo'd/future status string is treated as
-        # blocked rather than silently permitted.
-        usable = embedding_status in ("ok", "unverified") or (
-            embedding_status == "rate_limited" and not still_rate_limited
-        )
+        usable = is_embedding_key_usable(embedding_status, rate_limit_until_str)
         if not embedding_info or not usable:
             if not embedding_info:
                 reason = "No embedding API key configured; auto-indexing skipped."

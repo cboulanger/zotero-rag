@@ -128,6 +128,7 @@ class AutoIndexKeyStore:
                 "validated_at": entry.get("validated_at"),
                 "has_embedding_key": bool(entry.get("embedding_key_ciphertext")),
                 "embedding_key_status": entry.get("embedding_key_status"),
+                "embedding_key_rate_limit_until": entry.get("embedding_key_rate_limit_until"),
             })
         return out
 

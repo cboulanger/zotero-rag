@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from cryptography.fernet import Fernet
 
 from backend.services.autoindex_key_store import AutoIndexKeyStore
-from backend.services.autoindex_resolver import resolve_targets
+from backend.services.autoindex_resolver import is_embedding_key_usable, resolve_targets
 from backend.zotero.key_validator import KeyValidation
 
 
@@ -192,6 +192,34 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(targets["users/1"]["embedding_key"])
         self.assertIsNone(targets["users/1"]["embedding_key_name"])
         self.assertEqual(issues, [])
+
+
+class IsEmbeddingKeyUsableTest(unittest.TestCase):
+    def test_ok_status_is_usable(self):
+        self.assertTrue(is_embedding_key_usable("ok", None))
+
+    def test_unverified_status_is_usable(self):
+        self.assertTrue(is_embedding_key_usable("unverified", None))
+
+    def test_invalid_status_is_not_usable(self):
+        self.assertFalse(is_embedding_key_usable("invalid", None))
+
+    def test_missing_status_is_not_usable(self):
+        self.assertFalse(is_embedding_key_usable(None, None))
+
+    def test_rate_limited_within_window_is_not_usable(self):
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        self.assertFalse(is_embedding_key_usable("rate_limited", future))
+
+    def test_rate_limited_after_window_is_usable(self):
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        self.assertTrue(is_embedding_key_usable("rate_limited", past))
+
+    def test_rate_limited_without_timestamp_is_not_usable(self):
+        self.assertFalse(is_embedding_key_usable("rate_limited", None))
+
+    def test_unrecognized_status_is_not_usable(self):
+        self.assertFalse(is_embedding_key_usable("some-future-status", None))
 
 
 if __name__ == "__main__":

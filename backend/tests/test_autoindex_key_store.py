@@ -96,6 +96,13 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         meta = self.store.list_metadata()[0]
         self.assertEqual(meta["embedding_key_status"], "rate_limited")
 
+    def test_list_metadata_exposes_rate_limit_until(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        self.store.set_embedding_key_status(fp, "rate_limited", rate_limit_until="2026-01-01T00:00:00+00:00")
+        meta = self.store.list_metadata()[0]
+        self.assertEqual(meta["embedding_key_rate_limit_until"], "2026-01-01T00:00:00+00:00")
+
     def test_embedding_key_ciphertext_not_in_metadata(self):
         fp = self.store.add("ZOTKEY", _validation())
         self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
