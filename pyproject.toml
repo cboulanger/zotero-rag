@@ -59,6 +59,9 @@ markers = [
 # -rs prints the reason for every skipped test in the summary, so environment-driven
 # skips (e.g. missing spaCy model) are visible rather than silently counted.
 addopts = "-rs -m 'not integration and not api and not container'"
+# Hard per-test wall-clock limit so an accidental blocking call (e.g. unmocked
+# network I/O) fails fast with a traceback instead of hanging the whole suite.
+timeout = 30
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]
@@ -70,5 +73,6 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "aioresponses>=0.7.9",
+    "pytest-timeout>=2.4.0",
 ]
 

@@ -19,6 +19,14 @@ class QueryAuthorizationTest(unittest.TestCase):
         reset_identity_cache()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
+        # `data_path` only *derives* other paths at Settings construction time
+        # (see set_derived_paths); mutating it post-construction does not move
+        # already-resolved paths. Without this, the real lifespan below would
+        # open the real project's data/qdrant directory instead of the temp
+        # sandbox — silently defeating isolation and risking a lock collision
+        # with any other process (e.g. a locally running dev server) that has
+        # that real directory open.
+        s.vector_db_path = Path(self.tmp.name) / "qdrant"
         s.testing = True
         # Enter the TestClient as a context manager (not just construct it) so
         # that FastAPI's `lifespan` runs and populates app.state.vector_store —

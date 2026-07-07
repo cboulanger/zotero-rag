@@ -174,6 +174,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_index_library_skip_duplicate(self):
         """Test that duplicate attachments are skipped."""
         mock_item = {
+            "version": 1,
             "data": {
                 "key": "ITEM123",
                 "itemType": "journalArticle",
@@ -181,32 +182,147 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             }
         }
 
-        mock_pdf_attachment = {
-            "data": {
-                "key": "PDF123",
-                "itemType": "attachment",
-                "contentType": "application/pdf",
-            }
-        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
 
-        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
         self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
         self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
 
-        # Mock duplicate found
+        # Mock duplicate found: same item already has this exact content indexed.
         duplicate_record = DeduplicationRecord(
             content_hash="existing_hash",
             library_id="test_lib",
-            item_key="OLD_ITEM",
+            item_key="ITEM123",
             relation_uri=None,
         )
         self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        self.mock_vector_store.get_item_version.return_value = 1
 
         result = await self.processor.index_library("test_lib")
 
         self.assertEqual(result["chunks_added"], 0)
         # Extractor should not be called for duplicates
         self.mock_extractor.extract_and_chunk.assert_not_called()
+
+    async def test_index_library_copies_duplicate_from_different_item(self):
+        """A hash match belonging to a *different* item in the same library must
+        get its own chunks copied, not be silently skipped — otherwise it can
+        never be counted as indexed (regression test for the permanently-stuck
+        "not indexed" bug)."""
+        mock_item = {
+            "version": 1,
+            "data": {
+                "key": "ITEM123",
+                "itemType": "journalArticle",
+                "title": "Test Paper",
+            }
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
+
+        duplicate_record = DeduplicationRecord(
+            content_hash="existing_hash",
+            library_id="test_lib",
+            item_key="OTHER_ITEM",
+            relation_uri=None,
+        )
+        self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "chunk1", "payload": {"chunk_index": 0, "text": "shared content"}},
+        ]
+        self.mock_vector_store.copy_chunks_cross_library.return_value = 1
+
+        result = await self.processor.index_library("test_lib")
+
+        self.assertEqual(result["chunks_added"], 1)
+        # Chunks are copied, not freshly extracted/embedded.
+        self.mock_extractor.extract_and_chunk.assert_not_called()
+        self.mock_embedding_service.embed_batch.assert_not_called()
+        self.mock_vector_store.copy_chunks_cross_library.assert_called_once_with(
+            "test_lib", "OTHER_ITEM", "test_lib", "ITEM123",
+            "PDF123", unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY, unittest.mock.ANY,
+        )
+        # The current item gets its own dedup record so it's no longer
+        # dependent on OTHER_ITEM's record surviving.
+        added_record = self.mock_vector_store.add_deduplication_record.call_args[0][0]
+        self.assertEqual(added_record.item_key, "ITEM123")
+        self.assertEqual(added_record.content_hash, "existing_hash")
+
+    async def test_index_library_reindexes_when_duplicate_source_has_no_chunks(self):
+        """If the matching item's chunks are gone (orphaned dedup record across
+        items), fall through to fresh extraction instead of leaving this item
+        unindexed forever."""
+        mock_item = {
+            "version": 1,
+            "data": {
+                "key": "ITEM123",
+                "itemType": "journalArticle",
+                "title": "Test Paper",
+            }
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
+
+        duplicate_record = DeduplicationRecord(
+            content_hash="existing_hash",
+            library_id="test_lib",
+            item_key="OTHER_ITEM",
+            relation_uri=None,
+        )
+        self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        self.mock_vector_store.get_item_chunks.return_value = []
+        self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Some content.", 1),
+        )
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2, 0.3]]
+
+        result = await self.processor.index_library("test_lib")
+
+        self.assertEqual(result["chunks_added"], 1)
+        self.mock_extractor.extract_and_chunk.assert_called_once()
+        self.mock_vector_store.copy_chunks_cross_library.assert_not_called()
+
+    async def test_index_from_abstract_copies_duplicate_from_different_item(self):
+        """Abstract-based indexing must also copy (not silently skip) when the
+        duplicate hash belongs to a different item in the same library."""
+        abstract_text = "word " * 150  # exceeds default min_abstract_words=100
+        doc_metadata = DocumentMetadata(
+            library_id="test_lib",
+            item_key="ITEM123",
+            title="Test Paper",
+            item_type="journalArticle",
+        )
+        duplicate_record = DeduplicationRecord(
+            content_hash="existing_hash",
+            library_id="test_lib",
+            item_key="OTHER_ITEM",
+            relation_uri=None,
+        )
+        self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "chunk1", "payload": {"chunk_index": 0}},
+        ]
+        self.mock_vector_store.copy_chunks_cross_library.return_value = 1
+
+        chunks_written = await self.processor._index_from_abstract(
+            abstract_text=abstract_text,
+            doc_metadata=doc_metadata,
+            item_version=1,
+            item_modified="2024-01-01T00:00:00Z",
+        )
+
+        self.assertEqual(chunks_written, 1)
+        self.mock_vector_store.copy_chunks_cross_library.assert_called_once_with(
+            "test_lib", "OTHER_ITEM", "test_lib", "ITEM123",
+            "ITEM123:abstract", unittest.mock.ANY, 1, 0, "2024-01-01T00:00:00Z",
+        )
+        added_record = self.mock_vector_store.add_deduplication_record.call_args[0][0]
+        self.assertEqual(added_record.item_key, "ITEM123")
 
     async def test_index_library_extraction_error(self):
         """Test handling of extraction errors."""

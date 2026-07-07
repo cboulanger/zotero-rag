@@ -272,8 +272,15 @@ async def _execute_upload(
     # and count_indexed_items see no chunks.  So before honouring the dedup hit,
     # verify the record's item still has chunks; if not, the record is orphaned —
     # purge it and fall through to re-index.
+    #
+    # Only handle the genuine same-item case here (a re-upload of content this exact
+    # item already has indexed). A hash match belonging to a *different* item in this
+    # library must NOT be short-circuited as a no-op skip — that item would then never
+    # get its own chunks and would stay permanently "not indexed". That case is left
+    # to fall through to _process_attachment_bytes, which copies the shared content
+    # under this item's own key (see _handle_same_library_duplicate).
     dup = await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id)
-    if dup is not None:
+    if dup is not None and dup.item_key == item_key:
         dup_has_chunks = await asyncio.to_thread(
             vector_store.get_item_version, library_id, dup.item_key
         ) is not None
@@ -341,7 +348,7 @@ async def _execute_upload(
         lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, item_version)
         lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
         lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
-        if proc_result.status in ("indexed_fresh", "copied_cross_library"):
+        if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
             lib_meta.total_items_indexed += 1
         await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
     except Exception as e:
@@ -384,7 +391,7 @@ async def _execute_upload(
 
     api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
     if proc_result.status in (
-        "indexed_fresh", "copied_cross_library",
+        "indexed_fresh", "copied_cross_library", "copied_same_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
     ):
         _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
@@ -688,8 +695,12 @@ async def upload_and_index_document_async(
 
     content_hash = hashlib.sha256(file_bytes).hexdigest()
 
-    # Fast-path: return immediately for duplicates (no background task needed)
-    if await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id):
+    # Fast-path: return immediately only for a genuine same-item duplicate (no
+    # background task needed). A hash match belonging to a *different* item must
+    # go through the normal background-task path so _execute_upload can copy the
+    # shared content under this item's own key instead of silently skipping it.
+    dup = await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id)
+    if dup is not None and dup.item_key == item_key:
         logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
         result = DocumentUploadResult(
             library_id=library_id,

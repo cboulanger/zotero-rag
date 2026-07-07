@@ -769,6 +769,71 @@ class DocumentProcessor:
 
         return total_chunks
 
+    async def _handle_same_library_duplicate(
+        self,
+        dup: DeduplicationRecord,
+        library_id: str,
+        item_key: str,
+        attachment_key: str,
+        doc_metadata: "DocumentMetadata",
+        item_version: int,
+        attachment_version: int,
+        item_modified: str,
+    ) -> Optional[AttachmentProcessingResult]:
+        """
+        Resolve a check_duplicate() hit within the same library.
+
+        A hash match can belong to the item currently being processed (a genuine
+        re-upload of already-indexed content) or to a *different* item that happens
+        to share identical attachment bytes (e.g. a duplicate Zotero entry). Treating
+        both cases as a blind skip left the second case with no chunks of its own —
+        permanently "not indexed" from check-indexed's and count_indexed_items'
+        point of view, since both key off chunk records tagged with this item_key.
+
+        Returns an AttachmentProcessingResult if the duplicate was fully handled,
+        or None if the caller should fall through to fresh extraction (the
+        matching record turned out to be orphaned — no chunks left to reuse).
+        """
+        if dup.item_key == item_key:
+            if await asyncio.to_thread(self.vector_store.get_item_version, library_id, item_key) is not None:
+                logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {dup.content_hash[:8]})")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_duplicate")
+            return None
+
+        source_chunks = await asyncio.to_thread(self.vector_store.get_item_chunks, library_id, dup.item_key)
+        if not source_chunks:
+            return None
+
+        copied = await asyncio.to_thread(
+            self.vector_store.copy_chunks_cross_library,
+            library_id, dup.item_key,
+            library_id, item_key,
+            attachment_key, doc_metadata,
+            item_version, attachment_version, item_modified,
+        )
+        if copied == 0:
+            return None
+
+        await asyncio.to_thread(
+            self.vector_store.add_deduplication_record,
+            DeduplicationRecord(
+                content_hash=dup.content_hash,
+                library_id=library_id,
+                item_key=item_key,
+                relation_uri=None,
+            ),
+        )
+        logger.info(
+            f"Same-library copy: {copied} chunks from "
+            f"{library_id}/{dup.item_key} -> {attachment_key}"
+        )
+        return AttachmentProcessingResult(
+            chunks_written=copied,
+            status="copied_same_library",
+            source_library_id=library_id,
+            source_item_key=dup.item_key,
+        )
+
     async def _process_attachment_bytes(
         self,
         file_bytes: bytes,
@@ -802,10 +867,23 @@ class DocumentProcessor:
 
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
-        # Step 1: same-library dedup (existing behaviour)
-        if await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id):
-            logger.info(f"Skipping duplicate attachment {attachment_key} (hash: {content_hash[:8]})")
-            return AttachmentProcessingResult(chunks_written=0, status="skipped_duplicate")
+        # Step 1: same-library dedup
+        same_lib_dup = await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id)
+        if same_lib_dup is not None:
+            dup_result = await self._handle_same_library_duplicate(
+                dup=same_lib_dup,
+                library_id=library_id,
+                item_key=item_key,
+                attachment_key=attachment_key,
+                doc_metadata=doc_metadata,
+                item_version=item_version,
+                attachment_version=attachment_version,
+                item_modified=item_modified,
+            )
+            if dup_result is not None:
+                return dup_result
+            # else: the matching record's item has no chunks left (orphaned) —
+            # fall through to Step 2 / fresh extraction.
 
         # Step 2: cross-library content-hash copy — reuse chunks from another library
         cross_record = await asyncio.to_thread(
@@ -1057,9 +1135,23 @@ class DocumentProcessor:
         item_key = meta.item_key
 
         content_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
-        if await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id):
-            logger.info(f"Skipping duplicate abstract for {item_key}")
-            return 0
+        abstract_dup = await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id)
+        if abstract_dup is not None:
+            dup_result = await self._handle_same_library_duplicate(
+                dup=abstract_dup,
+                library_id=library_id,
+                item_key=item_key,
+                attachment_key=abstract_key,
+                doc_metadata=meta,
+                item_version=item_version,
+                attachment_version=0,
+                item_modified=item_modified,
+            )
+            if dup_result is not None:
+                if dup_result.status == "skipped_duplicate":
+                    logger.info(f"Skipping duplicate abstract for {item_key}")
+                return dup_result.chunks_written
+            # else: fall through and index fresh (orphaned record)
 
         preset = settings.get_hardware_preset()
         chunker = TextChunker(max_chunk_size=preset.rag.max_chunk_size)

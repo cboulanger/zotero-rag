@@ -35,9 +35,15 @@ _METADATA = json.dumps({
 })
 
 
-def _mock_vector_store(*, is_duplicate: bool = False) -> MagicMock:
+def _mock_vector_store(*, is_duplicate: bool = False, dup_item_key: str = "ITEM001") -> MagicMock:
     vs = MagicMock()
-    vs.check_duplicate.return_value = is_duplicate
+    if is_duplicate:
+        from backend.models.document import DeduplicationRecord
+        vs.check_duplicate.return_value = DeduplicationRecord(
+            content_hash="hash123", library_id="lib1", item_key=dup_item_key, relation_uri=None,
+        )
+    else:
+        vs.check_duplicate.return_value = None
     vs.get_item_version.return_value = None
     vs.get_library_metadata.return_value = None
     vs.count_library_chunks.return_value = 0
@@ -81,6 +87,28 @@ class TestAsyncUploadEndpoint(unittest.TestCase):
         self.assertIsNone(data["task_id"])
         self.assertIsNotNone(data["result"])
         self.assertEqual(data["result"]["status"], "skipped_duplicate")
+
+    def test_duplicate_from_different_item_still_creates_task(self):
+        """A hash match belonging to a *different* item must not take the
+        immediate skip shortcut — it needs the background task path so
+        _execute_upload can copy the shared chunks under this item's own key
+        instead of leaving it permanently unindexed."""
+        self.app.dependency_overrides[self.get_vector_store] = lambda: _mock_vector_store(
+            is_duplicate=True, dup_item_key="OTHER_ITEM"
+        )
+        def _discard_task(coro):
+            coro.close()  # prevent "coroutine never awaited" warning
+            return MagicMock()
+
+        with (
+            patch("backend.api.document_upload.make_embedding_service"),
+            patch("backend.api.document_upload.asyncio.create_task", side_effect=_discard_task),
+        ):
+            resp = self._post()
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "processing")
+        self.assertIsNotNone(data["task_id"])
 
     def test_non_duplicate_returns_task_id_and_processing_status(self):
         """Non-duplicate upload returns status=processing with a non-null task_id."""
