@@ -20,6 +20,7 @@ from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.cron_indexer import read_live_status
+from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 class KeyRequest(BaseModel):
     api_key: str
+    embedding_api_key: Optional[str] = None
 
 
 def _store() -> AutoIndexKeyStore:
@@ -48,12 +50,29 @@ async def add_key(request: KeyRequest) -> dict:
     validation = await validate_key(request.api_key)
     if not validation.read_only:
         raise HTTPException(status_code=400, detail=validation.reason or "Key is not read-only.")
-    await asyncio.to_thread(store.add, request.api_key, validation)
-    return {
+    fp = await asyncio.to_thread(store.add, request.api_key, validation)
+
+    response: dict = {
         "user_id": validation.user_id,
         "username": validation.username,
         "targets": validation.targets,
     }
+
+    if request.embedding_api_key:
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+        emb_validation = await validate_embedding_key(request.embedding_api_key, preset.embedding)
+        if emb_validation.status == "invalid":
+            response["embedding_key_status"] = "invalid"
+            response["embedding_key_error"] = emb_validation.reason
+        else:
+            await asyncio.to_thread(
+                store.set_embedding_key, fp, request.embedding_api_key,
+                emb_validation.key_name, emb_validation.status,
+            )
+            response["embedding_key_status"] = emb_validation.status
+
+    return response
 
 
 @router.delete("/autoindex/keys", summary="Remove an auto-index key")

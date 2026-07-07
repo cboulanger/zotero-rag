@@ -45,6 +45,39 @@ class AutoIndexApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 400)
         self.assertIn("write access", r.json()["detail"])
 
+    def test_post_stores_valid_embedding_key(self):
+        from backend.services.embedding_key_validator import EmbeddingKeyValidation
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
+        emb_validation = EmbeddingKeyValidation(status="ok", key_name="KISSKI_API_KEY")
+        with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)), \
+             patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
+            r = self.client.post("/api/autoindex/keys", json={"api_key": "RO", "embedding_api_key": "EMB"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["embedding_key_status"], "ok")
+        r2 = self.client.get("/api/autoindex/keys")
+        self.assertTrue(r2.json()["keys"][0]["has_embedding_key"])
+        self.assertNotIn("EMB", r2.text)
+
+    def test_post_rejects_invalid_embedding_key_but_keeps_zotero_key(self):
+        from backend.services.embedding_key_validator import EmbeddingKeyValidation
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
+        emb_validation = EmbeddingKeyValidation(status="invalid", key_name="KISSKI_API_KEY", reason="bad creds")
+        with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)), \
+             patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
+            r = self.client.post("/api/autoindex/keys", json={"api_key": "RO", "embedding_api_key": "BAD"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["embedding_key_status"], "invalid")
+        self.assertEqual(r.json()["embedding_key_error"], "bad creds")
+        r2 = self.client.get("/api/autoindex/keys")
+        self.assertFalse(r2.json()["keys"][0]["has_embedding_key"])
+
+    def test_post_without_embedding_key_omits_status(self):
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
+        with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)):
+            r = self.client.post("/api/autoindex/keys", json={"api_key": "RO"})
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("embedding_key_status", r.json())
+
     def test_delete_removes_key(self):
         validation = KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True)
         with patch("backend.api.autoindex.validate_key", new=AsyncMock(return_value=validation)):
