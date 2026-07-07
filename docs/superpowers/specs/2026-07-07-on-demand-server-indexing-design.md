@@ -184,10 +184,38 @@ Scoped deliberately to `submitIndexOnly()` only — **not** the other two `check
 
 Fails open on fetch error or non-2xx, and is a no-op when auto-indexing isn't configured at all (`running` is simply absent/falsy).
 
-**Known edge case (accepted, not fixed):** `running` is a single global flag — the whole system already has exactly one indexing lock. If User B's manual "Run now" is active, User A's "Index" click also redirects to the monitor dialog, which (via the existing per-caller filtering in `GET /api/autoindex/status`) shows empty progress for User A's own libraries until the lock is free. This is the existing single-global-lock architecture, not a new limitation introduced here.
+**Edge case — another user's run is active:** `running` is a single global flag — the whole system has exactly one indexing lock. If User B's manual "Run now" is active, User A's "Index" click also redirects to the monitor dialog, but `GET /api/autoindex/status` filters `slugs` down to the caller's own targets, so User A's dialog would otherwise show a bare, unexplained empty progress list. Fixed in `plugin/src/autoindex-status.js`'s `render()`:
+
+```js
+render(data) {
+    if (!data.enabled) {
+        this.renderBanner(data.disabled_reason || 'Automatic indexing is not configured on this server.', 'crashed');
+        return;
+    }
+    const ownSlugCount = Object.keys(data.slugs || {}).length;
+    if (data.crashed) {
+        this.renderBanner('The last automatic indexing run crashed unexpectedly.', 'crashed');
+    } else if (data.running && ownSlugCount === 0) {
+        // A run is active, but none of it is this caller's own libraries —
+        // most likely another user's manual trigger or a shared-lock cron tick.
+        this.renderBanner('Indexing server currently busy, please wait and try again later.', 'running');
+    } else if (data.running) {
+        this.renderBanner(`Running since ${this.formatTime(data.started_at)}…`, 'running');
+    } else if (data.finished_at) {
+        this.renderBanner(`Idle. Last run finished ${this.formatTime(data.finished_at)}.`, 'idle');
+    } else {
+        this.renderBanner('Idle. No automatic indexing run has happened yet.', 'idle');
+    }
+
+    this.renderLibraries(data.slugs || {});
+    this.renderProblems(data.key_issues || []);
+}
+```
+
+Only the banner message changes; `renderLibraries()` still shows its existing empty-state placeholder underneath (harmless — the banner above it now explains why). This same `render()` path is used both by the periodic poll and by the dialog opened via the Index-button redirect, so the fix covers both entry points with one change. It's a UX message only — it doesn't affect the "Run now" button's own disable logic (§5), which already disables on `data.running === true` regardless of whose run it is.
 
 ## 7. Testing
 
 - `backend/tests/test_autoindex_api.py`: `POST /api/autoindex/run` — success (mocked subprocess spawn), 400 (unregistered fingerprint), 400 (missing/invalid embedding key on a remote preset), success with no embedding key required (local preset), 409 (already running).
 - Coverage for `bin/index_libraries.py`'s `--fingerprint` filtering logic.
-- No plugin-side automated tests (consistent with the rest of this codebase's privileged-Zotero-global JS, which has no unit-test harness) — verified manually: register keys, click "Run now" in the monitor dialog and confirm progress bars update; click "Index" in the search dialog while a server run is active and confirm it opens the monitor dialog instead; confirm the "Run now" button disables while client-side indexing is active in the search dialog.
+- No plugin-side automated tests (consistent with the rest of this codebase's privileged-Zotero-global JS, which has no unit-test harness) — verified manually: register keys, click "Run now" in the monitor dialog and confirm progress bars update; click "Index" in the search dialog while a server run is active and confirm it opens the monitor dialog instead; confirm the "Run now" button disables while client-side indexing is active in the search dialog; confirm that opening the monitor dialog while a *different* user's run is active shows "Indexing server currently busy, please wait and try again later." instead of a bare empty list.
