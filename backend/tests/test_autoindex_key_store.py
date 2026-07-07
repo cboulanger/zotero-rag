@@ -55,6 +55,40 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         self.assertEqual(key, "K1")
         self.assertEqual(entry["targets"], ["users/39226", "groups/456"])
 
+    def test_set_and_get_embedding_key(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        key_name, key = self.store.get_decrypted_embedding_key(fp)
+        self.assertEqual(key_name, "KISSKI_API_KEY")
+        self.assertEqual(key, "EMBKEY")
+
+    def test_get_decrypted_embedding_key_absent_returns_none(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        self.assertIsNone(self.store.get_decrypted_embedding_key(fp))
+
+    def test_list_metadata_reports_embedding_key_presence(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        meta = self.store.list_metadata()[0]
+        self.assertFalse(meta["has_embedding_key"])
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        meta = self.store.list_metadata()[0]
+        self.assertTrue(meta["has_embedding_key"])
+        self.assertEqual(meta["embedding_key_status"], "ok")
+
+    def test_set_embedding_key_status_updates_rate_limit(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        self.store.set_embedding_key_status(fp, "rate_limited", rate_limit_until="2026-01-01T00:00:00+00:00")
+        meta = self.store.list_metadata()[0]
+        self.assertEqual(meta["embedding_key_status"], "rate_limited")
+
+    def test_embedding_key_ciphertext_not_in_metadata(self):
+        fp = self.store.add("ZOTKEY", _validation())
+        self.store.set_embedding_key(fp, "EMBKEY", "KISSKI_API_KEY")
+        meta = self.store.list_metadata()[0]
+        self.assertNotIn("embedding_key_ciphertext", meta)
+        self.assertNotIn("EMBKEY", str(meta))
+
     def test_disabled_when_no_secret(self):
         store = AutoIndexKeyStore(self.path, secret=None)
         self.assertFalse(store.enabled)

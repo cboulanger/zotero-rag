@@ -111,6 +111,8 @@ class AutoIndexKeyStore:
                 "targets": entry.get("targets", []),
                 "last_status": entry.get("last_status"),
                 "validated_at": entry.get("validated_at"),
+                "has_embedding_key": bool(entry.get("embedding_key_ciphertext")),
+                "embedding_key_status": entry.get("embedding_key_status"),
             })
         return out
 
@@ -125,9 +127,43 @@ class AutoIndexKeyStore:
                 continue
             yield fp, key, entry
 
+    def set_embedding_key(self, fp: str, api_key: str, key_name: str, status: str = "ok") -> None:
+        """Encrypt and store an embedding API key on an existing entry."""
+        self._require_enabled()
+        with self._lock:
+            data = self._load()
+            if fp not in data:
+                raise KeyError(f"No auto-index entry for fingerprint {fp}")
+            data[fp]["embedding_key_ciphertext"] = self._fernet.encrypt(api_key.encode()).decode()
+            data[fp]["embedding_key_name"] = key_name
+            data[fp]["embedding_key_status"] = status
+            data[fp]["embedding_key_rate_limit_until"] = None
+            self._save(data)
+
+    def get_decrypted_embedding_key(self, fp: str) -> Optional[tuple[str, str]]:
+        """Return (key_name, plaintext_key) for the entry's embedding key, or None."""
+        self._require_enabled()
+        entry = self._load().get(fp)
+        if not entry or not entry.get("embedding_key_ciphertext"):
+            return None
+        try:
+            key = self._fernet.decrypt(entry["embedding_key_ciphertext"].encode()).decode()
+        except InvalidToken:
+            logger.error("Could not decrypt embedding key for %s (wrong AUTOINDEX_SECRET?)", fp)
+            return None
+        return entry.get("embedding_key_name"), key
+
     def set_status(self, fp: str, status: str) -> None:
         with self._lock:
             data = self._load()
             if fp in data:
                 data[fp]["last_status"] = status
+                self._save(data)
+
+    def set_embedding_key_status(self, fp: str, status: str, rate_limit_until: Optional[str] = None) -> None:
+        with self._lock:
+            data = self._load()
+            if fp in data:
+                data[fp]["embedding_key_status"] = status
+                data[fp]["embedding_key_rate_limit_until"] = rate_limit_until
                 self._save(data)
