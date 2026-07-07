@@ -1,3 +1,10 @@
+## [1.36.1](https://github.com/cboulanger/zotero-rag/compare/v1.36.0...v1.36.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* default API_HOST to DEPLOY_FQDN so remote deploys activate the access gate ([a223c40](https://github.com/cboulanger/zotero-rag/commit/a223c40cda9b275fa06a163009383aa20ca5bd7f))
+
 # [1.36.0](https://github.com/cboulanger/zotero-rag/compare/v1.35.0...v1.36.0) (2026-07-06)
 
 
