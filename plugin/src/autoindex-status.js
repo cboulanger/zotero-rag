@@ -172,9 +172,10 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner('Idle. No automatic indexing run has happened yet.', 'idle');
 		}
 
-		this.renderLibraries(data.slugs || {});
+		this.renderLibraries(data.slugs || {}, data.is_admin === true);
 		this.renderProblems(data.key_issues || []);
 		this.updateRunNowButtonState(data);
+		this.updateAdminControlsVisibility(data);
 	},
 
 	/**
@@ -189,6 +190,162 @@ var ZoteroRAGAutoIndexStatus = {
 		const busy = data.running === true || (this.plugin && this.plugin.isClientIndexingActive());
 		button.disabled = busy;
 		button.textContent = busy ? 'Indexing in progress…' : 'Run indexing now';
+	},
+
+	/**
+	 * Show/hide the admin-only controls block based on the server-reported
+	 * is_admin flag. Runs on every poll so admin status granted/revoked
+	 * mid-session takes effect within one tick.
+	 * @param {AutoIndexStatusResponse} data
+	 * @returns {void}
+	 */
+	updateAdminControlsVisibility(data) {
+		const block = document.getElementById('admin-controls');
+		if (!block) return;
+		const isAdmin = data.is_admin === true;
+		block.style.display = isAdmin ? '' : 'none';
+		if (!isAdmin) {
+			this.adminScope = 'own';
+			const toggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-scope-toggle'));
+			if (toggle) toggle.checked = false;
+		}
+	},
+
+	/**
+	 * Trigger an immediate, unscoped indexing run covering every registered
+	 * library (admin only).
+	 * @returns {Promise<void>}
+	 */
+	async runNowAdmin() {
+		if (!this.plugin) return;
+		const button = /** @type {HTMLButtonElement} */ (document.getElementById('admin-run-now-button'));
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Starting…';
+		}
+		this.renderBanner('Starting full index…', 'running');
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/run-now`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
+				if (button) {
+					button.disabled = false;
+					button.textContent = 'Run full index now (all libraries)';
+				}
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+			if (button) {
+				button.disabled = false;
+				button.textContent = 'Run full index now (all libraries)';
+			}
+		}
+	},
+
+	/**
+	 * Pause the built-in scheduler (admin only).
+	 * @returns {Promise<void>}
+	 */
+	async pauseScheduler() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/pause`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not pause scheduler (HTTP ${response.status}).`, 'crashed');
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
+	},
+
+	/**
+	 * Resume the built-in scheduler (admin only).
+	 * @returns {Promise<void>}
+	 */
+	async resumeScheduler() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/resume`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not resume scheduler (HTTP ${response.status}).`, 'crashed');
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
+	},
+
+	/**
+	 * Abort the entire running indexing process (admin only).
+	 * @returns {Promise<void>}
+	 */
+	async abortRun() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/abort`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not abort run (HTTP ${response.status}).`, 'crashed');
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
+	},
+
+	/**
+	 * Cooperatively skip a single job in the active run without killing the
+	 * whole process (admin only).
+	 * @param {string} slug
+	 * @returns {Promise<void>}
+	 */
+	async skipSlug(slug) {
+		if (!this.plugin) return;
+		const button = /** @type {HTMLButtonElement|null} */ (document.querySelector(`[data-skip-slug="${slug}"]`));
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Skipping…';
+		}
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/skip-slug`, {
+				method: 'POST',
+				headers: { ...this.plugin.getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ slug }),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not skip job (HTTP ${response.status}).`, 'crashed');
+				if (button) {
+					button.disabled = false;
+					button.textContent = 'Skip this job';
+				}
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
 	},
 
 	/**
