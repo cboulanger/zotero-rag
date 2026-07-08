@@ -342,6 +342,17 @@ class CronIndexer:
             self._write_status(status)  # inside try so a write failure releases the lock
 
             for slug_info in slug_infos:
+                control = read_control_state(get_settings().data_path)
+                if control.get("skip_slug") == slug_info.slug:
+                    status["slugs"][slug_info.slug] = {
+                        "status": "skipped",
+                        "skip_reason": "Skipped by admin request",
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    self._write_status(status)
+                    clear_control_state(get_settings().data_path, matched_slug=slug_info.slug)
+                    continue
+
                 status["slugs"][slug_info.slug] = {
                     "status": "indexing",
                     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -447,6 +458,9 @@ class CronIndexer:
             entry["chunks_added"] = chunks_added
             if counter["n"] % self.progress_update_interval == 0:
                 self._write_status(status)
+                control = read_control_state(get_settings().data_path)
+                if control.get("skip_slug") == slug_info.slug:
+                    raise SlugSkipRequested(slug_info.slug)
 
         preset = get_settings().get_hardware_preset()
         embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
@@ -502,6 +516,13 @@ class CronIndexer:
             status["slugs"][slug_info.slug]["skip_reason"] = "embedding_rate_limit"
             self._write_status(status)
             return {"status": "skipped", "skip_reason": "embedding_rate_limit"}
+        except SlugSkipRequested:
+            self.log.info("Skip requested by admin for %s; moving to next slug.", slug_info.slug)
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = "Skipped by admin request"
+            self._write_status(status)
+            clear_control_state(get_settings().data_path, matched_slug=slug_info.slug)
+            return {"status": "skipped", "skip_reason": "Skipped by admin request"}
         except Exception as exc:
             self.log.error("Error indexing %s: %s", slug_info.slug, exc, exc_info=True)
             status["slugs"][slug_info.slug]["status"] = "error"
