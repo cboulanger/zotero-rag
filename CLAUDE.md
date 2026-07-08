@@ -166,7 +166,35 @@ sudo podman exec zotero-rag-zotero-rag-panya-de python bin/index_libraries.py \
 
 Running without `2>>` redirects output to the terminal/background and nothing appears in the log.
 
-**Enable/disable the cron job:**
+**Enable/disable indexing:**
+
+If the deployment uses the built-in scheduler (`AUTOINDEX_INTERVAL_MINUTES`
+set in the deploy env file), pause/resume it without a restart, as an admin
+— the calling Zotero key must belong to an owner/admin of the server's
+`AUTHORIZED_GROUP_ID` (see `docs/cron-indexing.md`'s "Admin Controls"
+section):
+
+```bash
+curl -X POST https://rag.example.com/api/autoindex/scheduler/pause \
+  -H "X-Zotero-API-Key: <admin-read-only-key>"
+curl -X POST https://rag.example.com/api/autoindex/scheduler/resume \
+  -H "X-Zotero-API-Key: <admin-read-only-key>"
+```
+
+To force an immediate full run instead of waiting for the next tick:
+
+```bash
+curl -X POST https://rag.example.com/api/autoindex/scheduler/run-now \
+  -H "X-Zotero-API-Key: <admin-read-only-key>"
+```
+
+To disable scheduling entirely, unset `AUTOINDEX_INTERVAL_MINUTES` in the
+deploy env file and restart the service; setting it again and restarting
+re-enables it.
+
+If the deployment still uses the external `/etc/cron.d/zotero-rag-indexer`
+job instead (see `docs/cron-indexing.md`'s "Alternative: external scheduler"):
+
 ```bash
 # Disable (comment out)
 sudo sed -i 's|^0 \* \* \* \* root /usr/bin/podman exec|#DISABLED 0 * * * * root /usr/bin/podman exec|' /etc/cron.d/zotero-rag-indexer

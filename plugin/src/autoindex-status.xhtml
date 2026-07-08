@@ -51,11 +51,23 @@
     .dialog-buttons { display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid #ddd; margin-top: 12px; }
     .dialog-button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background-color: #f5f5f5; color: #333; cursor: pointer; }
     .dialog-button:hover { background-color: #e5e5e5; }
+    #admin-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .admin-scope-toggle { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
+    .library-skip-button { font-size: 11px; padding: 2px 8px; }
   </style>
 </head>
 
 <body>
   <button id="run-now-button" type="button" class="dialog-button">Run indexing now</button>
+  <div id="admin-controls" style="display:none;">
+    <button id="admin-run-now-button" type="button" class="dialog-button">Run full index now (all libraries)</button>
+    <button id="admin-pause-button" type="button" class="dialog-button">Pause scheduler</button>
+    <button id="admin-resume-button" type="button" class="dialog-button" style="display:none;">Resume scheduler</button>
+    <button id="admin-abort-button" type="button" class="dialog-button">Abort running index</button>
+    <label id="admin-scope-toggle-label" class="admin-scope-toggle">
+      <input id="admin-scope-toggle" type="checkbox"/> Show all users' jobs
+    </label>
+  </div>
   <div id="run-banner">Loading status…</div>
   <div id="libraries-container"></div>
   <div id="empty-state" style="display:none;">No libraries are registered for automatic indexing yet.</div>

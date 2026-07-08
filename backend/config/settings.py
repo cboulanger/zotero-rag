@@ -137,6 +137,14 @@ class Settings(BaseSettings):
         description="Path to the encrypted auto-index keys JSON. Defaults to "
                     "<data_path>/system/autoindex_keys.json.",
     )
+    autoindex_interval_minutes: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="If set, the backend runs its own in-process scheduler that "
+                    "triggers an auto-index run every N minutes, instead of "
+                    "relying on an external OS cron job. Unset (default) leaves "
+                    "scheduling entirely to the operator (see docs/cron-indexing.md)."
+    )
 
     qdrant_url: Optional[str] = Field(
         default=None,

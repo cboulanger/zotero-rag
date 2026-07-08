@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -52,6 +53,10 @@ class AlreadyRunningError(Exception):
     """Raised when another cron indexer process is already running."""
 
 
+class SlugSkipRequested(Exception):
+    """Raised to unwind out of indexing the current slug when an admin requests a skip."""
+
+
 @dataclass
 class SlugInfo:
     """Parsed Zotero library slug with all ID representations."""
@@ -84,6 +89,26 @@ def is_process_alive(pid: int) -> bool:
             return True  # alive, insufficient permission
 
 
+def abort_process(pid: int) -> bool:
+    """Send a termination signal to a running cron-indexer process.
+
+    Returns False if the process was already gone. Uses the same POSIX/Windows
+    branching as is_process_alive(): SIGTERM on POSIX (kernel releases the
+    process's flock automatically, exactly as on a crash), TerminateProcess
+    via os.kill(pid, signal.SIGTERM) on Windows (Python maps this to
+    TerminateProcess for non-Python-created handles).
+    """
+    if not is_process_alive(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False  # process exited in the window between the check and the signal
+    except PermissionError:
+        return True  # process is alive but we can't signal it — same "alive" semantics is_process_alive uses
+    return True
+
+
 def read_live_status(data_path: Path) -> dict:
     """Return the last cron run's live status from ``system/cron_status.json``.
 
@@ -100,6 +125,40 @@ def read_live_status(data_path: Path) -> dict:
             cron_data["running"] = False
             cron_data["crashed"] = True
     return cron_data
+
+
+def read_control_state(data_path: Path) -> dict:
+    """Return the current admin skip-slug control request, or {} if none."""
+    control_path = data_path / "system" / "autoindex_control.json"
+    try:
+        return json.loads(control_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_control_state(data_path: Path, state: dict) -> None:
+    """Atomically write the control-state JSON file (same pattern as CronIndexer._write_status)."""
+    control_path = data_path / "system" / "autoindex_control.json"
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=control_path.parent, suffix=".tmp", prefix="autoindex_control_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, control_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def clear_control_state(data_path: Path, matched_slug: str) -> None:
+    """Clear the skip request only if it still targets matched_slug — avoids
+    clobbering a newer, unrelated request that may have arrived in between."""
+    current = read_control_state(data_path)
+    if current.get("skip_slug") == matched_slug:
+        write_control_state(data_path, {"skip_slug": None, "requested_at": None})
 
 
 class CronIndexer:
@@ -283,6 +342,17 @@ class CronIndexer:
             self._write_status(status)  # inside try so a write failure releases the lock
 
             for slug_info in slug_infos:
+                control = read_control_state(get_settings().data_path)
+                if control.get("skip_slug") == slug_info.slug:
+                    status["slugs"][slug_info.slug] = {
+                        "status": "skipped",
+                        "skip_reason": "Skipped by admin request",
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    self._write_status(status)
+                    clear_control_state(get_settings().data_path, matched_slug=slug_info.slug)
+                    continue
+
                 status["slugs"][slug_info.slug] = {
                     "status": "indexing",
                     "started_at": datetime.now(timezone.utc).isoformat(),
@@ -324,6 +394,10 @@ class CronIndexer:
                 self._write_status(status)
             except Exception as exc:
                 self.log.warning("Failed to write final cron status: %s", exc)
+            try:
+                write_control_state(get_settings().data_path, {"skip_slug": None, "requested_at": None})
+            except Exception as exc:
+                self.log.warning("Failed to clear control state at end of run: %s", exc)
             self._release_lock()  # always runs even if _write_status raised
 
         return total_stats
@@ -388,6 +462,9 @@ class CronIndexer:
             entry["chunks_added"] = chunks_added
             if counter["n"] % self.progress_update_interval == 0:
                 self._write_status(status)
+                control = read_control_state(get_settings().data_path)
+                if control.get("skip_slug") == slug_info.slug:
+                    raise SlugSkipRequested(slug_info.slug)
 
         preset = get_settings().get_hardware_preset()
         embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
@@ -443,6 +520,13 @@ class CronIndexer:
             status["slugs"][slug_info.slug]["skip_reason"] = "embedding_rate_limit"
             self._write_status(status)
             return {"status": "skipped", "skip_reason": "embedding_rate_limit"}
+        except SlugSkipRequested:
+            self.log.info("Skip requested by admin for %s; moving to next slug.", slug_info.slug)
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = "Skipped by admin request"
+            self._write_status(status)
+            clear_control_state(get_settings().data_path, matched_slug=slug_info.slug)
+            return {"status": "skipped", "skip_reason": "Skipped by admin request"}
         except Exception as exc:
             self.log.error("Error indexing %s: %s", slug_info.slug, exc, exc_info=True)
             status["slugs"][slug_info.slug]["status"] = "error"
