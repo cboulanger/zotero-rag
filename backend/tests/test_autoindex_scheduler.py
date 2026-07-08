@@ -1,5 +1,6 @@
 """Unit tests for backend.services.autoindex_scheduler."""
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +11,9 @@ from pydantic import ValidationError
 
 from backend.config.settings import Settings
 from backend.services.autoindex_scheduler import (
+    _STARTUP_DELAY_SECONDS,
     read_scheduler_state,
+    run_scheduler_loop,
     trigger_index_run,
     write_scheduler_state,
 )
@@ -83,6 +86,62 @@ class SchedulerStateTest(unittest.TestCase):
     def test_round_trip(self):
         write_scheduler_state(self.tmp, {"paused": True})
         self.assertEqual(read_scheduler_state(self.tmp), {"paused": True})
+
+
+class RunSchedulerLoopTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tick_then_cancel(self):
+        """One tick fires after the startup delay, then the loop can be
+        cancelled cleanly via the next sleep call."""
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=60)
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock(return_value="started")) as mock_trigger:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_scheduler_loop(settings)
+
+        mock_trigger.assert_awaited_once()
+        self.assertEqual(calls, [_STARTUP_DELAY_SECONDS, settings.autoindex_interval_minutes * 60])
+
+    async def test_tick_exception_does_not_stop_loop(self):
+        """A tick that raises is logged and swallowed, not propagated —
+        proven by reaching the second sleep call."""
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=60)
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            with self.assertRaises(asyncio.CancelledError):
+                await run_scheduler_loop(settings)
+
+        self.assertEqual(len(calls), 2)
+
+    async def test_paused_scheduler_skips_trigger(self):
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=60)
+        write_scheduler_state(settings.data_path, {"paused": True})
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock()) as mock_trigger:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_scheduler_loop(settings)
+
+        mock_trigger.assert_not_awaited()
 
 
 if __name__ == "__main__":

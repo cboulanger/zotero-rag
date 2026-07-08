@@ -47,6 +47,31 @@ async def trigger_index_run(settings: Settings, fingerprint: Optional[str] = Non
     return "started"
 
 
+async def run_scheduler_loop(settings: Settings) -> None:
+    """Runs forever until cancelled. Ticks every AUTOINDEX_INTERVAL_MINUTES,
+    triggering an unscoped (all-targets) indexing run via trigger_index_run().
+
+    The tick body is wrapped in try/except Exception (re-raising
+    CancelledError) deliberately: a single tick's failure (e.g. a transient
+    exception in trigger_index_run itself, not the subprocess it spawns)
+    must not kill the scheduler task permanently — the loop must keep
+    ticking on the configured interval indefinitely.
+    """
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            if not read_scheduler_state(settings.data_path).get("paused", False):
+                result = await trigger_index_run(settings)
+                logger.info("Scheduler tick: %s", result)
+            else:
+                logger.debug("Scheduler tick skipped: paused by admin.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Scheduler tick failed unexpectedly; will retry next interval.")
+        await asyncio.sleep(settings.autoindex_interval_minutes * 60)
+
+
 async def _spawn_index_run(settings: Settings, fingerprint: Optional[str]) -> None:
     log_path = settings.data_path / "logs" / "cron_indexer.log"
     script_path = _PROJECT_ROOT / "bin" / "index_libraries.py"
