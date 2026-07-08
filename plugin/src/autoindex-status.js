@@ -36,6 +36,7 @@
  * @property {Record<string, AutoIndexSlugStatus>} [slugs]
  * @property {AutoIndexKeyIssue[]} [key_issues]
  * @property {boolean} [is_admin]
+ * @property {{active: boolean, interval_minutes: number|null, paused: boolean}} [scheduler]
  */
 
 var ZoteroRAGAutoIndexStatus = {
@@ -195,7 +196,9 @@ var ZoteroRAGAutoIndexStatus = {
 	/**
 	 * Show/hide the admin-only controls block based on the server-reported
 	 * is_admin flag. Runs on every poll so admin status granted/revoked
-	 * mid-session takes effect within one tick.
+	 * mid-session takes effect within one tick. Also toggles which of the
+	 * pause/resume buttons is shown, based on the scheduler's persisted
+	 * pause state.
 	 * @param {AutoIndexStatusResponse} data
 	 * @returns {void}
 	 */
@@ -209,6 +212,12 @@ var ZoteroRAGAutoIndexStatus = {
 			const toggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-scope-toggle'));
 			if (toggle) toggle.checked = false;
 		}
+
+		const paused = data.scheduler?.paused === true;
+		const pauseButton = document.getElementById('admin-pause-button');
+		const resumeButton = document.getElementById('admin-resume-button');
+		if (pauseButton) pauseButton.style.display = paused ? 'none' : '';
+		if (resumeButton) resumeButton.style.display = paused ? '' : 'none';
 	},
 
 	/**
