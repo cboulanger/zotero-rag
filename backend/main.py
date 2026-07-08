@@ -3,7 +3,9 @@ FastAPI application entry point for Zotero RAG backend.
 """
 
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
+from typing import Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -115,7 +117,19 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Failed to initialise VectorStore after {_vs_retries} attempts: {e}")
                 app.state.vector_store = None
 
+    scheduler_task: Optional[asyncio.Task] = None
+    if settings.autoindex_interval_minutes:
+        from backend.services.autoindex_scheduler import run_scheduler_loop
+        scheduler_task = asyncio.create_task(run_scheduler_loop(settings))
+        app.state.autoindex_scheduler_task = scheduler_task
+        logger.info(f"Auto-index scheduler started (every {settings.autoindex_interval_minutes} min)")
+
     yield
+
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await scheduler_task
 
     logger.info("Shutting down Zotero RAG backend")
     save_item_cache(_cache_path)
