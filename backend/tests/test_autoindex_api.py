@@ -14,6 +14,7 @@ from backend.config.settings import get_settings, reset_settings
 from backend.dependencies import require_authorized_group_admin
 from backend.services.autoindex_scheduler import read_scheduler_state
 from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
+from backend.zotero.group_roles import reset_admin_role_cache
 from backend.zotero.key_validator import KeyValidation
 
 
@@ -203,6 +204,7 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         reset_settings()
         reset_identity_cache()
+        reset_admin_role_cache()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         s.autoindex_secret = Fernet.generate_key().decode()
@@ -227,6 +229,7 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.tmp.cleanup()
         reset_settings()
         reset_identity_cache()
+        reset_admin_role_cache()
 
     def _override_admin(self, identity):
         from backend.main import app as main_app
