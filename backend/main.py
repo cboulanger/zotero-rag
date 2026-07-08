@@ -266,14 +266,28 @@ def root(request: Request):
     # unset (the feature is disabled and no keys can be decrypted). Key counts and
     # live per-run progress live on the authenticated GET /api/autoindex/status.
     from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.autoindex_scheduler import read_scheduler_state
+    # Re-fetch settings here rather than reusing the module-level `settings`
+    # captured once at import time (line 24): that snapshot never reflects
+    # get_settings() being reset/reconfigured later (e.g. reset_settings() in
+    # tests, or any future runtime reconfiguration), so reading it directly
+    # would silently report stale enabled/scheduler state.
+    current_settings = get_settings()
     try:
-        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        store = AutoIndexKeyStore(current_settings.autoindex_keys_path, current_settings.autoindex_secret)
         enabled = store.enabled
     except Exception as exc:
         logger.warning("Failed to read auto-index key store: %s", exc)
         enabled = False
 
-    response["cron_indexing"] = {"enabled": enabled}
+    response["cron_indexing"] = {
+        "enabled": enabled,
+        "scheduler": {
+            "active": bool(current_settings.autoindex_interval_minutes),
+            "interval_minutes": current_settings.autoindex_interval_minutes,
+            "paused": read_scheduler_state(current_settings.data_path).get("paused", False),
+        },
+    }
 
     return response
 

@@ -26,9 +26,17 @@ class AutoIndexApiTest(unittest.TestCase):
         s.autoindex_secret = Fernet.generate_key().decode()
         s.autoindex_keys_path = Path(self.tmp.name) / "autoindex_keys.json"
         s.data_path = Path(self.tmp.name)
+        # GET / (exercised by test_root_reports_scheduler_subobject below)
+        # depends on app.state.vector_store, which is only populated by the
+        # app's lifespan — and TestClient(app) without a `with` block never
+        # runs lifespan. Stub it directly, matching the pattern in
+        # test_main_auth_middleware.py.
+        app.state.vector_store = MagicMock()
+        app.state.vector_store.get_collection_info.return_value = {}
         self.client = TestClient(app)
 
     def tearDown(self):
+        del app.state.vector_store
         self.tmp.cleanup()
         reset_settings()
 
@@ -197,6 +205,14 @@ class AutoIndexApiTest(unittest.TestCase):
             r = self.client.post("/api/autoindex/run", headers={"X-Zotero-API-Key": "RO"})
         self.assertEqual(r.status_code, 409)
         self.assertIn("already running", r.json()["detail"])
+
+    def test_root_reports_scheduler_subobject(self):
+        get_settings().autoindex_interval_minutes = 30
+        r = self.client.get("/")
+        scheduler = r.json()["cron_indexing"]["scheduler"]
+        self.assertTrue(scheduler["active"])
+        self.assertEqual(scheduler["interval_minutes"], 30)
+        self.assertFalse(scheduler["paused"])
 
 
 class AdminSchedulerControlsTest(unittest.TestCase):
@@ -566,6 +582,25 @@ class StatusAdminFieldTest(unittest.TestCase):
             r = self.client.get("/api/autoindex/status?scope=all")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(len(r.json()["key_issues"]), 2)  # both alice's and bob's, unfiltered
+
+    def test_scheduler_subobject_reflects_settings_and_pause_state(self):
+        get_settings().autoindex_interval_minutes = 60
+        from backend.services.autoindex_scheduler import write_scheduler_state
+        write_scheduler_state(get_settings().data_path, {"paused": True})
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        scheduler = r.json()["scheduler"]
+        self.assertTrue(scheduler["active"])
+        self.assertEqual(scheduler["interval_minutes"], 60)
+        self.assertTrue(scheduler["paused"])
+
+    def test_scheduler_subobject_inactive_when_interval_unset(self):
+        get_settings().autoindex_interval_minutes = None
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        scheduler = r.json()["scheduler"]
+        self.assertFalse(scheduler["active"])
+        self.assertFalse(scheduler["paused"])  # no state file written -> defaults False
 
 
 if __name__ == "__main__":

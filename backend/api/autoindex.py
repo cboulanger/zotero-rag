@@ -29,7 +29,7 @@ from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
-from backend.services.autoindex_scheduler import trigger_index_run, write_scheduler_state
+from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, write_scheduler_state
 from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.registration_service import RegistrationService
@@ -166,6 +166,13 @@ async def status(
         result["enabled"] = False
         result["keys_registered"] = 0
         result["disabled_reason"] = f"key store error: {exc}"
+
+    scheduler_state = await asyncio.to_thread(read_scheduler_state, settings.data_path)
+    result["scheduler"] = {
+        "active": bool(settings.autoindex_interval_minutes),
+        "interval_minutes": settings.autoindex_interval_minutes,
+        "paused": scheduler_state.get("paused", False),
+    }
 
     try:
         result.update(await asyncio.to_thread(read_live_status, settings.data_path))
