@@ -29,7 +29,7 @@ from backend.dependencies import get_zotero_identity, require_authorized_group_a
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import trigger_index_run, write_scheduler_state
-from backend.services.cron_indexer import abort_process, read_live_status
+from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 class KeyRequest(BaseModel):
     api_key: str
     embedding_api_key: Optional[str] = None
+
+
+class SkipSlugRequest(BaseModel):
+    slug: str
 
 
 def _store() -> AutoIndexKeyStore:
@@ -243,6 +247,32 @@ async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authori
         raise HTTPException(status_code=500, detail="Indexing is reported as running but no PID was recorded.")
     aborted = await asyncio.to_thread(abort_process, pid)
     return {"aborted": aborted, "pid": pid}
+
+
+@router.post(
+    "/autoindex/scheduler/skip-slug",
+    summary="Cooperatively skip one job in the active run without killing the process (admin only)",
+)
+async def skip_slug(
+    body: SkipSlugRequest,
+    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+) -> dict:
+    settings = get_settings()
+    live_status = await asyncio.to_thread(read_live_status, settings.data_path)
+    if not live_status.get("running"):
+        raise HTTPException(status_code=409, detail="No indexing run is currently active.")
+    slug_state = live_status.get("slugs", {}).get(body.slug)
+    if slug_state is None or slug_state.get("status") not in ("pending", "indexing"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"{body.slug!r} is not a pending or in-progress job in the active run.",
+        )
+    from datetime import datetime, timezone
+    await asyncio.to_thread(
+        write_control_state, settings.data_path,
+        {"skip_slug": body.slug, "requested_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return {"skip_requested": True, "slug": body.slug}
 
 
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:

@@ -345,6 +345,49 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.json(), {"aborted": False, "pid": 5555})
         mock_abort.assert_called_once_with(5555)
 
+    def _seed_running_status(self, slugs: dict) -> None:
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(
+            json.dumps({"running": True, "pid": 1, "slugs": slugs}), encoding="utf-8",
+        )
+
+    def test_skip_slug_rejects_when_nothing_running(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        r = self.client.post("/api/autoindex/scheduler/skip-slug", json={"slug": "users/1"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_skip_slug_rejects_unknown_slug(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._seed_running_status({"users/1": {"status": "indexing"}})
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/skip-slug", json={"slug": "groups/999"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_skip_slug_rejects_already_done_slug(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._seed_running_status({"users/1": {"status": "done"}})
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/skip-slug", json={"slug": "users/1"})
+        self.assertEqual(r.status_code, 404)
+
+    def test_skip_slug_writes_control_state_for_indexing_slug(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._seed_running_status({"users/1": {"status": "indexing"}})
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/skip-slug", json={"slug": "users/1"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"skip_requested": True, "slug": "users/1"})
+        from backend.services.cron_indexer import read_control_state
+        self.assertEqual(read_control_state(get_settings().data_path)["skip_slug"], "users/1")
+
+    def test_skip_slug_accepts_pending_slug(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._seed_running_status({"users/1": {"status": "pending"}})
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/skip-slug", json={"slug": "users/1"})
+        self.assertEqual(r.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
