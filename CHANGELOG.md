@@ -1,3 +1,10 @@
+# [1.38.0](https://github.com/cboulanger/zotero-rag/compare/v1.37.0...v1.38.0) (2026-07-08)
+
+
+### Features
+
+* Add in-process auto-index scheduler with admin controls ([#41](https://github.com/cboulanger/zotero-rag/issues/41)) ([e57cfd3](https://github.com/cboulanger/zotero-rag/commit/e57cfd3a3c87ddb1fc8273408b585f7d2a540ae8))
+
 # [1.37.0](https://github.com/cboulanger/zotero-rag/compare/v1.36.2...v1.37.0) (2026-07-07)
 
 
