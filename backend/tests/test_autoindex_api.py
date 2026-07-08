@@ -389,5 +389,51 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
 
 
+class StatusAdminFieldTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+        s = get_settings()
+        s.data_path = Path(self.tmp.name)
+        s.autoindex_secret = Fernet.generate_key().decode()
+        s.autoindex_keys_path = Path(self.tmp.name) / "autoindex_keys.json"
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        from backend.main import app as main_app
+        main_app.dependency_overrides.clear()
+        self.tmp.cleanup()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+
+    def _set_identity(self, identity):
+        import backend.dependencies as dependencies
+        from backend.main import app as main_app
+        main_app.dependency_overrides[dependencies.get_zotero_identity] = lambda: identity
+
+    def test_is_admin_true_on_loopback(self):
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertTrue(r.json()["is_admin"])
+
+    def test_is_admin_false_without_authorized_group_id(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = None
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status")
+        self.assertFalse(r.json()["is_admin"])
+
+    def test_is_admin_reflects_cache_result(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=True)):
+            r = self.client.get("/api/autoindex/status")
+        self.assertTrue(r.json()["is_admin"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,7 @@ from backend.services.autoindex_scheduler import trigger_index_run, write_schedu
 from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
+from backend.zotero.group_roles import get_admin_role_cache
 from backend.zotero.key_validator import validate_key
 
 router = APIRouter()
@@ -115,7 +116,10 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
 
 
 @router.get("/autoindex/status", summary="Live auto-index cron-run progress")
-def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) -> dict:
+async def status(
+    request: Request,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+) -> dict:
     """Return the live status of the auto-index cron run.
 
     Unlike the ``/`` root endpoint (which exposes only ``enabled``), this
@@ -133,6 +137,11 @@ def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) ->
     entries matching the caller's own username — this endpoint previously
     leaked every user's real username and every library's slug/stats to any
     caller who merely passed the instance-wide access gate.
+
+    Also reports ``is_admin``: True on loopback, True/False (via the cached
+    Zotero group-admin check) when AUTHORIZED_GROUP_ID is configured, False
+    when it isn't — the plugin uses this to decide whether to show admin
+    controls, without a separate round trip.
     """
     settings = get_settings()
     result: dict = {}
@@ -140,7 +149,7 @@ def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) ->
         store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
         result["enabled"] = store.enabled
         if store.enabled:
-            result["keys_registered"] = len(store.list_metadata())
+            result["keys_registered"] = len(await asyncio.to_thread(store.list_metadata))
         else:
             result["keys_registered"] = 0
             result["disabled_reason"] = "AUTOINDEX_SECRET is not set"
@@ -151,11 +160,18 @@ def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) ->
         result["disabled_reason"] = f"key store error: {exc}"
 
     try:
-        result.update(read_live_status(settings.data_path))
+        result.update(await asyncio.to_thread(read_live_status, settings.data_path))
     except Exception as exc:
         logger.warning("Failed to read cron status file: %s", exc)
 
     if identity is not None:
+        if settings.authorized_group_id:
+            api_key = request.headers.get("X-Zotero-API-Key", "")
+            result["is_admin"] = await get_admin_role_cache().is_admin(
+                identity.user_id, settings.authorized_group_id, api_key,
+            )
+        else:
+            result["is_admin"] = False
         if "slugs" in result:
             result["slugs"] = {
                 slug: info for slug, info in result["slugs"].items()
@@ -166,6 +182,8 @@ def status(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity)) ->
                 issue for issue in result["key_issues"]
                 if issue.get("user") == identity.username
             ]
+    else:
+        result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
 
     return result
 
