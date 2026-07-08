@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -52,6 +53,10 @@ class AlreadyRunningError(Exception):
     """Raised when another cron indexer process is already running."""
 
 
+class SlugSkipRequested(Exception):
+    """Raised to unwind out of indexing the current slug when an admin requests a skip."""
+
+
 @dataclass
 class SlugInfo:
     """Parsed Zotero library slug with all ID representations."""
@@ -84,6 +89,21 @@ def is_process_alive(pid: int) -> bool:
             return True  # alive, insufficient permission
 
 
+def abort_process(pid: int) -> bool:
+    """Send a termination signal to a running cron-indexer process.
+
+    Returns False if the process was already gone. Uses the same POSIX/Windows
+    branching as is_process_alive(): SIGTERM on POSIX (kernel releases the
+    process's flock automatically, exactly as on a crash), TerminateProcess
+    via os.kill(pid, signal.SIGTERM) on Windows (Python maps this to
+    TerminateProcess for non-Python-created handles).
+    """
+    if not is_process_alive(pid):
+        return False
+    os.kill(pid, signal.SIGTERM)
+    return True
+
+
 def read_live_status(data_path: Path) -> dict:
     """Return the last cron run's live status from ``system/cron_status.json``.
 
@@ -100,6 +120,40 @@ def read_live_status(data_path: Path) -> dict:
             cron_data["running"] = False
             cron_data["crashed"] = True
     return cron_data
+
+
+def read_control_state(data_path: Path) -> dict:
+    """Return the current admin skip-slug control request, or {} if none."""
+    control_path = data_path / "system" / "autoindex_control.json"
+    try:
+        return json.loads(control_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_control_state(data_path: Path, state: dict) -> None:
+    """Atomically write the control-state JSON file (same pattern as CronIndexer._write_status)."""
+    control_path = data_path / "system" / "autoindex_control.json"
+    control_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=control_path.parent, suffix=".tmp", prefix="autoindex_control_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, control_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def clear_control_state(data_path: Path, matched_slug: str) -> None:
+    """Clear the skip request only if it still targets matched_slug — avoids
+    clobbering a newer, unrelated request that may have arrived in between."""
+    current = read_control_state(data_path)
+    if current.get("skip_slug") == matched_slug:
+        write_control_state(data_path, {"skip_slug": None, "requested_at": None})
 
 
 class CronIndexer:

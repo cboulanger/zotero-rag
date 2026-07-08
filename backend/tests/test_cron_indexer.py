@@ -12,8 +12,12 @@ from backend.services.cron_indexer import (
     AlreadyRunningError,
     CronIndexer,
     SlugInfo,
+    abort_process,
+    clear_control_state,
     is_process_alive,
+    read_control_state,
     read_live_status,
+    write_control_state,
 )
 
 
@@ -588,6 +592,44 @@ class TestResolveMode(unittest.IsolatedAsyncioTestCase):
         mock_api.get_library_item_count = AsyncMock(return_value=1000)
         result = await indexer._resolve_mode(slug_info, mock_api)
         self.assertEqual(result, "full")
+
+
+class TestAbortProcess(unittest.TestCase):
+    def test_returns_false_when_process_already_gone(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=False):
+            self.assertFalse(abort_process(999999))
+
+    def test_sends_sigterm_when_alive(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.services.cron_indexer.os.kill") as mock_kill:
+            result = abort_process(1234)
+        self.assertTrue(result)
+        import signal
+        mock_kill.assert_called_once_with(1234, signal.SIGTERM)
+
+
+class TestControlState(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_missing_file_reads_empty_dict(self):
+        self.assertEqual(read_control_state(self.tmp), {})
+
+    def test_round_trip(self):
+        write_control_state(self.tmp, {"skip_slug": "users/1", "requested_at": "now"})
+        self.assertEqual(read_control_state(self.tmp), {"skip_slug": "users/1", "requested_at": "now"})
+
+    def test_clear_removes_matching_request(self):
+        write_control_state(self.tmp, {"skip_slug": "users/1", "requested_at": "now"})
+        clear_control_state(self.tmp, matched_slug="users/1")
+        self.assertIsNone(read_control_state(self.tmp).get("skip_slug"))
+
+    def test_clear_is_noop_when_slug_no_longer_matches(self):
+        """A newer request for a different slug must not be clobbered by a
+        stale clear for the slug that was skipped earlier."""
+        write_control_state(self.tmp, {"skip_slug": "groups/2", "requested_at": "later"})
+        clear_control_state(self.tmp, matched_slug="users/1")
+        self.assertEqual(read_control_state(self.tmp).get("skip_slug"), "groups/2")
 
 
 if __name__ == "__main__":
