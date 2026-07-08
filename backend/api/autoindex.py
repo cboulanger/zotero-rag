@@ -191,11 +191,14 @@ async def status(
         if not result["is_admin"]:
             raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
         if "slugs" in result:
-            registrations = await asyncio.to_thread(RegistrationService(settings.registrations_path).get_all)
-            for slug, info in result["slugs"].items():
-                library_name, owner_id = _job_label(slug, registrations)
-                info["library_name"] = library_name
-                info["owner_id"] = owner_id
+            try:
+                registrations = await asyncio.to_thread(RegistrationService(settings.registrations_path).get_all)
+                for slug, info in result["slugs"].items():
+                    library_name, owner_id = _job_label(slug, registrations)
+                    info["library_name"] = library_name
+                    info["owner_id"] = owner_id
+            except Exception as exc:
+                logger.warning("Failed to join registrations for scope=all status: %s", exc)
     elif identity is not None:
         if "slugs" in result:
             result["slugs"] = {

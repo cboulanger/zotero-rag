@@ -530,6 +530,43 @@ class StatusAdminFieldTest(unittest.TestCase):
         self.assertEqual(set(data["slugs"].keys()), {"users/1"})
         self.assertNotIn("library_name", data["slugs"]["users/1"])
 
+    def test_scope_all_loopback_sees_every_slug_with_labels(self):
+        """Loopback deployments get is_admin=True unconditionally, so
+        ?scope=all must work for them too, without needing an identity override."""
+        self._seed_status({
+            "users/1": {"status": "done"},
+            "users/2": {"status": "indexing"},
+        })
+        self._seed_registrations({
+            "u1": {"library_name": "Alice's Library", "users": [{"user_id": 1, "username": "alice"}]},
+            "u2": {"library_name": "Bob's Library", "users": [{"user_id": 2, "username": "bob"}]},
+        })
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(set(data["slugs"].keys()), {"users/1", "users/2"})
+        self.assertEqual(data["slugs"]["users/1"]["library_name"], "Alice's Library")
+
+    def test_scope_all_admin_sees_all_key_issues_unfiltered(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({
+            "running": False,
+            "slugs": {"users/1": {"status": "done"}},
+            "key_issues": [
+                {"user": "alice", "reason": "revoked", "pruned": True},
+                {"user": "bob", "reason": "revoked", "pruned": True},
+            ],
+        }), encoding="utf-8")
+        self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=True)):
+            r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.json()["key_issues"]), 2)  # both alice's and bob's, unfiltered
+
 
 if __name__ == "__main__":
     unittest.main()
