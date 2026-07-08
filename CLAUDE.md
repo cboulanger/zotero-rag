@@ -169,19 +169,22 @@ Running without `2>>` redirects output to the terminal/background and nothing ap
 **Enable/disable indexing:**
 
 If the deployment uses the built-in scheduler (`AUTOINDEX_INTERVAL_MINUTES`
-set in the deploy env file), pause/resume it without a restart, as an admin:
+set in the deploy env file), pause/resume it without a restart, as an admin
+— the calling Zotero key must belong to an owner/admin of the server's
+`AUTHORIZED_GROUP_ID` (see `docs/cron-indexing.md`'s "Admin Controls"
+section):
 
 ```bash
-curl -X POST https://your-instance/api/autoindex/scheduler/pause \
+curl -X POST https://rag.example.com/api/autoindex/scheduler/pause \
   -H "X-Zotero-API-Key: <admin-read-only-key>"
-curl -X POST https://your-instance/api/autoindex/scheduler/resume \
+curl -X POST https://rag.example.com/api/autoindex/scheduler/resume \
   -H "X-Zotero-API-Key: <admin-read-only-key>"
 ```
 
 To force an immediate full run instead of waiting for the next tick:
 
 ```bash
-curl -X POST https://your-instance/api/autoindex/scheduler/run-now \
+curl -X POST https://rag.example.com/api/autoindex/scheduler/run-now \
   -H "X-Zotero-API-Key: <admin-read-only-key>"
 ```
 
