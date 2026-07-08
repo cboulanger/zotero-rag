@@ -224,6 +224,11 @@ async def run_now_admin(identity: Optional[ZoteroIdentity] = Depends(require_aut
     result = await trigger_index_run(settings)
     if result == "already_running":
         raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
+    if result == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
+        )
     return {"started": True}
 
 

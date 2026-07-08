@@ -310,6 +310,12 @@ class AdminSchedulerControlsTest(unittest.TestCase):
             r = self.client.post("/api/autoindex/scheduler/run-now")
         self.assertEqual(r.status_code, 409)
 
+    def test_run_now_admin_rejects_when_autoindex_disabled(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        get_settings().autoindex_secret = None
+        r = self.client.post("/api/autoindex/scheduler/run-now")
+        self.assertEqual(r.status_code, 503)
+
 
 if __name__ == "__main__":
     unittest.main()
