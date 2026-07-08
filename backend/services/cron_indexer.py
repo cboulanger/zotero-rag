@@ -394,6 +394,10 @@ class CronIndexer:
                 self._write_status(status)
             except Exception as exc:
                 self.log.warning("Failed to write final cron status: %s", exc)
+            try:
+                write_control_state(get_settings().data_path, {"skip_slug": None, "requested_at": None})
+            except Exception as exc:
+                self.log.warning("Failed to clear control state at end of run: %s", exc)
             self._release_lock()  # always runs even if _write_status raised
 
         return total_stats

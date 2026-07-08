@@ -729,6 +729,31 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
         status = indexer._read_status()
         self.assertEqual(status["slugs"]["users/1"]["status"], "done")
 
+    async def test_control_state_cleared_at_end_of_run_even_if_unconsumed(self):
+        """A skip request naming a slug never touched by either checkpoint
+        during this run (e.g. it targets a slug not in this run at all)
+        must not leak into a future, unrelated run."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        write_control_state(self.tmp, {"skip_slug": "groups/999", "requested_at": "now"})  # not part of this run
+
+        with patch("backend.services.cron_indexer.get_settings") as mock_get_settings, \
+             patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+            mock_get_settings.return_value.data_path = self.tmp
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(return_value={"items_processed": 5, "chunks_added": 10})
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
+        self.assertIsNone(read_control_state(self.tmp).get("skip_slug"))
+
 
 if __name__ == "__main__":
     unittest.main()
