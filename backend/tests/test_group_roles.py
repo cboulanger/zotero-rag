@@ -72,6 +72,18 @@ class AdminRoleCacheTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(admin_result)
         self.assertFalse(non_admin_result)
 
+    async def test_same_group_different_users_cached_independently(self):
+        """Same group_id, two different user_ids — catches a cache-key bug
+        that collapsed to group_id alone, dropping user_id."""
+        cache = AdminRoleCache(ttl_seconds=60)
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/groups/999", payload={"meta": {"isAdmin": True}})
+            m.get(f"{ZOTERO_API_BASE}/groups/999", payload={"meta": {}})
+            admin_result = await cache.is_admin(1, 999, "KEY_A")
+            non_admin_result = await cache.is_admin(2, 999, "KEY_B")
+        self.assertTrue(admin_result)
+        self.assertFalse(non_admin_result)
+
 
 class ModuleSingletonTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
