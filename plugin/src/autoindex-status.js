@@ -186,11 +186,19 @@ var ZoteroRAGAutoIndexStatus = {
 	 * @returns {void}
 	 */
 	updateRunNowButtonState(data) {
-		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
-		if (!button) return;
 		const busy = data.running === true || (this.plugin && this.plugin.isClientIndexingActive());
-		button.disabled = busy;
-		button.textContent = busy ? 'Indexing in progress…' : 'Run indexing now';
+
+		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
+		if (button) {
+			button.disabled = busy;
+			button.textContent = busy ? 'Indexing in progress…' : 'Run indexing now';
+		}
+
+		const adminButton = /** @type {HTMLButtonElement} */ (document.getElementById('admin-run-now-button'));
+		if (adminButton) {
+			adminButton.disabled = busy;
+			adminButton.textContent = busy ? 'Indexing in progress…' : 'Run full index now (all libraries)';
+		}
 	},
 
 	/**
