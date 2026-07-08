@@ -85,7 +85,9 @@ async def require_authorized_group_admin(request: Request) -> Optional[ZoteroIde
         return None
     if not settings.authorized_group_id:
         raise HTTPException(status_code=503, detail="Admin controls require AUTHORIZED_GROUP_ID to be configured.")
-    identity = request.state.zotero_identity
+    identity = get_zotero_identity(request)
+    if identity is None:
+        raise HTTPException(status_code=401, detail="Missing or invalid Zotero API key.")
     api_key = request.headers.get("X-Zotero-API-Key", "")
     if not await get_admin_role_cache().is_admin(identity.user_id, settings.authorized_group_id, api_key):
         raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
