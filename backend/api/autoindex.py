@@ -167,9 +167,13 @@ async def status(
     if identity is not None:
         if settings.authorized_group_id:
             api_key = request.headers.get("X-Zotero-API-Key", "")
-            result["is_admin"] = await get_admin_role_cache().is_admin(
-                identity.user_id, settings.authorized_group_id, api_key,
-            )
+            try:
+                result["is_admin"] = await get_admin_role_cache().is_admin(
+                    identity.user_id, settings.authorized_group_id, api_key,
+                )
+            except Exception as exc:
+                logger.warning("Failed to check admin role: %s", exc)
+                result["is_admin"] = False
         else:
             result["is_admin"] = False
         if "slugs" in result:

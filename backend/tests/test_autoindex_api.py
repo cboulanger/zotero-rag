@@ -434,6 +434,26 @@ class StatusAdminFieldTest(unittest.TestCase):
             r = self.client.get("/api/autoindex/status")
         self.assertTrue(r.json()["is_admin"])
 
+    def test_is_admin_false_when_cache_says_not_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            r = self.client.get("/api/autoindex/status")
+        self.assertFalse(r.json()["is_admin"])
+
+    def test_is_admin_false_on_admin_check_exception(self):
+        """A transient Zotero API failure during the admin check must degrade
+        to is_admin=False, not crash the whole status endpoint."""
+        import asyncio as asyncio_module
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(side_effect=asyncio_module.TimeoutError())):
+            r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["is_admin"])
+
 
 if __name__ == "__main__":
     unittest.main()
