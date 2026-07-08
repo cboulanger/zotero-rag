@@ -413,9 +413,10 @@ var ZoteroRAGAutoIndexStatus = {
 	/**
 	 * Render one row per library with a progress bar reflecting its status.
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
+	 * @param {boolean} [isAdmin]
 	 * @returns {void}
 	 */
-	renderLibraries(slugs) {
+	renderLibraries(slugs, isAdmin = false) {
 		const container = document.getElementById('libraries-container');
 		const emptyState = document.getElementById('empty-state');
 		if (!container || !emptyState) return;
@@ -438,13 +439,25 @@ var ZoteroRAGAutoIndexStatus = {
 
 			const nameSpan = document.createElement('span');
 			nameSpan.className = 'library-name';
-			nameSpan.textContent = slug;
+			nameSpan.textContent = info.library_name
+				? `${info.library_name} (${info.owner_id ?? 'unknown owner'})`
+				: slug;
 			header.appendChild(nameSpan);
 
 			const badge = document.createElement('span');
 			badge.className = `library-status-badge ${info.status}`;
 			badge.textContent = info.status;
 			header.appendChild(badge);
+
+			if (isAdmin && (info.status === 'pending' || info.status === 'indexing')) {
+				const skipButton = document.createElement('button');
+				skipButton.type = 'button';
+				skipButton.className = 'dialog-button library-skip-button';
+				skipButton.textContent = 'Skip this job';
+				skipButton.dataset.skipSlug = slug;
+				skipButton.addEventListener('click', () => this.skipSlug(slug));
+				header.appendChild(skipButton);
+			}
 
 			row.appendChild(header);
 
