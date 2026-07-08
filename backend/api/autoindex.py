@@ -25,10 +25,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from backend.config.settings import get_settings
-from backend.dependencies import get_zotero_identity
+from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
-from backend.services.autoindex_scheduler import trigger_index_run
+from backend.services.autoindex_scheduler import trigger_index_run, write_scheduler_state
 from backend.services.cron_indexer import read_live_status
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
@@ -199,6 +199,20 @@ async def run_now(request: Request) -> dict:
     if result == "already_running":
         raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
     return {"started": True}
+
+
+@router.post("/autoindex/scheduler/pause", summary="Pause the built-in scheduler (admin only)")
+async def pause_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
+    settings = get_settings()
+    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": True})
+    return {"paused": True}
+
+
+@router.post("/autoindex/scheduler/resume", summary="Resume the built-in scheduler (admin only)")
+async def resume_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
+    settings = get_settings()
+    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": False})
+    return {"paused": False}
 
 
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
