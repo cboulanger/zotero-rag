@@ -238,7 +238,9 @@ async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authori
     live_status = await asyncio.to_thread(read_live_status, settings.data_path)
     if not live_status.get("running"):
         raise HTTPException(status_code=409, detail="No indexing run is currently active.")
-    pid = live_status["pid"]
+    pid = live_status.get("pid")
+    if pid is None:
+        raise HTTPException(status_code=500, detail="Indexing is reported as running but no PID was recorded.")
     aborted = await asyncio.to_thread(abort_process, pid)
     return {"aborted": aborted, "pid": pid}
 
