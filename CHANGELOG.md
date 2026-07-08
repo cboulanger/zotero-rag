@@ -1,3 +1,10 @@
+## [1.38.1](https://github.com/cboulanger/zotero-rag/compare/v1.38.0...v1.38.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* label auto-indexed group libraries with real names, not raw slugs ([4c5b6a1](https://github.com/cboulanger/zotero-rag/commit/4c5b6a17f3c86e4ebe8484030ba8f02b770b5301))
+
 # [1.38.0](https://github.com/cboulanger/zotero-rag/compare/v1.37.0...v1.38.0) (2026-07-08)
 
 
