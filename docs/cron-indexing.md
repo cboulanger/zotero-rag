@@ -207,15 +207,68 @@ EMBEDDING_BATCH_SIZE=64   # recommended for hosts with ≤16 GB RAM
 
 ---
 
-## Setting Up a Scheduled Job (local installation)
+## Setting Up a Scheduled Job
 
-### Linux / macOS (cron)
+The simplest way to schedule indexing — for both local installs and
+containers — is the backend's own built-in scheduler: set
+`AUTOINDEX_INTERVAL_MINUTES` (see `.env.dist`) and restart. No crontab entry,
+no `podman exec` cron line, nothing living outside version control:
+
+```env
+AUTOINDEX_INTERVAL_MINUTES=60   # index every 60 minutes
+```
+
+The scheduler starts 60 seconds after the backend does, then ticks on the
+configured interval indefinitely, triggering the same unscoped indexing run
+the admin "run full index now" control (see [Admin Controls](#admin-controls))
+triggers on demand. `GET /` and `GET /api/autoindex/status` both report the
+scheduler's state under `cron_indexing.scheduler` / `scheduler`:
+`active` (whether `AUTOINDEX_INTERVAL_MINUTES` is set), `interval_minutes`,
+and `paused` (see [Admin Controls](#admin-controls)).
+
+### Alternative: external scheduler
+
+If you need per-slug control (`--fingerprint`, `--force`) outside the
+built-in scheduler's unscoped ticks, an external cron job still works exactly
+as before — the built-in scheduler and an external one can coexist, since
+both ultimately call the same `bin/index_libraries.py` guarded by the same
+lock file:
 
 ```cron
 # Edit with: crontab -e
 # Index every night at 2 AM (targets come from the stored keys)
 0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py >> data/logs/cron_indexer.log 2>&1
 ```
+
+## Admin Controls
+
+Owners/admins of the server's authorizing Zotero group (`AUTHORIZED_GROUP_ID`)
+get five additional endpoints, all requiring `X-Zotero-API-Key` from an
+account Zotero itself reports as an owner or admin of that group (checked
+live against `GET https://api.zotero.org/groups/<id>`, cached 5 minutes).
+Loopback deployments (`API_HOST=localhost`) bypass this check entirely, same
+as the rest of the Zotero-key auth gate. All five are also reachable from the
+plugin's auto-index status dialog, hidden unless the backend reports
+`is_admin: true`.
+
+| Endpoint | Effect |
+|---|---|
+| `POST /api/autoindex/scheduler/pause` | Pauses the built-in scheduler (persists across restarts) |
+| `POST /api/autoindex/scheduler/resume` | Resumes it |
+| `POST /api/autoindex/scheduler/run-now` | Triggers an immediate unscoped run of every registered library, without waiting for the next tick |
+| `POST /api/autoindex/abort` | Kills the entire running indexing process (last resort — use when it's genuinely stuck) |
+| `POST /api/autoindex/scheduler/skip-slug` `{"slug": "users/12345"}` | Cooperatively skips one job in the active run, without killing the process — the running subprocess notices the request at its next progress-callback checkpoint (or immediately, if the slug hasn't started yet) and moves on to the next library |
+
+Admins can also pass `?scope=all` to `GET /api/autoindex/status` to see every
+job in the run (not just their own), with each job labeled
+`library_name`/`owner_id` joined from `registrations.json` rather than a raw
+slug. A slug with no matching registration falls back to the raw slug string.
+
+`abort` vs. `skip-slug`: `abort` kills the whole subprocess and relies on the
+existing crash-recovery path (the next run detects the dead PID and forces a
+full re-index of whatever was mid-flight). `skip-slug` only ever affects the
+one named job — every other library in the run keeps indexing uninterrupted.
+Prefer `skip-slug` unless the process itself is unresponsive.
 
 ## Reading Progress
 
