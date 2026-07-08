@@ -454,6 +454,82 @@ class StatusAdminFieldTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertFalse(r.json()["is_admin"])
 
+    def _seed_status(self, slugs: dict) -> None:
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(
+            json.dumps({"running": False, "slugs": slugs}), encoding="utf-8",
+        )
+
+    def _seed_registrations(self, data: dict) -> None:
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "registrations.json").write_text(json.dumps(data), encoding="utf-8")
+        get_settings().registrations_path = system_dir / "registrations.json"
+
+    def test_scope_all_rejects_when_authorized_group_id_unset(self):
+        """Without AUTHORIZED_GROUP_ID configured, is_admin is False even with
+        a non-loopback identity override, so scope=all must still 403 —
+        there's no admin to be."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._seed_status({
+            "users/1": {"status": "done"},
+            "users/2": {"status": "indexing"},
+        })
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 403)
+
+    def test_scope_all_admin_sees_every_slug_with_labels(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._seed_status({
+            "users/1": {"status": "done"},
+            "users/2": {"status": "indexing"},
+        })
+        self._seed_registrations({
+            "u1": {"library_name": "Alice's Library", "users": [{"user_id": 1, "username": "alice"}]},
+            "u2": {"library_name": "Bob's Library", "users": [{"user_id": 2, "username": "bob"}]},
+        })
+        self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=True)):
+            r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(set(data["slugs"].keys()), {"users/1", "users/2"})
+        self.assertEqual(data["slugs"]["users/1"]["library_name"], "Alice's Library")
+        self.assertEqual(data["slugs"]["users/1"]["owner_id"], 1)
+        self.assertEqual(data["slugs"]["users/2"]["library_name"], "Bob's Library")
+        self.assertEqual(data["slugs"]["users/2"]["owner_id"], 2)
+
+    def test_scope_all_falls_back_to_raw_slug_when_no_registration(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._seed_status({"groups/555": {"status": "pending"}})
+        self._seed_registrations({})  # no matching registration for groups/555
+        self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=True)):
+            r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["slugs"]["groups/555"]["library_name"], "groups/555")
+        self.assertIsNone(data["slugs"]["groups/555"]["owner_id"])
+
+    def test_scope_own_unaffected_by_registrations(self):
+        """Regression check: the default (own) scope must not gain
+        library_name/owner_id fields or change its filtering behavior."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._seed_status({
+            "users/1": {"status": "done"},
+            "users/2": {"status": "done"},
+        })
+        self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(set(data["slugs"].keys()), {"users/1"})
+        self.assertNotIn("library_name", data["slugs"]["users/1"])
+
 
 if __name__ == "__main__":
     unittest.main()

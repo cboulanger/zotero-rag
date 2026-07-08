@@ -19,11 +19,12 @@ AUTHORIZED_GROUP_ID — see backend.dependencies.require_authorized_group_admin.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
@@ -31,6 +32,7 @@ from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import trigger_index_run, write_scheduler_state
 from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
+from backend.services.registration_service import RegistrationService
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.group_roles import get_admin_role_cache
 from backend.zotero.key_validator import validate_key
@@ -118,6 +120,7 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
 @router.get("/autoindex/status", summary="Live auto-index cron-run progress")
 async def status(
     request: Request,
+    scope: Literal["own", "all"] = "own",
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
 ) -> dict:
     """Return the live status of the auto-index cron run.
@@ -142,6 +145,11 @@ async def status(
     Zotero group-admin check) when AUTHORIZED_GROUP_ID is configured, False
     when it isn't — the plugin uses this to decide whether to show admin
     controls, without a separate round trip.
+
+    Admins (see require_authorized_group_admin) may pass ?scope=all to see
+    every job in the run, not just their own, with each job labeled with its
+    library name and owner id (joined from registrations.json). Non-admins
+    passing scope=all get a 403.
     """
     settings = get_settings()
     result: dict = {}
@@ -176,6 +184,19 @@ async def status(
                 result["is_admin"] = False
         else:
             result["is_admin"] = False
+    else:
+        result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
+
+    if scope == "all":
+        if not result["is_admin"]:
+            raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
+        if "slugs" in result:
+            registrations = await asyncio.to_thread(RegistrationService(settings.registrations_path).get_all)
+            for slug, info in result["slugs"].items():
+                library_name, owner_id = _job_label(slug, registrations)
+                info["library_name"] = library_name
+                info["owner_id"] = owner_id
+    elif identity is not None:
         if "slugs" in result:
             result["slugs"] = {
                 slug: info for slug, info in result["slugs"].items()
@@ -186,10 +207,32 @@ async def status(
                 issue for issue in result["key_issues"]
                 if issue.get("user") == identity.username
             ]
-    else:
-        result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
 
     return result
+
+
+def _job_label(slug: str, registrations: dict) -> tuple[str, Optional[int]]:
+    """Join a slug to its human-readable library name and owner id via registrations.json.
+
+    Falls back to the raw slug / owner_id=None when there's no matching
+    registration (e.g. a library registered for auto-indexing but never
+    separately registered for RAG querying) — a real, expected case, not
+    an error. registrations.json entries carry a `users` list, not a single
+    owner; users[0] (first-registered) is used as a pragmatic stand-in —
+    exact for personal libraries (users/{id}, which have exactly one
+    registered user by construction), an arbitrary but deterministic
+    tie-break for shared group libraries.
+    """
+    try:
+        backend_id = slug_to_backend_id(slug)
+    except ValueError:
+        return slug, None
+    entry = registrations.get(backend_id)
+    if not entry:
+        return slug, None
+    users = entry.get("users") or []
+    owner_id = users[0]["user_id"] if users else None
+    return entry.get("library_name", slug), owner_id
 
 
 @router.post("/autoindex/run", summary="Trigger an on-demand indexing run for the caller's own libraries")
