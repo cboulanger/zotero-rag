@@ -29,7 +29,7 @@ from backend.dependencies import get_zotero_identity, require_authorized_group_a
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import trigger_index_run, write_scheduler_state
-from backend.services.cron_indexer import read_live_status
+from backend.services.cron_indexer import abort_process, read_live_status
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
@@ -230,6 +230,17 @@ async def run_now_admin(identity: Optional[ZoteroIdentity] = Depends(require_aut
             detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
         )
     return {"started": True}
+
+
+@router.post("/autoindex/abort", summary="Abort the entire running indexing process (admin only)")
+async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
+    settings = get_settings()
+    live_status = await asyncio.to_thread(read_live_status, settings.data_path)
+    if not live_status.get("running"):
+        raise HTTPException(status_code=409, detail="No indexing run is currently active.")
+    pid = live_status["pid"]
+    aborted = await asyncio.to_thread(abort_process, pid)
+    return {"aborted": aborted, "pid": pid}
 
 
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:

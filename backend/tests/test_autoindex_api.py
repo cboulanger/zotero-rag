@@ -316,6 +316,23 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         r = self.client.post("/api/autoindex/scheduler/run-now")
         self.assertEqual(r.status_code, 503)
 
+    def test_abort_rejects_when_nothing_running(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        r = self.client.post("/api/autoindex/abort")
+        self.assertEqual(r.status_code, 409)
+
+    def test_abort_calls_abort_process_with_pid(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({"running": True, "pid": 4242}), encoding="utf-8")
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.api.autoindex.abort_process", return_value=True) as mock_abort:
+            r = self.client.post("/api/autoindex/abort")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"aborted": True, "pid": 4242})
+        mock_abort.assert_called_once_with(4242)
+
 
 if __name__ == "__main__":
     unittest.main()
