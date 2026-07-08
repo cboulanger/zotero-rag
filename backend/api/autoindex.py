@@ -1,19 +1,24 @@
 """Auto-index key endpoints.
 
-POST   /api/autoindex/keys    — submit a read-only key (validated, stored encrypted)
-DELETE /api/autoindex/keys    — remove a key
-GET    /api/autoindex/keys    — list the caller's own key metadata (no plaintext)
-GET    /api/autoindex/status  — live cron-run progress (running/crashed, counts)
-POST   /api/autoindex/run     — trigger an on-demand run scoped to the caller's own libraries
+POST   /api/autoindex/keys                — submit a read-only key (validated, stored encrypted)
+DELETE /api/autoindex/keys                — remove a key
+GET    /api/autoindex/keys                — list the caller's own key metadata (no plaintext)
+GET    /api/autoindex/status              — live cron-run progress; admins may pass ?scope=all
+POST   /api/autoindex/run                 — on-demand run scoped to the caller's own libraries
+POST   /api/autoindex/scheduler/pause     — pause the built-in scheduler (admin only)
+POST   /api/autoindex/scheduler/resume    — resume the built-in scheduler (admin only)
+POST   /api/autoindex/scheduler/run-now   — immediate unscoped run of every library (admin only)
+POST   /api/autoindex/scheduler/skip-slug — cooperatively skip one job in the active run (admin only)
+POST   /api/autoindex/abort               — kill the entire running indexing process (admin only)
 
 All endpoints are protected by the global Zotero-key auth middleware (X-Zotero-API-Key). When
-AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503.
+AUTOINDEX_SECRET is unset the feature is disabled and the key endpoints return 503. The
+scheduler/abort/skip-slug endpoints additionally require the caller to be an owner/admin of
+AUTHORIZED_GROUP_ID — see backend.dependencies.require_authorized_group_admin.
 """
 
 import asyncio
 import logging
-import sys
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,6 +28,7 @@ from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
+from backend.services.autoindex_scheduler import trigger_index_run
 from backend.services.cron_indexer import read_live_status
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.zotero_identity import ZoteroIdentity
@@ -30,8 +36,6 @@ from backend.zotero.key_validator import validate_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class KeyRequest(BaseModel):
@@ -191,11 +195,9 @@ async def run_now(request: Request) -> dict:
         if reason:
             raise HTTPException(status_code=400, detail=reason)
 
-    live_status = await asyncio.to_thread(read_live_status, settings.data_path)
-    if live_status.get("running"):
+    result = await trigger_index_run(settings, fingerprint=fp)
+    if result == "already_running":
         raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
-
-    await _spawn_index_run(settings, fp)
     return {"started": True}
 
 
@@ -215,21 +217,3 @@ def _embedding_key_block_reason(own: dict) -> Optional[str]:
     if status == "rate_limited":
         return f"Embedding API key is rate-limited until {rate_limit_until}; try again later."
     return f"Embedding API key has unrecognized status {status!r}."
-
-
-async def _spawn_index_run(settings, fp: str) -> None:
-    log_path = settings.data_path / "logs" / "cron_indexer.log"
-    script_path = _PROJECT_ROOT / "bin" / "index_libraries.py"
-
-    def _open_log():
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        return open(log_path, "ab")
-
-    logf = await asyncio.to_thread(_open_log)
-    try:
-        await asyncio.create_subprocess_exec(
-            sys.executable, str(script_path), "--fingerprint", fp,
-            stdout=logf, stderr=logf, cwd=str(_PROJECT_ROOT),
-        )
-    finally:
-        await asyncio.to_thread(logf.close)

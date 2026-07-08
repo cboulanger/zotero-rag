@@ -161,7 +161,7 @@ class AutoIndexApiTest(unittest.TestCase):
     def test_run_succeeds_on_local_preset_without_embedding_key(self):
         self._register_user()
         self._set_model_type("local")
-        with patch("backend.api.autoindex.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+        with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
             r = self.client.post("/api/autoindex/run", headers={"X-Zotero-API-Key": "RO"})
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["started"])
@@ -177,7 +177,7 @@ class AutoIndexApiTest(unittest.TestCase):
              patch("backend.api.autoindex.validate_embedding_key", new=AsyncMock(return_value=emb_validation)):
             self.client.post("/api/autoindex/keys", json={"api_key": "RO", "embedding_api_key": "EMB"})
         self._set_model_type("remote")
-        with patch("backend.api.autoindex.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+        with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
             r = self.client.post("/api/autoindex/run", headers={"X-Zotero-API-Key": "RO"})
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["started"])
