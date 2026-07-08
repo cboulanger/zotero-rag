@@ -13,7 +13,7 @@ from backend.main import app
 from backend.config.settings import get_settings, reset_settings
 from backend.dependencies import require_authorized_group_admin
 from backend.services.autoindex_scheduler import read_scheduler_state
-from backend.services.zotero_identity import ZoteroIdentity
+from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
 from backend.zotero.key_validator import KeyValidation
 
 
@@ -202,6 +202,7 @@ class AdminSchedulerControlsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         reset_settings()
+        reset_identity_cache()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         s.autoindex_secret = Fernet.generate_key().decode()
@@ -225,6 +226,7 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         main_app.dependency_overrides.clear()
         self.tmp.cleanup()
         reset_settings()
+        reset_identity_cache()
 
     def _override_admin(self, identity):
         from backend.main import app as main_app
@@ -246,17 +248,31 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.status_code, 503)
 
     def test_pause_rejects_non_admin(self):
+        # Non-loopback so require_authorized_group_admin's real checks run.
+        # zotero_identity.py imports validate_key by name
+        # (`from backend.zotero.key_validator import ... validate_key`), so the
+        # identity cache calls it as a module-level name in
+        # backend.services.zotero_identity — patch it there, not at its
+        # definition site, or the mock won't be observed. This keeps the whole
+        # request hermetic (no live call to api.zotero.org), matching the
+        # convention in backend/tests/test_resolve_zotero_identity.py.
         get_settings().api_host = "rag.example.com"
-        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+        # targets must include "groups/999" (the setUp's authorized_group_id)
+        # so resolve_zotero_identity's own passes_gate() check succeeds and
+        # the request reaches the route's is_group_admin() check below —
+        # otherwise the middleware would 403 first for an unrelated reason
+        # (not a member of the authorizing group at all, vs. member-but-not-
+        # admin, which is what this test targets).
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1", "groups/999"], read_only=True)
+        with patch("backend.services.zotero_identity.validate_key", new=AsyncMock(return_value=validation)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
             r = self.client.post(
                 "/api/autoindex/scheduler/pause",
                 headers={"X-Zotero-API-Key": "K"},
             )
-        # Non-loopback + no real identity resolved by the auth middleware in
-        # this unit test yields a 401 before reaching the admin check at all
-        # unless identity resolution is also mocked; assert the request is
-        # rejected either way (401 unauthenticated or 403 not-admin), never 200.
-        self.assertIn(r.status_code, (401, 403))
+        # Identity resolution is now deterministic (resolved, non-admin), so
+        # the outcome is precisely "not an admin of the authorizing group".
+        self.assertEqual(r.status_code, 403)
 
     def test_pause_admin_writes_state(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
