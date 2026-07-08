@@ -215,6 +215,18 @@ async def resume_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_
     return {"paused": False}
 
 
+@router.post(
+    "/autoindex/scheduler/run-now",
+    summary="Trigger an immediate full indexing run for every registered library (admin only)",
+)
+async def run_now_admin(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
+    settings = get_settings()
+    result = await trigger_index_run(settings)
+    if result == "already_running":
+        raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
+    return {"started": True}
+
+
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
     return next((k for k in store.list_metadata() if k["fingerprint"] == fp), None)
 
