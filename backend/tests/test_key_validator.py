@@ -55,15 +55,69 @@ class KeyValidatorTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(res.read_only)
         self.assertEqual(set(res.targets), {"users/39226", "groups/456", "groups/789"})
 
+    async def test_groups_all_enumerated_captures_names_and_owners(self):
+        """The group-enumeration response carries each group's name/owner
+        under `data` — capture them instead of discarding everything but
+        `id`, so admin views can label auto-index-only group libraries."""
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/GA2", payload={
+                "key": "GA2", "userID": 39226, "username": "cboulanger",
+                "access": {"user": {"library": True},
+                           "groups": {"all": {"library": True}}},
+            })
+            m.get(f"{ZOTERO_API_BASE}/users/39226/groups", payload=[
+                {"id": 456, "data": {"id": 456, "name": "Alpha Group", "owner": 111}},
+                {"id": 789, "data": {"id": 789, "name": "Beta Group", "owner": 222}},
+            ])
+            res = await validate_key("GA2")
+        self.assertEqual(res.target_names, {"groups/456": "Alpha Group", "groups/789": "Beta Group"})
+        self.assertEqual(res.target_owners, {"groups/456": 111, "groups/789": 222})
+
     async def test_specific_group(self):
         with aioresponses() as m:
             m.get(f"{ZOTERO_API_BASE}/keys/SG", payload={
                 "key": "SG", "userID": 1, "username": "u",
                 "access": {"groups": {"123": {"library": True}}},
             })
+            m.get(f"{ZOTERO_API_BASE}/groups/123", payload={
+                "id": 123, "data": {"id": 123, "name": "Specific Group", "owner": 55},
+            })
             res = await validate_key("SG")
         self.assertTrue(res.read_only)
         self.assertEqual(res.targets, ["groups/123"])
+
+    async def test_specific_group_captures_name_and_owner(self):
+        """A key scoped to specific individual groups (not `groups.all`) is a
+        common real-world case — it must still get labeled, not just keys
+        granting blanket access to every group the user belongs to."""
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/SG2", payload={
+                "key": "SG2", "userID": 1, "username": "u",
+                "access": {"groups": {"123": {"library": True}, "456": {"library": True}}},
+            })
+            m.get(f"{ZOTERO_API_BASE}/groups/123", payload={
+                "id": 123, "data": {"id": 123, "name": "Specific Group", "owner": 55},
+            })
+            m.get(f"{ZOTERO_API_BASE}/groups/456", payload={
+                "id": 456, "data": {"id": 456, "name": "Another Specific Group", "owner": 66},
+            })
+            res = await validate_key("SG2")
+        self.assertEqual(set(res.targets), {"groups/123", "groups/456"})
+        self.assertEqual(res.target_names, {"groups/123": "Specific Group", "groups/456": "Another Specific Group"})
+        self.assertEqual(res.target_owners, {"groups/123": 55, "groups/456": 66})
+
+    async def test_specific_group_detail_fetch_failure_falls_back_to_slug(self):
+        """A transient failure fetching one group's details must not crash
+        validation or drop the group from targets — it just stays unlabeled."""
+        with aioresponses() as m:
+            m.get(f"{ZOTERO_API_BASE}/keys/SG3", payload={
+                "key": "SG3", "userID": 1, "username": "u",
+                "access": {"groups": {"789": {"library": True}}},
+            })
+            m.get(f"{ZOTERO_API_BASE}/groups/789", status=500)
+            res = await validate_key("SG3")
+        self.assertEqual(res.targets, ["groups/789"])
+        self.assertEqual(res.target_names, {})
 
     async def test_revoked_key_404(self):
         with aioresponses() as m:

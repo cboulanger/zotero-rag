@@ -18,6 +18,16 @@ def _validation():
                          targets=["users/39226", "groups/456"], read_only=True)
 
 
+def _validation_with_labels():
+    return KeyValidation(
+        user_id=39226, username="cboulanger",
+        targets=["users/39226", "groups/456"],
+        target_names={"groups/456": "Alpha Group"},
+        target_owners={"groups/456": 111},
+        read_only=True,
+    )
+
+
 class AutoIndexKeyStoreTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -150,6 +160,27 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         meta = self.store.list_metadata()[0]
         self.assertNotIn("embedding_key_ciphertext", meta)
         self.assertNotIn("EMBKEY", str(meta))
+
+    def test_get_target_labels_returns_names_and_owners_from_validation(self):
+        self.store.add("SECRETKEY", _validation_with_labels())
+        labels = self.store.get_target_labels()
+        self.assertEqual(labels, {"groups/456": ("Alpha Group", 111)})
+
+    def test_get_target_labels_empty_when_no_names_captured(self):
+        self.store.add("SECRETKEY", _validation())
+        self.assertEqual(self.store.get_target_labels(), {})
+
+    def test_get_target_labels_merges_across_entries_first_wins(self):
+        self.store.add("KEY1", _validation_with_labels())
+        v2 = KeyValidation(
+            user_id=999, username="other", targets=["groups/456"],
+            target_names={"groups/456": "Duplicate Name"},
+            target_owners={"groups/456": 222},
+            read_only=True,
+        )
+        self.store.add("KEY2", v2)
+        labels = self.store.get_target_labels()
+        self.assertEqual(labels, {"groups/456": ("Alpha Group", 111)})
 
     def test_disabled_when_no_secret(self):
         store = AutoIndexKeyStore(self.path, secret=None)

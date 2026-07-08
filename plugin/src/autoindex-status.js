@@ -12,8 +12,8 @@
  * @property {number} [chunks_added]
  * @property {string} [error]
  * @property {string} [skip_reason]
- * @property {string} [library_name] - only present in ?scope=all responses (admin)
- * @property {number} [owner_id] - only present in ?scope=all responses (admin)
+ * @property {string} [library_name] - human-readable name, falls back to the raw slug server-side
+ * @property {number} [owner_id] - numeric Zotero user id; not shown in the UI (no username resolution available), kept for potential future use
  */
 
 /**
@@ -448,7 +448,7 @@ var ZoteroRAGAutoIndexStatus = {
 			const nameSpan = document.createElement('span');
 			nameSpan.className = 'library-name';
 			nameSpan.textContent = (info.library_name && info.library_name !== slug)
-				? `${info.library_name} (${info.owner_id ?? 'unknown owner'})`
+				? info.library_name
 				: slug;
 			header.appendChild(nameSpan);
 

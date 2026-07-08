@@ -15,6 +15,7 @@ from backend.dependencies import require_authorized_group_admin
 from backend.services.autoindex_scheduler import read_scheduler_state
 from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
 from backend.zotero.group_roles import reset_admin_role_cache
+from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.zotero.key_validator import KeyValidation
 
 
@@ -531,20 +532,51 @@ class StatusAdminFieldTest(unittest.TestCase):
         self.assertEqual(data["slugs"]["groups/555"]["library_name"], "groups/555")
         self.assertIsNone(data["slugs"]["groups/555"]["owner_id"])
 
-    def test_scope_own_unaffected_by_registrations(self):
-        """Regression check: the default (own) scope must not gain
-        library_name/owner_id fields or change its filtering behavior."""
+    def test_scope_all_falls_back_to_key_store_label_when_no_registration(self):
+        """A group that's only ever been auto-indexed (never separately
+        registered via the manual RAG-query flow, so registrations.json has
+        no entry for it) must still show its real name/owner in the admin
+        view, using what was captured at auto-index key validation time."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = 999
+        self._seed_status({"groups/555": {"status": "pending"}})
+        self._seed_registrations({})  # no matching registration for groups/555
+        store = AutoIndexKeyStore(get_settings().autoindex_keys_path, get_settings().autoindex_secret)
+        store.add("ZOTKEY", KeyValidation(
+            user_id=1, username="alice", targets=["groups/555"],
+            target_names={"groups/555": "Research Group"},
+            target_owners={"groups/555": 42},
+            read_only=True,
+        ))
+        self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
+        with patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=True)):
+            r = self.client.get("/api/autoindex/status?scope=all")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["slugs"]["groups/555"]["library_name"], "Research Group")
+        self.assertEqual(data["slugs"]["groups/555"]["owner_id"], 42)
+
+    def test_scope_own_gets_labels_too_but_stays_filtered_to_own_targets(self):
+        """A library's human-readable name isn't admin-only information —
+        every caller (not just ?scope=all admins) should see it for their
+        own libraries. Only the breadth of *which* slugs are visible is
+        scope-gated: default (own) scope must still filter to the caller's
+        own readable targets."""
         from backend.services.zotero_identity import ZoteroIdentity
         self._seed_status({
             "users/1": {"status": "done"},
             "users/2": {"status": "done"},
+        })
+        self._seed_registrations({
+            "u1": {"library_name": "Alice's Library", "users": [{"user_id": 1, "username": "alice"}]},
         })
         self._set_identity(ZoteroIdentity(user_id=1, username="alice", targets=["users/1"]))
         r = self.client.get("/api/autoindex/status")
         self.assertEqual(r.status_code, 200)
         data = r.json()
         self.assertEqual(set(data["slugs"].keys()), {"users/1"})
-        self.assertNotIn("library_name", data["slugs"]["users/1"])
+        self.assertEqual(data["slugs"]["users/1"]["library_name"], "Alice's Library")
+        self.assertEqual(data["slugs"]["users/1"]["owner_id"], 1)
 
     def test_scope_all_loopback_sees_every_slug_with_labels(self):
         """Loopback deployments get is_admin=True unconditionally, so

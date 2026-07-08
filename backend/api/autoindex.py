@@ -146,10 +146,16 @@ async def status(
     when it isn't — the plugin uses this to decide whether to show admin
     controls, without a separate round trip.
 
-    Admins (see require_authorized_group_admin) may pass ?scope=all to see
-    every job in the run, not just their own, with each job labeled with its
-    library name and owner id (joined from registrations.json). Non-admins
-    passing scope=all get a 403.
+    Every visible job — for any caller, any scope — is labeled with its
+    human-readable ``library_name`` and ``owner_id``: joined from
+    registrations.json first, falling back to the name/owner captured at
+    auto-index key validation time (see AutoIndexKeyStore.get_target_labels)
+    for libraries that were only ever auto-indexed and never separately
+    registered via the manual RAG-query flow. This labeling is not
+    admin-gated; only the *breadth* of which slugs are visible is: admins
+    (see require_authorized_group_admin) may pass ?scope=all to see every job
+    in the run instead of just their own. Non-admins passing scope=all get a
+    403.
     """
     settings = get_settings()
     result: dict = {}
@@ -194,19 +200,10 @@ async def status(
     else:
         result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
 
-    if scope == "all":
-        if not result["is_admin"]:
-            raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
-        if "slugs" in result:
-            try:
-                registrations = await asyncio.to_thread(RegistrationService(settings.registrations_path).get_all)
-                for slug, info in result["slugs"].items():
-                    library_name, owner_id = _job_label(slug, registrations)
-                    info["library_name"] = library_name
-                    info["owner_id"] = owner_id
-            except Exception as exc:
-                logger.warning("Failed to join registrations for scope=all status: %s", exc)
-    elif identity is not None:
+    if scope == "all" and not result["is_admin"]:
+        raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
+
+    if scope == "own" and identity is not None:
         if "slugs" in result:
             result["slugs"] = {
                 slug: info for slug, info in result["slugs"].items()
@@ -218,31 +215,53 @@ async def status(
                 if issue.get("user") == identity.username
             ]
 
+    # Human-readable library_name/owner_id labeling applies to whatever
+    # slugs are visible above — for every caller, not just admins on
+    # scope=all. Only the breadth of *which* slugs are visible is
+    # scope-gated; a library's name isn't admin-only information.
+    if "slugs" in result:
+        try:
+            registrations = await asyncio.to_thread(RegistrationService(settings.registrations_path).get_all)
+            key_store_labels = await asyncio.to_thread(store.get_target_labels)
+            for slug, info in result["slugs"].items():
+                library_name, owner_id = _job_label(slug, registrations, key_store_labels)
+                info["library_name"] = library_name
+                info["owner_id"] = owner_id
+        except Exception as exc:
+            logger.warning("Failed to join registrations for status labeling: %s", exc)
+
     return result
 
 
-def _job_label(slug: str, registrations: dict) -> tuple[str, Optional[int]]:
-    """Join a slug to its human-readable library name and owner id via registrations.json.
+def _job_label(
+    slug: str, registrations: dict,
+    key_store_labels: Optional[dict[str, tuple[str, Optional[int]]]] = None,
+) -> tuple[str, Optional[int]]:
+    """Join a slug to its human-readable library name and owner id.
 
-    Falls back to the raw slug / owner_id=None when there's no matching
-    registration (e.g. a library registered for auto-indexing but never
-    separately registered for RAG querying) — a real, expected case, not
-    an error. registrations.json entries carry a `users` list, not a single
-    owner; users[0] (first-registered) is used as a pragmatic stand-in —
-    exact for personal libraries (users/{id}, which have exactly one
-    registered user by construction), an arbitrary but deterministic
-    tie-break for shared group libraries.
+    Tries registrations.json first (entries carry a `users` list, not a
+    single owner; users[0] (first-registered) is used as a pragmatic
+    stand-in — exact for personal libraries (users/{id}, which have exactly
+    one registered user by construction), an arbitrary but deterministic
+    tie-break for shared group libraries). Falls back to key_store_labels
+    (name/owner captured at auto-index key validation time — see
+    AutoIndexKeyStore.get_target_labels) for group libraries that were only
+    ever auto-indexed and never separately registered via the manual
+    RAG-query flow. Falls back to the raw slug / owner_id=None when neither
+    source has a match — a real, expected case, not an error.
     """
     try:
         backend_id = slug_to_backend_id(slug)
     except ValueError:
         return slug, None
     entry = registrations.get(backend_id)
-    if not entry:
-        return slug, None
-    users = entry.get("users") or []
-    owner_id = users[0]["user_id"] if users else None
-    return entry.get("library_name", slug), owner_id
+    if entry:
+        users = entry.get("users") or []
+        owner_id = users[0]["user_id"] if users else None
+        return entry.get("library_name", slug), owner_id
+    if key_store_labels and slug in key_store_labels:
+        return key_store_labels[slug]
+    return slug, None
 
 
 @router.post("/autoindex/run", summary="Trigger an on-demand indexing run for the caller's own libraries")

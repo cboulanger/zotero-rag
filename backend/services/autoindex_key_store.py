@@ -96,6 +96,8 @@ class AutoIndexKeyStore:
                 "user_id": validation.user_id,
                 "username": validation.username,
                 "targets": list(validation.targets),
+                "target_names": dict(validation.target_names),
+                "target_owners": dict(validation.target_owners),
                 "validated_at": now,
                 "last_status": "ok",
             }
@@ -149,6 +151,25 @@ class AutoIndexKeyStore:
             })
         return out
 
+    def get_target_labels(self) -> dict[str, tuple[str, Optional[int]]]:
+        """Map each auto-indexed slug to (name, owner_id) captured during key
+        validation (see KeyValidation.target_names/target_owners).
+
+        Used as a fallback name source for the status endpoint's
+        library_name/owner_id join, for slugs that were only ever
+        auto-indexed and never separately registered via the manual
+        RAG-query flow (see RegistrationService) — the common case for
+        group libraries.
+        """
+        labels: dict[str, tuple[str, Optional[int]]] = {}
+        for entry in self._load().values():
+            names = entry.get("target_names") or {}
+            owners = entry.get("target_owners") or {}
+            for slug, name in names.items():
+                if slug not in labels:
+                    labels[slug] = (name, owners.get(slug))
+        return labels
+
     def iter_decrypted(self) -> Iterator[tuple[str, str, dict]]:
         """Yield (fingerprint, plaintext_key, entry) for cron use."""
         self._require_enabled()
@@ -186,11 +207,30 @@ class AutoIndexKeyStore:
             return None
         return entry.get("embedding_key_name"), key
 
-    def set_status(self, fp: str, status: str) -> None:
+    def set_status(
+        self, fp: str, status: str,
+        targets: Optional[list[str]] = None,
+        target_names: Optional[dict[str, str]] = None,
+        target_owners: Optional[dict[str, int]] = None,
+    ) -> None:
+        """Update an entry's validation status, optionally refreshing its
+        resolved targets/names/owners from a fresh validate_key() result.
+
+        Called on every successful cron re-validation so that group
+        libraries added before name/owner capture existed (or whose group
+        was renamed/transferred) get backfilled without the user having to
+        resubmit their key.
+        """
         with self._lock:
             data = self._load()
             if fp in data:
                 data[fp]["last_status"] = status
+                if targets is not None:
+                    data[fp]["targets"] = targets
+                if target_names is not None:
+                    data[fp]["target_names"] = target_names
+                if target_owners is not None:
+                    data[fp]["target_owners"] = target_owners
                 self._save(data)
 
     def set_embedding_key_status(self, fp: str, status: str, rate_limit_until: Optional[str] = None) -> None:

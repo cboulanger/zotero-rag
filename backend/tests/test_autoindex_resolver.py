@@ -58,6 +58,27 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         for meta in store.list_metadata():
             self.assertEqual(meta["last_status"], "ok")
 
+    async def test_backfills_target_names_on_revalidation(self):
+        """Keys stored before name/owner capture existed (or whose group was
+        renamed) must get target_names/target_owners backfilled on the very
+        next cron re-validation, without the user resubmitting their key."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1", "groups/99"], read_only=True)
+        fp1 = store.add("KA", v1)
+        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        self.assertEqual(store.get_target_labels(), {})
+
+        v1_refreshed = KeyValidation(
+            1, "a", ["users/1", "groups/99"],
+            target_names={"groups/99": "Renamed Group"},
+            target_owners={"groups/99": 42},
+            read_only=True,
+        )
+        with patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(return_value=v1_refreshed)):
+            await resolve_targets(store)
+        self.assertEqual(store.get_target_labels(), {"groups/99": ("Renamed Group", 42)})
+
     async def test_prunes_revoked_key(self):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)

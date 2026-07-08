@@ -71,7 +71,11 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
     for fp, api_key, entry in list(store.iter_decrypted()):
         validation = await validate_key(api_key)
         if validation.read_only:
-            store.set_status(fp, "ok")
+            store.set_status(
+                fp, "ok", targets=validation.targets,
+                target_names=validation.target_names,
+                target_owners=validation.target_owners,
+            )
             slugs = validation.targets
         elif validation.transient:
             # Transient failure (outage/network/5xx): keep the key and reuse its
