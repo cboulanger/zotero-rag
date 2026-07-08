@@ -607,6 +607,11 @@ class TestAbortProcess(unittest.TestCase):
         import signal
         mock_kill.assert_called_once_with(1234, signal.SIGTERM)
 
+    def test_returns_false_when_process_exits_between_check_and_signal(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.services.cron_indexer.os.kill", side_effect=ProcessLookupError):
+            self.assertFalse(abort_process(1234))
+
 
 class TestControlState(unittest.TestCase):
     def setUp(self):

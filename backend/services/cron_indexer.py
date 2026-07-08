@@ -100,7 +100,12 @@ def abort_process(pid: int) -> bool:
     """
     if not is_process_alive(pid):
         return False
-    os.kill(pid, signal.SIGTERM)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return False  # process exited in the window between the check and the signal
+    except PermissionError:
+        return True  # process is alive but we can't signal it — same "alive" semantics is_process_alive uses
     return True
 
 
