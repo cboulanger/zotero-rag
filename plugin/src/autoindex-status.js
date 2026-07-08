@@ -439,7 +439,7 @@ var ZoteroRAGAutoIndexStatus = {
 
 			const nameSpan = document.createElement('span');
 			nameSpan.className = 'library-name';
-			nameSpan.textContent = info.library_name
+			nameSpan.textContent = (info.library_name && info.library_name !== slug)
 				? `${info.library_name} (${info.owner_id ?? 'unknown owner'})`
 				: slug;
 			header.appendChild(nameSpan);
