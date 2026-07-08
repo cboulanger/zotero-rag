@@ -57,6 +57,9 @@ async def run_scheduler_loop(settings: Settings) -> None:
     must not kill the scheduler task permanently — the loop must keep
     ticking on the configured interval indefinitely.
     """
+    if not settings.autoindex_interval_minutes:
+        logger.error("run_scheduler_loop called without autoindex_interval_minutes set; exiting immediately.")
+        return
     await asyncio.sleep(_STARTUP_DELAY_SECONDS)
     while True:
         try:

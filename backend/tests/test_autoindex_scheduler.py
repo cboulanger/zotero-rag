@@ -143,6 +143,34 @@ class RunSchedulerLoopTest(unittest.IsolatedAsyncioTestCase):
 
         mock_trigger.assert_not_awaited()
 
+    async def test_returns_immediately_when_interval_unset(self):
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=None)
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock()) as mock_sleep, \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock()) as mock_trigger:
+            await run_scheduler_loop(settings)  # must return, not raise or hang
+        mock_sleep.assert_not_awaited()
+        mock_trigger.assert_not_awaited()
+
+    async def test_read_scheduler_state_exception_does_not_stop_loop(self):
+        """A corrupted/unreadable scheduler-state file must not kill the loop,
+        same as a trigger_index_run failure."""
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=60)
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.autoindex_scheduler.read_scheduler_state", side_effect=UnicodeDecodeError("utf-8", b"", 0, 1, "boom")), \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock()) as mock_trigger:
+            with self.assertRaises(asyncio.CancelledError):
+                await run_scheduler_loop(settings)
+
+        self.assertEqual(len(calls), 2)  # reached the second sleep -> loop survived
+        mock_trigger.assert_not_awaited()  # never got past the raising read_scheduler_state call
+
 
 if __name__ == "__main__":
     unittest.main()
