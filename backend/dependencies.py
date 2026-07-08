@@ -18,6 +18,7 @@ from backend.services.access_gate import is_loopback, passes_gate
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
 from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
+from backend.zotero.group_roles import get_admin_role_cache
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,27 @@ def get_zotero_identity(request: Request) -> Optional[ZoteroIdentity]:
     per-library enforcement".
     """
     return getattr(request.state, "zotero_identity", None)
+
+
+async def require_authorized_group_admin(request: Request) -> Optional[ZoteroIdentity]:
+    """FastAPI dependency gating admin-only auto-index control routes.
+
+    Loopback deployments bypass this (same trust boundary as
+    resolve_zotero_identity's Part 4 exception) — localhost access already
+    implies shell access to the host. Everywhere else, AUTHORIZED_GROUP_ID
+    must be configured and the caller's Zotero key must belong to an
+    owner/admin of that group (backend.zotero.group_roles.is_group_admin).
+    """
+    settings = get_settings()
+    if is_loopback(settings):
+        return None
+    if not settings.authorized_group_id:
+        raise HTTPException(status_code=503, detail="Admin controls require AUTHORIZED_GROUP_ID to be configured.")
+    identity = request.state.zotero_identity
+    api_key = request.headers.get("X-Zotero-API-Key", "")
+    if not await get_admin_role_cache().is_admin(identity.user_id, settings.authorized_group_id, api_key):
+        raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
+    return identity
 
 
 def get_client_api_keys(request: Request) -> dict[str, str]:
