@@ -12,6 +12,8 @@
  * @property {number} [chunks_added]
  * @property {string} [error]
  * @property {string} [skip_reason]
+ * @property {string} [library_name] - only present in ?scope=all responses (admin)
+ * @property {number} [owner_id] - only present in ?scope=all responses (admin)
  */
 
 /**
@@ -33,6 +35,7 @@
  * @property {string} [finished_at]
  * @property {Record<string, AutoIndexSlugStatus>} [slugs]
  * @property {AutoIndexKeyIssue[]} [key_issues]
+ * @property {boolean} [is_admin]
  */
 
 var ZoteroRAGAutoIndexStatus = {
@@ -40,6 +43,8 @@ var ZoteroRAGAutoIndexStatus = {
 	plugin: null,
 	/** @type {number|null} */
 	refreshTimer: null,
+	/** @type {'own'|'all'} */
+	adminScope: 'own',
 
 	/**
 	 * Initialize the dialog.
@@ -65,6 +70,34 @@ var ZoteroRAGAutoIndexStatus = {
 			runNowButton.addEventListener('click', () => this.runNow());
 		}
 
+		const adminRunNowButton = document.getElementById('admin-run-now-button');
+		if (adminRunNowButton) {
+			adminRunNowButton.addEventListener('click', () => this.runNowAdmin());
+		}
+
+		const adminPauseButton = document.getElementById('admin-pause-button');
+		if (adminPauseButton) {
+			adminPauseButton.addEventListener('click', () => this.pauseScheduler());
+		}
+
+		const adminResumeButton = document.getElementById('admin-resume-button');
+		if (adminResumeButton) {
+			adminResumeButton.addEventListener('click', () => this.resumeScheduler());
+		}
+
+		const adminAbortButton = document.getElementById('admin-abort-button');
+		if (adminAbortButton) {
+			adminAbortButton.addEventListener('click', () => this.abortRun());
+		}
+
+		const adminScopeToggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-scope-toggle'));
+		if (adminScopeToggle) {
+			adminScopeToggle.addEventListener('change', () => {
+				this.adminScope = adminScopeToggle.checked ? 'all' : 'own';
+				this.fetchAndRender();
+			});
+		}
+
 		window.addEventListener('unload', () => {
 			if (this.refreshTimer !== null) {
 				clearInterval(this.refreshTimer);
@@ -83,7 +116,10 @@ var ZoteroRAGAutoIndexStatus = {
 	async fetchAndRender() {
 		if (!this.plugin) return;
 		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
+			const url = this.adminScope === 'all'
+				? `${this.plugin.backendURL}/api/autoindex/status?scope=all`
+				: `${this.plugin.backendURL}/api/autoindex/status`;
+			const response = await fetch(url, {
 				headers: this.plugin.getAuthHeaders(),
 			});
 			if (!response.ok) {
