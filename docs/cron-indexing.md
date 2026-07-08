@@ -250,13 +250,17 @@ unauthenticated auto-index detail:
   "service": "Zotero RAG API",
   ...
   "cron_indexing": {
-    "enabled": true
+    "enabled": true,
+    "scheduler": { "active": true, "interval_minutes": 60, "paused": false }
   }
 }
 ```
 
 `enabled` reflects whether `AUTOINDEX_SECRET` is configured (when `false` no keys
-can be decrypted).
+can be decrypted). `scheduler` reports the built-in scheduler's state:
+`active` (whether `AUTOINDEX_INTERVAL_MINUTES` is set), `interval_minutes`, and
+`paused` (set via the admin pause/resume endpoints — see
+[Admin Controls](#admin-controls)).
 
 Everything else — the registered-key count and live per-run progress — is served
 by the **authenticated** `GET /api/autoindex/status` endpoint (requires
@@ -268,6 +272,7 @@ last run's full status once a run has produced a status file:
 {
   "enabled": true,
   "keys_registered": 3,
+  "scheduler": { "active": true, "interval_minutes": 60, "paused": false },
   "running": true,
   "started_at": "2026-06-23T02:00:01Z",
   "pid": 12345,
