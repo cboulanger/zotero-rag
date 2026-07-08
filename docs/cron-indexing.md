@@ -240,36 +240,6 @@ lock file:
 0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py >> data/logs/cron_indexer.log 2>&1
 ```
 
-## Admin Controls
-
-Owners/admins of the server's authorizing Zotero group (`AUTHORIZED_GROUP_ID`)
-get five additional endpoints, all requiring `X-Zotero-API-Key` from an
-account Zotero itself reports as an owner or admin of that group (checked
-live against `GET https://api.zotero.org/groups/<id>`, cached 5 minutes).
-Loopback deployments (`API_HOST=localhost`) bypass this check entirely, same
-as the rest of the Zotero-key auth gate. All five are also reachable from the
-plugin's auto-index status dialog, hidden unless the backend reports
-`is_admin: true`.
-
-| Endpoint | Effect |
-|---|---|
-| `POST /api/autoindex/scheduler/pause` | Pauses the built-in scheduler (persists across restarts) |
-| `POST /api/autoindex/scheduler/resume` | Resumes it |
-| `POST /api/autoindex/scheduler/run-now` | Triggers an immediate unscoped run of every registered library, without waiting for the next tick |
-| `POST /api/autoindex/abort` | Kills the entire running indexing process (last resort — use when it's genuinely stuck) |
-| `POST /api/autoindex/scheduler/skip-slug` `{"slug": "users/12345"}` | Cooperatively skips one job in the active run, without killing the process — the running subprocess notices the request at its next progress-callback checkpoint (or immediately, if the slug hasn't started yet) and moves on to the next library |
-
-Admins can also pass `?scope=all` to `GET /api/autoindex/status` to see every
-job in the run (not just their own), with each job labeled
-`library_name`/`owner_id` joined from `registrations.json` rather than a raw
-slug. A slug with no matching registration falls back to the raw slug string.
-
-`abort` vs. `skip-slug`: `abort` kills the whole subprocess and relies on the
-existing crash-recovery path (the next run detects the dead PID and forces a
-full re-index of whatever was mid-flight). `skip-slug` only ever affects the
-one named job — every other library in the run keeps indexing uninterrupted.
-Prefer `skip-slug` unless the process itself is unresponsive.
-
 ## Reading Progress
 
 The `/` root endpoint carries only whether the feature is enabled — the single
@@ -341,6 +311,36 @@ validated cleanly.
 The status file persists at `data/system/cron_status.json` between runs, so
 `GET /api/autoindex/status` shows the result of the last run even when nothing is
 currently running.
+
+## Admin Controls
+
+Owners/admins of the server's authorizing Zotero group (`AUTHORIZED_GROUP_ID`)
+get five additional endpoints, all requiring `X-Zotero-API-Key` from an
+account Zotero itself reports as an owner or admin of that group (checked
+live against `GET https://api.zotero.org/groups/<id>`, cached 5 minutes).
+Loopback deployments (`API_HOST=localhost`) bypass this check entirely, same
+as the rest of the Zotero-key auth gate. All five are also reachable from the
+plugin's auto-index status dialog, hidden unless the backend reports
+`is_admin: true`.
+
+| Endpoint | Effect |
+|---|---|
+| `POST /api/autoindex/scheduler/pause` | Pauses the built-in scheduler (persists across restarts) |
+| `POST /api/autoindex/scheduler/resume` | Resumes it |
+| `POST /api/autoindex/scheduler/run-now` | Triggers an immediate unscoped run of every registered library, without waiting for the next tick |
+| `POST /api/autoindex/abort` | Kills the entire running indexing process (last resort — use when it's genuinely stuck) |
+| `POST /api/autoindex/scheduler/skip-slug` `{"slug": "users/12345"}` | Cooperatively skips one job in the active run, without killing the process — the running subprocess notices the request at its next progress-callback checkpoint (or immediately, if the slug hasn't started yet) and moves on to the next library |
+
+Admins can also pass `?scope=all` to `GET /api/autoindex/status` to see every
+job in the run (not just their own), with each job labeled
+`library_name`/`owner_id` joined from `registrations.json` rather than a raw
+slug. A slug with no matching registration falls back to the raw slug string.
+
+`abort` vs. `skip-slug`: `abort` kills the whole subprocess and relies on the
+existing crash-recovery path (the next run detects the dead PID and forces a
+full re-index of whatever was mid-flight). `skip-slug` only ever affects the
+one named job — every other library in the run keeps indexing uninterrupted.
+Prefer `skip-slug` unless the process itself is unresponsive.
 
 ## Troubleshooting
 
