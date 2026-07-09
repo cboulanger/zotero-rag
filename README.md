@@ -15,17 +15,45 @@ This plugin implements a RAG (Retrieval-Augmented-Generation) System for Zotero 
 
 Most document-chat tools require you to manually upload PDFs to a cloud service. Zotero RAG works differently:
 
+- **Multi-user by design** — one backend deployment can serve an entire research group or institution from a single shared index, instead of everyone running their own local copy. Each member authenticates with their own read-only Zotero API key, authorized automatically via Zotero group membership — no separate accounts or credentials to manage.
 - **Always in sync** — the plugin reads directly from your local Zotero library. When you add, update, or delete an item in Zotero, the index stays current without any manual export or re-upload step.
-- **Bibliographic awareness** — because the index carries full Zotero metadata (authors, year, item type, title), you can ask questions that go beyond document content: *"List all books by Luhmann in my library"* or *"What journal articles on systems theory were published between 1975 and 1990?"* — answered instantly from the metadata index, without reading a single PDF.
-- **Abstracts indexed automatically** — for items without a locally available attachment, the abstract is indexed so the item still shows up in relevant search results.
-- **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete.
-- **No file uploads to third parties** — the plugin sends file bytes only to the backend you control. With a local model preset, nothing ever leaves your machine.
+- **Bibliographic awareness** — because the index carries full Zotero metadata (authors, year, item type, title), you can ask questions that go beyond document content: *"List all books by Luhmann in my library"* or *"What journal articles on systems theory were published between 1975 and 1990?"* — answered instantly from the metadata index, without reading a single PDF. See [Query Routing](docs/query-routing.md) for how metadata and content questions are told apart.
 - **Multi-library** — query across several Zotero libraries in a single question.
 - **Rich source citations** — answers include page numbers and text anchors (first words of the source passage), not just titles, making it easy to locate the original passage.
+- **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin. See [Public Web Interface](docs/public-web-interface.md).
+- **No file uploads to third parties** — the plugin sends file bytes only to the backend you control. With a [local model preset](docs/presets.md), nothing ever leaves your machine.
+- **Open source & self-hosted** — no subscription, no closed-source backend, no vendor lock-in. Deploy it once on infrastructure you control and own your data and model choices outright.
+
 - **Multi-format** — indexes PDFs, HTML snapshots, EPUB, and DOCX attachments — not PDFs only.
-- **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin.
-- **Headless / cron indexing** — index libraries directly via the Zotero web API without Zotero running, using a standalone script suitable for scheduled server-side jobs.
-- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code.
+- **Abstracts indexed automatically** — for items without a locally available attachment, the abstract is indexed so the item still shows up in relevant search results.
+- **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete. See [Fix Unavailable Attachments](docs/fix-unavailable-attachments.md).
+- **Automatic (scheduled) indexing, administered from the plugin** — enable a single toggle in Preferences to have the server keep your libraries indexed on a recurring schedule, with no need to keep Zotero open or index manually. Group admins can additionally pause, resume, trigger, or monitor indexing runs for the whole server entirely from the plugin UI — no shell or server access required. Server operators can alternatively drive the same indexer headlessly via script or cron. See [Automatic Indexing Setup](docs/auto-indexing-setup.md) (or [Cron / Headless Indexing](docs/cron-indexing.md) for the server-side script).
+- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code. See [Presets](docs/presets.md).
+
+## Why THIS Zotero RAG?
+
+Several other tools let you chat with a Zotero library — among them
+[Beaver](https://github.com/jlegewie/beaver-zotero),
+[PapersGPT](https://github.com/papersgpt/papersgpt-for-zotero),
+[BibGenie](https://www.bibgenie.com/),
+[Zotero-RAG-Assistant](https://github.com/aahepburn/Zotero-RAG-Assistant),
+the Rust [zotero-rag](https://github.com/zotero-rag/zotero-rag) CLI,
+[Zotero-ChatPDF](https://github.com/ljeagle/zotero-chatpdf), and various
+[Zotero MCP servers](https://github.com/54yyyu/zotero-mcp). A full writeup
+of how each compares is in [Zotero RAG Landscape](docs/comparison.md); the
+short version:
+
+Every alternative surveyed falls into one of two camps — either it has a
+richly configurable RAG pipeline but is strictly single-user and local
+(PapersGPT, Zotero-RAG-Assistant, the Rust CLI, Zotero-ChatPDF), or it
+offers some shared/hosted backend but with a fixed pipeline and no
+self-hostable multi-tenant option (Beaver, BibGenie). None combine a
+**self-hosted server that authorizes many users against a Zotero group**
+with **plugin-controlled administration** of that server's indexing (no
+shell access needed) and a **fully swappable local-or-remote RAG
+pipeline**. This project is built around exactly that combination: one
+deployment, run once by whoever administers it, serving and configurable
+by an entire research group from inside Zotero itself.
 
 ## Quick Start
 
@@ -126,131 +154,25 @@ Once installed:
 5. If the library has not been indexed, you will not be able to ask a question on this library but need to index it first. This might take from minutes to hours depending on the size of the library.
 6. Once indexed, you can ask questions that can be answered by the PDF documents contained in the selected libraries. The plugin will search through your documents and provide answers with source citations.
 
-The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers.
-
-#### Query Routing
-
-The backend automatically routes your question to the most appropriate search strategy before answering:
-
-- **Semantic (RAG) search** — for content questions: arguments, definitions, quotes, or explanations found in document text. Example: *"Where does Luhmann define autopoiesis?"*
-- **Metadata catalog search** — for bibliographic questions about what items exist. Example: *"List all books on Rechtssoziologie published between 1960 and 1990."*
-- **Combined** — for questions that need both, e.g. *"Papers by Habermas on communicative action after 1980"* uses a metadata filter while still searching document content.
-
-Routing is transparent and requires no extra configuration. To bypass routing and use pure RAG (faster, no routing LLM call), include `"enable_routing": false` in the API request body. See [Query Routing Architecture](docs/query-routing.md) for details.
+The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers. Answers are backed by transparent [query routing](docs/query-routing.md) between semantic and metadata search, and can optionally be saved as a note:
 
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 
-The plugin automatically creates a **RAG Results** saved search in your library the first time a result note or indexing report is generated. This search collects all notes whose tag starts with `RAG` followed by a space (query results tagged `RAG Query Result`, indexing reports tagged `RAG Indexing Report`) in one place for quick retrieval.
+The plugin automatically creates a **RAG Results** saved search in your library the first time a result note or indexing report is generated, collecting every note tagged `RAG Query Result` or `RAG Indexing Report` in one place.
 
-#### Public Web Interface
-
-The backend can optionally expose a browser-accessible query UI at `/public/` that lets anyone query a publicly readable Zotero library **without** the Zotero plugin or an API key.
-
-**1. Make sure the Zotero library is set to *Public* in your Zotero.org account settings.**
-
-**2. Create a config file** (use [`public-libraries.example.json`](public-libraries.example.json) as a template):
-
-```json
-{
-  "users/1234567": {
-    "title": "My Research Library",
-    "description": "Papers on computational linguistics.",
-    "placeholder": "e.g. What methods are used for cross-lingual transfer?"
-  },
-  "groups/9876543": {
-    "title": "DH Working Group",
-    "description": "Digital humanities reading list."
-  }
-}
-```
-
-Keys are Zotero.org library slugs (`users/{userId}` or `groups/{groupId}`). The optional `placeholder` field customises the hint text in the question input; `title` and `description` are shown on the query page.
-
-**3. Point the server at the file** by adding this line to your `.env`:
-
-```env
-PUBLIC_LIBRARIES_CONFIG=/path/to/public-libraries.json
-```
-
-**4. (Re)start the server.** The UI is then available at:
-
-| URL | Page |
-| --- | --- |
-| `/public/` | Index listing all configured libraries |
-| `/public/users/{id}` | Query form + results for a user library |
-| `/public/groups/{id}` | Query form + results for a group library |
-
-Results include inline citations linked to the corresponding item on `www.zotero.org`, with author/year labels fetched from the Zotero web API. Libraries that are not listed in the config file return **403 Forbidden**.
-
-> **Note:** The public UI only works for libraries that have already been indexed in **this running backend instance** via the Zotero plugin. It does not provide access to arbitrary public Zotero libraries — the library must first be indexed locally before queries can be answered.
-
-#### Fix Unavailable Attachments
-
-<img src="./docs/images/fix-attachments-tool.png" width="300" alt="Screenshot of the fix attachment tool">
-
-If Zotero sync is incomplete, some attachment files may be missing locally even though the metadata exists. The plugin detects this and shows a warning badge (e.g. **⚠ 3**) in the Zotero toolbar, or a message "x unavailable" in the list of libraries after indexing. Click on the badge or on that message to open the **Fix Unavailable Attachments** dialog, which lists all affected items in the current library.
-
-For each missing file the tool tries the following strategies in order:
-
-1. **Zotero sync download** — triggers the normal Zotero file sync for that attachment.
-2. **Filename match** — searches all other libraries for an attachment with the same filename.
-3. **MD5 hash match** — searches by the file's stored sync hash (`storageHash`).
-4. **`owl:sameAs` relations** — follows cross-library item relations to find the same file elsewhere.
-5. **Direct URL download** — downloads from the attachment's stored URL using Zotero's proxy-aware HTTP client.
-6. **DOI / Open Access resolver** — uses Zotero's built-in file resolvers (Unpaywall, etc.) to locate a freely available copy.
-
-When a file is found it is copied into the correct Zotero storage directory. Items that cannot be recovered can be deleted permanently from the dialog using the **Delete Selected** button.
-
-#### Import Open Access Articles from OpenAlex
-
-The script `scripts/openalex_import.py` bulk-imports all open-access articles of a journal (identified by ISSN) from [OpenAlex](https://openalex.org) into a Zotero group library, including PDF attachments.
-
-**Step 1 — fetch article metadata into a local CSV:**
-
-```bash
-uv run python scripts/openalex_import.py fetch --issn 2050-084X --email you@example.com
-```
-
-This writes `.local/openalex_2050_084X.csv` with one row per OA article that has a PDF URL. If interrupted, re-running resumes from where it left off.
-
-**Step 2 — import into Zotero:**
-
-```bash
-uv run python scripts/openalex_import.py import \
-    --issn 2050-084X \
-    --group-id 12345 \
-    --api-key YOUR_ZOTERO_API_KEY
-```
-
-This reads the CSV, creates a `journalArticle` item in the Zotero group library for each pending row (fetching full metadata from OpenAlex), and uploads the PDF as a child attachment. Already-imported rows are skipped, making the command safe to re-run after interruption.
-
-**Requirements:**
-
-- `OPENALEX_EMAIL` / `--email` — recommended for the OpenAlex [polite pool](https://docs.openalex.org/how-to-use-the-api/rate-limits-and-authentication) (higher rate limits; no sign-up needed)
-- `ZOTERO_API_KEY` / `--api-key` — required for the `import` command; must have read+write access to the group library. Create one at <https://www.zotero.org/settings/keys>. This key is used only by this script — the server, cron indexing, and the plugin all use separate, read-only keys (see below).
-
-Both env vars can be set in `.env` (see `.env.dist` for the template entries). Only group libraries are supported.
-
-#### Headless / Cron Indexing
-
-Libraries can be indexed without the Zotero desktop app or the plugin by calling the Zotero web API directly. This is useful for automated nightly jobs on headless servers.
-
-```bash
-uv run python bin/index_libraries.py
-
-# Force a full re-index
-uv run python bin/index_libraries.py --mode full
-```
-
-Indexing targets aren't passed on the command line — they come from an encrypted store of read-only Zotero API keys that users register via the plugin (Preferences → Automatic indexing) or with `uv run python bin/autoindex_add_key.py <read-only-key>`. The `/` root endpoint reports a compact `cron_indexing` summary (`enabled`, `keys_registered`); live per-run progress is served by the authenticated `GET /api/autoindex/status` endpoint.
-
-See [docs/cron-indexing.md](docs/cron-indexing.md) for cron job setup, all CLI options, and troubleshooting.
+From here, see [User Documentation](#user-documentation) below for automatic indexing, the public web interface, and the attachment-repair tool.
 
 ## Versioning and Release Policy
 
 The project uses [Semantic Release](https://github.com/semantic-release/semantic-release) workflow, which relies on [Semantic Versioning](https://semver.org/) principles. This determines the version number. The major version increases each time a backwards-incompatible change is being merged in terms of the frontend (plugin client) and backend (server) communication. All backend and frontend instances with the same major version number should be compatible and will handle missing new features gracefully.
 
 Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be the first stable release.
+
+## User Documentation
+
+- **[Automatic (scheduled) indexing setup](docs/auto-indexing-setup.md)**
+- **[Public web interface](docs/public-web-interface.md)**
+- **[Fix unavailable attachments](docs/fix-unavailable-attachments.md)**
 
 ## Developer Documentation
 
@@ -263,7 +185,8 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 - **[Setup CI/CD](docs/setup-ci-cd.md)**
 - **[Resources for coding agents](docs/agents.md)**
 - **[Cron / headless indexing](docs/cron-indexing.md)**
+- **[Import from OpenAlex](docs/openalex-import.md)**
 
 ## License
 
-The code is almost fully generated by Claude Code with an initial prompt and guidance by @cboulanger. It is therefore in the Public Domain as far as the code is machine-generated, otherwise it is licensed under Mozilla Public License (MPL) version 2.0.
+The code has been generated by Claude Code with an prompts and guidance by @cboulanger (documented [here](./docs/history/)). It is therefore in the Public Domain as far as the code is fully machine-generated, otherwise it is licensed under Mozilla Public License (MPL) version 2.0.
