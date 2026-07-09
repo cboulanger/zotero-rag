@@ -151,7 +151,7 @@ Once installed:
 2. Select a library (user or group)
 3. Open the "Tools" menu and then click on the "Zotero RAG" menu item
 4. In the dialog, the current library will be pre-selected, but you can add additional ones to search (this works only if all of them have already been indexed)
-5. If the library has not been indexed, you will not be able to ask a question on this library but need to index it first. This might take from minutes to hours depending on the size of the library.
+5. If the library index is outdated or it has not been indexed yet, you will not be able to ask a question on this library. Indexing might take from minutes to days depending on the size of the library and the number of unindexed items. Configure [server-side auto-indexing](docs/auto-indexing-setup.md) to do this automatically and without having to keep Zotero running. From then on, you only need to index new and changed items in your library. If you have enabled auto-indexing on the server, you only have to index what you added since the last run. 
 6. Once indexed, you can ask questions that can be answered by the PDF documents contained in the selected libraries. The plugin will search through your documents and provide answers with source citations.
 
 The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers. Answers are backed by transparent [query routing](docs/query-routing.md) between semantic and metadata search, and can optionally be saved as a note:
