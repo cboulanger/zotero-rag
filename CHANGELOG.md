@@ -1,3 +1,10 @@
+## [1.38.3](https://github.com/cboulanger/zotero-rag/compare/v1.38.2...v1.38.3) (2026-07-17)
+
+
+### Bug Fixes
+
+* surface items_failed to the plugin so it stops showing false "(incomplete)" ([7a08711](https://github.com/cboulanger/zotero-rag/commit/7a08711b7d3a9da2dc854d0d8d7588c4d199cd4d))
+
 ## [1.38.2](https://github.com/cboulanger/zotero-rag/compare/v1.38.1...v1.38.2) (2026-07-17)
 
 
