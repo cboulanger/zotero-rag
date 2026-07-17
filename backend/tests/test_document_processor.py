@@ -780,6 +780,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.total_items_indexed, 1)
         # last_full_scan_indexable still records how many items had indexable content.
         self.assertEqual(saved.last_full_scan_indexable, 2)
+        # The failure is persisted too, so the plugin can tell a permanent
+        # per-item failure apart from a still-incomplete index.
+        self.assertEqual(saved.last_full_scan_items_failed, 1)
 
     async def test_full_sync_indexes_standalone_attachment_without_parent(self):
         """A PDF/HTML/DOCX/EPUB attachment with no parentItem is itself an indexable item.
@@ -956,6 +959,35 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["items_added"], 0)
         self.assertEqual(result["items_failed"], 1)
+
+    async def test_incremental_sync_preserves_last_full_scan_items_failed(self):
+        """Incremental sync only ever sees items that changed since last_indexed_version
+        — an item that failed in a prior full scan and hasn't changed since is never
+        re-attempted, so incremental sync must not overwrite the last full scan's
+        items-failed floor with its own much narrower (and here, zero) count."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib", library_type="user", library_name="t",
+            last_indexed_version=5, last_full_scan_items_failed=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        item = {"version": 6, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
+        self.mock_zotero_client.get_library_items_since.return_value = [item]
+        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.assertEqual(result["items_failed"], 0)
+        saved = self.mock_vector_store.update_library_metadata.call_args[0][0]
+        self.assertEqual(saved.last_full_scan_items_failed, 5)
 
     async def test_full_sync_reports_items_failed_for_dead_download_link(self):
         """A candidate whose only attachment download returns no bytes (e.g. a dead

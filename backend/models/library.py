@@ -61,4 +61,15 @@ class LibraryIndexMetadata(BaseModel):
         description="Items with indexable content found in the last completed full scan"
     )
 
+    last_full_scan_items_failed: int = Field(
+        default=0,
+        description=(
+            "Items that failed per-item processing (e.g. dead attachment download "
+            "link, extraction error) in the last completed full scan. Only a full "
+            "scan re-examines every candidate, so incremental syncs never update "
+            "this — it stays the authoritative floor of currently un-indexable "
+            "items until the next full scan."
+        )
+    )
+
     schema_version: int = Field(default=1)

@@ -761,6 +761,11 @@ class DocumentProcessor:
         # last_full_scan_indexable is the scan floor: how many items had indexable
         # content this scan, used to detect legitimately low indexable ratios.
         metadata.last_full_scan_indexable = len(items_with_attachments)
+        # Only a full scan re-examines every candidate, so this is the authoritative
+        # "currently un-indexable" floor until the next full scan — incremental sync
+        # never touches it (see _index_library_incremental, which only ever sees
+        # items that changed, not previously-failed unchanged ones).
+        metadata.last_full_scan_items_failed = items_failed
 
         if items_failed:
             logger.warning(

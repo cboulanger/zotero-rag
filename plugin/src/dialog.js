@@ -30,6 +30,10 @@
  * @property {number} total_chunks - Total chunks in vector store
  * @property {string} indexing_mode - Last indexing mode (full/incremental)
  * @property {boolean} force_reindex - Whether hard reset is pending
+ * @property {number} last_full_scan_items_failed - Items that failed per-item
+ *   processing (dead download link, extraction error) in the last completed
+ *   full scan — the server's authoritative floor of currently un-indexable
+ *   items; incremental syncs never update it.
  */
 
 /**
@@ -618,9 +622,7 @@ var ZoteroRAGDialog = {
 			const syncedVersion = this.librarySyncedVersion.get(id) || 0;
 			if (currentVersion !== null && syncedVersion >= currentVersion) continue;
 			// Fall back to count comparison when no version tracking is available yet.
-			const totalIndexable = this.libraryIndexableCount.get(id);
-			const unavailable = this.libraryUnavailableCount.get(id) || 0;
-			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+			const effectiveTotal = this.getEffectiveTotal(id, metadata);
 			if (effectiveTotal !== undefined && metadata.total_items_indexed < effectiveTotal) return true;
 			if (effectiveTotal === undefined && metadata.total_items_indexed === 0) return true;
 		}
@@ -733,6 +735,43 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Effective total indexable count for a library: the raw indexable count
+	 * minus items known to be permanently un-indexable.
+	 *
+	 * Two signals can identify those items, but they aren't the same thing:
+	 * libraryUnavailableCount is a client-local heuristic (can Zotero open this
+	 * file on disk?), predating server-side failure tracking. metadata's
+	 * last_full_scan_items_failed is the backend's own record of what it
+	 * actually tried and couldn't index (dead download link, extraction
+	 * error) — the server downloads straight from Zotero's cloud storage via
+	 * its own API call, independent of the client's local file state, and its
+	 * full-scan crawl attempts every candidate, so a nonzero server count is
+	 * authoritative and takes precedence: it can't be a false positive, and if
+	 * it under-counts relative to a stale client-local value, the client one
+	 * is likely reporting on files that don't actually block server-side
+	 * indexing anyway. The client-local heuristic is only a fallback when the
+	 * server reports zero — which covers both "genuinely nothing failed" and
+	 * "this library's metadata predates last_full_scan_items_failed" (an old
+	 * full scan's stored payload defaults the field to 0 via Pydantic), so a
+	 * library that hasn't been rescanned since this field was introduced
+	 * doesn't silently lose a real client-detected gap.
+	 * @param {string} libraryId - Library ID
+	 * @param {LibraryIndexMetadata|null} metadata - Library metadata
+	 * @returns {number|undefined} Effective total, or undefined if the indexable count hasn't loaded yet.
+	 */
+	getEffectiveTotal(libraryId, metadata) {
+		const totalIndexable = this.libraryIndexableCount.get(libraryId);
+		if (totalIndexable === undefined) return undefined;
+		// A nonzero server count wins outright, even if stale (no full scan since a
+		// newer client-detected failure appeared) — self-heals at the next full scan,
+		// same direction of imprecision as last_full_scan_items_failed's own staleness
+		// window (see its docstring in backend/models/library.py).
+		const serverFailed = metadata ? (metadata.last_full_scan_items_failed || 0) : 0;
+		const unavailable = serverFailed > 0 ? serverFailed : (this.libraryUnavailableCount.get(libraryId) || 0);
+		return totalIndexable - unavailable;
+	},
+
+	/**
 	 * Update the status icon for a library after metadata is fetched.
 	 * @param {string} libraryId - Library ID
 	 * @param {LibraryIndexMetadata|null} metadata - Library metadata
@@ -742,9 +781,7 @@ var ZoteroRAGDialog = {
 		const statusIcon = document.getElementById(`status-icon-${libraryId}`);
 		const metaSpan = document.getElementById(`meta-${libraryId}`);
 
-		const totalIndexable = this.libraryIndexableCount.get(libraryId);
-		const unavailable = this.libraryUnavailableCount.get(libraryId) || 0;
-		const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+		const effectiveTotal = this.getEffectiveTotal(libraryId, metadata);
 		const indexed = metadata ? metadata.total_items_indexed : 0;
 		// Cap displayed count at effectiveTotal when the backend has indexed more entries than
 		// countIndexableAttachments reports (e.g. a parent item with multiple attachments is
@@ -781,7 +818,7 @@ var ZoteroRAGDialog = {
 			if (!metadata) {
 				metaSpan.style.fontStyle = 'italic';
 				metaSpan.style.color = '#999';
-				mainText = totalIndexable === 0 ? 'no indexable attachments' : 'not indexed';
+				mainText = this.libraryIndexableCount.get(libraryId) === 0 ? 'no indexable attachments' : 'not indexed';
 			} else if (isCountGap) {
 				// Show count and "incomplete" label — available items not yet in the index.
 				const lastIndexed = new Date(metadata.last_indexed_at);
@@ -822,6 +859,7 @@ var ZoteroRAGDialog = {
 		// When not yet indexed, it acts as a forced index that bypasses the client cache.
 		const reindexBtn = document.getElementById(`reindex-btn-${libraryId}`);
 		if (reindexBtn) {
+			const totalIndexable = this.libraryIndexableCount.get(libraryId);
 			reindexBtn.style.display = (totalIndexable === undefined || totalIndexable > 0) ? 'inline' : 'none';
 			reindexBtn.title = metadata
 				? 'Re-index this library (keeps existing index, re-processes all items)'
@@ -1191,9 +1229,7 @@ var ZoteroRAGDialog = {
 			if (!this.libraryMetadata.has(id)) return false;
 			const metadata = this.libraryMetadata.get(id);
 			if (metadata == null) return true;
-			const totalIndexable = this.libraryIndexableCount.get(id);
-			const unavailable = this.libraryUnavailableCount.get(id) || 0;
-			const effectiveTotal = totalIndexable !== undefined ? totalIndexable - unavailable : undefined;
+			const effectiveTotal = this.getEffectiveTotal(id, metadata);
 			if (effectiveTotal !== undefined) return metadata.total_items_indexed < effectiveTotal;
 			return metadata.total_items_indexed === 0;
 		});
