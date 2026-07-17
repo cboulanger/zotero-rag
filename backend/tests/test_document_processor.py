@@ -969,11 +969,40 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_zotero_client.get_item_children.return_value = [_attachment("PDF", "AAA")]
         self.mock_zotero_client.get_attachment_file.return_value = None  # dead link
         self.mock_vector_store.check_duplicate.return_value = None
+        # No existing content for this item either — a genuine failure, not a
+        # duplicate skip (see test_full_sync_treats_duplicate_skip_as_added below).
+        self.mock_vector_store.get_item_version.return_value = None
 
         result = await self.processor.index_library("test_lib", mode="full")
 
         self.assertEqual(result["items_added"], 0)
         self.assertEqual(result["items_failed"], 1)
+
+    async def test_full_sync_treats_duplicate_skip_as_added_not_failed(self):
+        """A same-item duplicate skip (content already indexed under this exact
+        item_key) also returns zero chunks from _index_item, but it is NOT a
+        failure — the item already has valid indexed content, just not written
+        again this run. Regression test for the false positive this would
+        otherwise create once zero-chunk results start counting as items_failed."""
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        self.mock_zotero_client.get_library_items_since.return_value = [
+            item, _attachment("PDF", "AAA"),
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [_attachment("PDF", "AAA")]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        duplicate_record = DeduplicationRecord(
+            content_hash="existing_hash", library_id="test_lib", item_key="AAA", relation_uri=None,
+        )
+        self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        # Already has indexed content under this item_key -> _handle_same_library_duplicate
+        # takes the "skipped_duplicate" branch (zero new chunks, not a failure).
+        self.mock_vector_store.get_item_version.return_value = 1
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        self.assertEqual(result["items_added"], 1)
+        self.assertEqual(result["items_failed"], 0)
+        self.mock_extractor.extract_and_chunk.assert_not_called()
 
     async def test_incremental_reports_items_failed_for_dead_download_link(self):
         """Incremental sync must also count a zero-chunk dead-download-link result
@@ -1306,11 +1335,13 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
                 return False
 
         item = {"version": 1, "data": {"key": "DEADLINK", "itemType": "journalArticle", "title": "A"}}
+        mock_vector_store = MagicMock()
+        mock_vector_store.get_item_version.return_value = None  # no existing content either
 
         with patch("backend.services.document_processor.get_settings") as mock_settings, \
              patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
              patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
-             patch("backend.dependencies.make_vector_store", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=mock_vector_store), \
              patch.object(
                  dp_module.DocumentProcessor, "_index_item",
                  AsyncMock(return_value=0),

@@ -69,6 +69,18 @@ _libc = ctypes.CDLL("libc.so.6") if sys.platform == "linux" else None
 SUBPROCESS_BATCH_SIZE = int(os.environ.get("INDEX_BATCH_SIZE", "300"))
 
 
+async def _item_has_indexed_content(vector_store, library_id: str, item_key: str) -> bool:
+    """True if the item has at least one chunk already stored in the vector store.
+
+    Used to disambiguate a zero-chunk `_index_item` result: it can mean a real
+    failure (dead attachment download link, extraction error) or a legitimate
+    no-op where `_handle_same_library_duplicate` skipped re-writing content
+    that's already correctly indexed under this exact item_key. Both look
+    identical from the returned chunk count alone.
+    """
+    return await asyncio.to_thread(vector_store.get_item_version, library_id, item_key) is not None
+
+
 def _subprocess_index_batch(
     items: list[dict],
     library_id: str,
@@ -125,10 +137,10 @@ def _subprocess_index_batch(
                 try:
                     if existing is None:
                         n = await processor._index_item(item, library_id, library_type)
-                        if n == 0:
+                        if n == 0 and not await _item_has_indexed_content(vector_store, library_id, item_key):
                             # Candidate was selected as indexable but produced zero chunks
-                            # (e.g. a dead attachment download link) — never actually
-                            # indexed, so it's a failure, not a success.
+                            # (e.g. a dead attachment download link) and has no existing
+                            # content either — never actually indexed, so it's a failure.
                             items_failed += 1
                         else:
                             chunks_added += n
@@ -136,7 +148,7 @@ def _subprocess_index_batch(
                     elif existing < item_version:
                         vector_store.delete_item_chunks(library_id, item_key)
                         n = await processor._index_item(item, library_id, library_type)
-                        if n == 0:
+                        if n == 0 and not await _item_has_indexed_content(vector_store, library_id, item_key):
                             items_failed += 1
                         else:
                             chunks_added += n
@@ -705,10 +717,12 @@ class DocumentProcessor:
                     if existing_version is None:
                         logger.debug("New item %s (version %s)", item_key, item_version)
                         chunk_count = await self._index_item(item, library_id, library_type)
-                        if chunk_count == 0:
+                        if chunk_count == 0 and not await _item_has_indexed_content(
+                            self.vector_store, library_id, item_key
+                        ):
                             # Candidate was selected as indexable but produced zero
-                            # chunks (e.g. a dead attachment download link) — never
-                            # actually indexed, so it's a failure, not a success.
+                            # chunks (e.g. a dead attachment download link) and has no
+                            # existing content either — never actually indexed.
                             items_failed += 1
                         else:
                             items_added += 1
@@ -717,7 +731,9 @@ class DocumentProcessor:
                         logger.debug("Updated item %s (%s -> %s)", item_key, existing_version, item_version)
                         self.vector_store.delete_item_chunks(library_id, item_key)
                         chunk_count = await self._index_item(item, library_id, library_type)
-                        if chunk_count == 0:
+                        if chunk_count == 0 and not await _item_has_indexed_content(
+                            self.vector_store, library_id, item_key
+                        ):
                             items_failed += 1
                         else:
                             items_updated += 1
