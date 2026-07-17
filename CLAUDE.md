@@ -136,6 +136,16 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Add the output as `AUTOINDEX_SECRET=<value>` in `.local/.env.deploy.<target>`.
 
+The encrypted key store's path on the host is `<DEPLOY_DATA_DIR>/system/autoindex_keys.json`
+(root-owned; `DEPLOY_DATA_DIR` is set per deployment in its `.local/.env.deploy.<target>`
+file), and the matching `AUTOINDEX_SECRET` lives in that same deploy env file.
+Decrypting the store gives the read-only Zotero keys already on file for
+auto-indexing — useful when you need a read-only key (e.g. for the admin
+scheduler endpoints below) and don't want to ask the user for a fresh one.
+Easiest done from inside the running container via `podman exec`, which
+already has `AUTOINDEX_SECRET` in its env and the data volume mounted — see
+`backend/services/autoindex_key_store.py`'s `AutoIndexKeyStore.iter_decrypted()`.
+
 **Key validation and pruning:**
 
 Each run re-validates all stored keys against `api.zotero.org/keys`. Keys that are permanently invalid (revoked, expired, or write-scoped) are pruned from the store. Keys that fail due to transient errors (network issues, 5xx responses) are kept and their previously-stored targets are reused for that run. Pruned keys appear in `cron_status.json` under `key_issues` and in the plugin Preferences.
