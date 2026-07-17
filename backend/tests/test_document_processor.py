@@ -781,6 +781,132 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         # last_full_scan_indexable still records how many items had indexable content.
         self.assertEqual(saved.last_full_scan_indexable, 2)
 
+    async def test_full_sync_indexes_standalone_attachment_without_parent(self):
+        """A PDF/HTML/DOCX/EPUB attachment with no parentItem is itself an indexable item.
+
+        Zotero allows dropping a file directly into a collection with no bibliographic
+        parent record. Regression: the full-sync filter used to unconditionally skip
+        every itemType=="attachment" item, so these files were silently and permanently
+        never indexed (found via production library groups/2829873, e.g. item Z22WB65S).
+        """
+        standalone = {
+            "version": 1,
+            "data": {
+                "key": "STANDALONE_PDF",
+                "itemType": "attachment",
+                "contentType": "application/pdf",
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [standalone]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        self.assertEqual(result["items_processed"], 1)
+        self.assertEqual(result["items_added"], 1)
+        # Standalone attachments have no children to fetch.
+        self.mock_zotero_client.get_item_children.assert_not_called()
+        # The attachment's own key is downloaded directly (item_key == attachment_key).
+        self.mock_zotero_client.get_attachment_file.assert_called_once_with(
+            library_id="test_lib", item_key="STANDALONE_PDF", library_type="user"
+        )
+
+    async def test_full_sync_ignores_parented_attachment_as_standalone(self):
+        """An attachment that DOES have a parentItem must not be treated as its own
+        item — it's only relevant via its parent's children_by_parent lookup."""
+        child = _attachment("CHILD_PDF", "SOME_PARENT_NOT_IN_LIST")
+        self.mock_zotero_client.get_library_items_since.return_value = [child]
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        self.assertEqual(result["items_processed"], 0)
+
+    async def test_incremental_indexes_standalone_attachment_without_parent(self):
+        """Incremental sync must also pick up standalone attachments (no parentItem)."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib", library_type="user", library_name="t",
+            last_indexed_version=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        standalone = {
+            "version": 6,
+            "data": {"key": "STANDALONE", "itemType": "attachment", "contentType": "application/pdf"},
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [standalone]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.assertEqual(result["items_added"], 1)
+        self.mock_zotero_client.get_item_children.assert_not_called()
+
+    async def test_index_item_standalone_attachment_skips_get_item_children(self):
+        """_index_item must treat a standalone attachment as its own single attachment,
+        not fetch children for it (attachments don't have children in Zotero), and must
+        not attempt an abstract-fallback (attachments carry no abstractNote of their own)."""
+        standalone = {
+            "version": 3,
+            "data": {
+                "key": "STANDALONE",
+                "itemType": "attachment",
+                "contentType": "application/pdf",
+                "title": "Some Standalone File",
+            },
+        }
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        chunks = await self.processor._index_item(standalone, "test_lib", "user")
+
+        self.assertEqual(chunks, 1)
+        self.mock_zotero_client.get_item_children.assert_not_called()
+        self.mock_zotero_client.get_attachment_file.assert_called_once_with(
+            library_id="test_lib", item_key="STANDALONE", library_type="user"
+        )
+
+    async def test_filter_indexed_attachments_includes_standalone_attachment(self):
+        """_filter_indexed_attachments (used by incremental sync) must not skip every
+        itemType=="attachment" unconditionally — a standalone attachment with no
+        parentItem is itself indexable; a parented one is not included on its own."""
+        standalone = {
+            "version": 1,
+            "data": {"key": "STANDALONE", "itemType": "attachment", "contentType": "application/pdf"},
+        }
+        child_attachment = _attachment("CHILD_PDF", "PARENT_KEY")
+
+        result = await self.processor._filter_indexed_attachments(
+            [standalone, child_attachment], "test_lib", "user"
+        )
+
+        self.assertIn(standalone, result)
+        self.assertNotIn(child_attachment, result)
+
+    async def test_filter_indexed_attachments_excludes_standalone_non_indexable_type(self):
+        """A standalone attachment whose contentType isn't in INDEXABLE_MIME_TYPES
+        (e.g. an image) must not be included."""
+        standalone_image = {
+            "version": 1,
+            "data": {"key": "IMG", "itemType": "attachment", "contentType": "image/png"},
+        }
+
+        result = await self.processor._filter_indexed_attachments(
+            [standalone_image], "test_lib", "user"
+        )
+
+        self.assertEqual(result, [])
+
 
 class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
     """Tests for the subprocess-isolated batch processing path in _index_library_full."""

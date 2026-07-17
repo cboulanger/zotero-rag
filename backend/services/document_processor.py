@@ -516,7 +516,17 @@ class DocumentProcessor:
                     _item = json.loads(line)
                     if "data" not in _item:
                         continue
-                    if _item["data"].get("itemType") in ("attachment", "note"):
+                    _item_type = _item["data"].get("itemType")
+                    if _item_type == "note":
+                        continue
+                    if _item_type == "attachment":
+                        # A standalone attachment (no parentItem) is itself the indexable
+                        # unit — e.g. a PDF dropped straight into a collection with no
+                        # bibliographic parent. Attachments that DO have a parent are
+                        # handled below via children_by_parent, keyed on the parent.
+                        if not _item["data"].get("parentItem") \
+                                and _item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                            items_with_attachments.append(_item)
                         continue
                     _key = _item["data"]["key"]
                     _atts = children_by_parent.get(_key, [])
@@ -731,19 +741,24 @@ class DocumentProcessor:
             item_type=item["data"].get("itemType"),
         )
 
-        # Get attachments
-        attachments = await self.zotero_client.get_item_children(
-            library_id=library_id,
-            item_key=item_key,
-            library_type=library_type
-        )
+        is_standalone_attachment = item["data"].get("itemType") == "attachment"
+        if is_standalone_attachment:
+            # A standalone attachment (no parentItem) IS the indexable unit — it has
+            # no children to fetch and no abstract of its own.
+            attachments = [item]
+        else:
+            attachments = await self.zotero_client.get_item_children(
+                library_id=library_id,
+                item_key=item_key,
+                library_type=library_type
+            )
 
         indexable_attachments = [
             att for att in attachments
             if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
         ]
 
-        abstract_note = item["data"].get("abstractNote", "")
+        abstract_note = "" if is_standalone_attachment else item["data"].get("abstractNote", "")
 
         total_chunks = 0
 
@@ -1237,12 +1252,19 @@ class DocumentProcessor:
         items_with_content = []
 
         for item in items:
-            # Skip if not a regular item (skip attachments, notes, etc.)
+            # Skip if not a regular item (skip notes; attachments handled below)
             if "data" not in item:
                 continue
 
             item_type = item["data"].get("itemType")
-            if item_type in ["attachment", "note"]:
+            if item_type == "note":
+                continue
+            if item_type == "attachment":
+                # A standalone attachment (no parentItem) is itself the indexable
+                # unit — see the matching case in _index_library_full's filter.
+                if not item["data"].get("parentItem") \
+                        and item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                    items_with_content.append(item)
                 continue
 
             # Check if item has any indexable attachments
