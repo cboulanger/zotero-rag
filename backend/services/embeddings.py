@@ -356,6 +356,11 @@ class RemoteEmbeddingService(EmbeddingService):
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
         )
 
+    @property
+    def api_key(self) -> Optional[str]:
+        """The explicit API key override this service was constructed with, if any."""
+        return self._api_key
+
     @staticmethod
     def required_api_keys(config: EmbeddingConfig) -> list[dict]:
         """Return the API key required by this remote embedding service."""

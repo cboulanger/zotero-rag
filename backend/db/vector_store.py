@@ -1255,7 +1255,10 @@ class VectorStore:
                 scroll_filter=Filter(must=[
                     FieldCondition(key="library_id", match=MatchValue(value=library_id))
                 ]),
-                limit=1000,
+                # Payload is two small fields, so a large page keeps this to a handful
+                # of round trips even for libraries with 1M+ chunks (e.g. one chunk-heavy
+                # PDF-based library took ~30 min at limit=1000 during a full-sync run).
+                limit=5000,
                 offset=offset,
                 with_payload=["item_key", "item_version"],
                 with_vectors=False,

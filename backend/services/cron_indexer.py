@@ -19,6 +19,7 @@ import os
 import signal
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -453,6 +454,17 @@ class CronIndexer:
         target = self.targets[slug_info.slug]
         web_api = ZoteroWebAPI(api_key=target["zotero_key"])
         counter = {"n": 0}  # mutable counter for closure
+        last_write = {"t": time.monotonic()}
+        # Full-sync mode calls progress_callback once per subprocess batch (coarse:
+        # each call can represent minutes of work), while incremental mode calls it
+        # once per item (fine-grained: many calls per second). progress_update_interval
+        # alone throttles the latter well but starves the former — a batch-sized library
+        # can go the entire run without a single status write, leaving the plugin's
+        # status dialog stuck at "0/0" even though real progress is happening. The time
+        # floor guarantees a write shows up within a few seconds regardless of call
+        # granularity; the first call also always writes so items_total is visible
+        # immediately instead of after the first throttle window.
+        _MIN_WRITE_INTERVAL_SECONDS = 3.0
 
         def progress_callback(current: int, total: int, chunks_added: int) -> None:
             counter["n"] += 1
@@ -460,7 +472,14 @@ class CronIndexer:
             entry["items_processed"] = current
             entry["items_total"] = total
             entry["chunks_added"] = chunks_added
-            if counter["n"] % self.progress_update_interval == 0:
+            now = time.monotonic()
+            due = (
+                counter["n"] == 1
+                or counter["n"] % self.progress_update_interval == 0
+                or now - last_write["t"] >= _MIN_WRITE_INTERVAL_SECONDS
+            )
+            if due:
+                last_write["t"] = now
                 self._write_status(status)
                 control = read_control_state(get_settings().data_path)
                 if control.get("skip_slug") == slug_info.slug:

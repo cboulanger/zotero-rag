@@ -879,6 +879,153 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["chunks_added"], 3)
 
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_dispatch_passes_client_api_key(self, mock_queue_cls, mock_process_cls):
+        """The subprocess batch worker must receive the per-request Zotero and embedding
+        API keys that self.zotero_client / self.embedding_service were constructed with —
+        not fall back to global (and, under per-user auto-indexing, unset) settings/env
+        vars. Regression test for items being silently dropped and their version cursor
+        advanced past them anyway when the global keys are unset (see cron_indexer.log
+        2026-07-07..11 for the Zotero-key case, and 2026-07-16 08:10 for the embedding-key
+        case: 'API key not found. Set the KISSKI_API_KEY environment variable.')."""
+        self.mock_zotero_client.api_key = "per-user-key-abc"
+        self.mock_embedding_service.api_key = "per-user-embed-key-xyz"
+
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": False, "chunks_added": 1, "items_added": 1,
+            "items_updated": 0, "items_skipped": 0,
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings:
+            # Global key deliberately unset, as in production auto-indexing.
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key=None,
+            )
+            await self.processor._index_library_full(
+                library_id="test_lib",
+                library_type="user",
+                metadata=MagicMock(last_indexed_version=0),
+            )
+
+        _, kwargs = mock_process_cls.call_args
+        self.assertIn("per-user-key-abc", kwargs["args"])
+        self.assertIn("per-user-embed-key-xyz", kwargs["args"])
+
+
+class TestSubprocessIndexBatchFunction(unittest.TestCase):
+    """Direct tests of the module-level subprocess worker function (no multiprocessing).
+
+    _subprocess_index_batch is synchronous — it spins up its own event loop via
+    asyncio.run() internally (it's designed to run inside a forked child process
+    with no event loop of its own), so this must be a plain sync test, not async.
+    """
+
+    def test_uses_passed_zotero_api_key_not_global_setting(self):
+        """_subprocess_index_batch must use its zotero_api_key argument to build the
+        ZoteroWebAPI client, not backend.config.settings.zotero_api_key. Under
+        per-user auto-indexing that global setting is unset, so falling back to it
+        raised RuntimeError for every item in the batch (see bug this test guards)."""
+        from backend.services import document_processor as dp_module
+
+        captured = {}
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                captured["api_key"] = api_key
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=MagicMock()):
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None,
+                testing=False,
+                extractor_backend="kreuzberg",
+                ocr_enabled=True,
+                kreuzberg_url="http://kreuzberg.test",
+            )
+
+            result = dp_module._subprocess_index_batch(
+                items=[],
+                library_id="lib1",
+                library_type="group",
+                indexed_versions={},
+                zotero_api_key="per-user-key-123",
+                embedding_api_key="irrelevant-for-this-test",
+            )
+
+        self.assertEqual(captured["api_key"], "per-user-key-123")
+        self.assertEqual(result["items_added"], 0)
+
+    def test_uses_passed_embedding_api_key_not_global_env_var(self):
+        """_subprocess_index_batch must use its embedding_api_key argument, not fall
+        back to a global env var (e.g. KISSKI_API_KEY/OPENAI_API_KEY) that per-user
+        auto-indexing never sets. Regression test: production logs showed 'API key
+        not found. Set the KISSKI_API_KEY environment variable.' for every item in
+        subprocess batches even after the Zotero-key fix, because the embedding
+        client had the same unfixed fallback."""
+        from backend.services import document_processor as dp_module
+
+        captured = {}
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        def fake_create_embedding_service(config, cache_dir=None, api_key=None, hf_token=None):
+            captured["api_key"] = api_key
+            return MagicMock()
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", side_effect=fake_create_embedding_service), \
+             patch("backend.dependencies.make_vector_store", return_value=MagicMock()):
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None,
+                testing=False,
+                extractor_backend="kreuzberg",
+                ocr_enabled=True,
+                kreuzberg_url="http://kreuzberg.test",
+            )
+
+            dp_module._subprocess_index_batch(
+                items=[],
+                library_id="lib1",
+                library_type="group",
+                indexed_versions={},
+                zotero_api_key="irrelevant-for-this-test",
+                embedding_api_key="per-user-embed-key-456",
+            )
+
+        self.assertEqual(captured["api_key"], "per-user-embed-key-456")
+
 
 if __name__ == "__main__":
     unittest.main()

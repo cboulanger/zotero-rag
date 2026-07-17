@@ -74,12 +74,17 @@ def _subprocess_index_batch(
     library_id: str,
     library_type: str,
     indexed_versions: dict[str, int],
+    zotero_api_key: Optional[str],
+    embedding_api_key: Optional[str],
 ) -> dict:
     """Process a batch of items in an isolated subprocess.
 
-    Re-initialises all clients from env vars so the subprocess is completely
-    independent of the parent's heap. Called via multiprocessing.Process on Linux
-    (fork context) — inherits all env vars from the parent process.
+    Re-initialises all clients so the subprocess is completely independent of the
+    parent's heap. Called via multiprocessing.Process on Linux (fork context) —
+    inherits all env vars from the parent process, but the Zotero key and the
+    embedding key must be passed explicitly: under per-user auto-indexing each
+    library is fetched and embedded with its owner's own keys, and there is no
+    longer a single global env var to fall back on for either.
 
     Returns a stats dict: chunks_added, items_added, items_updated, items_skipped.
     Raises EmbeddingAuthenticationError / EmbeddingRateLimitExhaustedError on fatal
@@ -87,17 +92,24 @@ def _subprocess_index_batch(
     """
     import asyncio as _asyncio
 
-    from backend.dependencies import make_embedding_service, make_vector_store
+    from backend.dependencies import make_vector_store
+    from backend.services.embeddings import create_embedding_service
     from backend.zotero.web_api import ZoteroWebAPI
 
     async def _run() -> dict:
-        settings = get_settings()
-        if not settings.zotero_api_key:
-            raise RuntimeError("ZOTERO_API_KEY is not set — cannot initialise ZoteroWebAPI in subprocess")
+        if not zotero_api_key:
+            raise RuntimeError("No Zotero API key available — cannot initialise ZoteroWebAPI in subprocess")
 
-        embedding_service = make_embedding_service()
+        settings = get_settings()
+        preset = settings.get_hardware_preset()
+        embedding_service = create_embedding_service(
+            preset.embedding,
+            cache_dir=str(settings.model_weights_path),
+            api_key=embedding_api_key,
+            hf_token=settings.get_api_key("HF_TOKEN"),
+        )
         vector_store = make_vector_store()
-        web_api = ZoteroWebAPI(api_key=settings.zotero_api_key)
+        web_api = ZoteroWebAPI(api_key=zotero_api_key)
 
         chunks_added = items_added = items_updated = items_skipped = 0
         async with web_api:
@@ -143,11 +155,15 @@ def _run_subprocess_batch(
     library_type: str,
     indexed_versions: dict[str, int],
     result_queue,  # multiprocessing.Queue
+    zotero_api_key: Optional[str],
+    embedding_api_key: Optional[str],
 ) -> None:
     """Target for multiprocessing.Process. Runs _subprocess_index_batch and puts
     result on result_queue. On fatal embedding error puts {'fatal': True, ...}."""
     try:
-        result = _subprocess_index_batch(items, library_id, library_type, indexed_versions)
+        result = _subprocess_index_batch(
+            items, library_id, library_type, indexed_versions, zotero_api_key, embedding_api_key
+        )
         result_queue.put({"fatal": False, **result})
     except _FATAL_EMBEDDING_ERRORS as e:
         result_queue.put({"fatal": True, "error": repr(e), "error_type": type(e).__name__})
@@ -575,6 +591,12 @@ class DocumentProcessor:
             # --- Subprocess-isolated batch processing ---
             # Each batch runs in a fresh OS process; when it exits the OS reclaims
             # all memory unconditionally, bounding heap growth to one batch at a time.
+            # The subprocess re-initialises its own ZoteroWebAPI and embedding client, so
+            # it needs the same keys this processor was constructed with (falling back to
+            # the global settings only for callers — e.g. tests, local-API mode — that
+            # don't set one on the client/service).
+            zotero_api_key = getattr(self.zotero_client, "api_key", None) or get_settings().zotero_api_key
+            embedding_api_key = getattr(self.embedding_service, "api_key", None)
             items_processed_so_far = 0
             for batch_start in range(0, total_items, SUBPROCESS_BATCH_SIZE):
                 if cancellation_check and cancellation_check():
@@ -588,7 +610,7 @@ class DocumentProcessor:
                 result_q: MPQueue = MPQueue()
                 proc = Process(
                     target=_run_subprocess_batch,
-                    args=(batch, library_id, library_type, batch_indexed, result_q),
+                    args=(batch, library_id, library_type, batch_indexed, result_q, zotero_api_key, embedding_api_key),
                     daemon=True,
                 )
                 proc.start()

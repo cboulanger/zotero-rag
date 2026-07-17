@@ -327,6 +327,39 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         # After run, the slug is done with final counts
         self.assertEqual(status["slugs"]["users/1"]["status"], "done")
 
+    async def test_first_progress_callback_always_writes_status(self):
+        """The very first progress callback for a slug must persist immediately,
+        even with the default progress_update_interval (10), under which counter==1
+        would not otherwise satisfy `n % interval == 0`. Regression test: full-sync
+        mode calls progress_callback once per subprocess batch (not once per item),
+        so a library needing only one batch to catch up could complete its entire
+        run without a single status write — leaving the plugin's "Automatic Indexing
+        Status" dialog stuck showing 0/0 the whole time even though real work was
+        happening (observed for groups/6297749 and groups/4370759 in production)."""
+        indexer = _make_indexer(["users/1"], self.tmp)
+        indexer.progress_update_interval = 10  # default; too coarse for a single call
+
+        async def fake_index_library(**kwargs):
+            cb = kwargs.get("progress_callback")
+            cb(0, 101, 0)  # single upfront call, as _index_library_full makes before its batch loop
+            on_disk = indexer._read_status()
+            self.assertEqual(on_disk["slugs"]["users/1"]["items_total"], 101)
+            return {"items_processed": 101, "chunks_added": 50}
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
 
 class TestIsProcessAlive(unittest.TestCase):
     def test_current_process_is_alive(self):
