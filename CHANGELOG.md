@@ -1,3 +1,15 @@
+## [1.38.2](https://github.com/cboulanger/zotero-rag/compare/v1.38.1...v1.38.2) (2026-07-17)
+
+
+### Bug Fixes
+
+* count zero-chunk indexing results as items_failed, not items_added ([7097ae7](https://github.com/cboulanger/zotero-rag/commit/7097ae757f8b54f99b7ca29a31895cc0b4a6be2c))
+* don't misclassify a same-item duplicate skip as items_failed ([87bb1f3](https://github.com/cboulanger/zotero-rag/commit/87bb1f39b6450ebdba2c8901fbf096e89d1c05ef))
+* exclude Zotero Trash from local indexable-item searches ([2aca674](https://github.com/cboulanger/zotero-rag/commit/2aca6743f268a93eb848faed19d0cfbb37dfc7ba))
+* index standalone Zotero attachments with no parent item ([0838e8a](https://github.com/cboulanger/zotero-rag/commit/0838e8a2ee2cd732ff09063c8026c3004f2df618))
+* propagate per-user API keys to indexing subprocesses, fix stalled progress UI ([29eb5e0](https://github.com/cboulanger/zotero-rag/commit/29eb5e09783493f5fb36f29f2347019ba11d6533))
+* surface silently-failing indexing items as items_failed ([251c62a](https://github.com/cboulanger/zotero-rag/commit/251c62abf31df18eb8c577280190c6e86fe896f1))
+
 ## [1.38.1](https://github.com/cboulanger/zotero-rag/compare/v1.38.0...v1.38.1) (2026-07-08)
 
 
