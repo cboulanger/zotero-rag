@@ -336,6 +336,7 @@ class CronIndexer:
         total_stats: dict = {
             "items_processed": 0,
             "chunks_added": 0,
+            "items_failed": 0,
             "libraries": [],
         }
 
@@ -378,6 +379,7 @@ class CronIndexer:
 
                 total_stats["items_processed"] += slug_stats.get("items_processed", 0)
                 total_stats["chunks_added"] += slug_stats.get("chunks_added", 0)
+                total_stats["items_failed"] += slug_stats.get("items_failed", 0)
                 total_stats["libraries"].append(slug_info.slug)
 
         except Exception as exc:
@@ -504,15 +506,18 @@ class CronIndexer:
                     progress_callback=progress_callback,
                     max_items=self.max_items,
                 )
+            items_failed = stats.get("items_failed", 0)
             self.log.info(
-                "Finished %s: %s items, %s chunks added",
+                "Finished %s: %s items, %s chunks added%s",
                 slug_info.slug,
                 stats.get("items_processed", 0),
                 stats.get("chunks_added", 0),
+                f", {items_failed} failed" if items_failed else "",
             )
             return {
                 "items_processed": stats.get("items_processed", 0),
                 "chunks_added": stats.get("chunks_added", 0),
+                "items_failed": items_failed,
                 "last_update": datetime.now(timezone.utc).isoformat(),
                 "rate_limit_headers": await embedding_service.get_rate_limit_info(),
             }

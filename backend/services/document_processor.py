@@ -111,7 +111,7 @@ def _subprocess_index_batch(
         vector_store = make_vector_store()
         web_api = ZoteroWebAPI(api_key=zotero_api_key)
 
-        chunks_added = items_added = items_updated = items_skipped = 0
+        chunks_added = items_added = items_updated = items_skipped = items_failed = 0
         async with web_api:
             processor = DocumentProcessor(
                 zotero_client=web_api,
@@ -138,12 +138,14 @@ def _subprocess_index_batch(
                     raise
                 except Exception as e:
                     logger.error("Error processing item %s in subprocess batch: %s", item_key, e, exc_info=True)
+                    items_failed += 1
 
         return {
             "chunks_added": chunks_added,
             "items_added": items_added,
             "items_updated": items_updated,
             "items_skipped": items_skipped,
+            "items_failed": items_failed,
         }
 
     return _asyncio.run(_run())
@@ -375,6 +377,7 @@ class DocumentProcessor:
 
         items_added = 0
         items_updated = 0
+        items_failed = 0
         chunks_added = 0
         chunks_deleted = 0
         total_items = len(items_with_attachments)
@@ -421,6 +424,7 @@ class DocumentProcessor:
                 raise
             except Exception as e:
                 logger.error(f"Error processing item in incremental mode: {e}", exc_info=True)
+                items_failed += 1
             finally:
                 # Always report progress
                 if progress_callback:
@@ -452,10 +456,18 @@ class DocumentProcessor:
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = metadata.total_items_indexed + items_added
 
+        if items_failed:
+            logger.warning(
+                "Incremental sync for library %s: %d item(s) failed to process and "
+                "were skipped (see errors above); they remain candidates for the next scan",
+                library_id, items_failed,
+            )
+
         return {
             "items_processed": len(items_with_attachments),
             "items_added": items_added,
             "items_updated": items_updated,
+            "items_failed": items_failed,
             "chunks_added": chunks_added,
             "chunks_deleted": chunks_deleted,
             "last_version": max_version_seen
@@ -590,6 +602,7 @@ class DocumentProcessor:
         items_added = 0
         items_updated = 0
         items_skipped = 0
+        items_failed = 0
         total_items = len(items_with_attachments)
 
         if progress_callback:
@@ -642,6 +655,7 @@ class DocumentProcessor:
                     items_added += result.get("items_added", 0)
                     items_updated += result.get("items_updated", 0)
                     items_skipped += result.get("items_skipped", 0)
+                    items_failed += result.get("items_failed", 0)
                 elif proc.exitcode is not None and proc.exitcode < 0:
                     logger.warning(
                         "Batch %d–%d killed by signal %d (likely OOM); "
@@ -688,6 +702,7 @@ class DocumentProcessor:
                     raise
                 except Exception as e:
                     logger.error("Error processing item in full sync mode: %s", e, exc_info=True)
+                    items_failed += 1
                 finally:
                     if progress_callback:
                         progress_callback(idx + 1, total_items, chunks_added)
@@ -704,11 +719,19 @@ class DocumentProcessor:
         # content this scan, used to detect legitimately low indexable ratios.
         metadata.last_full_scan_indexable = len(items_with_attachments)
 
+        if items_failed:
+            logger.warning(
+                "Full sync for library %s: %d item(s) failed to process and were "
+                "skipped (see errors above); they remain candidates for the next scan",
+                library_id, items_failed,
+            )
+
         return {
             "items_processed": len(items_with_attachments),
             "items_added": items_added,
             "items_updated": items_updated,
             "items_skipped": items_skipped,
+            "items_failed": items_failed,
             "orphaned_items": orphaned_item_count,
             "chunks_added": chunks_added,
             "chunks_deleted": chunks_deleted,

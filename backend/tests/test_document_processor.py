@@ -907,6 +907,56 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, [])
 
+    async def test_full_sync_reports_items_failed(self):
+        """A per-item processing failure (e.g. corrupted/broken attachment download)
+        must be counted as items_failed, not silently disappear from every stat."""
+        item_a = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        item_b = {"version": 1, "data": {"key": "BBB", "itemType": "journalArticle", "title": "B"}}
+
+        all_items = [item_a, item_b, _attachment("PDFA", "AAA"), _attachment("PDFB", "BBB")]
+        self.mock_zotero_client.get_library_items_since.return_value = all_items
+        self.mock_zotero_client.get_item_children.side_effect = (
+            lambda library_id, item_key, library_type: [
+                a for a in all_items if a["data"].get("parentItem") == item_key
+            ]
+        )
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.side_effect = [
+            _make_extraction_chunks(("content", 1)),
+            ValueError("boom"),
+        ]
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        result = await self.processor.index_library("test_lib", mode="full")
+
+        self.assertEqual(result["items_added"], 1)
+        self.assertEqual(result["items_failed"], 1)
+
+    async def test_incremental_reports_items_failed(self):
+        """Incremental sync must also count per-item failures instead of dropping them."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib", library_type="user", library_name="t",
+            last_indexed_version=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        item = {"version": 6, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = {"data": {"key": "PDF", "itemType": "attachment", "contentType": "application/pdf"}}
+        self.mock_zotero_client.get_library_items_since.return_value = [item]
+        self.mock_zotero_client.get_item_children.return_value = [pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.side_effect = ValueError("boom")
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.assertEqual(result["items_added"], 0)
+        self.assertEqual(result["items_failed"], 1)
+
 
 class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
     """Tests for the subprocess-isolated batch processing path in _index_library_full."""
@@ -1151,6 +1201,51 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
             )
 
         self.assertEqual(captured["api_key"], "per-user-embed-key-456")
+
+    def test_reports_items_failed_for_per_item_exception(self):
+        """_subprocess_index_batch must count a per-item exception as items_failed,
+        not just log it and move on with no trace in the returned stats."""
+        from backend.services import document_processor as dp_module
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        item = {"version": 1, "data": {"key": "BAD", "itemType": "journalArticle", "title": "A"}}
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=MagicMock()), \
+             patch.object(
+                 dp_module.DocumentProcessor, "_index_item",
+                 AsyncMock(side_effect=ValueError("corrupted attachment")),
+             ):
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None,
+                testing=False,
+                extractor_backend="kreuzberg",
+                ocr_enabled=True,
+                kreuzberg_url="http://kreuzberg.test",
+            )
+
+            result = dp_module._subprocess_index_batch(
+                items=[item],
+                library_id="test_lib",
+                library_type="user",
+                indexed_versions={},
+                zotero_api_key="fake-key",
+                embedding_api_key="fake-embed-key",
+            )
+
+        self.assertEqual(result["items_added"], 0)
+        self.assertEqual(result["items_failed"], 1)
 
 
 if __name__ == "__main__":

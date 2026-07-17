@@ -162,10 +162,12 @@ async def _main(argv: list[str] | None = None) -> int:
         )
         indexer.key_issues = key_issues
         stats = await indexer.run()
+        items_failed = stats.get("items_failed", 0)
         log.info(
-            "Done. Total items processed: %s, chunks added: %s",
+            "Done. Total items processed: %s, chunks added: %s%s",
             stats.get("items_processed", 0),
             stats.get("chunks_added", 0),
+            f", {items_failed} failed" if items_failed else "",
         )
         return 0
 

@@ -222,6 +222,33 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["slugs"]["users/1"]["status"], "done")
         self.assertEqual(status["slugs"]["groups/2"]["status"], "done")
 
+    async def test_run_aggregates_items_failed(self):
+        """items_failed must be forwarded per-slug and summed across the whole run, so a
+        library with silently-failing items (e.g. a broken attachment download) shows up
+        in cron_status.json and the final summary instead of vanishing without a trace."""
+        indexer = _make_indexer(["users/1", "groups/2"], self.tmp)
+
+        fake_stats = {"items_processed": 10, "chunks_added": 50, "items_failed": 3, "mode": "full"}
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(return_value=fake_stats)
+            MockProcessor.return_value = mock_proc_instance
+
+            result = await indexer.run()
+
+        self.assertEqual(result["items_failed"], 6)  # 3 per slug x 2 slugs
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["items_failed"], 3)
+        self.assertEqual(status["slugs"]["groups/2"]["items_failed"], 3)
+
     async def test_run_already_running(self):
         """AlreadyRunningError propagates when lock is held by another process."""
         from filelock import FileLock
