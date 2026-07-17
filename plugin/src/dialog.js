@@ -1258,9 +1258,11 @@ var ZoteroRAGDialog = {
 			return;
 		}
 
-		// Get all items in the library
+		// Get all items in the library (excluding Trash — matches the backend, which
+		// never indexes trashed items either).
 		const search = new Zotero.Search();
 		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
+		search.addCondition('deleted', 'false');
 		const itemIDs = await search.search();
 
 		if (itemIDs.length === 0) {

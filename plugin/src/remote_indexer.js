@@ -555,6 +555,7 @@ var RemoteIndexer = {
 
 		const search = new Zotero.Search();
 		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
+		search.addCondition('deleted', 'false');
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return { attachments: [], linkedUrls: 0 };
 
@@ -635,6 +636,7 @@ var RemoteIndexer = {
 
 		const search = new Zotero.Search();
 		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
+		search.addCondition('deleted', 'false');
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return 0;
 
@@ -1054,6 +1056,7 @@ var RemoteIndexer = {
 
 		const search = new Zotero.Search();
 		(/** @type {any} */ (search)).libraryID = zoteroLibraryID;
+		search.addCondition('deleted', 'false');
 		const itemIDs = await search.search();
 		if (!itemIDs.length) return [];
 
