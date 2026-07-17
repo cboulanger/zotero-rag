@@ -125,13 +125,22 @@ def _subprocess_index_batch(
                 try:
                     if existing is None:
                         n = await processor._index_item(item, library_id, library_type)
-                        chunks_added += n
-                        items_added += 1
+                        if n == 0:
+                            # Candidate was selected as indexable but produced zero chunks
+                            # (e.g. a dead attachment download link) — never actually
+                            # indexed, so it's a failure, not a success.
+                            items_failed += 1
+                        else:
+                            chunks_added += n
+                            items_added += 1
                     elif existing < item_version:
                         vector_store.delete_item_chunks(library_id, item_key)
                         n = await processor._index_item(item, library_id, library_type)
-                        chunks_added += n
-                        items_updated += 1
+                        if n == 0:
+                            items_failed += 1
+                        else:
+                            chunks_added += n
+                            items_updated += 1
                     else:
                         items_skipped += 1
                 except _FATAL_EMBEDDING_ERRORS:
@@ -404,16 +413,25 @@ class DocumentProcessor:
                     # New item
                     logger.debug(f"Indexing new item {item_key} (version {item_version})")
                     chunk_count = await self._index_item(item, library_id, library_type)
-                    items_added += 1
-                    chunks_added += chunk_count
+                    if chunk_count == 0:
+                        # Candidate was selected as indexable but produced zero chunks
+                        # (e.g. a dead attachment download link) — never actually
+                        # indexed, so it's a failure, not a success.
+                        items_failed += 1
+                    else:
+                        items_added += 1
+                        chunks_added += chunk_count
                 elif existing_version < item_version:
                     # Updated item - delete old chunks and reindex
                     logger.debug(f"Reindexing updated item {item_key} ({existing_version} -> {item_version})")
                     deleted = self.vector_store.delete_item_chunks(library_id, item_key)
                     chunk_count = await self._index_item(item, library_id, library_type)
-                    items_updated += 1
                     chunks_deleted += deleted
-                    chunks_added += chunk_count
+                    if chunk_count == 0:
+                        items_failed += 1
+                    else:
+                        items_updated += 1
+                        chunks_added += chunk_count
                 else:
                     # Already up-to-date (shouldn't happen with ?since, but defensive)
                     logger.debug(f"Item {item_key} already up-to-date (version {item_version})")
@@ -687,14 +705,23 @@ class DocumentProcessor:
                     if existing_version is None:
                         logger.debug("New item %s (version %s)", item_key, item_version)
                         chunk_count = await self._index_item(item, library_id, library_type)
-                        items_added += 1
-                        chunks_added += chunk_count
+                        if chunk_count == 0:
+                            # Candidate was selected as indexable but produced zero
+                            # chunks (e.g. a dead attachment download link) — never
+                            # actually indexed, so it's a failure, not a success.
+                            items_failed += 1
+                        else:
+                            items_added += 1
+                            chunks_added += chunk_count
                     elif existing_version < item_version:
                         logger.debug("Updated item %s (%s -> %s)", item_key, existing_version, item_version)
                         self.vector_store.delete_item_chunks(library_id, item_key)
                         chunk_count = await self._index_item(item, library_id, library_type)
-                        items_updated += 1
-                        chunks_added += chunk_count
+                        if chunk_count == 0:
+                            items_failed += 1
+                        else:
+                            items_updated += 1
+                            chunks_added += chunk_count
                     else:
                         items_skipped += 1
 
