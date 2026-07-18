@@ -1842,6 +1842,69 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
         self.assertEqual(result["items_added"], 0)
         self.assertEqual(result["items_failed"], 1)
 
+    def test_metadata_only_update_skips_reindex_in_subprocess_batch(self):
+        """The subprocess worker must also take the metadata-only fast path —
+        production always uses this code path for full sync
+        (settings.testing=False)."""
+        from backend.services import document_processor as dp_module
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        abstract_text = "word " * 150
+        abstract_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+        item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1", "itemType": "journalArticle", "title": "New Title",
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Doe"}],
+                "abstractNote": abstract_text,
+            },
+        }
+        mock_vector_store = MagicMock()
+        mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "ITEM1:abstract",
+                "content_hash": abstract_hash,
+                "has_content": True,
+            }},
+        ]
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=mock_vector_store):
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None, testing=False, extractor_backend="kreuzberg",
+                ocr_enabled=True, kreuzberg_url="http://kreuzberg.test",
+            )
+
+            result = dp_module._subprocess_index_batch(
+                items=[item],
+                library_id="test_lib",
+                library_type="user",
+                indexed_versions={"ITEM1": 5},
+                zotero_api_key="fake-key",
+                embedding_api_key="fake-embed-key",
+            )
+
+        mock_vector_store.delete_item_chunks.assert_not_called()
+        mock_vector_store.update_item_bibliographic_metadata.assert_called_once_with(
+            "test_lib", "ITEM1",
+            title="New Title", authors=["Jane Doe"], tags=[],
+            year=None, item_type="journalArticle", item_version=10,
+            zotero_modified="",
+        )
+        self.assertEqual(result["items_updated"], 1)
+        self.assertEqual(result["chunks_added"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

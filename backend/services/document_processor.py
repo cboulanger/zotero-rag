@@ -146,6 +146,9 @@ def _subprocess_index_batch(
                             chunks_added += n
                             items_added += 1
                     elif existing < item_version:
+                        if await processor._try_metadata_only_update(item, library_id, library_type):
+                            items_updated += 1
+                            continue
                         vector_store.delete_item_chunks(library_id, item_key)
                         n = await processor._index_item(item, library_id, library_type)
                         if n == 0 and not await _item_has_indexed_content(vector_store, library_id, item_key):
