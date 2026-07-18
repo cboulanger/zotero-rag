@@ -267,6 +267,11 @@ class DocumentProcessor:
             )
         self.document_extractor = document_extractor
 
+        # Attachments _index_item couldn't download this run — see _index_library_full,
+        # which persists up to 100 of these so the plugin's Fix Unavailable tool can
+        # attempt to recover them (unlike parse errors, these may be fixable client-side).
+        self._download_failures: list[dict] = []
+
         logger.debug("Initialized DocumentProcessor")
 
     async def index_library(
@@ -929,6 +934,7 @@ class DocumentProcessor:
 
                 if not file_bytes:
                     logger.warning(f"Could not download attachment {attachment_key}")
+                    self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
                     continue
 
                 result = await self._process_attachment_bytes(

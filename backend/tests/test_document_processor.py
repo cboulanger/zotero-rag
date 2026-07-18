@@ -804,6 +804,27 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertIn("mode", result)
         self.assertEqual(result["chunks_added"], 0)
 
+    async def test_index_item_records_download_failure(self):
+        """_index_item must append a record to self._download_failures when an
+        attachment can't be downloaded, so full sync can later surface these to
+        the plugin as potentially-fixable (unlike parse errors, which recur
+        regardless of how the bytes are obtained and are never recorded here)."""
+        mock_item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = {
+            "data": {"key": "PDF123", "itemType": "attachment", "contentType": "application/pdf"},
+        }
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = None  # Download failed
+
+        await self.processor._index_item(mock_item, "test_lib", "user")
+
+        self.assertEqual(self.processor._download_failures, [
+            {"item_key": "ITEM123", "attachment_key": "PDF123"},
+        ])
+
     async def test_index_library_html_attachment(self):
         """Test that HTML snapshot attachments are indexed."""
         mock_item = {
