@@ -369,6 +369,59 @@ class TestVectorStore(unittest.TestCase):
         stub_keys = self.vector_store.get_stub_item_keys("1")
         self.assertEqual(stub_keys, {"STUB1"})
 
+    def test_update_item_bibliographic_metadata_patches_all_chunks(self):
+        """update_item_bibliographic_metadata must patch title/authors/tags/
+        year/item_type/item_version on every existing chunk without touching
+        text or embeddings — used for the metadata-only reindex fast path."""
+        chunks = [
+            DocumentChunk(
+                text=f"Chunk {i}",
+                metadata=ChunkMetadata(
+                    chunk_id=f"chunk-{i}",
+                    document_metadata=DocumentMetadata(
+                        library_id="1",
+                        item_key="ITEM1",
+                        title="Old Title",
+                        authors=["Old Author"],
+                        year=2000,
+                        item_type="book",
+                    ),
+                    page_number=1,
+                    text_preview=f"Chunk {i}",
+                    chunk_index=i,
+                    content_hash=f"hash{i}",
+                    item_version=1,
+                ),
+                embedding=[0.1] * 384,
+            )
+            for i in range(3)
+        ]
+        self.vector_store.add_chunks_batch(chunks)
+
+        updated = self.vector_store.update_item_bibliographic_metadata(
+            "1", "ITEM1",
+            title="New Title", authors=["New Author"], tags=["Law"],
+            year=2020, item_type="journalArticle", item_version=2,
+            zotero_modified="2026-01-01T00:00:00Z",
+        )
+
+        self.assertEqual(updated, 3)
+        results = self.vector_store.get_item_chunks("1", "ITEM1")
+        self.assertEqual(len(results), 3)
+        for r in results:
+            payload = r["payload"]
+            self.assertEqual(payload["title"], "New Title")
+            self.assertEqual(payload["authors"], ["New Author"])
+            self.assertEqual(payload["author_lastnames"], ["author"])
+            self.assertEqual(payload["tags"], ["Law"])
+            self.assertEqual(payload["tags_lower"], ["law"])
+            self.assertEqual(payload["year"], 2020)
+            self.assertEqual(payload["item_type"], "journalArticle")
+            self.assertEqual(payload["item_version"], 2)
+            self.assertEqual(payload["zotero_modified"], "2026-01-01T00:00:00Z")
+            # Text and embedding must be untouched by the patch
+            self.assertEqual(payload["text"], f"Chunk {payload['chunk_index']}")
+
     def test_delete_library_chunks(self):
         """Test deleting all chunks for a library."""
         # Add chunks from different libraries

@@ -632,6 +632,44 @@ class VectorStore:
         logger.debug(f"Updated {len(point_ids)} chunks for {library_id}/{item_key}")
         return len(point_ids)
 
+    def update_item_bibliographic_metadata(
+        self,
+        library_id: str,
+        item_key: str,
+        *,
+        title: Optional[str],
+        authors: list[str],
+        tags: list[str],
+        year: Optional[int],
+        item_type: Optional[str],
+        item_version: int,
+        zotero_modified: str,
+    ) -> int:
+        """
+        Patch bibliographic fields on all chunks of an item without re-embedding.
+
+        Used for the metadata-only reindex fast path (DocumentProcessor.
+        _try_metadata_only_update): the item's own fields changed (title,
+        creators, tags, date, itemType) but its indexed content — attachment
+        bytes, or the fallback abstract text — is unchanged, so there's no
+        need to re-extract or re-embed anything.
+
+        Returns:
+            Number of chunks patched (0 if the item has no existing chunks).
+        """
+        fields = {
+            "title": title,
+            "authors": authors,
+            "author_lastnames": _extract_lastnames(authors),
+            "tags": tags,
+            "tags_lower": _lower_all(tags),
+            "year": year,
+            "item_type": item_type,
+            "item_version": item_version,
+            "zotero_modified": zotero_modified,
+        }
+        return self.update_item_metadata(library_id, item_key, fields)
+
     def check_duplicate(self, content_hash: str, library_id: Optional[str] = None) -> Optional[DeduplicationRecord]:
         """
         Check if a document with this content hash already exists.
