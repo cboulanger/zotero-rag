@@ -113,6 +113,24 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
+	 * Return a short "type" label for a row: why the attachment is
+	 * unavailable/unreadable, or its file type when there's no failure reason.
+	 * Priority matches searchAndFix()'s bucketing: skipReason and isParseError
+	 * both mean "not indexable, no retry" and take priority for display, even
+	 * though only one of them would ever be set on real data.
+	 * @param {AttachmentInfo} info
+	 * @returns {string}
+	 */
+	_typeLabelFor(info) {
+		if (info.skipReason === 'no text') return 'empty';
+		if (info.skipReason === 'timeout') return 'timeout';
+		if (info.isParseError) return 'parse err';
+		if (info.serverDownloadFailed) return 'srv fail';
+		if (info.isLinked) return 'linked';
+		return this.getFileTypeLabel(info.attachmentItem);
+	},
+
+	/**
 	 * Build the VirtualizedTable and render it into #table-container.
 	 * Uses getRowData for plain text columns and column.renderer for status/select.
 	 * The table uses the native selection model (click / Ctrl+click / Shift+click / Ctrl+A).
@@ -220,7 +238,7 @@ var ZoteroFixUnavailableDialog = {
 						title:    info.title   || '—',
 						zoteroID: info.zoteroID,
 						filename,
-						type:   info.skipReason === 'no text' ? 'empty' : info.skipReason === 'timeout' ? 'timeout' : info.isParseError ? 'parse err' : (info.isLinked ? 'linked' : this.getFileTypeLabel(info.attachmentItem)),
+						type:   this._typeLabelFor(info),
 						status: '', // rendered by column.renderer reading this.rowStatus
 						select: '', // rendered by column.renderer
 					};
