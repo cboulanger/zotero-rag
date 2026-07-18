@@ -561,6 +561,9 @@ class DocumentProcessor:
         remain searchable while the sync continues.
         """
         logger.info(f"Full sync for library {library_id}")
+        # Reset per-run: this list is instance-level so _index_item can append to it
+        # without threading a new parameter through every one of its callers.
+        self._download_failures = []
 
         # Fetch all items from Zotero
         items = await self.zotero_client.get_library_items_since(
@@ -849,6 +852,13 @@ class DocumentProcessor:
         # never touches it (see _index_library_incremental, which only ever sees
         # items that changed, not previously-failed unchanged ones).
         metadata.last_full_scan_items_failed = items_failed
+        # Cap at 100 to keep the metadata payload small — these are surfaced to the
+        # plugin's Fix Unavailable tool as potentially fixable. (Task 3 extends this
+        # line to also include failures from subprocess-dispatched batches, which
+        # this instance's own _download_failures can't see — a production run always
+        # goes through that path, so this task alone only covers the inline path
+        # settings.testing=True uses, i.e. what the test below exercises.)
+        metadata.last_full_scan_failed_downloads = self._download_failures[:100]
 
         if items_failed:
             logger.warning(

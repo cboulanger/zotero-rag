@@ -72,4 +72,17 @@ class LibraryIndexMetadata(BaseModel):
         )
     )
 
+    last_full_scan_failed_downloads: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Up to 100 {item_key, attachment_key} pairs whose attachment could not "
+            "be downloaded from Zotero in the last completed full scan. Unlike a "
+            "generic parse error (which recurs regardless of how the bytes are "
+            "obtained), these may be fixable client-side — e.g. the file exists on "
+            "the user's Zotero desktop even though the server's cloud-storage fetch "
+            "failed. Surfaced to the plugin's Fix Unavailable tool. Only a full "
+            "scan updates this; incremental syncs leave it stale."
+        )
+    )
+
     schema_version: int = Field(default=1)

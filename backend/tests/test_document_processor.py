@@ -825,6 +825,28 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
 
+    async def test_full_sync_persists_download_failures_on_metadata(self):
+        """Full sync must persist up to 100 download-failure records onto
+        LibraryIndexMetadata.last_full_scan_failed_downloads, capped, and reset
+        cleanly between runs."""
+        mock_item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = None  # Download failed
+
+        result = await self.processor.index_library("test_lib")
+
+        self.assertIn("mode", result)
+        saved_metadata = self.mock_vector_store.update_library_metadata.call_args.args[0]
+        self.assertEqual(saved_metadata.last_full_scan_failed_downloads, [
+            {"item_key": "ITEM123", "attachment_key": "PDF123"},
+        ])
+
     async def test_index_library_html_attachment(self):
         """Test that HTML snapshot attachments are indexed."""
         mock_item = {
