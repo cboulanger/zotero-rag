@@ -1939,6 +1939,11 @@ class ZoteroRAGPlugin {
 	 * @property {boolean} isLinked - True for linked files (linkMode=2); can't be auto-downloaded
 	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
 	 * @property {'no text'|'timeout'} [skipReason] - Set for items skipped by the server (skipped_empty / skipped_timeout)
+	 * @property {boolean} [serverDownloadFailed] - True when the server couldn't download this attachment
+	 *   from Zotero (dead link, transient error). Deliberately does NOT set isParseError or skipReason —
+	 *   unlike those, this may be fixable by retrying (the local file may already exist, or search/download
+	 *   may find a copy), so it must fall into the "imported"/"linked" retry buckets in fix-unavailable.js,
+	 *   not the "not indexable" one.
 	 */
 
 	/**
@@ -2146,6 +2151,114 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * @param {number} zoteroLibraryID
+	 * @returns {string}
+	 */
+	_downloadFailedFilePath(zoteroLibraryID) {
+		// @ts-ignore
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `download-failed-${zoteroLibraryID}.json`);
+	}
+
+	/**
+	 * Merge new server-reported download-failure attachment keys into the
+	 * persistent per-library store. Unlike parse errors, these may be fixable
+	 * client-side — the server failed to fetch the file from Zotero's cloud
+	 * storage, but the local Zotero client may already have it, or the Fix
+	 * Unavailable tool's search/download strategies may recover it.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {string[]} newKeys - Attachment keys the server could not download
+	 * @returns {Promise<number>} Number of keys newly added (not already stored)
+	 */
+	async storeDownloadFailedItems(backendLibraryId, newKeys) {
+		if (!newKeys || newKeys.length === 0) return 0;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return 0;
+		const filePath = this._downloadFailedFilePath(zoteroLibraryID);
+		/** @type {string[]} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {}
+		const added = newKeys.filter(k => !existing.includes(k));
+		const merged = [...new Set([...existing, ...newKeys])];
+		try {
+			// @ts-ignore
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			// @ts-ignore
+			await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(merged));
+		} catch (e) {
+			this.log(`[storeDownloadFailedItems] Failed to write download-failed file: ${e}`);
+		}
+		return added.length;
+	}
+
+	/**
+	 * Load server-reported download-failure attachment keys and resolve them to
+	 * UnavailableAttachmentInfo objects. Deliberately does NOT set isParseError
+	 * or skipReason (see the typedef) — these items must fall into the Fix
+	 * Unavailable dialog's "imported"/"linked" retry buckets, not the
+	 * "not indexable" one parse errors and server-skips use.
+	 * Silently drops keys where the Zotero item no longer exists.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getDownloadFailedAttachments(libraryID) {
+		const filePath = this._downloadFailedFilePath(libraryID);
+		/** @type {string[]} */
+		let keys = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			keys = JSON.parse(text);
+		} catch (_) {
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		/** @type {string[]} */
+		const validKeys = [];
+		for (const key of keys) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
+			if (!attachment || attachment.deleted) continue;
+			validKeys.push(key);
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				serverDownloadFailed: true,
+			});
+		}
+		if (validKeys.length !== keys.length) {
+			try {
+				// @ts-ignore
+				await IOUtils.writeUTF8(filePath, JSON.stringify(validKeys));
+			} catch (_) {}
+		}
+		return result;
+	}
+
+	/**
 	 * Return full detail records for all unavailable attachments in a library.
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
@@ -2207,7 +2320,19 @@ class ZoteroRAGPlugin {
 		// Append server-skipped items (skipped_empty / skipped_timeout), deduplicating by key
 		const skippedServerItems = await this._getSkippedServerAttachments(libraryID);
 		for (const item of skippedServerItems) {
-			if (!missingKeys.has(item.attachmentItem.key)) result.push(item);
+			if (!missingKeys.has(item.attachmentItem.key)) {
+				missingKeys.add(item.attachmentItem.key);
+				result.push(item);
+			}
+		}
+		// Append server-reported download failures, deduplicating by key — a file
+		// missing locally may already be in `result` from the SQL-based tier above.
+		const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID);
+		for (const item of downloadFailedItems) {
+			if (!missingKeys.has(item.attachmentItem.key)) {
+				missingKeys.add(item.attachmentItem.key);
+				result.push(item);
+			}
 		}
 		return result;
 	}
