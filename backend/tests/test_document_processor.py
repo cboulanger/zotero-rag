@@ -1691,6 +1691,49 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
     @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
     @patch("backend.services.document_processor.Process")
     @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_batch_aggregates_failed_downloads(self, mock_queue_cls, mock_process_cls):
+        """failed_downloads reported by a subprocess batch must be aggregated onto
+        metadata.last_full_scan_failed_downloads via _index_library_full's dispatch loop,
+        not just handled in _subprocess_index_batch in isolation."""
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": False, "chunks_added": 0, "items_added": 0,
+            "items_updated": 0, "items_skipped": 0,
+            "failed_downloads": [{"item_key": "AAA", "attachment_key": "PDF"}],
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        metadata = MagicMock(last_indexed_version=0)
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            await self.processor._index_library_full(
+                library_id="test_lib",
+                library_type="user",
+                metadata=metadata,
+            )
+
+        self.assertEqual(
+            metadata.last_full_scan_failed_downloads,
+            [{"item_key": "AAA", "attachment_key": "PDF"}],
+        )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
     async def test_subprocess_dispatch_passes_client_api_key(self, mock_queue_cls, mock_process_cls):
         """The subprocess batch worker must receive the per-request Zotero and embedding
         API keys that self.zotero_client / self.embedding_service were constructed with —
