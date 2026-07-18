@@ -34,6 +34,10 @@
  *   processing (dead download link, extraction error) in the last completed
  *   full scan — the server's authoritative floor of currently un-indexable
  *   items; incremental syncs never update it.
+ * @property {Array<{item_key: string, attachment_key: string}>} [last_full_scan_failed_downloads] -
+ *   Up to 100 attachments that failed to download from Zotero in the last full
+ *   scan. Unlike a parse error, these may be fixable client-side (see
+ *   mergeDownloadFailures).
  */
 
 /**
@@ -572,6 +576,28 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Merge a freshly-fetched library's server-reported download failures into
+	 * the local Fix Unavailable store, and bump the displayed "N unavailable"
+	 * count by however many were actually new. Unlike parse errors, these may
+	 * be fixable client-side — but nothing else ever surfaces them, since the
+	 * server only ever reports them via index-status.
+	 * @param {string} libraryId - Library ID
+	 * @param {LibraryIndexMetadata|null} metadata - Freshly-fetched library metadata
+	 * @returns {Promise<void>}
+	 */
+	async mergeDownloadFailures(libraryId, metadata) {
+		if (!metadata || !metadata.last_full_scan_failed_downloads || metadata.last_full_scan_failed_downloads.length === 0) {
+			return;
+		}
+		const keys = metadata.last_full_scan_failed_downloads.map(f => f.attachment_key);
+		const added = await this.plugin.storeDownloadFailedItems(libraryId, keys);
+		if (added > 0) {
+			const newTotal = (this.libraryMissingFilesCount.get(libraryId) || 0) + added;
+			this.onUnavailableCountUpdated(libraryId, newTotal);
+		}
+	},
+
+	/**
 	 * Fetch metadata for a single library and update UI.
 	 * @param {string} libraryId - Library ID
 	 * @returns {Promise<void>}
@@ -588,6 +614,8 @@ var ZoteroRAGDialog = {
 
 			const metadata = await this.fetchLibraryMetadata(libraryId);
 			this.libraryMetadata.set(libraryId, metadata);
+
+			if (this.plugin) await this.mergeDownloadFailures(libraryId, metadata);
 
 			// Update the UI
 			this.updateLibraryStatusIcon(libraryId, metadata);
