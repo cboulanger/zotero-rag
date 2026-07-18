@@ -448,6 +448,9 @@ class DocumentProcessor:
                         items_added += 1
                         chunks_added += chunk_count
                 elif existing_version < item_version:
+                    if await self._try_metadata_only_update(item, library_id, library_type):
+                        items_updated += 1
+                        continue
                     # Updated item - delete old chunks and reindex
                     logger.debug(f"Reindexing updated item {item_key} ({existing_version} -> {item_version})")
                     deleted = self.vector_store.delete_item_chunks(library_id, item_key)
