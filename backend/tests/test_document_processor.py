@@ -1928,6 +1928,58 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
         self.assertEqual(result["items_added"], 0)
         self.assertEqual(result["items_failed"], 1)
 
+    def test_reports_failed_downloads_in_result(self):
+        """_subprocess_index_batch must return the batch's own DocumentProcessor
+        instance's _download_failures so the parent process can aggregate them
+        across all batches of a full sync."""
+        from backend.services import document_processor as dp_module
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        item = {"version": 1, "data": {"key": "DEADLINK", "itemType": "journalArticle", "title": "A"}}
+        mock_vector_store = MagicMock()
+        mock_vector_store.get_item_version.return_value = None  # no existing content either
+
+        def fake_index_item(self, item, library_id, library_type):
+            # Simulates what the real _index_item does on a download failure
+            # (Task 1) — append to the instance's own accumulator and return 0.
+            self._download_failures.append({"item_key": "DEADLINK", "attachment_key": "ATT1"})
+            return 0
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=mock_vector_store), \
+             patch.object(dp_module.DocumentProcessor, "_index_item", side_effect=fake_index_item, autospec=True):
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None,
+                testing=False,
+                extractor_backend="kreuzberg",
+                ocr_enabled=True,
+                kreuzberg_url="http://kreuzberg.test",
+            )
+
+            result = dp_module._subprocess_index_batch(
+                items=[item],
+                library_id="test_lib",
+                library_type="user",
+                indexed_versions={},
+                zotero_api_key="fake-key",
+                embedding_api_key="fake-embed-key",
+            )
+
+        self.assertEqual(result["failed_downloads"], [
+            {"item_key": "DEADLINK", "attachment_key": "ATT1"},
+        ])
+
     def test_metadata_only_update_skips_reindex_in_subprocess_batch(self):
         """The subprocess worker must also take the metadata-only fast path —
         production always uses this code path for full sync

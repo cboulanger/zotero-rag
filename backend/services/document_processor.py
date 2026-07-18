@@ -170,6 +170,7 @@ def _subprocess_index_batch(
             "items_updated": items_updated,
             "items_skipped": items_skipped,
             "items_failed": items_failed,
+            "failed_downloads": processor._download_failures[:100],
         }
 
     return _asyncio.run(_run())
@@ -700,6 +701,9 @@ class DocumentProcessor:
         items_updated = 0
         items_skipped = 0
         items_failed = 0
+        # Aggregated across subprocess batches (each batch's own DocumentProcessor
+        # instance's _download_failures never reaches this process directly).
+        subprocess_download_failures: list[dict] = []
         total_items = len(items_with_attachments)
 
         if progress_callback:
@@ -753,6 +757,7 @@ class DocumentProcessor:
                     items_updated += result.get("items_updated", 0)
                     items_skipped += result.get("items_skipped", 0)
                     items_failed += result.get("items_failed", 0)
+                    subprocess_download_failures.extend(result.get("failed_downloads", []))
                 elif proc.exitcode is not None and proc.exitcode < 0:
                     logger.warning(
                         "Batch %d–%d killed by signal %d (likely OOM); "
@@ -853,12 +858,15 @@ class DocumentProcessor:
         # items that changed, not previously-failed unchanged ones).
         metadata.last_full_scan_items_failed = items_failed
         # Cap at 100 to keep the metadata payload small — these are surfaced to the
-        # plugin's Fix Unavailable tool as potentially fixable. (Task 3 extends this
-        # line to also include failures from subprocess-dispatched batches, which
-        # this instance's own _download_failures can't see — a production run always
-        # goes through that path, so this task alone only covers the inline path
-        # settings.testing=True uses, i.e. what the test below exercises.)
-        metadata.last_full_scan_failed_downloads = self._download_failures[:100]
+        # plugin's Fix Unavailable tool as potentially fixable. self._download_failures
+        # is populated by the inline path (settings.testing=True); the subprocess
+        # dispatch path (production) can't see that instance's accumulator directly,
+        # since each batch runs in a fresh process, so its results are aggregated
+        # into subprocess_download_failures above instead. Exactly one of the two
+        # lists is ever non-empty for a given run — use_subprocess is a single
+        # boolean deciding which branch processes every item — so concatenating
+        # both unconditionally is safe and needs no extra branching.
+        metadata.last_full_scan_failed_downloads = (self._download_failures + subprocess_download_failures)[:100]
 
         if items_failed:
             logger.warning(
