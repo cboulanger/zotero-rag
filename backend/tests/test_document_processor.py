@@ -988,6 +988,44 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items_added"], 1)
         self.assertEqual(result["chunks_added"], 1)
 
+    async def test_full_sync_metadata_only_update_skips_reindex(self):
+        """Full sync (inline path) must also take the metadata-only fast path."""
+        abstract_text = "word " * 150
+        abstract_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+        mock_item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1",
+                "itemType": "journalArticle",
+                "title": "New Title",
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Doe"}],
+                "abstractNote": abstract_text,
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_item_children.return_value = []
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {"ITEM1": 5}
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "ITEM1:abstract",
+                "content_hash": abstract_hash,
+                "has_content": True,
+            }},
+        ]
+
+        result = await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.delete_item_chunks.assert_not_called()
+        self.mock_extractor.extract_and_chunk.assert_not_called()
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_called_once_with(
+            "test_lib", "ITEM1",
+            title="New Title", authors=["Jane Doe"], tags=[],
+            year=None, item_type="journalArticle", item_version=10,
+            zotero_modified="",
+        )
+        self.assertEqual(result["items_updated"], 1)
+        self.assertEqual(result["chunks_added"], 0)
+
     async def test_incremental_writes_catalog_stub_for_non_indexable_item(self):
         """Incremental sync must also write a catalog-only stub for a changed
         item that has no indexable attachment and no substantial abstract."""
