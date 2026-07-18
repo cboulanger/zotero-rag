@@ -268,6 +268,44 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(results[0]["title"], "Der soziale Zivilprozess")
         self.assertFalse(results[0]["has_content"])
 
+    def test_add_chunk_stores_tags_and_filters_case_insensitively(self):
+        """Tags are stored verbatim for display but matched case-insensitively,
+        mirroring the existing author_lastnames filter pattern."""
+        from backend.models.filters import MetadataFilters
+
+        chunk = DocumentChunk(
+            text="Text about legal sociology.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-tags-1",
+                document_metadata=DocumentMetadata(
+                    library_id="1",
+                    item_key="TAGGED1",
+                    title="Tagged Item",
+                    tags=["Rechtssoziologie", "Zivilprozessrecht"],
+                ),
+                page_number=1,
+                text_preview="Text about legal",
+                chunk_index=0,
+                content_hash="hash-tags-1",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunk(chunk)
+
+        results = self.vector_store.get_items_by_metadata(
+            library_ids=["1"], filters=MetadataFilters(tags=["rechtssoziologie"])
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["item_key"], "TAGGED1")
+        # Original casing preserved for display
+        self.assertEqual(results[0]["tags"], ["Rechtssoziologie", "Zivilprozessrecht"])
+
+        # A tag that isn't present must not match
+        no_match = self.vector_store.get_items_by_metadata(
+            library_ids=["1"], filters=MetadataFilters(tags=["unrelatedtag"])
+        )
+        self.assertEqual(no_match, [])
+
     def test_search_excludes_catalog_stub(self):
         """Semantic search must never surface a catalog-only stub, even when its
         placeholder vector is the closest match to the query."""

@@ -14,6 +14,7 @@ class MetadataFilters(BaseModel):
     authors: list[str] = []         # last names (lowercase) to match against stored author strings
     item_types: list[str] = []      # e.g. ["book", "journalArticle"]
     title_keywords: list[str] = []  # words to match against the title field
+    tags: list[str] = []            # Zotero tags/keywords (case-insensitive) to match
 
     def is_empty(self) -> bool:
         return not any([
@@ -22,4 +23,5 @@ class MetadataFilters(BaseModel):
             self.authors,
             self.item_types,
             self.title_keywords,
+            self.tags,
         ])

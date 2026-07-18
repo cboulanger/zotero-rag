@@ -35,6 +35,7 @@ class MetadataResult(BaseModel):
     item_type: Optional[str]
     text_preview: Optional[str]   # first few words of the first indexed chunk
     has_content: bool = True      # False for catalog-only stubs (no attachment/abstract to embed)
+    tags: list[str] = []          # Zotero tags/keywords assigned to the item
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -111,6 +112,7 @@ class MetadataAgent(BaseAgent):
                 item_type=payload.get("item_type"),
                 text_preview=payload.get("text_preview"),
                 has_content=payload.get("has_content", True),
+                tags=payload.get("tags") or [],
             ))
 
         # Sort by year (ascending, unknowns last)

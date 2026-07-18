@@ -58,6 +58,12 @@ def _extract_lastnames(authors: list[str]) -> list[str]:
     return lastnames
 
 
+def _lower_all(values: list[str]) -> list[str]:
+    """Lowercase every string in a list — used to build a match-only companion
+    field (e.g. tags_lower) alongside a display-cased original."""
+    return [v.lower() for v in values]
+
+
 class VectorStore:
     """
     Vector database interface using Qdrant.
@@ -244,6 +250,8 @@ class VectorStore:
                 "title": chunk.metadata.document_metadata.title,
                 "authors": chunk.metadata.document_metadata.authors,
                 "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
+                "tags": chunk.metadata.document_metadata.tags,
+                "tags_lower": _lower_all(chunk.metadata.document_metadata.tags),
                 "year": chunk.metadata.document_metadata.year,
                 "item_type": chunk.metadata.document_metadata.item_type,
                 "page_number": chunk.metadata.page_number,
@@ -304,6 +312,8 @@ class VectorStore:
                     "title": chunk.metadata.document_metadata.title,
                     "authors": chunk.metadata.document_metadata.authors,
                     "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
+                    "tags": chunk.metadata.document_metadata.tags,
+                    "tags_lower": _lower_all(chunk.metadata.document_metadata.tags),
                     "year": chunk.metadata.document_metadata.year,
                     "item_type": chunk.metadata.document_metadata.item_type,
                     "page_number": chunk.metadata.page_number,
@@ -376,6 +386,12 @@ class VectorStore:
             ))
         for kw in filters.title_keywords:
             conditions.append(FieldCondition(key="title", match=MatchText(text=kw)))
+        if filters.tags:
+            # tags_lower is a keyword-indexed list[str] — MatchAny works reliably in all modes
+            conditions.append(FieldCondition(
+                key="tags_lower",
+                match=MatchAny(any=[t.lower() for t in filters.tags]),
+            ))
         return conditions
 
     def search(
@@ -707,7 +723,7 @@ class VectorStore:
         Text indexes on authors and title enable substring matching.
         Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames")
+        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower")
         for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
@@ -834,6 +850,7 @@ class VectorStore:
                     "attachment_key":     target_attachment_key,
                     "title":              target_doc_metadata.title,
                     "authors":            target_doc_metadata.authors,
+                    "tags":               target_doc_metadata.tags,
                     "year":               target_doc_metadata.year,
                     "item_type":          target_doc_metadata.item_type,
                     "item_version":       target_item_version,

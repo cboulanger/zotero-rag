@@ -479,6 +479,23 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(authors), 0)
 
+    async def test_extract_tags(self):
+        """Zotero tags come as a list of {"tag": ..., "type": ...} dicts; extract the names."""
+        item_data = {
+            "tags": [
+                {"tag": "Rechtssoziologie"},
+                {"tag": "Zivilprozessrecht", "type": 1},
+            ]
+        }
+
+        tags = self.processor._extract_tags(item_data)
+
+        self.assertEqual(tags, ["Rechtssoziologie", "Zivilprozessrecht"])
+
+    async def test_extract_tags_empty(self):
+        self.assertEqual(self.processor._extract_tags({"tags": []}), [])
+        self.assertEqual(self.processor._extract_tags({}), [])
+
     async def test_extract_year_various_formats(self):
         """Test year extraction from various date formats."""
         test_cases = [

@@ -158,6 +158,29 @@ class TestMetadataAgentExecute(unittest.IsolatedAsyncioTestCase):
         self.assertLess(years.index(1980) if 1980 in years else 0,
                         years.index(2000) if 2000 in years else 1)
 
+    async def test_tags_propagate_from_payload_into_trace(self):
+        agent = self._make_agent([
+            {"item_key": "TAGGED1", "library_id": "1", "title": "T", "authors": [],
+             "tags": ["Rechtssoziologie"]},
+        ])
+        trace = MagicMock()
+        await agent.execute(question="Q", library_ids=["1"], filters=MetadataFilters(), trace=trace)
+        recorded = trace.record.call_args.args[0]
+        self.assertEqual(recorded.catalog_results[0]["tags"], ["Rechtssoziologie"])
+
+    def test_metadata_result_carries_tags(self):
+        result = MetadataResult(
+            item_id="TAGGED1",
+            library_id="1",
+            title="Tagged Item",
+            authors=[],
+            year=None,
+            item_type=None,
+            text_preview=None,
+            tags=["Rechtssoziologie"],
+        )
+        self.assertEqual(result.tags, ["Rechtssoziologie"])
+
     async def test_has_content_false_propagates_from_payload(self):
         agent = self._make_agent([
             {"item_key": "STUB1", "library_id": "1", "title": "Stub", "authors": [],

@@ -8,7 +8,7 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
-CURRENT_SCHEMA_VERSION: int = 5
+CURRENT_SCHEMA_VERSION: int = 6
 
 ProcessingStatus = Literal[
     "indexed_fresh",
@@ -40,6 +40,7 @@ class DocumentMetadata(BaseModel):
     year: Optional[int] = Field(None, description="Publication year")
     item_type: Optional[str] = Field(None, description="Zotero item type")
     attachment_key: Optional[str] = Field(None, description="PDF attachment key")
+    tags: list[str] = Field(default_factory=list, description="Zotero tags/keywords assigned to the item")
 
 
 class ChunkMetadata(BaseModel):
@@ -84,6 +85,7 @@ class ChunkMetadata(BaseModel):
     # v3: added item_type to Qdrant payload
     # v4: added author_lastnames keyword field for Qdrant-native author filtering
     # v5: added has_content flag for catalog-only stub records
+    # v6: added tags (Zotero keywords) and tags_lower keyword field for filtering
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION)
 
 

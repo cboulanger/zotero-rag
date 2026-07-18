@@ -880,6 +880,7 @@ class DocumentProcessor:
             authors=self._extract_authors(item["data"]),
             year=self._extract_year(item["data"]),
             item_type=item["data"].get("itemType"),
+            tags=self._extract_tags(item["data"]),
         )
 
         is_standalone_attachment = item["data"].get("itemType") == "attachment"
@@ -1485,6 +1486,17 @@ class DocumentProcessor:
 
         return None
 
+    def _extract_tags(self, item_data: dict) -> list[str]:
+        """Extract tag/keyword names from Zotero item data.
+
+        Zotero tags are a list of {"tag": name, "type": 0|1} dicts (type 1 =
+        automatic tag). Both are extracted — no distinction is made here.
+        """
+        return [
+            t["tag"] for t in item_data.get("tags", [])
+            if t.get("tag")
+        ]
+
     def _add_catalog_stub(self, item: dict, library_id: str) -> None:
         """Write a catalog-only stub record for a bibliographic item with no
         indexable attachment and no substantial abstract (see the caller's
@@ -1496,6 +1508,7 @@ class DocumentProcessor:
             authors=self._extract_authors(item["data"]),
             year=self._extract_year(item["data"]),
             item_type=item["data"].get("itemType"),
+            tags=self._extract_tags(item["data"]),
         )
         self.vector_store.add_catalog_stub(
             doc_metadata,
