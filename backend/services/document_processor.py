@@ -1515,3 +1515,86 @@ class DocumentProcessor:
             item_version=item.get("version", 0),
             zotero_modified=item["data"].get("dateModified", ""),
         )
+
+    async def _try_metadata_only_update(
+        self,
+        item: dict,
+        library_id: str,
+        library_type: str,
+    ) -> bool:
+        """Attempt a cheap in-place metadata patch instead of a full reindex.
+
+        Applies when an item's Zotero version increased but its indexed content
+        (attachment bytes, or the fallback abstract text) is unchanged — i.e.
+        only item-level fields (title, creators, tags, date, itemType) were
+        edited. Standalone attachments and catalog-only stubs are out of scope
+        (see the per-branch comments below) and always return False.
+
+        Returns:
+            True if the metadata patch was applied — caller must skip the
+            delete-then-reindex path. False if a content change was detected,
+            or the item isn't eligible, so the caller must fall through to
+            the normal reindex path.
+        """
+        item_key = item["data"]["key"]
+
+        # Standalone attachments (itemType == "attachment") ARE the indexable
+        # unit, and Zotero bumps their own version for both a metadata-only
+        # edit and a real file re-upload — no cheap signal distinguishes them
+        # without downloading the file, so always fall through.
+        if item["data"].get("itemType") == "attachment":
+            return False
+
+        existing_chunks = self.vector_store.get_item_chunks(library_id, item_key)
+        if not existing_chunks:
+            return False
+
+        # Catalog-only stubs are already a cheap rewrite (see _add_catalog_stub);
+        # this path is only for items with real indexed content.
+        if any(not c["payload"].get("has_content", True) for c in existing_chunks):
+            return False
+
+        abstract_key = f"{item_key}:abstract"
+        is_abstract_fallback = all(
+            c["payload"].get("attachment_key") == abstract_key for c in existing_chunks
+        )
+
+        if is_abstract_fallback:
+            abstract_text = item["data"].get("abstractNote", "")
+            new_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+            if new_hash != existing_chunks[0]["payload"].get("content_hash"):
+                return False
+        else:
+            stored_versions: dict[str, int] = {}
+            for c in existing_chunks:
+                att_key = c["payload"].get("attachment_key")
+                if att_key is not None:
+                    stored_versions[att_key] = c["payload"].get("attachment_version", 0)
+
+            current_attachments = await self.zotero_client.get_item_children(
+                library_id=library_id, item_key=item_key, library_type=library_type
+            )
+            current_indexable = {
+                att["data"]["key"]: att.get("version", 0)
+                for att in current_attachments
+                if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+            }
+
+            if set(stored_versions) != set(current_indexable):
+                return False
+            if any(current_indexable[key] != version for key, version in stored_versions.items()):
+                return False
+
+        self.vector_store.update_item_bibliographic_metadata(
+            library_id,
+            item_key,
+            title=item["data"].get("title", "Untitled"),
+            authors=self._extract_authors(item["data"]),
+            tags=self._extract_tags(item["data"]),
+            year=self._extract_year(item["data"]),
+            item_type=item["data"].get("itemType"),
+            item_version=item.get("version", 0),
+            zotero_modified=item["data"].get("dateModified", ""),
+        )
+        logger.info(f"Metadata-only update for item {item_key} (version {item.get('version')})")
+        return True

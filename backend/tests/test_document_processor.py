@@ -3,6 +3,7 @@ Unit tests for document processor.
 """
 
 import unittest
+import hashlib
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from backend.services.document_processor import DocumentProcessor
@@ -69,6 +70,11 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         # Default stubs for catalog-only stub records (non-indexable items)
         self.mock_vector_store.get_stub_item_keys.return_value = set()
+
+        # Default: no existing chunks, so _try_metadata_only_update returns
+        # False immediately and every existing test keeps exercising the
+        # normal delete+reindex path unless it explicitly overrides this.
+        self.mock_vector_store.get_item_chunks.return_value = []
 
     async def test_init(self):
         """Test initialization."""
@@ -495,6 +501,180 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     async def test_extract_tags_empty(self):
         self.assertEqual(self.processor._extract_tags({"tags": []}), [])
         self.assertEqual(self.processor._extract_tags({}), [])
+
+    async def test_metadata_only_update_skips_standalone_attachment(self):
+        """Standalone attachments are out of scope — Zotero bumps their own
+        version for both a metadata-only edit and a real file re-upload, and
+        there's no cheap way to tell those apart."""
+        item = {"version": 5, "data": {"key": "ATT1", "itemType": "attachment"}}
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+        self.mock_vector_store.get_item_chunks.assert_not_called()
+
+    async def test_metadata_only_update_returns_false_when_no_existing_chunks(self):
+        item = {"version": 5, "data": {"key": "ITEM1", "itemType": "book"}}
+        self.mock_vector_store.get_item_chunks.return_value = []
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+
+    async def test_metadata_only_update_returns_false_for_catalog_stub(self):
+        item = {"version": 5, "data": {"key": "ITEM1", "itemType": "book"}}
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {"has_content": False}},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+
+    async def test_metadata_only_update_abstract_fallback_unchanged(self):
+        """Abstract-fallback item whose abstractNote text hasn't changed —
+        must patch metadata in place, not re-chunk/re-embed the abstract."""
+        abstract_text = "word " * 150
+        abstract_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+        item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1",
+                "itemType": "journalArticle",
+                "title": "New Title",
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Doe"}],
+                "tags": [{"tag": "Law"}],
+                "date": "2020",
+                "abstractNote": abstract_text,
+                "dateModified": "2026-01-01T00:00:00Z",
+            },
+        }
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "ITEM1:abstract",
+                "content_hash": abstract_hash,
+                "has_content": True,
+            }},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertTrue(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_called_once_with(
+            "test_lib", "ITEM1",
+            title="New Title", authors=["Jane Doe"], tags=["Law"],
+            year=2020, item_type="journalArticle", item_version=10,
+            zotero_modified="2026-01-01T00:00:00Z",
+        )
+        self.mock_zotero_client.get_item_children.assert_not_called()
+
+    async def test_metadata_only_update_abstract_fallback_changed(self):
+        """If the abstract text itself changed, that's a content change —
+        must fall through to the normal reindex path."""
+        item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1", "itemType": "journalArticle",
+                "abstractNote": "a completely different abstract " * 20,
+            },
+        }
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "ITEM1:abstract",
+                "content_hash": "stale-hash-from-before",
+                "has_content": True,
+            }},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_not_called()
+
+    async def test_metadata_only_update_attachment_unchanged(self):
+        """Attachment-backed item whose attachment version(s) haven't
+        changed — must patch metadata in place."""
+        item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1", "itemType": "journalArticle", "title": "New Title",
+                "creators": [], "tags": [],
+            },
+        }
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "PDF1", "attachment_version": 7, "has_content": True,
+            }},
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [
+            {"data": {"key": "PDF1", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 7},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertTrue(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_called_once_with(
+            "test_lib", "ITEM1",
+            title="New Title", authors=[], tags=[],
+            year=None, item_type="journalArticle", item_version=10,
+            zotero_modified="",
+        )
+
+    async def test_metadata_only_update_attachment_version_changed(self):
+        item = {"version": 10, "data": {"key": "ITEM1", "itemType": "journalArticle"}}
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "PDF1", "attachment_version": 7, "has_content": True,
+            }},
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [
+            {"data": {"key": "PDF1", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 8},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+
+    async def test_metadata_only_update_attachment_added(self):
+        """A new indexable attachment appeared — content changed, not just metadata."""
+        item = {"version": 10, "data": {"key": "ITEM1", "itemType": "journalArticle"}}
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "PDF1", "attachment_version": 7, "has_content": True,
+            }},
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [
+            {"data": {"key": "PDF1", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 7},
+            {"data": {"key": "PDF2", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 1},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+
+    async def test_metadata_only_update_attachment_removed(self):
+        """An indexed attachment is no longer present — content changed."""
+        item = {"version": 10, "data": {"key": "ITEM1", "itemType": "journalArticle"}}
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "PDF1", "attachment_version": 7, "has_content": True,
+            }},
+            {"id": "p2", "payload": {
+                "attachment_key": "PDF2", "attachment_version": 1, "has_content": True,
+            }},
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [
+            {"data": {"key": "PDF1", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 7},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
 
     async def test_extract_year_various_formats(self):
         """Test year extraction from various date formats."""
@@ -1247,6 +1427,7 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.find_cross_library_duplicate.return_value = None
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
         self.mock_vector_store.get_stub_item_keys.return_value = set()
+        self.mock_vector_store.get_item_chunks.return_value = []
         self.mock_zotero_client.get_deleted_item_keys.return_value = []
         self.mock_extractor = AsyncMock(spec=DocumentExtractor)
         self.processor = DocumentProcessor(
