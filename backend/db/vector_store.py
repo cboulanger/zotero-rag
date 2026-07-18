@@ -654,6 +654,17 @@ class VectorStore:
         bytes, or the fallback abstract text — is unchanged, so there's no
         need to re-extract or re-embed anything.
 
+        Args:
+            library_id: Library the item belongs to.
+            item_key: Zotero item key.
+            title: New title.
+            authors: New author display names.
+            tags: New tags (display casing).
+            year: New publication year.
+            item_type: New Zotero item type.
+            item_version: New Zotero item version.
+            zotero_modified: New Zotero dateModified timestamp.
+
         Returns:
             Number of chunks patched (0 if the item has no existing chunks).
         """
