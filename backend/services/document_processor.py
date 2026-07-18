@@ -1569,6 +1569,23 @@ class DocumentProcessor:
         )
 
         if is_abstract_fallback:
+            # An abstract-fallback item can transition to attachment-backed
+            # at any time (user attaches a PDF after adding the reference by
+            # metadata/DOI only) — that attach bumps the parent item's
+            # version just like a metadata edit does, so the abstract-hash
+            # check alone can't tell the two apart. Check for a newly
+            # present indexable attachment first; only fall back to the
+            # hash comparison once we know the item is still abstract-only.
+            current_attachments = await self.zotero_client.get_item_children(
+                library_id=library_id, item_key=item_key, library_type=library_type
+            )
+            has_indexable_attachment = any(
+                att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                for att in current_attachments
+            )
+            if has_indexable_attachment:
+                return False
+
             abstract_text = item["data"].get("abstractNote", "")
             new_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
             if new_hash != existing_chunks[0]["payload"].get("content_hash"):

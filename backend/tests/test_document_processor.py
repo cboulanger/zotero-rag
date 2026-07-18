@@ -556,6 +556,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
                 "has_content": True,
             }},
         ]
+        self.mock_zotero_client.get_item_children.return_value = []  # still no attachment
 
         result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
 
@@ -566,7 +567,11 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             year=2020, item_type="journalArticle", item_version=10,
             zotero_modified="2026-01-01T00:00:00Z",
         )
-        self.mock_zotero_client.get_item_children.assert_not_called()
+        # The abstract-vs-attachment-backed check now always queries current
+        # children first, to detect a transition to attachment-backed.
+        self.mock_zotero_client.get_item_children.assert_called_once_with(
+            library_id="test_lib", item_key="ITEM1", library_type="user"
+        )
 
     async def test_metadata_only_update_abstract_fallback_changed(self):
         """If the abstract text itself changed, that's a content change —
@@ -584,6 +589,44 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
                 "content_hash": "stale-hash-from-before",
                 "has_content": True,
             }},
+        ]
+
+        result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
+
+        self.assertFalse(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_not_called()
+
+    async def test_metadata_only_update_abstract_fallback_gained_attachment(self):
+        """Abstract-fallback item that has since had a real indexable
+        attachment attached — this is a state transition (abstract-only ->
+        attachment-backed), not a metadata-only edit, even though the
+        abstract text itself is unchanged. Must fall through to full
+        reindex so the new attachment gets extracted."""
+        abstract_text = "word " * 150
+        abstract_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
+        item = {
+            "version": 10,
+            "data": {
+                "key": "ITEM1",
+                "itemType": "journalArticle",
+                "title": "New Title",
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Doe"}],
+                "tags": [{"tag": "Law"}],
+                "date": "2020",
+                "abstractNote": abstract_text,
+                "dateModified": "2026-01-01T00:00:00Z",
+            },
+        }
+        self.mock_vector_store.get_item_chunks.return_value = [
+            {"id": "p1", "payload": {
+                "attachment_key": "ITEM1:abstract",
+                "content_hash": abstract_hash,
+                "has_content": True,
+            }},
+        ]
+        self.mock_zotero_client.get_item_children.return_value = [
+            {"data": {"key": "PDF1", "itemType": "attachment", "contentType": "application/pdf"},
+             "version": 1},
         ]
 
         result = await self.processor._try_metadata_only_update(item, "test_lib", "user")
@@ -1857,6 +1900,9 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
 
             async def __aexit__(self, *exc_info):
                 return False
+
+            async def get_item_children(self, library_id, item_key, library_type):
+                return []  # still no indexable attachment
 
         abstract_text = "word " * 150
         abstract_hash = hashlib.sha256(abstract_text.encode("utf-8")).hexdigest()
