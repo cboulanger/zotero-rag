@@ -67,6 +67,9 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
         self.mock_zotero_client.get_deleted_item_keys.return_value = []
 
+        # Default stubs for catalog-only stub records (non-indexable items)
+        self.mock_vector_store.get_stub_item_keys.return_value = set()
+
     async def test_init(self):
         """Test initialization."""
         self.assertIsNotNone(self.processor.document_extractor)
@@ -667,6 +670,162 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["chunks_deleted"], 3)
 
+    async def test_full_sync_writes_catalog_stub_for_non_indexable_item(self):
+        """Full sync must write a catalog-only stub for a bibliographic item with
+        no attachment and no substantial abstract, so it still surfaces in
+        metadata search even though there is no text to embed."""
+        mock_item = {
+            "version": 7,
+            "data": {
+                "key": "WASSERMANN1",
+                "itemType": "book",
+                "title": "Der soziale Zivilprozess",
+                "creators": [
+                    {"creatorType": "author", "firstName": "Rudolf", "lastName": "Wassermann"}
+                ],
+                "date": "1973",
+                "abstractNote": "Short abstract, far below the threshold.",
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+
+        result = await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.add_catalog_stub.assert_called_once()
+        call_args = self.mock_vector_store.add_catalog_stub.call_args
+        doc_metadata = call_args.args[0]
+        self.assertEqual(doc_metadata.item_key, "WASSERMANN1")
+        self.assertEqual(doc_metadata.title, "Der soziale Zivilprozess")
+        self.assertEqual(doc_metadata.authors, ["Rudolf Wassermann"])
+        self.assertEqual(doc_metadata.year, 1973)
+        self.assertEqual(doc_metadata.item_type, "book")
+        self.assertEqual(result["items_cataloged"], 1)
+        # Unchanged semantics: catalog-only items don't go through the embedding
+        # pipeline, so they're still excluded from items_processed.
+        self.assertEqual(result["items_processed"], 0)
+
+    async def test_full_sync_does_not_stub_notes_or_bare_attachments(self):
+        """Notes and non-indexable standalone attachments aren't bibliographic
+        catalog entries — they must never get a stub record."""
+        mock_items = [
+            {"data": {"key": "ATTACH1", "itemType": "attachment", "contentType": "image/png"}},
+            {"data": {"key": "NOTE1", "itemType": "note"}},
+        ]
+        self.mock_zotero_client.get_library_items_since.return_value = mock_items
+
+        result = await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.add_catalog_stub.assert_not_called()
+        self.assertEqual(result.get("items_cataloged", 0), 0)
+
+    async def test_full_sync_catalog_stub_is_idempotent(self):
+        """An already-stubbed item with an unchanged Zotero version must not be
+        rewritten on every full sync run."""
+        mock_item = {
+            "version": 7,
+            "data": {
+                "key": "WASSERMANN1",
+                "itemType": "book",
+                "title": "Der soziale Zivilprozess",
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {"WASSERMANN1": 7}
+        self.mock_vector_store.get_stub_item_keys.return_value = {"WASSERMANN1"}
+
+        result = await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.add_catalog_stub.assert_not_called()
+        self.mock_vector_store.delete_item_chunks.assert_not_called()
+        self.assertEqual(result["items_cataloged"], 0)
+
+    async def test_full_sync_orphan_purge_spares_catalog_stub_items(self):
+        """A previously-stubbed item that's still present (but still
+        non-indexable) in Zotero must not be purged as orphaned."""
+        mock_item = {
+            "version": 7,
+            "data": {
+                "key": "WASSERMANN1",
+                "itemType": "book",
+                "title": "Der soziale Zivilprozess",
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {"WASSERMANN1": 7}
+        self.mock_vector_store.get_stub_item_keys.return_value = {"WASSERMANN1"}
+
+        await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.delete_item_chunks.assert_not_called()
+
+    async def test_full_sync_reindexes_item_that_gained_content_over_stub(self):
+        """An item whose Zotero version didn't change but that now has a real
+        PDF attachment (stub -> real transition) must have its stale stub
+        cleared and be indexed with real content — not skipped as
+        'already indexed', since Zotero doesn't bump a parent item's own
+        version when a child attachment is added."""
+        mock_item = {
+            "version": 7,
+            "data": {
+                "key": "WASSERMANN1",
+                "itemType": "book",
+                "title": "Der soziale Zivilprozess",
+            },
+        }
+        mock_pdf = _attachment("PDF1", "WASSERMANN1")
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf]
+        self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("Content", 1)
+        )
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        self.mock_vector_store.get_all_indexed_item_versions.return_value = {"WASSERMANN1": 7}
+        self.mock_vector_store.get_stub_item_keys.return_value = {"WASSERMANN1"}
+
+        result = await self.processor.index_library("test_lib")
+
+        self.mock_vector_store.delete_item_chunks.assert_any_call("test_lib", "WASSERMANN1")
+        self.assertEqual(result["items_added"], 1)
+        self.assertEqual(result["chunks_added"], 1)
+
+    async def test_incremental_writes_catalog_stub_for_non_indexable_item(self):
+        """Incremental sync must also write a catalog-only stub for a changed
+        item that has no indexable attachment and no substantial abstract."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib", library_type="user", library_name="Test Library",
+            last_indexed_version=5,
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        mock_item = {
+            "version": 7,
+            "data": {
+                "key": "WASSERMANN1",
+                "itemType": "book",
+                "title": "Der soziale Zivilprozess",
+                "creators": [
+                    {"creatorType": "author", "firstName": "Rudolf", "lastName": "Wassermann"}
+                ],
+                "date": "1973",
+            },
+        }
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item]
+        self.mock_zotero_client.get_item_children.return_value = []
+        self.mock_vector_store.get_item_version.return_value = None
+        self.mock_vector_store.get_stub_item_keys.return_value = set()
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.mock_vector_store.add_catalog_stub.assert_called_once()
+        doc_metadata = self.mock_vector_store.add_catalog_stub.call_args.args[0]
+        self.assertEqual(doc_metadata.item_key, "WASSERMANN1")
+        self.assertEqual(doc_metadata.authors, ["Rudolf Wassermann"])
+        self.assertEqual(result["items_cataloged"], 1)
+
     async def test_full_sync_propagates_embedding_auth_error(self):
         """A fatal embedding auth error must abort the run, not be swallowed per-item.
 
@@ -1070,6 +1229,7 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store = Mock()
         self.mock_vector_store.find_cross_library_duplicate.return_value = None
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+        self.mock_vector_store.get_stub_item_keys.return_value = set()
         self.mock_zotero_client.get_deleted_item_keys.return_value = []
         self.mock_extractor = AsyncMock(spec=DocumentExtractor)
         self.processor = DocumentProcessor(

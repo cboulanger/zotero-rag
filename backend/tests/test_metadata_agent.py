@@ -62,6 +62,37 @@ class TestResultsToContext(unittest.TestCase):
         self.assertIn("[S1]", text)
         self.assertNotIn("None", text)
 
+    def test_catalog_only_item_is_flagged(self):
+        """An item with no indexed full text (has_content=False) must be marked
+        so the synthesis LLM doesn't silently treat 'no passages found' as
+        'nothing exists' — it exists in the catalog, just isn't searchable."""
+        result = MetadataResult(
+            item_id="WASSERMANN1",
+            library_id="1",
+            title="Der soziale Zivilprozess",
+            authors=["Rudolf Wassermann"],
+            year=1973,
+            item_type="book",
+            text_preview=None,
+            has_content=False,
+        )
+        text = _results_to_context([result])
+        self.assertIn("Der soziale Zivilprozess", text)
+        self.assertIn("full text not indexed", text.lower())
+
+    def test_normal_item_is_not_flagged(self):
+        result = MetadataResult(
+            item_id="ABC",
+            library_id="1",
+            title="Social Systems",
+            authors=["Luhmann, N."],
+            year=1984,
+            item_type="book",
+            text_preview="Systems theory is",
+        )
+        text = _results_to_context([result])
+        self.assertNotIn("full text not indexed", text.lower())
+
 
 class TestMetadataAgentExecute(unittest.IsolatedAsyncioTestCase):
 
@@ -126,6 +157,23 @@ class TestMetadataAgentExecute(unittest.IsolatedAsyncioTestCase):
         # 1980 before 2000
         self.assertLess(years.index(1980) if 1980 in years else 0,
                         years.index(2000) if 2000 in years else 1)
+
+    async def test_has_content_false_propagates_from_payload(self):
+        agent = self._make_agent([
+            {"item_key": "STUB1", "library_id": "1", "title": "Stub", "authors": [],
+             "has_content": False},
+        ])
+        result = await agent.execute(question="Q", library_ids=["1"], filters=MetadataFilters())
+        self.assertIn("full text not indexed", result.context_text.lower())
+
+    async def test_has_content_defaults_true_for_legacy_payloads(self):
+        """Payloads written before the has_content field existed must not be
+        misflagged as catalog-only."""
+        agent = self._make_agent([
+            {"item_key": "OLD1", "library_id": "1", "title": "Old Item", "authors": []},
+        ])
+        result = await agent.execute(question="Q", library_ids=["1"], filters=MetadataFilters())
+        self.assertNotIn("full text not indexed", result.context_text.lower())
 
     async def test_context_text_contains_items(self):
         agent = self._make_agent([

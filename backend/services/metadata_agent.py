@@ -34,6 +34,7 @@ class MetadataResult(BaseModel):
     year: Optional[int]
     item_type: Optional[str]
     text_preview: Optional[str]   # first few words of the first indexed chunk
+    has_content: bool = True      # False for catalog-only stubs (no attachment/abstract to embed)
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -57,6 +58,8 @@ def _results_to_context(results: list[MetadataResult]) -> str:
         lines.append(f"[S{i}] {_format_authors(r.authors)}{year_str} — {r.title}{type_str}")
         if r.text_preview:
             lines.append(f"      \"{r.text_preview}...\"")
+        if not r.has_content:
+            lines.append("      (catalog entry only — full text not indexed, cannot be searched by content)")
     return "\n".join(lines)
 
 
@@ -107,6 +110,7 @@ class MetadataAgent(BaseAgent):
                 year=payload.get("year"),
                 item_type=payload.get("item_type"),
                 text_preview=payload.get("text_preview"),
+                has_content=payload.get("has_content", True),
             ))
 
         # Sort by year (ascending, unknowns last)

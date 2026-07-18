@@ -32,6 +32,8 @@ class TestIncrementalIndexing(unittest.IsolatedAsyncioTestCase):
 
         # Default stubs required by the smart-sync full mode
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+        self.mock_vector_store.get_stub_item_keys.return_value = set()
+        self.mock_vector_store.get_item_version.return_value = None
 
     async def test_first_time_indexing_uses_full_mode(self):
         """First-time indexing should use full mode."""

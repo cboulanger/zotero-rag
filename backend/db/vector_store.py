@@ -256,6 +256,7 @@ class VectorStore:
                 "indexed_at": chunk.metadata.indexed_at,
                 "zotero_modified": chunk.metadata.zotero_modified,
                 "schema_version": chunk.metadata.schema_version,
+                "has_content": chunk.metadata.has_content,
             },
         )
 
@@ -410,13 +411,18 @@ class VectorStore:
         if filters and not filters.is_empty():
             must_conditions = self._build_metadata_must_conditions(filters)
 
-        if should_conditions or must_conditions:
-            query_filter = Filter(
-                should=should_conditions or None,
-                must=must_conditions or None,
-            )
-        else:
-            query_filter = None
+        # Catalog-only stub records (has_content=False) carry a placeholder vector
+        # with no real semantic meaning — always exclude them from similarity search.
+        # Missing-field points (all pre-existing chunks) are untouched by this.
+        must_not_conditions = [
+            FieldCondition(key="has_content", match=MatchValue(value=False)),
+        ]
+
+        query_filter = Filter(
+            should=should_conditions or None,
+            must=must_conditions or None,
+            must_not=must_not_conditions,
+        )
 
         # Search using query_points (replaces deprecated search method)
         results = self.client.query_points(
@@ -747,6 +753,19 @@ class VectorStore:
                 logger.debug(f"Ensured text index on {self.CHUNKS_COLLECTION}.{field}")
             except Exception as exc:
                 logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.{field}: {exc}")
+
+        # Bool index so search() can cheaply filter out catalog-only stub records
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.client.create_payload_index(
+                    collection_name=self.CHUNKS_COLLECTION,
+                    field_name="has_content",
+                    field_schema="bool",
+                )
+            logger.debug(f"Ensured bool index on {self.CHUNKS_COLLECTION}.has_content")
+        except Exception as exc:
+            logger.debug(f"Payload index on {self.CHUNKS_COLLECTION}.has_content: {exc}")
 
     def find_cross_library_duplicate(
         self, content_hash: str, current_library_id: str
@@ -1273,6 +1292,75 @@ class VectorStore:
                 break
             offset = next_offset
         return versions
+
+    def add_catalog_stub(
+        self,
+        document_metadata: DocumentMetadata,
+        item_version: int,
+        zotero_modified: str = "",
+    ) -> str:
+        """Add a catalog-only record for a Zotero item with no indexable content.
+
+        Items with no attachment and no abstract long enough to embed (see
+        DocumentProcessor's indexability filter) are otherwise invisible to every
+        query path — the metadata agent's "list what exists" search and the RAG
+        agent's semantic search both read only CHUNKS_COLLECTION. This writes one
+        placeholder point carrying the item's bibliographic fields so it still
+        appears in catalog/metadata lookups, without pretending there's text to
+        search semantically (has_content=False keeps it out of search()).
+
+        Uses a fixed non-zero placeholder vector — never compared for real
+        similarity — since Qdrant requires every point to carry a vector.
+        """
+        placeholder_embedding = [1.0] + [0.0] * (self.embedding_dim - 1)
+        stub_chunk = DocumentChunk(
+            text="",
+            metadata=ChunkMetadata(
+                chunk_id=f"{document_metadata.item_key}-stub",
+                document_metadata=document_metadata,
+                page_number=None,
+                text_preview="",
+                chunk_index=0,
+                content_hash=f"stub:{document_metadata.library_id}:{document_metadata.item_key}",
+                item_version=item_version,
+                zotero_modified=zotero_modified,
+                has_content=False,
+            ),
+            embedding=placeholder_embedding,
+        )
+        return self.add_chunk(stub_chunk)
+
+    def get_stub_item_keys(self, library_id: str) -> set[str]:
+        """Return item_keys whose only indexed record is a catalog-only stub.
+
+        Used by full-sync to detect items that transitioned from catalog-only to
+        indexable (e.g. a PDF was attached) without the parent item's own Zotero
+        version changing — adding a child attachment bumps the attachment's
+        version, not the parent's, so plain version comparison can't see this.
+        """
+        item_keys: set[str] = set()
+        offset = None
+        while True:
+            results, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=Filter(must=[
+                    FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+                    FieldCondition(key="has_content", match=MatchValue(value=False)),
+                ]),
+                limit=5000,
+                offset=offset,
+                with_payload=["item_key"],
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
+            for point in results:
+                ik = point.payload.get("item_key")
+                if ik:
+                    item_keys.add(ik)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return item_keys
 
     def get_library_size_bytes(self, library_id: str) -> int:
         """

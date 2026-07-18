@@ -8,7 +8,7 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
-CURRENT_SCHEMA_VERSION: int = 4
+CURRENT_SCHEMA_VERSION: int = 5
 
 ProcessingStatus = Literal[
     "indexed_fresh",
@@ -69,11 +69,21 @@ class ChunkMetadata(BaseModel):
         default="",
         description="Item's dateModified field from Zotero"
     )
+    has_content: bool = Field(
+        default=True,
+        description=(
+            "False for catalog-only stub records: bibliographic items with no "
+            "indexable attachment and no abstract long enough to embed. Stubs carry "
+            "a placeholder vector and are excluded from semantic search, but remain "
+            "visible to metadata/catalog lookups."
+        ),
+    )
 
     # Schema version for future migrations.
     # v2: added item_version / attachment_version / indexed_at / zotero_modified
     # v3: added item_type to Qdrant payload
     # v4: added author_lastnames keyword field for Qdrant-native author filtering
+    # v5: added has_content flag for catalog-only stub records
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION)
 
 

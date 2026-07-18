@@ -385,20 +385,28 @@ class DocumentProcessor:
             default=metadata.last_indexed_version,
         )
 
-        # Filter to items with indexable attachments
-        items_with_attachments = (
-            await self._filter_indexed_attachments(items, library_id, library_type)
-            if items else []
+        # Split into items with indexable content vs. catalog-only (no attachment,
+        # no substantial abstract)
+        items_with_attachments, catalog_only_items = (
+            await self._split_indexable_and_catalog_only(items, library_id, library_type)
+            if items else ([], [])
         )
 
         # Limit items if max_items is specified
         if max_items is not None and max_items > 0:
             items_with_attachments = items_with_attachments[:max_items]
             logger.debug(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
+            catalog_only_items = []
+
+        # Items whose only indexed record is a catalog-only stub — see the matching
+        # comment in _index_library_full for why version comparison alone can miss
+        # an item that just gained real content.
+        stub_keys = self.vector_store.get_stub_item_keys(library_id)
 
         items_added = 0
         items_updated = 0
         items_failed = 0
+        items_cataloged = 0
         chunks_added = 0
         chunks_deleted = 0
         total_items = len(items_with_attachments)
@@ -420,6 +428,12 @@ class DocumentProcessor:
 
                 # Check if item already indexed
                 existing_version = self.vector_store.get_item_version(library_id, item_key)
+                if item_key in stub_keys:
+                    # Stub -> real transition: clear the stale stub and treat as new,
+                    # regardless of version (the parent item's version may not have
+                    # changed even though it just gained real content).
+                    self.vector_store.delete_item_chunks(library_id, item_key)
+                    existing_version = None
 
                 if existing_version is None:
                     # New item
@@ -482,6 +496,21 @@ class DocumentProcessor:
         except Exception as exc:
             logger.warning("Could not fetch deleted item keys: %s", exc)
 
+        # Catalog-only items: no embedding/extraction needed, just a payload write.
+        for item in catalog_only_items:
+            item_key = item["data"]["key"]
+            item_version = item.get("version", 0)
+            max_version_seen = max(max_version_seen, item_version)
+            existing_version = self.vector_store.get_item_version(library_id, item_key)
+            if existing_version is None:
+                self._add_catalog_stub(item, library_id)
+                items_cataloged += 1
+            elif existing_version < item_version:
+                self.vector_store.delete_item_chunks(library_id, item_key)
+                self._add_catalog_stub(item, library_id)
+                items_cataloged += 1
+            # else: already up to date, nothing to do
+
         # Update metadata with new version
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = metadata.total_items_indexed + items_added
@@ -498,6 +527,7 @@ class DocumentProcessor:
             "items_added": items_added,
             "items_updated": items_updated,
             "items_failed": items_failed,
+            "items_cataloged": items_cataloged,
             "chunks_added": chunks_added,
             "chunks_deleted": chunks_deleted,
             "last_version": max_version_seen
@@ -553,6 +583,10 @@ class DocumentProcessor:
             # Stream JSONL to filter to indexable parent items
             min_words = get_settings().min_abstract_words
             items_with_attachments: list[dict] = []
+            # Regular bibliographic items with neither an indexable attachment nor a
+            # substantial abstract — no text to embed, but still real catalog entries
+            # (unlike notes/bare attachments, which are skipped above and never stubbed).
+            catalog_only_items: list[dict] = []
             with open(tmp_path) as f:
                 for line in f:
                     _item = json.loads(line)
@@ -581,6 +615,8 @@ class DocumentProcessor:
                     elif _item["data"].get("abstractNote", "") and \
                             len(_item["data"]["abstractNote"].split()) >= min_words:
                         items_with_attachments.append(_item)
+                    else:
+                        catalog_only_items.append(_item)
 
             del children_by_parent
             gc.collect()
@@ -598,9 +634,14 @@ class DocumentProcessor:
         if max_items is not None and max_items > 0:
             items_with_attachments = items_with_attachments[:max_items]
             logger.debug(f"Limited to {len(items_with_attachments)} items (max_items={max_items})")
+            # Partial runs don't see the full catalog, so skip catalog-only
+            # stub bookkeeping entirely (mirrors the orphan-purge guard below).
+            catalog_only_items = []
 
-        # Build a set of item keys currently in Zotero
-        current_item_keys = {item["data"]["key"] for item in items_with_attachments}
+        # Build a set of item keys currently in Zotero (indexable + catalog-only —
+        # both are real, still-present items and must not be purged as orphaned)
+        current_item_keys = {item["data"]["key"] for item in items_with_attachments} | \
+            {item["data"]["key"] for item in catalog_only_items}
 
         # Single scroll to get all indexed item versions — avoids N+1 DB lookups
         indexed_versions = self.vector_store.get_all_indexed_item_versions(library_id)
@@ -620,10 +661,22 @@ class DocumentProcessor:
                     self.vector_store.delete_item_deduplication_records(library_id, key)
                 orphaned_item_count = len(orphaned_keys)
 
+        # Items whose only indexed record is a catalog-only stub. Zotero doesn't bump
+        # a parent item's own version when a child attachment is added, so an item
+        # that just gained real content can still show the same version we already
+        # have indexed — plain version comparison would wrongly treat it as
+        # up-to-date. Clear the stale stub now and drop it from indexed_versions so
+        # the indexing loop below treats it as brand new.
+        stub_keys = self.vector_store.get_stub_item_keys(library_id)
+        indexable_keys = {item["data"]["key"] for item in items_with_attachments}
+        for key in stub_keys & indexable_keys:
+            self.vector_store.delete_item_chunks(library_id, key)
+            indexed_versions.pop(key, None)
+
         # Pre-compute max_version_seen from the full item list — the subprocess
         # worker processes a slice and cannot update this value in the parent.
         max_version_seen = max(
-            (item.get("version", 0) for item in items_with_attachments),
+            (item.get("version", 0) for item in items_with_attachments + catalog_only_items),
             default=0,
         )
 
@@ -751,6 +804,22 @@ class DocumentProcessor:
                         progress_callback(idx + 1, total_items, chunks_added)
                     _trim_memory_if_needed()
 
+        # Catalog-only items: no embedding/extraction needed, just a payload write,
+        # so this runs inline in the parent process regardless of use_subprocess.
+        items_cataloged = 0
+        for item in catalog_only_items:
+            item_key = item["data"]["key"]
+            item_version = item.get("version", 0)
+            existing_version = indexed_versions.get(item_key)
+            if existing_version is None:
+                self._add_catalog_stub(item, library_id)
+                items_cataloged += 1
+            elif existing_version < item_version:
+                self.vector_store.delete_item_chunks(library_id, item_key)
+                self._add_catalog_stub(item, library_id)
+                items_cataloged += 1
+            # else: already up to date, nothing to do
+
         metadata.last_indexed_version = max_version_seen
         # Count only items that are actually indexed (newly added, updated, or already
         # current) — NOT len(items_with_attachments), which includes items that failed
@@ -780,6 +849,7 @@ class DocumentProcessor:
             "items_updated": items_updated,
             "items_skipped": items_skipped,
             "items_failed": items_failed,
+            "items_cataloged": items_cataloged,
             "orphaned_items": orphaned_item_count,
             "chunks_added": chunks_added,
             "chunks_deleted": chunks_deleted,
@@ -1319,8 +1389,28 @@ class DocumentProcessor:
         additional Zotero API calls are made.  Without it, each parent item triggers one
         get_item_children() call (legacy path used by incremental sync).
         """
+        items_with_content, _catalog_only = await self._split_indexable_and_catalog_only(
+            items, library_id, library_type, children_by_parent
+        )
+        return items_with_content
+
+    async def _split_indexable_and_catalog_only(
+        self,
+        items: list[dict],
+        library_id: str,
+        library_type: str,
+        children_by_parent: Optional[dict[str, list[dict]]] = None,
+    ) -> tuple[list[dict], list[dict]]:
+        """Split items into (indexable, catalog-only).
+
+        Indexable items have at least one indexable attachment or a substantial
+        abstract. Catalog-only items are regular bibliographic items (not notes,
+        not bare attachments) with neither — no text to embed, but still real
+        catalog entries that deserve a stub record (see _add_catalog_stub).
+        """
         min_words = get_settings().min_abstract_words
         items_with_content = []
+        catalog_only_items = []
 
         for item in items:
             # Skip if not a regular item (skip notes; attachments handled below)
@@ -1362,8 +1452,10 @@ class DocumentProcessor:
             abstract = item["data"].get("abstractNote", "")
             if abstract and len(abstract.split()) >= min_words:
                 items_with_content.append(item)
+            else:
+                catalog_only_items.append(item)
 
-        return items_with_content
+        return items_with_content, catalog_only_items
 
     def _extract_authors(self, item_data: dict) -> list[str]:
         """Extract author names from Zotero item data."""
@@ -1392,3 +1484,21 @@ class DocumentProcessor:
             return int(year_match.group(0))
 
         return None
+
+    def _add_catalog_stub(self, item: dict, library_id: str) -> None:
+        """Write a catalog-only stub record for a bibliographic item with no
+        indexable attachment and no substantial abstract (see the caller's
+        indexability filter)."""
+        doc_metadata = DocumentMetadata(
+            library_id=library_id,
+            item_key=item["data"]["key"],
+            title=item["data"].get("title", "Untitled"),
+            authors=self._extract_authors(item["data"]),
+            year=self._extract_year(item["data"]),
+            item_type=item["data"].get("itemType"),
+        )
+        self.vector_store.add_catalog_stub(
+            doc_metadata,
+            item_version=item.get("version", 0),
+            zotero_modified=item["data"].get("dateModified", ""),
+        )

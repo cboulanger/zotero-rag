@@ -245,6 +245,92 @@ class TestVectorStore(unittest.TestCase):
         not_found = self.vector_store.check_duplicate("non-existent-hash")
         self.assertIsNone(not_found)
 
+    def test_add_catalog_stub_is_retrievable_via_metadata_scroll(self):
+        """A catalog-only stub (no attachment, short abstract) must surface in
+        get_items_by_metadata even though it carries no embeddable text."""
+        from backend.models.filters import MetadataFilters
+
+        doc_metadata = DocumentMetadata(
+            library_id="1",
+            item_key="WASSERMANN1",
+            title="Der soziale Zivilprozess",
+            authors=["Rudolf Wassermann"],
+            year=1973,
+            item_type="book",
+        )
+        self.vector_store.add_catalog_stub(doc_metadata, item_version=42)
+
+        results = self.vector_store.get_items_by_metadata(
+            library_ids=["1"], filters=MetadataFilters(authors=["wassermann"])
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["item_key"], "WASSERMANN1")
+        self.assertEqual(results[0]["title"], "Der soziale Zivilprozess")
+        self.assertFalse(results[0]["has_content"])
+
+    def test_search_excludes_catalog_stub(self):
+        """Semantic search must never surface a catalog-only stub, even when its
+        placeholder vector is the closest match to the query."""
+        doc_metadata = DocumentMetadata(
+            library_id="1",
+            item_key="STUB1",
+            title="Stub Item",
+            authors=[],
+        )
+        self.vector_store.add_catalog_stub(doc_metadata, item_version=1)
+
+        real_chunk = DocumentChunk(
+            text="Deep learning is powerful",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-real",
+                document_metadata=DocumentMetadata(
+                    library_id="1",
+                    item_key="REAL1",
+                    title="Real Item",
+                ),
+                page_number=1,
+                text_preview="Deep learning is",
+                chunk_index=0,
+                content_hash="hash-real",
+            ),
+            embedding=[0.0, 1.0] + [0.0] * 382,
+        )
+        self.vector_store.add_chunk(real_chunk)
+
+        # Query vector matches the stub's placeholder embedding ([1.0, 0.0, ...])
+        # far better than the real chunk's — if exclusion didn't work, the stub
+        # would win.
+        query_vector = [1.0, 0.0] + [0.0] * 382
+        results = self.vector_store.search(query_vector, limit=10)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].chunk.metadata.document_metadata.item_key, "REAL1")
+
+    def test_get_stub_item_keys(self):
+        """get_stub_item_keys returns only item_keys whose sole record is a stub."""
+        stub_metadata = DocumentMetadata(library_id="1", item_key="STUB1", title="Stub")
+        self.vector_store.add_catalog_stub(stub_metadata, item_version=1)
+
+        real_chunk = DocumentChunk(
+            text="Real content",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-real",
+                document_metadata=DocumentMetadata(
+                    library_id="1", item_key="REAL1", title="Real"
+                ),
+                page_number=1,
+                text_preview="Real content",
+                chunk_index=0,
+                content_hash="hash-real",
+                item_version=1,
+            ),
+            embedding=[0.5] * 384,
+        )
+        self.vector_store.add_chunk(real_chunk)
+
+        stub_keys = self.vector_store.get_stub_item_keys("1")
+        self.assertEqual(stub_keys, {"STUB1"})
+
     def test_delete_library_chunks(self):
         """Test deleting all chunks for a library."""
         # Add chunks from different libraries
