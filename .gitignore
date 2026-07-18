@@ -62,3 +62,9 @@ node_modules
 
 # Local configuration files (e.g. for development)
 .local/*
+
+# Timestamped backups written by bin/container.mjs / scripts before overwriting a file
+.duckversions/
+
+# Claude Code local (per-developer) settings — not shared project config
+.claude/settings.local.json
