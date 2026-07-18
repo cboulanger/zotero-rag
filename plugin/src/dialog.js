@@ -591,6 +591,8 @@ var ZoteroRAGDialog = {
 		}
 		const keys = metadata.last_full_scan_failed_downloads.map(f => f.attachment_key);
 		const added = await this.plugin.storeDownloadFailedItems(libraryId, keys);
+		// Additive heuristic: a download-failed attachment may already be counted by the tier-1 local-scan
+		// baseline if also missing locally, so this can transiently over-count; cosmetic and self-corrects on next full scan.
 		if (added > 0) {
 			const newTotal = (this.libraryMissingFilesCount.get(libraryId) || 0) + added;
 			this.onUnavailableCountUpdated(libraryId, newTotal);

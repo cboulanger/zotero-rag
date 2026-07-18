@@ -5,7 +5,7 @@
 // first and returns immediately if it's missing — so a `window` stub with no
 // `.arguments` property is enough to make loading the file side-effect-free.
 // A `console` global must exist too, or the file's own console-shim IIFE
-// would try to reference `Services`/`Cc`/`Ci`, which aren't stubbed here.
+// would try to reference `Services`/`Cc`/`Ci`, which are therefore stubbed below.
 
 const assert = require('node:assert');
 const { test } = require('node:test');
