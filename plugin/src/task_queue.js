@@ -136,13 +136,19 @@ var TaskQueue = {
 			if (!dispatcher) continue;
 
 			const batch = [...tasks.values()].slice(0, MAX_BATCH_SIZE);
+			for (const t of batch) tasks.delete(t.key);
 			this._inFlight = true;
 			try {
 				const result = await dispatcher(batch);
-				for (const key of result.succeededKeys) tasks.delete(key);
+				for (const t of batch) {
+					if (!result.succeededKeys.has(t.key) && !tasks.has(t.key)) tasks.set(t.key, t);
+				}
 				this._failureCount.set(type, 0);
 				this._nextAttemptAt.delete(type);
 			} catch (e) {
+				for (const t of batch) {
+					if (!tasks.has(t.key)) tasks.set(t.key, t);
+				}
 				const attempt = (this._failureCount.get(type) || 0) + 1;
 				this._failureCount.set(type, attempt);
 				const delay = Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS);

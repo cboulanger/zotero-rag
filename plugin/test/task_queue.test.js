@@ -205,3 +205,54 @@ test('stop() clears the pending queue and the running timer', () => {
 	assert.strictEqual(queue._timer, null);
 	assert.strictEqual(queue._pending.size, 0);
 });
+
+test('does not drop a newer edit if re-enqueued during in-flight dispatch', async () => {
+	const { queue } = loadTaskQueue();
+	/** @type {any[]} */
+	const dispatchedBatches = [];
+	/** @type {any} */
+	let resolveDispatcher;
+	queue._now = () => 1000;
+	queue.registerDispatcher('metadata', async (/** @type {any[]} */ batch) => {
+		dispatchedBatches.push({ batch, timestamp: queue._now() });
+		return new Promise(resolve => {
+			resolveDispatcher = () => {
+				resolve({ succeededKeys: new Set(batch.map(t => t.key)) });
+			};
+		});
+	});
+
+	// Enqueue first version of the task
+	queue.enqueue('metadata', 'lib:ITEM1', { title: 'First' }, 1000);
+
+	// Let it become ready and start dispatch
+	queue._now = () => 2001;
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+	assert.strictEqual(dispatchedBatches.length, 1);
+	assert.strictEqual(dispatchedBatches[0].batch[0].payload.title, 'First');
+
+	// While the first dispatch is still in-flight, enqueue a newer version
+	queue._now = () => 3000;
+	queue.enqueue('metadata', 'lib:ITEM1', { title: 'Second' }, 1000); // due at 4000
+
+	// Let the newer version become ready
+	queue._now = () => 4001;
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+	// The first dispatch is still in-flight, so the second shouldn't have dispatched yet
+	assert.strictEqual(dispatchedBatches.length, 1);
+
+	// Now resolve the first dispatch
+	resolveDispatcher();
+	await new Promise(r => setImmediate(r));
+
+	// After the first dispatch resolves, _inFlight is false, so we can dispatch the next batch.
+	// Call _tick() to trigger the second dispatch.
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+
+	// The second dispatch should have happened, with the newer payload
+	assert.strictEqual(dispatchedBatches.length, 2);
+	assert.strictEqual(dispatchedBatches[1].batch[0].payload.title, 'Second');
+});
