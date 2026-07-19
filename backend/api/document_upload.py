@@ -29,7 +29,7 @@ from typing import Callable, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 
-from backend.db.vector_store import VectorStore, _extract_lastnames
+from backend.db.vector_store import VectorStore, _extract_lastnames, _lower_all
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service
 from backend.models.document import (
     CURRENT_SCHEMA_VERSION,
@@ -174,8 +174,11 @@ class ItemMetadataUpdate(BaseModel):
     item_key: str
     title: Optional[str] = None
     authors: list[str] = []
+    tags: list[str] = []
     year: Optional[int] = None
     item_type: Optional[str] = None
+    item_version: Optional[int] = None
+    zotero_modified: Optional[str] = None
 
 
 class BatchMetadataUpdateRequest(BaseModel):
@@ -922,10 +925,17 @@ def batch_update_metadata(
         if item.authors:
             fields["authors"] = item.authors
             fields["author_lastnames"] = _extract_lastnames(item.authors)
+        if item.tags:
+            fields["tags"] = item.tags
+            fields["tags_lower"] = _lower_all(item.tags)
         if item.year is not None:
             fields["year"] = item.year
         if item.item_type is not None:
             fields["item_type"] = item.item_type
+        if item.item_version is not None:
+            fields["item_version"] = item.item_version
+        if item.zotero_modified is not None:
+            fields["zotero_modified"] = item.zotero_modified
 
         n = vector_store.update_item_metadata(request.library_id, item.item_key, fields)
         if n > 0:
