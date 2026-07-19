@@ -170,7 +170,10 @@ test('the item-delete notifier maps the internal libraryID to the backend librar
 	// through Services.console.logStringMessage — stub Services so that
 	// doesn't throw (same pattern as plugin/test/fix-unavailable.test.js).
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: servicesStub });
+	// init() now also registers the metadata dispatcher and starts the queue's
+	// heartbeat — stub those no-ops since this test only exercises the delete path.
+	const taskQueueStub = { start: () => {}, registerDispatcher: () => {} };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: servicesStub, TaskQueue: taskQueueStub });
 	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
 
 	capturedObserver.notify('delete', 'item', [1], { 1: { libraryID: 1, key: 'ITEM1' } });
@@ -345,4 +348,86 @@ test('the item-modify notifier isolates per-item failures: one throwing item doe
 	assert.strictEqual(type, 'metadata');
 	assert.strictEqual(key, 'u12345:ITEM2');
 	assert.strictEqual(payload.title, 'Good Title');
+});
+
+test('the metadata dispatcher POSTs one request per library_id and reports succeeded keys', async () => {
+	/** @type {Array<{url: string, init: any}>} */
+	const fetchCalls = [];
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ init) => {
+		fetchCalls.push({ url, init });
+		return { ok: true, status: 200, json: async () => ({ updated_items: 1, updated_chunks: 1 }) };
+	};
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = {
+		start: () => {},
+		registerDispatcher: (/** @type {string} */ type, /** @type {any} */ fn) => { if (type === 'metadata') registeredDispatcher = fn; },
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	// init() logs a "toolkit not loaded" warning via console.log(), which the
+	// file's own console-shim IIFE routes through Services.console.logStringMessage
+	// — stub Services so that doesn't throw (same pattern as other tests above).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	assert.strictEqual(typeof registeredDispatcher, 'function');
+
+	const result = await registeredDispatcher([
+		{ type: 'metadata', key: 'u123:ITEM1', payload: { item_key: 'ITEM1', title: 'A' } },
+		{ type: 'metadata', key: 'u123:ITEM2', payload: { item_key: 'ITEM2', title: 'B' } },
+		{ type: 'metadata', key: 'u456:ITEM3', payload: { item_key: 'ITEM3', title: 'C' } },
+	]);
+
+	assert.strictEqual(fetchCalls.length, 2); // one request per distinct library_id
+	const bodies = fetchCalls.map(c => JSON.parse(c.init.body));
+	const u123Body = bodies.find(b => b.library_id === 'u123');
+	assert.strictEqual(u123Body.items.length, 2);
+	assert.deepStrictEqual([...result.succeededKeys].sort(), ['u123:ITEM1', 'u123:ITEM2', 'u456:ITEM3'].sort());
+});
+
+test('the metadata dispatcher throws when the backend returns a non-2xx response', async () => {
+	const fetchStub = async () => ({ ok: false, status: 500 });
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = { start: () => {}, registerDispatcher: (/** @type {string} */ _type, /** @type {any} */ fn) => { registeredDispatcher = fn; } };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	await assert.rejects(
+		() => registeredDispatcher([{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } }]),
+		/HTTP 500/
+	);
+});
+
+test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
+	/** @type {string[]} */
+	const calls = [];
+	const taskQueueStub = {
+		start: () => calls.push('start'),
+		stop: () => calls.push('stop'),
+		registerDispatcher: () => {},
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+		getMainWindows: () => [],
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+	plugin.removeFromAllWindows();
+
+	assert.deepStrictEqual(calls, ['start', 'stop']);
 });

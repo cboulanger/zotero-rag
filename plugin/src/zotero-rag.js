@@ -242,6 +242,34 @@ class ZoteroRAGPlugin {
 			},
 			['item']
 		);
+
+		// Register the metadata dispatcher and start the queue's heartbeat.
+		// Groups ready tasks by library_id (the key format is "libraryId:itemKey",
+		// set by the notifier above) since the backend call is per-library.
+		TaskQueue.registerDispatcher('metadata', async (/** @type {any[]} */ tasks) => {
+			/** @type {Map<string, any[]>} */
+			const byLibrary = new Map();
+			for (const task of tasks) {
+				const libraryId = task.key.split(':')[0];
+				if (!byLibrary.has(libraryId)) byLibrary.set(libraryId, []);
+				/** @type {any[]} */ (byLibrary.get(libraryId)).push(task);
+			}
+			const succeededKeys = new Set();
+			for (const [libraryId, libTasks] of byLibrary) {
+				const response = await fetch(`${this.backendURL}/api/index/items/metadata`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({
+						library_id: libraryId,
+						items: libTasks.map(t => t.payload),
+					}),
+				});
+				if (!response.ok) throw new Error(`HTTP ${response.status}`);
+				for (const t of libTasks) succeededKeys.add(t.key);
+			}
+			return { succeededKeys };
+		});
+		TaskQueue.start();
 	}
 
 	/**
@@ -477,6 +505,7 @@ class ZoteroRAGPlugin {
 			Zotero.Notifier.unregisterObserver(this._notifierID);
 			this._notifierID = null;
 		}
+		TaskQueue.stop();
 	}
 
 	/**
