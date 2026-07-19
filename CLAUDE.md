@@ -399,6 +399,35 @@ For creating dialog windows in Zotero plugins:
 - Explicitly tell every such subagent **not to commit to `main`** (or whatever the original checkout's branch is) under any circumstances. A subagent that ignores or loses track of its working-directory instruction can silently commit to the main checkout instead of the worktree, defeating the entire purpose of the isolation and requiring a manual fix (cherry-pick the stray commit into the worktree, then reset the main checkout back to before it).
 - Before trusting a subagent's "commit created" report, verify the commit actually landed on the worktree's branch (e.g. `git log --oneline -1` from the worktree, or `git branch --contains <sha>`), not just that a SHA was produced.
 
+### Running the backend + plugin dev servers from a worktree
+
+A fresh worktree only has git-tracked files, so several things the main checkout already has (env config, a downloaded spaCy model, indexed Qdrant data) are missing and must be set up before `npm start` / `zotero-plugin dev` will work there. Steps, in order:
+
+1. **Copy `.env` from the main checkout.** It's gitignored, so a new worktree has none:
+   ```bash
+   cp /path/to/main-checkout/.env /path/to/worktree/.env
+   ```
+   Without this, the plugin dev server fails immediately with `ZOTERO_PLUGIN_ZOTERO_BIN_PATH environment variable is not set`, and the backend fails at request time on missing API keys.
+   **Careful with shell redirection here** — if the source file doesn't end in a newline, `>>`-appending a new line to it (see step 3) will silently concatenate onto the last existing line instead of starting a new one (e.g. `ZOTERO_API_KEY=abc` + append `DATA_PATH=...` → `ZOTERO_API_KEY=abcDATA_PATH=...`, corrupting both values). Always `Read` the tail of the file after any append to confirm it landed on its own line.
+
+2. **Install any Python packages the worktree's own `.venv` is missing that aren't declared as project dependencies** (e.g. the `en_core_web_sm` spaCy model, which is downloaded as a standalone wheel, not a `pyproject.toml` dependency — the main checkout's `.venv` already has it, a fresh worktree `.venv` doesn't). Symptom: a backend request fails with `spaCy model 'en_core_web_sm' not found`. Fix:
+   ```bash
+   cd /path/to/worktree
+   unset VIRTUAL_ENV   # otherwise uv may silently install into the main checkout's .venv instead
+   uv pip install --python .venv/bin/python3 "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+   ```
+   Verify it landed in the right place: `.venv/bin/python3 -c "import en_core_web_sm; print(en_core_web_sm.__file__)"` should print a path inside the worktree, not the main checkout.
+
+3. **To reuse the main checkout's already-indexed Qdrant/vector data** (instead of starting from an empty index — useful for testing metadata-sync/query features against real data without re-indexing), add `DATA_PATH` to the worktree's `.env` pointing at the main checkout's `data/` directory:
+   ```bash
+   printf '\nDATA_PATH=/path/to/main-checkout/data\n' >> /path/to/worktree/.env
+   ```
+   **Only one backend process can hold that embedded-Qdrant storage directory open at a time** (local/embedded mode uses a file lock) — stop the main checkout's backend (and any other process pointed at the same `data/` dir) before starting the worktree's, or you'll get a lock error. Since this makes the worktree write into what is otherwise the main checkout's data, treat any data mutated during testing as real (e.g. metadata pushed to an item during a live-sync test really changes that item's stored payload) — acceptable for verifying a feature that's *supposed* to mutate exactly that, but don't do this against data you care about keeping pristine.
+
+4. **Start the two dev servers** (in separate terminals, from the worktree directory): `npm start` for the backend, `npm run start` (or the scaffold's dev command) for the plugin — see "Live Server" and "Hot Reload Plugin Development Server" above for the normal (non-worktree) versions of these steps; nothing else about starting them differs once steps 1-3 are done.
+
+5. **Sanity-check before testing:** `ps aux | grep -i "uvicorn\|zotero-plugin dev"` should show both processes running from the worktree path (`.../.claude/worktrees/<name>/...`), not the main checkout — a stale server left running from the main checkout will silently serve old code on the same port.
+
 ## Debugging
 
 - if you insert code that is only for debugging, mark it as such so that it can be easily idenitified and removed after the code has been fixed (e.g., by a `# DEBUG` trailing comment or `# BEGIN DEBUG`/`# END DEBUG` header and footer for longer code fragments).
