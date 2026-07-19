@@ -824,8 +824,8 @@ var RemoteIndexer = {
 			item_version: att.item_version,
 			attachment_version: att.attachment_version,
 			title: parent.getField ? (parent.getField('title') || 'Untitled') : 'Untitled',
-			authors: this._extractAuthors(parent),
-			year: this._extractYear(parent),
+			authors: Zotero.ZoteroRAG._extractAuthors(parent),
+			year: Zotero.ZoteroRAG._extractYear(parent),
 			item_type: parent.itemType || null,
 			zotero_modified: parent.dateModified || new Date().toISOString(),
 			user_id: userId ?? null,
@@ -1121,7 +1121,7 @@ var RemoteIndexer = {
 	 */
 	async _sendMetadataUpdates({ statuses, attachments, libraryId, backendURL, getAuthHeaders, log, signal, onProgress }) {
 		const BATCH_SIZE = 100;
-		/** @type {Array<{item_key: string, title: string|null, authors: string[], year: number|null, item_type: string|null}>} */
+		/** @type {Array<{item_key: string, title: string|null, authors: string[], tags: string[], year: number|null, item_type: string|null, item_version: number, zotero_modified: string}>} */
 		const items = [];
 
 		for (const status of statuses) {
@@ -1132,9 +1132,12 @@ var RemoteIndexer = {
 			items.push({
 				item_key: status.item_key,
 				title: parent && parent.getField ? (parent.getField('title') || null) : null,
-				authors: parent ? this._extractAuthors(parent) : [],
-				year: parent ? this._extractYear(parent) : null,
+				authors: parent ? Zotero.ZoteroRAG._extractAuthors(parent) : [],
+				tags: parent ? Zotero.ZoteroRAG._extractTags(parent) : [],
+				year: parent ? Zotero.ZoteroRAG._extractYear(parent) : null,
 				item_type: parent ? (parent.itemType || null) : null,
+				item_version: parent ? (parent.version || 0) : 0,
+				zotero_modified: parent ? (parent.dateModified || new Date().toISOString()) : new Date().toISOString(),
 			});
 		}
 
@@ -1178,8 +1181,8 @@ var RemoteIndexer = {
 			item_key: abstractItem.item_key,
 			item_version: abstractItem.item_version,
 			title: item.getField ? (item.getField('title') || 'Untitled') : 'Untitled',
-			authors: this._extractAuthors(item),
-			year: this._extractYear(item),
+			authors: Zotero.ZoteroRAG._extractAuthors(item),
+			year: Zotero.ZoteroRAG._extractYear(item),
 			item_type: item.itemType || null,
 			zotero_modified: item.dateModified || new Date().toISOString(),
 			abstract_text: abstractItem.abstractNote,
@@ -1264,13 +1267,13 @@ var RemoteIndexer = {
 	 * @returns {string}
 	 */
 	_formatCitationLabel(item, maxTitleLen = 50) {
-		const authors = this._extractAuthors(item);
+		const authors = Zotero.ZoteroRAG._extractAuthors(item);
 		let authorPart = '';
 		if (authors.length > 0) {
 			const lastName = authors[0].split(' ').pop() || authors[0];
 			authorPart = authors.length > 1 ? `${lastName} et al.` : lastName;
 		}
-		const year = this._extractYear(item);
+		const year = Zotero.ZoteroRAG._extractYear(item);
 		const yearPart = year ? ` (${year})` : '';
 		let title = '';
 		try {
@@ -1279,39 +1282,5 @@ var RemoteIndexer = {
 		if (title.length > maxTitleLen) title = title.slice(0, maxTitleLen) + '\u2026';
 		const titlePart = title ? ` "${title}"` : '';
 		return `${authorPart}${yearPart}${titlePart}`.trim();
-	},
-
-	/**
-	 * Extract author names from a Zotero item.
-	 * @param {any} item
-	 * @returns {Array<string>}
-	 */
-	_extractAuthors(item) {
-		if (!item || !item.getCreators) return [];
-		try {
-			return item.getCreators()
-				.filter(c => c.creatorTypeID === Zotero.CreatorTypes.getID('author') ||
-				             c.creatorTypeID === Zotero.CreatorTypes.getID('editor'))
-				.map(c => `${c.firstName || ''} ${c.lastName || ''}`.trim())
-				.filter(Boolean);
-		} catch (_) {
-			return [];
-		}
-	},
-
-	/**
-	 * Extract the publication year from a Zotero item.
-	 * @param {any} item
-	 * @returns {number|null}
-	 */
-	_extractYear(item) {
-		if (!item || !item.getField) return null;
-		try {
-			const dateStr = item.getField('date') || '';
-			const m = dateStr.match(/\b(19|20)\d{2}\b/);
-			return m ? parseInt(m[0], 10) : null;
-		} catch (_) {
-			return null;
-		}
 	},
 };

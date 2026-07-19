@@ -81,6 +81,13 @@
  */
 
 /**
+ * How long to wait after the last edit to an item before pushing its
+ * metadata to the backend — collapses rapid successive field edits
+ * (e.g. typing a title, then adding tags) into one request.
+ */
+const METADATA_DEBOUNCE_MS = 4000;
+
+/**
  * Main plugin class for Zotero RAG integration.
  */
 class ZoteroRAGPlugin {
@@ -194,22 +201,81 @@ class ZoteroRAGPlugin {
 			this.requiredApiKeys = [];
 		}
 
-		// Watch for permanent item deletions and remove their indexed chunks from the backend.
+		// Watch for permanent item deletions (removes indexed chunks) and
+		// metadata edits (pushes an updated payload) to the backend.
 		this._notifierID = Zotero.Notifier.registerObserver(
 			{
 				notify: (/** @type {string} */ event, /** @type {string} */ type, /** @type {number[]} */ ids, /** @type {Record<number, {libraryID: number, key: string}>} */ extraData) => {
-					if (event !== 'delete' || type !== 'item') return;
-					for (const id of ids) {
-						const { libraryID, key } = extraData[id] || {};
-						if (!libraryID || !key) continue;
-						const url = `${this.backendURL}/api/libraries/${libraryID}/items/${key}/chunks`;
-						fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
-							.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
+					if (type !== 'item') return;
+					if (event === 'delete') {
+						for (const id of ids) {
+							const { libraryID, key } = extraData[id] || {};
+							if (!libraryID || !key) continue;
+							const backendLibraryId = this.getBackendLibraryId(libraryID);
+							const url = `${this.backendURL}/api/libraries/${backendLibraryId}/items/${key}/chunks`;
+							fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
+								.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
+						}
+					} else if (event === 'modify') {
+						for (const id of ids) {
+							try {
+								const item = Zotero.Items.get(id);
+								if (!item || !item.isRegularItem()) continue;
+								const backendLibraryId = this.getBackendLibraryId(item.libraryID);
+								const snapshot = {
+									item_key: item.key,
+									title: item.getField('title') || null,
+									authors: this._extractAuthors(item),
+									tags: this._extractTags(item),
+									year: this._extractYear(item),
+									item_type: item.itemType || null,
+									item_version: item.version || 0,
+									zotero_modified: item.dateModified || new Date().toISOString(),
+								};
+								TaskQueue.enqueue('metadata', `${backendLibraryId}:${item.key}`, snapshot, METADATA_DEBOUNCE_MS);
+							} catch (e) {
+								console.warn(`Failed to enqueue metadata update for item id ${id}: ${e.message}`);
+							}
+						}
 					}
 				}
 			},
 			['item']
 		);
+
+		// Register the metadata dispatcher and start the queue's heartbeat.
+		// Groups ready tasks by library_id (the key format is "libraryId:itemKey",
+		// set by the notifier above) since the backend call is per-library.
+		TaskQueue.registerDispatcher('metadata', async (/** @type {any[]} */ tasks) => {
+			/** @type {Map<string, any[]>} */
+			const byLibrary = new Map();
+			for (const task of tasks) {
+				const libraryId = task.key.split(':')[0];
+				if (!byLibrary.has(libraryId)) byLibrary.set(libraryId, []);
+				/** @type {any[]} */ (byLibrary.get(libraryId)).push(task);
+			}
+			const succeededKeys = new Set();
+			let failed = false;
+			for (const [libraryId, libTasks] of byLibrary) {
+				try {
+					const response = await fetch(`${this.backendURL}/api/index/items/metadata`, {
+						method: 'POST',
+						headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+						body: JSON.stringify({
+							library_id: libraryId,
+							items: libTasks.map(t => t.payload),
+						}),
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					for (const t of libTasks) succeededKeys.add(t.key);
+				} catch (e) {
+					failed = true;
+					console.warn(`Metadata dispatch failed for library ${libraryId}: ${/** @type {Error} */ (e).message}`);
+				}
+			}
+			return { succeededKeys, failed };
+		});
+		TaskQueue.start();
 	}
 
 	/**
@@ -445,6 +511,7 @@ class ZoteroRAGPlugin {
 			Zotero.Notifier.unregisterObserver(this._notifierID);
 			this._notifierID = null;
 		}
+		TaskQueue.stop();
 	}
 
 	/**
@@ -686,6 +753,71 @@ class ZoteroRAGPlugin {
 	getCurrentZoteroUserId() {
 		const id = Zotero.Users.getCurrentUserID();
 		return id ? Number(id) : null;
+	}
+
+	/**
+	 * Map a Zotero-internal numeric libraryID to the backend's library_id
+	 * string convention: "u{zoteroUserId}" for the personal library, or the
+	 * numeric zotero.org group ID (as a string) for a group library. Falls
+	 * back to the raw libraryID (stringified) if unsynced/not a group.
+	 * @param {number} libraryID
+	 * @returns {string}
+	 */
+	getBackendLibraryId(libraryID) {
+		if (libraryID === Zotero.Libraries.userLibraryID) {
+			const userId = this.getCurrentZoteroUserId();
+			return userId ? `u${userId}` : String(libraryID);
+		}
+		const group = Zotero.Groups.getByLibraryID(libraryID);
+		return group ? String(group.id) : String(libraryID);
+	}
+
+	/**
+	 * Extract "First Last" display names for authors and editors of an item.
+	 * @param {any} item - Zotero item
+	 * @returns {Array<string>}
+	 */
+	_extractAuthors(item) {
+		if (!item || !item.getCreators) return [];
+		try {
+			return item.getCreators()
+				.filter((/** @type {any} */ c) => c.creatorTypeID === Zotero.CreatorTypes.getID('author') ||
+				             c.creatorTypeID === Zotero.CreatorTypes.getID('editor'))
+				.map((/** @type {any} */ c) => `${c.firstName || ''} ${c.lastName || ''}`.trim())
+				.filter(Boolean);
+		} catch (_) {
+			return [];
+		}
+	}
+
+	/**
+	 * Extract a 4-digit publication year from an item's date field.
+	 * @param {any} item - Zotero item
+	 * @returns {number|null}
+	 */
+	_extractYear(item) {
+		if (!item || !item.getField) return null;
+		try {
+			const dateStr = item.getField('date') || '';
+			const m = dateStr.match(/\b(19|20)\d{2}\b/);
+			return m ? parseInt(m[0], 10) : null;
+		} catch (_) {
+			return null;
+		}
+	}
+
+	/**
+	 * Extract tag names (manual and automatic) as a plain string array.
+	 * @param {any} item - Zotero item
+	 * @returns {Array<string>}
+	 */
+	_extractTags(item) {
+		if (!item || !item.getTags) return [];
+		try {
+			return item.getTags().map((/** @type {any} */ t) => t.tag).filter(Boolean);
+		} catch (_) {
+			return [];
+		}
 	}
 
 	/**
@@ -964,20 +1096,7 @@ class ZoteroRAGPlugin {
 		const libraryID = zoteroPane.getSelectedLibraryID();
 		if (!libraryID) return null;
 
-		// For group libraries, return the group ID instead of library ID
-		const library = Zotero.Libraries.get(libraryID);
-		// @ts-ignore - libraryType exists on ZoteroLibrary at runtime
-		if (library && library.libraryType === 'group') {
-			// Get the group associated with this library
-			const group = Zotero.Groups.getByLibraryID(libraryID);
-			if (group) {
-				return String(group.id);  // Return group ID for backend
-			}
-		}
-
-		// For user library, use "u{zoteroUserId}" when synced; fall back to raw ID on localhost-no-registration
-		const userId = this.getCurrentZoteroUserId();
-		return userId ? `u${userId}` : String(libraryID);
+		return this.getBackendLibraryId(libraryID);
 	}
 
 	/**
@@ -1810,14 +1929,7 @@ class ZoteroRAGPlugin {
 		}
 		try {
 			// Map Zotero internal library ID → backend library ID to read the pref.
-			let backendId = null;
-			if (libraryID === Zotero.Libraries.userLibraryID) {
-				const userId = this.getCurrentZoteroUserId();
-				backendId = userId ? `u${userId}` : String(libraryID);
-			} else {
-				const group = Zotero.Groups.getAll().find(/** @param {any} g */ g => g.libraryID === libraryID);
-				if (group) backendId = String(group.id);
-			}
+			const backendId = this.getBackendLibraryId(libraryID);
 			const count = backendId
 				? (parseInt(/** @type {any} */ (Zotero.Prefs).get(`extensions.zotero-rag.missingFiles.${backendId}`, true) || '0') || 0)
 				: 0;

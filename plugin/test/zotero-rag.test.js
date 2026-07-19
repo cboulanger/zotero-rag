@@ -52,11 +52,12 @@ function makeStubs(attachmentsByKey = {}) {
  * @param {any} zoteroStub
  * @param {any} ioUtilsStub
  * @param {any} pathUtilsStub
+ * @param {Record<string, any>} [extra] - Extra globals to add to the vm context (e.g. TaskQueue, fetch)
  * @returns {any} a new ZoteroRAGPlugin instance
  */
-function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub) {
+function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console };
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -113,4 +114,360 @@ test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exist
 	// from the vm context's separate realm, and assert.deepStrictEqual treats
 	// same-shape-but-cross-realm objects as unequal ("not reference-equal").
 	assert.deepStrictEqual([...results], []);
+});
+
+test('getBackendLibraryId returns "u{userId}" for the personal library', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(1), 'u12345');
+});
+
+test('getBackendLibraryId returns the numeric group id for a group library', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: (/** @type {number} */ id) => (id === 7 ? { id: 999 } : null) },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(7), '999');
+});
+
+test('getBackendLibraryId falls back to the raw libraryID when unsynced and not a group', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => null },
+		Groups: { getByLibraryID: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(1), '1');
+});
+
+test('the item-delete notifier maps the internal libraryID to the backend library_id in the DELETE URL', () => {
+	/** @type {string[]} */
+	const deletedUrls = [];
+	/** @type {any} */
+	let capturedObserver;
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: (/** @type {number} */ id) => (id === 7 ? { id: 999 } : null) },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const fetchStub = (/** @type {string} */ url) => { deletedUrls.push(url); return Promise.resolve({ ok: true }); };
+	// plugin.init() logs via this.log() -> console.log(), and the file's own
+	// console-shim IIFE (top of zotero-rag.js) rewires console.log to route
+	// through Services.console.logStringMessage — stub Services so that
+	// doesn't throw (same pattern as plugin/test/fix-unavailable.test.js).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	// init() now also registers the metadata dispatcher and starts the queue's
+	// heartbeat — stub those no-ops since this test only exercises the delete path.
+	const taskQueueStub = { start: () => {}, registerDispatcher: () => {} };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: servicesStub, TaskQueue: taskQueueStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('delete', 'item', [1], { 1: { libraryID: 1, key: 'ITEM1' } });
+	capturedObserver.notify('delete', 'item', [2], { 2: { libraryID: 7, key: 'ITEM2' } });
+
+	assert.strictEqual(deletedUrls[0], 'http://localhost:8119/api/libraries/u12345/items/ITEM1/chunks');
+	assert.strictEqual(deletedUrls[1], 'http://localhost:8119/api/libraries/999/items/ITEM2/chunks');
+});
+
+test('_extractAuthors returns "First Last" for authors and editors, skipping other creator types', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		CreatorTypes: { getID: (/** @type {string} */ name) => (/** @type {Record<string, number>} */ ({ author: 1, editor: 2, contributor: 3 }))[name] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	const item = {
+		getCreators: () => [
+			{ creatorTypeID: 1, firstName: 'Jane', lastName: 'Doe' },
+			{ creatorTypeID: 3, firstName: 'Ignored', lastName: 'Contributor' },
+			{ creatorTypeID: 2, firstName: '', lastName: 'Smith' },
+		],
+	};
+
+	assert.deepStrictEqual(plugin._extractAuthors(item), ['Jane Doe', 'Smith']);
+});
+
+test('_extractYear extracts a 4-digit year from the date field', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getField: (/** @type {string} */ f) => (f === 'date' ? 'March 3, 2021' : '') };
+
+	assert.strictEqual(plugin._extractYear(item), 2021);
+});
+
+test('_extractYear returns null when there is no parseable year', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getField: () => '' };
+
+	assert.strictEqual(plugin._extractYear(item), null);
+});
+
+test('_extractTags maps Zotero tag objects to a plain string array, dropping empty tags', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getTags: () => [{ tag: 'Law', type: 0 }, { tag: 'Automatic', type: 1 }, { tag: '' }] };
+
+	assert.deepStrictEqual(plugin._extractTags(item), ['Law', 'Automatic']);
+});
+
+test('the item-modify notifier enqueues a metadata task for top-level regular items', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const fakeItem = {
+		key: 'ITEM1', libraryID: 1, version: 7, dateModified: '2026-01-01T00:00:00Z',
+		itemType: 'journalArticle',
+		isRegularItem: () => true,
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'A Title' : ''),
+		getCreators: () => [],
+		getTags: () => [{ tag: 'Law' }],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+		Items: { get: (/** @type {number} */ id) => (id === 42 ? fakeItem : null) },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = {
+		enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args),
+		start: () => {},
+		registerDispatcher: () => {},
+	};
+	// plugin.init() logs via this.log() -> console.log(), routed through
+	// Services.console.logStringMessage — stub Services so that doesn't throw
+	// (same pattern as the item-delete notifier test above).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('modify', 'item', [42], {});
+
+	assert.strictEqual(enqueued.length, 1);
+	const [type, key, payload, debounceMs] = enqueued[0];
+	assert.strictEqual(type, 'metadata');
+	assert.strictEqual(key, 'u12345:ITEM1');
+	assert.strictEqual(payload.title, 'A Title');
+	assert.deepStrictEqual(payload.tags, ['Law']);
+	assert.strictEqual(payload.item_version, 7);
+	assert.strictEqual(debounceMs, 4000);
+});
+
+test('the item-modify notifier ignores non-regular items (attachments, notes)', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const fakeItem = { key: 'ATT1', libraryID: 1, isRegularItem: () => false };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: { get: () => fakeItem },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = { enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args), start: () => {}, registerDispatcher: () => {} };
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('modify', 'item', [1], {});
+
+	assert.strictEqual(enqueued.length, 0);
+});
+
+test('the item-modify notifier isolates per-item failures: one throwing item does not block the rest of the batch', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const goodItem = {
+		key: 'ITEM2', libraryID: 1, version: 3, dateModified: '2026-01-02T00:00:00Z',
+		itemType: 'book',
+		isRegularItem: () => true,
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'Good Title' : ''),
+		getCreators: () => [],
+		getTags: () => [],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+		Items: {
+			get: (/** @type {number} */ id) => {
+				if (id === 1) throw new Error('simulated failure reading item 1');
+				if (id === 2) return goodItem;
+				return null;
+			},
+		},
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = {
+		enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args),
+		start: () => {},
+		registerDispatcher: () => {},
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	// The per-item catch block logs via console.warn(), which the file's own
+	// console-shim IIFE routes through Cc/Ci (nsIScriptError) rather than
+	// Services.console.logStringMessage — stub those too (same pattern as
+	// plugin/test/fix-unavailable.test.js).
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	// id 1 throws when Zotero.Items.get() is called; id 2 is a normal valid item.
+	// The failure on id 1 must not prevent id 2 from being enqueued.
+	capturedObserver.notify('modify', 'item', [1, 2], {});
+
+	assert.strictEqual(enqueued.length, 1);
+	const [type, key, payload] = enqueued[0];
+	assert.strictEqual(type, 'metadata');
+	assert.strictEqual(key, 'u12345:ITEM2');
+	assert.strictEqual(payload.title, 'Good Title');
+});
+
+test('the metadata dispatcher POSTs one request per library_id and reports succeeded keys', async () => {
+	/** @type {Array<{url: string, init: any}>} */
+	const fetchCalls = [];
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ init) => {
+		fetchCalls.push({ url, init });
+		return { ok: true, status: 200, json: async () => ({ updated_items: 1, updated_chunks: 1 }) };
+	};
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = {
+		start: () => {},
+		registerDispatcher: (/** @type {string} */ type, /** @type {any} */ fn) => { if (type === 'metadata') registeredDispatcher = fn; },
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	// init() logs a "toolkit not loaded" warning via console.log(), which the
+	// file's own console-shim IIFE routes through Services.console.logStringMessage
+	// — stub Services so that doesn't throw (same pattern as other tests above).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	assert.strictEqual(typeof registeredDispatcher, 'function');
+
+	const result = await registeredDispatcher([
+		{ type: 'metadata', key: 'u123:ITEM1', payload: { item_key: 'ITEM1', title: 'A' } },
+		{ type: 'metadata', key: 'u123:ITEM2', payload: { item_key: 'ITEM2', title: 'B' } },
+		{ type: 'metadata', key: 'u456:ITEM3', payload: { item_key: 'ITEM3', title: 'C' } },
+	]);
+
+	assert.strictEqual(fetchCalls.length, 2); // one request per distinct library_id
+	const bodies = fetchCalls.map(c => JSON.parse(c.init.body));
+	const u123Body = bodies.find(b => b.library_id === 'u123');
+	assert.strictEqual(u123Body.items.length, 2);
+	assert.deepStrictEqual([...result.succeededKeys].sort(), ['u123:ITEM1', 'u123:ITEM2', 'u456:ITEM3'].sort());
+});
+
+test('the metadata dispatcher reports failed:true (without throwing) when the backend returns a non-2xx response', async () => {
+	const fetchStub = async () => ({ ok: false, status: 500 });
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = { start: () => {}, registerDispatcher: (/** @type {string} */ _type, /** @type {any} */ fn) => { registeredDispatcher = fn; } };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	// The per-library catch block logs via console.warn(), which the file's own
+	// console-shim IIFE routes through Cc/Ci (nsIScriptError) rather than
+	// Services.console.logStringMessage — stub those too (same pattern as
+	// the "isolates per-item failures" test above).
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	// A per-library HTTP failure must NOT reject the dispatcher promise — doing
+	// so would prevent TaskQueue from ever seeing succeededKeys for OTHER
+	// libraries dispatched in the same batch (see the mixed-library test below).
+	// Instead it resolves with an empty succeededKeys and failed: true, which
+	// TaskQueue's _dispatchNext() treats as "apply backoff, but still trust
+	// succeededKeys for what to keep vs. re-queue."
+	const result = await registeredDispatcher([{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } }]);
+	assert.strictEqual(result.failed, true);
+	assert.strictEqual(result.succeededKeys.size, 0);
+});
+
+test('the metadata dispatcher preserves partial success: a failing library does not discard another library\'s succeeded keys', async () => {
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ init) => {
+		const body = JSON.parse(init.body);
+		if (body.library_id === 'u1') return { ok: true, status: 200, json: async () => ({ updated_items: body.items.length }) };
+		return { ok: false, status: 500 };
+	};
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = { start: () => {}, registerDispatcher: (/** @type {string} */ _type, /** @type {any} */ fn) => { registeredDispatcher = fn; } };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	const result = await registeredDispatcher([
+		{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } },
+		{ type: 'metadata', key: 'u2:ITEM2', payload: { item_key: 'ITEM2' } },
+	]);
+
+	assert.strictEqual(result.failed, true);
+	assert.deepStrictEqual([...result.succeededKeys], ['u1:ITEM1']);
+});
+
+test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
+	/** @type {string[]} */
+	const calls = [];
+	const taskQueueStub = {
+		start: () => calls.push('start'),
+		stop: () => calls.push('stop'),
+		registerDispatcher: () => {},
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+		getMainWindows: () => [],
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+	plugin.removeFromAllWindows();
+
+	assert.deepStrictEqual(calls, ['start', 'stop']);
 });

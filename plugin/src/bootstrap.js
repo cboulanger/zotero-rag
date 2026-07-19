@@ -37,6 +37,10 @@ async function startup({ id, version, rootURI }) {
 	// Load Zotero Plugin Toolkit bundle
 	Services.scriptloader.loadSubScript(rootURI + 'toolkit.bundle.js');
 
+	// Load the generic task queue before zotero-rag.js, which registers a
+	// metadata dispatcher on it and starts it during init().
+	Services.scriptloader.loadSubScript(rootURI + 'task_queue.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');

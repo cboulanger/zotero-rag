@@ -422,6 +422,40 @@ class TestVectorStore(unittest.TestCase):
             # Text and embedding must be untouched by the patch
             self.assertEqual(payload["text"], f"Chunk {payload['chunk_index']}")
 
+    def test_update_item_metadata_paginates_past_a_single_scroll_page(self):
+        """A single-page scroll() call caps at 1000 points; an item with more
+        chunks than that must still have every chunk patched, not just the
+        first 1000 — regression test for a bug found via manual testing where
+        the remaining chunks silently kept a stale payload."""
+        chunk_count = 1050
+        chunks = [
+            DocumentChunk(
+                text=f"Chunk {i}",
+                metadata=ChunkMetadata(
+                    chunk_id=f"chunk-{i}",
+                    document_metadata=DocumentMetadata(
+                        library_id="1",
+                        item_key="BIGITEM",
+                        title="Old Title",
+                    ),
+                    page_number=1,
+                    text_preview=f"Chunk {i}",
+                    chunk_index=i,
+                    content_hash=f"hash{i}",
+                ),
+                embedding=[0.1] * 384,
+            )
+            for i in range(chunk_count)
+        ]
+        self.vector_store.add_chunks_batch(chunks)
+
+        updated = self.vector_store.update_item_metadata("1", "BIGITEM", {"title": "New Title"})
+
+        self.assertEqual(updated, chunk_count)
+        results = self.vector_store.get_item_chunks("1", "BIGITEM")
+        self.assertEqual(len(results), chunk_count)
+        self.assertTrue(all(r["payload"]["title"] == "New Title" for r in results))
+
     def test_delete_library_chunks(self):
         """Test deleting all chunks for a library."""
         # Add chunks from different libraries

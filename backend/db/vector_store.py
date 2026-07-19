@@ -611,17 +611,28 @@ class VectorStore:
         Returns:
             Number of points updated.
         """
-        chunks = self.client.scroll(
-            collection_name=self.CHUNKS_COLLECTION,
-            scroll_filter=Filter(must=[
-                FieldCondition(key="library_id", match=MatchValue(value=library_id)),
-                FieldCondition(key="item_key", match=MatchValue(value=item_key)),
-            ]),
-            limit=1000,
-            with_payload=False,
-            with_vectors=False,
-        )
-        point_ids = [p.id for p in chunks[0]]
+        # Paginate through every matching point — a single item can have more
+        # chunks than one scroll page (observed with a real 1584-chunk item);
+        # a single unpaginated scroll() call would silently patch only the
+        # first 1000 and leave the rest with stale payload fields.
+        scroll_filter = Filter(must=[
+            FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+            FieldCondition(key="item_key", match=MatchValue(value=item_key)),
+        ])
+        point_ids: list = []
+        next_offset = None
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=1000,
+                offset=next_offset,
+                with_payload=False,
+                with_vectors=False,
+            )
+            point_ids.extend(p.id for p in points)
+            if next_offset is None:
+                break
         if not point_ids:
             return 0
         self.client.set_payload(
@@ -1188,15 +1199,25 @@ class VectorStore:
         Returns:
             List of chunk dictionaries with id and payload
         """
-        results = self.client.scroll(
-            collection_name=self.CHUNKS_COLLECTION,
-            scroll_filter=Filter(must=[
-                FieldCondition(key="library_id", match=MatchValue(value=library_id)),
-                FieldCondition(key="item_key", match=MatchValue(value=item_key))
-            ]),
-            limit=1000  # Max chunks per item
-        )
-        return [{"id": p.id, "payload": p.payload} for p in results[0]]
+        # Paginate through every matching point — see update_item_metadata()
+        # above for why a single unpaginated scroll() call isn't enough.
+        scroll_filter = Filter(must=[
+            FieldCondition(key="library_id", match=MatchValue(value=library_id)),
+            FieldCondition(key="item_key", match=MatchValue(value=item_key))
+        ])
+        chunks: list = []
+        next_offset = None
+        while True:
+            points, next_offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=1000,
+                offset=next_offset,
+            )
+            chunks.extend(points)
+            if next_offset is None:
+                break
+        return [{"id": p.id, "payload": p.payload} for p in chunks]
 
     def get_item_version(self, library_id: str, item_key: str) -> Optional[int]:
         """
