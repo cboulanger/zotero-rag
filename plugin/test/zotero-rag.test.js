@@ -179,3 +179,41 @@ test('the item-delete notifier maps the internal libraryID to the backend librar
 	assert.strictEqual(deletedUrls[0], 'http://localhost:8119/api/libraries/u12345/items/ITEM1/chunks');
 	assert.strictEqual(deletedUrls[1], 'http://localhost:8119/api/libraries/999/items/ITEM2/chunks');
 });
+
+test('_extractAuthors returns "First Last" for authors and editors, skipping other creator types', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		CreatorTypes: { getID: (/** @type {string} */ name) => (/** @type {Record<string, number>} */ ({ author: 1, editor: 2, contributor: 3 }))[name] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	const item = {
+		getCreators: () => [
+			{ creatorTypeID: 1, firstName: 'Jane', lastName: 'Doe' },
+			{ creatorTypeID: 3, firstName: 'Ignored', lastName: 'Contributor' },
+			{ creatorTypeID: 2, firstName: '', lastName: 'Smith' },
+		],
+	};
+
+	assert.deepStrictEqual(plugin._extractAuthors(item), ['Jane Doe', 'Smith']);
+});
+
+test('_extractYear extracts a 4-digit year from the date field', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getField: (/** @type {string} */ f) => (f === 'date' ? 'March 3, 2021' : '') };
+
+	assert.strictEqual(plugin._extractYear(item), 2021);
+});
+
+test('_extractYear returns null when there is no parseable year', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getField: () => '' };
+
+	assert.strictEqual(plugin._extractYear(item), null);
+});
+
+test('_extractTags maps Zotero tag objects to a plain string array, dropping empty tags', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const item = { getTags: () => [{ tag: 'Law', type: 0 }, { tag: 'Automatic', type: 1 }, { tag: '' }] };
+
+	assert.deepStrictEqual(plugin._extractTags(item), ['Law', 'Automatic']);
+});

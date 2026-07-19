@@ -707,6 +707,54 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Extract "First Last" display names for authors and editors of an item.
+	 * @param {any} item - Zotero item
+	 * @returns {Array<string>}
+	 */
+	_extractAuthors(item) {
+		if (!item || !item.getCreators) return [];
+		try {
+			return item.getCreators()
+				.filter((/** @type {any} */ c) => c.creatorTypeID === Zotero.CreatorTypes.getID('author') ||
+				             c.creatorTypeID === Zotero.CreatorTypes.getID('editor'))
+				.map((/** @type {any} */ c) => `${c.firstName || ''} ${c.lastName || ''}`.trim())
+				.filter(Boolean);
+		} catch (_) {
+			return [];
+		}
+	}
+
+	/**
+	 * Extract a 4-digit publication year from an item's date field.
+	 * @param {any} item - Zotero item
+	 * @returns {number|null}
+	 */
+	_extractYear(item) {
+		if (!item || !item.getField) return null;
+		try {
+			const dateStr = item.getField('date') || '';
+			const m = dateStr.match(/\b(19|20)\d{2}\b/);
+			return m ? parseInt(m[0], 10) : null;
+		} catch (_) {
+			return null;
+		}
+	}
+
+	/**
+	 * Extract tag names (manual and automatic) as a plain string array.
+	 * @param {any} item - Zotero item
+	 * @returns {Array<string>}
+	 */
+	_extractTags(item) {
+		if (!item || !item.getTags) return [];
+		try {
+			return item.getTags().map((/** @type {any} */ t) => t.tag).filter(Boolean);
+		} catch (_) {
+			return [];
+		}
+	}
+
+	/**
 	 * Register a library and the current zotero.org user with the backend.
 	 *
 	 * @param {string} libraryId
