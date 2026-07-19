@@ -1,3 +1,27 @@
+# [1.39.0](https://github.com/cboulanger/zotero-rag/compare/v1.38.3...v1.39.0) (2026-07-19)
+
+
+### Bug Fixes
+
+* detect abstract-to-attachment transition in metadata-only fast path ([091318f](https://github.com/cboulanger/zotero-rag/commit/091318f8221bf92bcb777ca97d017cd5545a9bbe))
+* index catalog-only items with no attachment/abstract as stub records ([4c83937](https://github.com/cboulanger/zotero-rag/commit/4c839377a0798313f352a1ff034ceb10bfaa8bbc))
+
+
+### Features
+
+* add _try_metadata_only_update decision logic (not yet wired in) ([41af1a0](https://github.com/cboulanger/zotero-rag/commit/41af1a0bf1851c296e173d9866d19a72254734e5))
+* add update_item_bibliographic_metadata for cheap metadata patches ([f277a94](https://github.com/cboulanger/zotero-rag/commit/f277a943a6c08b63bb0e19f53d6486ae8dd71fc5))
+* aggregate download failures across subprocess batches ([97c7e53](https://github.com/cboulanger/zotero-rag/commit/97c7e53bb7a95a8db210d4cd785704e4a5fac3a5))
+* fetch and merge server-reported download failures on every library metadata poll ([bf8d8ad](https://github.com/cboulanger/zotero-rag/commit/bf8d8ad51a70d06f7ecfbeec5e4656661d4ef6a1))
+* index Zotero tags/keywords as a filterable field ([cf446a5](https://github.com/cboulanger/zotero-rag/commit/cf446a59e379f9e79cc005d96df40bf9a2140c9a))
+* label server-download-failure rows distinctly in Fix Unavailable table ([d8d2070](https://github.com/cboulanger/zotero-rag/commit/d8d207003da6503d28dd93a6a0f46091924da9c3))
+* persist and merge server-reported download failures into Fix Unavailable candidates ([dd924db](https://github.com/cboulanger/zotero-rag/commit/dd924db5ea2bd54daa4789ab07db75c4ee90d68b))
+* persist download-failure records on LibraryIndexMetadata (full sync inline path) ([ea35a9c](https://github.com/cboulanger/zotero-rag/commit/ea35a9c2c6bd91066179a6aa52c320572376025b))
+* record per-attachment download failures on DocumentProcessor ([3963368](https://github.com/cboulanger/zotero-rag/commit/396336865cae2d51ba6991209ef529f5e4786609))
+* skip reindex for metadata-only changes in full sync inline path ([1ef58ed](https://github.com/cboulanger/zotero-rag/commit/1ef58edc2c8bd66a36222c2efb98aef6306c1a90))
+* skip reindex for metadata-only changes in incremental sync ([9b5c94b](https://github.com/cboulanger/zotero-rag/commit/9b5c94bfb09e8b2053644ed4e94411bff659b9a5))
+* skip reindex for metadata-only changes in subprocess batch worker ([e414565](https://github.com/cboulanger/zotero-rag/commit/e414565a3187541f8ee258472d26a6eb4cad1767))
+
 ## [1.38.3](https://github.com/cboulanger/zotero-rag/compare/v1.38.2...v1.38.3) (2026-07-17)
 
 
