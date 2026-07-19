@@ -217,3 +217,76 @@ test('_extractTags maps Zotero tag objects to a plain string array, dropping emp
 
 	assert.deepStrictEqual(plugin._extractTags(item), ['Law', 'Automatic']);
 });
+
+test('the item-modify notifier enqueues a metadata task for top-level regular items', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const fakeItem = {
+		key: 'ITEM1', libraryID: 1, version: 7, dateModified: '2026-01-01T00:00:00Z',
+		itemType: 'journalArticle',
+		isRegularItem: () => true,
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'A Title' : ''),
+		getCreators: () => [],
+		getTags: () => [{ tag: 'Law' }],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+		Items: { get: (/** @type {number} */ id) => (id === 42 ? fakeItem : null) },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = {
+		enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args),
+		start: () => {},
+		registerDispatcher: () => {},
+	};
+	// plugin.init() logs via this.log() -> console.log(), routed through
+	// Services.console.logStringMessage — stub Services so that doesn't throw
+	// (same pattern as the item-delete notifier test above).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('modify', 'item', [42], {});
+
+	assert.strictEqual(enqueued.length, 1);
+	const [type, key, payload, debounceMs] = enqueued[0];
+	assert.strictEqual(type, 'metadata');
+	assert.strictEqual(key, 'u12345:ITEM1');
+	assert.strictEqual(payload.title, 'A Title');
+	assert.deepStrictEqual(payload.tags, ['Law']);
+	assert.strictEqual(payload.item_version, 7);
+	assert.strictEqual(debounceMs, 4000);
+});
+
+test('the item-modify notifier ignores non-regular items (attachments, notes)', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const fakeItem = { key: 'ATT1', libraryID: 1, isRegularItem: () => false };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: { get: () => fakeItem },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = { enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args), start: () => {}, registerDispatcher: () => {} };
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('modify', 'item', [1], {});
+
+	assert.strictEqual(enqueued.length, 0);
+});

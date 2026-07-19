@@ -81,6 +81,13 @@
  */
 
 /**
+ * How long to wait after the last edit to an item before pushing its
+ * metadata to the backend — collapses rapid successive field edits
+ * (e.g. typing a title, then adding tags) into one request.
+ */
+const METADATA_DEBOUNCE_MS = 4000;
+
+/**
  * Main plugin class for Zotero RAG integration.
  */
 class ZoteroRAGPlugin {
@@ -194,18 +201,38 @@ class ZoteroRAGPlugin {
 			this.requiredApiKeys = [];
 		}
 
-		// Watch for permanent item deletions and remove their indexed chunks from the backend.
+		// Watch for permanent item deletions (removes indexed chunks) and
+		// metadata edits (pushes an updated payload) to the backend.
 		this._notifierID = Zotero.Notifier.registerObserver(
 			{
 				notify: (/** @type {string} */ event, /** @type {string} */ type, /** @type {number[]} */ ids, /** @type {Record<number, {libraryID: number, key: string}>} */ extraData) => {
-					if (event !== 'delete' || type !== 'item') return;
-					for (const id of ids) {
-						const { libraryID, key } = extraData[id] || {};
-						if (!libraryID || !key) continue;
-						const backendLibraryId = this.getBackendLibraryId(libraryID);
-						const url = `${this.backendURL}/api/libraries/${backendLibraryId}/items/${key}/chunks`;
-						fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
-							.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
+					if (type !== 'item') return;
+					if (event === 'delete') {
+						for (const id of ids) {
+							const { libraryID, key } = extraData[id] || {};
+							if (!libraryID || !key) continue;
+							const backendLibraryId = this.getBackendLibraryId(libraryID);
+							const url = `${this.backendURL}/api/libraries/${backendLibraryId}/items/${key}/chunks`;
+							fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
+								.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
+						}
+					} else if (event === 'modify') {
+						for (const id of ids) {
+							const item = Zotero.Items.get(id);
+							if (!item || !item.isRegularItem()) continue;
+							const backendLibraryId = this.getBackendLibraryId(item.libraryID);
+							const snapshot = {
+								item_key: item.key,
+								title: item.getField('title') || null,
+								authors: this._extractAuthors(item),
+								tags: this._extractTags(item),
+								year: this._extractYear(item),
+								item_type: item.itemType || null,
+								item_version: item.version || 0,
+								zotero_modified: item.dateModified || new Date().toISOString(),
+							};
+							TaskQueue.enqueue('metadata', `${backendLibraryId}:${item.key}`, snapshot, METADATA_DEBOUNCE_MS);
+						}
 					}
 				}
 			},
