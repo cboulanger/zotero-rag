@@ -194,6 +194,67 @@ test('a dispatch failure in one type does not block a ready task of another type
 	assert.strictEqual(attachmentCalls.length, 1);
 });
 
+test('a partial batch failure (failed:true) keeps succeeded keys out of the ready map, re-queues the rest with backoff, and resets on a later full success', async () => {
+	const { queue, warnings } = loadTaskQueue();
+	/** @type {any[]} */
+	const dispatchedBatches = [];
+	// First call: lib1's item succeeds, lib2's item fails (mirrors a dispatcher
+	// like zotero-rag.js's metadata one, which POSTs per-library and folds a
+	// per-library failure into `failed: true` rather than throwing).
+	let secondCallSucceedsBoth = false;
+	queue._now = () => 1000;
+	queue.registerDispatcher('metadata', async (/** @type {any[]} */ batch) => {
+		// `batch` is an array from task_queue.js's own vm-context realm, so
+		// `batch.map(...)` would produce another foreign-realm array — build
+		// plain Node-realm arrays with Array.from() instead, since
+		// assert.deepStrictEqual treats cross-realm arrays as non-equal even
+		// with identical contents.
+		dispatchedBatches.push(Array.from(batch, t => t.key));
+		if (secondCallSucceedsBoth) {
+			return { succeededKeys: new Set(Array.from(batch, t => t.key)) };
+		}
+		const succeededKeys = new Set(Array.from(batch.filter(t => t.key.startsWith('lib1:')), t => t.key));
+		const failed = batch.some(t => t.key.startsWith('lib2:'));
+		return { succeededKeys, failed };
+	});
+	queue.enqueue('metadata', 'lib1:ITEM1', { title: 'A' }, 1000);
+	queue.enqueue('metadata', 'lib2:ITEM2', { title: 'B' }, 1000);
+
+	queue._now = () => 2001;
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+
+	assert.strictEqual(dispatchedBatches.length, 1);
+	assert.deepStrictEqual(dispatchedBatches[0].sort(), ['lib1:ITEM1', 'lib2:ITEM2']);
+
+	// (a)+(b): lib1's succeeded key is gone from the ready map; lib2's is re-queued.
+	const readyKeys = [...(/** @type {Map<string, any>} */ (queue._ready.get('metadata'))).keys()];
+	assert.deepStrictEqual(readyKeys, ['lib2:ITEM2']);
+
+	// (c): backoff applied — a warning was logged and a retry before the
+	// backoff window elapses must not re-dispatch.
+	assert.strictEqual(warnings.length, 1);
+	assert.match(warnings[0], /attempt 1, retry in 5000ms/);
+
+	queue._now = () => 2500; // still within the 5000ms backoff window
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+	assert.strictEqual(dispatchedBatches.length, 1); // no new dispatch
+
+	// (d): once the backoff window elapses and the dispatcher fully succeeds,
+	// the failure count resets cleanly (next failure would start again at attempt 1).
+	secondCallSucceedsBoth = true;
+	queue._now = () => 7002; // past the 5000ms backoff from t=2001
+	queue._tick();
+	await new Promise(r => setImmediate(r));
+
+	assert.strictEqual(dispatchedBatches.length, 2);
+	assert.deepStrictEqual(dispatchedBatches[1], ['lib2:ITEM2']);
+	assert.strictEqual(queue._failureCount.get('metadata'), 0);
+	assert.strictEqual(queue._nextAttemptAt.has('metadata'), false);
+	assert.strictEqual(warnings.length, 1); // no additional warning on the successful retry
+});
+
 test('stop() clears the pending queue and the running timer', () => {
 	const { queue } = loadTaskQueue();
 	queue.enqueue('metadata', 'lib:ITEM1', {}, 4000);

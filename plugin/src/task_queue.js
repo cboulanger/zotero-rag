@@ -27,6 +27,12 @@ const STUCK_THRESHOLD = 5;
  * @property {Set<string>} succeededKeys - Keys from the batch that were
  *   successfully processed and should be removed from the queue. Keys not
  *   in this set stay queued and are retried on a later dispatch attempt.
+ * @property {boolean} [failed] - True if at least one task in the batch did
+ *   NOT succeed (distinct from keys simply being absent from succeededKeys
+ *   due to, e.g., being superseded by a fresher enqueue). When true,
+ *   exponential backoff is applied for this type just as it would be for a
+ *   thrown error — but unlike a thrown error, whatever DID succeed
+ *   (succeededKeys) is still honored and removed from the queue.
  */
 
 var TaskQueue = {
@@ -143,8 +149,17 @@ var TaskQueue = {
 				for (const t of batch) {
 					if (!result.succeededKeys.has(t.key) && !tasks.has(t.key)) tasks.set(t.key, t);
 				}
-				this._failureCount.set(type, 0);
-				this._nextAttemptAt.delete(type);
+				if (result.failed) {
+					const attempt = (this._failureCount.get(type) || 0) + 1;
+					this._failureCount.set(type, attempt);
+					const delay = Math.min(BASE_BACKOFF_MS * 2 ** (attempt - 1), MAX_BACKOFF_MS);
+					this._nextAttemptAt.set(type, this._now() + delay);
+					const failedTasks = batch.filter(t => !result.succeededKeys.has(t.key));
+					this._logDispatchFailure(type, failedTasks, attempt, delay, new Error('partial dispatch failure'));
+				} else {
+					this._failureCount.set(type, 0);
+					this._nextAttemptAt.delete(type);
+				}
 			} catch (e) {
 				for (const t of batch) {
 					if (!tasks.has(t.key)) tasks.set(t.key, t);

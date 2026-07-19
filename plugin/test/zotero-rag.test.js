@@ -390,7 +390,7 @@ test('the metadata dispatcher POSTs one request per library_id and reports succe
 	assert.deepStrictEqual([...result.succeededKeys].sort(), ['u123:ITEM1', 'u123:ITEM2', 'u456:ITEM3'].sort());
 });
 
-test('the metadata dispatcher throws when the backend returns a non-2xx response', async () => {
+test('the metadata dispatcher reports failed:true (without throwing) when the backend returns a non-2xx response', async () => {
 	const fetchStub = async () => ({ ok: false, status: 500 });
 	/** @type {any} */
 	let registeredDispatcher;
@@ -401,13 +401,53 @@ test('the metadata dispatcher throws when the backend returns a non-2xx response
 		Prefs: { get: () => null },
 	};
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub });
+	// The per-library catch block logs via console.warn(), which the file's own
+	// console-shim IIFE routes through Cc/Ci (nsIScriptError) rather than
+	// Services.console.logStringMessage — stub those too (same pattern as
+	// the "isolates per-item failures" test above).
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
 	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
 
-	await assert.rejects(
-		() => registeredDispatcher([{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } }]),
-		/HTTP 500/
-	);
+	// A per-library HTTP failure must NOT reject the dispatcher promise — doing
+	// so would prevent TaskQueue from ever seeing succeededKeys for OTHER
+	// libraries dispatched in the same batch (see the mixed-library test below).
+	// Instead it resolves with an empty succeededKeys and failed: true, which
+	// TaskQueue's _dispatchNext() treats as "apply backoff, but still trust
+	// succeededKeys for what to keep vs. re-queue."
+	const result = await registeredDispatcher([{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } }]);
+	assert.strictEqual(result.failed, true);
+	assert.strictEqual(result.succeededKeys.size, 0);
+});
+
+test('the metadata dispatcher preserves partial success: a failing library does not discard another library\'s succeeded keys', async () => {
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ init) => {
+		const body = JSON.parse(init.body);
+		if (body.library_id === 'u1') return { ok: true, status: 200, json: async () => ({ updated_items: body.items.length }) };
+		return { ok: false, status: 500 };
+	};
+	/** @type {any} */
+	let registeredDispatcher;
+	const taskQueueStub = { start: () => {}, registerDispatcher: (/** @type {string} */ _type, /** @type {any} */ fn) => { registeredDispatcher = fn; } };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Notifier: { registerObserver: () => 'nid', unregisterObserver: () => {} },
+		Prefs: { get: () => null },
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, fetch: fetchStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	const result = await registeredDispatcher([
+		{ type: 'metadata', key: 'u1:ITEM1', payload: { item_key: 'ITEM1' } },
+		{ type: 'metadata', key: 'u2:ITEM2', payload: { item_key: 'ITEM2' } },
+	]);
+
+	assert.strictEqual(result.failed, true);
+	assert.deepStrictEqual([...result.succeededKeys], ['u1:ITEM1']);
 });
 
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {

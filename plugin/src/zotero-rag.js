@@ -255,19 +255,25 @@ class ZoteroRAGPlugin {
 				/** @type {any[]} */ (byLibrary.get(libraryId)).push(task);
 			}
 			const succeededKeys = new Set();
+			let failed = false;
 			for (const [libraryId, libTasks] of byLibrary) {
-				const response = await fetch(`${this.backendURL}/api/index/items/metadata`, {
-					method: 'POST',
-					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({
-						library_id: libraryId,
-						items: libTasks.map(t => t.payload),
-					}),
-				});
-				if (!response.ok) throw new Error(`HTTP ${response.status}`);
-				for (const t of libTasks) succeededKeys.add(t.key);
+				try {
+					const response = await fetch(`${this.backendURL}/api/index/items/metadata`, {
+						method: 'POST',
+						headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+						body: JSON.stringify({
+							library_id: libraryId,
+							items: libTasks.map(t => t.payload),
+						}),
+					});
+					if (!response.ok) throw new Error(`HTTP ${response.status}`);
+					for (const t of libTasks) succeededKeys.add(t.key);
+				} catch (e) {
+					failed = true;
+					console.warn(`Metadata dispatch failed for library ${libraryId}: ${/** @type {Error} */ (e).message}`);
+				}
 			}
-			return { succeededKeys };
+			return { succeededKeys, failed };
 		});
 		TaskQueue.start();
 	}
