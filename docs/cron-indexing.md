@@ -14,6 +14,15 @@ Useful for:
 - Initial bulk indexing before deploying the plugin to end users
 - Incremental sync jobs triggered by CI or task schedulers
 
+**Note on metadata edits:** when the plugin is running, title/author/tag/year/type
+edits made in Zotero reach the backend within seconds via a separate live push
+(see [docs/indexing.md](indexing.md#live-client-side-metadata-sync)), independent
+of this script. This cron job remains the mechanism for everything that live push
+doesn't cover: new/changed attachments, items indexed while the plugin wasn't
+running, deleted-item cleanup, and cleared/blanked metadata fields — it's the
+system of record and safety net, not the primary path for a metadata-only edit
+made while the plugin is active.
+
 ## How keys are supplied
 
 `index_libraries.py` does **not** take a single global `ZOTERO_API_KEY` or a list

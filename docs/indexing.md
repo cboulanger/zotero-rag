@@ -82,7 +82,11 @@ Stored in vector database payload:
     "attachment_key": str,
     "title": str,
     "authors": list[str],
+    "author_lastnames": list[str],      # Lowercased last names (schema v4), for author filtering
+    "tags": list[str],                  # Zotero tags/keywords (schema v6)
+    "tags_lower": list[str],            # Lowercased tags (schema v6), for case-insensitive filtering
     "year": int,
+    "item_type": str,                   # Zotero item type (schema v3)
     "page_number": int,
     "text_preview": str,                # First 5 words for citation
     "chunk_index": int,
@@ -93,7 +97,7 @@ Stored in vector database payload:
     "attachment_version": int,          # Attachment version at indexing
     "indexed_at": str,                  # ISO 8601 timestamp
     "zotero_modified": str,             # Item's dateModified field
-    "schema_version": int               # Default: 2
+    "schema_version": int               # Current: CURRENT_SCHEMA_VERSION in backend/models/document.py
 }
 ```
 
@@ -594,7 +598,7 @@ for changes that only affect vector content — those are handled by full re-ind
 
 2. **Collection** — The plugin collects those items after the check-indexed loop and
    calls `_sendMetadataUpdates()`, which POSTs the current Zotero bibliographic
-   metadata (title, authors, year, item_type, …) to:
+   metadata (title, authors, tags, year, item_type, item_version, zotero_modified) to:
 
    ```http
    POST /api/index/items/metadata
@@ -602,11 +606,16 @@ for changes that only affect vector content — those are handled by full re-ind
    ```
 
    No file bytes are sent; the metadata comes from the Zotero parent item in memory.
+   This is one of two callers of this endpoint — see
+   [Live Client-Side Metadata Sync](#live-client-side-metadata-sync) below for the other.
 
 3. **Application** — `batch_update_metadata()` calls `vector_store.update_item_metadata()`
    for each item, which uses Qdrant's `set_payload()` to patch the new fields on all
    existing chunks for that item and writes `schema_version: CURRENT_SCHEMA_VERSION`.
-   Vectors are untouched — no re-embedding occurs.
+   Vectors are untouched — no re-embedding occurs. Each field is patched only when the
+   caller actually sends it (a falsy/omitted field leaves the existing stored value
+   untouched) — this conditional pattern is what lets the two callers share one endpoint
+   safely without one accidentally blanking fields the other doesn't send.
 
 ### Graceful degradation
 
@@ -622,10 +631,69 @@ improves incrementally as items are checked.
    `backend/db/vector_store.py`.
 3. Add a Qdrant payload index for it in `_ensure_chunks_indexes()` if you need to
    filter on it efficiently (keyword, integer, or text index as appropriate).
-4. Add the field to `ItemMetadataUpdate` in `backend/api/document_upload.py`.
-5. Include it in the `fields` dict inside `update_item_metadata()`.
-6. The plugin's `_sendMetadataUpdates()` already reads all standard Zotero bibliographic
-   fields from the parent item, so no plugin-side changes are needed for standard fields.
+4. Add the field to `ItemMetadataUpdate` in `backend/api/document_upload.py`, and add a
+   conditional branch in `batch_update_metadata()`'s field-assembly loop (`if item.<field>
+   is not None:` or `if item.<field>:` for lists) so an omitted field is never patched —
+   see step 3 above.
+5. Both plugin-side callers read the field from the same live Zotero item object, so a
+   standard bibliographic field usually needs no plugin-side change: `_sendMetadataUpdates()`
+   in `remote_indexer.js` (schema-migration path) and the item-modify notifier's snapshot
+   builder in `zotero-rag.js` (live-sync path, see below) both already read all standard
+   fields. A genuinely new kind of field may need extraction logic added to both.
+
+## Live Client-Side Metadata Sync
+
+In addition to the schema-migration path above, the plugin also pushes metadata
+edits to the backend **immediately** when a user edits an item's title, authors,
+tags, year, or item type in Zotero — instead of waiting for the hourly cron.
+Full design rationale: `docs/superpowers/specs/2026-07-19-live-metadata-sync-design.md`.
+
+### Client side
+
+- `plugin/src/task_queue.js` defines a generic, type-agnostic `TaskQueue` engine:
+  debounces per-item edits (`METADATA_DEBOUNCE_MS = 4000`), batches ready tasks
+  (up to `MAX_BATCH_SIZE = 50` per request), dispatches at most one request at a
+  time, and retries failed dispatches with exponential backoff (5s → 10s → 20s →
+  … capped at 5 minutes), escalating from `console.warn` to `console.error` once
+  a task type has failed 5 consecutive times. It has no Zotero dependency and is
+  loaded once at plugin startup (`bootstrap.js`), not on demand.
+- `zotero-rag.js`'s item notifier (registered once in `init()`) watches Zotero's
+  `modify` event for top-level regular items — standalone attachments, notes,
+  and annotations are excluded, since they either lack these bibliographic
+  fields or can't be distinguished from a real content change without
+  out-of-scope logic. For each edit it builds a metadata snapshot (title,
+  authors, tags, year, item_type, item_version, zotero_modified) and calls
+  `TaskQueue.enqueue('metadata', "<library_id>:<item_key>", snapshot, METADATA_DEBOUNCE_MS)`.
+  A per-item try/catch means one item's failure can't block the rest of the
+  same notifier batch.
+- A `metadata` dispatcher (registered at the end of `init()`) groups ready tasks
+  by `library_id` and POSTs each group to `POST /api/index/items/metadata` — the
+  same endpoint the schema-migration path uses. A per-library try/catch means
+  one library's failure doesn't discard another library's success within the
+  same batch; the dispatcher reports `{ succeededKeys, failed }` so `TaskQueue`
+  can apply backoff without losing already-succeeded work.
+
+### Backend side
+
+No new endpoint was added — `batch_update_metadata()` was extended to also
+accept `tags`, `item_version`, and `zotero_modified` (previously only
+`title`/`authors`/`year`/`item_type`).
+
+### Scope and limitations
+
+- Only **metadata** changes are pushed live — new/changed attachments (content
+  requiring re-extraction and re-embedding) are explicitly out of scope and
+  still wait for the hourly cron / manual "Index Library".
+- If an item hasn't been indexed yet, the live push is a silent no-op
+  (`updated_items: 0` for that item, no error); it's indexed with current
+  metadata whenever a full index run eventually processes it.
+- *Clearing* a field entirely (removing the last tag, blanking the title) is
+  not pushed live, since an empty value is indistinguishable from "field not
+  sent" in the conditional pattern described above — the hourly cron's
+  full-item comparison sends explicit empty values and reconciles this within
+  the hour.
+- The in-memory queue does not persist across a Zotero restart; any edit still
+  queued when Zotero closes is picked up by the next cron run instead.
 
 ## References
 

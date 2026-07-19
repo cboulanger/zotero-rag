@@ -136,9 +136,11 @@ Author and title matching use a full-text index
 
 ## Schema Versioning
 
-`CURRENT_SCHEMA_VERSION = 3` (in `backend/models/document.py`) is stored in every
-Qdrant chunk payload.  The version was bumped from 2 to 3 when `item_type` was added
-to the payload, enabling `item_type`-based filtering.
+`CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
+in every Qdrant chunk payload. Each bump added a new filterable field — see the
+version history comments next to the constant, and
+[docs/indexing.md](indexing.md#schema-versioning-and-metadata-migration) for the
+full migration mechanism.
 
 When the plugin calls `GET /api/libraries/{library_id}/check-indexed`:
 - items with `stored_schema_version < CURRENT_SCHEMA_VERSION` receive
@@ -168,7 +170,12 @@ Set `enable_routing: false` to bypass the routing LLM call and go straight to
 
 ### `POST /api/index/items/metadata`
 
-Lightweight metadata-only update — no file bytes, no re-embedding:
+Lightweight metadata-only update — no file bytes, no re-embedding. Called both by
+the plugin's schema-migration path and by its live client-side metadata sync
+(edits pushed within seconds of a title/author/tag/year/type change) — see
+[docs/indexing.md](indexing.md#live-client-side-metadata-sync). Every field is
+optional except `item_key`; an omitted field leaves the existing stored value
+untouched rather than being cleared:
 
 ```json
 {
@@ -178,8 +185,11 @@ Lightweight metadata-only update — no file bytes, no re-embedding:
       "item_key": "ABC123",
       "title": "Social Systems",
       "authors": ["Luhmann, N."],
+      "tags": ["systems theory", "sociology"],
       "year": 1984,
-      "item_type": "book"
+      "item_type": "book",
+      "item_version": 42,
+      "zotero_modified": "2026-01-01T00:00:00Z"
     }
   ]
 }
