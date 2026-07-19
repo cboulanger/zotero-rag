@@ -393,6 +393,12 @@ For creating dialog windows in Zotero plugins:
 - Make atomic commits that represent single logical changes
 - Reference issues/tasks in commit messages when applicable
 
+### Working with git worktrees and subagents
+
+- When implementation work is happening in a git worktree (e.g. via subagent-driven-development or executing-plans), every subagent prompt dispatched for that work MUST explicitly state the worktree's absolute path and instruct the subagent to `cd` there and verify (`pwd`, `git branch --show-current`) as its first action, and to make **all** file edits, test runs, and commits from that directory — never from the original repo checkout.
+- Explicitly tell every such subagent **not to commit to `main`** (or whatever the original checkout's branch is) under any circumstances. A subagent that ignores or loses track of its working-directory instruction can silently commit to the main checkout instead of the worktree, defeating the entire purpose of the isolation and requiring a manual fix (cherry-pick the stray commit into the worktree, then reset the main checkout back to before it).
+- Before trusting a subagent's "commit created" report, verify the commit actually landed on the worktree's branch (e.g. `git log --oneline -1` from the worktree, or `git branch --contains <sha>`), not just that a SHA was produced.
+
 ## Debugging
 
 - if you insert code that is only for debugging, mark it as such so that it can be easily idenitified and removed after the code has been fixed (e.g., by a `# DEBUG` trailing comment or `# BEGIN DEBUG`/`# END DEBUG` header and footer for longer code fragments).
