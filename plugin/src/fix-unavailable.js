@@ -145,6 +145,16 @@ var ZoteroFixUnavailableDialog = {
 		// (see zotero/chrome/content/zotero/components/virtualized-table.jsx line 1475), so
 		// span.className = `cell ${column.className}` gives e.g. "cell status status_abc123".
 
+		// Shared renderer for plain text columns: shows the full cell value as a
+		// hover tooltip so content clipped by the column's fixed/flex width is still readable.
+		const textCellRenderer = (/** @type {number} */ _index, /** @type {string} */ data, /** @type {any} */ column) => {
+			const span = document.createElement('span');
+			span.className = `cell ${column.className}`;
+			span.textContent = data;
+			span.title = data;
+			return span;
+		};
+
 		/** @type {Array<any>} */
 		const columns = [
 			{
@@ -173,12 +183,12 @@ var ZoteroFixUnavailableDialog = {
 					return span;
 				},
 			},
-			{ dataKey: 'author',   label: 'Author(s)', flex: 2 },
-			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48 },
-			{ dataKey: 'title',    label: 'Title',     flex: 3 },
-			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84 },
-			{ dataKey: 'filename', label: 'Filename',  flex: 2 },
-			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 50 },
+			{ dataKey: 'author',   label: 'Author(s)', flex: 2,   renderer: textCellRenderer },
+			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48, renderer: textCellRenderer },
+			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer },
+			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer },
+			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer },
+			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 70, renderer: textCellRenderer },
 			{
 				dataKey: 'status',
 				label: 'Status',
