@@ -1,3 +1,25 @@
+# [1.40.0](https://github.com/cboulanger/zotero-rag/compare/v1.39.0...v1.40.0) (2026-07-19)
+
+
+### Bug Fixes
+
+* **backend:** paginate Qdrant scroll in update_item_metadata/get_item_chunks ([f3258ce](https://github.com/cboulanger/zotero-rag/commit/f3258ceba2b368aed552938c8614675738c525a7))
+* **plugin:** isolate per-item failures in the modify-notifier loop ([c76bccb](https://github.com/cboulanger/zotero-rag/commit/c76bccbdcc55f03d68211780c6dc24ad8690dbfa))
+* **plugin:** map libraryID to backend library_id in delete-notifier ([83b7571](https://github.com/cboulanger/zotero-rag/commit/83b7571ccba8b62485e49e6aa06efc4a0596b4f1))
+* **plugin:** preserve partial-batch success when one library's metadata push fails ([73b8194](https://github.com/cboulanger/zotero-rag/commit/73b8194913e1c3cb76ee8f548299d582aa038f9a))
+* **plugin:** prevent TaskQueue from dropping a newer edit during in-flight dispatch ([2c57932](https://github.com/cboulanger/zotero-rag/commit/2c5793245561cc096eecc3f2a24354d8bf07ed5f))
+* show full text via tooltip on truncated Fix Unavailable columns ([a64295e](https://github.com/cboulanger/zotero-rag/commit/a64295e6f4d0bda9b74340add9d1874884ba2a1e))
+* show full text via tooltip on truncated Fix Unavailable columns ([716e8d4](https://github.com/cboulanger/zotero-rag/commit/716e8d40997d8fa694f6d51f25eeef9aeade33a0))
+
+
+### Features
+
+* **backend:** accept tags/item_version/zotero_modified in metadata update endpoint ([eeb884d](https://github.com/cboulanger/zotero-rag/commit/eeb884dda982d04fbb347f44c3e45b2ed97f0c29))
+* **plugin:** add generic debounced/batched/retrying TaskQueue engine ([0b6084d](https://github.com/cboulanger/zotero-rag/commit/0b6084d4517f889be04e05f2af4ae898edf360eb))
+* **plugin:** enqueue metadata updates on item modify events ([656cfed](https://github.com/cboulanger/zotero-rag/commit/656cfeddf96a6c24c0116cc553ce4dd623aa4206))
+* **plugin:** load task_queue.js at plugin startup ([a0c8a92](https://github.com/cboulanger/zotero-rag/commit/a0c8a924358aec097d81d21bae4115ba303c5846))
+* **plugin:** wire TaskQueue into the plugin lifecycle for live metadata sync ([bc2f03d](https://github.com/cboulanger/zotero-rag/commit/bc2f03d3e48bc97e4ee64005294c20e9e17e7cdb))
+
 # [1.39.0](https://github.com/cboulanger/zotero-rag/compare/v1.38.3...v1.39.0) (2026-07-19)
 
 
