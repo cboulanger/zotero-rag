@@ -202,7 +202,8 @@ class ZoteroRAGPlugin {
 					for (const id of ids) {
 						const { libraryID, key } = extraData[id] || {};
 						if (!libraryID || !key) continue;
-						const url = `${this.backendURL}/api/libraries/${libraryID}/items/${key}/chunks`;
+						const backendLibraryId = this.getBackendLibraryId(libraryID);
+						const url = `${this.backendURL}/api/libraries/${backendLibraryId}/items/${key}/chunks`;
 						fetch(url, { method: 'DELETE', headers: this.getAuthHeaders() })
 							.catch(e => console.warn(`Failed to delete chunks for item ${key}: ${e.message}`));
 					}
@@ -689,6 +690,23 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Map a Zotero-internal numeric libraryID to the backend's library_id
+	 * string convention: "u{zoteroUserId}" for the personal library, or the
+	 * numeric zotero.org group ID (as a string) for a group library. Falls
+	 * back to the raw libraryID (stringified) if unsynced/not a group.
+	 * @param {number} libraryID
+	 * @returns {string}
+	 */
+	getBackendLibraryId(libraryID) {
+		if (libraryID === Zotero.Libraries.userLibraryID) {
+			const userId = this.getCurrentZoteroUserId();
+			return userId ? `u${userId}` : String(libraryID);
+		}
+		const group = Zotero.Groups.getByLibraryID(libraryID);
+		return group ? String(group.id) : String(libraryID);
+	}
+
+	/**
 	 * Register a library and the current zotero.org user with the backend.
 	 *
 	 * @param {string} libraryId
@@ -964,20 +982,7 @@ class ZoteroRAGPlugin {
 		const libraryID = zoteroPane.getSelectedLibraryID();
 		if (!libraryID) return null;
 
-		// For group libraries, return the group ID instead of library ID
-		const library = Zotero.Libraries.get(libraryID);
-		// @ts-ignore - libraryType exists on ZoteroLibrary at runtime
-		if (library && library.libraryType === 'group') {
-			// Get the group associated with this library
-			const group = Zotero.Groups.getByLibraryID(libraryID);
-			if (group) {
-				return String(group.id);  // Return group ID for backend
-			}
-		}
-
-		// For user library, use "u{zoteroUserId}" when synced; fall back to raw ID on localhost-no-registration
-		const userId = this.getCurrentZoteroUserId();
-		return userId ? `u${userId}` : String(libraryID);
+		return this.getBackendLibraryId(libraryID);
 	}
 
 	/**
@@ -1810,14 +1815,7 @@ class ZoteroRAGPlugin {
 		}
 		try {
 			// Map Zotero internal library ID → backend library ID to read the pref.
-			let backendId = null;
-			if (libraryID === Zotero.Libraries.userLibraryID) {
-				const userId = this.getCurrentZoteroUserId();
-				backendId = userId ? `u${userId}` : String(libraryID);
-			} else {
-				const group = Zotero.Groups.getAll().find(/** @param {any} g */ g => g.libraryID === libraryID);
-				if (group) backendId = String(group.id);
-			}
+			const backendId = this.getBackendLibraryId(libraryID);
 			const count = backendId
 				? (parseInt(/** @type {any} */ (Zotero.Prefs).get(`extensions.zotero-rag.missingFiles.${backendId}`, true) || '0') || 0)
 				: 0;

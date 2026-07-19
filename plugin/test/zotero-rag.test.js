@@ -52,11 +52,12 @@ function makeStubs(attachmentsByKey = {}) {
  * @param {any} zoteroStub
  * @param {any} ioUtilsStub
  * @param {any} pathUtilsStub
+ * @param {Record<string, any>} [extra] - Extra globals to add to the vm context (e.g. TaskQueue, fetch)
  * @returns {any} a new ZoteroRAGPlugin instance
  */
-function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub) {
+function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console };
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -113,4 +114,68 @@ test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exist
 	// from the vm context's separate realm, and assert.deepStrictEqual treats
 	// same-shape-but-cross-realm objects as unequal ("not reference-equal").
 	assert.deepStrictEqual([...results], []);
+});
+
+test('getBackendLibraryId returns "u{userId}" for the personal library', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(1), 'u12345');
+});
+
+test('getBackendLibraryId returns the numeric group id for a group library', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: (/** @type {number} */ id) => (id === 7 ? { id: 999 } : null) },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(7), '999');
+});
+
+test('getBackendLibraryId falls back to the raw libraryID when unsynced and not a group', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => null },
+		Groups: { getByLibraryID: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	assert.strictEqual(plugin.getBackendLibraryId(1), '1');
+});
+
+test('the item-delete notifier maps the internal libraryID to the backend library_id in the DELETE URL', () => {
+	/** @type {string[]} */
+	const deletedUrls = [];
+	/** @type {any} */
+	let capturedObserver;
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: (/** @type {number} */ id) => (id === 7 ? { id: 999 } : null) },
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const fetchStub = (/** @type {string} */ url) => { deletedUrls.push(url); return Promise.resolve({ ok: true }); };
+	// plugin.init() logs via this.log() -> console.log(), and the file's own
+	// console-shim IIFE (top of zotero-rag.js) rewires console.log to route
+	// through Services.console.logStringMessage — stub Services so that
+	// doesn't throw (same pattern as plugin/test/fix-unavailable.test.js).
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: servicesStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	capturedObserver.notify('delete', 'item', [1], { 1: { libraryID: 1, key: 'ITEM1' } });
+	capturedObserver.notify('delete', 'item', [2], { 2: { libraryID: 7, key: 'ITEM2' } });
+
+	assert.strictEqual(deletedUrls[0], 'http://localhost:8119/api/libraries/u12345/items/ITEM1/chunks');
+	assert.strictEqual(deletedUrls[1], 'http://localhost:8119/api/libraries/999/items/ITEM2/chunks');
 });
