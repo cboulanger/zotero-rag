@@ -218,20 +218,24 @@ class ZoteroRAGPlugin {
 						}
 					} else if (event === 'modify') {
 						for (const id of ids) {
-							const item = Zotero.Items.get(id);
-							if (!item || !item.isRegularItem()) continue;
-							const backendLibraryId = this.getBackendLibraryId(item.libraryID);
-							const snapshot = {
-								item_key: item.key,
-								title: item.getField('title') || null,
-								authors: this._extractAuthors(item),
-								tags: this._extractTags(item),
-								year: this._extractYear(item),
-								item_type: item.itemType || null,
-								item_version: item.version || 0,
-								zotero_modified: item.dateModified || new Date().toISOString(),
-							};
-							TaskQueue.enqueue('metadata', `${backendLibraryId}:${item.key}`, snapshot, METADATA_DEBOUNCE_MS);
+							try {
+								const item = Zotero.Items.get(id);
+								if (!item || !item.isRegularItem()) continue;
+								const backendLibraryId = this.getBackendLibraryId(item.libraryID);
+								const snapshot = {
+									item_key: item.key,
+									title: item.getField('title') || null,
+									authors: this._extractAuthors(item),
+									tags: this._extractTags(item),
+									year: this._extractYear(item),
+									item_type: item.itemType || null,
+									item_version: item.version || 0,
+									zotero_modified: item.dateModified || new Date().toISOString(),
+								};
+								TaskQueue.enqueue('metadata', `${backendLibraryId}:${item.key}`, snapshot, METADATA_DEBOUNCE_MS);
+							} catch (e) {
+								console.warn(`Failed to enqueue metadata update for item id ${id}: ${e.message}`);
+							}
 						}
 					}
 				}

@@ -290,3 +290,59 @@ test('the item-modify notifier ignores non-regular items (attachments, notes)', 
 
 	assert.strictEqual(enqueued.length, 0);
 });
+
+test('the item-modify notifier isolates per-item failures: one throwing item does not block the rest of the batch', () => {
+	/** @type {any[]} */
+	const enqueued = [];
+	/** @type {any} */
+	let capturedObserver;
+	const goodItem = {
+		key: 'ITEM2', libraryID: 1, version: 3, dateModified: '2026-01-02T00:00:00Z',
+		itemType: 'book',
+		isRegularItem: () => true,
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'Good Title' : ''),
+		getCreators: () => [],
+		getTags: () => [],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Users: { getCurrentUserID: () => 12345 },
+		Groups: { getByLibraryID: () => null },
+		Items: {
+			get: (/** @type {number} */ id) => {
+				if (id === 1) throw new Error('simulated failure reading item 1');
+				if (id === 2) return goodItem;
+				return null;
+			},
+		},
+		Notifier: {
+			registerObserver: (/** @type {any} */ observer) => { capturedObserver = observer; return 'nid'; },
+			unregisterObserver: () => {},
+		},
+		Prefs: { get: () => null },
+	};
+	const taskQueueStub = {
+		enqueue: (/** @type {any[]} */ ...args) => enqueued.push(args),
+		start: () => {},
+		registerDispatcher: () => {},
+	};
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	// The per-item catch block logs via console.warn(), which the file's own
+	// console-shim IIFE routes through Cc/Ci (nsIScriptError) rather than
+	// Services.console.logStringMessage — stub those too (same pattern as
+	// plugin/test/fix-unavailable.test.js).
+	const ccStub = { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } };
+	const ciStub = { nsIScriptError: {} };
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub, Cc: ccStub, Ci: ciStub });
+	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
+
+	// id 1 throws when Zotero.Items.get() is called; id 2 is a normal valid item.
+	// The failure on id 1 must not prevent id 2 from being enqueued.
+	capturedObserver.notify('modify', 'item', [1, 2], {});
+
+	assert.strictEqual(enqueued.length, 1);
+	const [type, key, payload] = enqueued[0];
+	assert.strictEqual(type, 'metadata');
+	assert.strictEqual(key, 'u12345:ITEM2');
+	assert.strictEqual(payload.title, 'Good Title');
+});
