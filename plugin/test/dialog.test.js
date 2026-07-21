@@ -96,3 +96,34 @@ test('mergeDownloadFailures does not bump the count when nothing new was added',
 	assert.deepStrictEqual(storeCalls, [{ libraryId: 'lib1', keys: ['ATT1'] }]);
 	assert.deepStrictEqual(countUpdates, []);
 });
+
+test('resolveZoteroLibraryID resolves a group library id via Zotero.Groups', () => {
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Zotero: { Groups: { get: (/** @type {number} */ id) => (id === 42 ? { libraryID: 99 } : null) } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ZoteroRAGDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = { plugin: { getLibraries: () => [{ id: '42', type: 'group' }] } };
+	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '42');
+
+	assert.strictEqual(result, 99);
+});
+
+test('resolveZoteroLibraryID resolves a personal library id by parsing it as an integer', () => {
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console, Zotero: { Groups: { get: () => null } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ZoteroRAGDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = { plugin: { getLibraries: () => [{ id: '7', type: 'user' }] } };
+	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '7');
+
+	assert.strictEqual(result, 7);
+});

@@ -1102,13 +1102,37 @@ var ZoteroRAGDialog = {
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
-			const result = await this.plugin.submitQuery(question, libraryIds, {
+			let result = await this.plugin.submitQuery(question, libraryIds, {
 				minScore: minScore,
 				topK: topK,
 				llmModel: llmModel,
 				enableRouting: enableRouting,
 				includeTrace: includeTrace
 			});
+
+			// The router determined this question needs citation evidence that only
+			// exists in the user's local Zotero full-text index — gather it and resubmit,
+			// echoing back query_plan so the backend doesn't re-run the routing LLM call.
+			if (result.status === 'needs_client_evidence') {
+				this.updateProgress(25, 'Searching local library', 'Scanning full text for citations...');
+				const zoteroLibraryIDs = /** @type {Array<number>} */ (
+					libraryIds
+						.map((/** @type {string} */ id) => this.resolveZoteroLibraryID(id))
+						.filter((/** @type {number|null} */ id) => id !== null)
+				);
+				const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
+
+				this.updateProgress(40, 'Processing query', 'Sending citation evidence to backend...');
+				result = await this.plugin.submitQuery(question, libraryIds, {
+					minScore: minScore,
+					topK: topK,
+					llmModel: llmModel,
+					enableRouting: enableRouting,
+					includeTrace: includeTrace,
+					clientEvidence: evidence,
+					queryPlan: result.query_plan
+				});
+			}
 
 			// Update progress for note creation phase
 			this.updateProgress(50, 'Creating note', 'Formatting results...');
@@ -1424,6 +1448,23 @@ var ZoteroRAGDialog = {
 
 		this.plugin.log(`Completed downloading ${total} attachments for library ${libraryId}`);
 		this.updateLibraryProgressText(libraryId, null); // restore normal display
+	},
+
+	/**
+	 * Resolve a backend-format library ID (e.g. "u123" or a numeric group ID
+	 * string) to the native Zotero integer libraryID needed by
+	 * `Zotero.Search()`. Mirrors the resolution in downloadMissingAttachments().
+	 * @param {string} libraryId
+	 * @returns {number|null}
+	 */
+	resolveZoteroLibraryID(libraryId) {
+		if (!this.plugin) return null;
+		const library = this.plugin.getLibraries().find((/** @type {any} */ l) => l.id === libraryId);
+		const libraryType = library ? library.type : 'user';
+		const zoteroLibraryID = libraryType === 'group'
+			? Zotero.Groups.get(parseInt(libraryId, 10))?.libraryID
+			: parseInt(libraryId, 10);
+		return zoteroLibraryID || null;
 	},
 
 	/**

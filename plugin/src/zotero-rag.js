@@ -71,6 +71,8 @@
  * @property {string} [llmModel] - LLM model override (must be in preset's model list)
  * @property {boolean} [enableRouting] - When false, skips routing and runs pure-RAG mode (default: true)
  * @property {boolean} [includeTrace] - When true, request a full execution trace from the backend
+ * @property {any} [clientEvidence] - Citation-mention evidence gathered client-side, sent back on the resubmit half of the two-phase "needs_client_evidence" flow
+ * @property {any} [queryPlan] - The `query_plan` echoed back from a prior `needs_client_evidence` response, so the backend can skip re-running the routing LLM call
  */
 
 
@@ -1138,6 +1140,12 @@ class ZoteroRAGPlugin {
 			}
 			if (options.includeTrace) {
 				payload.include_trace = true;
+			}
+			if (options.clientEvidence !== undefined) {
+				payload.client_evidence = options.clientEvidence;
+			}
+			if (options.queryPlan !== undefined) {
+				payload.query_plan = options.queryPlan;
 			}
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
