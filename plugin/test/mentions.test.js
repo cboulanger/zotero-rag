@@ -34,6 +34,15 @@ test('expandVariants includes original, diacritic-folded, and transliterated for
 	assert.ok(variants.includes('wiethoelter'));
 });
 
+test('expandVariants filters out blank variants', () => {
+	const M = loadMentionSearch();
+	// Array.from normalizes the vm-context array to this realm's Array before
+	// comparing — deepStrictEqual otherwise treats same-content arrays from
+	// different vm realms as unequal (differing Array.prototype identity).
+	assert.deepStrictEqual(Array.from(M.expandVariants('')), []);
+	assert.deepStrictEqual(Array.from(M.expandVariants('   ')), []);
+});
+
 test('buildSearchTerms combines author variants and title keyword variants', () => {
 	const M = loadMentionSearch();
 	const terms = M.buildSearchTerms({ author: 'Teubner', title_keywords: ['Bukowina'] });
@@ -53,6 +62,19 @@ test('extractSnippets is case-insensitive and matches multiple terms', () => {
 	const M = loadMentionSearch();
 	const { count } = M.extractSnippets('WIETHÖLTER and bukowina', ['wiethölter', 'bukowina']);
 	assert.strictEqual(count, 2);
+});
+
+test('extractSnippets with an empty term list matches nothing (not everything)', () => {
+	const M = loadMentionSearch();
+	const { count, snippets } = M.extractSnippets('abcde', M.expandVariants(''));
+	assert.strictEqual(count, 0);
+	assert.deepStrictEqual(Array.from(snippets), []);
+});
+
+test('extractSnippets treats regex metacharacters in terms as literal text', () => {
+	const M = loadMentionSearch();
+	const { count } = M.extractSnippets('see Müller (Hrsg.) 2020 for details', ['müller (hrsg.)']);
+	assert.strictEqual(count, 1);
 });
 
 test('isSelfCitation is true when author and title keyword both match', () => {

@@ -6,6 +6,10 @@
 
 // @ts-check
 
+// Budget for the evidence payload shipped back to the backend: capped so a query
+// with many matches still fits comfortably in the synthesis LLM's context window
+// (empirically, ~3 snippets/target/doc across ~40 docs stays in the low tens of
+// thousands of tokens even for a multi-target query).
 const MENTION_SNIPPET_CHARS = 240;
 const MENTION_MAX_SNIPPETS_PER_TARGET = 3;
 const MENTION_MAX_EVIDENCE_ITEMS = 40;
@@ -16,7 +20,7 @@ const MENTION_MAX_EVIDENCE_ITEMS = 40;
  * @returns {string}
  */
 function foldDiacritics(s) {
-	return s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  return s.normalize('NFD').replace(/[̀-ͯ]/g, '');
 }
 
 /**
@@ -26,11 +30,11 @@ function foldDiacritics(s) {
  * @returns {string}
  */
 function transliterateGerman(s) {
-	return s
-		.replace(/ö/g, 'oe').replace(/Ö/g, 'Oe')
-		.replace(/ä/g, 'ae').replace(/Ä/g, 'Ae')
-		.replace(/ü/g, 'ue').replace(/Ü/g, 'Ue')
-		.replace(/ß/g, 'ss');
+  return s
+    .replace(/ö/g, 'oe').replace(/Ö/g, 'Oe')
+    .replace(/ä/g, 'ae').replace(/Ä/g, 'Ae')
+    .replace(/ü/g, 'ue').replace(/Ü/g, 'Ue')
+    .replace(/ß/g, 'ss');
 }
 
 /**
@@ -41,8 +45,9 @@ function transliterateGerman(s) {
  * @returns {Array<string>}
  */
 function expandVariants(word) {
-	const lower = word.toLowerCase();
-	return [...new Set([lower, foldDiacritics(lower), transliterateGerman(lower)])];
+  const lower = word.toLowerCase();
+  return [...new Set([lower, foldDiacritics(lower), transliterateGerman(lower)])]
+    .filter(v => v.trim().length > 0);
 }
 
 /**
@@ -53,11 +58,11 @@ function expandVariants(word) {
  * @returns {Array<string>}
  */
 function buildSearchTerms(target) {
-	const terms = expandVariants(target.author);
-	for (const kw of target.title_keywords || []) {
-		terms.push(...expandVariants(kw));
-	}
-	return [...new Set(terms)];
+  const terms = expandVariants(target.author);
+  for (const kw of target.title_keywords || []) {
+    terms.push(...expandVariants(kw));
+  }
+  return [...new Set(terms)];
 }
 
 /**
@@ -70,21 +75,21 @@ function buildSearchTerms(target) {
  * @returns {{count: number, snippets: Array<string>}}
  */
 function extractSnippets(text, terms, maxSnippets = MENTION_MAX_SNIPPETS_PER_TARGET, windowChars = MENTION_SNIPPET_CHARS) {
-	if (!terms.length) return { count: 0, snippets: [] };
-	const pattern = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
-	const snippets = [];
-	let count = 0;
-	let match;
-	while ((match = pattern.exec(text)) !== null) {
-		count++;
-		if (snippets.length < maxSnippets) {
-			const start = Math.max(0, match.index - windowChars / 2);
-			const end = Math.min(text.length, match.index + match[0].length + windowChars / 2);
-			snippets.push(text.slice(start, end).replace(/\s+/g, ' ').trim());
-		}
-		if (match.index === pattern.lastIndex) pattern.lastIndex++;
-	}
-	return { count, snippets };
+  if (!terms.length) return { count: 0, snippets: [] };
+  const pattern = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi');
+  const snippets = [];
+  let count = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    count++;
+    if (snippets.length < maxSnippets) {
+      const start = Math.max(0, match.index - windowChars / 2);
+      const end = Math.min(text.length, match.index + match[0].length + windowChars / 2);
+      snippets.push(text.slice(start, end).replace(/\s+/g, ' ').trim());
+    }
+    if (match.index === pattern.lastIndex) pattern.lastIndex++;
+  }
+  return { count, snippets };
 }
 
 /**
@@ -97,15 +102,15 @@ function extractSnippets(text, terms, maxSnippets = MENTION_MAX_SNIPPETS_PER_TAR
  * @returns {boolean}
  */
 function isSelfCitation(itemAuthors, itemTitle, target) {
-	const authorVariants = expandVariants(target.author);
-	const authorMatches = itemAuthors.some(a => {
-		const folded = foldDiacritics(a.toLowerCase());
-		return authorVariants.some(v => folded.includes(v) || folded.includes(foldDiacritics(v)));
-	});
-	if (!authorMatches) return false;
-	if (!target.title_keywords || target.title_keywords.length === 0) return true;
-	const foldedTitle = foldDiacritics(itemTitle.toLowerCase());
-	return target.title_keywords.some(kw => foldedTitle.includes(foldDiacritics(kw.toLowerCase())));
+  const authorVariants = expandVariants(target.author);
+  const authorMatches = itemAuthors.some(a => {
+    const folded = foldDiacritics(a.toLowerCase());
+    return authorVariants.some(v => folded.includes(foldDiacritics(v)));
+  });
+  if (!authorMatches) return false;
+  if (!target.title_keywords || target.title_keywords.length === 0) return true;
+  const foldedTitle = foldDiacritics(itemTitle.toLowerCase());
+  return target.title_keywords.some(kw => foldedTitle.includes(foldDiacritics(kw.toLowerCase())));
 }
 
 /**
@@ -116,19 +121,19 @@ function isSelfCitation(itemAuthors, itemTitle, target) {
  * @returns {{items: Array<any>, truncated: boolean, total_candidates: number}}
  */
 function rankAndCap(items, maxItems = MENTION_MAX_EVIDENCE_ITEMS) {
-	const scored = items.map(item => {
-		const score = Object.values(item.target_matches)
-			.filter((/** @type {any} */ m) => !m.is_self)
-			.reduce((sum, /** @type {any} */ m) => sum + m.count, 0);
-		return { item, score };
-	});
-	scored.sort((a, b) => b.score - a.score);
-	const capped = scored.slice(0, maxItems).map(s => s.item);
-	return {
-		items: capped,
-		truncated: items.length > maxItems,
-		total_candidates: items.length,
-	};
+  const scored = items.map(item => {
+    const score = Object.values(item.target_matches)
+      .filter((/** @type {any} */ m) => !m.is_self)
+      .reduce((sum, /** @type {any} */ m) => sum + m.count, 0);
+    return { item, score };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  const capped = scored.slice(0, maxItems).map(s => s.item);
+  return {
+    items: capped,
+    truncated: items.length > maxItems,
+    total_candidates: items.length,
+  };
 }
 
 /**
@@ -138,29 +143,30 @@ function rankAndCap(items, maxItems = MENTION_MAX_EVIDENCE_ITEMS) {
  * @param {Record<string, any>} existing
  * @param {Record<string, any>} incoming
  * @param {number} [maxSnippets]
+ * @returns {void}
  */
 function mergeTargetMatches(existing, incoming, maxSnippets = MENTION_MAX_SNIPPETS_PER_TARGET) {
-	for (const [key, match] of Object.entries(incoming)) {
-		if (!existing[key]) {
-			existing[key] = match;
-			continue;
-		}
-		existing[key].count += match.count;
-		existing[key].is_self = existing[key].is_self || match.is_self;
-		existing[key].snippets = existing[key].snippets.concat(match.snippets).slice(0, maxSnippets);
-	}
+  for (const [key, match] of Object.entries(incoming)) {
+    if (!existing[key]) {
+      existing[key] = match;
+      continue;
+    }
+    existing[key].count += match.count;
+    existing[key].is_self = existing[key].is_self || match.is_self;
+    existing[key].snippets = existing[key].snippets.concat(match.snippets).slice(0, maxSnippets);
+  }
 }
 
 var MentionSearch = {
-	MENTION_SNIPPET_CHARS,
-	MENTION_MAX_SNIPPETS_PER_TARGET,
-	MENTION_MAX_EVIDENCE_ITEMS,
-	foldDiacritics,
-	transliterateGerman,
-	expandVariants,
-	buildSearchTerms,
-	extractSnippets,
-	isSelfCitation,
-	rankAndCap,
-	mergeTargetMatches,
+  MENTION_SNIPPET_CHARS,
+  MENTION_MAX_SNIPPETS_PER_TARGET,
+  MENTION_MAX_EVIDENCE_ITEMS,
+  foldDiacritics,
+  transliterateGerman,
+  expandVariants,
+  buildSearchTerms,
+  extractSnippets,
+  isSelfCitation,
+  rankAndCap,
+  mergeTargetMatches,
 };
