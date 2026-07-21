@@ -116,6 +116,20 @@ Executes a payload-only Qdrant scroll (no query vector) via
 `[M1] Author (Year) — Title [item_type]`.  Its `capability_prompt` emphasises
 bibliographic listing questions.
 
+### `MentionsAgent` (`backend/services/mentions_agent.py`)
+
+Answers "who cites/discusses work X" questions. Unlike `RAGAgent`/`MetadataAgent`,
+it never retrieves anything itself — citation evidence only exists in the *citing*
+document's full text, and the backend has no reliable lexical index for that (Qdrant
+chunks are sized/embedded for semantic search, not citation lookup). Instead, the
+Zotero client's own local full-text search index (built for every downloaded
+attachment) supplies the evidence — see "Two-Phase Protocol for the `mentions`
+Agent" below.
+
+The router extracts `citation_targets` (author/year/title of the *cited* work),
+kept structurally separate from `authors` (which means "written by"). Its
+`capability_prompt` teaches the router this distinction with a worked example.
+
 ## `MetadataFilters` (`backend/models/filters.py`)
 
 A single Pydantic model shared across the entire pipeline:
@@ -133,6 +147,50 @@ Author and title matching use a full-text index
 
 `MetadataFilters.is_empty()` returns `True` when all fields are at their default
 (no filtering).
+
+## Two-Phase Protocol for the `mentions` Agent
+
+`citation_targets` evidence is gathered from the Zotero client's local full-text
+search index (`fulltextWord` condition on `Zotero.Search`, snippets read from each
+attachment's `.zotero-ft-cache` file) — the backend cannot retrieve it itself. When
+the router selects `"mentions"` with non-empty `citation_targets` and the request
+carries no `client_evidence`, `/api/query` returns immediately without running any
+agents:
+
+```json
+{
+  "status": "needs_client_evidence",
+  "citation_targets": [{"author": "teubner", "year": null, "title_keywords": ["bukowina"]}],
+  "query_plan": {"agents_to_use": ["mentions"], "filters": {"...": "..."}}
+}
+```
+
+The plugin (`plugin/src/mentions.js`'s `findMentionEvidence()`) then searches the
+user's local full-text index for documents whose text contains ALL requested
+targets (set intersection), extracts up to 3 snippets per target per document
+(240 chars, capped to the top 40 documents by match count), flags documents whose
+own metadata identifies them as the cited work itself (`is_self`) or whose local
+index is incomplete (`partial_index`), and resubmits:
+
+```json
+{
+  "question": "...",
+  "library_ids": ["..."],
+  "client_evidence": {"items": [...], "truncated": false, "total_candidates": 3},
+  "query_plan": {"agents_to_use": ["mentions"], "filters": {"...": "..."}}
+}
+```
+
+Echoing `query_plan` back lets the orchestrator skip a second routing LLM call —
+`QueryOrchestrator.query(..., preset_plan=...)` uses it directly.
+
+**Known limitations:** full-text coverage is limited to attachments the user has
+downloaded and locally indexed (irrelevant for group-library items other members
+haven't synced); a "mention" is word co-occurrence, not a verified citation — the
+synthesis LLM, not the search itself, judges each snippet; partial per-document
+indexing (Zotero's `fulltext.pdfMaxPages`/`textMaxLength` prefs) can miss mentions
+near the end of long documents, flagged via `partial_index` but not otherwise
+compensated for.
 
 ## Schema Versioning
 
