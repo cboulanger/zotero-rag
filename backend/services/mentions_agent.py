@@ -14,12 +14,26 @@ agent depends on.
 
 from __future__ import annotations
 
-from typing import Optional
+import time
+from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel
 
 from backend.models.filters import CitationTarget, MetadataFilters
+from backend.models.trace import AgentExecutionTrace
 from backend.services.base_agent import AgentResult, BaseAgent
-from backend.services.metadata_agent import _format_authors
+
+if TYPE_CHECKING:
+    from backend.services.trace_collector import TraceCollector
+
+
+def _format_authors(authors: list[str]) -> str:
+    if not authors:
+        return "Unknown"
+    if len(authors) == 1:
+        return authors[0]
+    if len(authors) == 2:
+        return f"{authors[0]} & {authors[1]}"
+    return f"{authors[0]} et al."
 
 
 class TargetMatch(BaseModel):
@@ -126,9 +140,10 @@ class MentionsAgent(BaseAgent):
         question: str,
         library_ids: list[str],
         filters: MetadataFilters,
-        trace=None,
+        trace: Optional["TraceCollector"] = None,
         **kwargs,
     ) -> AgentResult:
+        t_start = time.monotonic()
         evidence: ClientEvidence = kwargs["client_evidence"]
         context_text = _evidence_to_context(evidence, filters.citation_targets)
         sources = [
@@ -143,4 +158,15 @@ class MentionsAgent(BaseAgent):
             for item in evidence.items
             if not all(m.is_self for m in item.target_matches.values())
         ]
+
+        if trace is not None:
+            trace.record(AgentExecutionTrace(
+                agent_name=self.name,
+                retrieval=None,
+                catalog_results=[item.model_dump() for item in evidence.items],
+                context_text=context_text,
+                sources_count=len(sources),
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+            ))
+
         return AgentResult(agent_name=self.name, context_text=context_text, sources=sources)
