@@ -185,6 +185,10 @@ function makeEvidenceStubs(docs) {
 				const doc = docs.find(d => d.id === id);
 				return { indexedPages: doc.indexedPages ?? 1, total: doc.totalPages ?? 1 };
 			},
+			// By default, simulate a FAILED retry — a real re-index pass can fail too
+			// (e.g. the underlying PDF file is itself missing locally). Tests that want
+			// to exercise the retry-succeeds path override this per-test.
+			indexItems: async () => { throw new Error('reindex failed'); },
 		},
 		ZoteroRAG: {
 			_extractAuthors: (/** @type {any} */ item) => {
@@ -270,6 +274,42 @@ test('findMentionEvidence skips a document whose cache file is unreadable, witho
 
 	assert.strictEqual(result.items.length, 1);
 	assert.strictEqual(result.items[0].item_key, 'READABLE');
+});
+
+test('findMentionEvidence retries via Zotero.FullText.indexItems when the cache file is initially missing, and recovers', async () => {
+	const docs = [
+		{ id: 1, key: 'LAZY_INDEX', title: 'T', authors: [], text: 'mentions Wiethölter here' },
+	];
+	const { zotero, ioUtils } = makeEvidenceStubs(docs);
+
+	// Simulate: Zotero's word index already has this item (makeEvidenceStubs' Zotero.Search
+	// stub reflects that regardless of cache-file state), but the cache TEXT file doesn't
+	// exist yet — until indexItems is called, which "regenerates" it, mirroring a real
+	// re-index pass populating the file from the still-present local PDF.
+	const cachePath = '/cache/LAZY_INDEX';
+	const realText = docs[0].text;
+	let indexItemsCalled = false;
+
+	// First read attempt fails (simulating the missing file before indexItems runs).
+	ioUtils.readUTF8 = async (/** @type {string} */ p) => {
+		if (p === cachePath) throw new Error('ENOENT');
+		throw new Error('ENOENT');
+	};
+	zotero.FullText.indexItems = async (/** @type {Array<number>} */ ids) => {
+		indexItemsCalled = true;
+		// Regenerate the cache file the way a real re-index pass would.
+		ioUtils.readUTF8 = async (/** @type {string} */ p) => {
+			if (p === cachePath) return realText;
+			throw new Error('ENOENT');
+		};
+	};
+
+	const M = loadMentionSearch(zotero, ioUtils);
+	const result = await M.findMentionEvidence([{ author: 'wiethölter' }], [1]);
+
+	assert.strictEqual(indexItemsCalled, true);
+	assert.strictEqual(result.items.length, 1);
+	assert.strictEqual(result.items[0].item_key, 'LAZY_INDEX');
 });
 
 test('findMentionEvidence returns an empty result when nothing matches', async () => {

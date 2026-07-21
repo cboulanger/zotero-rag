@@ -212,8 +212,18 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 		try {
 			text = await IOUtils.readUTF8(Zotero.FullText.getItemCacheFile(att).path);
 		} catch (_) {
-			console.warn(`MentionSearch: attachment ${att.key} is in Zotero's full-text word index but its cache file could not be read — skipping.`);
-			continue;
+			// Zotero's full-text word index (word -> item mappings, indexed page counts) can be
+			// populated via library sync before the actual cache TEXT file is ever regenerated
+			// locally — e.g. a group-library member who hasn't personally opened this PDF yet.
+			// The underlying PDF is a separate, usually-already-synced asset, so retry via a
+			// local (re)index pass before giving up on this candidate.
+			try {
+				await Zotero.FullText.indexItems([att.id], { complete: true });
+				text = await IOUtils.readUTF8(Zotero.FullText.getItemCacheFile(att).path);
+			} catch (_retryErr) {
+				console.warn(`MentionSearch: attachment ${att.key} is in Zotero's full-text word index but its cache file could not be read or regenerated — skipping.`);
+				continue;
+			}
 		}
 
 		const parent = att.parentItemID ? await Zotero.Items.getAsync(att.parentItemID) : null;
