@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
-from backend.models.filters import MetadataFilters
+from backend.models.filters import CitationTarget, MetadataFilters
 from backend.models.trace import LLMCallTrace, RoutingTrace
 from backend.services.base_agent import BaseAgent, QueryPlan
 from backend.services.llm import LLMService
@@ -33,6 +33,19 @@ General guidance:
   organisations, events, or arguments — even if they use "listing" or "exist" language.
   Those questions require "rag" to read document content.
 - Combine both agents only when the question BOTH lists catalog items AND asks about content.
+- Use "mentions" when the question asks which publications CITE, DISCUSS, RESPOND TO, or
+  MENTION a specific named work — as opposed to questions about work BY that person.
+  Populate citation_targets with one entry per cited work (author surname, optional year,
+  optional distinctive title keywords) and leave the cited author OUT of "authors".
+  Example: "Which publications cite Wiethölter's 1975 article and discuss Teubner's Globale
+  Bukowina?" -> agents: ["mentions"], authors: [] (NOT ["wiethölter", "teubner"] — they are
+  cited, not authored-by), citation_targets: [
+    {"author": "wiethölter", "year": 1975, "title_keywords": []},
+    {"author": "teubner", "year": null, "title_keywords": ["bukowina"]}
+  ].
+- "mentions" is expensive (a client-side full-text scan) and approximate (word co-occurrence,
+  not a verified citation) — only select it when the question is clearly about citation or
+  discussion of a specific named work, not a general topic search (that's "rag").
 - Default when uncertain: {"agents": ["rag"], ...rest null/empty}
 """
 
@@ -52,16 +65,20 @@ Return ONLY a valid JSON object — no other text:
   "authors": [],
   "item_types": [],
   "title_keywords": [],
+  "citation_targets": [],
   "routing_description": null
 }}
 
 Field explanations:
 - agents: list of agent names to invoke (must be from the agents listed above)
 - year_min / year_max: earliest/latest year mentioned (integer or null)
-- authors: author last names mentioned in the question (lowercase strings)
+- authors: author last names mentioned in the question (lowercase strings) — WRITTEN BY only
 - item_types: e.g. ["book", "journalArticle"] if item type is specified; empty otherwise
 - title_keywords: ONLY populate when the user explicitly names a specific document title
   they want to find (e.g. "find the paper called 'X'"). Leave empty for topic/keyword searches.
+- citation_targets: list of {{author, year, title_keywords}} for works the question asks about
+  being CITED/DISCUSSED by other publications (see "mentions" agent below). Leave empty unless
+  the question is clearly about citation/discussion of specific named work(s).
 - routing_description: brief one-sentence note on why these agents were chosen
 {guidance}"""
 
@@ -111,6 +128,15 @@ class QueryRouter:
             if not selected:
                 selected = ["rag"]
 
+            citation_targets = []
+            for ct in data.get("citation_targets") or []:
+                if isinstance(ct, dict) and ct.get("author"):
+                    citation_targets.append(CitationTarget(
+                        author=str(ct["author"]),
+                        year=ct.get("year"),
+                        title_keywords=ct.get("title_keywords") or [],
+                    ))
+
             plan = QueryPlan(
                 agents_to_use=selected,
                 filters=MetadataFilters(
@@ -119,6 +145,7 @@ class QueryRouter:
                     authors=data.get("authors") or [],
                     item_types=data.get("item_types") or [],
                     title_keywords=data.get("title_keywords") or [],
+                    citation_targets=citation_targets,
                 ),
                 routing_description=data.get("routing_description"),
             )

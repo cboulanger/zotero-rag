@@ -124,6 +124,40 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
         plan = await router.route("Find autopoiesis papers", agents)
         self.assertEqual(plan.filters.title_keywords, ["autopoiesis"])
 
+    async def test_extracts_citation_targets(self):
+        router = _make_router(
+            '{"agents": ["mentions"], "authors": [], '
+            '"citation_targets": ['
+            '{"author": "wiethölter", "year": 1975, "title_keywords": []}, '
+            '{"author": "teubner", "title_keywords": ["bukowina"]}'
+            ']}'
+        )
+        agents = [_make_agent("mentions", "citation search")]
+        plan = await router.route(
+            "Which publications cite Wiethölter (1975) and Teubner's Globale Bukowina?", agents
+        )
+        self.assertEqual(len(plan.filters.citation_targets), 2)
+        self.assertEqual(plan.filters.citation_targets[0].author, "wiethölter")
+        self.assertEqual(plan.filters.citation_targets[0].year, 1975)
+        self.assertEqual(plan.filters.citation_targets[1].title_keywords, ["bukowina"])
+        self.assertEqual(plan.filters.authors, [])
+
+    async def test_missing_citation_targets_defaults_to_empty(self):
+        router = _make_router('{"agents": ["rag"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("What is autopoiesis?", agents)
+        self.assertEqual(plan.filters.citation_targets, [])
+
+    async def test_ignores_malformed_citation_target_entries(self):
+        router = _make_router(
+            '{"agents": ["mentions"], '
+            '"citation_targets": [{"year": 1975}, "not a dict", {"author": "teubner"}]}'
+        )
+        agents = [_make_agent("mentions", "citation search")]
+        plan = await router.route("q", agents)
+        self.assertEqual(len(plan.filters.citation_targets), 1)
+        self.assertEqual(plan.filters.citation_targets[0].author, "teubner")
+
     async def test_extracts_routing_description(self):
         router = _make_router('{"agents": ["rag"], "routing_description": "semantic question"}')
         agents = [_make_agent("rag", "semantic")]
