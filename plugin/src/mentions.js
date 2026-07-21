@@ -157,6 +157,97 @@ function mergeTargetMatches(existing, incoming, maxSnippets = MENTION_MAX_SNIPPE
 	}
 }
 
+/**
+ * Search the user's local Zotero full-text index for documents mentioning
+ * ALL of `citationTargets` (set intersection across targets), gather
+ * evidence snippets from each match's `.zotero-ft-cache` file, and return
+ * the ranked, budget-capped `client_evidence` payload for POST /api/query.
+ * @param {Array<{author: string, year?: number|null, title_keywords?: Array<string>}>} citationTargets
+ * @param {Array<number>} zoteroLibraryIDs - native Zotero library IDs to search
+ * @returns {Promise<{items: Array<any>, truncated: boolean, total_candidates: number}>}
+ */
+async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
+	if (!citationTargets.length || !zoteroLibraryIDs.length) {
+		return { items: [], truncated: false, total_candidates: 0 };
+	}
+
+	// 1. Per-target candidate attachment ID sets (union over variants/libraries).
+	const perTargetIDs = [];
+	for (const target of citationTargets) {
+		const terms = buildSearchTerms(target);
+		const ids = new Set();
+		for (const libraryID of zoteroLibraryIDs) {
+			for (const term of terms) {
+				const search = new Zotero.Search();
+				(/** @type {any} */ (search)).libraryID = libraryID;
+				search.addCondition('deleted', 'false');
+				search.addCondition('fulltextWord', 'contains', term);
+				for (const id of await search.search()) ids.add(id);
+			}
+		}
+		perTargetIDs.push(ids);
+	}
+
+	// 2. Intersect across targets — "cites A and B" means both must be present.
+	let candidateIDs = perTargetIDs[0];
+	for (const ids of perTargetIDs.slice(1)) {
+		candidateIDs = new Set([...candidateIDs].filter(id => ids.has(id)));
+	}
+	if (candidateIDs.size === 0) {
+		return { items: [], truncated: false, total_candidates: 0 };
+	}
+
+	// 3. Read cache files, extract per-target evidence, dedupe by parent item.
+	const attachments = await Zotero.Items.getAsync([...candidateIDs]);
+	/** @type {Map<string, any>} */
+	const byParentKey = new Map();
+
+	for (const att of attachments) {
+		let text;
+		try {
+			text = await IOUtils.readUTF8(Zotero.FullText.getItemCacheFile(att).path);
+		} catch (_) {
+			continue; // no cache file — shouldn't happen if the word index has this item, but be defensive
+		}
+
+		const parent = att.parentItemID ? await Zotero.Items.getAsync(att.parentItemID) : null;
+		const subject = parent || att;
+		const itemKey = subject.key;
+		const title = subject.getField ? (subject.getField('title') || 'Untitled') : 'Untitled';
+		const authors = Zotero.ZoteroRAG._extractAuthors(subject);
+		const year = Zotero.ZoteroRAG._extractYear(subject);
+		const libraryId = Zotero.ZoteroRAG.getBackendLibraryId(subject.libraryID);
+
+		const pages = await Zotero.FullText.getPages(att.id);
+		const partialIndex = !!(pages && pages.total && pages.indexedPages < pages.total);
+
+		/** @type {Record<string, any>} */
+		const targetMatches = {};
+		citationTargets.forEach((target, idx) => {
+			const terms = buildSearchTerms(target);
+			const { count, snippets } = extractSnippets(text, terms);
+			if (count === 0) return;
+			targetMatches[String(idx)] = {
+				count, snippets, is_self: isSelfCitation(authors, title, target),
+			};
+		});
+		if (Object.keys(targetMatches).length === 0) continue;
+
+		const existing = byParentKey.get(itemKey);
+		if (existing) {
+			mergeTargetMatches(existing.target_matches, targetMatches);
+			existing.partial_index = existing.partial_index || partialIndex;
+		} else {
+			byParentKey.set(itemKey, {
+				item_key: itemKey, library_id: libraryId, title, authors, year,
+				target_matches: targetMatches, partial_index: partialIndex,
+			});
+		}
+	}
+
+	return rankAndCap([...byParentKey.values()]);
+}
+
 var MentionSearch = {
 	MENTION_SNIPPET_CHARS,
 	MENTION_MAX_SNIPPETS_PER_TARGET,
@@ -169,4 +260,5 @@ var MentionSearch = {
 	isSelfCitation,
 	rankAndCap,
 	mergeTargetMatches,
+	findMentionEvidence,
 };
