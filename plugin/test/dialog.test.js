@@ -97,33 +97,40 @@ test('mergeDownloadFailures does not bump the count when nothing new was added',
 	assert.deepStrictEqual(countUpdates, []);
 });
 
-test('resolveZoteroLibraryID resolves a group library id via Zotero.Groups', () => {
+test('resolveZoteroLibraryID delegates to the plugin\'s own resolver', () => {
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
 		window: {}, console,
-		Zotero: { Groups: { get: (/** @type {number} */ id) => (id === 42 ? { libraryID: 99 } : null) } },
 	};
 	vm.createContext(context);
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ZoteroRAGDialog = context.ZoteroRAGDialog;
 
-	const fakeThis = { plugin: { getLibraries: () => [{ id: '42', type: 'group' }] } };
-	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '42');
+	const calls = [];
+	const fakeThis = {
+		plugin: {
+			_resolveZoteroLibraryID(id) {
+				calls.push(id);
+				return id === 'u12345' ? 1 : (id === '42' ? 99 : null);
+			},
+		},
+	};
 
-	assert.strictEqual(result, 99);
+	assert.strictEqual(ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, 'u12345'), 1);
+	assert.strictEqual(ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '42'), 99);
+	assert.deepStrictEqual(calls, ['u12345', '42']);
 });
 
-test('resolveZoteroLibraryID resolves a personal library id by parsing it as an integer', () => {
+test('resolveZoteroLibraryID returns null when the plugin is not available', () => {
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
-		window: {}, console, Zotero: { Groups: { get: () => null } },
+		window: {}, console,
 	};
 	vm.createContext(context);
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ZoteroRAGDialog = context.ZoteroRAGDialog;
 
-	const fakeThis = { plugin: { getLibraries: () => [{ id: '7', type: 'user' }] } };
-	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '7');
+	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call({ plugin: null }, 'u12345');
 
-	assert.strictEqual(result, 7);
+	assert.strictEqual(result, null);
 });

@@ -1122,7 +1122,7 @@ var ZoteroRAGDialog = {
 				);
 				const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
 
-				this.updateProgress(40, 'Processing query', 'Sending citation evidence to backend...');
+				this.updateProgress(40, 'Resubmitting query', 'Sending citation evidence to backend...');
 				result = await this.plugin.submitQuery(question, libraryIds, {
 					minScore: minScore,
 					topK: topK,
@@ -1132,6 +1132,10 @@ var ZoteroRAGDialog = {
 					clientEvidence: evidence,
 					queryPlan: result.query_plan
 				});
+
+				if (result.status === 'needs_client_evidence') {
+					throw new Error('Backend requested citation evidence a second time — this should not happen.');
+				}
 			}
 
 			// Update progress for note creation phase
@@ -1453,18 +1457,14 @@ var ZoteroRAGDialog = {
 	/**
 	 * Resolve a backend-format library ID (e.g. "u123" or a numeric group ID
 	 * string) to the native Zotero integer libraryID needed by
-	 * `Zotero.Search()`. Mirrors the resolution in downloadMissingAttachments().
+	 * `Zotero.Search()`. Delegates to the plugin's own resolver, which
+	 * correctly handles the "u{userId}" personal-library format.
 	 * @param {string} libraryId
 	 * @returns {number|null}
 	 */
 	resolveZoteroLibraryID(libraryId) {
 		if (!this.plugin) return null;
-		const library = this.plugin.getLibraries().find((/** @type {any} */ l) => l.id === libraryId);
-		const libraryType = library ? library.type : 'user';
-		const zoteroLibraryID = libraryType === 'group'
-			? Zotero.Groups.get(parseInt(libraryId, 10))?.libraryID
-			: parseInt(libraryId, 10);
-		return zoteroLibraryID || null;
+		return this.plugin._resolveZoteroLibraryID(libraryId);
 	},
 
 	/**
