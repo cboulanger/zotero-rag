@@ -224,7 +224,8 @@ re-indexing of unchanged documents.
 ```
 
 Set `enable_routing: false` to bypass the routing LLM call and go straight to
-`RAGAgent` (faster, but no metadata-filter extraction or catalog search).
+`RAGAgent` (faster, but no metadata-filter extraction, catalog search, or
+citation/mentions search).
 
 ### `POST /api/index/items/metadata`
 

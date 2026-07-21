@@ -51,6 +51,9 @@
  * @property {Array<string>} [agents_used] - Agent(s) dispatched to answer
  * @property {Record<string, number>} [library_document_counts] - Indexed document count per library ID
  * @property {Record<string, any>|null} [trace] - Full execution trace, populated when include_trace=true
+ * @property {string} [status] - "complete" | "needs_client_evidence"
+ * @property {Array<{author: string, year: number|null, title_keywords: Array<string>}>} [citation_targets] - populated when status is "needs_client_evidence"
+ * @property {any} [query_plan] - echo of the routing plan, present when status is "needs_client_evidence"; pass through unchanged on resubmit
  */
 
 
