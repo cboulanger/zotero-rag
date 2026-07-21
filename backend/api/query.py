@@ -7,7 +7,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
 from backend.models.filters import CitationTarget
@@ -60,12 +60,14 @@ class QueryResponse(BaseModel):
     agents_used: List[str] = []
     library_document_counts: dict[str, int] = {}
     trace: Optional[QueryTrace] = None  # Populated when include_trace=True
-    status: str = "complete"  # "complete" | "needs_client_evidence"
+    status: Literal["complete", "needs_client_evidence"] = "complete"
     citation_targets: List[CitationTarget] = []  # populated when status == "needs_client_evidence"
     query_plan: Optional[QueryPlan] = None  # echo back on the resubmit round trip
 
 
 def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
+    """Map a NeedsClientEvidenceError to a placeholder response telling the client
+    to gather full-text citation evidence locally and resubmit with it attached."""
     return QueryResponse(
         question=query.question,
         answer="",
