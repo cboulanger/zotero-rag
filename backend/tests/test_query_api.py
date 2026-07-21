@@ -74,5 +74,27 @@ class QueryAuthorizationTest(unittest.TestCase):
         self.assertEqual(r.status_code, 403)
 
 
+class NeedsEvidenceResponseTest(unittest.TestCase):
+    def test_maps_exception_to_pending_response(self):
+        from backend.api.query import _needs_evidence_response, QueryRequest
+        from backend.models.filters import CitationTarget, MetadataFilters
+        from backend.services.base_agent import NeedsClientEvidenceError, QueryPlan
+
+        query = QueryRequest(question="Who cites Teubner?", library_ids=["u1"])
+        plan = QueryPlan(
+            agents_to_use=["mentions"],
+            filters=MetadataFilters(citation_targets=[CitationTarget(author="teubner")]),
+        )
+        exc = NeedsClientEvidenceError(citation_targets=plan.filters.citation_targets, plan=plan)
+
+        response = _needs_evidence_response(query, exc)
+
+        self.assertEqual(response.status, "needs_client_evidence")
+        self.assertEqual(response.answer, "")
+        self.assertEqual(len(response.citation_targets), 1)
+        self.assertEqual(response.citation_targets[0].author, "teubner")
+        self.assertEqual(response.query_plan.agents_to_use, ["mentions"])
+
+
 if __name__ == "__main__":
     unittest.main()

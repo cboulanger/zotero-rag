@@ -17,7 +17,8 @@ Most document-chat tools require you to manually upload PDFs to a cloud service.
 
 - **Multi-user by design** — one backend deployment can serve an entire research group or institution from a single shared index, instead of everyone running their own local copy. Each member authenticates with their own read-only Zotero API key, authorized automatically via Zotero group membership — no separate accounts or credentials to manage.
 - **Always in sync** — the plugin reads directly from your local Zotero library. When you add, update, or delete an item in Zotero, the index stays current without any manual export or re-upload step.
-- **Bibliographic awareness** — because the index carries full Zotero metadata (authors, year, item type, title), you can ask questions that go beyond document content: *"List all books by Luhmann in my library"* or *"What journal articles on systems theory were published between 1975 and 1990?"* — answered instantly from the metadata index, without reading a single PDF. See [Query Routing](docs/query-routing.md) for how metadata and content questions are told apart.
+- **Bibliographic awareness** — go beyond document content and query your library's catalog metadata directly.
+- **Citation-aware search** — find out who in your library cites or discusses a specific work.
 - **Multi-library** — query across several Zotero libraries in a single question.
 - **Rich source citations** — answers include page numbers and text anchors (first words of the source passage), not just titles, making it easy to locate the original passage.
 - **Public web interface** — optionally expose a browser-accessible query UI for publicly readable Zotero libraries, so collaborators or readers can search your library without installing the plugin. See [Public Web Interface](docs/public-web-interface.md).
@@ -154,7 +155,13 @@ Once installed:
 5. If the library index is outdated or it has not been indexed yet, you will not be able to ask a question on this library. Indexing might take from minutes to days depending on the size of the library and the number of unindexed items. Configure [server-side auto-indexing](docs/auto-indexing-setup.md) to do this automatically and without having to keep Zotero running. From then on, you only need to index new and changed items in your library. If you have enabled auto-indexing on the server, you only have to index what you added since the last run. 
 6. Once indexed, you can ask questions that can be answered by the PDF documents contained in the selected libraries. The plugin will search through your documents and provide answers with source citations.
 
-The plugin uses AI to understand your questions and retrieve relevant information from your Zotero library, making it easy to find insights across multiple papers. Answers are backed by transparent [query routing](docs/query-routing.md) between semantic and metadata search, and can optionally be saved as a note:
+The plugin uses AI to understand your question and automatically pick the right way to answer it — you don't need to phrase things differently depending on what you're asking:
+
+- **Content questions** — about arguments, definitions, or ideas discussed in your library, e.g. *"How does Luhmann define autopoiesis?"* — answered by reading the relevant passages.
+- **Catalog questions** — about what's in your library, e.g. *"List all books by Habermas published after 2000"* — answered instantly from your Zotero metadata, without reading any files.
+- **Citation questions** — about who cites or discusses a specific work, e.g. *"Which publications in my library cite Sarat and Silbey's article on the pull of the policy audience?"* — answered by searching the full text of your library for that citation. This works best for documents you've already opened at least once in Zotero, since it relies on Zotero's own local full-text search index.
+
+Answers are backed by [transparent query routing](docs/query-routing.md) and can optionally be saved as a note:
 
 <img src="./docs/images/note.png" width="300" alt="Screenshot of a result note">
 

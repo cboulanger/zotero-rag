@@ -10,8 +10,9 @@ Unit tests for QueryOrchestrator:
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.models.filters import MetadataFilters
-from backend.services.base_agent import AgentResult, BaseAgent, QueryPlan
+from backend.models.filters import CitationTarget, MetadataFilters
+from backend.services.base_agent import AgentResult, BaseAgent, NeedsClientEvidenceError, QueryPlan
+from backend.services.mentions_agent import ClientEvidence
 from backend.services.query_orchestrator import (
     QueryOrchestrator, _all_empty, _merge_sources, _rag_passthrough,
 )
@@ -338,6 +339,120 @@ class TestRagFallback(unittest.IsolatedAsyncioTestCase):
         rag_agent.execute.assert_called_once()
         self.assertIn("Vereinigung", result.answer)
         self.assertIn("rag", result.agents_used)
+
+
+class TestMentionsShortCircuit(unittest.IsolatedAsyncioTestCase):
+
+    async def test_raises_needs_client_evidence_when_targets_present_and_no_evidence(self):
+        orch = _make_orchestrator()
+        mentions_agent = _stub_agent(
+            "mentions", AgentResult(agent_name="mentions", context_text="", sources=[])
+        )
+        # A second agent must be registered so the orchestrator's routing gate
+        # (`len(self._agents) > 1`) actually invokes the mocked QueryRouter below,
+        # rather than short-circuiting to the default ["rag"] plan.
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="", sources=[]))
+        orch.register(mentions_agent)
+        orch.register(rag_agent)
+
+        mock_plan = QueryPlan(
+            agents_to_use=["mentions"],
+            filters=MetadataFilters(citation_targets=[CitationTarget(author="teubner")]),
+        )
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            with self.assertRaises(NeedsClientEvidenceError) as cm:
+                await orch.query(question="Who cites Teubner?", library_ids=["1"], enable_routing=True)
+
+        self.assertEqual(len(cm.exception.citation_targets), 1)
+        self.assertEqual(cm.exception.citation_targets[0].author, "teubner")
+        mentions_agent.execute.assert_not_called()
+
+    async def test_drops_mentions_when_no_citation_targets_extracted(self):
+        orch = _make_orchestrator()
+        rag_result = AgentResult(agent_name="rag", context_text="RAG answer", sources=[])
+        rag_agent = _stub_agent("rag", rag_result)
+        mentions_agent = _stub_agent(
+            "mentions", AgentResult(agent_name="mentions", context_text="", sources=[])
+        )
+        orch.register(rag_agent)
+        orch.register(mentions_agent)
+
+        # Router selected "mentions" but extracted no citation_targets — must be dropped,
+        # not passed through to raise NeedsClientEvidenceError for nothing.
+        mock_plan = QueryPlan(agents_to_use=["mentions", "rag"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            result = await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        mentions_agent.execute.assert_not_called()
+        self.assertEqual(result.answer, "RAG answer")
+
+    async def test_dropping_only_agent_falls_back_to_rag_without_double_execution(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="", sources=[]))
+        mentions_agent = _stub_agent(
+            "mentions", AgentResult(agent_name="mentions", context_text="", sources=[])
+        )
+        orch.register(rag_agent)
+        orch.register(mentions_agent)
+
+        # Router selected ONLY "mentions", with no citation_targets — and the RAG agent's
+        # own result also happens to be empty, which is what triggers step 3b's fallback
+        # guard. Before the fix, "mentions" being dropped left plan.agents_to_use == [],
+        # fooling that guard into running RAG a second time.
+        mock_plan = QueryPlan(agents_to_use=["mentions"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        rag_agent.execute.assert_called_once()
+        mentions_agent.execute.assert_not_called()
+
+    async def test_runs_mentions_when_evidence_supplied(self):
+        orch = _make_orchestrator()
+        mentions_result = AgentResult(agent_name="mentions", context_text="found it", sources=[])
+        mentions_agent = _stub_agent("mentions", mentions_result)
+        orch.register(mentions_agent)
+        orch._llm_service.generate = AsyncMock(return_value="Synthesized")
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        evidence = ClientEvidence()
+        mock_plan = QueryPlan(
+            agents_to_use=["mentions"],
+            filters=MetadataFilters(citation_targets=[CitationTarget(author="teubner")]),
+        )
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            result = await orch.query(
+                question="Q?", library_ids=["1"], enable_routing=True, client_evidence=evidence,
+            )
+
+        mentions_agent.execute.assert_awaited_once()
+        self.assertIs(mentions_agent.execute.call_args.kwargs["client_evidence"], evidence)
+        self.assertEqual(result.answer, "Synthesized")
+
+    async def test_preset_plan_skips_routing_llm_call(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="a", sources=[]))
+        orch.register(rag_agent)
+
+        preset_plan = QueryPlan(agents_to_use=["rag"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            await orch.query(question="Q?", library_ids=["1"], preset_plan=preset_plan)
+            MockRouter.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -96,3 +96,41 @@ test('mergeDownloadFailures does not bump the count when nothing new was added',
 	assert.deepStrictEqual(storeCalls, [{ libraryId: 'lib1', keys: ['ATT1'] }]);
 	assert.deepStrictEqual(countUpdates, []);
 });
+
+test('resolveZoteroLibraryID delegates to the plugin\'s own resolver', () => {
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ZoteroRAGDialog = context.ZoteroRAGDialog;
+
+	const calls = [];
+	const fakeThis = {
+		plugin: {
+			_resolveZoteroLibraryID(id) {
+				calls.push(id);
+				return id === 'u12345' ? 1 : (id === '42' ? 99 : null);
+			},
+		},
+	};
+
+	assert.strictEqual(ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, 'u12345'), 1);
+	assert.strictEqual(ZoteroRAGDialog.resolveZoteroLibraryID.call(fakeThis, '42'), 99);
+	assert.deepStrictEqual(calls, ['u12345', '42']);
+});
+
+test('resolveZoteroLibraryID returns null when the plugin is not available', () => {
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ZoteroRAGDialog = context.ZoteroRAGDialog;
+
+	const result = ZoteroRAGDialog.resolveZoteroLibraryID.call({ plugin: null }, 'u12345');
+
+	assert.strictEqual(result, null);
+});

@@ -13,7 +13,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional
 from pydantic import BaseModel
 
-from backend.models.filters import MetadataFilters
+from backend.models.filters import CitationTarget, MetadataFilters
 
 if TYPE_CHECKING:
     from backend.services.trace_collector import TraceCollector
@@ -34,6 +34,23 @@ class QueryPlan(BaseModel):
     agents_to_use: list[str] = ["rag"]    # names of agents to invoke (must match registered names)
     filters: MetadataFilters = MetadataFilters()
     routing_description: Optional[str] = None   # LLM's brief reasoning, used in synthesis
+
+
+class NeedsClientEvidenceError(Exception):
+    """
+    Raised by QueryOrchestrator when the routing plan selects the "mentions"
+    agent but no client-gathered full-text evidence was supplied. Citation
+    ("who cites X") evidence lives only in the user's local Zotero full-text
+    index — the backend cannot retrieve it itself. The API layer catches this
+    and returns a "needs_client_evidence" response asking the plugin to
+    search the client-side index and resubmit, echoing `plan` back so a
+    second routing LLM call isn't needed.
+    """
+
+    def __init__(self, citation_targets: list[CitationTarget], plan: QueryPlan):
+        self.citation_targets = citation_targets
+        self.plan = plan
+        super().__init__(f"Need client evidence for {len(citation_targets)} citation target(s)")
 
 
 class BaseAgent(ABC):

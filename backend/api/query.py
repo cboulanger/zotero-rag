@@ -7,11 +7,14 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
+from backend.models.filters import CitationTarget
 from backend.models.trace import QueryTrace
 from backend.services.access_gate import assert_can_access
+from backend.services.base_agent import NeedsClientEvidenceError, QueryPlan
+from backend.services.mentions_agent import ClientEvidence
 from backend.services.query_orchestrator import QueryOrchestrator
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
@@ -42,6 +45,8 @@ class QueryRequest(BaseModel):
     enable_routing: bool = True  # False skips routing LLM call (backward-compatible pure-RAG mode)
     llm_model: Optional[str] = None  # Override preset default; must be in preset's model_names list
     include_trace: bool = False  # When True, attach a full execution trace to the response
+    client_evidence: Optional[ClientEvidence] = None  # gathered client-side, resubmit round trip
+    query_plan: Optional[QueryPlan] = None  # echoed back from a prior "needs_client_evidence" response
 
 
 class QueryResponse(BaseModel):
@@ -55,6 +60,24 @@ class QueryResponse(BaseModel):
     agents_used: List[str] = []
     library_document_counts: dict[str, int] = {}
     trace: Optional[QueryTrace] = None  # Populated when include_trace=True
+    status: Literal["complete", "needs_client_evidence"] = "complete"
+    citation_targets: List[CitationTarget] = []  # populated when status == "needs_client_evidence"
+    query_plan: Optional[QueryPlan] = None  # echo back on the resubmit round trip
+
+
+def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
+    """Map a NeedsClientEvidenceError to a placeholder response telling the client
+    to gather full-text citation evidence locally and resubmit with it attached."""
+    return QueryResponse(
+        question=query.question,
+        answer="",
+        answer_format="text",
+        sources=[],
+        library_ids=query.library_ids,
+        status="needs_client_evidence",
+        citation_targets=exc.citation_targets,
+        query_plan=exc.plan,
+    )
 
 
 @router.post("/query", response_model=QueryResponse)
@@ -171,6 +194,8 @@ async def query_libraries(
             min_score=min_score,
             enable_routing=query.enable_routing,
             trace=trace_collector,
+            client_evidence=query.client_evidence,
+            preset_plan=query.query_plan,
         )
 
         # Format citations
@@ -201,6 +226,9 @@ async def query_libraries(
             library_document_counts=library_document_counts,
             trace=trace_collector.finalize() if trace_collector is not None else None,
         )
+
+    except NeedsClientEvidenceError as exc:
+        return _needs_evidence_response(query, exc)
 
     except Exception as e:
         logger.exception("Query failed")

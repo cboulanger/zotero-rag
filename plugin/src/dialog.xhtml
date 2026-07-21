@@ -29,6 +29,16 @@
         console.error("Failed to load remote_indexer.js:", e);
       }
 
+      // Load mention/citation search (must load before dialog.js)
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/mentions.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load mentions.js:", e);
+      }
+
       // Load dialog script
       try {
         Services.scriptloader.loadSubScript(
@@ -159,7 +169,7 @@
         <div class="form-group" style="margin-bottom: 0; display:grid; grid-template-columns:1fr 1fr; gap:0 16px;">
           <label style="display:flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
             <input type="checkbox" id="disable-routing" />
-            Disable query routing (faster, no metadata search)
+            Disable query routing (faster, no metadata or citation search)
           </label>
           <label style="display:flex; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
             <input type="checkbox" id="include-trace" />

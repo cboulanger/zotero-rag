@@ -8,6 +8,21 @@ Usage:
 
 The script calls POST /api/query with include_trace=true and writes
 the .trace field (plus the normal response fields) to the output file.
+
+For remote-model presets (e.g. KISSKI), the backend also requires a
+client-supplied provider API key header (e.g. X-Kisski-Api-Key) — pass it
+with --header 'X-Kisski-Api-Key: <value>' (repeatable). Get your own
+plugin-configured keys without ever printing them to the terminal by having
+Zotero write them to a local file (requires the MCP Bridge for Zotero
+plugin; see CLAUDE.md's "Live query debugging" section for the snippet),
+then read them from that file into --header/--api-key.
+
+If the response comes back with status "needs_client_evidence" (a citation/
+"mentions" query awaiting full-text evidence only the Zotero client can
+gather), this script cannot complete the round trip itself — it prints the
+extracted citation_targets and query_plan so you can inspect what the
+router decided, then stops (see docs/query-routing.md's two-phase protocol
+section for what the plugin does next).
 """
 
 import argparse
@@ -76,7 +91,22 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Output only the .trace field, omitting the answer and sources",
     )
+    parser.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        metavar="NAME: VALUE",
+        help="Extra request header, e.g. --header 'X-Kisski-Api-Key: sk-...' "
+             "(repeatable; required for remote-model presets)",
+    )
     return parser.parse_args()
+
+
+def _parse_header(raw: str) -> tuple[str, str]:
+    name, _, value = raw.partition(":")
+    if not _:
+        raise SystemExit(f"[ERROR] --header must be 'Name: Value', got {raw!r}")
+    return name.strip(), value.strip()
 
 
 def main() -> None:
@@ -104,6 +134,9 @@ def main() -> None:
     headers: dict = {"Content-Type": "application/json"}
     if args.api_key:
         headers["X-Zotero-API-Key"] = args.api_key
+    for raw_header in args.header:
+        name, value = _parse_header(raw_header)
+        headers[name] = value
 
     url = args.url.rstrip("/") + "/api/query"
     print(f"POST {url}", file=sys.stderr)
@@ -122,6 +155,19 @@ def main() -> None:
         sys.exit(1)
 
     data = response.json()
+
+    if data.get("status") == "needs_client_evidence":
+        print(
+            "[INFO] status=needs_client_evidence — the router selected the "
+            "'mentions' agent and is waiting on full-text evidence that only "
+            "the Zotero client can gather. This script cannot supply it "
+            "(that requires plugin/src/mentions.js's findMentionEvidence(), "
+            "run inside Zotero). Extracted citation_targets:",
+            file=sys.stderr,
+        )
+        print(json.dumps(data.get("citation_targets"), indent=2, ensure_ascii=False), file=sys.stderr)
+        print("\nEchoed query_plan (would be resubmitted with client_evidence attached):", file=sys.stderr)
+        print(json.dumps(data.get("query_plan"), indent=2, ensure_ascii=False), file=sys.stderr)
 
     if args.trace_only:
         output = data.get("trace") or {}
