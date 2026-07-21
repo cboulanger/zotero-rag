@@ -1,3 +1,10 @@
+# [1.41.0](https://github.com/cboulanger/zotero-rag/compare/v1.40.0...v1.41.0) (2026-07-21)
+
+
+### Features
+
+* answer citation questions by searching the local Zotero full-text index ([43adcde](https://github.com/cboulanger/zotero-rag/commit/43adcde258ac366683b8ed8aa77c32decf61e1c0))
+
 # [1.40.0](https://github.com/cboulanger/zotero-rag/compare/v1.39.0...v1.40.0) (2026-07-19)
 
 
