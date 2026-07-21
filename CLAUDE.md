@@ -249,6 +249,108 @@ sudo dmesg --since "1 hour ago" | grep -i "oom\|killed process"
 [OK] API docs at: <http://localhost:8119/docs>
 [OK] Logs: /Volumes/Data-SSD/Code/zotero-rag/logs/server.log
 
+## Live Query Debugging
+
+To reproduce a real user-reported query result against the actual local backend +
+Zotero library (e.g. to debug why an answer was wrong), you need API keys and,
+for plugin-side logic, a way to execute code inside the running Zotero instance.
+
+### Getting API keys without ever printing them to the terminal
+
+Both the read-only Zotero identity key and any remote-model provider key
+(e.g. `KISSKI_API_KEY`) the user has configured are stored encrypted in
+`data/system/autoindex_keys.json`, decryptable with `AUTOINDEX_SECRET` (see
+"Debugging the cron indexer" above for the store's normal purpose). Use
+`bin/debug_get_zotero_key.py` to extract them for debugging — it prints only
+the requested key to stdout, so pipe it directly into a variable rather than
+echoing it:
+
+```bash
+ZOTERO_KEY=$(uv run python bin/debug_get_zotero_key.py)
+KISSKI_HEADER=$(uv run python bin/debug_get_zotero_key.py --embedding-key)  # prints "KISSKI_API_KEY=<value>"
+uv run python bin/debug_get_zotero_key.py --list   # see what's available first, no key values printed
+```
+
+If no key is stored yet (e.g. a fresh dev profile), the plugin's own
+`extensions.zotero-rag.serviceApiKey.<NAME>` preference has it — read it via
+the MCP Bridge for Zotero plugin's `zotero_execute_js` tool and write it
+directly to a **gitignored** file (`.local/*` is ignored) rather than
+returning it in the tool result, so it never appears in the conversation:
+
+```js
+const key = Zotero.Prefs.get('extensions.zotero-rag.serviceApiKey.KISSKI_API_KEY', true) || '';
+await IOUtils.writeUTF8('/absolute/path/to/.local/scratch_key.txt', key);
+return { present: !!key, length: key.length };  // confirm without ever returning the value itself
+```
+
+### Replaying a query against the live backend
+
+`scripts/query_trace.py` calls `POST /api/query` with `include_trace=true` and
+supports arbitrary extra headers (needed for remote-model presets, which
+require a client-supplied provider key header like `X-Kisski-Api-Key`):
+
+```bash
+uv run python scripts/query_trace.py "the exact question" \
+  --library-ids <backend-library-id> \
+  --api-key "$ZOTERO_KEY" \
+  --header "X-Kisski-Api-Key: <value>" \
+  --llm-model <model-name> \
+  --output .local/trace.json
+```
+
+If the response comes back with `status: "needs_client_evidence"` (a citation/
+`mentions` query — see `docs/query-routing.md`'s two-phase protocol), this
+script prints the extracted `citation_targets`/`query_plan` to stderr and
+stops — it cannot gather full-text evidence itself, since that requires
+Zotero's own local index (see below). Remote-model providers can be
+transiently flaky; if you get a `500` from the LLM call, retry with
+`--llm-model` set to a model confirmed working (check with
+`uv run python scripts/test_kisski_api.py` for the KISSKI preset) before
+concluding there's a code bug.
+
+### Testing plugin JS directly against the live Zotero library
+
+For bugs in `plugin/src/*.js` logic (not just the backend), load the file
+into the running Zotero instance via the MCP Bridge for Zotero plugin's
+`zotero_execute_js` tool and call its functions directly — this is far more
+direct than reproducing a bug only through the full UI flow, and lets you
+instrument each internal step to isolate exactly where a pipeline breaks
+(see "Gather Evidence in Multi-Component Systems" in the
+`superpowers:systematic-debugging` skill):
+
+```js
+return await (async () => {
+  const sandbox = {};
+  Services.scriptloader.loadSubScript("file:///absolute/path/to/plugin/src/mentions.js", sandbox);
+  const MentionSearch = sandbox.MentionSearch;
+  const result = await MentionSearch.findMentionEvidence(
+    [{ author: "sarat" }, { author: "silbey" }], [31]  // [31] = a Zotero internal libraryID
+  );
+  return JSON.stringify(result);
+})();
+```
+
+Notes on quirks hit while doing this:
+
+- Top-level `await` requires the code to already be inside an `async` function
+  — wrap in `return await (async () => { ... })();` rather than relying on
+  auto-wrapping if you also use a top-level `try`/`catch`.
+- `Zotero.DB.queryAsync(sql, params)` rejects a literal (unparameterized)
+  `LIKE` clause ("Please enter a LIKE clause with bindings") — always pass
+  the pattern as a bound `?` parameter.
+- Returning nested arrays/objects directly can render as `"[Array]"`/`"[Object]"`
+  in the tool's summarized output; use `JSON.stringify(...)` (or reduce to a
+  plain string) when you need to actually see the values.
+- A real bug found this way: `Zotero.FullText.getIndexedState()`/`getPages()`
+  can report an attachment as fully indexed purely from metadata that synced
+  via Zotero library sync (word index + page counts), even when the local
+  `.zotero-ft-cache` **text** file was never regenerated on this machine
+  (e.g. a group-library member who hasn't personally opened that PDF) —
+  `IOUtils.readUTF8(Zotero.FullText.getItemCacheFile(item).path)` throws
+  despite the item showing as indexed. `await Zotero.FullText.indexItems([id],
+  { complete: true })` regenerates the cache from the (separately-synced)
+  attachment file, when present locally.
+
 ## Testing
 
 ### Python Tests
