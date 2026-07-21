@@ -252,6 +252,26 @@ test('findMentionEvidence flags partial indexing from Zotero.FullText.getPages',
 	assert.strictEqual(result.items[0].partial_index, true);
 });
 
+test('findMentionEvidence skips a document whose cache file is unreadable, without crashing', async () => {
+	const docs = [
+		{ id: 1, key: 'READABLE', title: 'T1', authors: [], text: 'mentions Wiethölter here' },
+		{ id: 2, key: 'UNREADABLE', title: 'T2', authors: [], text: 'also mentions Wiethölter' },
+	];
+	const { zotero, ioUtils } = makeEvidenceStubs(docs);
+	// Deliberately break the cache read for doc 2's attachment only.
+	const originalReadUTF8 = ioUtils.readUTF8;
+	ioUtils.readUTF8 = async (/** @type {string} */ p) => {
+		if (p === '/cache/UNREADABLE') throw new Error('ENOENT');
+		return originalReadUTF8(p);
+	};
+	const M = loadMentionSearch(zotero, ioUtils);
+
+	const result = await M.findMentionEvidence([{ author: 'wiethölter' }], [1]);
+
+	assert.strictEqual(result.items.length, 1);
+	assert.strictEqual(result.items[0].item_key, 'READABLE');
+});
+
 test('findMentionEvidence returns an empty result when nothing matches', async () => {
 	const { zotero, ioUtils } = makeEvidenceStubs([]);
 	const M = loadMentionSearch(zotero, ioUtils);

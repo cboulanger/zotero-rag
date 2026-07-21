@@ -171,10 +171,15 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 		return { items: [], truncated: false, total_candidates: 0 };
 	}
 
+	// Each target's search terms are a pure function of the target, so compute
+	// them once up front and reuse in both the ID-collection loop below and the
+	// per-attachment evidence-extraction loop (step 3) — avoids recomputing
+	// them per candidate attachment.
+	const targetTerms = citationTargets.map(target => buildSearchTerms(target));
+
 	// 1. Per-target candidate attachment ID sets (union over variants/libraries).
 	const perTargetIDs = [];
-	for (const target of citationTargets) {
-		const terms = buildSearchTerms(target);
+	for (const terms of targetTerms) {
 		const ids = new Set();
 		for (const libraryID of zoteroLibraryIDs) {
 			for (const term of terms) {
@@ -207,7 +212,8 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 		try {
 			text = await IOUtils.readUTF8(Zotero.FullText.getItemCacheFile(att).path);
 		} catch (_) {
-			continue; // no cache file — shouldn't happen if the word index has this item, but be defensive
+			console.warn(`MentionSearch: attachment ${att.key} is in Zotero's full-text word index but its cache file could not be read — skipping.`);
+			continue;
 		}
 
 		const parent = att.parentItemID ? await Zotero.Items.getAsync(att.parentItemID) : null;
@@ -224,8 +230,7 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 		/** @type {Record<string, any>} */
 		const targetMatches = {};
 		citationTargets.forEach((target, idx) => {
-			const terms = buildSearchTerms(target);
-			const { count, snippets } = extractSnippets(text, terms);
+			const { count, snippets } = extractSnippets(text, targetTerms[idx]);
 			if (count === 0) return;
 			targetMatches[String(idx)] = {
 				count, snippets, is_self: isSelfCitation(authors, title, target),
@@ -233,12 +238,13 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 		});
 		if (Object.keys(targetMatches).length === 0) continue;
 
-		const existing = byParentKey.get(itemKey);
+		const dedupKey = `${libraryId}:${itemKey}`;
+		const existing = byParentKey.get(dedupKey);
 		if (existing) {
 			mergeTargetMatches(existing.target_matches, targetMatches);
 			existing.partial_index = existing.partial_index || partialIndex;
 		} else {
-			byParentKey.set(itemKey, {
+			byParentKey.set(dedupKey, {
 				item_key: itemKey, library_id: libraryId, title, authors, year,
 				target_matches: targetMatches, partial_index: partialIndex,
 			});
