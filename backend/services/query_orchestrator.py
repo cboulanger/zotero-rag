@@ -22,9 +22,10 @@ from backend.config.settings import Settings
 from backend.db.vector_store import VectorStore
 from backend.models.filters import MetadataFilters
 from backend.models.trace import FallbackTrace, LLMCallTrace
-from backend.services.base_agent import AgentResult, BaseAgent, QueryPlan
+from backend.services.base_agent import AgentResult, BaseAgent, NeedsClientEvidenceError, QueryPlan
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
+from backend.services.mentions_agent import ClientEvidence, MentionsAgent
 from backend.services.metadata_agent import MetadataAgent
 from backend.services.query_router import QueryRouter
 from backend.services.rag_agent import RAGAgent
@@ -88,6 +89,7 @@ class QueryOrchestrator:
     ) -> None:
         self.register(RAGAgent(embedding_service, llm_service, vector_store, settings))
         self.register(MetadataAgent(vector_store))
+        self.register(MentionsAgent())
 
     async def query(
         self,
@@ -97,6 +99,8 @@ class QueryOrchestrator:
         min_score: float = 0.3,
         enable_routing: bool = True,
         trace: Optional[TraceCollector] = None,
+        client_evidence: Optional[ClientEvidence] = None,
+        preset_plan: Optional[QueryPlan] = None,
     ) -> QueryResult:
         """
         Route the question, run selected agents, and synthesize the final answer.
@@ -108,9 +112,19 @@ class QueryOrchestrator:
             min_score: Minimum similarity score (RAGAgent).
             enable_routing: False skips the routing LLM call and goes straight to RAGAgent.
             trace: Optional collector for recording intermediate trace events.
+            client_evidence: Full-text citation evidence gathered client-side, required to
+                run the "mentions" agent — see NeedsClientEvidenceError.
+            preset_plan: A previously-returned QueryPlan to reuse instead of calling the
+                routing LLM again — used on the client's resubmit-with-evidence round trip.
+
+        Raises:
+            NeedsClientEvidenceError: the plan selects "mentions" with extracted
+                citation_targets, but client_evidence was not supplied.
         """
         # 1. Routing
-        if enable_routing and len(self._agents) > 1:
+        if preset_plan is not None:
+            plan = preset_plan
+        elif enable_routing and len(self._agents) > 1:
             plan = await QueryRouter(self._llm_service).route(
                 question, list(self._agents.values()), trace=trace
             )
@@ -122,6 +136,18 @@ class QueryOrchestrator:
             )
         else:
             plan = QueryPlan(agents_to_use=["rag"])
+
+        # 1b. "mentions" evidence only exists client-side. If the router extracted no
+        # citation_targets it was a spurious selection — drop it. Otherwise, without
+        # client_evidence there is nothing to run yet — short-circuit and let the API
+        # layer ask the client to gather it and resubmit.
+        if "mentions" in plan.agents_to_use:
+            if not plan.filters.citation_targets:
+                plan.agents_to_use = [a for a in plan.agents_to_use if a != "mentions"]
+            elif client_evidence is None:
+                raise NeedsClientEvidenceError(
+                    citation_targets=plan.filters.citation_targets, plan=plan,
+                )
 
         # 2. Resolve agents (unknown names fall back to "rag")
         selected: list[BaseAgent] = [
@@ -141,6 +167,7 @@ class QueryOrchestrator:
                 trace=trace,
                 top_k=top_k,
                 min_score=min_score,
+                client_evidence=client_evidence,
             )
             for agent in selected
         ])
