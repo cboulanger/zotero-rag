@@ -394,6 +394,30 @@ class TestMentionsShortCircuit(unittest.IsolatedAsyncioTestCase):
         mentions_agent.execute.assert_not_called()
         self.assertEqual(result.answer, "RAG answer")
 
+    async def test_dropping_only_agent_falls_back_to_rag_without_double_execution(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="", sources=[]))
+        mentions_agent = _stub_agent(
+            "mentions", AgentResult(agent_name="mentions", context_text="", sources=[])
+        )
+        orch.register(rag_agent)
+        orch.register(mentions_agent)
+
+        # Router selected ONLY "mentions", with no citation_targets — and the RAG agent's
+        # own result also happens to be empty, which is what triggers step 3b's fallback
+        # guard. Before the fix, "mentions" being dropped left plan.agents_to_use == [],
+        # fooling that guard into running RAG a second time.
+        mock_plan = QueryPlan(agents_to_use=["mentions"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            instance = MagicMock()
+            instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = instance
+
+            await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        rag_agent.execute.assert_called_once()
+        mentions_agent.execute.assert_not_called()
+
     async def test_runs_mentions_when_evidence_supplied(self):
         orch = _make_orchestrator()
         mentions_result = AgentResult(agent_name="mentions", context_text="found it", sources=[])

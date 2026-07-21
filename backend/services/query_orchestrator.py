@@ -143,7 +143,7 @@ class QueryOrchestrator:
         # layer ask the client to gather it and resubmit.
         if "mentions" in plan.agents_to_use:
             if not plan.filters.citation_targets:
-                plan.agents_to_use = [a for a in plan.agents_to_use if a != "mentions"]
+                plan.agents_to_use = [a for a in plan.agents_to_use if a != "mentions"] or ["rag"]
             elif client_evidence is None:
                 raise NeedsClientEvidenceError(
                     citation_targets=plan.filters.citation_targets, plan=plan,
