@@ -10,8 +10,11 @@ Unit tests for QueryOrchestrator:
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget, MetadataFilters
-from backend.services.base_agent import AgentResult, BaseAgent, NeedsClientEvidenceError, QueryPlan
+from backend.services.base_agent import (
+    AgentResult, BaseAgent, NeedsClarificationError, NeedsClientEvidenceError, QueryPlan,
+)
 from backend.services.mentions_agent import ClientEvidence
 from backend.services.query_orchestrator import (
     QueryOrchestrator, _all_empty, _merge_sources, _rag_passthrough,
@@ -453,6 +456,114 @@ class TestMentionsShortCircuit(unittest.IsolatedAsyncioTestCase):
         with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
             await orch.query(question="Q?", library_ids=["1"], preset_plan=preset_plan)
             MockRouter.assert_not_called()
+
+
+class TestConversationHistoryThreading(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_history_passed_to_agents(self):
+        orch = _make_orchestrator()
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return AgentResult(agent_name="rag", context_text="ans", sources=[])
+
+        agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="x"))
+        agent.execute = fake_execute
+        orch._agents = {"rag": agent}
+        history = [ChatTurn(question="Q0", answer="A0")]
+
+        await orch.query("Follow-up", ["1"], enable_routing=False, conversation_history=history)
+
+        self.assertEqual(captured["conversation_history"], history)
+
+    async def test_force_fresh_retrieval_clears_history_for_agents(self):
+        orch = _make_orchestrator()
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            captured.update(kwargs)
+            return AgentResult(agent_name="rag", context_text="ans", sources=[])
+
+        agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="x"))
+        agent.execute = fake_execute
+        orch._agents = {"rag": agent}
+        history = [ChatTurn(question="Q0", answer="A0")]
+
+        await orch.query("Follow-up", ["1"], enable_routing=False,
+                          conversation_history=history, force_fresh_retrieval=True)
+
+        self.assertEqual(captured["conversation_history"], [])
+
+
+class TestClarificationShortCircuit(unittest.IsolatedAsyncioTestCase):
+    async def test_router_clarification_needed_raises_before_agents_run(self):
+        orch = _make_orchestrator()
+        agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="should not run"))
+        orch._agents = {"rag": agent}
+        plan = QueryPlan(agents_to_use=["rag"], clarification_needed=True,
+                          clarification_question="Which years?")
+
+        with self.assertRaises(NeedsClarificationError) as ctx:
+            await orch.query("Broad question", ["1"], preset_plan=plan)
+
+        self.assertEqual(ctx.exception.message, "Which years?")
+        agent.execute.assert_not_called()
+
+    async def test_all_agents_flagging_clarification_raises(self):
+        orch = _make_orchestrator()
+        agent = _stub_agent("metadata", AgentResult(
+            agent_name="metadata", context_text="too many",
+            needs_clarification=True, clarification_message="Narrow it down",
+        ))
+        orch._agents = {"rag": agent, "metadata": agent}
+        plan = QueryPlan(agents_to_use=["metadata"])
+
+        with self.assertRaises(NeedsClarificationError) as ctx:
+            await orch.query("Broad", ["1"], preset_plan=plan)
+        self.assertEqual(ctx.exception.message, "Narrow it down")
+
+    async def test_mixed_clarification_proceeds_with_usable_content(self):
+        orch = _make_orchestrator()
+        orch._llm_service.generate = AsyncMock(return_value="Synthesized answer.")
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+        good = _stub_agent("rag", AgentResult(
+            agent_name="rag", context_text="[S1] Good content",
+            sources=[_make_source(item_id="A")],
+        ))
+        broad = _stub_agent("metadata", AgentResult(
+            agent_name="metadata", context_text="too many",
+            needs_clarification=True, clarification_message="Catalog too broad",
+        ))
+        orch._agents = {"rag": good, "metadata": broad}
+        plan = QueryPlan(agents_to_use=["rag", "metadata"])
+
+        result = await orch.query("Mixed", ["1"], preset_plan=plan)
+
+        self.assertIn("Synthesized answer.", result.answer)
+        sent_prompt = orch._llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn("Catalog too broad", sent_prompt)
+
+
+class TestContinuationAgentRegistration(unittest.IsolatedAsyncioTestCase):
+    async def test_continuation_agent_registered_by_default(self):
+        with patch("backend.services.query_orchestrator.RAGAgent"), \
+             patch("backend.services.query_orchestrator.MetadataAgent"), \
+             patch("backend.services.query_orchestrator.ContinuationAgent") as MockContinuation:
+            MockContinuation.return_value.name = "continuation"
+            orch = QueryOrchestrator(MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        self.assertIn("continuation", orch._agents)
+
+    async def test_continuation_dropped_when_no_history(self):
+        orch = _make_orchestrator()
+        rag = _stub_agent("rag", AgentResult(agent_name="rag", context_text="ans"))
+        continuation = _stub_agent("continuation", AgentResult(agent_name="continuation", context_text="x"))
+        orch._agents = {"rag": rag, "continuation": continuation}
+        plan = QueryPlan(agents_to_use=["continuation"])
+
+        await orch.query("First question", ["1"], preset_plan=plan)
+
+        continuation.execute.assert_not_called()
+        rag.execute.assert_called_once()
 
 
 if __name__ == "__main__":
