@@ -1221,9 +1221,10 @@ class VectorStore:
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[dict]:
         """
-        Payload-only lookup by the payload's `chunk_id` field (content-hash-derived,
-        stable — NOT the internal Qdrant point ID, which this module never exposes
-        externally). No embedding call, no similarity search.
+        Payload-only lookup by the payload's `chunk_id` field (positional and
+        stable for unchanged content — "{library_id}:{item_key}:{attachment_key}:{i}",
+        NOT derived from content_hash — NOT the internal Qdrant point ID, which
+        this module never exposes externally). No embedding call, no similarity search.
 
         Synchronous (the Qdrant client is sync) — callers must wrap in
         asyncio.to_thread() from an async context, same as get_items_by_metadata().
