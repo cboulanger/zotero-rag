@@ -378,6 +378,32 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_kwargs["max_tokens"], 2048)  # Uses mock preset value
         self.assertEqual(call_kwargs["temperature"], 0.7)
 
+    async def test_source_info_carries_chunk_id(self):
+        question = "What is machine learning?"
+        library_ids = ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        chunk = DocumentChunk(
+            text="Machine learning is a subset of artificial intelligence.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk1",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key="ABC123", attachment_key="ATT1",
+                    title="Introduction to ML", authors=["Smith, J."], year=2023,
+                    item_type="journalArticle",
+                ),
+                page_number=5, text_preview="Machine learning is a", chunk_index=0,
+                content_hash="h1",
+            ),
+        )
+        self.mock_vector_store.search.return_value = [
+            SearchResult(chunk=chunk, score=0.9),
+        ]
+        self.mock_llm_service.generate = AsyncMock(return_value="An answer [S1].")
+
+        result = await self.rag_engine.query(question, library_ids)
+        self.assertEqual(result.sources[0].chunk_id, "chunk1")
+
 
 class TestSourceInfo(unittest.TestCase):
     """Test SourceInfo model."""

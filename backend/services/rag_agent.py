@@ -80,4 +80,5 @@ class RAGAgent(BaseAgent):
             agent_name=self.name,
             context_text=result.answer,
             sources=sources,
+            source_refs=[s.chunk_id for s in sources if s.chunk_id],
         )

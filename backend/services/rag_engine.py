@@ -47,6 +47,9 @@ class SourceInfo(BaseModel):
     page_number: int | None = None
     text_anchor: str | None = None
     score: float
+    chunk_id: str | None = None   # payload chunk_id backing this citation's representative
+                                   # chunk — lets a follow-up turn re-fetch the same evidence
+                                   # via VectorStore.get_chunks_by_ids()
 
 
 class QueryResult(BaseModel):
@@ -56,6 +59,7 @@ class QueryResult(BaseModel):
     sources: List[SourceInfo]
     model_name: Optional[str] = None
     agents_used: list[str] = []
+    source_refs: list[str] = []   # union of every contributing source's chunk_id
 
 
 class RAGEngine:
@@ -285,7 +289,8 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                 # the PDF at its natural start when page is absent.
                 page_number=None,
                 text_anchor=metadata.text_preview,
-                score=result.score
+                score=result.score,
+                chunk_id=metadata.chunk_id,
             )
             sources.append(source)
 
