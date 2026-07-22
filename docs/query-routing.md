@@ -210,9 +210,10 @@ like any other agent — no orchestrator changes are needed to add further
 chat-specific agents later (e.g. one comparing two cited works).
 
 `source_refs` on `AgentResult`/`QueryResponse` is the payload's `chunk_id`
-field (positional and stable for unchanged content — `library_id:item_key:
-attachment_key:index` — NOT derived from content_hash), not Qdrant's internal
-point ID, which this module never exposes externally. `MentionsAgent`-derived
+field (positional and stable for unchanged content —
+`library_id:item_key:attachment_key:index` — NOT derived from content_hash),
+not Qdrant's internal point ID, which this module never exposes externally.
+`MentionsAgent`-derived
 turns have no `source_refs` (client-gathered evidence is never stored
 server-side) — a follow-up to such a turn falls back to conversation-history
 text only.
