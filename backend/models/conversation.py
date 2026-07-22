@@ -23,4 +23,8 @@ class ChatTurn(BaseModel):
     answer: str
     agents_used: list[str] = []
     source_refs: list[str] = []   # opaque evidence refs from that turn — see AgentResult.source_refs
-    query_plan: Optional[QueryPlan] = None
+    query_plan: Optional[QueryPlan] = None   # NOT YET READ anywhere in the backend — reserved for a
+                                              # future enhancement that merges prior filters into the
+                                              # next routing call. Currently, filter carry-forward across
+                                              # turns happens implicitly via the router LLM re-inferring
+                                              # filters from the raw conversation_history text.
