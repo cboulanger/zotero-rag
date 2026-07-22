@@ -76,6 +76,8 @@
  * @property {boolean} [includeTrace] - When true, request a full execution trace from the backend
  * @property {any} [clientEvidence] - Citation-mention evidence gathered client-side, sent back on the resubmit half of the two-phase "needs_client_evidence" flow
  * @property {any} [queryPlan] - The `query_plan` echoed back from a prior `needs_client_evidence` response, so the backend can skip re-running the routing LLM call
+ * @property {Array<Object>} [conversationHistory] - Prior follow-up turns to echo back
+ * @property {boolean} [forceFreshRetrieval] - Ignore conversationHistory for this turn's routing
  */
 
 
@@ -1150,6 +1152,12 @@ class ZoteroRAGPlugin {
 			if (options.queryPlan !== undefined) {
 				payload.query_plan = options.queryPlan;
 			}
+			if (options.conversationHistory !== undefined) {
+				payload.conversation_history = options.conversationHistory;
+			}
+			if (options.forceFreshRetrieval) {
+				payload.force_fresh_retrieval = true;
+			}
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
 				method: 'POST',
@@ -1731,44 +1739,22 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Format the query result as HTML for the note.
-	 * @param {string} question - Original question
-	 * @param {QueryResult} result - Query result
-	 * @param {Array<string>} libraryIDs - Libraries that were queried
-	 * @returns {string} HTML content
+	 * @typedef {Object} LibraryInfo
+	 * @property {string} name - Library name
+	 * @property {'user'|'group'} type - Library type
 	 */
-	formatNoteHTML(question, result, libraryIDs) {
-		const timestamp = new Date().toLocaleString();
 
-		// Build map of library ID to library info for source URI generation
-		/**
-		 * @typedef {Object} LibraryInfo
-		 * @property {string} name - Library name
-		 * @property {'user'|'group'} type - Library type
-		 */
-
-		/** @type {Map<string, LibraryInfo>} */
-		const libraryMap = new Map();
-
-		for (let id of libraryIDs) {
-			const libraries = this.getLibraries();
-			const lib = libraries.find((/** @type {Library} */ l) => l.id === id);
-			if (lib) {
-				libraryMap.set(id, {
-					name: lib.name,
-					type: lib.type
-				});
-			}
-		}
-
-		const counts = result.library_document_counts || {};
-		const libraryNames = Array.from(libraryMap.entries()).map(([id, info]) => {
-			const n = counts[id];
-			return n ? `${info.name} (${n} documents)` : info.name;
-		}).join(', ');
-
-		let html = `<div>`;
-		html += `<h2>${this.escapeHTML(question)}</h2>`;
+	/**
+	 * Format one Q&A turn (heading + answer + bibliography) as an HTML fragment,
+	 * with no outer wrapper and no metadata footer — reused by formatNoteHTML()
+	 * for the first turn and by ChatPane for every follow-up turn appended later.
+	 * @param {string} question - The question for this turn
+	 * @param {QueryResult} result - Query result
+	 * @param {Map<string, LibraryInfo>} libraryMap - Library ID to library info
+	 * @returns {string} HTML fragment
+	 */
+	formatTurnHTML(question, result, libraryMap) {
+		let html = `<h2>${this.escapeHTML(question)}</h2>`;
 		html += `<p><strong>Answer:</strong></p>`;
 
 		// Process answer text to replace inline citations, then merge consecutive ones
@@ -1783,6 +1769,57 @@ class ZoteroRAGPlugin {
 
 		// Add bibliography
 		html += this.formatBibliographyHTML(result.sources || [], libraryMap);
+
+		return html;
+	}
+
+	/**
+	 * Build a library-ID → {name, type} map for the given backend library IDs,
+	 * annotated with document counts when available. Shared by formatNoteHTML()
+	 * and ChatPane's note-append formatter.
+	 * @param {Array<string>} libraryIDs - Backend library IDs
+	 * @param {Record<string, number>} [libraryDocumentCounts] - Optional map of library ID to document count
+	 * @returns {Map<string, LibraryInfo>}
+	 */
+	buildLibraryMap(libraryIDs, libraryDocumentCounts = {}) {
+		/** @type {Map<string, LibraryInfo>} */
+		const libraryMap = new Map();
+
+		for (let id of libraryIDs) {
+			const libraries = this.getLibraries();
+			const lib = libraries.find((/** @type {Library} */ l) => l.id === id);
+			if (lib) {
+				libraryMap.set(id, {
+					name: lib.name,
+					type: lib.type
+				});
+			}
+		}
+
+		return libraryMap;
+	}
+
+	/**
+	 * Format the query result as HTML for the note.
+	 * @param {string} question - Original question
+	 * @param {QueryResult} result - Query result
+	 * @param {Array<string>} libraryIDs - Libraries that were queried
+	 * @returns {string} HTML content
+	 */
+	formatNoteHTML(question, result, libraryIDs) {
+		const timestamp = new Date().toLocaleString();
+
+		// Build map of library ID to library info for source URI generation
+		const libraryMap = this.buildLibraryMap(libraryIDs, result.library_document_counts);
+
+		const counts = result.library_document_counts || {};
+		const libraryNames = Array.from(libraryMap.entries()).map(([id, info]) => {
+			const n = counts[id];
+			return n ? `${info.name} (${n} documents)` : info.name;
+		}).join(', ');
+
+		let html = `<div>`;
+		html += this.formatTurnHTML(question, result, libraryMap);
 
 		// Add metadata
 		html += `<hr/>`;

@@ -450,6 +450,52 @@ test('the metadata dispatcher preserves partial success: a failing library does 
 	assert.deepStrictEqual([...result.succeededKeys], ['u1:ITEM1']);
 });
 
+test('submitQuery includes conversation_history in the payload when provided', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	const history = [{ question: 'Q0', answer: 'A0', agents_used: ['rag'], source_refs: ['c1'], query_plan: null }];
+	await plugin.submitQuery('Follow-up', ['1'], { conversationHistory: history });
+
+	assert.deepStrictEqual(capturedBody.conversation_history, history);
+});
+
+test('submitQuery includes force_fresh_retrieval only when true', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.force_fresh_retrieval, undefined);
+
+	await plugin.submitQuery('Q', ['1'], { forceFreshRetrieval: true });
+	assert.strictEqual(capturedBody.force_fresh_retrieval, true);
+});
+
+test('formatTurnHTML renders question heading, answer, and bibliography without the outer wrapper', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const result = {
+		answer: 'The answer.',
+		answer_format: 'text',
+		sources: [],
+	};
+	const html = plugin.formatTurnHTML('A follow-up question?', result, new Map());
+	assert.ok(html.includes('A follow-up question?'));
+	assert.ok(html.includes('The answer.'));
+	assert.ok(!html.includes('Generated:')); // metadata footer belongs to formatNoteHTML only
+});
+
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 	/** @type {string[]} */
 	const calls = [];
