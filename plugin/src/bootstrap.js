@@ -41,10 +41,20 @@ async function startup({ id, version, rootURI }) {
 	// metadata dispatcher on it and starts it during init().
 	Services.scriptloader.loadSubScript(rootURI + 'task_queue.js');
 
+	// Eager, plugin-lifetime scripts — loaded once at startup, not per dialog
+	// window. mentions.js is also loaded separately inside dialog.xhtml for
+	// that window's own separate scope; this is a second, independent load
+	// into the plugin-lifetime scope, needed because chat-pane.js's
+	// ChatPane.submitFollowUp calls MentionSearch.findMentionEvidence(...)
+	// from this scope.
+	Services.scriptloader.loadSubScript(rootURI + 'mentions.js');
+	Services.scriptloader.loadSubScript(rootURI + 'chat-pane.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
+	ChatPane.init({ pluginID: id });
 	Zotero.ZoteroRAG = ZoteroRAG;
 	ZoteroRAG.addToAllWindows();
 	await ZoteroRAG.main();

@@ -1219,10 +1219,19 @@ class ZoteroRAGPlugin {
 		await note.saveTx();
 		await this._ensureRAGResultsSearch(note.libraryID);
 
-		// Open the note in a separate window and resize it
-		zoteroPane.openNoteWindow(note.id);
-		const noteWin = zoteroPane.findNoteWindow(note.id);
-		if (noteWin) noteWin.resizeTo(900, 700);
+		ChatPane.seedConversation(note.id, libraryIDs, [{
+			question,
+			answer: result.answer,
+			agents_used: result.agents_used || [],
+			source_refs: result.source_refs || [],
+			query_plan: result.query_plan || null,
+		}]);
+
+		// Select the note in the main library view so the item pane — and the
+		// new chat section — is visible. A standalone note window (Zotero's own
+		// "New Note Window" command) has no item pane, so it can't show ours;
+		// this is why we no longer open one automatically here.
+		zoteroPane.selectItem(note.id);
 
 		return note;
 	}
