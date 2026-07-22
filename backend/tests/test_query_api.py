@@ -96,5 +96,50 @@ class NeedsEvidenceResponseTest(unittest.TestCase):
         self.assertEqual(response.query_plan.agents_to_use, ["mentions"])
 
 
+class TestNeedsClarificationResponse(unittest.TestCase):
+    def test_builds_needs_clarification_response(self):
+        from backend.api.query import QueryRequest, _needs_clarification_response
+        from backend.services.base_agent import NeedsClarificationError, QueryPlan
+
+        req = QueryRequest(question="What has Luhmann written?", library_ids=["1"])
+        exc = NeedsClarificationError(message="Please narrow by year.", plan=QueryPlan(agents_to_use=["metadata"]))
+
+        resp = _needs_clarification_response(req, exc)
+
+        self.assertEqual(resp.status, "needs_clarification")
+        self.assertEqual(resp.clarification_message, "Please narrow by year.")
+        self.assertEqual(resp.query_plan.agents_to_use, ["metadata"])
+        self.assertEqual(resp.answer, "")
+
+
+class TestRequestResponseNewFields(unittest.TestCase):
+    def test_conversation_history_defaults_empty(self):
+        from backend.api.query import QueryRequest
+
+        req = QueryRequest(question="Q", library_ids=["1"])
+        self.assertEqual(req.conversation_history, [])
+
+    def test_force_fresh_retrieval_defaults_false(self):
+        from backend.api.query import QueryRequest
+
+        req = QueryRequest(question="Q", library_ids=["1"])
+        self.assertFalse(req.force_fresh_retrieval)
+
+    def test_response_source_refs_defaults_empty(self):
+        from backend.api.query import QueryResponse
+
+        resp = QueryResponse(question="Q", answer="A", answer_format="text", sources=[], library_ids=["1"])
+        self.assertEqual(resp.source_refs, [])
+
+    def test_response_status_accepts_needs_clarification(self):
+        from backend.api.query import QueryResponse
+
+        resp = QueryResponse(
+            question="Q", answer="", answer_format="text", sources=[], library_ids=["1"],
+            status="needs_clarification",
+        )
+        self.assertEqual(resp.status, "needs_clarification")
+
+
 if __name__ == "__main__":
     unittest.main()

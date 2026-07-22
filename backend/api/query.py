@@ -10,10 +10,13 @@ from pydantic import BaseModel
 from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
+from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget
 from backend.models.trace import QueryTrace
 from backend.services.access_gate import assert_can_access
-from backend.services.base_agent import NeedsClientEvidenceError, QueryPlan
+from backend.services.base_agent import (
+    NeedsClarificationError, NeedsClientEvidenceError, NeedsUserInputError, QueryPlan,
+)
 from backend.services.mentions_agent import ClientEvidence
 from backend.services.query_orchestrator import QueryOrchestrator
 from backend.services.trace_collector import TraceCollector
@@ -47,6 +50,8 @@ class QueryRequest(BaseModel):
     include_trace: bool = False  # When True, attach a full execution trace to the response
     client_evidence: Optional[ClientEvidence] = None  # gathered client-side, resubmit round trip
     query_plan: Optional[QueryPlan] = None  # echoed back from a prior "needs_client_evidence" response
+    conversation_history: List[ChatTurn] = []  # prior turns of a follow-up chat conversation
+    force_fresh_retrieval: bool = False        # ignore conversation_history for routing this turn
 
 
 class QueryResponse(BaseModel):
@@ -60,9 +65,12 @@ class QueryResponse(BaseModel):
     agents_used: List[str] = []
     library_document_counts: dict[str, int] = {}
     trace: Optional[QueryTrace] = None  # Populated when include_trace=True
-    status: Literal["complete", "needs_client_evidence"] = "complete"
+    status: Literal["complete", "needs_client_evidence", "needs_clarification"] = "complete"
     citation_targets: List[CitationTarget] = []  # populated when status == "needs_client_evidence"
     query_plan: Optional[QueryPlan] = None  # echo back on the resubmit round trip
+    source_refs: List[str] = []                       # union of every used source's chunk_id,
+                                                        # echoed back verbatim on the next turn
+    clarification_message: Optional[str] = None        # populated when status == "needs_clarification"
 
 
 def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
@@ -76,6 +84,20 @@ def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError)
         library_ids=query.library_ids,
         status="needs_client_evidence",
         citation_targets=exc.citation_targets,
+        query_plan=exc.plan,
+    )
+
+
+def _needs_clarification_response(query: QueryRequest, exc: NeedsClarificationError) -> QueryResponse:
+    """Map a NeedsClarificationError to a response asking the user to narrow their question."""
+    return QueryResponse(
+        question=query.question,
+        answer="",
+        answer_format="text",
+        sources=[],
+        library_ids=query.library_ids,
+        status="needs_clarification",
+        clarification_message=exc.message,
         query_plan=exc.plan,
     )
 
@@ -196,6 +218,8 @@ async def query_libraries(
             trace=trace_collector,
             client_evidence=query.client_evidence,
             preset_plan=query.query_plan,
+            conversation_history=query.conversation_history,
+            force_fresh_retrieval=query.force_fresh_retrieval,
         )
 
         # Format citations
@@ -225,10 +249,15 @@ async def query_libraries(
             agents_used=result.agents_used,
             library_document_counts=library_document_counts,
             trace=trace_collector.finalize() if trace_collector is not None else None,
+            source_refs=result.source_refs,
         )
 
-    except NeedsClientEvidenceError as exc:
-        return _needs_evidence_response(query, exc)
+    except NeedsUserInputError as exc:
+        if isinstance(exc, NeedsClientEvidenceError):
+            return _needs_evidence_response(query, exc)
+        if isinstance(exc, NeedsClarificationError):
+            return _needs_clarification_response(query, exc)
+        raise
 
     except Exception as e:
         logger.exception("Query failed")
