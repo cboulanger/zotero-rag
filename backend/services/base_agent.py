@@ -26,6 +26,12 @@ class AgentResult(BaseModel):
     context_text: str        # formatted text block for the synthesis LLM prompt
     # SourceInfo is defined in rag_engine to avoid a circular import; typed as Any here.
     sources: list = []
+    source_refs: list[str] = []              # opaque evidence refs (payload chunk_id values)
+                                              # a later ContinuationAgent call can re-fetch by ID
+    needs_clarification: bool = False        # this agent judges the query too broad to answer well
+    clarification_message: Optional[str] = None    # human-readable narrowing prompt
+    clarification_suggestions: list[str] = []       # optional hints; unpopulated in v1 — a hook
+                                                     # for later facet-based suggestions
 
 
 class QueryPlan(BaseModel):
@@ -34,9 +40,15 @@ class QueryPlan(BaseModel):
     agents_to_use: list[str] = ["rag"]    # names of agents to invoke (must match registered names)
     filters: MetadataFilters = MetadataFilters()
     routing_description: Optional[str] = None   # LLM's brief reasoning, used in synthesis
+    clarification_needed: bool = False          # router judged the question too broad, pre-execution
+    clarification_question: Optional[str] = None
 
 
-class NeedsClientEvidenceError(Exception):
+class NeedsUserInputError(Exception):
+    """Base: the orchestrator cannot proceed to synthesis without more from the user."""
+
+
+class NeedsClientEvidenceError(NeedsUserInputError):
     """
     Raised by QueryOrchestrator when the routing plan selects the "mentions"
     agent but no client-gathered full-text evidence was supplied. Citation
@@ -51,6 +63,21 @@ class NeedsClientEvidenceError(Exception):
         self.citation_targets = citation_targets
         self.plan = plan
         super().__init__(f"Need client evidence for {len(citation_targets)} citation target(s)")
+
+
+class NeedsClarificationError(NeedsUserInputError):
+    """
+    Raised when the router or an executed agent judges the question too broad
+    to answer usefully (e.g. an unconstrained catalog dump). The API layer
+    returns a "needs_clarification" response with `message` asking the user
+    to narrow their question; `plan` is echoed back so the next turn's
+    filters can be refined rather than reset.
+    """
+
+    def __init__(self, message: str, plan: QueryPlan):
+        self.message = message
+        self.plan = plan
+        super().__init__(message)
 
 
 class BaseAgent(ABC):
