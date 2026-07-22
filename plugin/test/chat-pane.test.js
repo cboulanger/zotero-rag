@@ -85,3 +85,131 @@ test('buildFollowUpPayload on an unseeded note returns empty history and library
 	assert.deepStrictEqual(Array.from(payload.libraryIds), []);
 	assert.deepStrictEqual(Array.from(payload.conversationHistory), []);
 });
+
+test('init registers an item pane section with a trash button', () => {
+	/** @type {any[]} */
+	const registered = [];
+	const zoteroStub = {
+		ItemPaneManager: { registerSection: (opts) => registered.push(opts) },
+		Items: { trashTx: () => {} },
+	};
+	const ChatPane = loadChatPane(zoteroStub);
+
+	ChatPane.init({ pluginID: 'zotero-rag@example.com' });
+
+	assert.strictEqual(registered.length, 1);
+	assert.strictEqual(registered[0].paneID, 'zotero-rag-chat');
+	assert.strictEqual(registered[0].pluginID, 'zotero-rag@example.com');
+	assert.strictEqual(registered[0].sectionButtons.length, 1);
+	assert.strictEqual(registered[0].sectionButtons[0].type, 'zotero-rag-trash-note');
+});
+
+test('the trash section button calls Zotero.Items.trashTx with the item id', () => {
+	/** @type {any[]} */
+	const registered = [];
+	/** @type {number[][]} */
+	const trashedCalls = [];
+	const zoteroStub = {
+		ItemPaneManager: { registerSection: (opts) => registered.push(opts) },
+		Items: { trashTx: (ids) => trashedCalls.push(ids) },
+	};
+	const ChatPane = loadChatPane(zoteroStub);
+	ChatPane.init({ pluginID: 'zotero-rag@example.com' });
+
+	registered[0].sectionButtons[0].onClick({ item: { id: 42 } });
+
+	// The array passed to trashTx() is created inside the vm-executed source,
+	// so it belongs to a different realm's Array than this file's literal —
+	// normalize with Array.from() (see the getTurns() test above for the
+	// same cross-realm quirk).
+	assert.deepStrictEqual(trashedCalls.map((ids) => Array.from(ids)), [[42]]);
+});
+
+test('onItemChange enables the section only for notes tagged RAG Query Result', () => {
+	/** @type {any[]} */
+	const registered = [];
+	const zoteroStub = {
+		ItemPaneManager: { registerSection: (opts) => registered.push(opts) },
+		Items: { trashTx: () => {} },
+	};
+	const ChatPane = loadChatPane(zoteroStub);
+	ChatPane.init({ pluginID: 'zotero-rag@example.com' });
+
+	/** @type {boolean[]} */
+	const enabledCalls = [];
+	const setEnabled = (v) => enabledCalls.push(v);
+
+	const taggedNote = { isNote: () => true, hasTag: (t) => t === 'RAG Query Result' };
+	registered[0].onItemChange({ item: taggedNote, setEnabled });
+	assert.strictEqual(enabledCalls[0], true);
+
+	const untaggedNote = { isNote: () => true, hasTag: () => false };
+	registered[0].onItemChange({ item: untaggedNote, setEnabled });
+	assert.strictEqual(enabledCalls[1], false);
+
+	registered[0].onItemChange({ item: null, setEnabled });
+	assert.strictEqual(enabledCalls[2], false);
+});
+
+test('submitFollowUp records the turn and appends it to the note', async () => {
+	const zoteroStub = {
+		ItemPaneManager: { registerSection: () => {} },
+		Items: { trashTx: () => {} },
+	};
+	const ChatPane = loadChatPane(zoteroStub);
+	ChatPane.seedConversation(101, ['1'], []);
+
+	/** @type {any[]} */
+	const submittedOptions = [];
+	const fakeZoteroRAG = {
+		submitQuery: async (question, libraryIds, options) => {
+			submittedOptions.push(options);
+			return {
+				status: 'complete', answer: 'The answer.', answer_format: 'text',
+				sources: [], agents_used: ['continuation'], source_refs: ['c1'], query_plan: null,
+			};
+		},
+		formatTurnHTML: () => '<h2>Q</h2><p>The answer.</p>',
+		buildLibraryMap: () => new Map(),
+	};
+	/** @type {string[]} */
+	const notedHtml = [];
+	const noteStub = {
+		id: 101,
+		getNote: () => '<div>existing</div>',
+		setNote: (html) => notedHtml.push(html),
+		saveTx: async () => {},
+	};
+
+	const result = await ChatPane.submitFollowUp(fakeZoteroRAG, noteStub, 'Follow-up question');
+
+	assert.strictEqual(result.answer, 'The answer.');
+	assert.strictEqual(submittedOptions[0].conversationHistory.length, 0);
+	assert.strictEqual(ChatPane.getTurns(101).length, 1);
+	assert.strictEqual(ChatPane.getTurns(101)[0].question, 'Follow-up question');
+	assert.strictEqual(notedHtml.length, 1);
+	assert.ok(notedHtml[0].includes('The answer.'));
+});
+
+test('submitFollowUp records a needs_clarification turn using the clarification message as the answer', async () => {
+	const zoteroStub = { ItemPaneManager: { registerSection: () => {} }, Items: { trashTx: () => {} } };
+	const ChatPane = loadChatPane(zoteroStub);
+	ChatPane.seedConversation(101, ['1'], []);
+
+	const fakeZoteroRAG = {
+		submitQuery: async () => ({
+			status: 'needs_clarification', answer: '', answer_format: 'text', sources: [],
+			agents_used: [], source_refs: [], query_plan: { agents_to_use: ['metadata'] },
+			clarification_message: 'Please narrow by year.',
+		}),
+		formatTurnHTML: () => '<p>Please narrow by year.</p>',
+		buildLibraryMap: () => new Map(),
+	};
+	const noteStub = { id: 101, getNote: () => '', setNote: () => {}, saveTx: async () => {} };
+
+	await ChatPane.submitFollowUp(fakeZoteroRAG, noteStub, 'What has Luhmann written?');
+
+	const turn = ChatPane.getTurns(101)[0];
+	assert.strictEqual(turn.answer, 'Please narrow by year.');
+	assert.deepStrictEqual(turn.source_refs, []);
+});
