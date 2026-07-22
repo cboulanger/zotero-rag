@@ -3,4 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 export type FluentMessageId =
-  | 'zotero-rag-ask-question';
+  | 'zotero-rag-ask-question'
+  | 'zotero-rag-chat-header'
+  | 'zotero-rag-chat-sidenav'
+  | 'zotero-rag-chat-trash-button';
