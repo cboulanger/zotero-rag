@@ -192,6 +192,69 @@ indexing (Zotero's `fulltext.pdfMaxPages`/`textMaxLength` prefs) can miss mentio
 near the end of long documents, flagged via `partial_index` but not otherwise
 compensated for.
 
+## Follow-up Conversations
+
+`POST /api/query` accepts an optional `conversation_history` — a list of prior
+`{question, answer, agents_used, source_refs, query_plan}` turns, echoed back
+verbatim by the client on every follow-up request. The backend keeps no
+server-side session state: every request is fully self-contained, so a
+backend restart mid-conversation (this deployment restarts often — see root
+`CLAUDE.md`'s hotfix workflow) is a non-event, not a failure mode.
+
+A dedicated `ContinuationAgent` (`backend/services/continuation_agent.py`)
+handles most follow-ups: it re-fetches the previous turn's evidence by the
+`chunk_id` values recorded in `source_refs` (`VectorStore.get_chunks_by_ids()`
+— no embedding call, no similarity search) and synthesizes from that plus the
+conversation text. The router selects it via its `capability_prompt` exactly
+like any other agent — no orchestrator changes are needed to add further
+chat-specific agents later (e.g. one comparing two cited works).
+
+`source_refs` on `AgentResult`/`QueryResponse` is the payload's `chunk_id`
+field (positional and stable for unchanged content — `library_id:item_key:
+attachment_key:index` — NOT derived from content_hash), not Qdrant's internal
+point ID, which this module never exposes externally. `MentionsAgent`-derived
+turns have no `source_refs` (client-gathered evidence is never stored
+server-side) — a follow-up to such a turn falls back to conversation-history
+text only.
+
+Set `force_fresh_retrieval: true` on a follow-up request to ignore
+`conversation_history` for routing/agent selection and run the normal full
+pipeline for that turn, while still recording it as part of the conversation.
+
+### Clarification when a question is too broad
+
+Both the router and individual agents can decide a question needs narrowing
+before (or instead of) producing an answer:
+
+- The router can set `clarification_needed`/`clarification_question` directly
+  in its JSON response, before any agent runs, for an obviously unconstrained
+  catalog-style question.
+- `MetadataAgent` sets `AgentResult.needs_clarification` when more than
+  `settings.metadata_narrowing_threshold` (default 50) distinct items match —
+  it never dumps an oversized, unfiltered catalog listing into the synthesis
+  prompt.
+
+If **every** selected agent flags `needs_clarification`, `/api/query` returns
+without a synthesis call:
+
+```json
+{
+  "status": "needs_clarification",
+  "clarification_message": "Found more than 50 matching items — try narrowing by year, author, or item type.",
+  "query_plan": {"agents_to_use": ["metadata"], "filters": {"...": "..."}}
+}
+```
+
+If only **some** agents flag it, synthesis still proceeds using the other
+agents' usable content, with the flagged agent's message folded into the
+synthesis prompt as a caveat instead of blocking the whole answer.
+
+`NeedsClarificationError` and the existing `NeedsClientEvidenceError` (see
+above) both extend `NeedsUserInputError` — one exception family, one
+`QueryResponse.status` field, so a third future "needs more from the user"
+case (e.g. disambiguating two same-named authors) doesn't need a new
+wire-protocol shape.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
