@@ -72,6 +72,18 @@ class Settings(BaseSettings):
         description="Minimum word count for abstractNote to be used as fallback when no attachment is available"
     )
 
+    # Follow-up chat
+    metadata_narrowing_threshold: int = Field(
+        default=50,
+        description="MetadataAgent: max distinct catalog items to answer directly; "
+                    "above this, ask the user to narrow their question instead."
+    )
+    max_conversation_context_chars: int = Field(
+        default=6000,
+        description="Max characters of prior Q&A turns included in the routing prompt "
+                    "for a follow-up chat turn; older turns are dropped once this is exceeded."
+    )
+
     # Extraction backend
     extractor_backend: str = Field(
         default="kreuzberg",
