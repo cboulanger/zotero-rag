@@ -565,6 +565,33 @@ class TestContinuationAgentRegistration(unittest.IsolatedAsyncioTestCase):
         continuation.execute.assert_not_called()
         rag.execute.assert_called_once()
 
+    async def test_continuation_kept_and_executes_when_history_present(self):
+        orch = _make_orchestrator()
+        # continuation's agent_name is "continuation", not "rag" — even as the sole
+        # selected agent it does NOT take the single-agent RAG passthrough shortcut
+        # (that shortcut checks agent_name == "rag"), so it goes through _synthesize().
+        orch._llm_service.generate = AsyncMock(return_value="Synthesized continuation answer.")
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+        continuation_result = AgentResult(
+            agent_name="continuation", context_text="Continuation answer",
+            sources=[_make_source(item_id="C")],
+        )
+        continuation = _stub_agent("continuation", continuation_result)
+        orch._agents = {"rag": _stub_agent("rag", AgentResult(agent_name="rag", context_text="unused")),
+                         "continuation": continuation}
+        plan = QueryPlan(agents_to_use=["continuation"])
+        history = [ChatTurn(question="Q0", answer="A0", source_refs=["c1"])]
+
+        result = await orch.query("Tell me more", ["1"], preset_plan=plan, conversation_history=history)
+
+        continuation.execute.assert_called_once()
+        call_kwargs = continuation.execute.call_args.kwargs
+        self.assertEqual(call_kwargs["conversation_history"], history)
+        self.assertEqual(result.answer, "Synthesized continuation answer.")
+        synthesis_prompt = orch._llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn("Continuation answer", synthesis_prompt)
+        self.assertEqual(result.sources[0].item_id, "C")
+
 
 if __name__ == "__main__":
     unittest.main()
