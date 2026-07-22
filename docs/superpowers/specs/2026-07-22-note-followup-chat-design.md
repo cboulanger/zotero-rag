@@ -28,6 +28,7 @@ Confirmed during design and shaping the rest of this spec:
 | Mixed clarification policy | If some selected agents return usable content while another flags "too broad," synthesis proceeds using the usable content, with a caveat about the oversized listing folded into the prompt. Only short-circuits to a clarification response if *no* selected agent produced usable content |
 | Mentions-derived turns | `MentionsAgent` evidence is gathered client-side and never stored server-side, so it has no re-fetchable evidence reference. Continuing a mentions-derived answer works via conversation-history text only (no chunk re-fetch) — an accepted v1 limitation, not a blocker |
 | Backend restart resilience | No backend-side session state is introduced. Every follow-up request is self-contained (it carries the full conversation history and evidence references), so a backend restart mid-conversation (this deployment restarts frequently — see root `CLAUDE.md`'s hotfix workflow) does not break continuation; the next request just works against a freshly started process the same as any other request |
+| Trash-from-note (unrelated, bundled because §5.8 already touches note UI wiring) | A "Move to Trash" header button on the same item-pane section, so query notes that shouldn't persist can be discarded without navigating the collection tree — see §5.9 |
 
 ## 4. Architecture
 
@@ -198,6 +199,14 @@ Zotero.ItemPaneManager.registerSection({
         setEnabled(!!item && item.isNote() && item.hasTag('RAG Query Result'));
     },
     onRender: ({ body, item }) => ChatPane._render(body, item),
+    sectionButtons: [
+        {
+            type: 'zotero-rag-trash-note',
+            icon: 'chrome://zotero/skin/16/universal/trash.svg',
+            l10nID: 'zotero-rag-chat-trash-button',
+            onClick: ({ item }) => Zotero.Items.trashTx([item.id]),
+        },
+    ],
 });
 ```
 
@@ -220,6 +229,17 @@ A "Start fresh search" button in the pane calls `submitFollowUp(note, question, 
 ### 5.8 `plugin/src/zotero-rag.js` changes
 
 `createResultNote()` changes from `zoteroPane.openNoteWindow(note.id)` to `zoteroPane.selectItem(note.id)` (selecting it in the main library view, where the item pane — and the new chat section — is visible), and calls `ChatPane.seedConversation(...)` right after `note.saveTx()`. A user can still open a standalone note window via Zotero's own UI if they want the larger editor view; like every other item-pane section, ours simply won't be visible there, matching how all `ItemPaneManager` sections behave today.
+
+### 5.9 Trash-from-note button (unrelated, bundled in because §5.7/§5.8 already add note-UI wiring)
+
+A `sectionButtons` entry on the same `zotero-rag-chat` section (§5.7) puts a trash icon in the section header — visible under the exact same `onItemChange`/`setEnabled` gating as the rest of the section, i.e. whenever a note tagged `RAG Query Result` is selected. Clicking it calls `Zotero.Items.trashTx([item.id])` — Zotero's own transactional soft-delete (moves the note to Trash, recoverable, fires the standard `trash`/`modify` notifier events), the same primitive Zotero's native "Move Item to Trash" command uses internally.
+
+Two deliberate choices worth surfacing:
+
+- **No confirmation dialog.** Zotero's own tree UI (Del key, right-click → Move to Trash) doesn't prompt before trashing either, precisely because it's a recoverable action (unlike Empty Trash / Delete Permanently, which do prompt) — matching that convention keeps the one-click behavior consistent with the rest of the app, and is the whole point of the feature (saving a trip to the tree just to do the same single-click delete there).
+- **Icon reuse.** Uses Zotero's own bundled trash icon (`chrome://zotero/skin/16/universal/trash.svg`, confirmed present in the Zotero source tree) rather than shipping a new asset — exact path to be double-checked against the running Zotero version at implementation time.
+
+No special handling is needed for what happens to the pane afterward: once the note is trashed it's no longer the selected/valid item pane target, and `ItemPaneManager`'s normal `onItemChange` lifecycle (the same mechanism that disables our section for any non-matching item) takes over exactly as it does for every other section when the selection changes.
 
 ## 6. Data flow — worked examples
 
@@ -254,4 +274,4 @@ Two abstractions are introduced specifically so future work doesn't require touc
 - **Backend unit tests**: `ContinuationAgent.execute()` against a mocked `vector_store.get_chunks_by_ids` (found chunks, partially-missing chunks, zero chunks → text-only fallback); router response parsing for `clarification_needed`/`clarification_question`; `QueryOrchestrator`'s partition logic for mixed vs. all-clarification agent results (fake agents forcing each combination); `MetadataAgent`'s threshold behavior (count above/below `metadata_narrowing_threshold`).
 - **Backend integration tests**: a full `/api/query` round trip with `conversation_history` populated and `enable_routing=False` + `query_plan` preset to `agents_to_use: ["continuation"]` (bypassing the real router LLM call), confirming the response's `source_refs` match what was re-fetched.
 - **Plugin unit tests** (`plugin/test/`): `ChatPane` transcript rendering from a `ChatTurn[]` array; `submitFollowUp` payload construction (correct `conversation_history`/`source_refs` echoed, `force_fresh_retrieval` flag wiring); per-turn note-HTML-append formatter.
-- **Manual verification**: a real end-to-end drill-down conversation on a live note; a deliberately unconstrained query that triggers `needs_clarification` and a follow-up reply that resolves it; a backend restart (`sudo systemctl restart zotero-rag.service` in a dev/hotfix-style setup, or just restarting the local `npm start` server) mid-conversation confirming continuation still works; a Zotero restart confirming the graceful fallback to a fresh, full-routing query.
+- **Manual verification**: a real end-to-end drill-down conversation on a live note; a deliberately unconstrained query that triggers `needs_clarification` and a follow-up reply that resolves it; a backend restart (`sudo systemctl restart zotero-rag.service` in a dev/hotfix-style setup, or just restarting the local `npm start` server) mid-conversation confirming continuation still works; a Zotero restart confirming the graceful fallback to a fresh, full-routing query; clicking the trash button on a result note confirms it lands in Trash (recoverable) and the item pane deselects cleanly.
