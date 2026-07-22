@@ -1221,7 +1221,7 @@ class ZoteroRAGPlugin {
 
 		ChatPane.seedConversation(note.id, libraryIDs, [{
 			question,
-			answer: result.answer,
+			answer: result.status === 'needs_clarification' ? result.clarification_message : result.answer,
 			agents_used: result.agents_used || [],
 			source_refs: result.source_refs || [],
 			query_plan: result.query_plan || null,
@@ -1770,12 +1770,18 @@ class ZoteroRAGPlugin {
 		let html = `<h2>${this.escapeHTML(question)}</h2>`;
 		html += `<p><strong>Answer:</strong></p>`;
 
+		// When the backend judged the question too broad (status: 'needs_clarification'),
+		// `answer` is empty and the human-readable question lives in `clarification_message`
+		// instead — display that. It's always plain text (never answer_format: 'html'),
+		// so it goes through the same escaping path as the existing plain-text branch.
+		const displayAnswer = result.status === 'needs_clarification' ? result.clarification_message : result.answer;
+
 		// Process answer text to replace inline citations, then merge consecutive ones
 		let answerHTML = '';
-		if (result.answer_format === 'html') {
+		if (result.answer_format === 'html' && result.status !== 'needs_clarification') {
 			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap);
 		} else {
-			const escapedAnswer = this.escapeHTML(result.answer);
+			const escapedAnswer = this.escapeHTML(displayAnswer || '');
 			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap)}</p>`;
 		}
 		html += this.mergeConsecutiveCitations(answerHTML);

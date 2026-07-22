@@ -1143,7 +1143,11 @@ var ZoteroRAGDialog = {
 
 			await this.plugin.createResultNote(question, result, libraryIds);
 
-			this.updateProgress(100, 'Complete', 'Note created successfully!');
+			if (result.status === 'needs_clarification') {
+				this.updateProgress(100, 'Needs narrowing', 'Your question was too broad — see the note for details, and use the note\'s follow-up chat to narrow it.');
+			} else {
+				this.updateProgress(100, 'Complete', 'Note created successfully!');
+			}
 
 			// Close dialog after successful completion
 			setTimeout(() => {

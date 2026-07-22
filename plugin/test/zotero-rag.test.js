@@ -545,6 +545,69 @@ test('formatTurnHTML resolves an inline [S1] citation to a Zotero item and lists
 	assert.ok(!html.includes('A Great Paper (fallback title)'), 'bibliography should use the real item title, not the source fallback title');
 });
 
+test('formatTurnHTML renders the clarification message (not the empty answer) when status is needs_clarification', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const result = {
+		status: 'needs_clarification',
+		answer: '',
+		clarification_message: 'Please narrow by year.',
+		sources: [],
+	};
+	const html = plugin.formatTurnHTML('What has Luhmann written about?', result, new Map());
+	assert.ok(html.includes('Please narrow by year.'), `expected clarification message in rendered HTML, got: ${html}`);
+	// Must not silently render an empty answer paragraph with nothing in it.
+	assert.ok(!/<p>\s*<\/p>/.test(html), `expected no empty answer paragraph, got: ${html}`);
+});
+
+test('createResultNote seeds ChatPane with the clarification message (not the empty answer) when status is needs_clarification', async () => {
+	/** @type {any} */
+	let seededTurns = null;
+	const chatPaneStub = {
+		seedConversation: (/** @type {any} */ _noteId, /** @type {any} */ _libraryIds, /** @type {any} */ turns) => {
+			seededTurns = turns;
+		},
+	};
+
+	const noteStub = {
+		id: 'note1',
+		libraryID: 1,
+		setNote() {},
+		addToCollection() {},
+		addTag() {},
+		async saveTx() {},
+	};
+
+	const zoteroPaneStub = {
+		getSelectedLibraryID: () => 1,
+		getSelectedCollection: () => undefined,
+		selectItem: async () => {},
+	};
+
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+		Item: function (/** @type {string} */ _type) { return noteStub; },
+		getActiveZoteroPane: () => zoteroPaneStub,
+	};
+
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { ChatPane: chatPaneStub, Services: servicesStub });
+	plugin.version = '1.0.0';
+
+	const result = {
+		status: 'needs_clarification',
+		answer: '',
+		clarification_message: 'Please narrow by year.',
+		sources: [],
+	};
+
+	await plugin.createResultNote('What has Luhmann written about?', result, ['u12345']);
+
+	assert.ok(seededTurns, 'ChatPane.seedConversation should have been called');
+	assert.strictEqual(seededTurns[0].answer, 'Please narrow by year.');
+});
+
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 	/** @type {string[]} */
 	const calls = [];
