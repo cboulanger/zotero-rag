@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Optional
 
 from backend.db.vector_store import VectorStore
 from backend.models.conversation import ChatTurn
 from backend.models.filters import MetadataFilters
+from backend.models.trace import AgentExecutionTrace
 from backend.services.base_agent import AgentResult, BaseAgent
 
 if TYPE_CHECKING:
@@ -50,6 +52,7 @@ class ContinuationAgent(BaseAgent):
         trace: Optional["TraceCollector"] = None,
         **kwargs,
     ) -> AgentResult:
+        t_start = time.monotonic()
         conversation_history: list[ChatTurn] = kwargs.get("conversation_history") or []
 
         prior_refs: list[str] = []
@@ -76,10 +79,22 @@ class ContinuationAgent(BaseAgent):
                 "answer from the conversation history above only.)"
             )
 
+        sources = _sources_from_chunks(chunks)
+
+        if trace is not None:
+            trace.record(AgentExecutionTrace(
+                agent_name=self.name,
+                retrieval=None,
+                catalog_results=None,
+                context_text=context_text,
+                sources_count=len(sources),
+                duration_ms=int((time.monotonic() - t_start) * 1000),
+            ))
+
         return AgentResult(
             agent_name=self.name,
             context_text=context_text,
-            sources=_sources_from_chunks(chunks),
+            sources=sources,
             source_refs=[c["payload"]["chunk_id"] for c in chunks if c["payload"].get("chunk_id")],
         )
 

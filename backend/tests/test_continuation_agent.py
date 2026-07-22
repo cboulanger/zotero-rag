@@ -42,6 +42,20 @@ class TestContinuationAgent(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Q0", result.context_text)
         self.assertIn("Some text", result.context_text)
 
+    async def test_dedups_source_refs_across_multiple_turns(self):
+        agent, store = self._make_agent([_chunk("c1"), _chunk("c2"), _chunk("c3")])
+        history = [
+            ChatTurn(question="Q0", answer="A0", source_refs=["c1", "c2"]),
+            ChatTurn(question="Q1", answer="A1", source_refs=["c2", "c3"]),
+        ]
+
+        await agent.execute(
+            question="Tell me more", library_ids=["1"], filters=MetadataFilters(),
+            conversation_history=history,
+        )
+
+        store.get_chunks_by_ids.assert_called_once_with(["c1", "c2", "c3"])
+
     async def test_missing_chunks_tolerated(self):
         agent, store = self._make_agent([_chunk("c1")])  # c2 no longer exists
         history = [ChatTurn(question="Q0", answer="A0", source_refs=["c1", "c2"])]
