@@ -496,6 +496,55 @@ test('formatTurnHTML renders question heading, answer, and bibliography without 
 	assert.ok(!html.includes('Generated:')); // metadata footer belongs to formatNoteHTML only
 });
 
+test('formatTurnHTML resolves an inline [S1] citation to a Zotero item and lists it in the bibliography', () => {
+	const fakeItem = {
+		key: 'ITEM1',
+		getCreators: () => [{ lastName: 'Smith', firstName: 'Jane' }],
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'A Great Paper' : f === 'date' ? '2020' : ''),
+		getAttachments: () => [], // no PDF attachment -> falls back to zotero://select/
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				(libraryID === 1 && key === 'ITEM1') ? fakeItem : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source = {
+		item_id: 'ITEM1',
+		library_id: 'u12345',
+		title: 'A Great Paper (fallback title)',
+		page_number: null,
+		text_anchor: null,
+		relevance_score: 0.9,
+	};
+	const result = {
+		answer: 'This claim is supported by prior work [S1].',
+		answer_format: 'text',
+		sources: [source],
+	};
+	// buildLibraryMap() would produce exactly this shape for a 'u12345' user library.
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.formatTurnHTML('Does prior work support this?', result, libraryMap);
+
+	// The [S1] marker must be gone, replaced by a resolved citation link using the
+	// real Zotero item's author/year (not the raw source.title fallback) — proves
+	// replaceCitationsInText() actually looked up the item via getZoteroItem().
+	assert.ok(!html.includes('[S1]'), 'raw [S1] marker should have been replaced');
+	assert.ok(html.includes('>(Smith, 2020)</a>'), `expected a resolved "Smith, 2020" citation link, got: ${html}`);
+	assert.ok(html.includes('zotero://select/library/items/ITEM1'), 'citation link should point at the resolved Zotero item');
+
+	// The bibliography section (formatBibliographyHTML) must list the same item,
+	// formatted as "Author (Year) \"Title\"" using the real item's metadata.
+	assert.ok(html.includes('<strong>References</strong>'), 'bibliography header missing');
+	assert.ok(html.includes('Smith (2020) &quot;A Great Paper&quot;'), `expected bibliography entry for the resolved item, got: ${html}`);
+	assert.ok(!html.includes('A Great Paper (fallback title)'), 'bibliography should use the real item title, not the source fallback title');
+});
+
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 	/** @type {string[]} */
 	const calls = [];
