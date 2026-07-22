@@ -783,7 +783,7 @@ class VectorStore:
         Text indexes on authors and title enable substring matching.
         Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower")
+        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower", "chunk_id")
         for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
@@ -1218,6 +1218,32 @@ class VectorStore:
             if next_offset is None:
                 break
         return [{"id": p.id, "payload": p.payload} for p in chunks]
+
+    def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[dict]:
+        """
+        Payload-only lookup by the payload's `chunk_id` field (content-hash-derived,
+        stable — NOT the internal Qdrant point ID, which this module never exposes
+        externally). No embedding call, no similarity search.
+
+        Synchronous (the Qdrant client is sync) — callers must wrap in
+        asyncio.to_thread() from an async context, same as get_items_by_metadata().
+
+        Returns:
+            List of {"id": <qdrant point id>, "payload": <dict>} — same shape as
+            get_item_chunks(). Missing IDs are silently omitted, never an error.
+        """
+        if not chunk_ids:
+            return []
+        points, _ = self.client.scroll(
+            collection_name=self.CHUNKS_COLLECTION,
+            scroll_filter=Filter(must=[
+                FieldCondition(key="chunk_id", match=MatchAny(any=chunk_ids)),
+            ]),
+            limit=len(chunk_ids),
+            with_payload=True,
+            with_vectors=False,
+        )
+        return [{"id": p.id, "payload": p.payload} for p in points]
 
     def get_item_version(self, library_id: str, item_key: str) -> Optional[int]:
         """

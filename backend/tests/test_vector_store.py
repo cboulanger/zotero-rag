@@ -80,6 +80,39 @@ class TestVectorStore(unittest.TestCase):
         info = self.vector_store.get_collection_info()
         self.assertEqual(info["chunks_count"], 1)
 
+    def test_get_chunks_by_ids_returns_matching_payloads(self):
+        chunk_a = DocumentChunk(
+            text="Chunk A text",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-A", document_metadata=DocumentMetadata(
+                    library_id="1", item_key="ITEM1", title="Doc A",
+                ),
+                page_number=1, text_preview="Chunk A", chunk_index=0, content_hash="hA",
+            ),
+            embedding=[0.1] * 384,
+        )
+        chunk_b = DocumentChunk(
+            text="Chunk B text",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-B", document_metadata=DocumentMetadata(
+                    library_id="1", item_key="ITEM2", title="Doc B",
+                ),
+                page_number=1, text_preview="Chunk B", chunk_index=0, content_hash="hB",
+            ),
+            embedding=[0.2] * 384,
+        )
+        self.vector_store.add_chunk(chunk_a)
+        self.vector_store.add_chunk(chunk_b)
+
+        found = self.vector_store.get_chunks_by_ids(["chunk-A", "chunk-nonexistent"])
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["payload"]["chunk_id"], "chunk-A")
+        self.assertEqual(found[0]["payload"]["text"], "Chunk A text")
+
+    def test_get_chunks_by_ids_empty_list_returns_empty(self):
+        self.assertEqual(self.vector_store.get_chunks_by_ids([]), [])
+
     def test_add_chunk_without_embedding_raises_error(self):
         """Test that adding chunk without embedding raises error."""
         chunk = DocumentChunk(
