@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
+from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget, MetadataFilters
 from backend.models.trace import LLMCallTrace, RoutingTrace
 from backend.services.base_agent import BaseAgent, QueryPlan
@@ -54,7 +55,7 @@ You are a query router for an academic library system.
 You have these agents available:
 
 {agent_blocks}
-
+{conversation_block}
 Question: "{question}"
 
 Return ONLY a valid JSON object — no other text:
@@ -66,7 +67,9 @@ Return ONLY a valid JSON object — no other text:
   "item_types": [],
   "title_keywords": [],
   "citation_targets": [],
-  "routing_description": null
+  "routing_description": null,
+  "clarification_needed": false,
+  "clarification_question": null
 }}
 
 Field explanations:
@@ -80,6 +83,13 @@ Field explanations:
   being CITED/DISCUSSED by other publications (see "mentions" agent below). Leave empty unless
   the question is clearly about citation/discussion of specific named work(s).
 - routing_description: brief one-sentence note on why these agents were chosen
+- clarification_needed: true ONLY when the question is an unconstrained catalog-style request
+  (e.g. "What has X written about?", "List everything on topic Y") with no year range, specific
+  title, or other narrowing detail — asking the user to narrow it is better than guessing.
+  Leave false for any question with enough specificity to search directly, and false whenever
+  a conversation history is present and the follow-up is clearly building on it.
+- clarification_question: if clarification_needed is true, a short question asking the user to
+  narrow by year, author, item type, or topic; otherwise null.
 {guidance}"""
 
 
@@ -89,12 +99,24 @@ class QueryRouter:
     def __init__(self, llm_service: LLMService):
         self._llm = llm_service
 
-    def _build_prompt(self, agents: list[BaseAgent], question: str) -> str:
+    def _build_prompt(
+        self,
+        agents: list[BaseAgent],
+        question: str,
+        conversation_history: Optional[list[ChatTurn]] = None,
+        max_conversation_context_chars: int = 6000,
+    ) -> str:
         agent_blocks = "\n\n".join(
             f"[AGENT: {a.name}]\n{a.capability_prompt}" for a in agents
         )
+        conversation_block = ""
+        if conversation_history:
+            rendered = _render_conversation_history(conversation_history, max_conversation_context_chars)
+            if rendered:
+                conversation_block = f"\nConversation so far (oldest first):\n{rendered}\n"
         return _PROMPT_TEMPLATE.format(
             agent_blocks=agent_blocks,
+            conversation_block=conversation_block,
             question=question,
             guidance=_ROUTING_GUIDANCE,
         )
@@ -104,6 +126,8 @@ class QueryRouter:
         question: str,
         agents: list[BaseAgent],
         trace: Optional[TraceCollector] = None,
+        conversation_history: Optional[list[ChatTurn]] = None,
+        max_conversation_context_chars: int = 6000,
     ) -> QueryPlan:
         """
         Call the LLM to classify the question and extract filters.
@@ -114,7 +138,7 @@ class QueryRouter:
         if not agents:
             return QueryPlan()
 
-        prompt = self._build_prompt(agents, question)
+        prompt = self._build_prompt(agents, question, conversation_history, max_conversation_context_chars)
         valid_names = {a.name for a in agents}
         t0 = time.monotonic()
         raw = ""
@@ -148,6 +172,8 @@ class QueryRouter:
                     citation_targets=citation_targets,
                 ),
                 routing_description=data.get("routing_description"),
+                clarification_needed=bool(data.get("clarification_needed", False)),
+                clarification_question=data.get("clarification_question"),
             )
 
             if trace is not None:
@@ -173,6 +199,22 @@ class QueryRouter:
         except Exception as exc:
             logger.warning("QueryRouter: routing failed (%s) — falling back to RAG", exc)
             return QueryPlan()
+
+
+def _render_conversation_history(history: list[ChatTurn], max_chars: int) -> str:
+    """Render the most recent turns that fit under max_chars, dropping older ones."""
+    if not history:
+        return ""
+    kept: list[str] = []
+    total = 0
+    for turn in reversed(history):
+        block = f"Q: {turn.question}\nA: {turn.answer}"
+        if total + len(block) > max_chars and kept:
+            break
+        kept.append(block)
+        total += len(block)
+    kept.reverse()
+    return "\n\n".join(kept)
 
 
 def _parse_json(text: str) -> dict:

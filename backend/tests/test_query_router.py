@@ -9,6 +9,7 @@ Unit tests for QueryRouter:
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+from backend.models.conversation import ChatTurn
 from backend.models.filters import MetadataFilters
 from backend.services.base_agent import AgentResult, BaseAgent, QueryPlan
 from backend.services.query_router import QueryRouter, _parse_json
@@ -227,6 +228,63 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
         await router.route("UNIQUE_QUESTION_TEXT", agents)
         prompt = llm.generate.call_args.kwargs["prompt"]
         self.assertIn("UNIQUE_QUESTION_TEXT", prompt)
+
+
+class TestConversationHistoryInPrompt(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_history_included_in_prompt(self):
+        router = _make_router('{"agents": ["continuation"]}')
+        agents = [_make_agent("continuation", "cap")]
+        history = [ChatTurn(question="First question", answer="First answer")]
+
+        await router.route("Follow-up", agents, conversation_history=history)
+
+        sent_prompt = router._llm.generate.call_args.kwargs["prompt"]
+        self.assertIn("First question", sent_prompt)
+        self.assertIn("First answer", sent_prompt)
+
+    async def test_no_conversation_history_omits_block(self):
+        router = _make_router('{"agents": ["rag"]}')
+        agents = [_make_agent("rag", "cap")]
+
+        await router.route("A fresh question", agents)
+
+        sent_prompt = router._llm.generate.call_args.kwargs["prompt"]
+        self.assertNotIn("Conversation so far", sent_prompt)
+
+    async def test_long_history_is_truncated_to_max_chars(self):
+        router = _make_router('{"agents": ["rag"]}')
+        agents = [_make_agent("rag", "cap")]
+        history = [
+            ChatTurn(question=f"Q{i}" * 50, answer=f"A{i}" * 50) for i in range(10)
+        ]
+
+        await router.route("Follow-up", agents, conversation_history=history,
+                            max_conversation_context_chars=200)
+
+        sent_prompt = router._llm.generate.call_args.kwargs["prompt"]
+        # Only the most recent turn(s) fit under a 200-char budget — the first turn's
+        # question text must have been dropped.
+        self.assertNotIn("Q0" * 50, sent_prompt)
+        self.assertIn("Q9" * 50, sent_prompt)
+
+
+class TestClarificationParsing(unittest.IsolatedAsyncioTestCase):
+    async def test_parses_clarification_needed_true(self):
+        router = _make_router(
+            '{"agents": ["metadata"], "clarification_needed": true, '
+            '"clarification_question": "Which years?"}'
+        )
+        agents = [_make_agent("metadata", "cap")]
+        plan = await router.route("What has Luhmann written?", agents)
+        self.assertTrue(plan.clarification_needed)
+        self.assertEqual(plan.clarification_question, "Which years?")
+
+    async def test_clarification_needed_defaults_false(self):
+        router = _make_router('{"agents": ["rag"]}')
+        agents = [_make_agent("rag", "cap")]
+        plan = await router.route("Q", agents)
+        self.assertFalse(plan.clarification_needed)
+        self.assertIsNone(plan.clarification_question)
 
 
 if __name__ == "__main__":
