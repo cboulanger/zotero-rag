@@ -206,13 +206,64 @@ class TestMetadataAgentExecute(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Social Systems", result.context_text)
         self.assertIn("1984", result.context_text)
 
-    async def test_custom_limit_via_kwargs(self):
+    async def test_narrowing_threshold_controls_fetch_limit(self):
         store = MagicMock()
         store.get_items_by_metadata.return_value = []
         agent = MetadataAgent(store)
-        await agent.execute(question="Q", library_ids=[], filters=MetadataFilters(), metadata_limit=10)
+        await agent.execute(
+            question="Q", library_ids=[], filters=MetadataFilters(),
+            metadata_narrowing_threshold=10,
+        )
         call_kwargs = store.get_items_by_metadata.call_args.kwargs
-        self.assertEqual(call_kwargs["limit"], 10)
+        self.assertEqual(call_kwargs["limit"], 11)
+
+    async def test_default_narrowing_threshold_is_50(self):
+        store = MagicMock()
+        store.get_items_by_metadata.return_value = []
+        agent = MetadataAgent(store)
+        await agent.execute(question="Q", library_ids=[], filters=MetadataFilters())
+        call_kwargs = store.get_items_by_metadata.call_args.kwargs
+        self.assertEqual(call_kwargs["limit"], 51)
+
+    async def test_over_threshold_returns_clarification_not_items(self):
+        payloads = [
+            {"item_key": f"I{i}", "library_id": "1", "title": f"T{i}", "authors": []}
+            for i in range(11)
+        ]
+        store = MagicMock()
+        store.get_items_by_metadata.return_value = payloads
+        agent = MetadataAgent(store)
+        result = await agent.execute(
+            question="Q", library_ids=["1"], filters=MetadataFilters(),
+            metadata_narrowing_threshold=10,
+        )
+        self.assertTrue(result.needs_clarification)
+        self.assertIn("more than 10", result.clarification_message)
+        self.assertEqual(result.sources, [])
+
+    async def test_under_threshold_returns_normal_items(self):
+        payloads = [
+            {"item_key": "I1", "library_id": "1", "title": "T1", "authors": []},
+        ]
+        store = MagicMock()
+        store.get_items_by_metadata.return_value = payloads
+        agent = MetadataAgent(store)
+        result = await agent.execute(
+            question="Q", library_ids=["1"], filters=MetadataFilters(),
+            metadata_narrowing_threshold=10,
+        )
+        self.assertFalse(result.needs_clarification)
+        self.assertEqual(len(result.sources), 1)
+
+    async def test_source_refs_populated_from_chunk_id(self):
+        payloads = [
+            {"item_key": "I1", "library_id": "1", "title": "T1", "authors": [], "chunk_id": "c1"},
+        ]
+        store = MagicMock()
+        store.get_items_by_metadata.return_value = payloads
+        agent = MetadataAgent(store)
+        result = await agent.execute(question="Q", library_ids=["1"], filters=MetadataFilters())
+        self.assertEqual(result.source_refs, ["c1"])
 
 
 if __name__ == "__main__":
