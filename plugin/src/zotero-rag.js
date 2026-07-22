@@ -1231,7 +1231,11 @@ class ZoteroRAGPlugin {
 		// new chat section — is visible. A standalone note window (Zotero's own
 		// "New Note Window" command) has no item pane, so it can't show ours;
 		// this is why we no longer open one automatically here.
-		zoteroPane.selectItem(note.id);
+		try {
+			await zoteroPane.selectItem(note.id);
+		} catch (e) {
+			this.log(`[createResultNote] Failed to select note in library pane: ${e instanceof Error ? e.message : e}`);
+		}
 
 		return note;
 	}
