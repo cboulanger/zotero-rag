@@ -154,3 +154,95 @@ test('buildConversationHistory returns an empty array with no turns yet', () => 
 	const ZoteroRAGDialog = loadDialogMethods();
 	assert.deepStrictEqual(ZoteroRAGDialog.buildConversationHistory.call({ turns: [] }), []);
 });
+
+test('runQuery returns the result directly when no client evidence is needed', async () => {
+	const ZoteroRAGDialog = loadDialogMethods();
+	const fakeThis = {
+		plugin: { submitQuery: async () => ({ status: 'complete', answer: 'A', sources: [] }) },
+	};
+	const result = await ZoteroRAGDialog.runQuery.call(fakeThis, 'Q', ['1'], { minScore: 0.3 });
+	assert.strictEqual(result.answer, 'A');
+});
+
+test('runQuery gathers mention evidence and resubmits once when the backend requests it', async () => {
+	/** @type {any[]} */
+	const submittedOptions = [];
+	const fakeThis = {
+		plugin: {
+			submitQuery: async (/** @type {string} */ _q, /** @type {string[]} */ _ids, /** @type {any} */ opts) => {
+				submittedOptions.push(opts);
+				if (submittedOptions.length === 1) {
+					return { status: 'needs_client_evidence', citation_targets: [{ author: 'X', year: null, title_keywords: [] }], query_plan: { agents_to_use: ['mentions'] } };
+				}
+				return { status: 'complete', answer: 'Resolved.', sources: [] };
+			},
+		},
+		resolveZoteroLibraryID: (/** @type {string} */ id) => (id === 'u1' ? 1 : null),
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		MentionSearch: { findMentionEvidence: async () => ({ items: [], truncated: false, total_candidates: 0 }) },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const result = await ContextDialog.runQuery.call(fakeThis, 'Q', ['u1'], {});
+
+	assert.strictEqual(result.answer, 'Resolved.');
+	assert.strictEqual(submittedOptions.length, 2);
+	assert.ok(submittedOptions[1].clientEvidence);
+	assert.deepStrictEqual(submittedOptions[1].queryPlan, { agents_to_use: ['mentions'] });
+});
+
+test('runQuery calls the optional progress callback around the mentions round trip', async () => {
+	/** @type {any[]} */
+	const progressCalls = [];
+	let calls = 0;
+	const fakeThis = {
+		plugin: {
+			submitQuery: async () => {
+				calls++;
+				return calls === 1
+					? { status: 'needs_client_evidence', citation_targets: [], query_plan: null }
+					: { status: 'complete', answer: 'A', sources: [] };
+			},
+		},
+		resolveZoteroLibraryID: () => null,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		MentionSearch: { findMentionEvidence: async () => ({ items: [], truncated: false, total_candidates: 0 }) },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	await ContextDialog.runQuery.call(fakeThis, 'Q', [], {}, (/** @type {number} */ pct, /** @type {string} */ label) => progressCalls.push({ pct, label }));
+
+	assert.strictEqual(progressCalls.length, 2);
+	assert.strictEqual(progressCalls[0].label, 'Searching local library');
+	assert.strictEqual(progressCalls[1].label, 'Resubmitting query');
+});
+
+test('runQuery throws if the backend requests client evidence a second time', async () => {
+	const fakeThis = {
+		plugin: { submitQuery: async () => ({ status: 'needs_client_evidence', citation_targets: [], query_plan: null }) },
+		resolveZoteroLibraryID: () => null,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		MentionSearch: { findMentionEvidence: async () => ({ items: [], truncated: false, total_candidates: 0 }) },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	await assert.rejects(
+		() => ContextDialog.runQuery.call(fakeThis, 'Q', [], {}),
+		/requested citation evidence a second time/
+	);
+});

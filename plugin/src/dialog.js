@@ -1502,6 +1502,46 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Submit a question to the backend, transparently handling the two-phase
+	 * "needs_client_evidence" mentions protocol (gathers local full-text
+	 * evidence and resubmits once, echoing back query_plan so the backend
+	 * skips re-running the routing LLM call). Shared by submit() (the first
+	 * turn) and submitFollowUp() (every later turn) so the protocol lives in
+	 * one place.
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @param {(percentage: number, label: string, message?: string) => void} [onProgress] - Optional UI progress callback for the mentions round trip
+	 * @returns {Promise<QueryResult>}
+	 */
+	async runQuery(question, libraryIds, options, onProgress) {
+		let result = await this.plugin.submitQuery(question, libraryIds, options);
+
+		if (result.status === 'needs_client_evidence') {
+			if (onProgress) onProgress(25, 'Searching local library', 'Scanning full text for citations...');
+			const zoteroLibraryIDs = /** @type {Array<number>} */ (
+				libraryIds
+					.map((/** @type {string} */ id) => this.resolveZoteroLibraryID(id))
+					.filter((/** @type {number|null} */ id) => id !== null)
+			);
+			const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
+
+			if (onProgress) onProgress(40, 'Resubmitting query', 'Sending citation evidence to backend...');
+			result = await this.plugin.submitQuery(question, libraryIds, {
+				...options,
+				clientEvidence: evidence,
+				queryPlan: result.query_plan,
+			});
+
+			if (result.status === 'needs_client_evidence') {
+				throw new Error('Backend requested citation evidence a second time — this should not happen.');
+			}
+		}
+
+		return result;
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
