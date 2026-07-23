@@ -11,9 +11,11 @@
 ### Deployment overview
 
 Production instances are deployed with:
+
 ```bash
 sudo env "PATH=$PATH:/usr/sbin:/sbin" node bin/deploy.mjs .local/.env.deploy.<target>
 ```
+
 This requires a CI-built image in the registry (`DEPLOY_PULL=true`). For hotfixes without CI, see below.
 
 The deploy env file (`.local/.env.deploy.<target>`) contains `DEPLOY_*` keys that map to `container.mjs deploy` flags, plus container env vars. The critical keys for identifying containers:
@@ -44,6 +46,7 @@ To confirm names at any time: `sudo podman ps | grep zotero-rag`
 ### Two separate podman image stores
 
 `podman` (no sudo) and `sudo podman` use **different image stores**:
+
 - User store: `~/.local/share/containers/storage` — used by `node bin/container.mjs build`
 - Root store: `/var/lib/containers/storage` — used by systemd / `sudo podman run`
 
@@ -52,6 +55,7 @@ To confirm names at any time: `sudo podman ps | grep zotero-rag`
 ### How the systemd service works
 
 The service definition uses `ExecStartPre=-/usr/bin/podman rm -f <container-name>`, so **every restart creates a fresh container from the current image**. This means:
+
 - `sudo podman cp` file changes into a running container **are lost on the next restart**
 - Sending SIGHUP to the container (via `sudo podman kill --signal HUP`) signals PID 1 (the shell wrapper), which kills it; systemd then restarts from the unchanged image
 - The only way to make changes survive restarts is to rebuild the image
@@ -63,6 +67,7 @@ For small changes (1–few files), use a thin patch image. Full rebuilds re-down
 **1. Edit the source files** normally with Edit/Write tools.
 
 **2. Build a thin patch image** (seconds, no network):
+
 ```bash
 # Create a temporary patch Dockerfile listing only the changed files
 cat > /tmp/Dockerfile.patch << 'EOF'
@@ -74,16 +79,19 @@ sudo podman build -f /tmp/Dockerfile.patch -t zotero-rag:latest /home/cloud/zote
 ```
 
 **3. Verify the new image has the change:**
+
 ```bash
 sudo podman run --rm zotero-rag:latest grep -c "new_symbol" /app/backend/path/to/changed.py
 ```
 
 **4. Restart the service:**
+
 ```bash
 sudo systemctl restart zotero-rag.service   # or the value of DEPLOY_SYSTEMD_SERVICE
 ```
 
 **5. Verify** (allow ~8s for startup):
+
 ```bash
 sleep 8 && sudo systemctl status zotero-rag.service | head -5
 ```
@@ -107,6 +115,7 @@ sudo podman exec zotero-rag-rag-example-com env
 ### Cleanup
 
 After hotfixing, remove non-root (user-space) images to free space:
+
 ```bash
 podman rmi --all
 ```
@@ -130,6 +139,7 @@ Only **read-only** Zotero API keys are accepted; write-scoped keys are rejected 
 `AUTOINDEX_SECRET` must be set in the deploy env file. It is a Fernet symmetric key used to encrypt/decrypt the key store. Without it the cron job exits immediately with "AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index." and the auto-index API endpoints return 503.
 
 Generate a new secret with:
+
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
@@ -159,16 +169,19 @@ Each run re-validates all stored keys against `api.zotero.org/keys`. Keys that a
 **Important:** Timestamps in the log are **UTC**, not local time (CEST = UTC+2).
 
 **Watch live progress (filter out noisy HTTP lines):**
+
 ```bash
 tail -f /home/cloud/data/zotero-rag/logs/cron_indexer.log | grep -v "HTTP Request"
 ```
 
 **Check recent meaningful events:**
+
 ```bash
 grep -v "HTTP Request" /home/cloud/data/zotero-rag/logs/cron_indexer.log | tail -20
 ```
 
 **Run manually (writes to log file, matches what cron does):**
+
 ```bash
 sudo podman exec zotero-rag-zotero-rag-panya-de python bin/index_libraries.py \
   > /dev/null 2>> /home/cloud/data/zotero-rag/logs/cron_indexer.log &
@@ -217,12 +230,14 @@ sudo cat /etc/cron.d/zotero-rag-indexer
 ```
 
 **Monitor memory and process RSS during a run** (`ps --sort` flag not available on this Debian system — use `sort` pipe):
+
 ```bash
 free -h
 ps -eo pid,rss,pcpu,comm | sort -k2 -rn | grep -E "python|qdrant|uvicorn" | head -8
 ```
 
 **Check for OOM kills:**
+
 ```bash
 sudo dmesg --since "1 hour ago" | grep -i "oom\|killed process"
 ```
@@ -263,6 +278,41 @@ is Zotero used for?", "Compare reference management tools", "What citation style
 discussed?"). Its items exist specifically to be queried and can be freely mutated
 (edited, tagged, added, deleted) for test purposes — no need to be careful with it the
 way you would with real user data.
+
+### Quick start: one-shot debug script
+
+For most answer-quality bug reports, skip the manual key-extraction/library-id/
+trace-request steps below and use `scripts/debug_live_query.py` — it does all of
+that in one process (keys are decrypted in-memory and never printed or passed as
+a subprocess argument), auto-resolves the test-rag-plugin library id, and prints
+a compact per-run summary (agents used, `documents_grouped` retrieval diversity,
+whether every source has a `[SN]` citation) plus the full trace JSON per run:
+
+```bash
+uv run python scripts/debug_live_query.py "the exact question" \
+  --llm-model meta-llama-3.1-8b-instruct \
+  --repeat 5
+```
+
+Given router/LLM non-determinism (routing runs at temperature 0.7), always use
+`--repeat 3` or more before drawing conclusions from a single run — see
+"Root-caused (not a bug)" pattern below. Add `--no-routing` to bypass the router
+and go straight to the `rag` agent when you want a deterministic single-agent
+comparison. Add `--inspect-index` to additionally report how many chunks each
+indexed item contributes to the library (helpful when `documents_grouped` looks
+suspiciously low and you suspect a few over-chunked documents are crowding out
+others in nearest-neighbor search) — this stops the backend via
+`scripts/server.py stop` (embedded/sidecar Qdrant only allows one process to hold
+the storage directory open at a time) and restarts it via `scripts/server.py start`
+afterward, so expect ~10s of downtime and, on the first `start` after a manual
+`kill` of the uvicorn process, a rebuild of the Qdrant/Kreuzberg sidecar
+containers (`podman ps` to confirm they're up) — this is normal, not a sign of
+data loss; the sidecars mount `data/qdrant-server/`, the same persisted data an
+embedded-mode connection reads.
+
+Use the manual steps below only when you need something the script doesn't do
+yet (a non-default library, testing plugin-side JS, or inspecting the index
+without running a query first).
 
 ### Getting API keys without ever printing them to the terminal
 
@@ -515,24 +565,30 @@ For creating dialog windows in Zotero plugins:
 A fresh worktree only has git-tracked files, so several things the main checkout already has (env config, a downloaded spaCy model, indexed Qdrant data) are missing and must be set up before `npm start` / `zotero-plugin dev` will work there. Steps, in order:
 
 1. **Copy `.env` from the main checkout.** It's gitignored, so a new worktree has none:
+
    ```bash
    cp /path/to/main-checkout/.env /path/to/worktree/.env
    ```
+
    Without this, the plugin dev server fails immediately with `ZOTERO_PLUGIN_ZOTERO_BIN_PATH environment variable is not set`, and the backend fails at request time on missing API keys.
    **Careful with shell redirection here** — if the source file doesn't end in a newline, `>>`-appending a new line to it (see step 3) will silently concatenate onto the last existing line instead of starting a new one (e.g. `ZOTERO_API_KEY=abc` + append `DATA_PATH=...` → `ZOTERO_API_KEY=abcDATA_PATH=...`, corrupting both values). Always `Read` the tail of the file after any append to confirm it landed on its own line.
 
 2. **Install any Python packages the worktree's own `.venv` is missing that aren't declared as project dependencies** (e.g. the `en_core_web_sm` spaCy model, which is downloaded as a standalone wheel, not a `pyproject.toml` dependency — the main checkout's `.venv` already has it, a fresh worktree `.venv` doesn't). Symptom: a backend request fails with `spaCy model 'en_core_web_sm' not found`. Fix:
+
    ```bash
    cd /path/to/worktree
    unset VIRTUAL_ENV   # otherwise uv may silently install into the main checkout's .venv instead
    uv pip install --python .venv/bin/python3 "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
    ```
+
    Verify it landed in the right place: `.venv/bin/python3 -c "import en_core_web_sm; print(en_core_web_sm.__file__)"` should print a path inside the worktree, not the main checkout.
 
 3. **To reuse the main checkout's already-indexed Qdrant/vector data** (instead of starting from an empty index — useful for testing metadata-sync/query features against real data without re-indexing), add `DATA_PATH` to the worktree's `.env` pointing at the main checkout's `data/` directory:
+
    ```bash
    printf '\nDATA_PATH=/path/to/main-checkout/data\n' >> /path/to/worktree/.env
    ```
+
    **Only one backend process can hold that embedded-Qdrant storage directory open at a time** (local/embedded mode uses a file lock) — stop the main checkout's backend (and any other process pointed at the same `data/` dir) before starting the worktree's, or you'll get a lock error. Since this makes the worktree write into what is otherwise the main checkout's data, treat any data mutated during testing as real (e.g. metadata pushed to an item during a live-sync test really changes that item's stored payload) — acceptable for verifying a feature that's *supposed* to mutate exactly that, but don't do this against data you care about keeping pristine.
 
 4. **Start the two dev servers** (in separate terminals, from the worktree directory): `npm start` for the backend, `npm run start` (or the scaffold's dev command) for the plugin — see "Live Server" and "Hot Reload Plugin Development Server" above for the normal (non-worktree) versions of these steps; nothing else about starting them differs once steps 1-3 are done.
