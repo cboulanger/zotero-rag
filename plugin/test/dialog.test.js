@@ -511,7 +511,7 @@ test('exportDebugInfo writes the first turn\'s trace as formatted JSON to the pi
 	};
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
-		window: {}, console,
+		window: { browsingContext: {} }, console,
 		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => fakePicker } },
 		Ci: { nsIFilePicker: { modeSave: 0, returnOK: 1, returnReplace: 2 } },
 		IOUtils: { writeUTF8: async (/** @type {string} */ p, /** @type {string} */ text) => { written.push(`${p}::${text}`); } },
@@ -531,7 +531,7 @@ test('exportDebugInfo writes the first turn\'s trace as formatted JSON to the pi
 test('exportDebugInfo does nothing when the first turn has no trace', async () => {
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
-		window: {}, console,
+		window: { browsingContext: {} }, console,
 		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => { throw new Error('should not be called'); } } },
 		Ci: { nsIFilePicker: {} },
 		IOUtils: { writeUTF8: async () => { throw new Error('should not be called'); } },
@@ -554,7 +554,7 @@ test('exportDebugInfo does not write a file when the user cancels the save dialo
 	};
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
-		window: {}, console,
+		window: { browsingContext: {} }, console,
 		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => fakePicker } },
 		Ci: { nsIFilePicker: { modeSave: 0, returnOK: 1, returnReplace: 2 } },
 		IOUtils: { writeUTF8: async (/** @type {string} */ p) => { written.push(p); } },
@@ -565,4 +565,35 @@ test('exportDebugInfo does not write a file when the user cancels the save dialo
 
 	await ContextDialog.exportDebugInfo.call({ turns: [{ question: 'Q', result: { trace: { a: 1 } } }] });
 	assert.strictEqual(written.length, 0);
+});
+
+test('exportDebugInfo shows an error status if writing the file fails', async () => {
+	const fakePicker = {
+		appendFilter() {}, init() {}, defaultString: '',
+		file: { path: '/fake/path/trace.json' },
+		open: (/** @type {(rv: number) => void} */ callback) => callback(1 /* returnOK */),
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: { browsingContext: {} }, console,
+		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => fakePicker } },
+		Ci: { nsIFilePicker: { modeSave: 0, returnOK: 1, returnReplace: 2 } },
+		IOUtils: { writeUTF8: async () => { throw new Error('disk full'); } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	/** @type {any[]} */
+	const statusCalls = [];
+	const fakeThis = {
+		turns: [{ question: 'Q', result: { trace: { a: 1 } } }],
+		showStatus(/** @type {string} */ msg, /** @type {string} */ type) { statusCalls.push({ msg, type }); },
+	};
+
+	await ContextDialog.exportDebugInfo.call(fakeThis);
+
+	assert.strictEqual(statusCalls.length, 1);
+	assert.strictEqual(statusCalls[0].type, 'error');
+	assert.ok(statusCalls[0].msg.includes('disk full'));
 });

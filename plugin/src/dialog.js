@@ -1653,17 +1653,23 @@ var ZoteroRAGDialog = {
 		const trace = this.turns[0] && this.turns[0].result.trace;
 		if (!trace) return;
 
-		// @ts-ignore - Cc/Ci are globals in this privileged context
-		const fp = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
-		fp.init(window, 'Export Debug Info', Ci.nsIFilePicker.modeSave);
-		fp.appendFilter('JSON files', '*.json');
-		fp.defaultString = 'zotero-rag-debug-trace.json';
+		try {
+			// @ts-ignore - Cc/Ci are globals in this privileged context
+			const fp = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+			// @ts-ignore - window.browsingContext exists in this privileged Gecko window
+			fp.init(window.browsingContext, 'Export Debug Info', Ci.nsIFilePicker.modeSave);
+			fp.appendFilter('JSON files', '*.json');
+			fp.defaultString = 'zotero-rag-debug-trace.json';
 
-		const rv = await new Promise((resolve) => fp.open(resolve));
-		if (rv !== Ci.nsIFilePicker.returnOK && rv !== Ci.nsIFilePicker.returnReplace) return;
+			const rv = await new Promise((resolve) => fp.open(resolve));
+			if (rv !== Ci.nsIFilePicker.returnOK && rv !== Ci.nsIFilePicker.returnReplace) return;
 
-		// @ts-ignore - IOUtils is a global in Firefox/Zotero
-		await IOUtils.writeUTF8(fp.file.path, JSON.stringify(trace, null, 2));
+			// @ts-ignore - IOUtils is a global in Firefox/Zotero
+			await IOUtils.writeUTF8(fp.file.path, JSON.stringify(trace, null, 2));
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Failed to export debug info: ${msg}`, 'error');
+		}
 	},
 
 	/**
