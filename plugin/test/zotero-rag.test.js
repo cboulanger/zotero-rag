@@ -594,19 +594,13 @@ test('formatNoteHTML never embeds a debug trace — export is on-demand only', (
 	assert.ok(!html.includes('trace data'));
 });
 
-test('createResultNote seeds ChatPane with the clarification message (not the empty answer) when status is needs_clarification', async () => {
-	/** @type {any} */
-	let seededTurns = null;
-	const chatPaneStub = {
-		seedConversation: (/** @type {any} */ _noteId, /** @type {any} */ _libraryIds, /** @type {any} */ turns) => {
-			seededTurns = turns;
-		},
-	};
-
+test('createResultNote creates a tagged note from every turn and does not reference ChatPane', async () => {
+	/** @type {string[]} */
+	const noteHtmls = [];
 	const noteStub = {
 		id: 'note1',
 		libraryID: 1,
-		setNote() {},
+		setNote(/** @type {string} */ html) { noteHtmls.push(html); },
 		addToCollection() {},
 		addTag() {},
 		async saveTx() {},
@@ -627,20 +621,19 @@ test('createResultNote seeds ChatPane with the clarification message (not the em
 	};
 
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { ChatPane: chatPaneStub, Services: servicesStub });
+	const plugin = loadPlugin(zotero, {}, {}, { Services: servicesStub });
 	plugin.version = '1.0.0';
 
-	const result = {
-		status: 'needs_clarification',
-		answer: '',
-		clarification_message: 'Please narrow by year.',
-		sources: [],
-	};
+	const turns = [
+		{ question: 'Q1', result: { answer: 'A1', answer_format: 'text', sources: [] } },
+		{ question: 'Q2', result: { answer: 'A2', answer_format: 'text', sources: [] } },
+	];
 
-	await plugin.createResultNote('What has Luhmann written about?', result, ['u12345']);
+	const note = await plugin.createResultNote(turns, ['u12345']);
 
-	assert.ok(seededTurns, 'ChatPane.seedConversation should have been called');
-	assert.strictEqual(seededTurns[0].answer, 'Please narrow by year.');
+	assert.strictEqual(note, noteStub);
+	assert.strictEqual(noteHtmls.length, 1);
+	assert.ok(noteHtmls[0].includes('Q1') && noteHtmls[0].includes('Q2'));
 });
 
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {

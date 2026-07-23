@@ -1183,14 +1183,15 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Create a note in the current collection with the query result.
-	 * @param {string} question - Original question
-	 * @param {QueryResult} result - Query result
+	 * Create a note in the current collection from an entire conversation.
+	 * Called on demand from the result dialog's "Save as Note" button — not
+	 * automatically at submit time.
+	 * @param {Array<{question: string, result: QueryResult}>} turns
 	 * @param {Array<string>} libraryIDs - Libraries that were queried
 	 * @returns {Promise<*>} Created note item
 	 * @throws {Error} If note creation fails
 	 */
-	async createResultNote(question, result, libraryIDs) {
+	async createResultNote(turns, libraryIDs) {
 		const zoteroPane = Zotero.getActiveZoteroPane();
 		if (!zoteroPane) {
 			throw new Error('No active Zotero pane');
@@ -1207,7 +1208,7 @@ class ZoteroRAGPlugin {
 		}
 
 		// Format note content as HTML
-		const html = this.formatNoteHTML(question, result, libraryIDs);
+		const html = this.formatNoteHTML(turns, libraryIDs);
 		note.setNote(html);
 
 		// Add to collection before saving so it's included in the same transaction
@@ -1221,18 +1222,8 @@ class ZoteroRAGPlugin {
 		await note.saveTx();
 		await this._ensureRAGResultsSearch(note.libraryID);
 
-		ChatPane.seedConversation(note.id, libraryIDs, [{
-			question,
-			answer: result.status === 'needs_clarification' ? result.clarification_message : result.answer,
-			agents_used: result.agents_used || [],
-			source_refs: result.source_refs || [],
-			query_plan: result.query_plan || null,
-		}]);
-
-		// Select the note in the main library view so the item pane — and the
-		// new chat section — is visible. A standalone note window (Zotero's own
-		// "New Note Window" command) has no item pane, so it can't show ours;
-		// this is why we no longer open one automatically here.
+		// Select the note in the main library view, so the user sees the note
+		// they just asked to be saved.
 		try {
 			await zoteroPane.selectItem(note.id);
 		} catch (e) {
@@ -1762,7 +1753,8 @@ class ZoteroRAGPlugin {
 	/**
 	 * Format one Q&A turn (heading + answer + bibliography) as an HTML fragment,
 	 * with no outer wrapper and no metadata footer — reused by formatNoteHTML()
-	 * for the first turn and by ChatPane for every follow-up turn appended later.
+	 * to render each turn in a saved note, and by dialog.js's result-state
+	 * renderer for the live in-dialog transcript.
 	 * @param {string} question - The question for this turn
 	 * @param {QueryResult} result - Query result
 	 * @param {Map<string, LibraryInfo>} libraryMap - Library ID to library info
