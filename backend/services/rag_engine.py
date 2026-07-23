@@ -79,6 +79,24 @@ def _quality_issue_reinforcement(answer: str) -> Optional[str]:
     return None
 
 
+# Observed live: a fixed top_k can be entirely saturated by chunks from a single
+# dominant document (e.g. one paper with 100+ indexed chunks vs. a handful for
+# everything else), starving the answer of other genuinely relevant sources even
+# though they exist in the library. Vector search is cheap (unlike an LLM call),
+# so when the raw search hits the top_k cap — not the corpus limit — and diversity
+# still looks low, retry once at a larger top_k before generating.
+_DIVERSITY_FLOOR = 3            # minimum distinct documents before escalating
+_DIVERSITY_ESCALATION_FACTOR = 3
+_DIVERSITY_ESCALATION_MAX_TOP_K = 30
+
+# Caps how many chunks from a single document are included in the assembled
+# context. Without this, an over-chunked document (especially after the
+# escalation above) can flood the prompt with many near-duplicate passages
+# while other included documents get only one or two — bounds prompt size and
+# keeps the context readable, independent of document diversity itself.
+_MAX_CHUNKS_PER_DOCUMENT = 4
+
+
 def _format_authors(authors: list[str]) -> str:
     if not authors:
         return ""
@@ -195,6 +213,34 @@ class RAGEngine:
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
+        # Escalate once if the search hit the top_k cap (not the corpus limit) and
+        # came back dominated by too few distinct documents.
+        escalated = False
+        if len(search_results) == top_k and top_k < _DIVERSITY_ESCALATION_MAX_TOP_K:
+            unique_doc_count = len({
+                r.chunk.metadata.document_metadata.attachment_key
+                or r.chunk.metadata.document_metadata.item_key
+                for r in search_results
+            })
+            if unique_doc_count < _DIVERSITY_FLOOR:
+                escalated_top_k = min(top_k * _DIVERSITY_ESCALATION_FACTOR, _DIVERSITY_ESCALATION_MAX_TOP_K)
+                logger.info(
+                    f"Retrieval diversity low ({unique_doc_count} documents from top_k={top_k}); "
+                    f"escalating to top_k={escalated_top_k}"
+                )
+                escalated_results = await asyncio.to_thread(
+                    self.vector_store.search,
+                    query_vector=query_embedding,
+                    limit=escalated_top_k,
+                    score_threshold=min_score,
+                    library_ids=library_ids if library_ids else None,
+                    filters=active_filters,
+                )
+                if len(escalated_results) > len(search_results):
+                    search_results = escalated_results
+                    escalated = True
+                    logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
+
         # Group chunks by document (attachment_key), preserving all relevant passages.
         # This gives the LLM real content (not just the highest-scoring chunk, which is
         # often a bibliography/reference section) while still assigning one source number
@@ -223,6 +269,8 @@ class RAGEngine:
         doc_representatives: list = []  # best-scoring chunk per doc for SourceInfo
         for i, doc_key in enumerate(sorted_doc_keys, 1):
             results_for_doc = doc_chunks[doc_key]
+            if len(results_for_doc) > _MAX_CHUNKS_PER_DOCUMENT:
+                results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:_MAX_CHUNKS_PER_DOCUMENT]
             # Sort chunks within document by page number, then chunk index
             results_for_doc.sort(key=lambda r: (
                 r.chunk.metadata.page_number or 0,
@@ -270,6 +318,7 @@ class RAGEngine:
                     "library_ids": library_ids,
                     "filters": active_filters.model_dump() if active_filters else None,
                 },
+                escalated=escalated,
                 raw_results_count=len(search_results),
                 score_stats={
                     "min": min(scores),

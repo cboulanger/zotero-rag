@@ -1581,9 +1581,12 @@ class ZoteroRAGPlugin {
 	 * @param {string} text - Text with inline citation references
 	 * @param {Array<SourceCitation>} sources - Array of source citations
 	 * @param {Map<string, {name: string, type: 'user'|'group'}>} libraryMap - Map of library info
+	 * @param {Set<number>} [citedNumbers] - If provided, every 1-based source number
+	 *   actually found in the text is added to this set as a side effect (used by
+	 *   formatTurnHTML to filter the bibliography down to sources actually cited).
 	 * @returns {string} Text with citations replaced by HTML citation spans
 	 */
-	replaceCitationsInText(text, sources, libraryMap) {
+	replaceCitationsInText(text, sources, libraryMap, citedNumbers) {
 		// Normalise legacy "Source N" word form → [SN]
 		const sourceWordPattern = /\*{0,2}Source\s+(\d+)\*{0,2}/g;
 		text = text.replace(sourceWordPattern, (_m, n) => `[S${n}]`);
@@ -1619,6 +1622,7 @@ class ZoteroRAGPlugin {
 					citationSpans.push(`[${citation}]`);
 					continue;
 				}
+				if (citedNumbers) citedNumbers.add(sourceNum);
 
 				// Get library type
 				const libraryType = this.getLibraryType(source.library_id, libraryMap);
@@ -1770,18 +1774,31 @@ class ZoteroRAGPlugin {
 		// so it goes through the same escaping path as the existing plain-text branch.
 		const displayAnswer = result.status === 'needs_clarification' ? result.clarification_message : result.answer;
 
-		// Process answer text to replace inline citations, then merge consecutive ones
+		// Process answer text to replace inline citations, then merge consecutive ones.
+		// citedNumbers is populated as a side effect (the 1-based source numbers
+		// actually found in the text) so the bibliography below can be filtered to
+		// what was really cited, instead of every document retrieval happened to surface.
+		const citedNumbers = new Set();
 		let answerHTML = '';
 		if (result.answer_format === 'html' && result.status !== 'needs_clarification') {
-			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap);
+			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap, citedNumbers);
 		} else {
 			const escapedAnswer = this.escapeHTML(displayAnswer || '');
-			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap)}</p>`;
+			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap, citedNumbers)}</p>`;
 		}
 		html += this.mergeConsecutiveCitations(answerHTML);
 
-		// Add bibliography
-		html += this.formatBibliographyHTML(result.sources || [], libraryMap);
+		// Bibliography: only sources actually cited inline — a retrieval can surface
+		// several documents while the model only ends up citing one of them, and
+		// listing the rest as "References" would misrepresent what the answer used.
+		// Falls back to every retrieved source when none were cited at all (e.g. a
+		// clarification turn, or an answer that skipped citations despite the
+		// backend's retry guard) so the list isn't silently emptied out.
+		const allSources = result.sources || [];
+		const citedSources = citedNumbers.size > 0
+			? allSources.filter((_source, idx) => citedNumbers.has(idx + 1))
+			: allSources;
+		html += this.formatBibliographyHTML(citedSources, libraryMap);
 
 		return html;
 	}

@@ -98,6 +98,8 @@ def _run_query(
     extra_headers: dict[str, str],
     llm_model: str | None,
     no_routing: bool,
+    top_k: int | None = None,
+    min_score: float | None = None,
 ) -> dict:
     import httpx
 
@@ -109,6 +111,10 @@ def _run_query(
     }
     if llm_model:
         payload["llm_model"] = llm_model
+    if top_k is not None:
+        payload["top_k"] = top_k
+    if min_score is not None:
+        payload["min_score"] = min_score
 
     headers = {"Content-Type": "application/json", "X-Zotero-API-Key": zotero_key, **extra_headers}
     with httpx.Client(timeout=300.0) as client:
@@ -186,6 +192,8 @@ def main() -> None:
     parser.add_argument("--no-routing", action="store_true")
     parser.add_argument("--repeat", type=int, default=1, metavar="N", help="Run the query N times (useful given router/LLM non-determinism)")
     parser.add_argument("--output-dir", default=None, metavar="DIR", help="Write full trace JSON per run here (default: data/logs/debug_traces/)")
+    parser.add_argument("--top-k", type=int, default=None, metavar="N", help="Override retrieval top_k (default: preset value)")
+    parser.add_argument("--min-score", type=float, default=None, metavar="F", help="Override retrieval min_score (default: preset value)")
     parser.add_argument("--url", default="http://localhost:8119")
     parser.add_argument("--inspect-index", action="store_true", help="Also report per-item chunk counts (stops+restarts the backend)")
     args = parser.parse_args()
@@ -198,7 +206,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for i in range(1, args.repeat + 1):
-        data = _run_query(args.url, args.question, library_id, zotero_key, extra_headers, args.llm_model, args.no_routing)
+        data = _run_query(
+            args.url, args.question, library_id, zotero_key, extra_headers,
+            args.llm_model, args.no_routing, args.top_k, args.min_score,
+        )
         out_path = out_dir / f"run_{i}.json"
         out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"\n=== run {i}/{args.repeat} -> {out_path} ===")

@@ -545,6 +545,67 @@ test('formatTurnHTML resolves an inline [S1] citation to a Zotero item and lists
 	assert.ok(!html.includes('A Great Paper (fallback title)'), 'bibliography should use the real item title, not the source fallback title');
 });
 
+test('formatTurnHTML lists only the sources actually cited inline, not every retrieved source', () => {
+	const items = {
+		ITEM1: {
+			key: 'ITEM1',
+			getCreators: () => [{ lastName: 'Cited', firstName: 'Anne' }],
+			getField: (/** @type {string} */ f) => (f === 'title' ? 'The Cited Paper' : f === 'date' ? '2020' : ''),
+			getAttachments: () => [],
+		},
+		ITEM2: {
+			key: 'ITEM2',
+			getCreators: () => [{ lastName: 'Uncited', firstName: 'Bob' }],
+			getField: (/** @type {string} */ f) => (f === 'title' ? 'The Uncited Paper' : f === 'date' ? '2021' : ''),
+			getAttachments: () => [],
+		},
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				libraryID === 1 ? (items[key] || null) : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source1 = { item_id: 'ITEM1', library_id: 'u12345', title: 'The Cited Paper', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	/** @type {SourceCitation} */
+	const source2 = { item_id: 'ITEM2', library_id: 'u12345', title: 'The Uncited Paper', page_number: null, text_anchor: null, relevance_score: 0.8 };
+	const result = {
+		// Retrieval returned two documents (source1, source2), but the model
+		// only found source1 relevant enough to cite.
+		answer: 'This claim is supported by prior work [S1].',
+		answer_format: 'text',
+		sources: [source1, source2],
+	};
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.formatTurnHTML('Does prior work support this?', result, libraryMap);
+
+	assert.ok(html.includes('>(Cited, 2020)</a>'), `expected the cited source's inline link, got: ${html}`);
+	assert.ok(html.includes('Cited (2020)'), `expected the cited source in the bibliography, got: ${html}`);
+	assert.ok(!html.includes('Uncited'), `bibliography must not list a source that was never cited, got: ${html}`);
+});
+
+test('formatTurnHTML falls back to listing all retrieved sources when the answer has no [SN] citations at all', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: { getByLibraryAndKey: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	/** @type {SourceCitation} */
+	const source = { item_id: 'ITEM1', library_id: 'u12345', title: 'A Great Paper', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	const result = {
+		answer: 'This answer has no inline citation markers at all.',
+		answer_format: 'text',
+		sources: [source],
+	};
+	const html = plugin.formatTurnHTML('A question?', result, new Map());
+	assert.ok(html.includes('A Great Paper'), `expected the uncited-but-retrieved source to still appear when nothing was cited, got: ${html}`);
+});
+
 test('formatTurnHTML renders the clarification message (not the empty answer) when status is needs_clarification', () => {
 	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
 	const result = {

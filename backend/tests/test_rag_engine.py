@@ -481,6 +481,129 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not narrate", prompt)
         self.assertIn("stop there", prompt)
 
+    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0):
+        chunk = DocumentChunk(
+            text=f"Content from {title}.",
+            metadata=ChunkMetadata(
+                chunk_id=f"{item_key}-{chunk_index}",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key=item_key, attachment_key=attachment_key,
+                    title=title, authors=["Author, A."], year=2024,
+                    item_type="journalArticle",
+                ),
+                page_number=1, text_preview=title, chunk_index=chunk_index,
+                content_hash=f"hash-{item_key}-{chunk_index}",
+            ),
+        )
+        return SearchResult(chunk=chunk, score=score)
+
+    async def test_query_escalates_retrieval_when_top_k_is_saturated_and_diversity_is_low(self):
+        """Observed live: a fixed top_k=10 can be fully saturated by chunks from a
+        single dominant document, starving the answer of other relevant sources
+        even when they exist in the library. When the raw search hits the top_k
+        cap (not the corpus limit) and fewer than 3 distinct documents came back,
+        retry once with a larger top_k before generating."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+        diverse_results = (
+            [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+            + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+            + [self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8)]
+        )
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=5)
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        second_call_kwargs = self.mock_vector_store.search.call_args_list[1].kwargs
+        self.assertGreater(second_call_kwargs["limit"], 5)
+        self.assertEqual(len(result.sources), 3)
+
+    async def test_query_does_not_escalate_when_diversity_already_sufficient(self):
+        """No wasted second search when the first pass already spans enough documents."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_does_not_escalate_when_raw_results_are_below_top_k(self):
+        """If the search returned fewer chunks than top_k, the corpus (or the
+        min_score threshold) is already exhausted — escalating limit wouldn't
+        surface anything new, so don't waste a second search."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Only Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=10)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_does_not_escalate_past_the_max_top_k(self):
+        """Already at/above the escalation ceiling — don't escalate further even
+        if diversity is low, to keep prompt size bounded."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(30)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=30)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_caps_chunks_per_document_in_the_assembled_context(self):
+        """A single over-chunked document must not be allowed to dominate the
+        prompt with many near-duplicate passages at the expense of readability —
+        cap how many of its chunks are included, keeping the highest-scoring ones."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(10)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=10)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertLessEqual(prompt.count("Content from Dominant Doc"), 4)
+
+    async def test_retrieval_trace_records_whether_escalation_happened(self):
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+        diverse_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)] + [
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8)
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+        self.mock_llm_service.model_name = "test-model"
+
+        collector = TraceCollector(question, library_ids, {})
+        await self.rag_engine.query(question, library_ids, top_k=5, trace=collector)
+        trace = collector.finalize()
+
+        self.assertTrue(trace.agent_executions[0].retrieval.escalated)
+
     async def test_prompt_requires_a_citation_on_every_factual_sentence(self):
         """Observed live: weaker models frequently drop citations entirely (2 of
         3 repeated attempts at the same question produced zero inline [SN]

@@ -35,6 +35,7 @@ class RetrievalTrace(Trace):
     score_stats: dict              # {"min": float, "max": float, "avg": float}
     documents_grouped: int
     chunks: list[ChunkTrace]
+    escalated: bool = False        # True if top_k was escalated due to low document diversity
 
 
 class AgentExecutionTrace(Trace):
