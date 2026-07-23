@@ -358,9 +358,19 @@ test('switchToResultState is idempotent — a second call does not re-attach the
 function makeShowStatusContext() {
 	const progressSection = { style: {} };
 	const statusSection = { style: {} };
-	const statusMessages = { children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1 };
+	// innerHTML setter mirrors real DOM semantics (setting it to '' clears children), since
+	// clearStatusMessages() clears via `container.innerHTML = ''`.
+	const statusMessages = {
+		children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1,
+		get innerHTML() { return this.children.length ? '<div/>' : ''; },
+		set innerHTML(/** @type {string} */ _v) { this.children = []; },
+	};
 	const resultStatusSection = { style: {} };
-	const resultStatusMessages = { children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1 };
+	const resultStatusMessages = {
+		children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1,
+		get innerHTML() { return this.children.length ? '<div/>' : ''; },
+		set innerHTML(/** @type {string} */ _v) { this.children = []; },
+	};
 	const elementsById = {
 		'progress-section': progressSection,
 		'status-section': statusSection,
@@ -385,7 +395,7 @@ test('showStatus writes an input-state error into #status-section/#status-messag
 	const { context, progressSection, statusSection, statusMessages, resultStatusSection, resultStatusMessages } = makeShowStatusContext();
 	const ContextDialog = context.ZoteroRAGDialog;
 
-	ContextDialog.showStatus.call({ _resultStateActive: false }, 'Something broke', 'error');
+	ContextDialog.showStatus.call({ _resultStateActive: false, _getStatusElementIds: ContextDialog._getStatusElementIds }, 'Something broke', 'error');
 
 	assert.strictEqual(progressSection.style.display, 'none');
 	assert.strictEqual(statusSection.style.display, '');
@@ -399,7 +409,7 @@ test('showStatus writes a result-state error into #result-status-section/#result
 	const { context, progressSection, statusSection, resultStatusSection, resultStatusMessages, statusMessages } = makeShowStatusContext();
 	const ContextDialog = context.ZoteroRAGDialog;
 
-	ContextDialog.showStatus.call({ _resultStateActive: true }, 'Follow-up failed', 'error');
+	ContextDialog.showStatus.call({ _resultStateActive: true, _getStatusElementIds: ContextDialog._getStatusElementIds }, 'Follow-up failed', 'error');
 
 	assert.strictEqual(resultStatusSection.style.display, '');
 	assert.strictEqual(resultStatusMessages.children.length, 1);
@@ -410,10 +420,65 @@ test('showStatus writes a result-state error into #result-status-section/#result
 	assert.strictEqual(statusMessages.children.length, 0);
 });
 
-test('submitFollowUp appends a turn and re-renders, without touching a note when none has been saved', async () => {
+test('clearStatusMessages clears and hides the input-state elements when not in result state', () => {
+	const { context, progressSection, statusSection, statusMessages, resultStatusSection, resultStatusMessages } = makeShowStatusContext();
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	// Seed stale content in both pairs to prove only the active (input-state) one is touched.
+	statusMessages.children.push({ textContent: 'stale input error' });
+	statusSection.style.display = '';
+	resultStatusMessages.children.push({ textContent: 'stale result error' });
+	resultStatusSection.style.display = '';
+	progressSection.style.display = 'none';
+
+	ContextDialog.clearStatusMessages.call({ _resultStateActive: false, _getStatusElementIds: ContextDialog._getStatusElementIds });
+
+	assert.strictEqual(statusMessages.children.length, 0);
+	assert.strictEqual(statusSection.style.display, 'none');
+	assert.strictEqual(progressSection.style.display, '');
+	// Result-state elements are untouched.
+	assert.strictEqual(resultStatusMessages.children.length, 1);
+	assert.strictEqual(resultStatusSection.style.display, '');
+});
+
+test('clearStatusMessages clears and hides the result-state elements when in result state', () => {
+	const { context, progressSection, statusSection, statusMessages, resultStatusSection, resultStatusMessages } = makeShowStatusContext();
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	// Seed stale content in both pairs to prove only the active (result-state) one is touched.
+	statusMessages.children.push({ textContent: 'stale input error' });
+	statusSection.style.display = '';
+	resultStatusMessages.children.push({ textContent: 'stale result error' });
+	resultStatusSection.style.display = '';
+	progressSection.style.display = 'none';
+
+	ContextDialog.clearStatusMessages.call({ _resultStateActive: true, _getStatusElementIds: ContextDialog._getStatusElementIds });
+
+	assert.strictEqual(resultStatusMessages.children.length, 0);
+	assert.strictEqual(resultStatusSection.style.display, 'none');
+	// The result state has no progress widget to reset, so it's left untouched.
+	assert.strictEqual(progressSection.style.display, 'none');
+	// Input-state elements are untouched.
+	assert.strictEqual(statusMessages.children.length, 1);
+	assert.strictEqual(statusSection.style.display, '');
+});
+
+test('submitFollowUp clears a stale result-status error before appending a turn and re-renders, without touching a note when none has been saved', async () => {
 	const fakeInput = { value: 'Follow-up question', disabled: false };
 	const fakeButton = { disabled: false };
-	const elementsById = { 'followup-input': fakeInput, 'result-submit-button': fakeButton };
+	const resultStatusMessages = {
+		children: /** @type {any[]} */ ([{ textContent: 'stale error from a previous failed attempt' }]),
+		appendChild(/** @type {any} */ el) { this.children.push(el); },
+		get innerHTML() { return this.children.length ? '<div>stale</div>' : ''; },
+		set innerHTML(/** @type {string} */ _v) { this.children = []; },
+	};
+	const resultStatusSection = { style: { display: '' } };
+	const elementsById = {
+		'followup-input': fakeInput,
+		'result-submit-button': fakeButton,
+		'result-status-messages': resultStatusMessages,
+		'result-status-section': resultStatusSection,
+	};
 	/** @type {number[]} */
 	const renderCalls = [];
 	const context = {
@@ -429,14 +494,20 @@ test('submitFollowUp appends a turn and re-renders, without touching a note when
 		libraryIds: ['u1'],
 		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
 		noteID: null,
+		_resultStateActive: true,
 		buildConversationHistory: ContextDialog.buildConversationHistory,
 		runQuery: ContextDialog.runQuery,
 		renderResultContent() { renderCalls.push(this.turns.length); },
 		showStatus() {},
+		clearStatusMessages: ContextDialog.clearStatusMessages,
+		_getStatusElementIds: ContextDialog._getStatusElementIds,
 	};
 
 	await ContextDialog.submitFollowUp.call(fakeThis);
 
+	// The stale error from a previous failed attempt was cleared before the new answer rendered.
+	assert.strictEqual(resultStatusMessages.children.length, 0);
+	assert.strictEqual(resultStatusSection.style.display, 'none');
 	assert.strictEqual(fakeThis.turns.length, 2);
 	assert.strictEqual(fakeThis.turns[1].question, 'Follow-up question');
 	assert.strictEqual(fakeInput.value, '');
@@ -472,6 +543,7 @@ test('submitFollowUp regenerates the note from the full turn history when one ha
 		runQuery: ContextDialog.runQuery,
 		renderResultContent() {},
 		showStatus() {},
+		clearStatusMessages() {},
 	};
 
 	await ContextDialog.submitFollowUp.call(fakeThis);
@@ -517,6 +589,7 @@ test('saveAsNote creates the note from every turn and disables the button', asyn
 		libraryIds: ['u1'],
 		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
 		noteID: null,
+		clearStatusMessages() {},
 	};
 
 	await ContextDialog.saveAsNote.call(fakeThis);
@@ -554,6 +627,7 @@ test('saveAsNote re-enables the button and shows an error if note creation fails
 		plugin: { createResultNote: async () => { throw new Error('disk full'); } },
 		libraryIds: ['u1'], turns: [{ question: 'Q0', result: { answer: 'A0' } }], noteID: null,
 		showStatus(/** @type {string} */ msg, /** @type {string} */ type) { statusCalls.push({ msg, type }); },
+		clearStatusMessages() {},
 	};
 
 	await ContextDialog.saveAsNote.call(fakeThis);
@@ -583,7 +657,7 @@ test('exportDebugInfo writes the first turn\'s trace as formatted JSON to the pi
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ContextDialog = context.ZoteroRAGDialog;
 
-	const fakeThis = { turns: [{ question: 'Q', result: { trace: { step: 1 } } }] };
+	const fakeThis = { turns: [{ question: 'Q', result: { trace: { step: 1 } } }], clearStatusMessages() {} };
 	await ContextDialog.exportDebugInfo.call(fakeThis);
 
 	assert.strictEqual(written.length, 1);
@@ -626,7 +700,7 @@ test('exportDebugInfo does not write a file when the user cancels the save dialo
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ContextDialog = context.ZoteroRAGDialog;
 
-	await ContextDialog.exportDebugInfo.call({ turns: [{ question: 'Q', result: { trace: { a: 1 } } }] });
+	await ContextDialog.exportDebugInfo.call({ turns: [{ question: 'Q', result: { trace: { a: 1 } } }], clearStatusMessages() {} });
 	assert.strictEqual(written.length, 0);
 });
 
@@ -652,6 +726,7 @@ test('exportDebugInfo shows an error status if writing the file fails', async ()
 	const fakeThis = {
 		turns: [{ question: 'Q', result: { trace: { a: 1 } } }],
 		showStatus(/** @type {string} */ msg, /** @type {string} */ type) { statusCalls.push({ msg, type }); },
+		clearStatusMessages() {},
 	};
 
 	await ContextDialog.exportDebugInfo.call(fakeThis);

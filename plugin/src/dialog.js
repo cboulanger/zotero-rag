@@ -1620,6 +1620,7 @@ var ZoteroRAGDialog = {
 		if (!input) return;
 		const question = input.value.trim();
 		if (!question) return;
+		this.clearStatusMessages();
 
 		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
 		if (submitButton) submitButton.disabled = true;
@@ -1657,6 +1658,7 @@ var ZoteroRAGDialog = {
 	 */
 	async saveAsNote() {
 		if (!this.plugin || this.noteID !== null) return;
+		this.clearStatusMessages();
 		const saveButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('save-note-button'));
 		if (saveButton) saveButton.disabled = true;
 		try {
@@ -1680,6 +1682,7 @@ var ZoteroRAGDialog = {
 	async exportDebugInfo() {
 		const trace = this.turns[0] && this.turns[0].result.trace;
 		if (!trace) return;
+		this.clearStatusMessages();
 
 		try {
 			// @ts-ignore - Cc/Ci are globals in this privileged context
@@ -2028,21 +2031,33 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Show status message.
-	 *
-	 * Once switchToResultState() has run, #input-content (and the
+	 * Resolve the DOM ids of the currently-active status section/messages
+	 * pair. Once switchToResultState() has run, #input-content (and the
 	 * #status-section/#status-messages nested inside it) is hidden, so
-	 * errors from result-state actions (submitFollowUp, saveAsNote,
-	 * exportDebugInfo) are routed to the separate #result-status-section/
+	 * status from result-state actions (submitFollowUp, saveAsNote,
+	 * exportDebugInfo) must be routed to the separate #result-status-section/
 	 * #result-status-messages pair that lives inside #result-section instead.
+	 * Shared by showStatus() and clearStatusMessages() so both route
+	 * identically.
+	 * @returns {{statusSectionId: string, statusMessagesId: string}}
+	 */
+	_getStatusElementIds() {
+		const inResultState = !!this._resultStateActive;
+		return {
+			statusSectionId: inResultState ? 'result-status-section' : 'status-section',
+			statusMessagesId: inResultState ? 'result-status-messages' : 'status-messages',
+		};
+	},
+
+	/**
+	 * Show status message.
 	 * @param {string} message - Status message
 	 * @param {'info'|'success'|'error'} [type] - Message type
 	 * @returns {void}
 	 */
 	showStatus(message, type = 'info') {
 		const inResultState = !!this._resultStateActive;
-		const statusSectionId = inResultState ? 'result-status-section' : 'status-section';
-		const statusMessagesId = inResultState ? 'result-status-messages' : 'status-messages';
+		const { statusSectionId, statusMessagesId } = this._getStatusElementIds();
 
 		// Show status section (for errors), hide progress (input state only — the
 		// result state has no progress widget to hide).
@@ -2068,17 +2083,26 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Clear all status messages.
+	 * Clear all status messages from whichever status section/messages pair
+	 * is currently active (see _getStatusElementIds()), so a stale error from
+	 * a previous attempt never survives into a later, successful one.
 	 * @returns {void}
 	 */
 	clearStatusMessages() {
-		const container = document.getElementById('status-messages');
-		const statusSection = document.getElementById('status-section');
-		const progressSection = document.getElementById('progress-section');
+		const inResultState = !!this._resultStateActive;
+		const { statusSectionId, statusMessagesId } = this._getStatusElementIds();
+
+		const container = document.getElementById(statusMessagesId);
+		const statusSection = document.getElementById(statusSectionId);
 
 		if (container) container.innerHTML = '';
 		if (statusSection) statusSection.style.display = 'none';
-		if (progressSection) progressSection.style.display = '';
+
+		// The result state has no progress widget to reset.
+		if (!inResultState) {
+			const progressSection = document.getElementById('progress-section');
+			if (progressSection) progressSection.style.display = '';
+		}
 	},
 
 	/**
