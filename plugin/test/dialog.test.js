@@ -246,3 +246,50 @@ test('runQuery throws if the backend requests client evidence a second time', as
 		/requested citation evidence a second time/
 	);
 });
+
+test('renderResultContent joins every turn\'s formatted HTML with a divider', () => {
+	/** @type {any[][]} */
+	const libraryMapCalls = [];
+	const fakeElement = { innerHTML: '' };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => (id === 'result-content' ? fakeElement : null) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: {
+			buildLibraryMap: (/** @type {string[]} */ ids) => { libraryMapCalls.push(ids); return new Map(); },
+			formatTurnHTML: (/** @type {string} */ q, /** @type {any} */ r) => `<p>${q}:${r.answer}</p>`,
+		},
+		libraryIds: ['u1'],
+		turns: [
+			{ question: 'Q1', result: { answer: 'A1' } },
+			{ question: 'Q2', result: { answer: 'A2' } },
+		],
+	};
+
+	ContextDialog.renderResultContent.call(fakeThis);
+
+	assert.strictEqual(fakeElement.innerHTML, '<p>Q1:A1</p><hr/><p>Q2:A2</p>');
+	assert.deepStrictEqual(libraryMapCalls, [['u1']]);
+});
+
+test('updateExportButtonVisibility shows the button only when the first turn has a trace', () => {
+	const fakeButton = { style: {} };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => (id === 'export-debug-button' ? fakeButton : null) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.updateExportButtonVisibility.call({ turns: [{ question: 'Q', result: { trace: { a: 1 } } }] });
+	assert.strictEqual(fakeButton.style.display, '');
+
+	ContextDialog.updateExportButtonVisibility.call({ turns: [{ question: 'Q', result: {} }] });
+	assert.strictEqual(fakeButton.style.display, 'none');
+});

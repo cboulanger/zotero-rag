@@ -1542,6 +1542,36 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Re-render the full conversation transcript from `this.turns` into
+	 * `#result-content`. Called after the first submit and after every
+	 * follow-up — simpler and more robust than incrementally appending DOM
+	 * nodes, since the QueryResult objects (not their rendered HTML) are the
+	 * source of truth.
+	 * @returns {void}
+	 */
+	renderResultContent() {
+		const container = document.getElementById('result-content');
+		if (!container || !this.plugin) return;
+		const libraryMap = this.plugin.buildLibraryMap(this.libraryIds);
+		container.innerHTML = this.turns
+			.map(({ question, result }) => this.plugin.formatTurnHTML(question, result, libraryMap))
+			.join('<hr/>');
+	},
+
+	/**
+	 * Show the Export Debug Info button iff the very first turn's result
+	 * carries a trace — only the original question's advanced options can
+	 * request one; follow-ups never expose that control.
+	 * @returns {void}
+	 */
+	updateExportButtonVisibility() {
+		const exportButton = /** @type {HTMLElement|null} */ (document.getElementById('export-debug-button'));
+		if (!exportButton) return;
+		const hasTrace = !!(this.turns[0] && this.turns[0].result.trace);
+		exportButton.style.display = hasTrace ? '' : 'none';
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
