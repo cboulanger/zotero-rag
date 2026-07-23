@@ -85,6 +85,9 @@ var ZoteroRAGDialog = {
 	/** @type {Array<string>} Backend library IDs used for the current conversation. */
 	libraryIds: [],
 
+	/** @type {boolean} Guards switchToResultState() against double-attaching its click listener if ever called more than once. */
+	_resultStateActive: false,
+
 	/**
 	 * Cache of attachment Zotero key → local file path for attachments that have
 	 * been downloaded in this dialog session.  Zotero's getFilePathAsync() can
@@ -1575,10 +1578,15 @@ var ZoteroRAGDialog = {
 	 * Hide the input-state form and reveal the result-state view. One-way per
 	 * dialog session — the window only returns to a fresh input state by
 	 * being closed and reopened (ZoteroRAG.openQueryDialog() always creates a
-	 * new window/document when none is already open).
+	 * new window/document when none is already open). Idempotent — a second
+	 * call is a no-op, since the DOM toggle and listener attachment should
+	 * only ever happen once per session.
 	 * @returns {void}
 	 */
 	switchToResultState() {
+		if (this._resultStateActive) return;
+		this._resultStateActive = true;
+
 		const inputContent = /** @type {HTMLElement|null} */ (document.getElementById('input-content'));
 		const inputButtons = /** @type {HTMLElement|null} */ (document.getElementById('input-buttons'));
 		const resultSection = document.getElementById('result-section');

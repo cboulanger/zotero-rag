@@ -319,3 +319,30 @@ test('switchToResultState hides the input state and reveals the result state', (
 	assert.strictEqual(inputButtons.style.display, 'none');
 	assert.deepStrictEqual(resultSection.classList.added, ['visible']);
 });
+
+test('switchToResultState is idempotent — a second call does not re-attach the listener', () => {
+	let listenerCount = 0;
+	const inputContent = { style: {} };
+	const inputButtons = { style: {} };
+	const resultSection = { classList: { add() {} } };
+	const resultContent = { addEventListener: () => { listenerCount++; } };
+	const elementsById = {
+		'input-content': inputContent,
+		'input-buttons': inputButtons,
+		'result-section': resultSection,
+		'result-content': resultContent,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = { _resultStateActive: false };
+	ContextDialog.switchToResultState.call(fakeThis);
+	ContextDialog.switchToResultState.call(fakeThis);
+
+	assert.strictEqual(listenerCount, 1);
+});
