@@ -230,6 +230,34 @@ var ZoteroRAGDialog = {
 			});
 		}
 
+		const resultSubmitButton = document.getElementById('result-submit-button');
+		if (resultSubmitButton) {
+			resultSubmitButton.addEventListener('click', () => {
+				this.submitFollowUp();
+			});
+		}
+
+		const saveNoteButton = document.getElementById('save-note-button');
+		if (saveNoteButton) {
+			saveNoteButton.addEventListener('click', () => {
+				this.saveAsNote();
+			});
+		}
+
+		const exportDebugButton = document.getElementById('export-debug-button');
+		if (exportDebugButton) {
+			exportDebugButton.addEventListener('click', () => {
+				this.exportDebugInfo();
+			});
+		}
+
+		const resultCloseButton = document.getElementById('result-close-button');
+		if (resultCloseButton) {
+			resultCloseButton.addEventListener('click', () => {
+				window.close();
+			});
+		}
+
 		// Check if dev-mode is enabled and show force reindex checkbox if so
 		this.initDevModeFeatures();
 
