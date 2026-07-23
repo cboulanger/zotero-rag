@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
@@ -24,6 +25,25 @@ if TYPE_CHECKING:
     from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
+
+
+# Some models occasionally hallucinate raw tool/function-call pseudocode as
+# their entire answer (e.g. `tool.call('getResearchTrends', ...)`), even
+# though no `tools` parameter is ever sent in the completion request — an
+# artifact of heavy agentic fine-tuning bleeding into plain-completion mode,
+# more likely on questions that sound like they want structured/classified
+# output. Detected below so query() can retry once rather than silently
+# showing the user pseudocode instead of an answer.
+_TOOL_CALL_LEAK_PATTERN = re.compile(
+    r"\b\w+\.call\(|\bfunction_call\s*\(|\btool_call\s*\(|<tool_call>|<function_call>",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_tool_call_leak(text: str) -> bool:
+    """True if `text` looks like leaked tool/function-call pseudocode rather
+    than a natural-language answer."""
+    return bool(_TOOL_CALL_LEAK_PATTERN.search(text))
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -238,6 +258,8 @@ Question: {question}
 
 Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response.
 
+You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
+
 CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. The ONLY acceptable citation formats are:
   - [SN]        — reference to source N (e.g. [S1], [S3])
   - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7]
@@ -260,11 +282,33 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
 
         logger.debug(f"Generating answer with LLM (max_tokens={max_tokens})...")
         t_llm = time.monotonic()
+        final_prompt = prompt
         answer = await self.llm_service.generate(
-            prompt=prompt,
+            prompt=final_prompt,
             max_tokens=max_tokens,
             temperature=0.7
         )
+
+        if _looks_like_tool_call_leak(answer):
+            logger.warning(
+                "LLM answer looked like a tool/function-call leak instead of "
+                f"prose; retrying once. Original answer: {answer[:200]!r}"
+            )
+            final_prompt = prompt + (
+                "\n\nIMPORTANT: Your previous response incorrectly attempted to call "
+                "a tool or function. You have no tools available — answer directly "
+                "in plain prose using only the context above."
+            )
+            answer = await self.llm_service.generate(
+                prompt=final_prompt,
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
+            if _looks_like_tool_call_leak(answer):
+                logger.warning(
+                    f"Retry still looked like a tool-call leak; using it anyway: {answer[:200]!r}"
+                )
+
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 
         logger.info("Answer generated successfully")
@@ -306,7 +350,7 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
             trace.record(LLMCallTrace(
                 call_type="rag_generation",
                 model=self.llm_service.model_name,
-                prompt=prompt,
+                prompt=final_prompt,
                 response=answer,
                 temperature=0.7,
                 max_tokens=max_tokens,

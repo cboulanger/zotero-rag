@@ -404,6 +404,69 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         result = await self.rag_engine.query(question, library_ids)
         self.assertEqual(result.sources[0].chunk_id, "chunk1")
 
+    async def _query_with_single_chunk(self):
+        """Shared minimal fixture for the tool-call-leak retry tests below."""
+        question = "What research trends do authors identify?"
+        library_ids = ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        chunk = DocumentChunk(
+            text="Several studies identify a shift toward qualitative methods.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk1",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key="ABC123", attachment_key="ATT1",
+                    title="Research Trends", authors=["Melles, J."], year=2015,
+                    item_type="journalArticle",
+                ),
+                page_number=5, text_preview="Several studies identify", chunk_index=0,
+                content_hash="h1",
+            ),
+        )
+        self.mock_vector_store.search.return_value = [
+            SearchResult(chunk=chunk, score=0.9),
+        ]
+        return question, library_ids
+
+    async def test_query_retries_once_when_answer_looks_like_a_tool_call_leak(self):
+        """Some models occasionally hallucinate tool/function-call pseudocode
+        instead of a plain-language answer, even though no `tools` parameter
+        is ever sent to the LLM. Detect this and retry once."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer = "tool.call('getResearchTrends', (Melles et al., 2015))"
+        good_answer = "Authors identify a shift toward qualitative methods [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer, good_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, good_answer)
+
+    async def test_query_uses_final_answer_if_retry_still_looks_like_a_tool_call_leak(self):
+        """If the retry also looks like a tool-call leak, don't loop forever —
+        use the retry's answer anyway (best effort) rather than the original."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer_1 = "tool.call('getResearchTrends', (Melles et al., 2015))"
+        bad_answer_2 = "function_call(getTrends, [S1])"
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer_1, bad_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, bad_answer_2)
+
+    async def test_query_calls_generate_once_when_answer_looks_normal(self):
+        """No regression: a normal prose answer must not trigger a retry."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(
+            return_value="Authors identify a shift toward qualitative methods [S1]."
+        )
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertEqual(result.answer, "Authors identify a shift toward qualitative methods [S1].")
+
 
 class TestSourceInfo(unittest.TestCase):
     """Test SourceInfo model."""
