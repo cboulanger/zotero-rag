@@ -534,11 +534,19 @@ test('submitFollowUp clears a stale result-status error before appending a turn 
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ContextDialog = context.ZoteroRAGDialog;
 
+	/** @type {any[]} */
+	const submittedOptions = [];
 	const fakeThis = {
-		plugin: { submitQuery: async () => ({ status: 'complete', answer: 'Follow-up answer.', sources: [] }) },
+		plugin: {
+			submitQuery: async (/** @type {string} */ _q, /** @type {string[]} */ _libIds, /** @type {any} */ opts) => {
+				submittedOptions.push(opts);
+				return { status: 'complete', answer: 'Follow-up answer.', sources: [] };
+			},
+		},
 		libraryIds: ['u1'],
 		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
 		noteID: null,
+		queryOptions: { minScore: 0.3, topK: 10, llmModel: 'test-model', enableRouting: true },
 		_resultStateActive: true,
 		buildConversationHistory: ContextDialog.buildConversationHistory,
 		runQuery: ContextDialog.runQuery,
@@ -557,6 +565,14 @@ test('submitFollowUp clears a stale result-status error before appending a turn 
 	assert.strictEqual(fakeThis.turns[1].question, 'Follow-up question');
 	assert.strictEqual(fakeInput.value, '');
 	assert.deepStrictEqual(renderCalls, [2]);
+
+	// The original turn's minScore/topK/llmModel/enableRouting were forwarded into the
+	// follow-up's runQuery/submitQuery call — this is the regression this test locks in.
+	assert.strictEqual(submittedOptions.length, 1);
+	assert.strictEqual(submittedOptions[0].minScore, 0.3);
+	assert.strictEqual(submittedOptions[0].topK, 10);
+	assert.strictEqual(submittedOptions[0].llmModel, 'test-model');
+	assert.strictEqual(submittedOptions[0].enableRouting, true);
 });
 
 test('submitFollowUp regenerates the note from the full turn history when one has already been saved', async () => {

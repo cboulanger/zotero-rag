@@ -85,6 +85,15 @@ var ZoteroRAGDialog = {
 	/** @type {Array<string>} Backend library IDs used for the current conversation. */
 	libraryIds: [],
 
+	/**
+	 * The minScore/topK/llmModel/enableRouting settings from the first turn's
+	 * submit(), reused by every submitFollowUp() so a follow-up silently keeps
+	 * the same model/settings rather than falling back to the backend's
+	 * default. Null until the first submit() succeeds.
+	 * @type {QueryOptions|null}
+	 */
+	queryOptions: null,
+
 	/** @type {boolean} Guards switchToResultState() against double-attaching its click listener if ever called more than once. */
 	_resultStateActive: false,
 
@@ -1158,6 +1167,10 @@ var ZoteroRAGDialog = {
 
 			this.libraryIds = libraryIds;
 			this.turns = [{ question, result }];
+			// includeTrace deliberately excluded: a debug trace is only ever read from
+			// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
+			// so forwarding it on every follow-up would just waste backend computation.
+			this.queryOptions = { minScore, topK, llmModel, enableRouting };
 
 			this.updateProgress(100, 'Complete', 'Rendering result...');
 			this.switchToResultState();
@@ -1642,6 +1655,7 @@ var ZoteroRAGDialog = {
 
 		try {
 			const result = await this.runQuery(question, this.libraryIds, {
+				...this.queryOptions,
 				conversationHistory: this.buildConversationHistory(),
 			});
 			this.turns.push({ question, result });
