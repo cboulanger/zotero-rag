@@ -33,6 +33,13 @@ General guidance:
   DO NOT use "metadata" alone for questions about real-world topics, concepts,
   organisations, events, or arguments — even if they use "listing" or "exist" language.
   Those questions require "rag" to read document content.
+- Reference-management tool and product names (Zotero, EndNote, Mendeley, RefWorks,
+  Papers, Citavi, etc.) are topics being discussed, not authors — capitalized as they
+  are, they are still never people's names. NEVER populate "authors" with a tool or
+  product name. A question comparing or asking about such tools (e.g. "What features
+  does EndNote have that Zotero does not?") is a content/comparison question — route
+  it to "rag", not "metadata", and leave "authors" empty unless a specific person's
+  name is also mentioned.
 - Combine both agents only when the question BOTH lists catalog items AND asks about content.
 - Use "mentions" when the question asks which publications CITE, DISCUSS, RESPOND TO, or
   MENTION a specific named work — as opposed to questions about work BY that person.

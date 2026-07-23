@@ -229,6 +229,21 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
         prompt = llm.generate.call_args.kwargs["prompt"]
         self.assertIn("UNIQUE_QUESTION_TEXT", prompt)
 
+    async def test_prompt_warns_against_treating_tool_names_as_authors(self):
+        """"Which features does Endnote have that Zotero does not?" was observed
+        misrouted: the router extracted authors=["endnote"], which then made it
+        look like an unconstrained by-author catalog request and triggered a
+        spurious clarification_needed=true. The prompt must explicitly warn
+        against treating reference-management tool/product names as authors."""
+        llm = MagicMock()
+        llm.generate = AsyncMock(return_value='{"agents": ["rag"]}')
+        router = QueryRouter(llm)
+        agents = [_make_agent("rag", "semantic"), _make_agent("metadata", "catalog")]
+        await router.route("Which features does Endnote have that Zotero does not?", agents)
+        prompt = llm.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("not authors", prompt)
+        self.assertIn("endnote", prompt)
+
 
 class TestConversationHistoryInPrompt(unittest.IsolatedAsyncioTestCase):
     async def test_conversation_history_included_in_prompt(self):
