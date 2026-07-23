@@ -1643,6 +1643,30 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Save the first turn's execution trace as formatted JSON via a native
+	 * save-file dialog. Only meaningfully callable when the button is
+	 * visible, which happens iff `this.turns[0].result.trace` is present
+	 * (see updateExportButtonVisibility()).
+	 * @returns {Promise<void>}
+	 */
+	async exportDebugInfo() {
+		const trace = this.turns[0] && this.turns[0].result.trace;
+		if (!trace) return;
+
+		// @ts-ignore - Cc/Ci are globals in this privileged context
+		const fp = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+		fp.init(window, 'Export Debug Info', Ci.nsIFilePicker.modeSave);
+		fp.appendFilter('JSON files', '*.json');
+		fp.defaultString = 'zotero-rag-debug-trace.json';
+
+		const rv = await new Promise((resolve) => fp.open(resolve));
+		if (rv !== Ci.nsIFilePicker.returnOK && rv !== Ci.nsIFilePicker.returnReplace) return;
+
+		// @ts-ignore - IOUtils is a global in Firefox/Zotero
+		await IOUtils.writeUTF8(fp.file.path, JSON.stringify(trace, null, 2));
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"

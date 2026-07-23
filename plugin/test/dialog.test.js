@@ -500,3 +500,69 @@ test('saveAsNote re-enables the button and shows an error if note creation fails
 	assert.strictEqual(statusCalls.length, 1);
 	assert.strictEqual(statusCalls[0].type, 'error');
 });
+
+test('exportDebugInfo writes the first turn\'s trace as formatted JSON to the picked file path', async () => {
+	/** @type {string[]} */
+	const written = [];
+	const fakePicker = {
+		appendFilter() {}, init() {}, defaultString: '',
+		file: { path: '/fake/path/trace.json' },
+		open: (/** @type {(rv: number) => void} */ callback) => callback(1 /* returnOK */),
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => fakePicker } },
+		Ci: { nsIFilePicker: { modeSave: 0, returnOK: 1, returnReplace: 2 } },
+		IOUtils: { writeUTF8: async (/** @type {string} */ p, /** @type {string} */ text) => { written.push(`${p}::${text}`); } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = { turns: [{ question: 'Q', result: { trace: { step: 1 } } }] };
+	await ContextDialog.exportDebugInfo.call(fakeThis);
+
+	assert.strictEqual(written.length, 1);
+	assert.ok(written[0].startsWith('/fake/path/trace.json::'));
+	assert.ok(written[0].includes('"step": 1'));
+});
+
+test('exportDebugInfo does nothing when the first turn has no trace', async () => {
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => { throw new Error('should not be called'); } } },
+		Ci: { nsIFilePicker: {} },
+		IOUtils: { writeUTF8: async () => { throw new Error('should not be called'); } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	await ContextDialog.exportDebugInfo.call({ turns: [{ question: 'Q', result: {} }] });
+	// No assertion beyond "did not throw" — the stubs above throw if called.
+});
+
+test('exportDebugInfo does not write a file when the user cancels the save dialog', async () => {
+	/** @type {string[]} */
+	const written = [];
+	const fakePicker = {
+		appendFilter() {}, init() {}, defaultString: '',
+		file: { path: '/fake/path/trace.json' },
+		open: (/** @type {(rv: number) => void} */ callback) => callback(-1 /* returnCancel */),
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Cc: { '@mozilla.org/filepicker;1': { createInstance: () => fakePicker } },
+		Ci: { nsIFilePicker: { modeSave: 0, returnOK: 1, returnReplace: 2 } },
+		IOUtils: { writeUTF8: async (/** @type {string} */ p) => { written.push(p); } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	await ContextDialog.exportDebugInfo.call({ turns: [{ question: 'Q', result: { trace: { a: 1 } } }] });
+	assert.strictEqual(written.length, 0);
+});
