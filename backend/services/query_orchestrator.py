@@ -50,12 +50,18 @@ Retrieved information:
 
 Instructions:
 - Provide a comprehensive answer based on the retrieved information above.
+- Answer directly. Do not narrate your process or describe what you are about to
+  do (e.g. do not write "I will look through the sources" or "Here are some
+  relevant sources:") — begin with the substantive answer itself.
 - For catalog listings, present items as a formatted list with author, year, and title.
 - Cite every source you mention using [SN] notation (e.g. [S1], [S2]).
   Use [SN] for both catalog entries and quoted document passages.
   For document passages with a page number use [SN:P] (e.g. [S2:7]).
 - Do not invent source numbers — only use the [SN] labels present in the retrieved information above.
-- If no relevant information was found, say so clearly.
+- If the retrieved information does not fully answer the question, state clearly
+  what is missing and stop there — do not supplement your answer with general
+  knowledge, guesses, or suggestions that are not grounded in and cited from the
+  retrieved information above.
 """
 
 

@@ -205,6 +205,28 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RAG context", synthesis_prompt)
         self.assertIn("META context", synthesis_prompt)
 
+    async def test_synthesis_prompt_forbids_process_narration_and_ungrounded_speculation(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="META context", sources=[]))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        orch._llm_service.generate = AsyncMock(return_value="Synthesized answer")
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        synthesis_prompt = orch._llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn("do not narrate", synthesis_prompt.lower())
+        self.assertIn("stop there", synthesis_prompt.lower())
+
     async def test_custom_agent_can_be_registered_and_called(self):
         orch = _make_orchestrator()
         custom_result = AgentResult(agent_name="custom", context_text="Custom answer", sources=[])

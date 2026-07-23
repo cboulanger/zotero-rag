@@ -467,6 +467,20 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.generate.assert_called_once()
         self.assertEqual(result.answer, "Authors identify a shift toward qualitative methods [S1].")
 
+    async def test_prompt_forbids_process_narration_and_ungrounded_speculation(self):
+        """A weak model can narrate its process ("I will use the library to find
+        relevant information...") or, when the context is thin, supplement its
+        answer with unsourced general-knowledge speculation. The prompt must
+        explicitly forbid both."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("do not narrate", prompt)
+        self.assertIn("stop there", prompt)
+
 
 class TestSourceInfo(unittest.TestCase):
     """Test SourceInfo model."""
