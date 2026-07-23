@@ -1542,15 +1542,29 @@ var ZoteroRAGDialog = {
 	 * follow-up — simpler and more robust than incrementally appending DOM
 	 * nodes, since the QueryResult objects (not their rendered HTML) are the
 	 * source of truth.
+	 *
+	 * Citation hrefs use the zotero:// scheme, which Gecko's innerHTML
+	 * fragment sanitizer silently strips (unlike http(s):// hrefs, which
+	 * survive) — confirmed live in the dialog window. Workaround: rename
+	 * href to a data-* attribute before assignment (survives the sanitizer
+	 * since it isn't a recognized link attribute), then restore it via
+	 * setAttribute afterward (which bypasses the sanitizer entirely).
 	 * @returns {void}
 	 */
 	renderResultContent() {
 		const container = document.getElementById('result-content');
 		if (!container || !this.plugin) return;
 		const libraryMap = this.plugin.buildLibraryMap(this.libraryIds);
-		container.innerHTML = this.turns
+		let html = this.turns
 			.map(({ question, result }) => this.plugin.formatTurnHTML(question, result, libraryMap))
 			.join('<hr/>');
+		html = html.replace(/href="(zotero:\/\/[^"]*)"/g, 'data-zotero-href="$1"');
+		container.innerHTML = html;
+		container.querySelectorAll('a[data-zotero-href]').forEach((/** @type {Element} */ a) => {
+			const href = a.getAttribute('data-zotero-href');
+			if (href) a.setAttribute('href', href);
+			a.removeAttribute('data-zotero-href');
+		});
 	},
 
 	/**

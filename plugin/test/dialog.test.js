@@ -250,7 +250,7 @@ test('runQuery throws if the backend requests client evidence a second time', as
 test('renderResultContent joins every turn\'s formatted HTML with a divider', () => {
 	/** @type {any[][]} */
 	const libraryMapCalls = [];
-	const fakeElement = { innerHTML: '' };
+	const fakeElement = { innerHTML: '', querySelectorAll: () => [] };
 	const context = {
 		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => (id === 'result-content' ? fakeElement : null) },
 		window: {}, console,
@@ -275,6 +275,51 @@ test('renderResultContent joins every turn\'s formatted HTML with a divider', ()
 
 	assert.strictEqual(fakeElement.innerHTML, '<p>Q1:A1</p><hr/><p>Q2:A2</p>');
 	assert.deepStrictEqual(libraryMapCalls, [['u1']]);
+});
+
+test('renderResultContent rewrites zotero:// hrefs to survive innerHTML sanitization, then restores them', () => {
+	/** @type {string} */
+	let capturedInnerHTML = '';
+	/** @type {any[]} */
+	const restoredAnchors = [];
+	const fakeAnchor = {
+		attrs: /** @type {Record<string, string>} */ ({}),
+		getAttribute(/** @type {string} */ name) { return this.attrs[name]; },
+		setAttribute(/** @type {string} */ name, /** @type {string} */ value) { this.attrs[name] = value; restoredAnchors.push({ name, value }); },
+		removeAttribute(/** @type {string} */ name) { delete this.attrs[name]; },
+	};
+	fakeAnchor.attrs['data-zotero-href'] = 'zotero://select/groups/1/items/ABC';
+	const fakeElement = {
+		set innerHTML(/** @type {string} */ html) { capturedInnerHTML = html; },
+		get innerHTML() { return capturedInnerHTML; },
+		querySelectorAll: (/** @type {string} */ selector) => (selector === 'a[data-zotero-href]' ? [fakeAnchor] : []),
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => (id === 'result-content' ? fakeElement : null) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: {
+			buildLibraryMap: () => new Map(),
+			formatTurnHTML: () => '<a href="zotero://select/groups/1/items/ABC">(cite)</a>',
+		},
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q', result: { answer: 'A' } }],
+	};
+
+	ContextDialog.renderResultContent.call(fakeThis);
+
+	assert.ok(capturedInnerHTML.includes('data-zotero-href="zotero://select/groups/1/items/ABC"'), 'href should be rewritten to data-zotero-href before assignment');
+	// Note: a plain `.includes('href="zotero://')` would be a false negative here, since
+	// 'data-zotero-href="zotero://' itself contains that substring — match only a real
+	// (non-data-*) href attribute instead.
+	assert.ok(!/(?<!data-zotero-)href="zotero:\/\//.test(capturedInnerHTML), 'raw href should not survive into the assigned HTML string (would be stripped by the sanitizer)');
+	assert.deepStrictEqual(restoredAnchors, [{ name: 'href', value: 'zotero://select/groups/1/items/ABC' }], 'href should be restored via setAttribute after assignment');
+	assert.strictEqual(fakeAnchor.attrs['data-zotero-href'], undefined, 'the temporary data attribute should be removed after restoring href');
 });
 
 test('updateExportButtonVisibility shows the button only when the first turn has a trace', () => {
