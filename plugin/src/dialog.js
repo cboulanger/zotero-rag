@@ -71,6 +71,21 @@ var ZoteroRAGDialog = {
 	abortController: null,
 
 	/**
+	 * Turns in the current result-state conversation, in chronological order.
+	 * Empty until the first submit completes; the window only ever returns
+	 * to a fresh input state by being closed and reopened (a new document
+	 * each time), so there's no separate "reset" for this.
+	 * @type {Array<{question: string, result: QueryResult}>}
+	 */
+	turns: [],
+
+	/** @type {number|null} Zotero note ID once "Save as Note" has been clicked; null until then. */
+	noteID: null,
+
+	/** @type {Array<string>} Backend library IDs used for the current conversation. */
+	libraryIds: [],
+
+	/**
 	 * Cache of attachment Zotero key → local file path for attachments that have
 	 * been downloaded in this dialog session.  Zotero's getFilePathAsync() can
 	 * return null even after a successful download if the item's in-memory state
@@ -1469,6 +1484,21 @@ var ZoteroRAGDialog = {
 	resolveZoteroLibraryID(libraryId) {
 		if (!this.plugin) return null;
 		return this.plugin._resolveZoteroLibraryID(libraryId);
+	},
+
+	/**
+	 * Convert the current turns into the `conversation_history` shape the
+	 * backend expects (see backend/models/conversation.py's ChatTurn).
+	 * @returns {Array<Object>}
+	 */
+	buildConversationHistory() {
+		return this.turns.map(({ question, result }) => ({
+			question,
+			answer: result.status === 'needs_clarification' ? result.clarification_message : result.answer,
+			agents_used: result.agents_used || [],
+			source_refs: result.source_refs || [],
+			query_plan: result.query_plan || null,
+		}));
 	},
 
 	/**

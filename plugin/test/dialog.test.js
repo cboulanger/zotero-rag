@@ -134,3 +134,23 @@ test('resolveZoteroLibraryID returns null when the plugin is not available', () 
 
 	assert.strictEqual(result, null);
 });
+
+test('buildConversationHistory maps turns to the backend ChatTurn shape', () => {
+	const ZoteroRAGDialog = loadDialogMethods();
+	const fakeThis = {
+		turns: [
+			{ question: 'Q1', result: { answer: 'A1', agents_used: ['rag'], source_refs: ['c1'], query_plan: { agents_to_use: ['rag'] } } },
+			{ question: 'Q2', result: { status: 'needs_clarification', answer: '', clarification_message: 'Narrow it down.', agents_used: [], source_refs: [], query_plan: null } },
+		],
+	};
+	const history = ZoteroRAGDialog.buildConversationHistory.call(fakeThis);
+	assert.strictEqual(history.length, 2);
+	assert.strictEqual(history[0].answer, 'A1');
+	assert.strictEqual(history[1].answer, 'Narrow it down.'); // clarification_message, not the empty answer
+	assert.deepStrictEqual(history[0].source_refs, ['c1']);
+});
+
+test('buildConversationHistory returns an empty array with no turns yet', () => {
+	const ZoteroRAGDialog = loadDialogMethods();
+	assert.deepStrictEqual(ZoteroRAGDialog.buildConversationHistory.call({ turns: [] }), []);
+});
