@@ -1581,8 +1581,9 @@ var ZoteroRAGDialog = {
 	/**
 	 * Submit a follow-up question in result state: run the query (reusing the
 	 * two-phase mentions protocol via runQuery), append the turn, re-render,
-	 * and — if a note has already been created via saveAsNote() — append the
-	 * turn to it too.
+	 * and — if a note has already been created via saveAsNote() — regenerate
+	 * the note's content from the full turn history so the metadata footer
+	 * stays trailing and its Agents list reflects every turn.
 	 * @returns {Promise<void>}
 	 */
 	async submitFollowUp() {
@@ -1605,11 +1606,10 @@ var ZoteroRAGDialog = {
 			this.renderResultContent();
 
 			if (this.noteID !== null) {
-				const libraryMap = this.plugin.buildLibraryMap(this.libraryIds);
-				const turnHtml = this.plugin.formatTurnHTML(question, result, libraryMap);
+				const html = this.plugin.formatNoteHTML(this.turns, this.libraryIds);
 				// @ts-ignore - Zotero is a global in this context
 				const note = Zotero.Items.get(this.noteID);
-				note.setNote(note.getNote() + turnHtml);
+				note.setNote(html);
 				await note.saveTx();
 			}
 		} catch (error) {

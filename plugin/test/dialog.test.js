@@ -380,12 +380,12 @@ test('submitFollowUp appends a turn and re-renders, without touching a note when
 	assert.deepStrictEqual(renderCalls, [2]);
 });
 
-test('submitFollowUp appends the new turn to the note when one has already been saved', async () => {
+test('submitFollowUp regenerates the note from the full turn history when one has already been saved', async () => {
 	const fakeInput = { value: 'Follow-up question', disabled: false };
 	const elementsById = { 'followup-input': fakeInput, 'result-submit-button': { disabled: false } };
 	/** @type {string[]} */
 	const notedHtml = [];
-	const noteStub = { getNote: () => '<div>existing</div>', setNote: (/** @type {string} */ html) => notedHtml.push(html), saveTx: async () => {} };
+	const noteStub = { setNote: (/** @type {string} */ html) => notedHtml.push(html), saveTx: async () => {} };
 	const context = {
 		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
 		window: {}, console,
@@ -395,11 +395,12 @@ test('submitFollowUp appends the new turn to the note when one has already been 
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ContextDialog = context.ZoteroRAGDialog;
 
+	/** @type {any} */
+	let receivedTurns = null;
 	const fakeThis = {
 		plugin: {
 			submitQuery: async () => ({ status: 'complete', answer: 'Follow-up answer.', sources: [] }),
-			buildLibraryMap: () => new Map(),
-			formatTurnHTML: (/** @type {string} */ q, /** @type {any} */ r) => `<p>${q}:${r.answer}</p>`,
+			formatNoteHTML: (/** @type {any} */ turns, /** @type {string[]} */ _libIds) => { receivedTurns = turns; return '<div>full regenerated html</div>'; },
 		},
 		libraryIds: ['u1'],
 		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
@@ -413,7 +414,10 @@ test('submitFollowUp appends the new turn to the note when one has already been 
 	await ContextDialog.submitFollowUp.call(fakeThis);
 
 	assert.strictEqual(notedHtml.length, 1);
-	assert.strictEqual(notedHtml[0], '<div>existing</div><p>Follow-up question:Follow-up answer.</p>');
+	assert.strictEqual(notedHtml[0], '<div>full regenerated html</div>');
+	assert.strictEqual(receivedTurns, fakeThis.turns);
+	assert.strictEqual(receivedTurns.length, 2);
+	assert.strictEqual(receivedTurns[1].question, 'Follow-up question');
 });
 
 test('submitFollowUp does nothing when the input is empty', async () => {
