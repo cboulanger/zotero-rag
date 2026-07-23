@@ -435,3 +435,68 @@ test('submitFollowUp does nothing when the input is empty', async () => {
 	await ContextDialog.submitFollowUp.call(fakeThis);
 	assert.strictEqual(fakeThis.turns.length, 0);
 });
+
+test('saveAsNote creates the note from every turn and disables the button', async () => {
+	const fakeButton = { disabled: false, textContent: 'Save as Note' };
+	const elementsById = { 'save-note-button': fakeButton };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	/** @type {any} */
+	let receivedTurns = null;
+	const fakeThis = {
+		plugin: { createResultNote: async (/** @type {any} */ turns, /** @type {string[]} */ _libIds) => { receivedTurns = turns; return { id: 99 }; } },
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
+		noteID: null,
+	};
+
+	await ContextDialog.saveAsNote.call(fakeThis);
+
+	assert.strictEqual(fakeThis.noteID, 99);
+	assert.strictEqual(receivedTurns, fakeThis.turns);
+	assert.strictEqual(fakeButton.disabled, true);
+	assert.strictEqual(fakeButton.textContent, 'Saved');
+});
+
+test('saveAsNote does nothing if a note has already been saved', async () => {
+	const ZoteroRAGDialog = loadDialogMethods();
+	const fakeThis = {
+		plugin: { createResultNote: async () => { throw new Error('should not be called'); } },
+		turns: [], noteID: 42,
+	};
+	await ZoteroRAGDialog.saveAsNote.call(fakeThis);
+	assert.strictEqual(fakeThis.noteID, 42);
+});
+
+test('saveAsNote re-enables the button and shows an error if note creation fails', async () => {
+	const fakeButton = { disabled: false, textContent: 'Save as Note' };
+	const elementsById = { 'save-note-button': fakeButton };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	/** @type {any[]} */
+	const statusCalls = [];
+	const fakeThis = {
+		plugin: { createResultNote: async () => { throw new Error('disk full'); } },
+		libraryIds: ['u1'], turns: [{ question: 'Q0', result: { answer: 'A0' } }], noteID: null,
+		showStatus(/** @type {string} */ msg, /** @type {string} */ type) { statusCalls.push({ msg, type }); },
+	};
+
+	await ContextDialog.saveAsNote.call(fakeThis);
+
+	assert.strictEqual(fakeThis.noteID, null);
+	assert.strictEqual(fakeButton.disabled, false);
+	assert.strictEqual(statusCalls.length, 1);
+	assert.strictEqual(statusCalls[0].type, 'error');
+});

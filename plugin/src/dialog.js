@@ -1622,6 +1622,27 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Create the Zotero note from every turn so far. First click only —
+	 * subsequent follow-ups regenerate the note from the full turn history
+	 * (see submitFollowUp()). Disables the button once done.
+	 * @returns {Promise<void>}
+	 */
+	async saveAsNote() {
+		if (!this.plugin || this.noteID !== null) return;
+		const saveButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('save-note-button'));
+		if (saveButton) saveButton.disabled = true;
+		try {
+			const note = await this.plugin.createResultNote(this.turns, this.libraryIds);
+			this.noteID = note.id;
+			if (saveButton) saveButton.textContent = 'Saved';
+		} catch (error) {
+			if (saveButton) saveButton.disabled = false;
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Failed to save note: ${msg}`, 'error');
+		}
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
