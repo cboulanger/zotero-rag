@@ -1120,57 +1120,21 @@ var ZoteroRAGDialog = {
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
-			let result = await this.plugin.submitQuery(question, libraryIds, {
+			const result = await this.runQuery(question, libraryIds, {
 				minScore: minScore,
 				topK: topK,
 				llmModel: llmModel,
 				enableRouting: enableRouting,
 				includeTrace: includeTrace
-			});
+			}, (pct, label, message) => this.updateProgress(pct, label, message));
 
-			// The router determined this question needs citation evidence that only
-			// exists in the user's local Zotero full-text index — gather it and resubmit,
-			// echoing back query_plan so the backend doesn't re-run the routing LLM call.
-			if (result.status === 'needs_client_evidence') {
-				this.updateProgress(25, 'Searching local library', 'Scanning full text for citations...');
-				const zoteroLibraryIDs = /** @type {Array<number>} */ (
-					libraryIds
-						.map((/** @type {string} */ id) => this.resolveZoteroLibraryID(id))
-						.filter((/** @type {number|null} */ id) => id !== null)
-				);
-				const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
+			this.libraryIds = libraryIds;
+			this.turns = [{ question, result }];
 
-				this.updateProgress(40, 'Resubmitting query', 'Sending citation evidence to backend...');
-				result = await this.plugin.submitQuery(question, libraryIds, {
-					minScore: minScore,
-					topK: topK,
-					llmModel: llmModel,
-					enableRouting: enableRouting,
-					includeTrace: includeTrace,
-					clientEvidence: evidence,
-					queryPlan: result.query_plan
-				});
-
-				if (result.status === 'needs_client_evidence') {
-					throw new Error('Backend requested citation evidence a second time — this should not happen.');
-				}
-			}
-
-			// Update progress for note creation phase
-			this.updateProgress(50, 'Creating note', 'Formatting results...');
-
-			await this.plugin.createResultNote(question, result, libraryIds);
-
-			if (result.status === 'needs_clarification') {
-				this.updateProgress(100, 'Needs narrowing', 'Your question was too broad — see the note for details, and use the note\'s follow-up chat to narrow it.');
-			} else {
-				this.updateProgress(100, 'Complete', 'Note created successfully!');
-			}
-
-			// Close dialog after successful completion
-			setTimeout(() => {
-				window.close();
-			}, 1000);
+			this.updateProgress(100, 'Complete', 'Rendering result...');
+			this.switchToResultState();
+			this.renderResultContent();
+			this.updateExportButtonVisibility();
 		} catch (error) {
 			// If cancelled, abortOperation() already cleaned up the UI — don't double-apply.
 			if (!this.isOperationInProgress) return;
