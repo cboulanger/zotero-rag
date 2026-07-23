@@ -346,3 +346,88 @@ test('switchToResultState is idempotent — a second call does not re-attach the
 
 	assert.strictEqual(listenerCount, 1);
 });
+
+test('submitFollowUp appends a turn and re-renders, without touching a note when none has been saved', async () => {
+	const fakeInput = { value: 'Follow-up question', disabled: false };
+	const fakeButton = { disabled: false };
+	const elementsById = { 'followup-input': fakeInput, 'result-submit-button': fakeButton };
+	/** @type {number[]} */
+	const renderCalls = [];
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: { submitQuery: async () => ({ status: 'complete', answer: 'Follow-up answer.', sources: [] }) },
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
+		noteID: null,
+		buildConversationHistory: ContextDialog.buildConversationHistory,
+		runQuery: ContextDialog.runQuery,
+		renderResultContent() { renderCalls.push(this.turns.length); },
+		showStatus() {},
+	};
+
+	await ContextDialog.submitFollowUp.call(fakeThis);
+
+	assert.strictEqual(fakeThis.turns.length, 2);
+	assert.strictEqual(fakeThis.turns[1].question, 'Follow-up question');
+	assert.strictEqual(fakeInput.value, '');
+	assert.deepStrictEqual(renderCalls, [2]);
+});
+
+test('submitFollowUp appends the new turn to the note when one has already been saved', async () => {
+	const fakeInput = { value: 'Follow-up question', disabled: false };
+	const elementsById = { 'followup-input': fakeInput, 'result-submit-button': { disabled: false } };
+	/** @type {string[]} */
+	const notedHtml = [];
+	const noteStub = { getNote: () => '<div>existing</div>', setNote: (/** @type {string} */ html) => notedHtml.push(html), saveTx: async () => {} };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+		Zotero: { Items: { get: (/** @type {number} */ id) => (id === 42 ? noteStub : null) } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: {
+			submitQuery: async () => ({ status: 'complete', answer: 'Follow-up answer.', sources: [] }),
+			buildLibraryMap: () => new Map(),
+			formatTurnHTML: (/** @type {string} */ q, /** @type {any} */ r) => `<p>${q}:${r.answer}</p>`,
+		},
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
+		noteID: 42,
+		buildConversationHistory: ContextDialog.buildConversationHistory,
+		runQuery: ContextDialog.runQuery,
+		renderResultContent() {},
+		showStatus() {},
+	};
+
+	await ContextDialog.submitFollowUp.call(fakeThis);
+
+	assert.strictEqual(notedHtml.length, 1);
+	assert.strictEqual(notedHtml[0], '<div>existing</div><p>Follow-up question:Follow-up answer.</p>');
+});
+
+test('submitFollowUp does nothing when the input is empty', async () => {
+	const fakeInput = { value: '   ', disabled: false };
+	const elementsById = { 'followup-input': fakeInput };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = { plugin: { submitQuery: async () => { throw new Error('should not be called'); } }, turns: [] };
+	await ContextDialog.submitFollowUp.call(fakeThis);
+	assert.strictEqual(fakeThis.turns.length, 0);
+});

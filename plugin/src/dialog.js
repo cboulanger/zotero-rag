@@ -1579,6 +1579,49 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Submit a follow-up question in result state: run the query (reusing the
+	 * two-phase mentions protocol via runQuery), append the turn, re-render,
+	 * and — if a note has already been created via saveAsNote() — append the
+	 * turn to it too.
+	 * @returns {Promise<void>}
+	 */
+	async submitFollowUp() {
+		if (!this.plugin) return;
+		const input = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('followup-input'));
+		if (!input) return;
+		const question = input.value.trim();
+		if (!question) return;
+
+		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
+		if (submitButton) submitButton.disabled = true;
+		input.disabled = true;
+
+		try {
+			const result = await this.runQuery(question, this.libraryIds, {
+				conversationHistory: this.buildConversationHistory(),
+			});
+			this.turns.push({ question, result });
+			input.value = '';
+			this.renderResultContent();
+
+			if (this.noteID !== null) {
+				const libraryMap = this.plugin.buildLibraryMap(this.libraryIds);
+				const turnHtml = this.plugin.formatTurnHTML(question, result, libraryMap);
+				// @ts-ignore - Zotero is a global in this context
+				const note = Zotero.Items.get(this.noteID);
+				note.setNote(note.getNote() + turnHtml);
+				await note.saveTx();
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error: ${msg}`, 'error');
+		} finally {
+			if (submitButton) submitButton.disabled = false;
+			input.disabled = false;
+		}
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
