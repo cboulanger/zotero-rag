@@ -293,3 +293,29 @@ test('updateExportButtonVisibility shows the button only when the first turn has
 	ContextDialog.updateExportButtonVisibility.call({ turns: [{ question: 'Q', result: {} }] });
 	assert.strictEqual(fakeButton.style.display, 'none');
 });
+
+test('switchToResultState hides the input state and reveals the result state', () => {
+	const inputContent = { style: {} };
+	const inputButtons = { style: {} };
+	const resultSection = { classList: { added: /** @type {string[]} */ ([]), add(/** @type {string} */ c) { this.added.push(c); } } };
+	const resultContent = { addEventListener: () => {} };
+	const elementsById = {
+		'input-content': inputContent,
+		'input-buttons': inputButtons,
+		'result-section': resultSection,
+		'result-content': resultContent,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.switchToResultState.call({});
+
+	assert.strictEqual(inputContent.style.display, 'none');
+	assert.strictEqual(inputButtons.style.display, 'none');
+	assert.deepStrictEqual(resultSection.classList.added, ['visible']);
+});

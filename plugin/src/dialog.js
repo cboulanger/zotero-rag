@@ -1572,6 +1572,41 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Hide the input-state form and reveal the result-state view. One-way per
+	 * dialog session — the window only returns to a fresh input state by
+	 * being closed and reopened (ZoteroRAG.openQueryDialog() always creates a
+	 * new window/document when none is already open).
+	 * @returns {void}
+	 */
+	switchToResultState() {
+		const inputContent = /** @type {HTMLElement|null} */ (document.getElementById('input-content'));
+		const inputButtons = /** @type {HTMLElement|null} */ (document.getElementById('input-buttons'));
+		const resultSection = document.getElementById('result-section');
+		if (inputContent) inputContent.style.display = 'none';
+		if (inputButtons) inputButtons.style.display = 'none';
+		if (resultSection) resultSection.classList.add('visible');
+
+		// zotero:// links are a real registered Gecko protocol handler (not
+		// specific to the note editor), but this is a privileged dialog window
+		// rather than the note editor's own document — handle the click
+		// explicitly via Zotero.launchURL rather than relying on default
+		// navigation.
+		const resultContent = document.getElementById('result-content');
+		if (resultContent) {
+			resultContent.addEventListener('click', (/** @type {MouseEvent} */ event) => {
+				const target = /** @type {HTMLElement} */ (event.target);
+				const anchor = /** @type {HTMLAnchorElement|null} */ (
+					target.closest ? target.closest('a[href^="zotero://"]') : null
+				);
+				if (!anchor) return;
+				event.preventDefault();
+				// @ts-ignore - Zotero is a global in this context
+				Zotero.launchURL(anchor.href);
+			});
+		}
+	},
+
+	/**
 	 * Check if libraries need indexing and monitor progress.
 	 * @param {Array<string>} libraryIds - Library IDs to check
 	 * @param {string} [mode='auto'] - Indexing mode: "auto" | "incremental" | "full" | "reindex"
