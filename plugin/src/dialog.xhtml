@@ -101,6 +101,10 @@
     #result-section.visible { display: flex; }
     #result-content { flex: 1; overflow-y: auto; padding-bottom: 10px; }
     #result-content h2:first-child { margin-top: 0; }
+    /* Result-state status/error display — sized to content (unlike #status-section,
+       which fills a fixed-height slot shared with the progress bar in input state),
+       since the result state has no progress widget to share space with. */
+    #result-status-section { flex-shrink: 0; margin-bottom: 10px; padding: 10px; background-color: #fff5f5; border: 1px solid #ffcccc; border-radius: 4px; box-sizing: border-box; }
   </style>
 </head>
 
@@ -236,6 +240,17 @@
                   placeholder="Ask a follow-up question..."
                   class="question-input"></textarea>
       </div>
+
+      <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/
+           exportDebugInfo) — a separate element from #status-section because that one
+           lives inside #input-content, which is hidden once switchToResultState() runs. -->
+      <div id="result-status-section" style="display: none;">
+        <div style="font-weight: 500; margin-bottom: 5px; color: #cc0000;">Error Details:</div>
+        <div id="result-status-messages" class="status-messages">
+          <!-- Status messages will be added here -->
+        </div>
+      </div>
+
       <div class="dialog-buttons">
         <button id="export-debug-button" type="button" class="dialog-button" style="display: none; margin-right: auto;">Export Debug Info</button>
         <button id="save-note-button" type="button" class="dialog-button">Save as Note</button>

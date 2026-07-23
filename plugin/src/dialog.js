@@ -2029,20 +2029,33 @@ var ZoteroRAGDialog = {
 
 	/**
 	 * Show status message.
+	 *
+	 * Once switchToResultState() has run, #input-content (and the
+	 * #status-section/#status-messages nested inside it) is hidden, so
+	 * errors from result-state actions (submitFollowUp, saveAsNote,
+	 * exportDebugInfo) are routed to the separate #result-status-section/
+	 * #result-status-messages pair that lives inside #result-section instead.
 	 * @param {string} message - Status message
 	 * @param {'info'|'success'|'error'} [type] - Message type
 	 * @returns {void}
 	 */
 	showStatus(message, type = 'info') {
-		// Show status section (for errors), hide progress
+		const inResultState = !!this._resultStateActive;
+		const statusSectionId = inResultState ? 'result-status-section' : 'status-section';
+		const statusMessagesId = inResultState ? 'result-status-messages' : 'status-messages';
+
+		// Show status section (for errors), hide progress (input state only — the
+		// result state has no progress widget to hide).
 		if (type === 'error') {
-			const progressSection = document.getElementById('progress-section');
-			const statusSection = document.getElementById('status-section');
-			if (progressSection) progressSection.style.display = 'none';
+			if (!inResultState) {
+				const progressSection = document.getElementById('progress-section');
+				if (progressSection) progressSection.style.display = 'none';
+			}
+			const statusSection = document.getElementById(statusSectionId);
 			if (statusSection) statusSection.style.display = '';
 		}
 
-		const container = document.getElementById('status-messages');
+		const container = document.getElementById(statusMessagesId);
 		if (!container) return;
 
 		const messageDiv = document.createElement('div');

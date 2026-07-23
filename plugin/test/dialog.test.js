@@ -347,6 +347,69 @@ test('switchToResultState is idempotent — a second call does not re-attach the
 	assert.strictEqual(listenerCount, 1);
 });
 
+/**
+ * Build a document stub wired up with fake elements for both the input-state
+ * status section (#status-section/#status-messages, nested inside
+ * #input-content) and the result-state one (#result-status-section/
+ * #result-status-messages, inside #result-section) so showStatus()'s routing
+ * between the two can be exercised directly.
+ * @returns {{context: any, progressSection: any, statusSection: any, statusMessages: any, resultStatusSection: any, resultStatusMessages: any}}
+ */
+function makeShowStatusContext() {
+	const progressSection = { style: {} };
+	const statusSection = { style: {} };
+	const statusMessages = { children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1 };
+	const resultStatusSection = { style: {} };
+	const resultStatusMessages = { children: /** @type {any[]} */ ([]), appendChild(el) { this.children.push(el); }, scrollTop: 0, scrollHeight: 1 };
+	const elementsById = {
+		'progress-section': progressSection,
+		'status-section': statusSection,
+		'status-messages': statusMessages,
+		'result-status-section': resultStatusSection,
+		'result-status-messages': resultStatusMessages,
+	};
+	const context = {
+		document: {
+			readyState: 'loading', addEventListener() {},
+			getElementById: (/** @type {string} */ id) => elementsById[id] || null,
+			createElement: () => ({ className: '', textContent: '' }),
+		},
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	return { context, progressSection, statusSection, statusMessages, resultStatusSection, resultStatusMessages };
+}
+
+test('showStatus writes an input-state error into #status-section/#status-messages when not in result state', () => {
+	const { context, progressSection, statusSection, statusMessages, resultStatusSection, resultStatusMessages } = makeShowStatusContext();
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.showStatus.call({ _resultStateActive: false }, 'Something broke', 'error');
+
+	assert.strictEqual(progressSection.style.display, 'none');
+	assert.strictEqual(statusSection.style.display, '');
+	assert.strictEqual(statusMessages.children.length, 1);
+	assert.strictEqual(statusMessages.children[0].textContent, 'Something broke');
+	assert.strictEqual(resultStatusSection.style.display, undefined);
+	assert.strictEqual(resultStatusMessages.children.length, 0);
+});
+
+test('showStatus writes a result-state error into #result-status-section/#result-status-messages once switchToResultState has run', () => {
+	const { context, progressSection, statusSection, resultStatusSection, resultStatusMessages, statusMessages } = makeShowStatusContext();
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.showStatus.call({ _resultStateActive: true }, 'Follow-up failed', 'error');
+
+	assert.strictEqual(resultStatusSection.style.display, '');
+	assert.strictEqual(resultStatusMessages.children.length, 1);
+	assert.strictEqual(resultStatusMessages.children[0].textContent, 'Follow-up failed');
+	// The input-state elements (already hidden behind #input-content) are left untouched.
+	assert.strictEqual(progressSection.style.display, undefined);
+	assert.strictEqual(statusSection.style.display, undefined);
+	assert.strictEqual(statusMessages.children.length, 0);
+});
+
 test('submitFollowUp appends a turn and re-renders, without touching a note when none has been saved', async () => {
 	const fakeInput = { value: 'Follow-up question', disabled: false };
 	const fakeButton = { disabled: false };
