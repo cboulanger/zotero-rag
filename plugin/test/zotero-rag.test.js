@@ -559,6 +559,41 @@ test('formatTurnHTML renders the clarification message (not the empty answer) wh
 	assert.ok(!/<p>\s*<\/p>/.test(html), `expected no empty answer paragraph, got: ${html}`);
 });
 
+test('formatNoteHTML joins multiple turns with a divider and appends a metadata footer built from the first turn', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.version = '1.0.0';
+	const turns = [
+		{ question: 'Q1', result: { answer: 'A1', answer_format: 'text', sources: [], model_name: 'gpt', agents_used: ['rag'] } },
+		{ question: 'Q2', result: { answer: 'A2', answer_format: 'text', sources: [], agents_used: ['continuation'] } },
+	];
+	const html = plugin.formatNoteHTML(turns, ['u12345']);
+
+	assert.ok(html.includes('Q1') && html.includes('A1'));
+	assert.ok(html.includes('Q2') && html.includes('A2'));
+	assert.ok(html.includes('Model: gpt'), 'model comes from the first turn');
+	assert.ok(html.includes('Agents: rag, continuation'), 'agents are the union across all turns');
+	assert.ok(html.includes('Generated:'));
+});
+
+test('formatNoteHTML never embeds a debug trace — export is on-demand only', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.version = '1.0.0';
+	const turns = [{ question: 'Q', result: { answer: 'A', answer_format: 'text', sources: [], trace: { some: 'trace data' } } }];
+	const html = plugin.formatNoteHTML(turns, ['u12345']);
+	assert.ok(!html.includes('Debugging Trace'));
+	assert.ok(!html.includes('trace data'));
+});
+
 test('createResultNote seeds ChatPane with the clarification message (not the empty answer) when status is needs_clarification', async () => {
 	/** @type {any} */
 	let seededTurns = null;

@@ -49,11 +49,13 @@
  * @property {Array<string>} library_ids - Libraries queried
  * @property {string|null} [model_name] - LLM model used for answering
  * @property {Array<string>} [agents_used] - Agent(s) dispatched to answer
+ * @property {Array<string>} [source_refs] - Opaque evidence refs this turn produced, echoed back on the next follow-up
  * @property {Record<string, number>} [library_document_counts] - Indexed document count per library ID
  * @property {Record<string, any>|null} [trace] - Full execution trace, populated when include_trace=true
- * @property {string} [status] - "complete" | "needs_client_evidence"
+ * @property {string} [status] - "complete" | "needs_client_evidence" | "needs_clarification"
+ * @property {string|null} [clarification_message] - Human-readable narrowing prompt, populated when status is "needs_clarification"
  * @property {Array<{author: string, year: number|null, title_keywords: Array<string>}>} [citation_targets] - populated when status is "needs_client_evidence"
- * @property {any} [query_plan] - echo of the routing plan, present when status is "needs_client_evidence"; pass through unchanged on resubmit
+ * @property {any} [query_plan] - echo of the routing plan; present when status is "needs_client_evidence" or "needs_clarification" — pass through unchanged on resubmit
  */
 
 
@@ -1795,7 +1797,7 @@ class ZoteroRAGPlugin {
 	/**
 	 * Build a library-ID → {name, type} map for the given backend library IDs,
 	 * annotated with document counts when available. Shared by formatNoteHTML()
-	 * and ChatPane's note-append formatter.
+	 * and dialog.js's result-state renderer.
 	 * @param {Array<string>} libraryIDs - Backend library IDs
 	 * @param {Record<string, number>} [libraryDocumentCounts] - Optional map of library ID to document count
 	 * @returns {Map<string, LibraryInfo>}
@@ -1819,46 +1821,48 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Format the query result as HTML for the note.
-	 * @param {string} question - Original question
-	 * @param {QueryResult} result - Query result
+	 * Format an entire conversation (one or more turns) as HTML for a note.
+	 * Called on demand from the result dialog's "Save as Note" button, once
+	 * every turn so far is known — not automatically at submit time. Never
+	 * embeds a debug trace; that's exported on demand instead (see dialog.js's
+	 * exportDebugInfo()).
+	 * @param {Array<{question: string, result: QueryResult}>} turns - All turns
+	 *   in the conversation so far, oldest first
 	 * @param {Array<string>} libraryIDs - Libraries that were queried
 	 * @returns {string} HTML content
 	 */
-	formatNoteHTML(question, result, libraryIDs) {
+	formatNoteHTML(turns, libraryIDs) {
 		const timestamp = new Date().toLocaleString();
+		const firstResult = turns[0].result;
 
 		// Build map of library ID to library info for source URI generation
-		const libraryMap = this.buildLibraryMap(libraryIDs, result.library_document_counts);
+		const libraryMap = this.buildLibraryMap(libraryIDs, firstResult.library_document_counts);
 
-		const counts = result.library_document_counts || {};
+		const counts = firstResult.library_document_counts || {};
 		const libraryNames = Array.from(libraryMap.entries()).map(([id, info]) => {
 			const n = counts[id];
 			return n ? `${info.name} (${n} documents)` : info.name;
 		}).join(', ');
 
 		let html = `<div>`;
-		html += this.formatTurnHTML(question, result, libraryMap);
+		html += turns.map(({ question, result }) => this.formatTurnHTML(question, result, libraryMap)).join('<hr/>');
 
-		// Add metadata
+		// Metadata footer, based on the first turn — the one that actually
+		// chose a model/routing config; follow-ups reuse it, so it stays
+		// representative of the whole conversation.
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
 		html += `<em>Generated: ${timestamp}<br/>`;
 		html += `Libraries: ${this.escapeHTML(libraryNames)}<br/>`;
-		if (result.model_name) {
-			html += `Model: ${this.escapeHTML(result.model_name)}<br/>`;
+		if (firstResult.model_name) {
+			html += `Model: ${this.escapeHTML(firstResult.model_name)}<br/>`;
 		}
-		if (result.agents_used && result.agents_used.length > 0) {
-			html += `Agents: ${this.escapeHTML(result.agents_used.join(', '))}<br/>`;
+		const allAgents = [...new Set(turns.flatMap(t => t.result.agents_used || []))];
+		if (allAgents.length > 0) {
+			html += `Agents: ${this.escapeHTML(allAgents.join(', '))}<br/>`;
 		}
 		html += `Plugin: v${this.escapeHTML(this.version)}`;
 		html += `</em></p>`;
-
-		if (result.trace) {
-			html += `<hr/>`;
-			html += `<p><strong>Debugging Trace</strong></p>`;
-			html += `<pre style="font-size:0.8em; white-space:pre-wrap; word-break:break-all; background:#f5f5f5; padding:8px; border-radius:4px;">${this.escapeHTML(JSON.stringify(result.trace, null, 2))}</pre>`;
-		}
 
 		html += `</div>`;
 
