@@ -102,7 +102,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search.return_value = search_results
 
         # Mock LLM response
-        llm_answer = "Machine learning is a subset of AI that learns patterns from data."
+        llm_answer = "Machine learning is a subset of AI that learns patterns from data. [S1]"
         self.mock_llm_service.generate = AsyncMock(return_value=llm_answer)
 
         # Execute query
@@ -223,7 +223,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Mock LLM response
-        self.mock_llm_service.generate = AsyncMock(return_value="Deep learning answer")
+        self.mock_llm_service.generate = AsyncMock(return_value="Deep learning answer [S1]")
 
         # Execute query
         result = await self.rag_engine.query(
@@ -297,7 +297,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Mock LLM
-        self.mock_llm_service.generate = AsyncMock(return_value="AI is the future.")
+        self.mock_llm_service.generate = AsyncMock(return_value="AI is the future. [S1]")
 
         # Execute query
         result = await self.rag_engine.query(question=question, library_ids=library_ids)
@@ -365,7 +365,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             SearchResult(chunk=chunk, score=0.9)
         ]
 
-        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
 
         # Execute query
         await self.rag_engine.query(question=question, library_ids=library_ids)
@@ -473,13 +473,28 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         answer with unsourced general-knowledge speculation. The prompt must
         explicitly forbid both."""
         question, library_ids = await self._query_with_single_chunk()
-        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
 
         await self.rag_engine.query(question, library_ids)
 
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
         self.assertIn("do not narrate", prompt)
         self.assertIn("stop there", prompt)
+
+    async def test_prompt_requires_a_citation_on_every_factual_sentence(self):
+        """Observed live: weaker models frequently drop citations entirely (2 of
+        3 repeated attempts at the same question produced zero inline [SN]
+        markers) even though the CRITICAL CITATION RULE explains the *format*
+        to use. The rule must also mandate that every factual sentence carry
+        one — format-only guidance isn't enough to make citations happen."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("every sentence", prompt)
+        self.assertIn("do not state it", prompt)
 
 
 class TestSourceInfo(unittest.TestCase):

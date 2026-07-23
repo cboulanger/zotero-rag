@@ -33,7 +33,7 @@ from backend.services.mentions_agent import ClientEvidence, MentionsAgent
 from backend.services.metadata_agent import MetadataAgent
 from backend.services.query_router import QueryRouter
 from backend.services.rag_agent import RAGAgent
-from backend.services.rag_engine import QueryResult, SourceInfo
+from backend.services.rag_engine import QueryResult, SourceInfo, _looks_like_tool_call_leak, _missing_citations
 
 if TYPE_CHECKING:
     from backend.services.trace_collector import TraceCollector
@@ -57,12 +57,34 @@ Instructions:
 - Cite every source you mention using [SN] notation (e.g. [S1], [S2]).
   Use [SN] for both catalog entries and quoted document passages.
   For document passages with a page number use [SN:P] (e.g. [S2:7]).
+  Every sentence that states a specific fact, feature, or claim drawn from the
+  retrieved information MUST end with an inline [SN] citation — if you cannot
+  attribute a claim to a specific source, do not state it.
 - Do not invent source numbers — only use the [SN] labels present in the retrieved information above.
 - If the retrieved information does not fully answer the question, state clearly
   what is missing and stop there — do not supplement your answer with general
   knowledge, guesses, or suggestions that are not grounded in and cited from the
   retrieved information above.
 """
+
+
+def _quality_issue_reinforcement(answer: str) -> Optional[str]:
+    """Return a reinforcement instruction to retry synthesis with, if `answer`
+    has a detectable quality issue — or None if it looks fine. Mirrors
+    rag_engine.py's own check (same underlying model, same failure modes)."""
+    if _looks_like_tool_call_leak(answer):
+        return (
+            "Your previous response incorrectly attempted to call a tool or function. "
+            "You have no tools available — answer directly in plain prose using only "
+            "the retrieved information above."
+        )
+    if _missing_citations(answer):
+        return (
+            "Your previous response did not include any [SN] citations. Revise it to "
+            "add an inline [SN] citation immediately after every factual claim, using "
+            "the source labels from the retrieved information above."
+        )
+    return None
 
 
 class QueryOrchestrator:
@@ -294,18 +316,37 @@ class QueryOrchestrator:
         preset = self._settings.get_hardware_preset()
         max_tokens = preset.llm.max_answer_tokens
         t_llm = time.monotonic()
+        final_prompt = prompt
         answer = await self._llm_service.generate(
-            prompt=prompt,
+            prompt=final_prompt,
             max_tokens=max_tokens,
             temperature=0.7,
         )
+
+        reinforcement = _quality_issue_reinforcement(answer)
+        if reinforcement:
+            logger.warning(
+                f"Synthesis answer had a quality issue; retrying once. {reinforcement} "
+                f"Original answer: {answer[:200]!r}"
+            )
+            final_prompt = prompt + f"\n\nIMPORTANT: {reinforcement}"
+            answer = await self._llm_service.generate(
+                prompt=final_prompt,
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+            if _quality_issue_reinforcement(answer):
+                logger.warning(
+                    f"Synthesis retry still had a quality issue; using it anyway: {answer[:200]!r}"
+                )
+
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 
         if trace is not None:
             trace.record(LLMCallTrace(
                 call_type="synthesis",
                 model=self._llm_service.model_name,
-                prompt=prompt,
+                prompt=final_prompt,
                 response=answer,
                 temperature=0.7,
                 max_tokens=max_tokens,

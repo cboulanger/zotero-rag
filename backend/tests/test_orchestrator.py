@@ -227,6 +227,57 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not narrate", synthesis_prompt.lower())
         self.assertIn("stop there", synthesis_prompt.lower())
 
+    async def test_synthesis_prompt_requires_a_citation_on_every_sentence(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="META context", sources=[]))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        orch._llm_service.generate = AsyncMock(return_value="Synthesized answer")
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        synthesis_prompt = orch._llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn("every sentence", synthesis_prompt.lower())
+        self.assertIn("do not state it", synthesis_prompt.lower())
+
+    async def test_synthesis_retries_once_when_answer_has_no_citations(self):
+        """Observed live: weaker models frequently drop citations entirely even
+        though the prompt asks for [SN] notation. Retry once with a reinforced
+        prompt asking for citations to be added."""
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        orch.register(rag_agent)
+
+        uncited = "Answer with no citations at all."
+        cited = "Answer with a citation [S1]."
+        orch._llm_service.generate = AsyncMock(side_effect=[uncited, cited])
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        # len(agent_results)==1 with agent_name=="rag" takes the passthrough
+        # shortcut and never reaches _synthesize() — register a second agent
+        # so this exercises the synthesis retry path.
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="META context", sources=[]))
+        orch.register(meta_agent)
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            result = await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        self.assertEqual(orch._llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, cited)
+
     async def test_custom_agent_can_be_registered_and_called(self):
         orch = _make_orchestrator()
         custom_result = AgentResult(agent_name="custom", context_text="Custom answer", sources=[])

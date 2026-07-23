@@ -46,6 +46,39 @@ def _looks_like_tool_call_leak(text: str) -> bool:
     return bool(_TOOL_CALL_LEAK_PATTERN.search(text))
 
 
+# Weaker models frequently comply with the CRITICAL CITATION RULE's *format*
+# but skip citations altogether — observed live: 2 of 3 repeated attempts at
+# the same question produced an answer with zero [SN] markers anywhere.
+# Detected below so query() can ask for a revision rather than silently
+# returning claims with no attributable source.
+_SN_CITATION_PATTERN = re.compile(r"\[S\d+(?::\d+)?(?:,\s*S\d+(?::\d+)?)*\]")
+
+
+def _missing_citations(text: str) -> bool:
+    """True if `text` contains no [SN] citation markers at all."""
+    return not _SN_CITATION_PATTERN.search(text)
+
+
+def _quality_issue_reinforcement(answer: str) -> Optional[str]:
+    """Return a reinforcement instruction to retry generation with, if `answer`
+    has a detectable quality issue — or None if it looks fine. Checked once
+    per generation attempt; only the first detected issue is reported."""
+    if _looks_like_tool_call_leak(answer):
+        return (
+            "Your previous response incorrectly attempted to call a tool or function. "
+            "You have no tools available — answer directly in plain prose using only "
+            "the context above."
+        )
+    if _missing_citations(answer):
+        return (
+            "Your previous response did not include any [SN] citations. Revise it to "
+            "add an inline [SN] citation (see the CRITICAL CITATION RULE above) "
+            "immediately after every factual claim, using the source labels from the "
+            "context above."
+        )
+    return None
+
+
 def _format_authors(authors: list[str]) -> str:
     if not authors:
         return ""
@@ -262,7 +295,7 @@ Answer directly. Do not narrate your process or describe what you are about to d
 
 You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
 
-CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. The ONLY acceptable citation formats are:
+CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:
   - [SN]        — reference to source N (e.g. [S1], [S3])
   - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7]
   - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
@@ -291,24 +324,21 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
             temperature=0.7
         )
 
-        if _looks_like_tool_call_leak(answer):
+        reinforcement = _quality_issue_reinforcement(answer)
+        if reinforcement:
             logger.warning(
-                "LLM answer looked like a tool/function-call leak instead of "
-                f"prose; retrying once. Original answer: {answer[:200]!r}"
+                f"LLM answer had a quality issue; retrying once. {reinforcement} "
+                f"Original answer: {answer[:200]!r}"
             )
-            final_prompt = prompt + (
-                "\n\nIMPORTANT: Your previous response incorrectly attempted to call "
-                "a tool or function. You have no tools available — answer directly "
-                "in plain prose using only the context above."
-            )
+            final_prompt = prompt + f"\n\nIMPORTANT: {reinforcement}"
             answer = await self.llm_service.generate(
                 prompt=final_prompt,
                 max_tokens=max_tokens,
                 temperature=0.7
             )
-            if _looks_like_tool_call_leak(answer):
+            if _quality_issue_reinforcement(answer):
                 logger.warning(
-                    f"Retry still looked like a tool-call leak; using it anyway: {answer[:200]!r}"
+                    f"Retry still had a quality issue; using it anyway: {answer[:200]!r}"
                 )
 
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
