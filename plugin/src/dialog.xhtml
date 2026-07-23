@@ -99,8 +99,24 @@
     .advanced-options .form-group:last-child { margin-bottom: 0; }
     #result-section { display: none; flex-direction: column; height: 100%; overflow: hidden; }
     #result-section.visible { display: flex; }
-    #result-content { flex: 1; overflow-y: auto; padding-bottom: 10px; }
+    #result-content {
+      flex: 1;
+      overflow-y: auto;
+      margin-bottom: 10px;
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      background: #fff;
+      box-sizing: border-box;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+    #result-content h2 { font-size: 16px; margin: 0 0 10px 0; }
     #result-content h2:first-child { margin-top: 0; }
+    #result-content p { margin: 0 0 12px 0; }
+    #result-content ul, #result-content ol { margin: 0 0 12px 0; padding-left: 24px; }
+    #result-content li { margin-bottom: 6px; }
+    #result-content hr { border: none; border-top: 1px solid #ddd; margin: 20px 0; }
     /* Result-state status/error display — sized to content (unlike #status-section,
        which fills a fixed-height slot shared with the progress bar in input state),
        since the result state has no progress widget to share space with. */
