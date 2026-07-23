@@ -255,6 +255,15 @@ To reproduce a real user-reported query result against the actual local backend 
 Zotero library (e.g. to debug why an answer was wrong), you need API keys and,
 for plugin-side logic, a way to execute code inside the running Zotero instance.
 
+**Always use the group library "test-rag-plugin"** (`groups/6297749`,
+<https://www.zotero.org/groups/6297749/test-rag-plugin>) for this kind of live/manual
+testing — never a real personal or project library. Every entry in it is about Zotero
+or reference management in general, so phrase test questions accordingly (e.g. "What
+is Zotero used for?", "Compare reference management tools", "What citation styles are
+discussed?"). Its items exist specifically to be queried and can be freely mutated
+(edited, tagged, added, deleted) for test purposes — no need to be careful with it the
+way you would with real user data.
+
 ### Getting API keys without ever printing them to the terminal
 
 Both the read-only Zotero identity key and any remote-model provider key
