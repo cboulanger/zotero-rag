@@ -66,6 +66,14 @@ class RAGAgent(BaseAgent):
             vector_store=self._vector_store,
             settings=self._settings,
         )
+        engine_kwargs = {}
+        for key in (
+            "diversity_floor", "diversity_escalation_factor",
+            "diversity_escalation_max_top_k", "max_chunks_per_document",
+            "low_diversity_available_floor",
+        ):
+            if key in kwargs:
+                engine_kwargs[key] = kwargs[key]
         result = await engine.query(
             question=question,
             library_ids=library_ids,
@@ -73,6 +81,7 @@ class RAGAgent(BaseAgent):
             min_score=min_score,
             filters=filters,
             trace=trace,
+            **engine_kwargs,
         )
 
         sources = result.sources
@@ -80,4 +89,5 @@ class RAGAgent(BaseAgent):
             agent_name=self.name,
             context_text=result.answer,
             sources=sources,
+            source_refs=[s.chunk_id for s in sources if s.chunk_id],
         )

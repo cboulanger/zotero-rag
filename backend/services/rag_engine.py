@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, List, Optional
@@ -24,6 +25,119 @@ if TYPE_CHECKING:
     from backend.services.trace_collector import TraceCollector
 
 logger = logging.getLogger(__name__)
+
+
+# Some models occasionally hallucinate raw tool/function-call pseudocode as
+# their entire answer (e.g. `tool.call('getResearchTrends', ...)`), even
+# though no `tools` parameter is ever sent in the completion request — an
+# artifact of heavy agentic fine-tuning bleeding into plain-completion mode,
+# more likely on questions that sound like they want structured/classified
+# output. Detected below so query() can retry once rather than silently
+# showing the user pseudocode instead of an answer.
+_TOOL_CALL_LEAK_PATTERN = re.compile(
+    r"\b\w+\.call\(|\bfunction_call\s*\(|\btool_call\s*\(|<tool_call>|<function_call>",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_tool_call_leak(text: str) -> bool:
+    """True if `text` looks like leaked tool/function-call pseudocode rather
+    than a natural-language answer."""
+    return bool(_TOOL_CALL_LEAK_PATTERN.search(text))
+
+
+# Weaker models frequently comply with the CRITICAL CITATION RULE's *format*
+# but skip citations altogether — observed live: 2 of 3 repeated attempts at
+# the same question produced an answer with zero [SN] markers anywhere.
+# Detected below so query() can ask for a revision rather than silently
+# returning claims with no attributable source.
+_SN_CITATION_PATTERN = re.compile(r"\[S\d+(?::\d+)?(?:,\s*S\d+(?::\d+)?)*\]")
+
+
+def _missing_citations(text: str) -> bool:
+    """True if `text` contains no [SN] citation markers at all."""
+    return not _SN_CITATION_PATTERN.search(text)
+
+
+def _extract_cited_source_numbers(text: str) -> set[int]:
+    """Return the set of source numbers (the N in [SN]) actually cited in `text`."""
+    cited: set[int] = set()
+    for bracket in _SN_CITATION_PATTERN.findall(text):
+        cited.update(int(n) for n in re.findall(r"S(\d+)", bracket))
+    return cited
+
+
+# Weaker models can comply with citation *format* while still citing only a
+# single source, even when several genuinely distinct documents were
+# retrieved — observed live: the same retrieved context (6 documents)
+# produced answers citing anywhere from 1 to 3 of them across repeated
+# attempts at temperature 0.7. Below this floor of available documents,
+# citing just one is common and expected (there may only be one relevant
+# source); at or above it, citing only one is worth a second look.
+_LOW_DIVERSITY_AVAILABLE_FLOOR = 3
+
+
+def _low_citation_diversity(
+    answer: str, available_sources: int, floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
+) -> bool:
+    """True if very few distinct sources were cited despite several being
+    available in the context (possible under-use of relevant material)."""
+    if available_sources < floor:
+        return False
+    return len(_extract_cited_source_numbers(answer)) <= 1
+
+
+def _quality_issue_reinforcement(
+    answer: str,
+    available_sources: int = 0,
+    low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+) -> Optional[str]:
+    """Return a reinforcement instruction to retry generation with, if `answer`
+    has a detectable quality issue — or None if it looks fine. Checked once
+    per generation attempt; only the first detected issue is reported.
+
+    available_sources: number of distinct documents available in the context,
+    used only by the low-diversity check below."""
+    if _looks_like_tool_call_leak(answer):
+        return (
+            "Your previous response incorrectly attempted to call a tool or function. "
+            "You have no tools available — answer directly in plain prose using only "
+            "the context above."
+        )
+    if _missing_citations(answer):
+        return (
+            "Your previous response did not include any [SN] citations. Revise it to "
+            "add an inline [SN] citation (see the CRITICAL CITATION RULE above) "
+            "immediately after every factual claim, using the source labels from the "
+            "context above."
+        )
+    if _low_citation_diversity(answer, available_sources, low_diversity_floor):
+        return (
+            "Your previous response cited only one source even though several distinct "
+            "documents were retrieved. Check whether any of the other sources in the "
+            "context above also contain information relevant to the question, and cite "
+            "them where genuinely relevant — do not cite a source that is not actually "
+            "relevant just to add variety."
+        )
+    return None
+
+
+# Observed live: a fixed top_k can be entirely saturated by chunks from a single
+# dominant document (e.g. one paper with 100+ indexed chunks vs. a handful for
+# everything else), starving the answer of other genuinely relevant sources even
+# though they exist in the library. Vector search is cheap (unlike an LLM call),
+# so when the raw search hits the top_k cap — not the corpus limit — and diversity
+# still looks low, retry once at a larger top_k before generating.
+_DIVERSITY_FLOOR = 3            # minimum distinct documents before escalating
+_DIVERSITY_ESCALATION_FACTOR = 3
+_DIVERSITY_ESCALATION_MAX_TOP_K = 30
+
+# Caps how many chunks from a single document are included in the assembled
+# context. Without this, an over-chunked document (especially after the
+# escalation above) can flood the prompt with many near-duplicate passages
+# while other included documents get only one or two — bounds prompt size and
+# keeps the context readable, independent of document diversity itself.
+_MAX_CHUNKS_PER_DOCUMENT = 4
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -47,6 +161,9 @@ class SourceInfo(BaseModel):
     page_number: int | None = None
     text_anchor: str | None = None
     score: float
+    chunk_id: str | None = None   # payload chunk_id backing this citation's representative
+                                   # chunk — lets a follow-up turn re-fetch the same evidence
+                                   # via VectorStore.get_chunks_by_ids()
 
 
 class QueryResult(BaseModel):
@@ -56,6 +173,7 @@ class QueryResult(BaseModel):
     sources: List[SourceInfo]
     model_name: Optional[str] = None
     agents_used: list[str] = []
+    source_refs: list[str] = []   # union of every contributing source's chunk_id
 
 
 class RAGEngine:
@@ -95,6 +213,11 @@ class RAGEngine:
         min_score: float = 0.3,  # Fallback default, should use preset value from API layer
         filters: Optional[MetadataFilters] = None,
         trace: Optional[TraceCollector] = None,
+        diversity_floor: int = _DIVERSITY_FLOOR,
+        diversity_escalation_factor: int = _DIVERSITY_ESCALATION_FACTOR,
+        diversity_escalation_max_top_k: int = _DIVERSITY_ESCALATION_MAX_TOP_K,
+        max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
+        low_diversity_available_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -104,6 +227,15 @@ class RAGEngine:
             library_ids: List of library IDs to search.
             top_k: Number of chunks to retrieve.
             min_score: Minimum similarity score threshold (default: from preset, fallback 0.3).
+            diversity_floor: Minimum distinct documents before retrieval escalates to a
+                larger top_k (see module docstring above _DIVERSITY_FLOOR).
+            diversity_escalation_factor: Multiplier applied to top_k when escalating.
+            diversity_escalation_max_top_k: Ceiling on the escalated top_k.
+            max_chunks_per_document: Cap on chunks from a single document in the
+                assembled context.
+            low_diversity_available_floor: Minimum distinct available sources before the
+                low-citation-diversity retry guard checks the answer (see
+                _LOW_DIVERSITY_AVAILABLE_FLOOR above).
 
         Returns:
             Query result with answer and source citations.
@@ -138,6 +270,34 @@ class RAGEngine:
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
+        # Escalate once if the search hit the top_k cap (not the corpus limit) and
+        # came back dominated by too few distinct documents.
+        escalated = False
+        if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
+            unique_doc_count = len({
+                r.chunk.metadata.document_metadata.attachment_key
+                or r.chunk.metadata.document_metadata.item_key
+                for r in search_results
+            })
+            if unique_doc_count < diversity_floor:
+                escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
+                logger.info(
+                    f"Retrieval diversity low ({unique_doc_count} documents from top_k={top_k}); "
+                    f"escalating to top_k={escalated_top_k}"
+                )
+                escalated_results = await asyncio.to_thread(
+                    self.vector_store.search,
+                    query_vector=query_embedding,
+                    limit=escalated_top_k,
+                    score_threshold=min_score,
+                    library_ids=library_ids if library_ids else None,
+                    filters=active_filters,
+                )
+                if len(escalated_results) > len(search_results):
+                    search_results = escalated_results
+                    escalated = True
+                    logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
+
         # Group chunks by document (attachment_key), preserving all relevant passages.
         # This gives the LLM real content (not just the highest-scoring chunk, which is
         # often a bibliography/reference section) while still assigning one source number
@@ -166,6 +326,8 @@ class RAGEngine:
         doc_representatives: list = []  # best-scoring chunk per doc for SourceInfo
         for i, doc_key in enumerate(sorted_doc_keys, 1):
             results_for_doc = doc_chunks[doc_key]
+            if len(results_for_doc) > max_chunks_per_document:
+                results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:max_chunks_per_document]
             # Sort chunks within document by page number, then chunk index
             results_for_doc.sort(key=lambda r: (
                 r.chunk.metadata.page_number or 0,
@@ -213,6 +375,7 @@ class RAGEngine:
                     "library_ids": library_ids,
                     "filters": active_filters.model_dump() if active_filters else None,
                 },
+                escalated=escalated,
                 raw_results_count=len(search_results),
                 score_stats={
                     "min": min(scores),
@@ -232,15 +395,21 @@ Context:
 
 Question: {question}
 
-Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, acknowledge this in your response.
+Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, state clearly what is missing and stop there — do not supplement your answer with general knowledge, guesses, or suggestions that are not grounded in and cited from the context above.
 
-CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. The ONLY acceptable citation formats are:
+Answer directly. Do not narrate your process or describe what you are about to do (e.g. do not write "I will look through the context" or "Here are some relevant sources:") — begin with the substantive answer itself.
+
+You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
+
+CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:
   - [SN]        — reference to source N (e.g. [S1], [S3])
   - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7]
   - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
   - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
 
 IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3].
+NEVER cite a page range like [S1:305-306] — pick the single page where the cited claim
+actually appears.
 NEVER use plain numbers like [1] or [4] — those are bibliography references inside the documents, not source labels.
 NEVER write "Source 1", "S1", or any form other than the bracket notation above.
 
@@ -256,11 +425,31 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
 
         logger.debug(f"Generating answer with LLM (max_tokens={max_tokens})...")
         t_llm = time.monotonic()
+        final_prompt = prompt
         answer = await self.llm_service.generate(
-            prompt=prompt,
+            prompt=final_prompt,
             max_tokens=max_tokens,
             temperature=0.7
         )
+
+        available_sources = len(sorted_doc_keys)
+        reinforcement = _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor)
+        if reinforcement:
+            logger.warning(
+                f"LLM answer had a quality issue; retrying once. {reinforcement} "
+                f"Original answer: {answer[:200]!r}"
+            )
+            final_prompt = prompt + f"\n\nIMPORTANT: {reinforcement}"
+            answer = await self.llm_service.generate(
+                prompt=final_prompt,
+                max_tokens=max_tokens,
+                temperature=0.7
+            )
+            if _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor):
+                logger.warning(
+                    f"Retry still had a quality issue; using it anyway: {answer[:200]!r}"
+                )
+
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 
         logger.info("Answer generated successfully")
@@ -285,7 +474,8 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                 # the PDF at its natural start when page is absent.
                 page_number=None,
                 text_anchor=metadata.text_preview,
-                score=result.score
+                score=result.score,
+                chunk_id=metadata.chunk_id,
             )
             sources.append(source)
 
@@ -301,7 +491,7 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
             trace.record(LLMCallTrace(
                 call_type="rag_generation",
                 model=self.llm_service.model_name,
-                prompt=prompt,
+                prompt=final_prompt,
                 response=answer,
                 temperature=0.7,
                 max_tokens=max_tokens,

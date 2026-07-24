@@ -142,6 +142,8 @@ The first time the plugin connects to a backend it isn't already configured for,
 - **Zotero API Key** — your own personal key from <https://www.zotero.org/settings/keys>- Do not reuse an existing key, generate a new key, which **must** be read-only and should only cover the libraries that you want to query. A local server (`localhost`) needs none of this and skips straight past it; a remote server uses this key to identify you and check that you're authorized to use that instance (e.g. membership in a designated Zotero group). The Preferences pane shows a live status (username + accessible library count) once a valid key is entered.
 - **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI), enter the corresponding API key here so the plugin can pass it to the server
 
+See the [Plugin Settings Reference](docs/plugin-settings.md) for every other setting available in this pane (automatic indexing, retrieval tuning, library visibility, and more) and in the query dialog's advanced options.
+
 ### 6. Using the Plugin
 
 <img src="./docs/images/dialog.png" width="300" alt="Screenshot of the RAG dialog">
@@ -177,6 +179,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 
 ## User Documentation
 
+- **[Plugin settings reference](docs/plugin-settings.md)**
 - **[Automatic (scheduled) indexing setup](docs/auto-indexing-setup.md)**
 - **[Public web interface](docs/public-web-interface.md)**
 - **[Fix unavailable attachments](docs/fix-unavailable-attachments.md)**

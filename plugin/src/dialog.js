@@ -71,6 +71,33 @@ var ZoteroRAGDialog = {
 	abortController: null,
 
 	/**
+	 * Turns in the current result-state conversation, in chronological order.
+	 * Empty until the first submit completes; the window only ever returns
+	 * to a fresh input state by being closed and reopened (a new document
+	 * each time), so there's no separate "reset" for this.
+	 * @type {Array<{question: string, result: QueryResult}>}
+	 */
+	turns: [],
+
+	/** @type {number|null} Zotero note ID once "Save as Note" has been clicked; null until then. */
+	noteID: null,
+
+	/** @type {Array<string>} Backend library IDs used for the current conversation. */
+	libraryIds: [],
+
+	/**
+	 * The minScore/topK/llmModel/enableRouting settings from the first turn's
+	 * submit(), reused by every submitFollowUp() so a follow-up silently keeps
+	 * the same model/settings rather than falling back to the backend's
+	 * default. Null until the first submit() succeeds.
+	 * @type {QueryOptions|null}
+	 */
+	queryOptions: null,
+
+	/** @type {boolean} Guards switchToResultState() against double-attaching its click listener if ever called more than once. */
+	_resultStateActive: false,
+
+	/**
 	 * Cache of attachment Zotero key → local file path for attachments that have
 	 * been downloaded in this dialog session.  Zotero's getFilePathAsync() can
 	 * return null even after a successful download if the item's in-memory state
@@ -209,6 +236,34 @@ var ZoteroRAGDialog = {
 		if (cancelButton) {
 			cancelButton.addEventListener('click', () => {
 				this.handleCancel();
+			});
+		}
+
+		const resultSubmitButton = document.getElementById('result-submit-button');
+		if (resultSubmitButton) {
+			resultSubmitButton.addEventListener('click', () => {
+				this.submitFollowUp();
+			});
+		}
+
+		const saveNoteButton = document.getElementById('save-note-button');
+		if (saveNoteButton) {
+			saveNoteButton.addEventListener('click', () => {
+				this.saveAsNote();
+			});
+		}
+
+		const exportDebugButton = document.getElementById('export-debug-button');
+		if (exportDebugButton) {
+			exportDebugButton.addEventListener('click', () => {
+				this.exportDebugInfo();
+			});
+		}
+
+		const resultCloseButton = document.getElementById('result-close-button');
+		if (resultCloseButton) {
+			resultCloseButton.addEventListener('click', () => {
+				window.close();
 			});
 		}
 
@@ -1102,53 +1157,25 @@ var ZoteroRAGDialog = {
 			// Update progress for query phase
 			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
 
-			let result = await this.plugin.submitQuery(question, libraryIds, {
+			const result = await this.runQuery(question, libraryIds, {
 				minScore: minScore,
 				topK: topK,
 				llmModel: llmModel,
 				enableRouting: enableRouting,
 				includeTrace: includeTrace
-			});
+			}, (pct, label, message) => this.updateProgress(pct, label, message));
 
-			// The router determined this question needs citation evidence that only
-			// exists in the user's local Zotero full-text index — gather it and resubmit,
-			// echoing back query_plan so the backend doesn't re-run the routing LLM call.
-			if (result.status === 'needs_client_evidence') {
-				this.updateProgress(25, 'Searching local library', 'Scanning full text for citations...');
-				const zoteroLibraryIDs = /** @type {Array<number>} */ (
-					libraryIds
-						.map((/** @type {string} */ id) => this.resolveZoteroLibraryID(id))
-						.filter((/** @type {number|null} */ id) => id !== null)
-				);
-				const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
+			this.libraryIds = libraryIds;
+			this.turns = [{ question, result }];
+			// includeTrace deliberately excluded: a debug trace is only ever read from
+			// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
+			// so forwarding it on every follow-up would just waste backend computation.
+			this.queryOptions = { minScore, topK, llmModel, enableRouting };
 
-				this.updateProgress(40, 'Resubmitting query', 'Sending citation evidence to backend...');
-				result = await this.plugin.submitQuery(question, libraryIds, {
-					minScore: minScore,
-					topK: topK,
-					llmModel: llmModel,
-					enableRouting: enableRouting,
-					includeTrace: includeTrace,
-					clientEvidence: evidence,
-					queryPlan: result.query_plan
-				});
-
-				if (result.status === 'needs_client_evidence') {
-					throw new Error('Backend requested citation evidence a second time — this should not happen.');
-				}
-			}
-
-			// Update progress for note creation phase
-			this.updateProgress(50, 'Creating note', 'Formatting results...');
-
-			await this.plugin.createResultNote(question, result, libraryIds);
-
-			this.updateProgress(100, 'Complete', 'Note created successfully!');
-
-			// Close dialog after successful completion
-			setTimeout(() => {
-				window.close();
-			}, 1000);
+			this.updateProgress(100, 'Complete', 'Rendering result...');
+			this.switchToResultState();
+			this.renderResultContent();
+			this.updateExportButtonVisibility();
 		} catch (error) {
 			// If cancelled, abortOperation() already cleaned up the UI — don't double-apply.
 			if (!this.isOperationInProgress) return;
@@ -1465,6 +1492,243 @@ var ZoteroRAGDialog = {
 	resolveZoteroLibraryID(libraryId) {
 		if (!this.plugin) return null;
 		return this.plugin._resolveZoteroLibraryID(libraryId);
+	},
+
+	/**
+	 * Convert the current turns into the `conversation_history` shape the
+	 * backend expects (see backend/models/conversation.py's ChatTurn).
+	 * @returns {Array<Object>}
+	 */
+	buildConversationHistory() {
+		return this.turns.map(({ question, result }) => ({
+			question,
+			answer: result.status === 'needs_clarification' ? result.clarification_message : result.answer,
+			agents_used: result.agents_used || [],
+			source_refs: result.source_refs || [],
+			query_plan: result.query_plan || null,
+		}));
+	},
+
+	/**
+	 * Submit a question to the backend, transparently handling the two-phase
+	 * "needs_client_evidence" mentions protocol (gathers local full-text
+	 * evidence and resubmits once, echoing back query_plan so the backend
+	 * skips re-running the routing LLM call). Shared by submit() (the first
+	 * turn) and submitFollowUp() (every later turn) so the protocol lives in
+	 * one place.
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @param {(percentage: number, label: string, message?: string) => void} [onProgress] - Optional UI progress callback for the mentions round trip
+	 * @returns {Promise<QueryResult>}
+	 */
+	async runQuery(question, libraryIds, options, onProgress) {
+		let result = await this.plugin.submitQuery(question, libraryIds, options);
+
+		if (result.status === 'needs_client_evidence') {
+			if (onProgress) onProgress(25, 'Searching local library', 'Scanning full text for citations...');
+			const zoteroLibraryIDs = /** @type {Array<number>} */ (
+				libraryIds
+					.map((/** @type {string} */ id) => this.resolveZoteroLibraryID(id))
+					.filter((/** @type {number|null} */ id) => id !== null)
+			);
+			const evidence = await MentionSearch.findMentionEvidence(result.citation_targets, zoteroLibraryIDs);
+
+			if (onProgress) onProgress(40, 'Resubmitting query', 'Sending citation evidence to backend...');
+			result = await this.plugin.submitQuery(question, libraryIds, {
+				...options,
+				clientEvidence: evidence,
+				queryPlan: result.query_plan,
+			});
+
+			if (result.status === 'needs_client_evidence') {
+				throw new Error('Backend requested citation evidence a second time — this should not happen.');
+			}
+		}
+
+		return result;
+	},
+
+	/**
+	 * Re-render the full conversation transcript from `this.turns` into
+	 * `#result-content`. Called after the first submit and after every
+	 * follow-up — simpler and more robust than incrementally appending DOM
+	 * nodes, since the QueryResult objects (not their rendered HTML) are the
+	 * source of truth.
+	 *
+	 * Citation hrefs use the zotero:// scheme, which Gecko's innerHTML
+	 * fragment sanitizer silently strips (unlike http(s):// hrefs, which
+	 * survive) — confirmed live in the dialog window. Workaround: rename
+	 * href to a data-* attribute before assignment (survives the sanitizer
+	 * since it isn't a recognized link attribute), then restore it via
+	 * setAttribute afterward (which bypasses the sanitizer entirely).
+	 * @returns {void}
+	 */
+	renderResultContent() {
+		const container = document.getElementById('result-content');
+		if (!container || !this.plugin) return;
+		const libraryMap = this.plugin.buildLibraryMap(this.libraryIds);
+		let html = this.turns
+			.map(({ question, result }) => this.plugin.formatTurnHTML(question, result, libraryMap))
+			.join('<hr/>');
+		html = html.replace(/href="(zotero:\/\/[^"]*)"/g, 'data-zotero-href="$1"');
+		container.innerHTML = html;
+		container.querySelectorAll('a[data-zotero-href]').forEach((/** @type {Element} */ a) => {
+			const href = a.getAttribute('data-zotero-href');
+			if (href) a.setAttribute('href', href);
+			a.removeAttribute('data-zotero-href');
+		});
+	},
+
+	/**
+	 * Show the Export Debug Info button iff the very first turn's result
+	 * carries a trace — only the original question's advanced options can
+	 * request one; follow-ups never expose that control.
+	 * @returns {void}
+	 */
+	updateExportButtonVisibility() {
+		const exportButton = /** @type {HTMLElement|null} */ (document.getElementById('export-debug-button'));
+		if (!exportButton) return;
+		const hasTrace = !!(this.turns[0] && this.turns[0].result.trace);
+		exportButton.style.display = hasTrace ? '' : 'none';
+	},
+
+	/**
+	 * Hide the input-state form and reveal the result-state view. One-way per
+	 * dialog session — the window only returns to a fresh input state by
+	 * being closed and reopened (ZoteroRAG.openQueryDialog() always creates a
+	 * new window/document when none is already open). Idempotent — a second
+	 * call is a no-op, since the DOM toggle and listener attachment should
+	 * only ever happen once per session.
+	 * @returns {void}
+	 */
+	switchToResultState() {
+		if (this._resultStateActive) return;
+		this._resultStateActive = true;
+
+		const inputContent = /** @type {HTMLElement|null} */ (document.getElementById('input-content'));
+		const inputButtons = /** @type {HTMLElement|null} */ (document.getElementById('input-buttons'));
+		const resultSection = document.getElementById('result-section');
+		if (inputContent) inputContent.style.display = 'none';
+		if (inputButtons) inputButtons.style.display = 'none';
+		if (resultSection) resultSection.classList.add('visible');
+
+		// zotero:// links are a real registered Gecko protocol handler (not
+		// specific to the note editor), but this is a privileged dialog window
+		// rather than the note editor's own document — handle the click
+		// explicitly via Zotero.launchURL rather than relying on default
+		// navigation.
+		const resultContent = document.getElementById('result-content');
+		if (resultContent) {
+			resultContent.addEventListener('click', (/** @type {MouseEvent} */ event) => {
+				const target = /** @type {HTMLElement} */ (event.target);
+				const anchor = /** @type {HTMLAnchorElement|null} */ (
+					target.closest ? target.closest('a[href^="zotero://"]') : null
+				);
+				if (!anchor) return;
+				event.preventDefault();
+				// @ts-ignore - Zotero is a global in this context
+				Zotero.launchURL(anchor.href);
+			});
+		}
+	},
+
+	/**
+	 * Submit a follow-up question in result state: run the query (reusing the
+	 * two-phase mentions protocol via runQuery), append the turn, re-render,
+	 * and — if a note has already been created via saveAsNote() — regenerate
+	 * the note's content from the full turn history so the metadata footer
+	 * stays trailing and its Agents list reflects every turn.
+	 * @returns {Promise<void>}
+	 */
+	async submitFollowUp() {
+		if (!this.plugin) return;
+		const input = /** @type {HTMLTextAreaElement|null} */ (document.getElementById('followup-input'));
+		if (!input) return;
+		const question = input.value.trim();
+		if (!question) return;
+		this.clearStatusMessages();
+
+		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
+		if (submitButton) submitButton.disabled = true;
+		input.disabled = true;
+
+		try {
+			const result = await this.runQuery(question, this.libraryIds, {
+				...this.queryOptions,
+				conversationHistory: this.buildConversationHistory(),
+			});
+			this.turns.push({ question, result });
+			input.value = '';
+			this.renderResultContent();
+
+			if (this.noteID !== null) {
+				const html = this.plugin.formatNoteHTML(this.turns, this.libraryIds);
+				// @ts-ignore - Zotero is a global in this context
+				const note = Zotero.Items.get(this.noteID);
+				note.setNote(html);
+				await note.saveTx();
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Error: ${msg}`, 'error');
+		} finally {
+			if (submitButton) submitButton.disabled = false;
+			input.disabled = false;
+		}
+	},
+
+	/**
+	 * Create the Zotero note from every turn so far. First click only —
+	 * subsequent follow-ups regenerate the note from the full turn history
+	 * (see submitFollowUp()). Disables the button once done.
+	 * @returns {Promise<void>}
+	 */
+	async saveAsNote() {
+		if (!this.plugin || this.noteID !== null) return;
+		this.clearStatusMessages();
+		const saveButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('save-note-button'));
+		if (saveButton) saveButton.disabled = true;
+		try {
+			const note = await this.plugin.createResultNote(this.turns, this.libraryIds);
+			this.noteID = note.id;
+			if (saveButton) saveButton.textContent = 'Saved';
+		} catch (error) {
+			if (saveButton) saveButton.disabled = false;
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Failed to save note: ${msg}`, 'error');
+		}
+	},
+
+	/**
+	 * Save the first turn's execution trace as formatted JSON via a native
+	 * save-file dialog. Only meaningfully callable when the button is
+	 * visible, which happens iff `this.turns[0].result.trace` is present
+	 * (see updateExportButtonVisibility()).
+	 * @returns {Promise<void>}
+	 */
+	async exportDebugInfo() {
+		const trace = this.turns[0] && this.turns[0].result.trace;
+		if (!trace) return;
+		this.clearStatusMessages();
+
+		try {
+			// @ts-ignore - Cc/Ci are globals in this privileged context
+			const fp = Cc['@mozilla.org/filepicker;1'].createInstance(Ci.nsIFilePicker);
+			// @ts-ignore - window.browsingContext exists in this privileged Gecko window
+			fp.init(window.browsingContext, 'Export Debug Info', Ci.nsIFilePicker.modeSave);
+			fp.appendFilter('JSON files', '*.json');
+			fp.defaultString = 'zotero-rag-debug-trace.json';
+
+			const rv = await new Promise((resolve) => fp.open(resolve));
+			if (rv !== Ci.nsIFilePicker.returnOK && rv !== Ci.nsIFilePicker.returnReplace) return;
+
+			// @ts-ignore - IOUtils is a global in Firefox/Zotero
+			await IOUtils.writeUTF8(fp.file.path, JSON.stringify(trace, null, 2));
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			this.showStatus(`Failed to export debug info: ${msg}`, 'error');
+		}
 	},
 
 	/**
@@ -1795,21 +2059,46 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Resolve the DOM ids of the currently-active status section/messages
+	 * pair. Once switchToResultState() has run, #input-content (and the
+	 * #status-section/#status-messages nested inside it) is hidden, so
+	 * status from result-state actions (submitFollowUp, saveAsNote,
+	 * exportDebugInfo) must be routed to the separate #result-status-section/
+	 * #result-status-messages pair that lives inside #result-section instead.
+	 * Shared by showStatus() and clearStatusMessages() so both route
+	 * identically.
+	 * @returns {{statusSectionId: string, statusMessagesId: string}}
+	 */
+	_getStatusElementIds() {
+		const inResultState = !!this._resultStateActive;
+		return {
+			statusSectionId: inResultState ? 'result-status-section' : 'status-section',
+			statusMessagesId: inResultState ? 'result-status-messages' : 'status-messages',
+		};
+	},
+
+	/**
 	 * Show status message.
 	 * @param {string} message - Status message
 	 * @param {'info'|'success'|'error'} [type] - Message type
 	 * @returns {void}
 	 */
 	showStatus(message, type = 'info') {
-		// Show status section (for errors), hide progress
+		const inResultState = !!this._resultStateActive;
+		const { statusSectionId, statusMessagesId } = this._getStatusElementIds();
+
+		// Show status section (for errors), hide progress (input state only — the
+		// result state has no progress widget to hide).
 		if (type === 'error') {
-			const progressSection = document.getElementById('progress-section');
-			const statusSection = document.getElementById('status-section');
-			if (progressSection) progressSection.style.display = 'none';
+			if (!inResultState) {
+				const progressSection = document.getElementById('progress-section');
+				if (progressSection) progressSection.style.display = 'none';
+			}
+			const statusSection = document.getElementById(statusSectionId);
 			if (statusSection) statusSection.style.display = '';
 		}
 
-		const container = document.getElementById('status-messages');
+		const container = document.getElementById(statusMessagesId);
 		if (!container) return;
 
 		const messageDiv = document.createElement('div');
@@ -1822,17 +2111,26 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Clear all status messages.
+	 * Clear all status messages from whichever status section/messages pair
+	 * is currently active (see _getStatusElementIds()), so a stale error from
+	 * a previous attempt never survives into a later, successful one.
 	 * @returns {void}
 	 */
 	clearStatusMessages() {
-		const container = document.getElementById('status-messages');
-		const statusSection = document.getElementById('status-section');
-		const progressSection = document.getElementById('progress-section');
+		const inResultState = !!this._resultStateActive;
+		const { statusSectionId, statusMessagesId } = this._getStatusElementIds();
+
+		const container = document.getElementById(statusMessagesId);
+		const statusSection = document.getElementById(statusSectionId);
 
 		if (container) container.innerHTML = '';
 		if (statusSection) statusSection.style.display = 'none';
-		if (progressSection) progressSection.style.display = '';
+
+		// The result state has no progress widget to reset.
+		if (!inResultState) {
+			const progressSection = document.getElementById('progress-section');
+			if (progressSection) progressSection.style.display = '';
+		}
 	},
 
 	/**

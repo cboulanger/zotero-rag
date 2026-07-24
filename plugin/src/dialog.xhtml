@@ -97,12 +97,36 @@
     .advanced-options > summary::before { content: '\25B6  '; font-size: 10px; }
     .advanced-options[open] > summary::before { content: '\25BC  '; font-size: 10px; }
     .advanced-options .form-group:last-child { margin-bottom: 0; }
+    #result-section { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+    #result-section.visible { display: flex; }
+    #result-content {
+      flex: 1;
+      overflow-y: auto;
+      margin-bottom: 10px;
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      background: #fff;
+      box-sizing: border-box;
+      line-height: 1.6;
+      font-size: 14px;
+    }
+    #result-content h2 { font-size: 16px; margin: 0 0 10px 0; }
+    #result-content h2:first-child { margin-top: 0; }
+    #result-content p { margin: 0 0 12px 0; }
+    #result-content ul, #result-content ol { margin: 0 0 12px 0; padding-left: 24px; }
+    #result-content li { margin-bottom: 6px; }
+    #result-content hr { border: none; border-top: 1px solid #ddd; margin: 20px 0; }
+    /* Result-state status/error display — sized to content (unlike #status-section,
+       which fills a fixed-height slot shared with the progress bar in input state),
+       since the result state has no progress widget to share space with. */
+    #result-status-section { flex-shrink: 0; margin-bottom: 10px; padding: 10px; background-color: #fff5f5; border: 1px solid #ffcccc; border-radius: 4px; box-sizing: border-box; }
   </style>
 </head>
 
 <body>
   <div class="dialog-container">
-    <div class="dialog-content">
+    <div id="input-content" class="dialog-content">
       <!-- Question input -->
       <div class="form-group">
         <label for="question-input">Question:</label>
@@ -202,7 +226,7 @@
     </div>
 
     <!-- Dialog buttons -->
-    <div class="dialog-buttons">
+    <div id="input-buttons" class="dialog-buttons">
       <span id="plugin-version" style="font-size: 11px; color: #999; align-self: center; margin-right: auto;"></span>
       <label id="force-reindex-container" class="force-reindex-label" style="display: none; margin-right: auto; align-items: center;">
         <input type="checkbox" id="force-full-reindex" style="margin-right: 5px;"/>
@@ -221,6 +245,34 @@
       </div>
       <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>
       <button id="submit-button" type="button" class="dialog-button primary">Submit</button>
+    </div>
+
+    <!-- Result state: rendered answer + follow-up chat (shown after a successful submit) -->
+    <div id="result-section">
+      <div id="result-content"></div>
+      <div class="form-group" style="flex-shrink: 0;">
+        <textarea id="followup-input"
+                  rows="3"
+                  placeholder="Ask a follow-up question..."
+                  class="question-input"></textarea>
+      </div>
+
+      <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/
+           exportDebugInfo) — a separate element from #status-section because that one
+           lives inside #input-content, which is hidden once switchToResultState() runs. -->
+      <div id="result-status-section" style="display: none;">
+        <div style="font-weight: 500; margin-bottom: 5px; color: #cc0000;">Error Details:</div>
+        <div id="result-status-messages" class="status-messages">
+          <!-- Status messages will be added here -->
+        </div>
+      </div>
+
+      <div class="dialog-buttons">
+        <button id="export-debug-button" type="button" class="dialog-button" style="display: none; margin-right: auto;">Export Debug Info</button>
+        <button id="save-note-button" type="button" class="dialog-button">Save as Note</button>
+        <button id="result-close-button" type="button" class="dialog-button" title="Close this dialog">Close</button>
+        <button id="result-submit-button" type="button" class="dialog-button primary">Submit</button>
+      </div>
     </div>
   </div>
 </body>

@@ -49,11 +49,13 @@
  * @property {Array<string>} library_ids - Libraries queried
  * @property {string|null} [model_name] - LLM model used for answering
  * @property {Array<string>} [agents_used] - Agent(s) dispatched to answer
+ * @property {Array<string>} [source_refs] - Opaque evidence refs this turn produced, echoed back on the next follow-up
  * @property {Record<string, number>} [library_document_counts] - Indexed document count per library ID
  * @property {Record<string, any>|null} [trace] - Full execution trace, populated when include_trace=true
- * @property {string} [status] - "complete" | "needs_client_evidence"
+ * @property {string} [status] - "complete" | "needs_client_evidence" | "needs_clarification"
+ * @property {string|null} [clarification_message] - Human-readable narrowing prompt, populated when status is "needs_clarification"
  * @property {Array<{author: string, year: number|null, title_keywords: Array<string>}>} [citation_targets] - populated when status is "needs_client_evidence"
- * @property {any} [query_plan] - echo of the routing plan, present when status is "needs_client_evidence"; pass through unchanged on resubmit
+ * @property {any} [query_plan] - echo of the routing plan; present when status is "needs_client_evidence" or "needs_clarification" — pass through unchanged on resubmit
  */
 
 
@@ -76,6 +78,8 @@
  * @property {boolean} [includeTrace] - When true, request a full execution trace from the backend
  * @property {any} [clientEvidence] - Citation-mention evidence gathered client-side, sent back on the resubmit half of the two-phase "needs_client_evidence" flow
  * @property {any} [queryPlan] - The `query_plan` echoed back from a prior `needs_client_evidence` response, so the backend can skip re-running the routing LLM call
+ * @property {Array<Object>} [conversationHistory] - Prior follow-up turns to echo back
+ * @property {boolean} [forceFreshRetrieval] - Ignore conversationHistory for this turn's routing
  */
 
 
@@ -91,6 +95,44 @@
  * (e.g. typing a title, then adding tags) into one request.
  */
 const METADATA_DEBOUNCE_MS = 4000;
+
+/**
+ * Retrieval/answer-diversity tuning knobs — configured in Preferences (see
+ * preferences.js's "Retrieval Tuning" section), sent on every query rather
+ * than being per-query dialog options. `prefKey` is the suffix after
+ * `extensions.zotero-rag.`; `apiKey` is the field name in the /api/query
+ * request body. Defaults here must match the backend's own hardcoded
+ * defaults in backend/services/rag_engine.py (_DIVERSITY_FLOOR etc.) — kept
+ * in sync manually since the two run in separate processes/languages.
+ * @type {Array<{prefKey: string, apiKey: string, default: number, label: string, description: string}>}
+ */
+const DIVERSITY_TUNING_FIELDS = [
+	{
+		prefKey: 'diversityFloor', apiKey: 'diversity_floor', default: 3,
+		label: 'Diversity floor',
+		description: 'Minimum distinct documents required before retrieval broadens its search.',
+	},
+	{
+		prefKey: 'diversityEscalationFactor', apiKey: 'diversity_escalation_factor', default: 3,
+		label: 'Escalation factor',
+		description: 'Multiplier applied to the search size when broadening.',
+	},
+	{
+		prefKey: 'diversityEscalationMaxTopK', apiKey: 'diversity_escalation_max_top_k', default: 30,
+		label: 'Escalation ceiling',
+		description: 'Maximum search size after broadening.',
+	},
+	{
+		prefKey: 'maxChunksPerDocument', apiKey: 'max_chunks_per_document', default: 4,
+		label: 'Max passages per document',
+		description: 'Passages from a single document allowed into the answer context.',
+	},
+	{
+		prefKey: 'lowDiversityAvailableFloor', apiKey: 'low_diversity_available_floor', default: 3,
+		label: 'Single-source retry floor',
+		description: 'Minimum sources available before an answer citing only one is retried.',
+	},
+];
 
 /**
  * Main plugin class for Zotero RAG integration.
@@ -1105,6 +1147,22 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Read the retrieval/answer-diversity tuning prefs (see DIVERSITY_TUNING_FIELDS),
+	 * falling back to each field's default when unset or not a valid number.
+	 * @returns {Record<string, number>} API request field name -> value
+	 */
+	getDiversityTuningPayload() {
+		/** @type {Record<string, number>} */
+		const payload = {};
+		for (const field of DIVERSITY_TUNING_FIELDS) {
+			const stored = Zotero.Prefs.get(`extensions.zotero-rag.${field.prefKey}`, true);
+			const value = parseInt(/** @type {any} */ (stored), 10);
+			payload[field.apiKey] = Number.isFinite(value) ? value : field.default;
+		}
+		return payload;
+	}
+
+	/**
 	 * Submit a query to the backend.
 	 * @param {string} question - Question to ask
 	 * @param {Array<string>} libraryIDs - Library IDs to query
@@ -1129,6 +1187,10 @@ class ZoteroRAGPlugin {
 				library_ids: libraryIDs
 			};
 
+			// Retrieval/answer-diversity tuning — configured in Preferences (not the query
+			// dialog), so read directly from Prefs on every query rather than via `options`.
+			Object.assign(payload, this.getDiversityTuningPayload());
+
 			if (options.topK !== undefined) {
 				payload.top_k = options.topK;
 			}
@@ -1149,6 +1211,12 @@ class ZoteroRAGPlugin {
 			}
 			if (options.queryPlan !== undefined) {
 				payload.query_plan = options.queryPlan;
+			}
+			if (options.conversationHistory !== undefined) {
+				payload.conversation_history = options.conversationHistory;
+			}
+			if (options.forceFreshRetrieval) {
+				payload.force_fresh_retrieval = true;
 			}
 
 			const response = await fetch(`${this.backendURL}/api/query`, {
@@ -1173,14 +1241,15 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Create a note in the current collection with the query result.
-	 * @param {string} question - Original question
-	 * @param {QueryResult} result - Query result
+	 * Create a note in the current collection from an entire conversation.
+	 * Called on demand from the result dialog's "Save as Note" button — not
+	 * automatically at submit time.
+	 * @param {Array<{question: string, result: QueryResult}>} turns
 	 * @param {Array<string>} libraryIDs - Libraries that were queried
 	 * @returns {Promise<*>} Created note item
 	 * @throws {Error} If note creation fails
 	 */
-	async createResultNote(question, result, libraryIDs) {
+	async createResultNote(turns, libraryIDs) {
 		const zoteroPane = Zotero.getActiveZoteroPane();
 		if (!zoteroPane) {
 			throw new Error('No active Zotero pane');
@@ -1197,7 +1266,7 @@ class ZoteroRAGPlugin {
 		}
 
 		// Format note content as HTML
-		const html = this.formatNoteHTML(question, result, libraryIDs);
+		const html = this.formatNoteHTML(turns, libraryIDs);
 		note.setNote(html);
 
 		// Add to collection before saving so it's included in the same transaction
@@ -1211,10 +1280,13 @@ class ZoteroRAGPlugin {
 		await note.saveTx();
 		await this._ensureRAGResultsSearch(note.libraryID);
 
-		// Open the note in a separate window and resize it
-		zoteroPane.openNoteWindow(note.id);
-		const noteWin = zoteroPane.findNoteWindow(note.id);
-		if (noteWin) noteWin.resizeTo(900, 700);
+		// Select the note in the main library view, so the user sees the note
+		// they just asked to be saved.
+		try {
+			await zoteroPane.selectItem(note.id);
+		} catch (e) {
+			this.log(`[createResultNote] Failed to select note in library pane: ${e instanceof Error ? e.message : e}`);
+		}
 
 		return note;
 	}
@@ -1505,7 +1577,7 @@ class ZoteroRAGPlugin {
 		let title = "";
 
 		if (pageLabel !== null && pageLabel !== undefined) {
-			label += `, p. ${this.escapeHTML(String(pageLabel))}`;
+			label += `, p. ${this.escapeHTML(String(pageLabel))}`;
 		}
 
 		if (textAnchor) {
@@ -1567,19 +1639,25 @@ class ZoteroRAGPlugin {
 	 * @param {string} text - Text with inline citation references
 	 * @param {Array<SourceCitation>} sources - Array of source citations
 	 * @param {Map<string, {name: string, type: 'user'|'group'}>} libraryMap - Map of library info
+	 * @param {Set<number>} [citedNumbers] - If provided, every 1-based source number
+	 *   actually found in the text is added to this set as a side effect (used by
+	 *   formatTurnHTML to filter the bibliography down to sources actually cited).
 	 * @returns {string} Text with citations replaced by HTML citation spans
 	 */
-	replaceCitationsInText(text, sources, libraryMap) {
+	replaceCitationsInText(text, sources, libraryMap, citedNumbers) {
 		// Normalise legacy "Source N" word form → [SN]
 		const sourceWordPattern = /\*{0,2}Source\s+(\d+)\*{0,2}/g;
 		text = text.replace(sourceWordPattern, (_m, n) => `[S${n}]`);
 
 		// Primary pattern: [S1], [S1:10], [S1:p.10], [S1,S2,S3], [S1:10,S2:20]
 		// Fallback pattern: [1], [1:10] — kept for older cached responses
-		// Page part tolerates an optional "p." or "p " prefix and section numbers (e.g. 0.3.1).
-		const pageToken = '(?::p\\.?\\s*[\\d.]+|:[\\d.]+)?';
+		// Page part tolerates an optional "p." or "p " prefix, section numbers (e.g. 0.3.1),
+		// and a page range (e.g. 305-306) — the prompt asks for a single integer page, but
+		// weaker models occasionally cite a range anyway; parseInt() below takes its start.
+		const pageNum = '[\\d.]+(?:-[\\d.]+)?';
+		const pageToken = `(?::p\\.?\\s*${pageNum}|:${pageNum})?`;
 		const sRef = `[Ss]\\d+${pageToken}`;
-		const nRef = `\\d+(?::[\\d.]+)?`;
+		const nRef = `\\d+(?::${pageNum})?`;
 		const citationPattern = new RegExp(
 			`\\[(${sRef}(?:,\\s*${sRef})*|${nRef}(?:,\\s*${nRef})*)\\]`, 'g'
 		);
@@ -1605,6 +1683,7 @@ class ZoteroRAGPlugin {
 					citationSpans.push(`[${citation}]`);
 					continue;
 				}
+				if (citedNumbers) citedNumbers.add(sourceNum);
 
 				// Get library type
 				const libraryType = this.getLibraryType(source.library_id, libraryMap);
@@ -1731,22 +1810,69 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Format the query result as HTML for the note.
-	 * @param {string} question - Original question
-	 * @param {QueryResult} result - Query result
-	 * @param {Array<string>} libraryIDs - Libraries that were queried
-	 * @returns {string} HTML content
+	 * @typedef {Object} LibraryInfo
+	 * @property {string} name - Library name
+	 * @property {'user'|'group'} type - Library type
 	 */
-	formatNoteHTML(question, result, libraryIDs) {
-		const timestamp = new Date().toLocaleString();
 
-		// Build map of library ID to library info for source URI generation
-		/**
-		 * @typedef {Object} LibraryInfo
-		 * @property {string} name - Library name
-		 * @property {'user'|'group'} type - Library type
-		 */
+	/**
+	 * Format one Q&A turn (heading + answer + bibliography) as an HTML fragment,
+	 * with no outer wrapper and no metadata footer — reused by formatNoteHTML()
+	 * to render each turn in a saved note, and by dialog.js's result-state
+	 * renderer for the live in-dialog transcript.
+	 * @param {string} question - The question for this turn
+	 * @param {QueryResult} result - Query result
+	 * @param {Map<string, LibraryInfo>} libraryMap - Library ID to library info
+	 * @returns {string} HTML fragment
+	 */
+	formatTurnHTML(question, result, libraryMap) {
+		let html = `<h2>${this.escapeHTML(question)}</h2>`;
+		html += `<p><strong>Answer:</strong></p>`;
 
+		// When the backend judged the question too broad (status: 'needs_clarification'),
+		// `answer` is empty and the human-readable question lives in `clarification_message`
+		// instead — display that. It's always plain text (never answer_format: 'html'),
+		// so it goes through the same escaping path as the existing plain-text branch.
+		const displayAnswer = result.status === 'needs_clarification' ? result.clarification_message : result.answer;
+
+		// Process answer text to replace inline citations, then merge consecutive ones.
+		// citedNumbers is populated as a side effect (the 1-based source numbers
+		// actually found in the text) so the bibliography below can be filtered to
+		// what was really cited, instead of every document retrieval happened to surface.
+		const citedNumbers = new Set();
+		let answerHTML = '';
+		if (result.answer_format === 'html' && result.status !== 'needs_clarification') {
+			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap, citedNumbers);
+		} else {
+			const escapedAnswer = this.escapeHTML(displayAnswer || '');
+			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap, citedNumbers)}</p>`;
+		}
+		html += this.mergeConsecutiveCitations(answerHTML);
+
+		// Bibliography: only sources actually cited inline — a retrieval can surface
+		// several documents while the model only ends up citing one of them, and
+		// listing the rest as "References" would misrepresent what the answer used.
+		// Falls back to every retrieved source when none were cited at all (e.g. a
+		// clarification turn, or an answer that skipped citations despite the
+		// backend's retry guard) so the list isn't silently emptied out.
+		const allSources = result.sources || [];
+		const citedSources = citedNumbers.size > 0
+			? allSources.filter((_source, idx) => citedNumbers.has(idx + 1))
+			: allSources;
+		html += this.formatBibliographyHTML(citedSources, libraryMap);
+
+		return html;
+	}
+
+	/**
+	 * Build a library-ID → {name, type} map for the given backend library IDs,
+	 * annotated with document counts when available. Shared by formatNoteHTML()
+	 * and dialog.js's result-state renderer.
+	 * @param {Array<string>} libraryIDs - Backend library IDs
+	 * @param {Record<string, number>} [libraryDocumentCounts] - Optional map of library ID to document count
+	 * @returns {Map<string, LibraryInfo>}
+	 */
+	buildLibraryMap(libraryIDs, libraryDocumentCounts = {}) {
 		/** @type {Map<string, LibraryInfo>} */
 		const libraryMap = new Map();
 
@@ -1761,48 +1887,52 @@ class ZoteroRAGPlugin {
 			}
 		}
 
-		const counts = result.library_document_counts || {};
+		return libraryMap;
+	}
+
+	/**
+	 * Format an entire conversation (one or more turns) as HTML for a note.
+	 * Called on demand from the result dialog's "Save as Note" button, once
+	 * every turn so far is known — not automatically at submit time. Never
+	 * embeds a debug trace; that's exported on demand instead (see dialog.js's
+	 * exportDebugInfo()).
+	 * @param {Array<{question: string, result: QueryResult}>} turns - All turns
+	 *   in the conversation so far, oldest first
+	 * @param {Array<string>} libraryIDs - Libraries that were queried
+	 * @returns {string} HTML content
+	 */
+	formatNoteHTML(turns, libraryIDs) {
+		const timestamp = new Date().toLocaleString();
+		const firstResult = turns[0].result;
+
+		// Build map of library ID to library info for source URI generation
+		const libraryMap = this.buildLibraryMap(libraryIDs, firstResult.library_document_counts);
+
+		const counts = firstResult.library_document_counts || {};
 		const libraryNames = Array.from(libraryMap.entries()).map(([id, info]) => {
 			const n = counts[id];
 			return n ? `${info.name} (${n} documents)` : info.name;
 		}).join(', ');
 
 		let html = `<div>`;
-		html += `<h2>${this.escapeHTML(question)}</h2>`;
-		html += `<p><strong>Answer:</strong></p>`;
+		html += turns.map(({ question, result }) => this.formatTurnHTML(question, result, libraryMap)).join('<hr/>');
 
-		// Process answer text to replace inline citations, then merge consecutive ones
-		let answerHTML = '';
-		if (result.answer_format === 'html') {
-			answerHTML = this.replaceCitationsInText(result.answer, result.sources || [], libraryMap);
-		} else {
-			const escapedAnswer = this.escapeHTML(result.answer);
-			answerHTML = `<p>${this.replaceCitationsInText(escapedAnswer, result.sources || [], libraryMap)}</p>`;
-		}
-		html += this.mergeConsecutiveCitations(answerHTML);
-
-		// Add bibliography
-		html += this.formatBibliographyHTML(result.sources || [], libraryMap);
-
-		// Add metadata
+		// Metadata footer, based on the first turn — the one that actually
+		// chose a model/routing config; follow-ups reuse it, so it stays
+		// representative of the whole conversation.
 		html += `<hr/>`;
 		html += `<p style="font-size: 0.9em; color: #666;">`;
 		html += `<em>Generated: ${timestamp}<br/>`;
 		html += `Libraries: ${this.escapeHTML(libraryNames)}<br/>`;
-		if (result.model_name) {
-			html += `Model: ${this.escapeHTML(result.model_name)}<br/>`;
+		if (firstResult.model_name) {
+			html += `Model: ${this.escapeHTML(firstResult.model_name)}<br/>`;
 		}
-		if (result.agents_used && result.agents_used.length > 0) {
-			html += `Agents: ${this.escapeHTML(result.agents_used.join(', '))}<br/>`;
+		const allAgents = [...new Set(turns.flatMap(t => t.result.agents_used || []))];
+		if (allAgents.length > 0) {
+			html += `Agents: ${this.escapeHTML(allAgents.join(', '))}<br/>`;
 		}
 		html += `Plugin: v${this.escapeHTML(this.version)}`;
 		html += `</em></p>`;
-
-		if (result.trace) {
-			html += `<hr/>`;
-			html += `<p><strong>Debugging Trace</strong></p>`;
-			html += `<pre style="font-size:0.8em; white-space:pre-wrap; word-break:break-all; background:#f5f5f5; padding:8px; border-radius:4px;">${this.escapeHTML(JSON.stringify(result.trace, null, 2))}</pre>`;
-		}
 
 		html += `</div>`;
 

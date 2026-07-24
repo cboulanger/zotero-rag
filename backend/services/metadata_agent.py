@@ -36,6 +36,8 @@ class MetadataResult(BaseModel):
     text_preview: Optional[str]   # first few words of the first indexed chunk
     has_content: bool = True      # False for catalog-only stubs (no attachment/abstract to embed)
     tags: list[str] = []          # Zotero tags/keywords assigned to the item
+    chunk_id: Optional[str] = None   # payload chunk_id of the representative chunk this
+                                      # catalog entry came from — enables follow-up continuation
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -91,15 +93,40 @@ class MetadataAgent(BaseAgent):
         trace: Optional[TraceCollector] = None,
         **kwargs,
     ) -> AgentResult:
-        limit: int = kwargs.get("metadata_limit", 30)
+        narrowing_threshold: int = kwargs.get("metadata_narrowing_threshold", 50)
         t_start = time.monotonic()
 
         raw = await asyncio.to_thread(
             self._vector_store.get_items_by_metadata,
             library_ids=library_ids if library_ids else None,
             filters=filters,
-            limit=limit,
+            limit=narrowing_threshold + 1,
         )
+
+        if len(raw) > narrowing_threshold:
+            message = (
+                f"Found more than {narrowing_threshold} matching items — "
+                "try narrowing by year, author, or item type."
+            )
+            logger.info(
+                f"MetadataAgent: {len(raw)} matches exceed narrowing threshold {narrowing_threshold}"
+            )
+            if trace is not None:
+                trace.record(AgentExecutionTrace(
+                    agent_name=self.name,
+                    retrieval=None,
+                    catalog_results=None,
+                    context_text=message,
+                    sources_count=0,
+                    duration_ms=int((time.monotonic() - t_start) * 1000),
+                ))
+            return AgentResult(
+                agent_name=self.name,
+                context_text=message,
+                sources=[],
+                needs_clarification=True,
+                clarification_message=message,
+            )
 
         results: list[MetadataResult] = []
         for payload in raw:
@@ -113,6 +140,7 @@ class MetadataAgent(BaseAgent):
                 text_preview=payload.get("text_preview"),
                 has_content=payload.get("has_content", True),
                 tags=payload.get("tags") or [],
+                chunk_id=payload.get("chunk_id"),
             ))
 
         # Sort by year (ascending, unknowns last)
@@ -127,6 +155,7 @@ class MetadataAgent(BaseAgent):
                 authors=r.authors,
                 year=r.year,
                 score=1.0,   # metadata matches have no similarity score
+                chunk_id=r.chunk_id,
             )
             for r in results
         ]
@@ -148,4 +177,5 @@ class MetadataAgent(BaseAgent):
             agent_name=self.name,
             context_text=context_text,
             sources=sources,
+            source_refs=[r.chunk_id for r in results if r.chunk_id],
         )

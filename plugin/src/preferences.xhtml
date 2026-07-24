@@ -96,6 +96,21 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Retrieval Tuning -->
+  <html:fieldset class="settings-group">
+    <html:legend>Retrieval Tuning</html:legend>
+
+    <html:div class="setting-description">
+      Advanced knobs controlling how broadly the backend searches when an answer looks too
+      narrow, and when it retries one that cites only a single source. Leave a field blank to
+      reset it to its default.
+    </html:div>
+
+    <html:div id="zotero-rag-diversity-tuning-container">
+      <!-- Populated dynamically by preferences.js from DIVERSITY_TUNING_FIELDS -->
+    </html:div>
+  </html:fieldset>
+
   <!-- Library Visibility -->
   <html:fieldset class="settings-group">
     <html:legend>Library Visibility</html:legend>

@@ -192,6 +192,119 @@ indexing (Zotero's `fulltext.pdfMaxPages`/`textMaxLength` prefs) can miss mentio
 near the end of long documents, flagged via `partial_index` but not otherwise
 compensated for.
 
+## Follow-up Conversations
+
+`POST /api/query` accepts an optional `conversation_history` — a list of prior
+`{question, answer, agents_used, source_refs, query_plan}` turns, echoed back
+verbatim by the client on every follow-up request. The backend keeps no
+server-side session state: every request is fully self-contained, so a
+backend restart mid-conversation (this deployment restarts often — see root
+`CLAUDE.md`'s hotfix workflow) is a non-event, not a failure mode.
+
+A dedicated `ContinuationAgent` (`backend/services/continuation_agent.py`)
+handles most follow-ups: it re-fetches the previous turn's evidence by the
+`chunk_id` values recorded in `source_refs` (`VectorStore.get_chunks_by_ids()`
+— no embedding call, no similarity search) and synthesizes from that plus the
+conversation text. The router selects it via its `capability_prompt` exactly
+like any other agent — no orchestrator changes are needed to add further
+chat-specific agents later (e.g. one comparing two cited works).
+
+`source_refs` on `AgentResult`/`QueryResponse` is the payload's `chunk_id`
+field (positional and stable for unchanged content —
+`library_id:item_key:attachment_key:index` — NOT derived from content_hash),
+not Qdrant's internal point ID, which this module never exposes externally.
+`MentionsAgent`-derived
+turns have no `source_refs` (client-gathered evidence is never stored
+server-side) — a follow-up to such a turn falls back to conversation-history
+text only.
+
+Set `force_fresh_retrieval: true` on a follow-up request to ignore
+`conversation_history` for routing/agent selection and run the normal full
+pipeline for that turn, while still recording it as part of the conversation.
+
+### Clarification when a question is too broad
+
+Both the router and individual agents can decide a question needs narrowing
+before (or instead of) producing an answer:
+
+- The router can set `clarification_needed`/`clarification_question` directly
+  in its JSON response, before any agent runs, for an obviously unconstrained
+  catalog-style question.
+- `MetadataAgent` sets `AgentResult.needs_clarification` when more than
+  `settings.metadata_narrowing_threshold` (default 50) distinct items match —
+  it never dumps an oversized, unfiltered catalog listing into the synthesis
+  prompt.
+
+If **every** selected agent flags `needs_clarification`, `/api/query` returns
+without a synthesis call:
+
+```json
+{
+  "status": "needs_clarification",
+  "clarification_message": "Found more than 50 matching items — try narrowing by year, author, or item type.",
+  "query_plan": {"agents_to_use": ["metadata"], "filters": {"...": "..."}}
+}
+```
+
+If only **some** agents flag it, synthesis still proceeds using the other
+agents' usable content, with the flagged agent's message folded into the
+synthesis prompt as a caveat instead of blocking the whole answer.
+
+`NeedsClarificationError` and the existing `NeedsClientEvidenceError` (see
+above) both extend `NeedsUserInputError` — one exception family, one
+`QueryResponse.status` field, so a third future "needs more from the user"
+case (e.g. disambiguating two same-named authors) doesn't need a new
+wire-protocol shape.
+
+## Answer Quality Guards
+
+Independent of routing, both `RAGEngine.query()` (single-agent RAG path) and
+`QueryOrchestrator._synthesize()` (multi-agent path) run the same post-generation
+checks on the LLM's answer, retrying once with a targeted follow-up instruction if
+a problem is detected (`_quality_issue_reinforcement()` in
+`backend/services/rag_engine.py`, shared by both call sites):
+
+- **Tool-call leak** — some models occasionally emit tool/function-call
+  pseudocode as their entire answer even though no tools were ever offered.
+  Detected via a regex over common call patterns; retried with an explicit
+  "you have no tools" instruction.
+- **Missing citations** — an answer with zero `[SN]` markers anywhere is retried
+  with a reminder to cite sources per the CRITICAL CITATION RULE.
+- **Low citation diversity** — when at least `low_diversity_available_floor`
+  (default 3) distinct documents were available in context but the answer cites
+  only one of them, it's retried with a neutral instruction to check whether the
+  other sources are also relevant — deliberately not a blanket "cite more,"
+  which risks false grounding on tangentially-relevant material.
+
+Each check runs at most once per generation — a retry that's still flawed is used
+as-is rather than looping further.
+
+### Retrieval diversity escalation
+
+Before generation, `RAGEngine.query()`'s vector search can come back saturated by
+chunks from a single dominant document (e.g. one very finely-chunked paper
+crowding out everything else in the top-`k` results). When the initial search
+hits its `top_k` cap and returns fewer than `diversity_floor` (default 3) distinct
+documents, it's retried once at a larger `top_k` —
+`min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)` —
+before generation runs at all. This is cheap relative to the LLM-retry guards
+above: an extra vector search, not an extra LLM call. A `max_chunks_per_document`
+cap (default 4) separately bounds how many chunks from any single document reach
+the assembled context, so escalating can't let one document dominate the prompt
+even after more documents are available.
+
+All five constants above — `diversity_floor`, `diversity_escalation_factor`,
+`diversity_escalation_max_top_k`, `max_chunks_per_document`,
+`low_diversity_available_floor` — are optional fields on `QueryRequest` (see
+[API](#api) below), threaded through `RAGAgent.execute()` and
+`QueryOrchestrator.query()`/`_synthesize()` with the module-level constants in
+`rag_engine.py` as defaults when omitted. The plugin sends its user's Preferences
+pane values on every query rather than exposing them in the query dialog — see
+[Plugin Settings Reference](plugin-settings.md#retrieval-tuning) for the
+end-user-facing explanation of each, and `RetrievalTrace.escalated` /
+`QueryTrace.parameters` (visible via `include_trace: true`) for observing them at
+runtime.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
@@ -226,6 +339,12 @@ re-indexing of unchanged documents.
 Set `enable_routing: false` to bypass the routing LLM call and go straight to
 `RAGAgent` (faster, but no metadata-filter extraction, catalog search, or
 citation/mentions search).
+
+Also accepts five optional retrieval/answer-diversity tuning fields —
+`diversity_floor`, `diversity_escalation_factor`, `diversity_escalation_max_top_k`,
+`max_chunks_per_document`, `low_diversity_available_floor` — each falling back to
+`rag_engine.py`'s module-level defaults when omitted. See
+[Answer Quality Guards](#answer-quality-guards) above.
 
 ### `POST /api/index/items/metadata`
 

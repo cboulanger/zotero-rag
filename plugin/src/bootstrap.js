@@ -41,6 +41,12 @@ async function startup({ id, version, rootURI }) {
 	// metadata dispatcher on it and starts it during init().
 	Services.scriptloader.loadSubScript(rootURI + 'task_queue.js');
 
+	// Eager, plugin-lifetime script — loaded once at startup, not per dialog
+	// window. dialog.js (loaded separately inside dialog.xhtml for that
+	// window's own scope) depends on MentionSearch for its two-phase
+	// "needs_client_evidence" protocol.
+	Services.scriptloader.loadSubScript(rootURI + 'mentions.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');

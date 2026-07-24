@@ -10,12 +10,19 @@ from pydantic import BaseModel
 from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
+from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget
 from backend.models.trace import QueryTrace
 from backend.services.access_gate import assert_can_access
-from backend.services.base_agent import NeedsClientEvidenceError, QueryPlan
+from backend.services.base_agent import (
+    NeedsClarificationError, NeedsClientEvidenceError, NeedsUserInputError, QueryPlan,
+)
 from backend.services.mentions_agent import ClientEvidence
 from backend.services.query_orchestrator import QueryOrchestrator
+from backend.services.rag_engine import (
+    _DIVERSITY_FLOOR, _DIVERSITY_ESCALATION_FACTOR, _DIVERSITY_ESCALATION_MAX_TOP_K,
+    _MAX_CHUNKS_PER_DOCUMENT, _LOW_DIVERSITY_AVAILABLE_FLOOR,
+)
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.db.vector_store import VectorStore
@@ -47,6 +54,18 @@ class QueryRequest(BaseModel):
     include_trace: bool = False  # When True, attach a full execution trace to the response
     client_evidence: Optional[ClientEvidence] = None  # gathered client-side, resubmit round trip
     query_plan: Optional[QueryPlan] = None  # echoed back from a prior "needs_client_evidence" response
+    conversation_history: List[ChatTurn] = []  # prior turns of a follow-up chat conversation
+    force_fresh_retrieval: bool = False        # ignore conversation_history for routing this turn
+
+    # Retrieval/answer-diversity tuning — client-configurable (plugin Preferences),
+    # not exposed in the query dialog itself. See rag_engine.py's module docstrings
+    # for _DIVERSITY_FLOOR / _MAX_CHUNKS_PER_DOCUMENT / _LOW_DIVERSITY_AVAILABLE_FLOOR
+    # for what each one does; defaults here match those.
+    diversity_floor: Optional[int] = None
+    diversity_escalation_factor: Optional[int] = None
+    diversity_escalation_max_top_k: Optional[int] = None
+    max_chunks_per_document: Optional[int] = None
+    low_diversity_available_floor: Optional[int] = None
 
 
 class QueryResponse(BaseModel):
@@ -60,9 +79,12 @@ class QueryResponse(BaseModel):
     agents_used: List[str] = []
     library_document_counts: dict[str, int] = {}
     trace: Optional[QueryTrace] = None  # Populated when include_trace=True
-    status: Literal["complete", "needs_client_evidence"] = "complete"
+    status: Literal["complete", "needs_client_evidence", "needs_clarification"] = "complete"
     citation_targets: List[CitationTarget] = []  # populated when status == "needs_client_evidence"
     query_plan: Optional[QueryPlan] = None  # echo back on the resubmit round trip
+    source_refs: List[str] = []                       # union of every used source's chunk_id,
+                                                        # echoed back verbatim on the next turn
+    clarification_message: Optional[str] = None        # populated when status == "needs_clarification"
 
 
 def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
@@ -76,6 +98,20 @@ def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError)
         library_ids=query.library_ids,
         status="needs_client_evidence",
         citation_targets=exc.citation_targets,
+        query_plan=exc.plan,
+    )
+
+
+def _needs_clarification_response(query: QueryRequest, exc: NeedsClarificationError) -> QueryResponse:
+    """Map a NeedsClarificationError to a response asking the user to narrow their question."""
+    return QueryResponse(
+        question=query.question,
+        answer="",
+        answer_format="text",
+        sources=[],
+        library_ids=query.library_ids,
+        status="needs_clarification",
+        clarification_message=exc.message,
         query_plan=exc.plan,
     )
 
@@ -139,6 +175,26 @@ async def query_libraries(
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k
         min_score = query.min_score if query.min_score is not None else preset.rag.score_threshold
 
+        # Retrieval/answer-diversity tuning — client-configurable, falls back to the
+        # hardcoded defaults in rag_engine.py when not overridden by the plugin.
+        diversity_floor = query.diversity_floor if query.diversity_floor is not None else _DIVERSITY_FLOOR
+        diversity_escalation_factor = (
+            query.diversity_escalation_factor
+            if query.diversity_escalation_factor is not None else _DIVERSITY_ESCALATION_FACTOR
+        )
+        diversity_escalation_max_top_k = (
+            query.diversity_escalation_max_top_k
+            if query.diversity_escalation_max_top_k is not None else _DIVERSITY_ESCALATION_MAX_TOP_K
+        )
+        max_chunks_per_document = (
+            query.max_chunks_per_document
+            if query.max_chunks_per_document is not None else _MAX_CHUNKS_PER_DOCUMENT
+        )
+        low_diversity_available_floor = (
+            query.low_diversity_available_floor
+            if query.low_diversity_available_floor is not None else _LOW_DIVERSITY_AVAILABLE_FLOOR
+        )
+
         # Validate that at least one library is indexed; collect per-library document counts
         from qdrant_client.models import Filter, FieldCondition, MatchValue
 
@@ -184,6 +240,11 @@ async def query_libraries(
                 "min_score": min_score,
                 "enable_routing": query.enable_routing,
                 "llm_model": query.llm_model,
+                "diversity_floor": diversity_floor,
+                "diversity_escalation_factor": diversity_escalation_factor,
+                "diversity_escalation_max_top_k": diversity_escalation_max_top_k,
+                "max_chunks_per_document": max_chunks_per_document,
+                "low_diversity_available_floor": low_diversity_available_floor,
             },
         ) if query.include_trace else None
 
@@ -196,6 +257,13 @@ async def query_libraries(
             trace=trace_collector,
             client_evidence=query.client_evidence,
             preset_plan=query.query_plan,
+            diversity_floor=diversity_floor,
+            diversity_escalation_factor=diversity_escalation_factor,
+            diversity_escalation_max_top_k=diversity_escalation_max_top_k,
+            max_chunks_per_document=max_chunks_per_document,
+            low_diversity_available_floor=low_diversity_available_floor,
+            conversation_history=query.conversation_history,
+            force_fresh_retrieval=query.force_fresh_retrieval,
         )
 
         # Format citations
@@ -225,10 +293,15 @@ async def query_libraries(
             agents_used=result.agents_used,
             library_document_counts=library_document_counts,
             trace=trace_collector.finalize() if trace_collector is not None else None,
+            source_refs=result.source_refs,
         )
 
-    except NeedsClientEvidenceError as exc:
-        return _needs_evidence_response(query, exc)
+    except NeedsUserInputError as exc:
+        if isinstance(exc, NeedsClientEvidenceError):
+            return _needs_evidence_response(query, exc)
+        if isinstance(exc, NeedsClarificationError):
+            return _needs_clarification_response(query, exc)
+        raise
 
     except Exception as e:
         logger.exception("Query failed")

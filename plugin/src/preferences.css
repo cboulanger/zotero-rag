@@ -84,6 +84,29 @@ body {
   line-height: 1.4;
 }
 
+.diversity-tuning-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.diversity-tuning-row label {
+  min-width: 150px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.diversity-tuning-row .setting-input-small {
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.diversity-tuning-description {
+  font-size: 11px;
+  color: #777;
+}
+
 .library-list {
   display: flex;
   flex-direction: column;

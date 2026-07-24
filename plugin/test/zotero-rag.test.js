@@ -450,6 +450,333 @@ test('the metadata dispatcher preserves partial success: a failing library does 
 	assert.deepStrictEqual([...result.succeededKeys], ['u1:ITEM1']);
 });
 
+test('submitQuery includes conversation_history in the payload when provided', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 }, Prefs: { get: () => undefined } }, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	const history = [{ question: 'Q0', answer: 'A0', agents_used: ['rag'], source_refs: ['c1'], query_plan: null }];
+	await plugin.submitQuery('Follow-up', ['1'], { conversationHistory: history });
+
+	assert.deepStrictEqual(capturedBody.conversation_history, history);
+});
+
+test('submitQuery includes force_fresh_retrieval only when true', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 }, Prefs: { get: () => undefined } }, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.force_fresh_retrieval, undefined);
+
+	await plugin.submitQuery('Q', ['1'], { forceFreshRetrieval: true });
+	assert.strictEqual(capturedBody.force_fresh_retrieval, true);
+});
+
+test('getDiversityTuningPayload returns hardcoded defaults when no prefs are set', () => {
+	const zotero = { Libraries: { userLibraryID: 1 }, Prefs: { get: () => undefined } };
+	const plugin = loadPlugin(zotero, {}, {});
+
+	const payload = plugin.getDiversityTuningPayload();
+	assert.strictEqual(payload.diversity_floor, 3);
+	assert.strictEqual(payload.diversity_escalation_factor, 3);
+	assert.strictEqual(payload.diversity_escalation_max_top_k, 30);
+	assert.strictEqual(payload.max_chunks_per_document, 4);
+	assert.strictEqual(payload.low_diversity_available_floor, 3);
+});
+
+test('getDiversityTuningPayload reflects stored pref overrides', () => {
+	const stored = {
+		'extensions.zotero-rag.diversityFloor': '5',
+		'extensions.zotero-rag.maxChunksPerDocument': '2',
+	};
+	const zotero = { Libraries: { userLibraryID: 1 }, Prefs: { get: (/** @type {string} */ key) => stored[key] } };
+	const plugin = loadPlugin(zotero, {}, {});
+
+	const payload = plugin.getDiversityTuningPayload();
+	assert.strictEqual(payload.diversity_floor, 5);
+	assert.strictEqual(payload.max_chunks_per_document, 2);
+	// Untouched fields still fall back to their defaults
+	assert.strictEqual(payload.diversity_escalation_factor, 3);
+});
+
+test('submitQuery includes the diversity tuning payload read from Prefs on every request', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	const stored = { 'extensions.zotero-rag.lowDiversityAvailableFloor': '7' };
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Prefs: { get: (/** @type {string} */ key) => stored[key] },
+	};
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	await plugin.submitQuery('Q', ['1'], {});
+
+	assert.strictEqual(capturedBody.low_diversity_available_floor, 7);
+	assert.strictEqual(capturedBody.diversity_floor, 3);
+});
+
+test('formatTurnHTML renders question heading, answer, and bibliography without the outer wrapper', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const result = {
+		answer: 'The answer.',
+		answer_format: 'text',
+		sources: [],
+	};
+	const html = plugin.formatTurnHTML('A follow-up question?', result, new Map());
+	assert.ok(html.includes('A follow-up question?'));
+	assert.ok(html.includes('The answer.'));
+	assert.ok(!html.includes('Generated:')); // metadata footer belongs to formatNoteHTML only
+});
+
+test('formatTurnHTML resolves an inline [S1] citation to a Zotero item and lists it in the bibliography', () => {
+	const fakeItem = {
+		key: 'ITEM1',
+		getCreators: () => [{ lastName: 'Smith', firstName: 'Jane' }],
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'A Great Paper' : f === 'date' ? '2020' : ''),
+		getAttachments: () => [], // no PDF attachment -> falls back to zotero://select/
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				(libraryID === 1 && key === 'ITEM1') ? fakeItem : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source = {
+		item_id: 'ITEM1',
+		library_id: 'u12345',
+		title: 'A Great Paper (fallback title)',
+		page_number: null,
+		text_anchor: null,
+		relevance_score: 0.9,
+	};
+	const result = {
+		answer: 'This claim is supported by prior work [S1].',
+		answer_format: 'text',
+		sources: [source],
+	};
+	// buildLibraryMap() would produce exactly this shape for a 'u12345' user library.
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.formatTurnHTML('Does prior work support this?', result, libraryMap);
+
+	// The [S1] marker must be gone, replaced by a resolved citation link using the
+	// real Zotero item's author/year (not the raw source.title fallback) — proves
+	// replaceCitationsInText() actually looked up the item via getZoteroItem().
+	assert.ok(!html.includes('[S1]'), 'raw [S1] marker should have been replaced');
+	assert.ok(html.includes('>(Smith, 2020)</a>'), `expected a resolved "Smith, 2020" citation link, got: ${html}`);
+	assert.ok(html.includes('zotero://select/library/items/ITEM1'), 'citation link should point at the resolved Zotero item');
+
+	// The bibliography section (formatBibliographyHTML) must list the same item,
+	// formatted as "Author (Year) \"Title\"" using the real item's metadata.
+	assert.ok(html.includes('<strong>References</strong>'), 'bibliography header missing');
+	assert.ok(html.includes('Smith (2020) &quot;A Great Paper&quot;'), `expected bibliography entry for the resolved item, got: ${html}`);
+	assert.ok(!html.includes('A Great Paper (fallback title)'), 'bibliography should use the real item title, not the source fallback title');
+});
+
+test('replaceCitationsInText resolves a page-range citation like [S1:305-306] instead of leaving it unreplaced', () => {
+	// Observed live: a weaker model cited a page range ("305-306") despite the
+	// prompt asking for a single integer page. The citation regex only accepted
+	// digits/dots after the colon, so the whole bracket failed to match and
+	// "[S1:305-306]" leaked into the rendered answer verbatim.
+	const fakeItem = {
+		key: 'ITEM1',
+		getCreators: () => [{ lastName: 'Watkins', firstName: 'Alexander' }],
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'Zotero for Personal Image Management' : f === 'date' ? '2013' : ''),
+		getAttachments: () => [],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				(libraryID === 1 && key === 'ITEM1') ? fakeItem : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source = { item_id: 'ITEM1', library_id: 'u12345', title: 'Zotero for Personal Image Management', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.replaceCitationsInText('Image citations are tricky [S1:305-306].', [source], libraryMap);
+
+	assert.ok(!html.includes('[S1:305-306]'), `raw page-range citation should have been replaced, got: ${html}`);
+	assert.ok(html.includes('Watkins, 2013'), `expected the resolved item's author/year in the citation, got: ${html}`);
+	assert.ok(html.includes('305-306'), `expected the page range preserved in the citation display text, got: ${html}`);
+	assert.ok(html.includes('zotero://select/library/items/ITEM1'), `citation link should point at the resolved Zotero item, got: ${html}`);
+});
+
+test('formatTurnHTML lists only the sources actually cited inline, not every retrieved source', () => {
+	const items = {
+		ITEM1: {
+			key: 'ITEM1',
+			getCreators: () => [{ lastName: 'Cited', firstName: 'Anne' }],
+			getField: (/** @type {string} */ f) => (f === 'title' ? 'The Cited Paper' : f === 'date' ? '2020' : ''),
+			getAttachments: () => [],
+		},
+		ITEM2: {
+			key: 'ITEM2',
+			getCreators: () => [{ lastName: 'Uncited', firstName: 'Bob' }],
+			getField: (/** @type {string} */ f) => (f === 'title' ? 'The Uncited Paper' : f === 'date' ? '2021' : ''),
+			getAttachments: () => [],
+		},
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				libraryID === 1 ? (items[key] || null) : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source1 = { item_id: 'ITEM1', library_id: 'u12345', title: 'The Cited Paper', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	/** @type {SourceCitation} */
+	const source2 = { item_id: 'ITEM2', library_id: 'u12345', title: 'The Uncited Paper', page_number: null, text_anchor: null, relevance_score: 0.8 };
+	const result = {
+		// Retrieval returned two documents (source1, source2), but the model
+		// only found source1 relevant enough to cite.
+		answer: 'This claim is supported by prior work [S1].',
+		answer_format: 'text',
+		sources: [source1, source2],
+	};
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.formatTurnHTML('Does prior work support this?', result, libraryMap);
+
+	assert.ok(html.includes('>(Cited, 2020)</a>'), `expected the cited source's inline link, got: ${html}`);
+	assert.ok(html.includes('Cited (2020)'), `expected the cited source in the bibliography, got: ${html}`);
+	assert.ok(!html.includes('Uncited'), `bibliography must not list a source that was never cited, got: ${html}`);
+});
+
+test('formatTurnHTML falls back to listing all retrieved sources when the answer has no [SN] citations at all', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: { getByLibraryAndKey: () => null },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	/** @type {SourceCitation} */
+	const source = { item_id: 'ITEM1', library_id: 'u12345', title: 'A Great Paper', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	const result = {
+		answer: 'This answer has no inline citation markers at all.',
+		answer_format: 'text',
+		sources: [source],
+	};
+	const html = plugin.formatTurnHTML('A question?', result, new Map());
+	assert.ok(html.includes('A Great Paper'), `expected the uncited-but-retrieved source to still appear when nothing was cited, got: ${html}`);
+});
+
+test('formatTurnHTML renders the clarification message (not the empty answer) when status is needs_clarification', () => {
+	const plugin = loadPlugin({ Libraries: { userLibraryID: 1 } }, {}, {});
+	const result = {
+		status: 'needs_clarification',
+		answer: '',
+		clarification_message: 'Please narrow by year.',
+		sources: [],
+	};
+	const html = plugin.formatTurnHTML('What has Luhmann written about?', result, new Map());
+	assert.ok(html.includes('Please narrow by year.'), `expected clarification message in rendered HTML, got: ${html}`);
+	// Must not silently render an empty answer paragraph with nothing in it.
+	assert.ok(!/<p>\s*<\/p>/.test(html), `expected no empty answer paragraph, got: ${html}`);
+});
+
+test('formatNoteHTML joins multiple turns with a divider and appends a metadata footer built from the first turn', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.version = '1.0.0';
+	const turns = [
+		{ question: 'Q1', result: { answer: 'A1', answer_format: 'text', sources: [], model_name: 'gpt', agents_used: ['rag'] } },
+		{ question: 'Q2', result: { answer: 'A2', answer_format: 'text', sources: [], agents_used: ['continuation'] } },
+	];
+	const html = plugin.formatNoteHTML(turns, ['u12345']);
+
+	assert.ok(html.includes('Q1') && html.includes('A1'));
+	assert.ok(html.includes('Q2') && html.includes('A2'));
+	assert.ok(html.includes('Model: gpt'), 'model comes from the first turn');
+	assert.ok(html.includes('Agents: rag, continuation'), 'agents are the union across all turns');
+	assert.ok(html.includes('Generated:'));
+});
+
+test('formatNoteHTML never embeds a debug trace — export is on-demand only', () => {
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.version = '1.0.0';
+	const turns = [{ question: 'Q', result: { answer: 'A', answer_format: 'text', sources: [], trace: { some: 'trace data' } } }];
+	const html = plugin.formatNoteHTML(turns, ['u12345']);
+	assert.ok(!html.includes('Debugging Trace'));
+	assert.ok(!html.includes('trace data'));
+});
+
+test('createResultNote creates a tagged note from every turn and does not reference ChatPane', async () => {
+	/** @type {string[]} */
+	const noteHtmls = [];
+	const noteStub = {
+		id: 'note1',
+		libraryID: 1,
+		setNote(/** @type {string} */ html) { noteHtmls.push(html); },
+		addToCollection() {},
+		addTag() {},
+		async saveTx() {},
+	};
+
+	const zoteroPaneStub = {
+		getSelectedLibraryID: () => 1,
+		getSelectedCollection: () => undefined,
+		selectItem: async () => {},
+	};
+
+	const zotero = {
+		Libraries: { userLibraryID: 1, get: () => ({ name: 'My Library' }) },
+		Users: { getCurrentUserID: () => 12345, getCurrentUsername: () => 'tester' },
+		Groups: { getAll: () => [] },
+		Item: function (/** @type {string} */ _type) { return noteStub; },
+		getActiveZoteroPane: () => zoteroPaneStub,
+	};
+
+	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {}, { Services: servicesStub });
+	plugin.version = '1.0.0';
+
+	const turns = [
+		{ question: 'Q1', result: { answer: 'A1', answer_format: 'text', sources: [] } },
+		{ question: 'Q2', result: { answer: 'A2', answer_format: 'text', sources: [] } },
+	];
+
+	const note = await plugin.createResultNote(turns, ['u12345']);
+
+	assert.strictEqual(note, noteStub);
+	assert.strictEqual(noteHtmls.length, 1);
+	assert.ok(noteHtmls[0].includes('Q1') && noteHtmls[0].includes('Q2'));
+});
+
 test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 	/** @type {string[]} */
 	const calls = [];

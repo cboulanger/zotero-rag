@@ -119,6 +119,57 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
+	// Retrieval Tuning section — one compact row per DIVERSITY_TUNING_FIELDS entry
+	// (defined in zotero-rag.js, shared with getDiversityTuningPayload()).
+	const diversityContainer = doc.getElementById('zotero-rag-diversity-tuning-container');
+	if (diversityContainer) {
+		for (const field of DIVERSITY_TUNING_FIELDS) {
+			const prefKey = `extensions.zotero-rag.${field.prefKey}`;
+			const inputId = `zotero-rag-diversity-${field.prefKey}`;
+
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'diversity-tuning-row';
+
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.setAttribute('for', inputId);
+			label.textContent = `${field.label}:`;
+
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.id = inputId;
+			input.type = 'number';
+			input.min = '1';
+			input.className = 'setting-input-small';
+			input.placeholder = String(field.default);
+			const stored = Zotero.Prefs.get(prefKey, true);
+			input.value = stored !== undefined && stored !== null && stored !== '' ? String(stored) : '';
+
+			const description = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			description.className = 'diversity-tuning-description';
+			description.textContent = field.description;
+
+			input.addEventListener('change', () => {
+				const raw = input.value.trim();
+				if (raw === '') {
+					Zotero.Prefs.clear(prefKey, true);
+					return;
+				}
+				const value = parseInt(raw, 10);
+				if (Number.isFinite(value) && value >= 1) {
+					Zotero.Prefs.set(prefKey, value, true);
+				} else {
+					// Invalid entry — revert the field rather than store garbage
+					input.value = '';
+					Zotero.Prefs.clear(prefKey, true);
+				}
+			});
+
+			row.appendChild(label);
+			row.appendChild(input);
+			row.appendChild(description);
+			diversityContainer.appendChild(row);
+		}
+	}
+
 	// External links inside the preferences pane don't open in the system browser
 	// on their own (target="_blank" is a no-op here). Route http(s) links through
 	// Zotero.launchURL so they open in the user's default browser.

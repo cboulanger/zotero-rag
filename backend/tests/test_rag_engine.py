@@ -102,7 +102,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search.return_value = search_results
 
         # Mock LLM response
-        llm_answer = "Machine learning is a subset of AI that learns patterns from data."
+        llm_answer = "Machine learning is a subset of AI that learns patterns from data. [S1]"
         self.mock_llm_service.generate = AsyncMock(return_value=llm_answer)
 
         # Execute query
@@ -223,7 +223,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Mock LLM response
-        self.mock_llm_service.generate = AsyncMock(return_value="Deep learning answer")
+        self.mock_llm_service.generate = AsyncMock(return_value="Deep learning answer [S1]")
 
         # Execute query
         result = await self.rag_engine.query(
@@ -297,7 +297,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         ]
 
         # Mock LLM
-        self.mock_llm_service.generate = AsyncMock(return_value="AI is the future.")
+        self.mock_llm_service.generate = AsyncMock(return_value="AI is the future. [S1]")
 
         # Execute query
         result = await self.rag_engine.query(question=question, library_ids=library_ids)
@@ -365,7 +365,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             SearchResult(chunk=chunk, score=0.9)
         ]
 
-        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
 
         # Execute query
         await self.rag_engine.query(question=question, library_ids=library_ids)
@@ -377,6 +377,363 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("prompt", call_kwargs)
         self.assertEqual(call_kwargs["max_tokens"], 2048)  # Uses mock preset value
         self.assertEqual(call_kwargs["temperature"], 0.7)
+
+    async def test_source_info_carries_chunk_id(self):
+        question = "What is machine learning?"
+        library_ids = ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        chunk = DocumentChunk(
+            text="Machine learning is a subset of artificial intelligence.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk1",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key="ABC123", attachment_key="ATT1",
+                    title="Introduction to ML", authors=["Smith, J."], year=2023,
+                    item_type="journalArticle",
+                ),
+                page_number=5, text_preview="Machine learning is a", chunk_index=0,
+                content_hash="h1",
+            ),
+        )
+        self.mock_vector_store.search.return_value = [
+            SearchResult(chunk=chunk, score=0.9),
+        ]
+        self.mock_llm_service.generate = AsyncMock(return_value="An answer [S1].")
+
+        result = await self.rag_engine.query(question, library_ids)
+        self.assertEqual(result.sources[0].chunk_id, "chunk1")
+
+    async def _query_with_single_chunk(self):
+        """Shared minimal fixture for the tool-call-leak retry tests below."""
+        question = "What research trends do authors identify?"
+        library_ids = ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        chunk = DocumentChunk(
+            text="Several studies identify a shift toward qualitative methods.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk1",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key="ABC123", attachment_key="ATT1",
+                    title="Research Trends", authors=["Melles, J."], year=2015,
+                    item_type="journalArticle",
+                ),
+                page_number=5, text_preview="Several studies identify", chunk_index=0,
+                content_hash="h1",
+            ),
+        )
+        self.mock_vector_store.search.return_value = [
+            SearchResult(chunk=chunk, score=0.9),
+        ]
+        return question, library_ids
+
+    async def test_query_retries_once_when_answer_looks_like_a_tool_call_leak(self):
+        """Some models occasionally hallucinate tool/function-call pseudocode
+        instead of a plain-language answer, even though no `tools` parameter
+        is ever sent to the LLM. Detect this and retry once."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer = "tool.call('getResearchTrends', (Melles et al., 2015))"
+        good_answer = "Authors identify a shift toward qualitative methods [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer, good_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, good_answer)
+
+    async def test_query_uses_final_answer_if_retry_still_looks_like_a_tool_call_leak(self):
+        """If the retry also looks like a tool-call leak, don't loop forever —
+        use the retry's answer anyway (best effort) rather than the original."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer_1 = "tool.call('getResearchTrends', (Melles et al., 2015))"
+        bad_answer_2 = "function_call(getTrends, [S1])"
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer_1, bad_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, bad_answer_2)
+
+    async def test_query_calls_generate_once_when_answer_looks_normal(self):
+        """No regression: a normal prose answer must not trigger a retry."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(
+            return_value="Authors identify a shift toward qualitative methods [S1]."
+        )
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertEqual(result.answer, "Authors identify a shift toward qualitative methods [S1].")
+
+    async def test_prompt_forbids_process_narration_and_ungrounded_speculation(self):
+        """A weak model can narrate its process ("I will use the library to find
+        relevant information...") or, when the context is thin, supplement its
+        answer with unsourced general-knowledge speculation. The prompt must
+        explicitly forbid both."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("do not narrate", prompt)
+        self.assertIn("stop there", prompt)
+
+    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0):
+        chunk = DocumentChunk(
+            text=f"Content from {title}.",
+            metadata=ChunkMetadata(
+                chunk_id=f"{item_key}-{chunk_index}",
+                document_metadata=DocumentMetadata(
+                    library_id="12345", item_key=item_key, attachment_key=attachment_key,
+                    title=title, authors=["Author, A."], year=2024,
+                    item_type="journalArticle",
+                ),
+                page_number=1, text_preview=title, chunk_index=chunk_index,
+                content_hash=f"hash-{item_key}-{chunk_index}",
+            ),
+        )
+        return SearchResult(chunk=chunk, score=score)
+
+    async def test_query_escalates_retrieval_when_top_k_is_saturated_and_diversity_is_low(self):
+        """Observed live: a fixed top_k=10 can be fully saturated by chunks from a
+        single dominant document, starving the answer of other relevant sources
+        even when they exist in the library. When the raw search hits the top_k
+        cap (not the corpus limit) and fewer than 3 distinct documents came back,
+        retry once with a larger top_k before generating."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+        diverse_results = (
+            [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+            + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+            + [self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8)]
+        )
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=5)
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        second_call_kwargs = self.mock_vector_store.search.call_args_list[1].kwargs
+        self.assertGreater(second_call_kwargs["limit"], 5)
+        self.assertEqual(len(result.sources), 3)
+
+    async def test_query_does_not_escalate_when_diversity_already_sufficient(self):
+        """No wasted second search when the first pass already spans enough documents."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_does_not_escalate_when_raw_results_are_below_top_k(self):
+        """If the search returned fewer chunks than top_k, the corpus (or the
+        min_score threshold) is already exhausted — escalating limit wouldn't
+        surface anything new, so don't waste a second search."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Only Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=10)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_does_not_escalate_past_the_max_top_k(self):
+        """Already at/above the escalation ceiling — don't escalate further even
+        if diversity is low, to keep prompt size bounded."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(30)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=30)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_caps_chunks_per_document_in_the_assembled_context(self):
+        """A single over-chunked document must not be allowed to dominate the
+        prompt with many near-duplicate passages at the expense of readability —
+        cap how many of its chunks are included, keeping the highest-scoring ones."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(10)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=10)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertLessEqual(prompt.count("Content from Dominant Doc"), 4)
+
+    async def test_query_custom_max_chunks_per_document_overrides_default(self):
+        """The chunk cap must be caller-configurable (plugin Preferences), not
+        hardwired to the module default."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(10)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=10, max_chunks_per_document=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertLessEqual(prompt.count("Content from Dominant Doc"), 2)
+
+    async def test_query_custom_diversity_floor_suppresses_escalation(self):
+        """A caller-supplied diversity_floor of 1 means "1 document is already
+        enough" — escalation must not fire even though the default floor (3)
+        would have triggered it for the same retrieval result."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=5, diversity_floor=1)
+
+        self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_custom_low_diversity_floor_suppresses_retry(self):
+        """A caller-supplied low_diversity_available_floor higher than the number
+        of available documents means the low-diversity retry guard never applies."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Only the first source matters here [S1].")
+
+        await self.rag_engine.query(question, library_ids, top_k=3, low_diversity_available_floor=10)
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_retrieval_trace_records_whether_escalation_happened(self):
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
+        diverse_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)] + [
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8)
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+        self.mock_llm_service.model_name = "test-model"
+
+        collector = TraceCollector(question, library_ids, {})
+        await self.rag_engine.query(question, library_ids, top_k=5, trace=collector)
+        trace = collector.finalize()
+
+        self.assertTrue(trace.agent_executions[0].retrieval.escalated)
+
+    async def test_query_retries_once_when_citing_only_one_of_several_available_sources(self):
+        """Observed live: with 6 genuinely distinct documents retrieved, repeated
+        attempts at the same question (temperature 0.7) sometimes cited only 1 of
+        them despite the others being equally present in context. Retry once with
+        a neutral instruction to consider the other sources."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        narrow_answer = "Only the first source matters here [S1]."
+        diverse_answer = "The first source [S1] and the third source [S3] both matter."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[narrow_answer, diverse_answer])
+
+        result = await self.rag_engine.query(question, library_ids, top_k=3)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, diverse_answer)
+
+    async def test_query_does_not_retry_when_only_one_document_was_retrieved(self):
+        """A single relevant document is a legitimate, expected outcome — citing
+        only it must not trigger the low-diversity retry."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Only Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Only the source matters here [S1].")
+
+        await self.rag_engine.query(question, library_ids, top_k=1)
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_query_does_not_retry_when_diversity_already_sufficient(self):
+        """No wasted retry when the answer already cites more than one source."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(
+            return_value="The first [S1] and second [S2] sources both matter."
+        )
+
+        await self.rag_engine.query(question, library_ids, top_k=3)
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_prompt_forbids_page_range_citations(self):
+        """Observed live: a weaker model cited a page range ([S1:305-306]) despite
+        the prompt asking for a single integer page. The frontend now tolerates
+        this defensively, but the prompt should also explicitly discourage it."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("page range", prompt)
+
+    async def test_prompt_requires_a_citation_on_every_factual_sentence(self):
+        """Observed live: weaker models frequently drop citations entirely (2 of
+        3 repeated attempts at the same question produced zero inline [SN]
+        markers) even though the CRITICAL CITATION RULE explains the *format*
+        to use. The rule must also mandate that every factual sentence carry
+        one — format-only guidance isn't enough to make citations happen."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("every sentence", prompt)
+        self.assertIn("do not state it", prompt)
 
 
 class TestSourceInfo(unittest.TestCase):
