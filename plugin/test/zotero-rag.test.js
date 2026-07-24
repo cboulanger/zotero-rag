@@ -625,6 +625,40 @@ test('replaceCitationsInText resolves a page-range citation like [S1:305-306] in
 	assert.ok(html.includes('zotero://select/library/items/ITEM1'), `citation link should point at the resolved Zotero item, got: ${html}`);
 });
 
+test('replaceCitationsInText resolves a citation with a literal "P" page placeholder like [S2:P] instead of leaving it unreplaced', () => {
+	// Observed live: the synthesis prompt shows "[SN:P]" as its own notation
+	// example ("P is a single integer"), and a weaker model occasionally
+	// echoed the placeholder letter "P" itself instead of substituting a real
+	// page number. The old regex required digits after the colon, so the
+	// whole bracket failed to match and "[S2:P]" leaked into the rendered
+	// answer verbatim, unlinked.
+	const fakeItem = {
+		key: 'ITEM2',
+		getCreators: () => [{ lastName: 'Ivey', firstName: 'Jane' }],
+		getField: (/** @type {string} */ f) => (f === 'title' ? 'Manuscript Matcher' : f === 'date' ? '2023' : ''),
+		getAttachments: () => [],
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Items: {
+			getByLibraryAndKey: (/** @type {number} */ libraryID, /** @type {string} */ key) =>
+				(libraryID === 1 && key === 'ITEM2') ? fakeItem : null,
+		},
+	};
+	const plugin = loadPlugin(zotero, {}, {});
+
+	/** @type {SourceCitation} */
+	const source = { item_id: 'ITEM2', library_id: 'u12345', title: 'Manuscript Matcher', page_number: null, text_anchor: null, relevance_score: 0.9 };
+	const libraryMap = new Map([['u12345', { name: 'My Library', type: 'user' }]]);
+
+	const html = plugin.replaceCitationsInText('EndNote has a matcher feature [S2:P].', [null, source], libraryMap);
+
+	assert.ok(!html.includes('[S2:P]'), `raw placeholder-page citation should have been replaced, got: ${html}`);
+	assert.ok(html.includes('Ivey, 2023'), `expected the resolved item's author/year in the citation, got: ${html}`);
+	assert.ok(!html.includes('p. P'), `the literal "P" placeholder should not be rendered as a page label, got: ${html}`);
+	assert.ok(html.includes('zotero://select/library/items/ITEM2'), `citation link should point at the resolved Zotero item, got: ${html}`);
+});
+
 test('formatTurnHTML lists only the sources actually cited inline, not every retrieved source', () => {
 	const items = {
 		ITEM1: {

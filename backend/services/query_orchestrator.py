@@ -60,8 +60,10 @@ Instructions:
 - For catalog listings, present items as a formatted list with author, year, and title.
 - Cite every source you mention using [SN] notation (e.g. [S1], [S2]).
   Use [SN] for both catalog entries and quoted document passages.
-  For document passages with a page number use [SN:P] (e.g. [S2:7]) — P is a single
-  integer; never cite a page range like [S2:7-8], pick the page the claim actually appears on.
+  For document passages with a known page number, add it after a colon as a plain
+  integer, e.g. [S2:7] — replace the number with the real page; never write the
+  literal letter "P" and never cite a page range like [S2:7-8]. If you don't know
+  the specific page, just write [SN] with no colon.
   Every sentence that states a specific fact, feature, or claim drawn from the
   retrieved information MUST end with an inline [SN] citation — if you cannot
   attribute a claim to a specific source, do not state it.

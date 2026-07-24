@@ -1651,13 +1651,16 @@ class ZoteroRAGPlugin {
 
 		// Primary pattern: [S1], [S1:10], [S1:p.10], [S1,S2,S3], [S1:10,S2:20]
 		// Fallback pattern: [1], [1:10] — kept for older cached responses
-		// Page part tolerates an optional "p." or "p " prefix, section numbers (e.g. 0.3.1),
-		// and a page range (e.g. 305-306) — the prompt asks for a single integer page, but
-		// weaker models occasionally cite a range anyway; parseInt() below takes its start.
-		const pageNum = '[\\d.]+(?:-[\\d.]+)?';
-		const pageToken = `(?::p\\.?\\s*${pageNum}|:${pageNum})?`;
+		// The page token after the colon is matched permissively (anything but "," or "]")
+		// rather than digits-only: some models echo the prompt's own "[SN:P]" notation
+		// literally — citing e.g. "[S2:P]" with the placeholder letter "P" instead of a
+		// real page number — and a digits-only token would fail to match that at all,
+		// leaving the whole citation as unlinked raw text. The loop below validates the
+		// captured token and discards it (falling back to a plain [SN] citation) unless
+		// it actually looks like a page number.
+		const pageToken = '(?::[^,\\]]+)?';
 		const sRef = `[Ss]\\d+${pageToken}`;
-		const nRef = `\\d+(?::${pageNum})?`;
+		const nRef = `\\d+${pageToken}`;
 		const citationPattern = new RegExp(
 			`\\[(${sRef}(?:,\\s*${sRef})*|${nRef}(?:,\\s*${nRef})*)\\]`, 'g'
 		);
@@ -1673,7 +1676,13 @@ class ZoteroRAGPlugin {
 				// Accept "p. 3", "p.3", or plain "3" after the colon
 				const colonIdx = normalised.indexOf(':');
 				const sourceNum = parseInt(colonIdx >= 0 ? normalised.slice(0, colonIdx) : normalised, 10);
-				const pageRaw = colonIdx >= 0 ? normalised.slice(colonIdx + 1).replace(/^p\.?\s*/i, '') : null;
+				let pageRaw = colonIdx >= 0 ? normalised.slice(colonIdx + 1).replace(/^p\.?\s*/i, '') : null;
+				// Discard anything that isn't actually a page/section number — e.g. a
+				// literal "P" placeholder the model echoed instead of substituting a
+				// real value — so the citation still links, just without a page label.
+				if (pageRaw !== null && !/^\d/.test(pageRaw)) {
+					pageRaw = null;
+				}
 				const page = pageRaw ? parseInt(pageRaw, 10) : null;
 
 				// Look up source metadata

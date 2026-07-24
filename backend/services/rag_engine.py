@@ -403,7 +403,10 @@ You have no tools, functions, or external APIs available. Respond only with plai
 
 CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:
   - [SN]        — reference to source N (e.g. [S1], [S3])
-  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7]
+  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7].
+                  Replace P with the real page number; never write the literal
+                  letter "P". If you don't know the specific page, write [SN]
+                  with no colon instead.
   - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
   - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
 
