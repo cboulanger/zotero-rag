@@ -40,6 +40,7 @@ Only scripts (3) and (4) write to Zotero. Both take a **write-scoped Zotero API 
 ## 4. Shared CLI + API + progress harness
 
 **New module** `backend/services/job_tracker.py`:
+
 ```python
 class JobTracker:
     """In-memory job registry, keyed by job_id. Mirrors backend/api/document_upload.py's
@@ -56,12 +57,14 @@ Each script's core logic is a plain async function `async def run(..., progress_
 - **CLI**: thin `argparse` wrapper (matching `bin/index_libraries.py`'s shell) that calls `run()` directly in-process and renders a `tqdm` gauge from the same callback — following the existing precedent in `scripts/openalex_import.py:496-508` (the only current user of the already-declared `tqdm` dependency).
 - **API**: one new router, `backend/api/chapter_linking.py`, registered in `backend/main.py` alongside the other feature routers. Each script gets a `POST /api/chapter-linking/{analyze,ocr,retrofit-link,segment-upload}` that creates a job via `JobTracker`, spawns `run()` as an `asyncio.create_task`, and returns `{"job_id": ...}` immediately. One shared `GET /api/chapter-linking/jobs/{job_id}` polls status for all four, matching `backend/api/document_upload.py:751-779`'s existing polling shape.
 - A job's lifetime is tied to the API process — if the server restarts mid-run, the job is simply lost and must be re-triggered. Acceptable for on-demand, human-supervised operations; the recurring-cron-style crash recovery in `cron_indexer.py` is not needed here.
+- **`--max-items <N>` (CLI) / `max_items` (API request field)**: caps how many items each script processes in a single run, on all four scripts (script 1's book scan, script 2's OCR list, script 3's unlinked-bookSection scan, script 4's chapter list). For testing/debugging against a real, large library without waiting for or committing a full run. Applied as a simple truncation of the work list before the main loop starts; omitted or `None` means no limit (the existing default, unchanged behavior).
 
 ## 5. Script 1 — Analyze (`analyze_book_chapters.py`)
 
 **Input:** library slug + read-only key; optional explicit item-key list (else scans all `book`-type items in the library); optional `--ocr-results <path>` to consume script 2's output for items that needed OCR.
 
 **Per book attachment:**
+
 1. Skip if `X-Contains`/`X-Contained-By` already present (via `chapter_link_store.parse_links`), unless `--relink`.
 2. Check text-layer presence (a Kreuzberg call without `force_ocr`, or reuse cached OCR text from script 2). If absent: emit `needs_ocr: true` and stop — this item is a candidate for script 2.
 3. If present, attempt segmentation. **Critical safeguard: PDF physical page index and printed/citation page number are never assumed to be equal** — front matter (title page, copyright page, TOC, often roman-numeral-paginated or unpaginated) routinely offsets them, and the offset can't be guessed, only located.
@@ -72,6 +75,7 @@ Each script's core logic is a plain async function `async def run(..., progress_
    - Cluster confirmed chapter-start PDF indices into contiguous `[pdf_start_index, pdf_end_index]` ranges.
 
 **Output JSON** (also the direct input to script 4):
+
 ```json
 {
   "item_key": "ABCD1234",
@@ -131,6 +135,7 @@ Each script's core logic is a plain async function `async def run(..., progress_
 4. If not (low text-overlap score, multiple equally-plausible spans, or the chapter's content doesn't appear as a contiguous span at all) → the identity link (`X-Contained-By`/`X-Contains`) is still written, since it's independently valuable for correct citation metadata, but `X-Chapter-Pdf-Range` is simply **not written** for that pair. §9 treats a missing range as "don't suppress this chapter" — this is a safe degradation, not an error: the retrofit still fixes the metadata problem even when it can't safely automate the retrieval-suppression problem for that specific pair.
 
 **Output JSON:**
+
 ```json
 {
   "linked": [{"chapter_key": "...", "book_key": "...", "score": 0.94, "pdf_range_localized": true}],
@@ -158,6 +163,7 @@ Each script's core logic is a plain async function `async def run(..., progress_
 The book's own item/attachment is never modified or deleted — it keeps its full PDF; new chapter items are strictly additive.
 
 **Collection organization** — new `--target-collection` option (default `"Book Chapters"`):
+
 - A top-level Zotero collection with this name is created on-demand if it doesn't already exist.
 - Under it, a per-book subcollection is created (or reused, if already present) named with an author-year short label — e.g. `"Miller (2023)"`, or `"Smith et al. (1999)"` for 3+ authors — derived from the book's own creators/date. `backend/db/vector_store.py:42` (`_extract_lastnames`) already extracts normalized last names from a Zotero author-string list for Qdrant filtering; the label-formatting logic here reuses that helper for the last-name extraction, adding only the "et al." / year suffix on top.
 - Both the top-level collection and the per-book subcollection are looked up before creation (`pyzotero`'s `collections()`/`collections_sub()`), so re-running script 4 against an already-processed book reuses the existing subcollection instead of creating a duplicate.
@@ -202,6 +208,7 @@ tests/fixtures/chapter_segmentation/   # ground-truth PDFs + annotations (§5)
 ## 11. New dependencies
 
 Confirmed absent from `pyproject.toml` (checked directly, alongside `pyzotero`/`spacy`/`pypdf`/`tqdm` which are already present):
+
 - `rapidfuzz` — fuzzy title matching, §7.
 - `langdetect` — title-based language detection, §6.
 
@@ -217,3 +224,4 @@ Confirmed absent from `pyproject.toml` (checked directly, alongside `pyzotero`/`
 - **Retrofit matching (§7) depends on `bookTitle`/`title` string similarity and year**, and will not link a book/chapter pair if either field is missing, badly mistyped, or the year is off by more than the tolerance — these fall into `no_match`/`ambiguous` for manual handling rather than being silently skipped.
 - **Suppression (§9) depends on `X-Chapter-Pdf-Range` being both present and correct.** It is deliberately decoupled from the human-editable `pages` field to avoid the printed-number/PDF-index confusion described in §2/§5, but a wrong range written by script 4 (bad boundary detection) or script 3 (bad content-localization) would still suppress the wrong pages from the book's own index. Since script 4 only auto-creates high-confidence chapters, script 3 only writes a range when content-localization is confident (§7), and §9 applies bounds/overlap sanity checks before acting, this risk is bounded but not eliminated.
 - **Retrofit-linked chapters without a successfully localized PDF range (§7) get no suppression at all** — the book keeps indexing those pages redundantly even after the identity link is established. This is an accepted, safe degradation rather than a bug: the alternative (guessing a range) risks suppressing unrelated content. Closing this fully would require either better OCR/text-extraction on the chapter's own attachment or a manual range-entry path — not built now.
+- **Until scripts 1–4 are run, books stay unsegmented and unsuppressed.** Right now, applying this whole feature to a library is a manual, human-triggered act (run script 1, review, run script 4/3, wait for the next indexing pass). Folding it into the normal indexing pipeline itself — i.e. having a routine indexing run notice an unlinked book and auto-segment it inline, opt-in via a config flag — is intentionally **not** part of this design. It surfaced a real unresolved conflict: script 4 needs a write-scoped Zotero key at the exact moment of indexing to create chapter items, but unattended cron indexing only ever holds read-only keys (§3, `AutoIndexKeyStore`), by deliberate design. Deferred to a later iteration, once scripts 1–4 have proven reliable standalone — at that point the key-sourcing question needs an explicit answer (e.g. limiting auto-segment to on-demand runs that already carry a write key, versus accepting a new persistent write-key store as a scoped exception to the read-only-only rule), not just an inline code change.
