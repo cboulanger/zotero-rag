@@ -26,11 +26,12 @@ X-Contains: groups/6297749:WXYZ5678,groups/6297749:MNOP9012
 - On a **book** item: `X-Contains` is a comma-separated list of its chapters.
 - On a **bookSection** item: `X-Contained-By` points at its book.
 - IDs are `<slug>:<item_key>` (slug = Zotero's own `users/{id}` / `groups/{id}`) rather than a bare item key, so the link stays unambiguous even if the same book/chapter pair is ever indexed from two different libraries. Item keys alone are only unique per-library.
-- Each chapter's **page range within the book** is *not* duplicated here — `bookSection` items already have a native Zotero `pages` field (e.g. `"45-67"`); §7's suppression logic reads that directly instead of maintaining a second source of truth.
+- Each chapter's **PDF page-index range within the book's file** is stored as a separate key, `X-Chapter-Pdf-Range`, e.g. `X-Chapter-Pdf-Range: groups/6297749:WXYZ5678:52-74`. This is deliberately **not** the same thing as the chapter's native Zotero `pages` field: `pages` holds the printed/bibliographic page numbers for citation display (e.g. `"45-67"`), while `X-Chapter-Pdf-Range` holds physical page *indices* into the book's PDF file, which is what §9's suppression logic and any future re-slicing actually need. The two numbers routinely differ once there's unnumbered or roman-numeral front matter before the book's arabic pagination starts, and `pages` is human-editable (so it must never be relied on as a machine input) while `X-Chapter-Pdf-Range` is only ever written by these scripts. See §5, §7, §8, §9 for how each script produces/consumes it.
 
 **New shared module** `backend/services/chapter_link_store.py`:
-- `parse_links(extra: str) -> ChapterLinks` — extracts `contained_by: str | None` and `contains: list[str]` from an item's `Extra` text; ignores unrelated lines.
-- `write_links(extra: str, *, contained_by=None, contains=None) -> str` — replaces only the `X-Contained-By:`/`X-Contains:` lines (if present) or appends them (if absent), leaving all other `Extra` content untouched. Idempotent: calling twice with the same value is a no-op change.
+
+- `parse_links(extra: str) -> ChapterLinks` — extracts `contained_by: str | None`, `contains: list[str]`, and `pdf_ranges: dict[str, tuple[int, int]]` (chapter ID → `(start_index, end_index)`, from `X-Chapter-Pdf-Range`) from an item's `Extra` text; ignores unrelated lines.
+- `write_links(extra: str, *, contained_by=None, contains=None, pdf_ranges=None) -> str` — replaces only the `X-Contained-By:`/`X-Contains:`/`X-Chapter-Pdf-Range:` lines (if present) or appends them (if absent), leaving all other `Extra` content untouched. Idempotent: calling twice with the same value is a no-op change. A chapter ID with no entry in `pdf_ranges` simply has no `X-Chapter-Pdf-Range` data — this is the normal, safe state when the range isn't confidently known (§7, §9).
 
 ## 3. Write-key handling
 
@@ -63,11 +64,12 @@ Each script's core logic is a plain async function `async def run(..., progress_
 **Per book attachment:**
 1. Skip if `X-Contains`/`X-Contained-By` already present (via `chapter_link_store.parse_links`), unless `--relink`.
 2. Check text-layer presence (a Kreuzberg call without `force_ocr`, or reuse cached OCR text from script 2). If absent: emit `needs_ocr: true` and stop — this item is a candidate for script 2.
-3. If present, attempt segmentation:
-   - Scan the first ~15% and last ~5% of pages for TOC-like structure (repeated `<title> ... <page number>` line patterns).
-   - Cross-reference each TOC candidate line against the actual text found at that page number (exact/fuzzy substring match) to confirm it's a real chapter start rather than a false TOC hit.
+3. If present, attempt segmentation. **Critical safeguard: PDF physical page index and printed/citation page number are never assumed to be equal** — front matter (title page, copyright page, TOC, often roman-numeral-paginated or unpaginated) routinely offsets them, and the offset can't be guessed, only located.
+   - Scan the first ~15% and last ~5% of pages for TOC-like structure (repeated `<title> ... <printed page number>` line patterns). The printed page number found here is a *target to search for*, not an index to jump to.
+   - For each TOC entry, locate its actual **PDF page index** by searching the book's full extracted text for that entry's title/author appearing at the start of a page (fuzzy/exact content match scanned across the whole document) — this is a content lookup, never an assumption that `pdf_index == printed_number`. The matching PDF index is `pdf_start_index` for that chapter.
+   - Independently, attempt to read the **printed page number** actually shown on that same physical page (a short header/footer line matching an arabic- or roman-numeral-only pattern) to populate `citation_pages` for later use in the Zotero `pages` field. If this can't be read confidently, or printed numbers don't increase monotonically across the confirmed chapter-start pages, mark `page_mapping_confidence: "unmappable"` and leave `citation_pages: null` — segmentation and slicing still proceed normally, since neither depends on this number.
    - Run spaCy NER (`en_core_web_sm`, already a project dependency — see `docs/zotero-plugin-dev.md`/CLAUDE.md for the model) on the lines around each confirmed chapter-start page to extract candidate author names.
-   - Cluster confirmed chapter-start pages into contiguous `[start_page, end_page]` ranges.
+   - Cluster confirmed chapter-start PDF indices into contiguous `[pdf_start_index, pdf_end_index]` ranges.
 
 **Output JSON** (also the direct input to script 4):
 ```json
@@ -76,13 +78,24 @@ Each script's core logic is a plain async function `async def run(..., progress_
   "attachment_key": "EFGH5678",
   "has_text_layer": true,
   "needs_ocr": false,
+  "total_pdf_pages": 412,
   "segmentation_confidence": "high",
   "chapters": [
-    {"title": "...", "authors": ["..."], "start_page": 12, "end_page": 34, "confidence": 0.93}
+    {
+      "title": "...",
+      "authors": ["..."],
+      "pdf_start_index": 52,
+      "pdf_end_index": 74,
+      "citation_pages": "45-67",
+      "confidence": 0.93,
+      "page_mapping_confidence": "high"
+    }
   ],
   "diagnostics": {"toc_pages_scanned": [1, 2, 3], "toc_matches_found": 9, "notes": "..."}
 }
 ```
+
+`pdf_start_index`/`pdf_end_index` (mechanical — physical position in the file, used for slicing in §8 and suppression in §9) and `citation_pages` (bibliographic — printed number, used only for the Zotero `pages` field) are independent fields with independent confidence: a chapter can have high boundary-detection `confidence` but `page_mapping_confidence: "unmappable"` (citation pages simply left blank for manual entry), and that never blocks slicing or suppression, which only need the PDF-index pair.
 
 **Design bias — precision over recall.** Born-digital academic edited-volume PDFs (Springer/Routledge/Palgrave-style) very often carry machine-generated, dotted-leader TOCs that heuristics can parse reliably. The expected failure modes are scanned/older volumes (OCR noise degrades TOC matching), running-header-only books with no real TOC, and non-Latin scripts. Given this is heuristics-only for v1 (no ML/NLP classifier), segmentation is only ever claimed when TOC cross-referencing strongly confirms it; everything else is reported as `segmentation_confidence: "low"` for manual review rather than guessed — a wrong auto-link would corrupt real bibliographic metadata, which is worse than a missed one. The output schema is intentionally decoupled from the detection method (plain page ranges + confidence scores) so a future ML-based detector could replace the heuristics internally without changing what scripts 3/4 consume.
 
@@ -110,14 +123,23 @@ Each script's core logic is a plain async function `async def run(..., progress_
 
 **Write, on auto-link:** `chapter_link_store.write_links(...)` on both the chapter (`X-Contained-By`) and the book (append to `X-Contains`).
 
+**PDF-range localization (new sub-step, needed for §9 suppression to work on retrofitted pairs).** Unlike script 4, which knows a chapter's PDF range by construction (it just sliced it), script 3 links two *pre-existing*, separately-catalogued items with no page relationship given — the chapter's own attachment might even be a different scan of the same content, not a byte-identical excerpt. So for each successful auto-link, script 3 additionally:
+
+1. Extracts the chapter item's own attachment text.
+2. Searches for its best-matching contiguous span inside the book's PDF text (fuzzy/sliding-window text matching across the book's pages).
+3. If a confident, unambiguous, contiguous match is found → writes `X-Chapter-Pdf-Range` for that pair, same as script 4.
+4. If not (low text-overlap score, multiple equally-plausible spans, or the chapter's content doesn't appear as a contiguous span at all) → the identity link (`X-Contained-By`/`X-Contains`) is still written, since it's independently valuable for correct citation metadata, but `X-Chapter-Pdf-Range` is simply **not written** for that pair. §9 treats a missing range as "don't suppress this chapter" — this is a safe degradation, not an error: the retrofit still fixes the metadata problem even when it can't safely automate the retrieval-suppression problem for that specific pair.
+
 **Output JSON:**
 ```json
 {
-  "linked": [{"chapter_key": "...", "book_key": "...", "score": 0.94}],
+  "linked": [{"chapter_key": "...", "book_key": "...", "score": 0.94, "pdf_range_localized": true}],
   "ambiguous": [{"chapter_key": "...", "candidates": [{"book_key": "...", "title": "...", "year": 2019, "score": 0.87}]}],
   "no_match": ["..."]
 }
 ```
+
+`pdf_range_localized: false` on a `linked` entry means the identity link was written but suppression won't apply for that chapter until its range can be established some other way (e.g. re-running with a cleaner chapter-attachment text layer, or manual entry).
 
 ## 8. Script 4 — Segment & upload (`upload_chapters.py`)
 
@@ -126,11 +148,12 @@ Each script's core logic is a plain async function `async def run(..., progress_
 **Defaults to dry-run.** Running with no explicit flag only returns/prints what *would* be created (new item field values, page range, PDF-slice preview) without writing anything to Zotero. An explicit `--commit` (CLI) / `"committed": true` (API) is required to actually create items and upload files — this is a hard-to-reverse, externally-visible write into a real Zotero library, so it does not happen silently.
 
 **Per detected chapter, on commit:**
-1. Slice the book PDF to `[start_page, end_page]` into a standalone file (`pypdf.PdfWriter` — already a project dependency, `pyproject.toml:17`).
+
+1. Slice the book PDF to `[pdf_start_index, pdf_end_index]` into a standalone file (`pypdf.PdfWriter` — already a project dependency, `pyproject.toml:17`). This always uses the PDF-index pair, never `citation_pages`.
 2. Create a new `bookSection` item via `pyzotero` (`item_template("bookSection")` → `create_items(...)`, following the existing precedent in `scripts/openalex_import.py:332-429`), populating it with metadata **inherited from the book** for correct citation quality: `bookTitle` = book's title, `editor` = the book's own creators, plus `publisher`/`place`/`date`/`ISBN`/`language` copied down — and the chapter's own detected `title`/`author` from script 1 (left blank for manual fill-in if author-detection confidence was low, rather than guessing a wrong name into permanent metadata).
-3. Set the new item's native `pages` field to `"<start_page>-<end_page>"` — this is what §9's suppression logic keys off of.
+3. Set the new item's native `pages` field from `citation_pages` **only if script 1 reported it** (`page_mapping_confidence` other than `"unmappable"`); otherwise leave `pages` blank for manual entry — never derived from `pdf_start_index`/`pdf_end_index`, which are a different number space and would silently print the wrong citation page range.
 4. Upload the sliced PDF as a child attachment (`attachment_simple(...)`, same precedent as step 2).
-5. Write the link (`chapter_link_store.write_links`): `X-Contained-By` on the new chapter, append to `X-Contains` on the book.
+5. Write the links (`chapter_link_store.write_links`): `X-Contained-By` on the new chapter, append to `X-Contains` on the book, **and** set `X-Chapter-Pdf-Range` for this chapter to `[pdf_start_index, pdf_end_index]` on the book — this, not the `pages` field just set in step 3, is what §9's suppression logic actually reads.
 
 The book's own item/attachment is never modified or deleted — it keeps its full PDF; new chapter items are strictly additive.
 
@@ -144,7 +167,11 @@ The book's own item/attachment is never modified or deleted — it keeps its ful
 
 This is what actually makes retrieval prefer the chapter citation, closing the loop this whole project started from.
 
-When `document_processor.py` indexes a **book** item that has an `X-Contains` list, it resolves each linked chapter's native `pages` field and **excludes the book's own pages that fall inside any linked chapter's range** from chunking — the book's index entry then only covers its true residual content (front matter, table of contents, index, and any chapters not yet linked), while each linked chapter's own attachment (with correct title/author metadata) independently covers its own pages.
+When `document_processor.py` indexes a **book** item that has an `X-Contains` list, it resolves each linked chapter's `X-Chapter-Pdf-Range` entry (via `chapter_link_store.parse_links`, §2) — **never** the chapter's Zotero `pages` field, which holds printed/citation numbers in a different, human-editable number space — and **excludes the book's own PDF pages whose index falls inside any linked chapter's range** from chunking. The book's index entry then only covers its true residual content (front matter, table of contents, index, and any chapters not yet linked or not yet range-localized), while each linked chapter's own attachment (with correct title/author metadata) independently covers its own pages.
+
+A chapter present in `X-Contains` but with **no** `X-Chapter-Pdf-Range` entry (possible after retrofit-linking, §7) contributes no suppression at all — its pages remain part of the book's index until/unless the range is later established. This is the deliberate safe default: suppressing on a guessed range risks silently dropping unrelated book content from the index, which is worse than temporarily leaving one redundant chapter un-suppressed.
+
+**Sanity checks before applying any range:** `pdf_end_index` must not exceed the book PDF's actual page count, and no two linked chapters' ranges may overlap — either violation is logged and that book's suppression is skipped entirely for the affected pass (safe default again: fall back to indexing the whole book rather than acting on a corrupted or manually-mistyped range) rather than applying a partially-nonsensical exclusion.
 
 This requires **no changes** to `backend/db/vector_store.py` or `backend/services/rag_engine.py`, no new Qdrant payload field, and no schema-version bump (`CURRENT_SCHEMA_VERSION` stays at 6) — it's a targeted change to the page-filtering step already present in `document_processor.py`'s chunking path.
 
@@ -188,4 +215,5 @@ Confirmed absent from `pyproject.toml` (checked directly, alongside `pyzotero`/`
 
 - **Heuristics-only segmentation will miss some real chapter boundaries.** Scanned/older volumes, non-standard layouts, and books without a machine-parseable TOC will often be reported as `segmentation_confidence: "low"` rather than segmented — by design (§5), since a wrong auto-link is worse than a missed one. A future ML-based detector is an intentional later option, not built now.
 - **Retrofit matching (§7) depends on `bookTitle`/`title` string similarity and year**, and will not link a book/chapter pair if either field is missing, badly mistyped, or the year is off by more than the tolerance — these fall into `no_match`/`ambiguous` for manual handling rather than being silently skipped.
-- **Suppression (§9) is page-range-based**, so it assumes chapter `pages` values are accurate; a wrong page range (from a bad script-1 detection or a manually-mistyped retrofit) would suppress the wrong pages from the book's own index. Since script 4 only auto-creates high-confidence chapters and script 3 only auto-links high-confidence matches, this risk is bounded but not eliminated.
+- **Suppression (§9) depends on `X-Chapter-Pdf-Range` being both present and correct.** It is deliberately decoupled from the human-editable `pages` field to avoid the printed-number/PDF-index confusion described in §2/§5, but a wrong range written by script 4 (bad boundary detection) or script 3 (bad content-localization) would still suppress the wrong pages from the book's own index. Since script 4 only auto-creates high-confidence chapters, script 3 only writes a range when content-localization is confident (§7), and §9 applies bounds/overlap sanity checks before acting, this risk is bounded but not eliminated.
+- **Retrofit-linked chapters without a successfully localized PDF range (§7) get no suppression at all** — the book keeps indexing those pages redundantly even after the identity link is established. This is an accepted, safe degradation rather than a bug: the alternative (guessing a range) risks suppressing unrelated content. Closing this fully would require either better OCR/text-extraction on the chapter's own attachment or a manual range-entry path — not built now.
