@@ -386,6 +386,123 @@ test('switchToResultState hides the input state and reveals the result state', (
 	assert.deepStrictEqual(resultSection.classList.added, ['visible']);
 });
 
+test('switchToResultState wires citation clicks to openZoteroLink, not Zotero.launchURL', () => {
+	// Regression test: clicking a citation used to call Zotero.launchURL(),
+	// which routes any non-http(s) scheme back out through the OS's
+	// external-protocol-handler service — circular when Zotero is already
+	// the running process, and it surfaced as a native "Allow this site to
+	// open the zotero link with Zotero?" dialog whose "Open Link" did
+	// nothing. The click handler must instead delegate to this.openZoteroLink().
+	const inputContent = { style: {} };
+	const inputButtons = { style: {} };
+	const resultSection = { classList: { add() {} } };
+	/** @type {((event: any) => void)|null} */
+	let clickListener = null;
+	const resultContent = { addEventListener: (/** @type {string} */ _type, /** @type {any} */ fn) => { clickListener = fn; } };
+	const elementsById = {
+		'input-content': inputContent,
+		'input-buttons': inputButtons,
+		'result-section': resultSection,
+		'result-content': resultContent,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	/** @type {string[]} */
+	const openedLinks = [];
+	const fakeThis = { openZoteroLink: (/** @type {string} */ href) => openedLinks.push(href) };
+	ContextDialog.switchToResultState.call(fakeThis);
+
+	/** @type {any} */
+	const fakeAnchorEl = { href: 'zotero://select/library/items/ABC' };
+	fakeAnchorEl.closest = () => fakeAnchorEl;
+	let prevented = false;
+	/** @type {any} */
+	const fakeEvent = { target: fakeAnchorEl, preventDefault: () => { prevented = true; } };
+
+	assert.ok(clickListener, 'a click listener should have been attached to #result-content');
+	/** @type {any} */ (clickListener)(fakeEvent);
+
+	assert.strictEqual(prevented, true);
+	assert.deepStrictEqual(openedLinks, ['zotero://select/library/items/ABC']);
+});
+
+test('openZoteroLink dispatches in-process via the registered "zotero" protocol handler, without calling Zotero.launchURL', () => {
+	/** @type {any[]} */
+	const doActionCalls = [];
+	/** @type {any[]} */
+	const launchURLCalls = [];
+	const fakeExtension = { noContent: true, doAction: (/** @type {any} */ uri) => doActionCalls.push(uri) };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Services: {
+			io: {
+				newURI: (/** @type {string} */ href) => ({ spec: href }),
+				getProtocolHandler: (/** @type {string} */ scheme) => {
+					assert.strictEqual(scheme, 'zotero');
+					return { wrappedJSObject: { getExtension: () => fakeExtension } };
+				},
+			},
+		},
+		Zotero: { launchURL: (/** @type {string} */ href) => launchURLCalls.push(href), logError: () => {} },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.openZoteroLink('zotero://open-pdf/library/items/ABC?page=5');
+
+	assert.strictEqual(doActionCalls.length, 1);
+	assert.strictEqual(doActionCalls[0].spec, 'zotero://open-pdf/library/items/ABC?page=5');
+	assert.strictEqual(launchURLCalls.length, 0, 'Zotero.launchURL should never be called for a noContent extension — that is the OS round-trip this fix avoids');
+});
+
+test('openZoteroLink falls back to Zotero.launchURL when the resolved extension is not a noContent one', () => {
+	/** @type {any[]} */
+	const launchURLCalls = [];
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Services: {
+			io: {
+				newURI: (/** @type {string} */ href) => ({ spec: href }),
+				getProtocolHandler: () => ({ wrappedJSObject: { getExtension: () => ({ noContent: false }) } }),
+			},
+		},
+		Zotero: { launchURL: (/** @type {string} */ href) => launchURLCalls.push(href), logError: () => {} },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	ContextDialog.openZoteroLink('zotero://something-else');
+
+	assert.deepStrictEqual(launchURLCalls, ['zotero://something-else']);
+});
+
+test('openZoteroLink swallows and logs an error instead of throwing, if URI resolution fails', () => {
+	/** @type {any[]} */
+	const loggedErrors = [];
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Services: { io: { newURI: () => { throw new Error('bad URI'); } } },
+		Zotero: { launchURL: () => { throw new Error('should not be called'); }, logError: (/** @type {any} */ e) => loggedErrors.push(e) },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	assert.doesNotThrow(() => ContextDialog.openZoteroLink('zotero://malformed'));
+	assert.strictEqual(loggedErrors.length, 1);
+});
+
 test('switchToResultState is idempotent — a second call does not re-attach the listener', () => {
 	let listenerCount = 0;
 	const inputContent = { style: {} };

@@ -1619,8 +1619,7 @@ var ZoteroRAGDialog = {
 		// zotero:// links are a real registered Gecko protocol handler (not
 		// specific to the note editor), but this is a privileged dialog window
 		// rather than the note editor's own document — handle the click
-		// explicitly via Zotero.launchURL rather than relying on default
-		// navigation.
+		// explicitly rather than relying on default navigation.
 		const resultContent = document.getElementById('result-content');
 		if (resultContent) {
 			resultContent.addEventListener('click', (/** @type {MouseEvent} */ event) => {
@@ -1630,9 +1629,46 @@ var ZoteroRAGDialog = {
 				);
 				if (!anchor) return;
 				event.preventDefault();
-				// @ts-ignore - Zotero is a global in this context
-				Zotero.launchURL(anchor.href);
+				this.openZoteroLink(anchor.href);
 			});
+		}
+	},
+
+	/**
+	 * Open a zotero://select/... or zotero://open-pdf/... URI in-process.
+	 *
+	 * Deliberately NOT Zotero.launchURL() — for a non-http(s) scheme that
+	 * unconditionally hands the URI to the OS's external-protocol-handler
+	 * service (nsIExternalProtocolService), asking the OS to find and
+	 * relaunch a registered "zotero:" handler. Since Zotero is already the
+	 * process running this very code, that round-trip is circular: it pops a
+	 * native "Allow this site to open the zotero link with Zotero?"
+	 * confirmation, and "Open Link" is a no-op because the OS handoff isn't
+	 * reliably wired up (especially for a scaffold-launched dev build).
+	 *
+	 * Instead this mirrors ZoteroPane.loadURI()'s own in-process dispatch:
+	 * fetch the already-registered "zotero" protocol handler and invoke its
+	 * extension directly (select/open-pdf are both `noContent` extensions,
+	 * so this never triggers content navigation).
+	 * @param {string} href - A zotero:// URI
+	 * @returns {void}
+	 */
+	openZoteroLink(href) {
+		try {
+			// @ts-ignore - Services/Zotero are globals in this context
+			const nsIURI = Services.io.newURI(href, null, null);
+			// @ts-ignore
+			const handler = Services.io.getProtocolHandler('zotero').wrappedJSObject;
+			const extension = handler.getExtension(nsIURI);
+			if (extension && extension.noContent) {
+				extension.doAction(nsIURI);
+			} else {
+				// @ts-ignore - Zotero is a global in this context
+				Zotero.launchURL(href);
+			}
+		} catch (error) {
+			// @ts-ignore - Zotero is a global in this context
+			Zotero.logError(error);
 		}
 	},
 
