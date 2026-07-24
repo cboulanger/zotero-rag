@@ -1,3 +1,10 @@
+# [1.42.0](https://github.com/cboulanger/zotero-rag/compare/v1.41.0...v1.42.0) (2026-07-24)
+
+
+### Features
+
+* **dialog:** add follow-up chat, citation-quality guards, and retrieval tuning ([ae72867](https://github.com/cboulanger/zotero-rag/commit/ae728673b6d2c84e61a0dd7194e3fe4e0cb79bf2))
+
 # [1.41.0](https://github.com/cboulanger/zotero-rag/compare/v1.40.0...v1.41.0) (2026-07-21)
 
 
