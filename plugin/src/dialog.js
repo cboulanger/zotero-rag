@@ -1578,6 +1578,9 @@ var ZoteroRAGDialog = {
 			if (href) a.setAttribute('href', href);
 			a.removeAttribute('data-zotero-href');
 		});
+		// Reveal newly-appended turns (e.g. a follow-up answer) — a full
+		// innerHTML replace does not preserve/update scroll position on its own.
+		container.scrollTop = container.scrollHeight;
 	},
 
 	/**
@@ -1650,8 +1653,10 @@ var ZoteroRAGDialog = {
 		this.clearStatusMessages();
 
 		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
+		const loadingIndicator = document.getElementById('followup-loading');
 		if (submitButton) submitButton.disabled = true;
 		input.disabled = true;
+		if (loadingIndicator) loadingIndicator.style.display = 'flex';
 
 		try {
 			const result = await this.runQuery(question, this.libraryIds, {
@@ -1675,6 +1680,7 @@ var ZoteroRAGDialog = {
 		} finally {
 			if (submitButton) submitButton.disabled = false;
 			input.disabled = false;
+			if (loadingIndicator) loadingIndicator.style.display = 'none';
 		}
 	},
 

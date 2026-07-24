@@ -257,6 +257,14 @@
                   class="question-input"></textarea>
       </div>
 
+      <!-- Follow-up in-flight indicator — the only feedback while submitFollowUp()
+           awaits its response, since the result state has no progress bar to reuse
+           (there is nothing "progressable" about waiting on a single LLM call). -->
+      <div id="followup-loading" style="display: none; flex-shrink: 0; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; color: #555;">
+        <span class="progress-spinner"></span>
+        <span>Processing query, please wait…</span>
+      </div>
+
       <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/
            exportDebugInfo) — a separate element from #status-section because that one
            lives inside #input-content, which is hidden once switchToResultState() runs. -->

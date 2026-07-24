@@ -80,6 +80,26 @@ class TestContinuationAgent(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.source_refs, [])
         self.assertIn("Q0", result.context_text)
 
+    async def test_strips_stale_citation_markers_from_history_answers(self):
+        # A prior turn's answer carries [SN] markers numbered against that
+        # turn's own (possibly much larger) sources list. This turn renumbers
+        # re-fetched chunks from 1, so those old markers are stale — if left
+        # in place, the LLM may echo them into the new answer where they
+        # point at the wrong (or nonexistent) entry in the new sources list.
+        agent, store = self._make_agent([_chunk("c1")])
+        history = [ChatTurn(
+            question="Q0", answer="Fact one [S6]. Fact two [S29:7].", source_refs=["c1"],
+        )]
+
+        result = await agent.execute(
+            question="Tell me more", library_ids=["1"], filters=MetadataFilters(),
+            conversation_history=history,
+        )
+        self.assertNotIn("[S6]", result.context_text)
+        self.assertNotIn("[S29:7]", result.context_text)
+        self.assertIn("Fact one", result.context_text)
+        self.assertIn("Fact two", result.context_text)
+
     async def test_no_conversation_history_produces_empty_result(self):
         agent, store = self._make_agent([])
         result = await agent.execute(question="Q", library_ids=["1"], filters=MetadataFilters())

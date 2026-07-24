@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -99,13 +100,24 @@ class ContinuationAgent(BaseAgent):
         )
 
 
+_CITATION_MARKER_RE = re.compile(r'\s?\[S\d+(?::\d+)?\]')
+
+
 def _render_history(history: list[ChatTurn]) -> str:
     if not history:
         return ""
     lines = ["Conversation so far:"]
     for turn in history:
         lines.append(f"Q: {turn.question}")
-        lines.append(f"A: {turn.answer}")
+        # Strip [SN]/[SN:P] markers: they were numbered against that turn's
+        # own sources list, which this turn re-numbers from 1 in
+        # _render_chunks() below — a stale marker echoed into the new answer
+        # would point at the wrong (or nonexistent) entry in the new sources
+        # list, leaving it unlinked in the client. Citations for the new
+        # answer must come only from the "Previously retrieved passages"
+        # section, never from this pasted history.
+        answer = _CITATION_MARKER_RE.sub('', turn.answer)
+        lines.append(f"A: {answer}")
     return "\n".join(lines)
 
 

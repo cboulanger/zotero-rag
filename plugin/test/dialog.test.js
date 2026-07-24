@@ -322,6 +322,27 @@ test('renderResultContent rewrites zotero:// hrefs to survive innerHTML sanitiza
 	assert.strictEqual(fakeAnchor.attrs['data-zotero-href'], undefined, 'the temporary data attribute should be removed after restoring href');
 });
 
+test('renderResultContent scrolls the container to the bottom after rendering, so a follow-up answer is visible', () => {
+	const fakeElement = { innerHTML: '', querySelectorAll: () => [], scrollTop: 0, scrollHeight: 500 };
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => (id === 'result-content' ? fakeElement : null) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: { buildLibraryMap: () => new Map(), formatTurnHTML: () => '<p>A</p>' },
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q', result: { answer: 'A' } }],
+	};
+
+	ContextDialog.renderResultContent.call(fakeThis);
+
+	assert.strictEqual(fakeElement.scrollTop, fakeElement.scrollHeight);
+});
+
 test('updateExportButtonVisibility shows the button only when the first turn has a trace', () => {
 	const fakeButton = { style: {} };
 	const context = {
@@ -573,6 +594,82 @@ test('submitFollowUp clears a stale result-status error before appending a turn 
 	assert.strictEqual(submittedOptions[0].topK, 10);
 	assert.strictEqual(submittedOptions[0].llmModel, 'test-model');
 	assert.strictEqual(submittedOptions[0].enableRouting, true);
+});
+
+test('submitFollowUp shows the "Processing query" indicator while awaiting the response, and hides it afterward', async () => {
+	const fakeInput = { value: 'Follow-up question', disabled: false };
+	const fakeButton = { disabled: false };
+	const loadingIndicator = { style: { display: 'none' } };
+	/** @type {string[]} */
+	const displayDuringRunQuery = [];
+	const elementsById = {
+		'followup-input': fakeInput,
+		'result-submit-button': fakeButton,
+		'followup-loading': loadingIndicator,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: {
+			submitQuery: async () => {
+				displayDuringRunQuery.push(loadingIndicator.style.display);
+				return { status: 'complete', answer: 'Follow-up answer.', sources: [] };
+			},
+		},
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
+		noteID: null,
+		buildConversationHistory: ContextDialog.buildConversationHistory,
+		runQuery: ContextDialog.runQuery,
+		renderResultContent() {},
+		showStatus() {},
+		clearStatusMessages() {},
+	};
+
+	await ContextDialog.submitFollowUp.call(fakeThis);
+
+	assert.deepStrictEqual(displayDuringRunQuery, ['flex'], 'indicator should be visible while the query is in flight');
+	assert.strictEqual(loadingIndicator.style.display, 'none', 'indicator should be hidden again once the response arrives');
+});
+
+test('submitFollowUp hides the "Processing query" indicator even when the query fails', async () => {
+	const fakeInput = { value: 'Follow-up question', disabled: false };
+	const fakeButton = { disabled: false };
+	const loadingIndicator = { style: { display: 'none' } };
+	const elementsById = {
+		'followup-input': fakeInput,
+		'result-submit-button': fakeButton,
+		'followup-loading': loadingIndicator,
+	};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => elementsById[id] || null },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const ContextDialog = context.ZoteroRAGDialog;
+
+	const fakeThis = {
+		plugin: { submitQuery: async () => { throw new Error('boom'); } },
+		libraryIds: ['u1'],
+		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
+		noteID: null,
+		buildConversationHistory: ContextDialog.buildConversationHistory,
+		runQuery: ContextDialog.runQuery,
+		renderResultContent() {},
+		showStatus() {},
+		clearStatusMessages() {},
+	};
+
+	await ContextDialog.submitFollowUp.call(fakeThis);
+
+	assert.strictEqual(loadingIndicator.style.display, 'none');
 });
 
 test('submitFollowUp regenerates the note from the full turn history when one has already been saved', async () => {
