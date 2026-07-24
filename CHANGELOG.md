@@ -1,3 +1,12 @@
+## [1.42.1](https://github.com/cboulanger/zotero-rag/compare/v1.42.0...v1.42.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **citations:** resolve [SN:P] citations left unlinked by a literal "P" placeholder ([8119d5c](https://github.com/cboulanger/zotero-rag/commit/8119d5c404452798034beda14c52e68ff07fb80c))
+* **dialog:** open citation links in-process instead of round-tripping through the OS ([d968c14](https://github.com/cboulanger/zotero-rag/commit/d968c140f853fdd5254d5ac97cade699e2ff0e53))
+* **dialog:** resolve follow-up citation links, auto-scroll, and add loading indicator ([916302c](https://github.com/cboulanger/zotero-rag/commit/916302ce836058dec8a2c9b14333c4ede56ed04b))
+
 # [1.42.0](https://github.com/cboulanger/zotero-rag/compare/v1.41.0...v1.42.0) (2026-07-24)
 
 
