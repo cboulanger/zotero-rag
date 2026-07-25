@@ -69,8 +69,14 @@ class AnalyzeRequest(BaseModel):
     max_items: int | None = None
 
 
-@router.post("/chapter-linking/analyze", summary="Analyze book PDFs for chapter-segmentation candidates")
-async def start_analyze(request: AnalyzeRequest) -> dict:
+class JobIdResponse(BaseModel):
+    """Response containing the job ID from analyze/OCR/retrofit-link/segment-upload endpoints."""
+
+    job_id: str
+
+
+@router.post("/chapter-linking/analyze", response_model=JobIdResponse, summary="Analyze book PDFs for chapter-segmentation candidates")
+async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
     library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
     client = ZoteroWebAPI(api_key=request.api_key)
     job_id = tracker.create()
@@ -93,4 +99,4 @@ async def start_analyze(request: AnalyzeRequest) -> dict:
             tracker.update(job_id, error=str(exc))
 
     asyncio.create_task(_task())
-    return {"job_id": job_id}
+    return JobIdResponse(job_id=job_id)
