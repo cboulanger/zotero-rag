@@ -9,8 +9,10 @@ its polling endpoint.
 """
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from backend.services.job_tracker import JobTracker
 
@@ -22,22 +24,34 @@ router = APIRouter()
 tracker = JobTracker()
 
 
+class JobStatusResponse(BaseModel):
+    """Response from the job-status poll endpoint."""
+
+    job_id: str
+    status: str  # "processing" | "done" | "error"
+    progress: float
+    message: str
+    result: Any | None = None
+    error: str | None = None
+
+
 @router.get(
     "/chapter-linking/jobs/{job_id}",
+    response_model=JobStatusResponse,
     summary="Poll the status of a chapter-linking background job",
 )
-async def get_job_status(job_id: str) -> dict:
+async def get_job_status(job_id: str) -> JobStatusResponse:
     job = tracker.get(job_id)
     if job is None:
         raise HTTPException(
             status_code=404,
             detail=f"Job {job_id!r} not found (may have expired or never existed)",
         )
-    return {
-        "job_id": job.job_id,
-        "status": job.status,
-        "progress": job.progress,
-        "message": job.message,
-        "result": job.result,
-        "error": job.error,
-    }
+    return JobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        message=job.message,
+        result=job.result,
+        error=job.error,
+    )
