@@ -1,7 +1,6 @@
 """
 Unit tests for QueryRouter:
 - prompt assembly from registered agents
-- JSON parsing with various edge cases
 - MetadataFilters extraction
 - Fallback to RAG-only plan on parse failure or unknown agent names
 """
@@ -32,7 +31,6 @@ def _make_router(json_response: str) -> QueryRouter:
     llm = MagicMock()
     llm.generate = AsyncMock(return_value=json_response)
     return QueryRouter(llm)
-
 
 
 # ---------------------------------------------------------------------------
