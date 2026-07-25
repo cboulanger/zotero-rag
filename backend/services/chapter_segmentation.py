@@ -80,6 +80,10 @@ class TocEntry:
     title: str
     printed_page_number: int
     source_page_index: int  # which page (0-based) the TOC entry itself was found on
+    authors: tuple[str, ...] = ()  # populated only by llm_extract_toc_entries (see
+    # docs/superpowers/specs/2026-07-25-llm-chapter-segmentation-fallback-design.md §4)
+    # -- a regex-found TOC line has no author info, so heuristic-found entries always
+    # leave this empty. Feeds locate_chapter_start's author-aware disambiguation (§5).
 
 
 def extract_page_texts_from_pdf_bytes(content: bytes) -> list[str]:

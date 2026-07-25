@@ -42,6 +42,16 @@ class TestFindTocCandidates(unittest.TestCase):
         self.assertEqual(entries[2].title, "Zotero in Practice")
         self.assertEqual(entries[2].printed_page_number, 89)
 
+    def test_entries_default_to_empty_authors(self):
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual(entries[0].authors, ())
+
     def test_ignores_non_toc_lines(self):
         pages = ["Just some ordinary prose with numbers like 1999 in it, no leaders here."]
         entries = find_toc_candidates(pages)
