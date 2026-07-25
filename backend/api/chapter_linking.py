@@ -21,6 +21,7 @@ from backend.services.chapter_link_store import parse_library_slug
 from backend.services.chapter_ocr import run as ocr_run
 from backend.services.chapter_retrofit import run as retrofit_run
 from backend.services.chapter_segmentation import run as analyze_run
+from backend.services.chapter_upload import run as upload_run
 from backend.services.extraction import create_document_extractor
 from backend.services.job_tracker import JobTracker
 from backend.zotero.web_api import ZoteroWebAPI
@@ -181,6 +182,48 @@ async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("chapter-linking retrofit-link job %s failed", job_id)
+            tracker.update(job_id, error=str(exc))
+
+    asyncio.create_task(_task())
+    return JobIdResponse(job_id=job_id)
+
+
+class SegmentUploadRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    analyses: list[dict]
+    committed: bool = False
+    confidence_threshold: float = 0.8
+    target_collection: str = "Book Chapters"
+    max_items: int | None = None
+
+
+@router.post(
+    "/chapter-linking/segment-upload",
+    response_model=JobIdResponse,
+    summary="Segment book PDFs into chapters and upload (dry-run by default)",
+)
+async def start_segment_upload(request: SegmentUploadRequest) -> JobIdResponse:
+    library_type, numeric_id, _library_id = parse_library_slug(request.library_slug)
+    write_client = zotero.Zotero(library_id=numeric_id, library_type=library_type, api_key=request.api_key)
+    read_client = ZoteroWebAPI(api_key=request.api_key)
+    job_id = tracker.create()
+
+    async def _task() -> None:
+        try:
+            result = await upload_run(
+                zotero_write_client=write_client,
+                zotero_read_client=read_client,
+                slug=request.library_slug,
+                analyses=request.analyses,
+                commit=request.committed,
+                confidence_threshold=request.confidence_threshold,
+                target_collection=request.target_collection,
+                max_items=request.max_items,
+            )
+            tracker.update(job_id, result=result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("chapter-linking segment-upload job %s failed", job_id)
             tracker.update(job_id, error=str(exc))
 
     asyncio.create_task(_task())

@@ -81,5 +81,24 @@ class TestOcrEndpoint(unittest.TestCase):
         self.assertIn("job_id", response.json())
 
 
+class TestSegmentUploadEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.upload_run", new_callable=AsyncMock)
+    def test_defaults_to_dry_run(self, mock_run, mock_zotero_module, mock_web_api):
+        mock_run.return_value = {"would_create": [], "created": [], "skipped_low_confidence": []}
+        response = self.client.post(
+            "/api/chapter-linking/segment-upload",
+            json={"library_slug": "groups/1", "api_key": "fake-key", "analyses": []},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("job_id", response.json())
+        _, kwargs = mock_run.call_args
+        self.assertFalse(kwargs["commit"])
+
+
 if __name__ == "__main__":
     unittest.main()
