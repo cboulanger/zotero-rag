@@ -1,6 +1,8 @@
 """Unit tests for backend.services.chapter_segmentation."""
 
 import unittest
+import unittest.mock
+from unittest.mock import AsyncMock, MagicMock
 
 from backend.services.chapter_segmentation import (
     TocEntry,
@@ -13,6 +15,7 @@ from backend.services.chapter_segmentation import (
 )
 from backend.services.chapter_segmentation import extract_authors_near
 from backend.services.chapter_segmentation import analyze_attachment
+from backend.services.chapter_segmentation import run as analyze_run
 
 
 class TestFindTocCandidates(unittest.TestCase):
@@ -141,6 +144,59 @@ class TestAnalyzeAttachment(unittest.TestCase):
     def test_authors_attached_to_chapters(self):
         result = analyze_attachment(self._fake_book_pages())
         self.assertIn("John Smith", result["chapters"][1]["authors"])
+
+
+class TestRun(unittest.TestCase):
+    def test_skips_already_linked_book(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0001", "itemType": "book", "extra": "X-Contains: groups/1:CH01"}},
+        ]
+        progress_calls = []
+        result = asyncio.run(analyze_run(
+            zotero_client=zotero_client,
+            library_id="1",
+            library_type="group",
+            slug="groups/1",
+            item_keys=None,
+            max_items=None,
+            relink=False,
+            progress_callback=lambda p, m: progress_calls.append((p, m)),
+        ))
+        self.assertEqual(result["attachments"], [])
+        zotero_client.get_item_children.assert_not_called()
+
+    def test_processes_unlinked_book(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0002", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0001", "itemType": "attachment", "contentType": "application/pdf"}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["Just filler prose, no TOC pattern here at all."],
+        ):
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+            ))
+        self.assertEqual(len(result["attachments"]), 1)
+        self.assertEqual(result["attachments"][0]["item_key"], "BOOK0002")
+        self.assertTrue(result["attachments"][0]["has_text_layer"])
 
 
 if __name__ == "__main__":

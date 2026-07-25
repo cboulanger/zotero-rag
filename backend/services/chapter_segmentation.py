@@ -12,10 +12,13 @@ never assumed from position.
 import io
 import re
 from dataclasses import dataclass
+from typing import Callable, Optional
 
 import spacy
 from pypdf import PdfReader
 from rapidfuzz import fuzz
+
+from backend.services.chapter_link_store import parse_links
 
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
@@ -205,3 +208,80 @@ def analyze_attachment(pages: list[str]) -> dict:
             "toc_matches_located": len(located),
         },
     }
+
+
+async def run(
+    *,
+    zotero_client,
+    library_id: str,
+    library_type: str,
+    slug: str,
+    item_keys: Optional[list[str]],
+    max_items: Optional[int],
+    relink: bool,
+    progress_callback: Callable[[float, str], None],
+) -> dict:
+    """Core logic for script 1 (analyze_book_chapters). Scans `book`-type
+    items in the library (or the explicit `item_keys` list), skips already-
+    linked ones unless `relink`, downloads each PDF attachment, and runs
+    analyze_attachment on its page text. See design spec §5.
+    """
+    items = await zotero_client.get_library_items_since(library_id, library_type=library_type)
+    books = [i for i in items if i["data"].get("itemType") == "book"]
+    if item_keys is not None:
+        wanted = set(item_keys)
+        books = [b for b in books if b["data"]["key"] in wanted]
+    if not relink:
+        books = [b for b in books if not parse_links(b["data"].get("extra", "")).contains]
+    if max_items is not None:
+        books = books[:max_items]
+
+    attachments_out: list[dict] = []
+    total = len(books) or 1
+    for i, book in enumerate(books):
+        item_key = book["data"]["key"]
+        progress_callback(i / total, f"Analyzing {item_key} ({i + 1}/{total})")
+
+        children = await zotero_client.get_item_children(library_id, item_key, library_type=library_type)
+        pdf_attachments = [c for c in children if c["data"].get("contentType") == "application/pdf"]
+        if not pdf_attachments:
+            continue
+        attachment_key = pdf_attachments[0]["data"]["key"]
+
+        file_bytes = await zotero_client.get_attachment_file(library_id, item_key, library_type=library_type)
+        if not file_bytes:
+            continue
+
+        pages = extract_page_texts_from_pdf_bytes(file_bytes)
+        # DEVIATION FROM SPEC TEXT (Task 9, verified reproducible): the spec's
+        # literal threshold here was `> 100`, which fails
+        # test_processes_unlinked_book's own fixture text ("Just filler
+        # prose, no TOC pattern here at all." — 46 non-whitespace chars)
+        # against the real implementation. A genuinely textless (scanned,
+        # OCR-needed) PDF page extracts as "" via pypdf, so a much lower bar
+        # still distinguishes "has real text" from "no text layer" while
+        # letting the spec's own test fixture pass. Smallest fix: lowered to
+        # > 20. Flagged per task instructions — do not silently raise this
+        # back to 100 without re-checking this test.
+        has_text_layer = sum(len(p.strip()) for p in pages) > 20
+
+        if not has_text_layer:
+            attachments_out.append({
+                "item_key": item_key,
+                "attachment_key": attachment_key,
+                "has_text_layer": False,
+                "needs_ocr": True,
+            })
+            continue
+
+        analysis = analyze_attachment(pages)
+        attachments_out.append({
+            "item_key": item_key,
+            "attachment_key": attachment_key,
+            "has_text_layer": True,
+            "needs_ocr": False,
+            **analysis,
+        })
+
+    progress_callback(1.0, "Done")
+    return {"slug": slug, "attachments": attachments_out}
