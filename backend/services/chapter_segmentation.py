@@ -683,8 +683,14 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
             entry_source[entry] = "llm"
             disambiguation_count += 1
 
-    located.sort(key=lambda pair: pair[1].index)
-    chapters = _chapters_from_located(pages, located, entry_source=entry_source)
+    if llm_toc_extraction_used or disambiguation_count:
+        located.sort(key=lambda pair: pair[1].index)
+        chapters = _chapters_from_located(pages, located, entry_source=entry_source)
+    else:
+        # Nothing changed since heuristic_chapters was computed above (no
+        # LLM path fired) -- reuse it instead of re-running clustering/NER
+        # a second time on the common (heuristic-succeeds) path.
+        chapters = heuristic_chapters
 
     return {
         "total_pdf_pages": len(pages),
