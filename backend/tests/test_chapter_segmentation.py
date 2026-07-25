@@ -632,6 +632,41 @@ class TestRun(unittest.TestCase):
         self.assertTrue(result["attachments"][0]["has_text_layer"])
         zotero_client.get_attachment_file.assert_called_once_with("1", "ATT0001", library_type="group")
 
+    def test_uses_llm_fallback_when_llm_service_provided(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0003", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0002", "itemType": "attachment", "contentType": "application/pdf"}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+        fake_llm = MagicMock()
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.analyze_attachment_with_llm_fallback",
+            new_callable=AsyncMock,
+            return_value={"total_pdf_pages": 1, "segmentation_confidence": "low", "chapters": [], "diagnostics": {}},
+        ) as mock_fallback:
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+                llm_service=fake_llm,
+            ))
+        mock_fallback.assert_called_once()
+        self.assertEqual(result["attachments"][0]["item_key"], "BOOK0003")
+
 
 if __name__ == "__main__":
     unittest.main()

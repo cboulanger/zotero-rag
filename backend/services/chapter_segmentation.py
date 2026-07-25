@@ -710,6 +710,7 @@ async def run(
     max_items: Optional[int],
     relink: bool,
     progress_callback: Callable[[float, str], None],
+    llm_service: Optional[LLMService] = None,
 ) -> dict:
     """Core logic for script 1 (analyze_book_chapters). Scans `book`-type
     items in the library (or the explicit `item_keys` list), skips already-
@@ -754,7 +755,10 @@ async def run(
             })
             continue
 
-        analysis = analyze_attachment(pages)
+        if llm_service is not None:
+            analysis = await analyze_attachment_with_llm_fallback(pages, llm_service)
+        else:
+            analysis = analyze_attachment(pages)
         attachments_out.append({
             "item_key": item_key,
             "attachment_key": attachment_key,
