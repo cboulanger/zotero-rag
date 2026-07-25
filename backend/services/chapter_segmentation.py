@@ -633,6 +633,68 @@ def analyze_attachment(pages: list[str]) -> dict:
     }
 
 
+async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LLMService) -> dict:
+    """Runs the heuristic TOC/locate pipeline first, then applies the two
+    LLM fallback paths (design spec §4/§6) only where the heuristic pass
+    reports a failure: TOC extraction when it found nothing usable at all,
+    and per-chapter start disambiguation for any entry left genuinely
+    ambiguous (as opposed to zero candidates -- out of scope, see spec §2).
+    Any LLM failure (network, malformed JSON) is swallowed and treated as
+    "fallback unavailable" -- never leaves the result worse than the pure
+    heuristic pass would have (spec §11).
+    """
+    toc_entries = find_toc_candidates(pages)
+    toc_page_indices = {e.source_page_index for e in toc_entries}
+    located, unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+    heuristic_chapters = _chapters_from_located(pages, located)
+
+    entry_source: dict[TocEntry, str] = {}
+    llm_toc_extraction_used = False
+    if len(toc_entries) == 0 or len(heuristic_chapters) == 0:
+        try:
+            llm_entries = await llm_extract_toc_entries(pages, llm_service)
+        except Exception:
+            logger.warning("analyze_attachment_with_llm_fallback: TOC extraction failed", exc_info=True)
+            llm_entries = []
+        if llm_entries:
+            toc_entries = llm_entries
+            toc_page_indices = _toc_scan_indices(pages)
+            entry_source = {e: "llm" for e in toc_entries}
+            located, unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+            llm_toc_extraction_used = True
+
+    disambiguation_count = 0
+    for entry in unlocated:
+        candidates = locate_chapter_start_candidates(pages, entry.title, exclude_indices=toc_page_indices, authors=entry.authors)
+        if len(candidates) <= 1:
+            continue  # zero-candidate case is out of scope for v1 (design spec §2)
+        try:
+            resolved = await llm_disambiguate_chapter_start(pages, entry.title, entry.authors, candidates, llm_service)
+        except Exception:
+            logger.warning("analyze_attachment_with_llm_fallback: disambiguation failed for %r", entry.title, exc_info=True)
+            continue
+        if resolved is not None:
+            located.append((entry, resolved))
+            entry_source[entry] = "llm"
+            disambiguation_count += 1
+
+    located.sort(key=lambda pair: pair[1].index)
+    chapters = _chapters_from_located(pages, located, entry_source=entry_source)
+
+    return {
+        "total_pdf_pages": len(pages),
+        "segmentation_confidence": "high" if chapters else "low",
+        "chapters": chapters,
+        "diagnostics": {
+            "toc_pages_scanned": sorted(toc_page_indices),
+            "toc_matches_found": len(toc_entries),
+            "toc_matches_located": len(located),
+            "llm_toc_extraction_used": llm_toc_extraction_used,
+            "llm_disambiguation_used": disambiguation_count,
+        },
+    }
+
+
 async def run(
     *,
     zotero_client,
