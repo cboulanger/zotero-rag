@@ -166,16 +166,19 @@ async def run(
                 template = zotero_write_client.item_template("bookSection")
                 item_data = build_book_section_item_data(template, book_data, chapter)
                 resp = zotero_write_client.create_items([item_data])
-                chapter_key = list(resp["successful"].values())[0]["key"]
+                created_item = list(resp["successful"].values())[0]
+                chapter_key = created_item["key"]
 
                 tmp_path = Path(tempfile.gettempdir()) / f"{chapter_key}.pdf"
-                tmp_path.write_bytes(sliced)
-                zotero_write_client.attachment_simple([str(tmp_path)], parentid=chapter_key)
-                tmp_path.unlink(missing_ok=True)
+                try:
+                    tmp_path.write_bytes(sliced)
+                    zotero_write_client.attachment_simple([str(tmp_path)], parentid=chapter_key)
+                finally:
+                    tmp_path.unlink(missing_ok=True)
 
                 # Write the chapter side (X-Contained-By) from the CHAPTER's own
-                # freshly-fetched extra — never the book's extra.
-                chapter_item = zotero_write_client.item(chapter_key)
+                # extra — never the book's extra.
+                chapter_item = created_item
                 chapter_id = format_chapter_id(slug, chapter_key)
                 book_id = format_chapter_id(slug, book_key)
                 chapter_extra = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
@@ -186,8 +189,7 @@ async def run(
                 pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
 
                 label = author_year_label(
-                    book_data.get("creators_names", [])
-                    or [c.get("lastName", "") for c in book_data.get("creators", [])],
+                    [c.get("lastName", "") for c in book_data.get("creators", [])],
                     book_data.get("date", ""),
                 )
                 _, sub_key = ensure_target_collection(zotero_write_client, target_collection, label)

@@ -132,7 +132,7 @@ class TestUploadRun(unittest.TestCase):
         zot.item_template.return_value = {"itemType": "bookSection", "title": "", "bookTitle": "", "editor": [],
                                            "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
                                            "pages": "", "creators": []}
-        zot.create_items.return_value = {"successful": {"0": {"key": "CHAP1"}}}
+        zot.create_items.return_value = {"successful": {"0": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}}}
         zot.collections.return_value = []
         zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
         zot.collections_sub.return_value = []
@@ -149,6 +149,10 @@ class TestUploadRun(unittest.TestCase):
         zot.attachment_simple.assert_called()
         self.assertEqual(len(result["created"]), 1)
         self.assertEqual(result["created"][0]["chapter_key"], "CHAP1")
+        # The chapter's own X-Contained-By is written from its own (empty)
+        # extra, not inherited from the book's extra — update_item's first
+        # call is for the chapter, the second for the book (see run()).
+        self.assertIn("X-Contained-By", zot.update_item.call_args_list[0][0][0]["data"]["extra"])
 
     def test_below_threshold_is_skipped(self):
         book_item, analysis = self._book_and_analysis()
