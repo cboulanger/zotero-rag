@@ -659,6 +659,11 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
         if llm_entries:
             toc_entries = llm_entries
             toc_page_indices = _toc_scan_indices(pages)
+            # If two entries are structurally equal (rare), this dict
+            # comprehension collapses them to one key -- harmless, since
+            # toc_entries/located/unlocated below stay plain lists and each
+            # equal entry is still processed independently; do not "fix" by
+            # deduplicating toc_entries, that would drop a real chapter.
             entry_source = {e: "llm" for e in toc_entries}
             located, unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
             llm_toc_extraction_used = True
