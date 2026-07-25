@@ -1,8 +1,10 @@
 """Unit tests for backend.services.chapter_retrofit."""
 
 import unittest
+from unittest.mock import MagicMock
 
 from backend.services.chapter_retrofit import find_best_book_match, locate_chapter_pdf_range
+from backend.services.chapter_retrofit import run as retrofit_run
 
 
 class TestFindBestBookMatch(unittest.TestCase):
@@ -57,6 +59,28 @@ class TestLocateChapterPdfRange(unittest.TestCase):
         chapter_text = "This is about astrophysics and black holes entirely."
         result = locate_chapter_pdf_range(chapter_text, book_pages)
         self.assertIsNone(result)
+
+
+class TestRetrofitRun(unittest.TestCase):
+    def test_links_confident_match_and_skips_ambiguous(self):
+        zot = MagicMock()
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        zot.everything.return_value = all_items
+        zot.item.side_effect = lambda key: next(i for i in all_items if i["key"] == key)
+
+        result = retrofit_run(
+            zotero_write_client=zot,
+            slug="groups/1",
+            item_keys=None,
+            max_items=None,
+        )
+        self.assertEqual(len(result["linked"]), 1)
+        self.assertEqual(result["linked"][0]["chapter_key"], "CHAP1")
+        self.assertEqual(result["linked"][0]["book_key"], "BOOK1")
+        zot.update_item.assert_called()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz
 
+from backend.services.chapter_link_store import format_chapter_id, parse_links, write_links
+
 _SCORE_THRESHOLD = 90.0  # rapidfuzz token_sort_ratio, 0-100
 # NOTE: _MARGIN_REQUIRED increased from 5.0 to 11.0 to catch ambiguous cases
 # where multiple candidates have similar titles (e.g., "Title" vs "Title Vol 2").
@@ -94,3 +96,75 @@ def locate_chapter_pdf_range(chapter_text: str, book_pages: list[str]) -> tuple[
         else:
             break
     return (best_start, end)
+
+
+def _year_from_date(date_str: str | None) -> int | None:
+    if not date_str:
+        return None
+    for token in date_str.replace("-", " ").split():
+        if token.isdigit() and len(token) == 4:
+            return int(token)
+    return None
+
+
+def run(
+    *,
+    zotero_write_client,
+    slug: str,
+    item_keys: list[str] | None,
+    max_items: int | None,
+) -> dict:
+    """Core logic for script 3 (retrofit_chapter_links). Synchronous —
+    pyzotero's client is itself synchronous. See design spec §7.
+    """
+    # zot.items() alone returns only the first page — everything() is
+    # required to auto-paginate through the full library.
+    all_items = zotero_write_client.everything(zotero_write_client.items())
+    books = [i for i in all_items if i["data"].get("itemType") == "book"]
+    chapters = [i for i in all_items if i["data"].get("itemType") == "bookSection"]
+
+    unlinked_chapters = [c for c in chapters if not parse_links(c["data"].get("extra", "")).contained_by]
+    if item_keys is not None:
+        wanted = set(item_keys)
+        unlinked_chapters = [c for c in unlinked_chapters if c["data"]["key"] in wanted]
+    if max_items is not None:
+        unlinked_chapters = unlinked_chapters[:max_items]
+
+    book_candidates = [
+        {"key": b["data"]["key"], "title": b["data"].get("title", ""), "year": _year_from_date(b["data"].get("date"))}
+        for b in books
+    ]
+
+    linked: list[dict] = []
+    ambiguous: list[dict] = []
+    no_match: list[str] = []
+
+    for chapter in unlinked_chapters:
+        chapter_key = chapter["data"]["key"]
+        book_title = chapter["data"].get("bookTitle", "")
+        year = _year_from_date(chapter["data"].get("date"))
+
+        if not book_title or not book_candidates:
+            no_match.append(chapter_key)
+            continue
+
+        match = find_best_book_match(book_title, year, book_candidates)
+        if match is None:
+            ambiguous.append({"chapter_key": chapter_key, "candidates": book_candidates})
+            continue
+
+        book_item = zotero_write_client.item(match.book_key)
+        chapter_id = format_chapter_id(slug, chapter_key)
+        book_id = format_chapter_id(slug, match.book_key)
+
+        chapter["data"]["extra"] = write_links(chapter["data"].get("extra", ""), contained_by=book_id)
+        zotero_write_client.update_item(chapter)
+
+        existing_links = parse_links(book_item["data"].get("extra", ""))
+        new_contains = list({*existing_links.contains, chapter_id})
+        book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
+        zotero_write_client.update_item(book_item)
+
+        linked.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
+
+    return {"linked": linked, "ambiguous": ambiguous, "no_match": no_match}
