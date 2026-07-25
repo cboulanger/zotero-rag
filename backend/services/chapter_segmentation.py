@@ -248,7 +248,7 @@ async def run(
             continue
         attachment_key = pdf_attachments[0]["data"]["key"]
 
-        file_bytes = await zotero_client.get_attachment_file(library_id, item_key, library_type=library_type)
+        file_bytes = await zotero_client.get_attachment_file(library_id, attachment_key, library_type=library_type)
         if not file_bytes:
             continue
 

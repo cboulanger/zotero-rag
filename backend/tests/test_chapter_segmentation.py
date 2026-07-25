@@ -197,6 +197,7 @@ class TestRun(unittest.TestCase):
         self.assertEqual(len(result["attachments"]), 1)
         self.assertEqual(result["attachments"][0]["item_key"], "BOOK0002")
         self.assertTrue(result["attachments"][0]["has_text_layer"])
+        zotero_client.get_attachment_file.assert_called_once_with("1", "ATT0001", library_type="group")
 
 
 if __name__ == "__main__":
