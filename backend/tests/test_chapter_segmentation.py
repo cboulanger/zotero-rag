@@ -11,8 +11,10 @@ from backend.services.chapter_segmentation import (
     _toc_scan_indices,
 )
 from backend.services.chapter_segmentation import (
+    ChapterStartCandidate,
     extract_printed_page_number,
     locate_chapter_start,
+    locate_chapter_start_candidates,
     match_confidence,
 )
 from backend.services.chapter_segmentation import extract_authors_near
@@ -204,6 +206,40 @@ class TestLocateChapterStart(unittest.TestCase):
         # cluster, not a rival) -- margin equals score, same as any other
         # single-cluster match.
         self.assertEqual(match.margin, match.score)
+
+    def test_locate_chapter_start_candidates_exposes_competing_clusters(self):
+        pages = [
+            "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines APA style only.",
+            "Unrelated filler page one.",
+            "Unrelated filler page two.",
+            "Unrelated filler page three.",
+            "Unrelated filler page four.",
+            "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
+        ]
+        candidates = locate_chapter_start_candidates(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual({c.index for c in candidates}, {0, 5})
+        # Sorted best-first.
+        self.assertGreaterEqual(candidates[0].score, candidates[1].score)
+
+    def test_author_confirmation_resolves_ambiguous_tie(self):
+        # Same near-tie shape as test_rejects_ambiguous_tie, but the true
+        # chapter's page also has its author's last name near the top --
+        # locate_chapter_start_candidates flags that cluster author_confirmed,
+        # and the bonus lets it beat an equally-scoring, unconfirmed rival
+        # that would otherwise make the match ambiguous.
+        pages = [
+            "Comparing Citation Styles\n\nBy Jane Doe\n\nThis chapter examines APA style only.",
+            "Unrelated filler page one.",
+            "Unrelated filler page two.",
+            "Unrelated filler page three.",
+            "Unrelated filler page four.",
+            "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
+        ]
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set(), authors=("Jane Doe",))
+        self.assertIsNotNone(match)
+        self.assertEqual(match.index, 0)
+        self.assertTrue(match.author_confirmed)
 
 
 class TestMatchConfidence(unittest.TestCase):

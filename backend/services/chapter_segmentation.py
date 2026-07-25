@@ -182,6 +182,14 @@ _LOCATE_MARGIN_REQUIRED = 8.0
 # this close together are treated as one location, not competing candidates,
 # so the chapter's own repeated header is never mistaken for ambiguity.
 _LOCATE_CLUSTER_GAP = 3
+# An author's last name appearing near the top of a candidate page is a much
+# stronger opening-page signal than title text alone (a running header can
+# repeat the title on every page of a chapter, but rarely repeats the
+# author's name on non-opening pages) -- see design spec §5. Chosen so a
+# confirmed candidate reliably beats a same-scoring unconfirmed rival
+# (15 > _LOCATE_MARGIN_REQUIRED's 8, with room to spare) without being large
+# enough to override a rival that scores far higher on title match alone.
+_AUTHOR_CONFIRMED_BONUS = 15.0
 
 
 @dataclass(frozen=True)
@@ -195,20 +203,42 @@ class ChapterStartMatch:
     score: float  # winning cluster's best rapidfuzz partial_ratio, 0-100
     margin: float  # score minus the runner-up cluster's score; equals score
     # itself when there was no competing cluster at all (uncontested match)
+    author_confirmed: bool = False
 
 
-def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> ChapterStartMatch | None:
-    """Find the PDF page index whose text most plausibly begins with `title`.
+@dataclass(frozen=True)
+class ChapterStartCandidate:
+    """One clustered candidate location from locate_chapter_start_candidates
+    -- exposes what locate_chapter_start only used internally before, so an
+    ambiguous result's competing clusters can be inspected (e.g. for LLM
+    disambiguation, see llm_disambiguate_chapter_start)."""
 
-    This is a content lookup, not an index computation: it never assumes the
-    TOC's printed page number corresponds to this page's index. Skips pages
-    whose head text is too short to score reliably. Qualifying pages within
-    _LOCATE_CLUSTER_GAP of each other are merged into one candidate location
-    (a chapter's own running header can repeat the title on several of its
-    pages) -- returns the earliest page of the best-scoring cluster, or None
-    if no page qualifies or the top cluster is ambiguous against a runner-up.
+    index: int
+    score: float
+    author_confirmed: bool
+
+
+def _candidate_ranking_key(candidate: ChapterStartCandidate) -> float:
+    return candidate.score + (_AUTHOR_CONFIRMED_BONUS if candidate.author_confirmed else 0.0)
+
+
+def locate_chapter_start_candidates(
+    pages: list[str], title: str, exclude_indices: set[int], authors: tuple[str, ...] = (),
+) -> list[ChapterStartCandidate]:
+    """Find every plausible page location for `title`'s chapter opening,
+    clustered exactly as locate_chapter_start does internally (see its
+    docstring for the clustering rationale), sorted best-first (the
+    author-confirmed bonus is already applied to the ranking). Returns an
+    empty list when nothing clears the score threshold at all.
+
+    When `authors` is non-empty, a candidate page is additionally checked
+    for whether any given author's last name (lowercased) appears in the
+    same head-of-page text the title is scored against -- mirrors the
+    disambiguation approach scripts/ground_truth_helper.py already
+    validated by hand while building this project's evaluation set.
     """
-    candidates: list[tuple[int, float]] = []
+    last_names = tuple(a.split()[-1].lower() for a in authors if a.strip())
+    raw_candidates: list[tuple[int, float, bool]] = []
     for index, text in enumerate(pages):
         if index in exclude_indices:
             continue
@@ -217,14 +247,16 @@ def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]
         head = text[:200]
         if len(head.strip()) < _LOCATE_MIN_HEAD_CHARS:
             continue
-        score = fuzz.partial_ratio(title.lower(), head.lower())
+        head_lower = head.lower()
+        score = fuzz.partial_ratio(title.lower(), head_lower)
         if score >= _LOCATE_SCORE_THRESHOLD:
-            candidates.append((index, score))
-    if not candidates:
-        return None
+            confirmed = bool(last_names) and any(name in head_lower for name in last_names)
+            raw_candidates.append((index, score, confirmed))
+    if not raw_candidates:
+        return []
 
-    candidates.sort()
-    clusters: list[tuple[int, float]] = []  # (first_index, max_score) per cluster
+    raw_candidates.sort()
+    clusters: list[ChapterStartCandidate] = []
     # Deliberately transitive (chained off the previous candidate, not the
     # cluster's first index): real academic books often repeat a running
     # header on every other page for a chapter's ENTIRE span (confirmed
@@ -237,24 +269,46 @@ def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]
     # theoretical risk of transitively bridging two genuinely different,
     # far-apart chapters if a spurious mid-range match happens to chain
     # them together -- not observed in this project's evaluation set.
-    cluster_start, cluster_max = candidates[0]
-    prev_index = candidates[0][0]
-    for index, score in candidates[1:]:
+    cluster_start, cluster_max, cluster_confirmed = raw_candidates[0]
+    prev_index = raw_candidates[0][0]
+    for index, score, confirmed in raw_candidates[1:]:
         if index - prev_index <= _LOCATE_CLUSTER_GAP:
             cluster_max = max(cluster_max, score)
+            cluster_confirmed = cluster_confirmed or confirmed
         else:
-            clusters.append((cluster_start, cluster_max))
-            cluster_start, cluster_max = index, score
+            clusters.append(ChapterStartCandidate(index=cluster_start, score=cluster_max, author_confirmed=cluster_confirmed))
+            cluster_start, cluster_max, cluster_confirmed = index, score, confirmed
         prev_index = index
-    clusters.append((cluster_start, cluster_max))
+    clusters.append(ChapterStartCandidate(index=cluster_start, score=cluster_max, author_confirmed=cluster_confirmed))
 
-    clusters.sort(key=lambda cluster: cluster[1], reverse=True)
-    best_index, best_score = clusters[0]
-    runner_up_score = clusters[1][1] if len(clusters) > 1 else 0.0
-    margin = best_score - runner_up_score
-    if len(clusters) > 1 and margin < _LOCATE_MARGIN_REQUIRED:
+    clusters.sort(key=_candidate_ranking_key, reverse=True)
+    return clusters
+
+
+def locate_chapter_start(
+    pages: list[str], title: str, exclude_indices: set[int], authors: tuple[str, ...] = (),
+) -> ChapterStartMatch | None:
+    """Find the PDF page index whose text most plausibly begins with `title`.
+
+    This is a content lookup, not an index computation: it never assumes the
+    TOC's printed page number corresponds to this page's index. Delegates
+    candidate-gathering and clustering to locate_chapter_start_candidates,
+    then applies the ambiguity guard: returns the earliest page of the
+    best-scoring cluster, or None if no page qualifies or the top cluster
+    doesn't beat the runner-up by _LOCATE_MARGIN_REQUIRED. Default
+    `authors=()` reproduces the exact behavior before author-aware
+    disambiguation was added -- see locate_chapter_start_candidates.
+    """
+    candidates = locate_chapter_start_candidates(pages, title, exclude_indices, authors)
+    if not candidates:
         return None
-    return ChapterStartMatch(index=best_index, score=best_score, margin=margin)
+
+    best = candidates[0]
+    runner_up_key = _candidate_ranking_key(candidates[1]) if len(candidates) > 1 else 0.0
+    margin = _candidate_ranking_key(best) - runner_up_key
+    if len(candidates) > 1 and margin < _LOCATE_MARGIN_REQUIRED:
+        return None
+    return ChapterStartMatch(index=best.index, score=best.score, margin=margin, author_confirmed=best.author_confirmed)
 
 
 # How much extra margin (beyond the minimum _LOCATE_MARGIN_REQUIRED) counts
