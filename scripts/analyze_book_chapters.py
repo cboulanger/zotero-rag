@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""CLI for script 1: analyze book PDFs for chapter-segmentation candidates.
+
+Usage:
+    uv run python scripts/analyze_book_chapters.py --library-slug groups/6297749 \
+        --api-key <read-only-zotero-key> --output .local/analysis.json
+"""
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from backend.services.chapter_link_store import parse_library_slug
+from backend.services.chapter_segmentation import run as analyze_run
+from backend.zotero.web_api import ZoteroWebAPI
+
+
+async def _main(args: argparse.Namespace) -> int:
+    library_type, _numeric_id, library_id = parse_library_slug(args.library_slug)
+    client = ZoteroWebAPI(api_key=args.api_key)
+
+    item_keys = args.item_keys.split(",") if args.item_keys else None
+
+    bar = tqdm(total=100, unit="%", desc="Analyzing")
+
+    def on_progress(progress: float, message: str) -> None:
+        bar.n = int(progress * 100)
+        bar.set_description(message)
+        bar.refresh()
+
+    result = await analyze_run(
+        zotero_client=client,
+        library_id=library_id,
+        library_type=library_type,
+        slug=args.library_slug,
+        item_keys=item_keys,
+        max_items=args.max_items,
+        relink=args.relink,
+        progress_callback=on_progress,
+    )
+    bar.close()
+
+    output = json.dumps(result, indent=2)
+    if args.output:
+        Path(args.output).write_text(output, encoding="utf-8")
+        print(f"Wrote analysis to {args.output}")
+    else:
+        print(output)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Analyze book PDFs for chapter-segmentation candidates.")
+    parser.add_argument("--library-slug", required=True, help="e.g. groups/6297749 or users/12345")
+    parser.add_argument("--api-key", required=True, help="Read-only Zotero API key")
+    parser.add_argument("--item-keys", default=None, help="Comma-separated list to restrict to specific book items")
+    parser.add_argument("--relink", action="store_true", help="Re-analyze books that already have X-Contains")
+    parser.add_argument("--max-items", type=int, default=None, help="Cap the number of book items processed (testing/debugging)")
+    parser.add_argument("--output", default=None, help="Write JSON output to this path instead of stdout")
+    args = parser.parse_args()
+    return asyncio.run(_main(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
