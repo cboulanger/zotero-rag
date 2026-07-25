@@ -8,6 +8,7 @@ from backend.services.chapter_segmentation import (
     TocEntry,
     extract_page_texts_from_pdf_bytes,
     find_toc_candidates,
+    _toc_scan_indices,
 )
 from backend.services.chapter_segmentation import (
     extract_printed_page_number,
@@ -115,6 +116,20 @@ class TestFindTocCandidates(unittest.TestCase):
         titles = [e.title for e in entries]
         self.assertFalse(any("doi.org" in t for t in titles))
         self.assertIn("Introduction to the Subject", titles)
+
+
+class TestTocScanIndices(unittest.TestCase):
+    def test_scans_front_and_back_fractions(self):
+        pages = ["x"] * 100
+        indices = _toc_scan_indices(pages, max_front_fraction=0.1, max_back_fraction=0.05)
+        self.assertIn(0, indices)
+        self.assertIn(9, indices)  # last front-matter page (10% of 100)
+        self.assertNotIn(10, indices)
+        self.assertIn(99, indices)  # last back-matter page is always included
+        self.assertNotIn(50, indices)  # a middle page is never scanned
+
+    def test_empty_pages_returns_empty_set(self):
+        self.assertEqual(_toc_scan_indices([]), set())
 
 
 class TestLocateChapterStart(unittest.TestCase):

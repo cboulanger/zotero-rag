@@ -62,6 +62,18 @@ _TOC_MAX_PAGE_NUMBER_RATIO = 2.0
 _TOC_PAGE_CLUSTER_GAP = 2
 
 
+def _toc_scan_indices(pages: list[str], max_front_fraction: float = 0.15, max_back_fraction: float = 0.05) -> set[int]:
+    """The front/back-matter page-index range both find_toc_candidates
+    (regex) and llm_extract_toc_entries (LLM fallback design spec §4) scan
+    for a table-of-contents listing."""
+    total = len(pages)
+    if total == 0:
+        return set()
+    front_count = max(1, int(total * max_front_fraction))
+    back_count = max(1, int(total * max_back_fraction))
+    return set(range(min(front_count, total))) | set(range(max(0, total - back_count), total))
+
+
 def _looks_like_url_or_doi(line: str) -> bool:
     """A chapter title is never a URL or DOI -- these show up in imprint/
     copyright front-matter text and can otherwise fuzzy-match the TOC-line
@@ -118,9 +130,7 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
     total = len(pages)
     if total == 0:
         return []
-    front_count = max(1, int(total * max_front_fraction))
-    back_count = max(1, int(total * max_back_fraction))
-    scan_indices = sorted(set(range(min(front_count, total))) | set(range(max(0, total - back_count), total)))
+    scan_indices = sorted(_toc_scan_indices(pages, max_front_fraction, max_back_fraction))
     max_plausible_page_number = total * _TOC_MAX_PAGE_NUMBER_RATIO
 
     raw_matches_by_page: dict[int, list[re.Match]] = {}
