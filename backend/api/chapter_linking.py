@@ -10,6 +10,7 @@ its polling endpoint.
 
 import asyncio
 import logging
+from pathlib import Path as _Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -17,8 +18,10 @@ from pydantic import BaseModel
 from pyzotero import zotero
 
 from backend.services.chapter_link_store import parse_library_slug
+from backend.services.chapter_ocr import run as ocr_run
 from backend.services.chapter_retrofit import run as retrofit_run
 from backend.services.chapter_segmentation import run as analyze_run
+from backend.services.extraction import create_document_extractor
 from backend.services.job_tracker import JobTracker
 from backend.zotero.web_api import ZoteroWebAPI
 
@@ -98,6 +101,51 @@ async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised
             logger.exception("chapter-linking analyze job %s failed", job_id)
+            tracker.update(job_id, error=str(exc))
+
+    asyncio.create_task(_task())
+    return JobIdResponse(job_id=job_id)
+
+
+class AttachmentSpec(BaseModel):
+    item_key: str
+    attachment_key: str
+
+
+class OcrRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    attachment_specs: list[AttachmentSpec]
+    max_items: int | None = None
+    cache_dir: str = "data/ocr_cache"
+
+
+@router.post(
+    "/chapter-linking/ocr",
+    response_model=JobIdResponse,
+    summary="OCR attachments lacking a text layer",
+)
+async def start_ocr(request: OcrRequest) -> JobIdResponse:
+    library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
+    client = ZoteroWebAPI(api_key=request.api_key)
+    extractor = create_document_extractor(backend="kreuzberg", ocr_enabled=True)
+    job_id = tracker.create()
+
+    async def _task() -> None:
+        try:
+            result = await ocr_run(
+                zotero_client=client,
+                extractor=extractor,
+                library_id=library_id,
+                library_type=library_type,
+                attachment_specs=[s.model_dump() for s in request.attachment_specs],
+                max_items=request.max_items,
+                cache_dir=_Path(request.cache_dir),
+                progress_callback=lambda p, m: tracker.update(job_id, progress=p, message=m),
+            )
+            tracker.update(job_id, result=result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("chapter-linking ocr job %s failed", job_id)
             tracker.update(job_id, error=str(exc))
 
     asyncio.create_task(_task())

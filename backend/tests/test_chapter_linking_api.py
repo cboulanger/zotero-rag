@@ -60,5 +60,26 @@ class TestRetrofitEndpoint(unittest.TestCase):
         self.assertIn("job_id", response.json())
 
 
+class TestOcrEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("backend.api.chapter_linking.create_document_extractor")
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.ocr_run", new_callable=AsyncMock)
+    def test_returns_job_id_immediately(self, mock_run, mock_web_api, mock_create_extractor):
+        mock_run.return_value = {"results": []}
+        response = self.client.post(
+            "/api/chapter-linking/ocr",
+            json={
+                "library_slug": "groups/1",
+                "api_key": "fake-key",
+                "attachment_specs": [{"item_key": "B1", "attachment_key": "A1"}],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("job_id", response.json())
+
+
 if __name__ == "__main__":
     unittest.main()
