@@ -44,5 +44,21 @@ class TestAnalyzeEndpoint(unittest.TestCase):
         self.assertIn("job_id", response.json())
 
 
+class TestRetrofitEndpoint(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.retrofit_run")
+    def test_returns_job_id_immediately(self, mock_run, mock_zotero_module):
+        mock_run.return_value = {"linked": [], "ambiguous": [], "no_match": []}
+        response = self.client.post(
+            "/api/chapter-linking/retrofit-link",
+            json={"library_slug": "groups/1", "api_key": "fake-write-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("job_id", response.json())
+
+
 if __name__ == "__main__":
     unittest.main()

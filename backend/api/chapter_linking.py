@@ -14,8 +14,10 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from pyzotero import zotero
 
 from backend.services.chapter_link_store import parse_library_slug
+from backend.services.chapter_retrofit import run as retrofit_run
 from backend.services.chapter_segmentation import run as analyze_run
 from backend.services.job_tracker import JobTracker
 from backend.zotero.web_api import ZoteroWebAPI
@@ -96,6 +98,41 @@ async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised
             logger.exception("chapter-linking analyze job %s failed", job_id)
+            tracker.update(job_id, error=str(exc))
+
+    asyncio.create_task(_task())
+    return JobIdResponse(job_id=job_id)
+
+
+class RetrofitLinkRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    item_keys: list[str] | None = None
+    max_items: int | None = None
+
+
+@router.post(
+    "/chapter-linking/retrofit-link",
+    response_model=JobIdResponse,
+    summary="Retrofit-link existing book/bookSection item pairs",
+)
+async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
+    library_type, numeric_id, _library_id = parse_library_slug(request.library_slug)
+    zot = zotero.Zotero(library_id=numeric_id, library_type=library_type, api_key=request.api_key)
+    job_id = tracker.create()
+
+    async def _task() -> None:
+        try:
+            result = await asyncio.to_thread(
+                retrofit_run,
+                zotero_write_client=zot,
+                slug=request.library_slug,
+                item_keys=request.item_keys,
+                max_items=request.max_items,
+            )
+            tracker.update(job_id, result=result)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("chapter-linking retrofit-link job %s failed", job_id)
             tracker.update(job_id, error=str(exc))
 
     asyncio.create_task(_task())
