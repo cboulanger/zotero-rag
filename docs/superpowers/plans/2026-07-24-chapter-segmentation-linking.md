@@ -3525,7 +3525,7 @@ Unlike the original draft of this task, the ground-truth data already exists —
 
 **Files:**
 - Test: `tests/test_chapter_segmentation_accuracy.py`
-- Reference (already present, not created by this task): `backend/evaluation/book-segmentation/manifest.json`, `backend/evaluation/book-segmentation/README.md`, `backend/evaluation/book-segmentation/*.expected.json`, `scripts/fetch_evaluation_pdfs.py`
+- Reference (already present, not created by this task): `backend/evaluation/book-segmentation/manifest.json`, `backend/evaluation/book-segmentation/README.md`, `backend/evaluation/book-segmentation/CLAUDE.md`, `backend/evaluation/book-segmentation/*.expected.json`, `scripts/fetch_evaluation_pdfs.py`, `scripts/ground_truth_helper.py`
 
 - [ ] **Step 1: Write the scoring harness**
 
@@ -3537,9 +3537,10 @@ backend/evaluation/book-segmentation/ (design spec §5, §12).
 The PDFs themselves are gitignored — run
 `uv run python scripts/fetch_evaluation_pdfs.py` first to download the
 open-access ones. A book is skipped (not failed) if its PDF isn't present
-locally yet (covers both "not fetched yet" and the one non-OA scan that
-can never be auto-fetched) — this is real, checkable state, not a
-placeholder standing in for unwritten logic.
+locally yet (covers "not fetched yet", the non-OA scans that can never be
+auto-fetched, and any manifest.local.json entries a developer hasn't placed
+the PDF for) — this is real, checkable state, not a placeholder standing in
+for unwritten logic.
 """
 
 import json
@@ -3554,12 +3555,26 @@ from backend.services.chapter_segmentation import (
 _EVAL_DIR = Path(__file__).parent.parent / "backend" / "evaluation" / "book-segmentation"
 
 
+def _load_manifest_books() -> list[dict]:
+    """Merge the committed manifest.json with the gitignored, optional
+    manifest.local.json (see backend/evaluation/book-segmentation/CLAUDE.md)
+    -- the latter holds "difficult" books found during live testing that
+    have no DOI or otherwise can't be shared, so they stay local-only but
+    are still exercised by this harness on the machine that added them.
+    """
+    books = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))["books"]
+    local_manifest_path = _EVAL_DIR / "manifest.local.json"
+    if local_manifest_path.exists():
+        books = books + json.loads(local_manifest_path.read_text(encoding="utf-8"))["books"]
+    return books
+
+
 def _available_books() -> list[tuple[Path, Path]]:
     """Return (pdf_path, expected_json_path) pairs for every manifest entry
-    whose PDF is actually present locally right now."""
-    manifest = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))
+    (committed or local-only) whose PDF is actually present locally right
+    now."""
     pairs = []
-    for book in manifest["books"]:
+    for book in _load_manifest_books():
         pdf_path = _EVAL_DIR / book["filename"]
         expected_path = _EVAL_DIR / (Path(book["filename"]).stem + ".expected.json")
         if pdf_path.exists() and expected_path.exists():
@@ -3614,6 +3629,271 @@ git commit -m "test: add accuracy scoring harness against real evaluation books"
 ```
 
 **Known limitation:** the seventh book, `9783322969828.pdf` (a 1976 scanned/OCR'd Springer yearbook, `oa: false`), *does* have a real `.expected.json` — its ground truth was built the same way as the other six (direct TOC cross-reference, offset verification), and its existing embedded text layer turned out to be good enough for `pypdf` extraction directly, no OCR needed. But it can never be auto-fetched (see `scripts/fetch_evaluation_pdfs.py`'s DOI-printing fallback), so this harness will only actually exercise that book on a machine where someone has manually placed the file after acquiring it via institutional access — CI and fresh clones will see six-book results, not seven, until that happens. Nothing to fix here; just don't be surprised if the seventh book's `precision=.../recall=...` line is silently absent from the test output on a machine that never fetched it.
+
+---
+
+### Task 31: Growing the evaluation set with "difficult" PDFs found during live testing
+
+Tasks 5-9's heuristics will inevitably score some real book low-confidence once tested against an actual Zotero library (design spec §13 already accepts this — heuristics-only, precision over recall). This task turns that from a one-off debugging session into a tracked regression: a repeatable path from "found a difficult PDF in the wild" to "it's part of the evaluation set" that works whether or not the book can legally be shared with the rest of the team.
+
+This task is process/tooling, not application code — `_load_manifest_books()` (already written in Task 30, Step 1) already merges the optional `manifest.local.json`; this task only adds the tooling and documentation that makes populating it (or the committed `manifest.json`, when the book has a DOI) a well-defined workflow instead of an ad hoc one.
+
+**Files:**
+- Create: `scripts/ground_truth_helper.py`
+- Create: `backend/evaluation/book-segmentation/CLAUDE.md`
+- Modify: `backend/evaluation/book-segmentation/.gitignore` (add `manifest.local.json`)
+- Modify: `backend/evaluation/book-segmentation/README.md` (point at `CLAUDE.md` for the add-a-book workflow)
+
+- [ ] **Step 1: Add `manifest.local.json` to `.gitignore`**
+
+Append to `backend/evaluation/book-segmentation/.gitignore`:
+```text
+manifest.local.json
+```
+
+- [ ] **Step 2: Write the ground-truth draft helper script**
+
+A CLI wrapping the same content-search approach already proven across all seven committed books (title+author-confirmed location, structural TOC-page detection, "Part N" divider back-off, leading/trailing printed-page-number extraction with the roman-numeral-false-positive guard) — a starting draft to hand-verify, not an oracle:
+
+```python
+#!/usr/bin/env python3
+"""Draft a chapter-segmentation ground-truth `.expected.json` from a real PDF
+and a hand-transcribed table of contents.
+
+This is a starting point, not an oracle: it locates each TOC entry's true
+chapter-OPENING page by content search (never by assuming
+pdf_index == printed_page_number -- see docs/superpowers/specs/
+2026-07-24-chapter-segmentation-linking-design.md section 2/5 for why that
+assumption breaks on real books), and separately tries to read the printed
+page number actually shown on that page for `citation_pages`. Always spot-check
+a handful of the output's pdf_start_index/pdf_end_index values by opening the
+PDF at those physical page indices before trusting them -- see
+backend/evaluation/book-segmentation/CLAUDE.md for the full workflow this
+script is one step of.
+
+Usage:
+    1. Open the PDF and transcribe its table of contents into a small JSON
+       file: a list of {"title": ..., "authors": [...]} objects in reading
+       order. Add {"skip": true} entries (authors: []) for any front/back
+       matter section between two real chapters that you don't want in the
+       final ground truth (e.g. "Acknowledgements", "Bibliography") -- they
+       are still needed here to correctly bound their neighbors' ranges.
+
+    2. Run:
+        uv run python scripts/ground_truth_helper.py \
+            --pdf backend/evaluation/book-segmentation/<name>.pdf \
+            --toc /tmp/<name>_toc.json \
+            --output backend/evaluation/book-segmentation/<name>.expected.json
+
+    3. Open the output and manually verify every entry (this script has no
+       way to know if it's wrong -- it found the best-scoring match, not
+       necessarily the correct one). Pay special attention to:
+       - Any `match_score` below ~90 -- likely a wrong match.
+       - `citation_start`/`citation_end` of `null` -- the printed-number
+         heuristic didn't find a footer/header number on that page; leave it
+         null in the final file rather than guessing.
+       - Gaps between one chapter's pdf_end_index and the next chapter's
+         pdf_start_index bigger than 1-2 pages -- often a Part-divider page
+         (correctly excluded) but sometimes a sign the real boundary is off.
+"""
+
+import argparse
+import json
+import re
+
+from pypdf import PdfReader
+from rapidfuzz import fuzz
+
+_PAGE_NUM_RE = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,7}$", re.IGNORECASE)
+
+# Roman-numeral matches require a non-letter boundary on the adjacent side --
+# otherwise a bare trailing/leading "d", "i", "v", "x", "l", "c", or "m" from
+# an ordinary word (e.g. "Afterword", "Index") false-positives as a
+# roman-numeral page number.
+_TRAILING_NUM_RE = re.compile(r"(?<![A-Za-z])(\d{1,4}|[ivxlcdm]{1,7})\s*$", re.IGNORECASE)
+_LEADING_NUM_RE = re.compile(r"^(\d{1,4}|[ivxlcdm]{1,7})(?![A-Za-z])", re.IGNORECASE)
+
+# A real table-of-contents page has several "<title> ... <page number>" lines
+# close together; a real chapter-start page does not. Requiring 3+ such lines
+# on one page (rather than fuzzy-matching titles against every page, which
+# false-positives on chapter-start pages that legitimately mention other
+# chapters) is what distinguishes a TOC/listing page to exclude from search.
+_TOC_LINE_RE = re.compile(r"^.{3,100}?[.\s]{1,}\d{1,4}\s*$")
+
+
+def load_pages(pdf_path: str) -> list[str]:
+    reader = PdfReader(pdf_path)
+    return [page.extract_text() or "" for page in reader.pages]
+
+
+def _looks_like_url(line: str) -> bool:
+    return "doi.org" in line or "http" in line.lower() or line.count(".") >= 3
+
+
+def extract_printed_number(text: str) -> str | None:
+    """Best-effort extraction of the printed page number shown on a page,
+    checking (1) an isolated footer/header line that's just the number, then
+    (2) a number embedded at either end of the first non-URL line (running
+    headers alternate between "<num> <author>" and "<title> ... <num>"
+    depending on recto/verso convention). Returns None rather than guessing.
+    """
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line for line in lines if not _looks_like_url(line)]
+    if not lines:
+        return None
+    for line in (lines[-2:] + lines[:2]):
+        if _PAGE_NUM_RE.match(line):
+            return line
+    if len(lines[0]) < 120:
+        match = _TRAILING_NUM_RE.search(lines[0])
+        if match:
+            return match.group(1)
+        match = _LEADING_NUM_RE.match(lines[0])
+        if match:
+            return match.group(1)
+    return None
+
+
+def find_toc_pages(pages: list[str]) -> set[int]:
+    toc_pages = set()
+    for index, text in enumerate(pages):
+        hits = sum(1 for line in text.splitlines() if _TOC_LINE_RE.match(line.strip()))
+        if hits >= 3:
+            toc_pages.add(index)
+    return toc_pages
+
+
+def locate_chapter_start(
+    pages: list[str],
+    title: str,
+    authors: list[str],
+    start_search: int,
+    exclude: set[int],
+) -> tuple[int | None, float]:
+    """Find the true chapter-OPENING page, not merely a continuation page
+    whose running header repeats the chapter title (common in academic
+    layouts). Requires a supplied author's last name to appear near the top
+    of the page too -- the title+byline block is unique to the opening page.
+    Falls back to a title-only match if no author-confirmed page is found.
+    """
+    last_names = [a.split()[-1].lower() for a in authors if a.strip()]
+
+    best_confirmed = (None, 0.0)
+    best_title_only = (None, 0.0)
+    for index in range(start_search, len(pages)):
+        if index in exclude:
+            continue
+        head = pages[index][:250].lower()
+        score = fuzz.partial_ratio(title.lower(), head)
+        if score > best_title_only[1]:
+            best_title_only = (index, score)
+        if score >= 90 and last_names and any(name in head for name in last_names):
+            if score > best_confirmed[1]:
+                best_confirmed = (index, score)
+
+    return best_confirmed if best_confirmed[0] is not None else best_title_only
+
+
+def build_draft(pdf_path: str, toc: list[dict]) -> list[dict]:
+    pages = load_pages(pdf_path)
+    toc_pages = find_toc_pages(pages)
+
+    results = []
+    search_from = 0
+    for entry in toc:
+        index, score = locate_chapter_start(
+            pages, entry["title"], entry.get("authors", []), search_from, toc_pages
+        )
+        results.append({
+            "title": entry["title"],
+            "authors": entry.get("authors", []),
+            "pdf_start_index": index,
+            "match_score": score,
+        })
+        if index is not None:
+            search_from = index + 1
+
+    for i, result in enumerate(results):
+        if result["pdf_start_index"] is None:
+            result["pdf_end_index"] = None
+            continue
+        next_start = results[i + 1]["pdf_start_index"] if i + 1 < len(results) else len(pages)
+        end = (next_start - 1) if next_start is not None else len(pages) - 1
+        # Back off past short "Part N" divider pages (title-only, no body
+        # text) -- these belong to neither neighboring chapter.
+        while end > result["pdf_start_index"] and len(pages[end].strip()) < 150:
+            end -= 1
+        result["pdf_end_index"] = end
+        result["citation_start"] = extract_printed_number(pages[result["pdf_start_index"]])
+        result["citation_end"] = extract_printed_number(pages[end])
+
+    # Entries marked "skip" (e.g. Acknowledgements, Contributors) were only
+    # needed to bound their neighbors -- drop them from the final output.
+    return [r for i, r in enumerate(results) if not toc[i].get("skip")]
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--pdf", required=True, help="Path to the real PDF")
+    parser.add_argument("--toc", required=True, help="JSON file: [{title, authors, skip?}] in reading order")
+    parser.add_argument("--output", default=None, help="Write draft JSON here instead of stdout")
+    args = parser.parse_args()
+
+    toc = json.loads(open(args.toc, encoding="utf-8").read())
+    draft = build_draft(args.pdf, toc)
+    output = json.dumps(draft, indent=2, ensure_ascii=False)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"Wrote draft to {args.output} -- now verify every entry by hand before trusting it.")
+    else:
+        print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 3: Smoke-test the script against an existing evaluation book**
+
+Write a small known-good TOC fixture for one of the already-committed books (these three titles/authors are real — the first three chapters of `9783031466373.expected.json`; **all three are needed**, since the helper bounds each entry's `pdf_end_index` by where the *next* entry starts — a 2-entry TOC would let the second entry's range run off to the end of the book instead of stopping at its real boundary):
+
+```bash
+cat > /tmp/smoke_toc.json <<'EOF'
+[
+  {"title": "Introduction: Transformations of European Welfare States and Social Rights", "authors": ["Stine Piilgaard Porner Nielsen", "Ole Hammerslev"]},
+  {"title": "Claim and Blame: How Welfare Law institutionalises Deservingness", "authors": ["Tobias Eule"]},
+  {"title": "What Is the Function of Welfare Law Today? Consequences of the Work-Line Policy", "authors": ["Inger-Johanne Sand"]}
+]
+EOF
+```
+
+Run:
+```bash
+uv run python scripts/ground_truth_helper.py \
+  --pdf backend/evaluation/book-segmentation/9783031466373.pdf \
+  --toc /tmp/smoke_toc.json
+```
+Expected: a JSON array with three entries, `match_score` close to 95-100 for each; the first two entries' `pdf_start_index`/`pdf_end_index` are `11`/`25` and `27`/`47`, matching `9783031466373.expected.json` exactly (the third entry's own `pdf_end_index` runs to the end of the PDF, since no fourth entry was supplied to bound it — that's expected, not a bug). Requires the PDF to be present locally; run `uv run python scripts/fetch_evaluation_pdfs.py` first if it isn't.
+
+- [ ] **Step 4: Write the workflow documentation**
+
+Create `backend/evaluation/book-segmentation/CLAUDE.md` covering: the DOI-vs-`manifest.local.json` decision (Step 0), how to transcribe a TOC (Step 1), how to run the helper script (Step 2), why every entry must be hand-verified and how (Step 3), the `.expected.json` schema plus the bounds/overlap sanity-check one-liner (Step 4), and the "Known failure modes" list (PDF-index ≠ printed-page-number with non-constant offsets; a chapter's own internal sub-outline getting mistaken for a TOC page; running headers repeating the full title on every page, not just the opening one; bare roman-numeral-letter endings on ordinary words false-positiving as page numbers; short/generic search titles like "Index" or "Postface" being unreliable fuzzy-match targets) — these are exactly the bugs found and fixed while building the seven committed books' ground truth, not hypothetical.
+
+- [ ] **Step 5: Update the README to point at the new workflow**
+
+In `backend/evaluation/book-segmentation/README.md`, replace the "Adding a new evaluation book" section's ad hoc 3-step list with a pointer to `CLAUDE.md` plus the short DOI-vs-local-only decision summary (has a DOI → committed `manifest.json` with `oa: false`; no DOI / can't share → `manifest.local.json`, gitignored, same schema).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/ground_truth_helper.py backend/evaluation/book-segmentation/CLAUDE.md backend/evaluation/book-segmentation/.gitignore backend/evaluation/book-segmentation/README.md
+git commit -m "feat: add ground-truth draft helper and workflow for difficult evaluation PDFs"
+```
+
+**Known limitation:** `manifest.local.json` entries are, by definition, invisible to anyone who didn't add them — CI and every other developer's machine will simply skip them (via the same "PDF not present" skip path Task 30 already has), so a difficult book someone finds and adds locally does not automatically become a shared regression test. If it later turns out to have a DOI after all (or the team decides it's fine to reference even without one), promoting it is just moving its entry from `manifest.local.json` to `manifest.json` and committing the `.expected.json` that's already sitting there — no code changes needed.
 
 ---
 

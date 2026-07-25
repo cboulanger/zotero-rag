@@ -6,8 +6,7 @@ see `docs/superpowers/plans/2026-07-24-chapter-segmentation-linking.md` Task 30)
 The PDFs themselves are gitignored (`*.pdf`, see `.gitignore` in this directory)
 and are not shipped.
 
-`manifest.json` is the **single source of truth** for this evaluation set —
-there is no README table to keep in sync with it. Each entry has:
+`manifest.json` is the source for this evaluation set. Each entry has:
 
 - `filename` — matches a `<name>.pdf` / `<name>.expected.json` pair here
 - `title`, `language`, `extraction_type` (`native` or `scan`), `embedded_toc`
@@ -29,15 +28,19 @@ the exact path to save the file to. Get that book through your institution's
 legal access (library subscription, interlibrary loan, etc.), save it there,
 and re-run the tests.
 
-**Adding a new evaluation book:**
+**Adding a new evaluation book** (e.g. a "difficult" PDF the segmentation
+heuristics scored low-confidence on during live testing against a real
+Zotero library) — see `CLAUDE.md` in this directory for the full step-by-step
+workflow, including the `scripts/ground_truth_helper.py` draft-then-verify
+process and known failure modes. Short version:
 
-1. Add an entry to `manifest.json` (set `"oa": false, "download_url": null`
-   if it can't be freely redistributed — that's fully supported, it just
-   means `fetch_evaluation_pdfs.py` won't auto-download it).
+1. Has a DOI? Add an entry to the committed `manifest.json` (`"oa": false,
+   "download_url": null` if it can't be freely redistributed — that's fully
+   supported, it just means `fetch_evaluation_pdfs.py` won't auto-download
+   it, only print the DOI for manual acquisition). No DOI, or can't be
+   identified/shared at all? Add it to `manifest.local.json` instead (same
+   schema, gitignored, never committed — see `CLAUDE.md`) so it's still
+   exercised by your own local test runs.
 2. Place (or fetch) the PDF at `<filename>` here.
-3. Build `<name>.expected.json` by actually inspecting the real PDF (open it,
-   cross-reference its table of contents against the true chapter-start
-   pages, verify the PDF-index↔printed-page relationship directly — several
-   books in this set have non-constant offsets from blank filler pages or
-   part-divider pages that consume a printed page number without their own
-   PDF page) — never guessed or extrapolated from the TOC alone.
+3. Build `<name>.expected.json` by actually inspecting the real PDF — never
+   guessed or extrapolated from the TOC alone (`CLAUDE.md` explains why).
