@@ -103,7 +103,7 @@ Each script's core logic is a plain async function `async def run(..., progress_
 
 **Design bias — precision over recall.** Born-digital academic edited-volume PDFs (Springer/Routledge/Palgrave-style) very often carry machine-generated, dotted-leader TOCs that heuristics can parse reliably. The expected failure modes are scanned/older volumes (OCR noise degrades TOC matching), running-header-only books with no real TOC, and non-Latin scripts. Given this is heuristics-only for v1 (no ML/NLP classifier), segmentation is only ever claimed when TOC cross-referencing strongly confirms it; everything else is reported as `segmentation_confidence: "low"` for manual review rather than guessed — a wrong auto-link would corrupt real bibliographic metadata, which is worse than a missed one. The output schema is intentionally decoupled from the detection method (plain page ranges + confidence scores) so a future ML-based detector could replace the heuristics internally without changing what scripts 3/4 consume.
 
-**Ground-truth testing:** `tests/fixtures/chapter_segmentation/` holds sample PDFs (to be supplied) plus hand-annotated expected output (title/author/page-range per chapter). A scoring harness (`tests/test_chapter_segmentation_accuracy.py`) reports precision/recall on chapter-boundary detection and author-attribution accuracy — probabilistic, not a hard pass/fail gate.
+**Ground-truth testing:** `backend/evaluation/book-segmentation/` holds six real, hand-verified OA books (`manifest.json` lists each with its language/download URL; the gitignored PDFs are fetched on demand via `scripts/fetch_evaluation_pdfs.py`) plus one manually-supplied non-OA scan, each paired with a hand-annotated `<name>.expected.json` (title/author/PDF-index-range/citation-pages per chapter — see that directory's README for the exact schema and how to add more books). A scoring harness (`tests/test_chapter_segmentation_accuracy.py`) reports precision/recall on chapter-boundary detection and author-attribution accuracy — probabilistic, not a hard pass/fail gate.
 
 ## 6. Script 2 — OCR (`ocr_attachments.py`)
 
@@ -202,7 +202,8 @@ scripts/                  # matches existing convention: bin/ is for unattended 
   ocr_attachments.py
   retrofit_chapter_links.py
   upload_chapters.py
-tests/fixtures/chapter_segmentation/   # ground-truth PDFs + annotations (§5)
+backend/evaluation/book-segmentation/  # ground-truth manifest.json + <name>.expected.json (§5); PDFs gitignored
+tests/test_chapter_segmentation_accuracy.py  # scoring harness reading the above
 ```
 
 ## 11. New dependencies

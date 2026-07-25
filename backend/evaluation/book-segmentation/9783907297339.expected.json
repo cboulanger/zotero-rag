@@ -1,0 +1,15 @@
+{
+  "chapters": [
+    {"title": "Avant-propos", "authors": ["Joséphine Boillat", "Stéphane Werly"], "pdf_start_index": 6, "pdf_end_index": 7, "citation_pages": "V-VI"},
+    {"title": "Historique de la LIPAD: 20 ans de transparence à Genève, une histoire commencée il y a 45 ans", "authors": ["Fabien Mangilli"], "pdf_start_index": 14, "pdf_end_index": 30, "citation_pages": "1-17"},
+    {"title": "20 ans d'utilisation de la LIPAD par les journalistes", "authors": ["Anaïs Fontaine", "Bastien von Wyss"], "pdf_start_index": 32, "pdf_end_index": 60, "citation_pages": "19-47"},
+    {"title": "La LIPAD et la bonne foi: Un principe essentiel lors de la requête d'accès à un document", "authors": ["David Hofmann"], "pdf_start_index": 62, "pdf_end_index": 90, "citation_pages": "49-77"},
+    {"title": "Droit d'accès aux documents officiels et protection des intérêts privés: Synthèse après 20 ans de pratique à Genève", "authors": ["Aurélie Gavillet"], "pdf_start_index": 92, "pdf_end_index": 120, "citation_pages": "79-107"},
+    {"title": "L'accès aux archives publiques: à la recherche d'un équilibre entre protection des données personnelles et droit à l'information", "authors": ["Pierre Flückiger"], "pdf_start_index": 122, "pdf_end_index": 142, "citation_pages": "109-129"},
+    {"title": "Zugang zu Prüfungsunterlagen: Anspruch nach Öffentlichkeitsprinzip unter Berücksichtigung des Datenschutzrechts und des Verfahrensrechts", "authors": ["Julian Powell"], "pdf_start_index": 144, "pdf_end_index": 161, "citation_pages": "131-148"},
+    {"title": "Principes de procédure poussés dans les cordes par celui de la transparence ?", "authors": ["Christian Flueckiger"], "pdf_start_index": 162, "pdf_end_index": 184, "citation_pages": "149-171"},
+    {"title": "La transparence — un principe devenu très populaire: L'exemple fribourgeois", "authors": ["Martine Stoffel", "Yann Vöchting"], "pdf_start_index": 186, "pdf_end_index": 214, "citation_pages": "173-201"},
+    {"title": "Les 20 ans de la LIPAD — Période de 2001–2009", "authors": ["Christine Sayegh"], "pdf_start_index": 216, "pdf_end_index": 227, "citation_pages": "203-214"},
+    {"title": "Postface: Transparence, quo vadis ?", "authors": ["Bertil Cottier"], "pdf_start_index": 228, "pdf_end_index": 239, "citation_pages": "215-226"}
+  ]
+}

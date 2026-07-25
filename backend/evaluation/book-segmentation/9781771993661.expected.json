@@ -1,0 +1,14 @@
+{
+  "chapters": [
+    {"title": "Foreword", "authors": ["Christiane Wilke"], "pdf_start_index": 6, "pdf_end_index": 8, "citation_pages": "vii-ix"},
+    {"title": "Introduction: Socio-legal Perspectives on Law's Violence", "authors": ["Mariful Alam", "Patrick Dwyer", "Katrin Roots"], "pdf_start_index": 14, "pdf_end_index": 44, "citation_pages": "1-31"},
+    {"title": "Race and Colonialism in Socio-legal Studies in Canada", "authors": ["Carmela Murdocca", "Shaira Vadasaria", "Timothy Bryan"], "pdf_start_index": 48, "pdf_end_index": 70, "citation_pages": "35-57"},
+    {"title": "Jurisfiction and Other Settler-Colonial Legal Imaginaries", "authors": ["Stacy Douglas"], "pdf_start_index": 72, "pdf_end_index": 91, "citation_pages": "59-78"},
+    {"title": "Making Terrorism: Security Practices and the Production of Terror Activities in Canada", "authors": ["Yavar Hameed", "Jeffrey Monaghan"], "pdf_start_index": 94, "pdf_end_index": 119, "citation_pages": "81-106"},
+    {"title": "Law, Gendered Violence, and Justice: Critically Engaging #MeToo", "authors": ["Emily Lockhart", "Katrin Roots", "Heather Tasker"], "pdf_start_index": 120, "pdf_end_index": 143, "citation_pages": "107-130"},
+    {"title": "Through Different Lenses: Legality, Humanitarianism, and the Western Gaze", "authors": ["Heather Tasker"], "pdf_start_index": 144, "pdf_end_index": 162, "citation_pages": "131-149"},
+    {"title": "Practicing Freedom of Information as \"Feral Law\" and Advancing Research Methods in Socio-legal Studies", "authors": ["Alex Luscombe", "Kevin Walby"], "pdf_start_index": 166, "pdf_end_index": 184, "citation_pages": "153-171"},
+    {"title": "Far from the Madding Crowds: Redefining the Field of Socio-legal Studies from Within", "authors": ["Nergis Canefe"], "pdf_start_index": 186, "pdf_end_index": 217, "citation_pages": "173-204"},
+    {"title": "Afterword: Toward the Law of Anti-laws: Notes on Prefigurative Politics and Radical Imaginations", "authors": ["Mariful Alam", "Irina Ceric"], "pdf_start_index": 218, "pdf_end_index": 225, "citation_pages": "205-212"}
+  ]
+}

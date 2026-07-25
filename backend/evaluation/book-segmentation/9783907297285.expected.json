@@ -1,0 +1,17 @@
+{
+  "chapters": [
+    {"title": "Vorwort", "authors": ["Irina Lehner", "Caroline Rausch", "Lea Ina Schneider", "Anna Elisa Stauffer"], "pdf_start_index": 4, "pdf_end_index": 8, "citation_pages": "V-IX"},
+    {"title": "Krise und römisches Recht", "authors": ["Ulrike Babusiaux"], "pdf_start_index": 30, "pdf_end_index": 48, "citation_pages": "3-21"},
+    {"title": "«Corona wirkt wie ein Vergrösserungsglas.»", "authors": ["Andreas Kley", "Larissa Tschudi"], "pdf_start_index": 50, "pdf_end_index": 56, "citation_pages": "23-29"},
+    {"title": "Die Krise als Sachverhalt", "authors": ["Giulia Walter", "Filippo Contarini"], "pdf_start_index": 60, "pdf_end_index": 75, "citation_pages": "33-48"},
+    {"title": "Finanzmarktrecht, Vertrauen und die «permanente Krise»", "authors": ["Claude Humbel"], "pdf_start_index": 76, "pdf_end_index": 93, "citation_pages": "49-66"},
+    {"title": "Versicherungsunternehmen in der Krise — Notwendigkeit eines Sanierungsrechts?", "authors": ["Alexander Salamon"], "pdf_start_index": 94, "pdf_end_index": 108, "citation_pages": "67-81"},
+    {"title": "Aufschub der Überschuldungsanzeige im neuen Aktienrecht", "authors": ["Sandro Bernet"], "pdf_start_index": 110, "pdf_end_index": 126, "citation_pages": "83-99"},
+    {"title": "Anreizmodelle zur Überwindung des Organmangels", "authors": ["Arezoo Sang Bastian"], "pdf_start_index": 128, "pdf_end_index": 144, "citation_pages": "101-117"},
+    {"title": "Die humanitäre Aufnahme von geflüchteten Personen in der Krise", "authors": ["Mei Yi Lew"], "pdf_start_index": 146, "pdf_end_index": 160, "citation_pages": "119-133"},
+    {"title": "Mit Poulantzas über die Corona-Krise nachdenken? Einführende Überlegungen", "authors": ["Thomas Schaad"], "pdf_start_index": 162, "pdf_end_index": 180, "citation_pages": "135-153"},
+    {"title": "Einschränkungen der politischen Rechte in Notsituationen", "authors": ["Luka Markić"], "pdf_start_index": 182, "pdf_end_index": 195, "citation_pages": "155-168"},
+    {"title": "Le droit d'urgence et la restriction des droits politiques", "authors": ["Romane Loviat"], "pdf_start_index": 196, "pdf_end_index": 206, "citation_pages": "169-179"},
+    {"title": "Kantonales Notrecht: Bewährungsprobe bestanden?", "authors": ["Martin Wilhelm"], "pdf_start_index": 208, "pdf_end_index": 228, "citation_pages": "181-201"}
+  ]
+}

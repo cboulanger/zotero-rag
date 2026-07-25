@@ -1,0 +1,67 @@
+{
+  "books": [
+    {
+      "filename": "9783031466373.pdf",
+      "title": "Transformations of European Welfare States and Social Rights",
+      "language": "en",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://library.oapen.org/bitstream/handle/20.500.12657/86934/978-3-031-46637-3.pdf?sequence=1"
+    },
+    {
+      "filename": "9781771993661.pdf",
+      "title": "Violence, Imagination, and Resistance: Socio-legal Interrogations of Power",
+      "language": "en",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://www.aupress.ca/app/uploads/120313_Alam_et_al_2023-Violence_Imagination_and_Resistance.pdf"
+    },
+    {
+      "filename": "9783907297339.pdf",
+      "title": "20 ans de transparence à Genève",
+      "language": "fr",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://library.oapen.org/bitstream/handle/20.500.12657/61692/oa_pdf-033-1675100892.pdf?sequence=1"
+    },
+    {
+      "filename": "9782375460122.pdf",
+      "title": "Accueillir des publics migrants et immigrés. Interculturalité en bibliothèque",
+      "language": "fr",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://books.openedition.org/pressesenssib/pdf/7527"
+    },
+    {
+      "filename": "9783907297285.pdf",
+      "title": "Recht in der Krise (APARIUZ XXIII)",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://library.oapen.org/bitstream/handle/20.500.12657/58534/oa_pdf-028-1-1663335379.pdf?sequence=1"
+    },
+    {
+      "filename": "9783847432364.pdf",
+      "title": "Recht umkämpft",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": true,
+      "oa": true,
+      "download_url": "https://library.oapen.org/bitstream/handle/20.500.12657/101141/UTF-89783847432364.pdf?sequence=1"
+    },
+    {
+      "filename": "9783322969828.pdf",
+      "title": "Jahrbuch für Rechtssoziologie und Rechtstheorie IV",
+      "language": "de",
+      "extraction_type": "scan",
+      "embedded_toc": false,
+      "oa": false,
+      "download_url": null
+    }
+  ]
+}

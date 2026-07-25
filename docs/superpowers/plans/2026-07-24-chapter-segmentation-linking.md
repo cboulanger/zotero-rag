@@ -3519,51 +3519,27 @@ git commit -m "feat: suppress a book's pages covered by a linked chapter during 
 
 ---
 
-### Task 30: Ground-truth fixtures directory + accuracy scoring harness (§5, §12)
+### Task 30: Ground-truth accuracy scoring harness against real evaluation data (§5, §12)
 
-The user will supply real sample book PDFs plus hand-annotated expected chapter boundaries after this plan lands (see design spec §5's "Ground-truth testing"). This task creates the directory, its annotation format, and a real (non-placeholder) scoring harness that runs against whatever fixtures exist — reporting nothing to score yet, honestly, rather than faking data that doesn't exist.
+Unlike the original draft of this task, the ground-truth data already exists — six real, hand-verified OA books (English/French/German, various publishers) live in `backend/evaluation/book-segmentation/`, each with a `<name>.expected.json` built by directly inspecting the real PDF (TOC page cross-referenced against actual chapter-start pages, page-numbering offset verified per book — not guessed). A seventh, non-OA scanned book (`9783322969828.pdf`) is documented in that directory's README but intentionally has no `.expected.json` yet (see Known limitations below). This task writes the scoring harness that runs against that real data.
 
 **Files:**
-- Create: `tests/fixtures/chapter_segmentation/README.md`
-- Create: `tests/test_chapter_segmentation_accuracy.py`
+- Test: `tests/test_chapter_segmentation_accuracy.py`
+- Reference (already present, not created by this task): `backend/evaluation/book-segmentation/manifest.json`, `backend/evaluation/book-segmentation/README.md`, `backend/evaluation/book-segmentation/*.expected.json`, `scripts/fetch_evaluation_pdfs.py`
 
-- [ ] **Step 1: Create the fixtures directory and document its format**
-
-```markdown
-# Chapter segmentation ground-truth fixtures
-
-Each fixture is a pair of files sharing a basename:
-
-- `<name>.pdf` — a real edited-book PDF (born-digital, with a text layer).
-- `<name>.expected.json` — hand-annotated expected output, in this shape:
-
-​```json
-{
-  "chapters": [
-    {"title": "...", "pdf_start_index": 12, "pdf_end_index": 34, "citation_pages": "45-67"}
-  ]
-}
-​```
-
-`pdf_start_index`/`pdf_end_index` are 0-based physical PDF page indices
-(open the PDF and count pages from 0, not the printed page numbers).
-`citation_pages` is the printed/bibliographic page range as it actually
-appears in the book, or `null` if the book has no printed page numbers on
-the relevant pages.
-
-This directory is empty until real PDFs are added — `test_chapter_segmentation_accuracy.py`
-skips cleanly (not a failure) when no `*.pdf` files are present here.
-```
-
-- [ ] **Step 2: Write the scoring harness**
+- [ ] **Step 1: Write the scoring harness**
 
 ```python
 """Precision/recall scoring for chapter_segmentation.analyze_attachment
-against hand-annotated ground-truth PDFs (design spec §5, §12).
+against the real, hand-verified ground-truth books in
+backend/evaluation/book-segmentation/ (design spec §5, §12).
 
-Skips (not fails) when no fixtures have been added yet — this file is a
-real, runnable test, just conditioned on real, checkable state (whether
-fixture files exist), not a placeholder standing in for unwritten logic.
+The PDFs themselves are gitignored — run
+`uv run python scripts/fetch_evaluation_pdfs.py` first to download the
+open-access ones. A book is skipped (not failed) if its PDF isn't present
+locally yet (covers both "not fetched yet" and the one non-OA scan that
+can never be auto-fetched) — this is real, checkable state, not a
+placeholder standing in for unwritten logic.
 """
 
 import json
@@ -3575,23 +3551,30 @@ from backend.services.chapter_segmentation import (
     extract_page_texts_from_pdf_bytes,
 )
 
-_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "chapter_segmentation"
+_EVAL_DIR = Path(__file__).parent.parent / "backend" / "evaluation" / "book-segmentation"
 
 
-def _fixture_pairs() -> list[tuple[Path, Path]]:
-    pdfs = sorted(_FIXTURES_DIR.glob("*.pdf"))
-    return [
-        (pdf, pdf.with_name(pdf.stem + ".expected.json"))
-        for pdf in pdfs
-        if pdf.with_name(pdf.stem + ".expected.json").exists()
-    ]
+def _available_books() -> list[tuple[Path, Path]]:
+    """Return (pdf_path, expected_json_path) pairs for every manifest entry
+    whose PDF is actually present locally right now."""
+    manifest = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))
+    pairs = []
+    for book in manifest["books"]:
+        pdf_path = _EVAL_DIR / book["filename"]
+        expected_path = _EVAL_DIR / (Path(book["filename"]).stem + ".expected.json")
+        if pdf_path.exists() and expected_path.exists():
+            pairs.append((pdf_path, expected_path))
+    return pairs
 
 
-@unittest.skipUnless(_fixture_pairs(), "No ground-truth PDFs in tests/fixtures/chapter_segmentation/ yet")
+@unittest.skipUnless(
+    _available_books(),
+    "No evaluation PDFs present — run: uv run python scripts/fetch_evaluation_pdfs.py",
+)
 class TestChapterSegmentationAccuracy(unittest.TestCase):
-    def test_boundary_precision_recall_per_fixture(self):
-        for pdf_path, expected_path in _fixture_pairs():
-            with self.subTest(fixture=pdf_path.name):
+    def test_boundary_precision_recall_per_book(self):
+        for pdf_path, expected_path in _available_books():
+            with self.subTest(book=pdf_path.name):
                 expected = json.loads(expected_path.read_text(encoding="utf-8"))["chapters"]
                 pages = extract_page_texts_from_pdf_bytes(pdf_path.read_bytes())
                 result = analyze_attachment(pages)
@@ -3606,27 +3589,31 @@ class TestChapterSegmentationAccuracy(unittest.TestCase):
                       f"({len(true_positives)}/{len(found_ranges)} found, {len(true_positives)}/{len(expected_ranges)} expected)")
                 # Reported, not gated (design spec §12: probabilistic, not pass/fail) —
                 # this assertion only catches a total regression to zero detection.
-                if expected_ranges:
-                    self.assertGreater(recall, 0.0, f"{pdf_path.name}: detected zero of {len(expected_ranges)} known chapters")
+                self.assertGreater(recall, 0.0, f"{pdf_path.name}: detected zero of {len(expected_ranges)} known chapters")
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 3: Run the harness to confirm it skips cleanly with no fixtures present**
+- [ ] **Step 2: Fetch the real evaluation PDFs**
+
+Run: `uv run python scripts/fetch_evaluation_pdfs.py`
+Expected: downloads the six OA books into `backend/evaluation/book-segmentation/` (or reports `[skip] ... already present` if you already have them from building the ground truth).
+
+- [ ] **Step 3: Run the harness against the real books**
 
 Run: `uv run python -m unittest tests.test_chapter_segmentation_accuracy -v`
-Expected: `test_boundary_precision_recall_per_fixture ... skipped 'No ground-truth PDFs in tests/fixtures/chapter_segmentation/ yet'`
+Expected: PASS, with six `precision=... recall=...` lines printed (one per book) — this is the first real signal on how well Tasks 5-8's heuristics actually perform, not a synthetic fixture. A recall well below 1.0 on any book is expected and informative (see design spec §13's precision-over-recall bias) — investigate via the `diagnostics` field in that book's `analyze_attachment` output, not by relaxing this test's assertion.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add tests/fixtures/chapter_segmentation/README.md tests/test_chapter_segmentation_accuracy.py
-git commit -m "test: add ground-truth fixtures directory and accuracy scoring harness"
+git add tests/test_chapter_segmentation_accuracy.py
+git commit -m "test: add accuracy scoring harness against real evaluation books"
 ```
 
-Once the user supplies real PDFs into `tests/fixtures/chapter_segmentation/` (with matching `.expected.json` annotations), re-run this harness to see actual precision/recall numbers — no plan changes needed for that, the harness already picks up whatever fixtures exist.
+**Known limitation (documented in `backend/evaluation/book-segmentation/README.md`, not fixed here):** the seventh book, `9783322969828.pdf` (a 1976 scanned/OCR'd Springer yearbook, `OA: No`), has no `.expected.json` — it isn't auto-fetchable, and its OCR-quality text needs validating against the real OCR pipeline (script 2, Task 19-20) rather than plain `pypdf` extraction before ground truth can be built for it confidently. Building that one book's ground truth, and wiring a manual-acquisition path into this harness, is a reasonable follow-up once script 2 exists — not required for this task.
 
 ---
 
