@@ -413,11 +413,12 @@ async def llm_disambiguate_chapter_start(
     llm_service: LLMService,
 ) -> ChapterStartMatch | None:
     """Shows the LLM each competing candidate's page index + a short
-    snippet (page head, matching the ~200-char window locate_chapter_start
-    itself scores against) and asks it to pick which one is the chapter's
-    true opening page, or none. A small, bounded prompt -- a handful of
-    short snippets, never whole-book text -- since locate_chapter_start_candidates
-    has already narrowed the field to the real contenders (design spec §6).
+    snippet (page head, larger than the ~200-char window locate_chapter_start
+    itself scores against, to give the LLM more context than the heuristic
+    had) and asks it to pick which one is the chapter's true opening page,
+    or none. A small, bounded prompt -- a handful of short snippets, never
+    whole-book text -- since locate_chapter_start_candidates has already
+    narrowed the field to the real contenders (design spec §6).
     """
     author_clause = f" by {', '.join(authors)}" if authors else ""
     candidate_blocks = "\n\n".join(

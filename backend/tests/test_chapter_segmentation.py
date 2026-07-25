@@ -204,6 +204,15 @@ class TestLlmDisambiguateChapterStart(unittest.IsolatedAsyncioTestCase):
         match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
         self.assertIsNone(match)
 
+    async def test_returns_none_on_zero_choice(self):
+        # 0 is a distinct boundary from "too high" -- a plausible LLM
+        # off-by-one response if it 0-indexes instead of 1-indexing.
+        candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
+        pages = ["some text"] * 2
+        llm = self._fake_llm('{"chosen_candidate": 0}')
+        match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
+        self.assertIsNone(match)
+
     async def test_returns_none_on_malformed_response(self):
         candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
         pages = ["some text"] * 2
