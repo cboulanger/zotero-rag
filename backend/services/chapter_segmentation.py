@@ -25,6 +25,55 @@ from backend.services.chapter_link_store import parse_links
 # prose sentences ending in a number don't false-positive.
 _TOC_LINE_RE = re.compile(r"^(?P<title>.{3,120}?)[.\s]{1,}(?P<page>\d{1,4})\s*$")
 
+# A real chapter TOC page has several title-like lines close together; a
+# back-of-book subject index, a bibliography, or an ordinary content page
+# can each contribute one or two incidental lines (a footnote reference, a
+# citation, a running header) that happen to fit the same pattern without
+# being a chapter listing at all. Requiring this many qualifying lines on
+# the SAME page before trusting any of them mirrors the already-proven
+# find_toc_pages logic in scripts/ground_truth_helper.py (built there for a
+# different purpose -- excluding TOC pages from content search -- but the
+# same page-density signal discriminates a real listing from scattered
+# noise here too). Found empirically: on real evaluation books, ~60-70% of
+# raw regex matches turned out to be isolated 1-2-line noise on unrelated
+# pages, not genuine TOC entries.
+_TOC_MIN_LINES_PER_PAGE = 3
+
+# A printed page number more than this many times the PDF's total physical
+# page count is implausible for a real chapter -- almost always a
+# publication year, a law/citation reference number, or similar noise
+# picked up from imprint or citation text that happens to match the
+# "<text> ... <number>" pattern. Never a real chapter's page number.
+_TOC_MAX_PAGE_NUMBER_RATIO = 2.0
+
+# A book has exactly one real table of contents, appearing once as a small
+# number of (near-)contiguous pages -- gap tolerance for grouping qualifying
+# pages (see _TOC_MIN_LINES_PER_PAGE) into that one listing. Only the FIRST
+# such cluster in page order is trusted; any later one is discarded, since
+# it's far more likely to be a chapter's own internal sub-outline or a
+# back-of-book index/bibliography (both structurally resemble a listing --
+# many short lines each ending in a number -- but are not the book's table
+# of contents). Found empirically: a legal-studies book had four qualifying
+# pages beyond its real 1-page front TOC, all internal chapter sub-outlines,
+# whose sub-heading entries (numbered/lettered "II.", "B.", "5.") corrupted
+# top-level chapter boundary detection when treated as competing chapters;
+# another book's real 2-page front TOC was joined by a 4-page, much denser
+# back-of-book index that would otherwise dominate with pure noise.
+_TOC_PAGE_CLUSTER_GAP = 2
+
+
+def _looks_like_url_or_doi(line: str) -> bool:
+    """A chapter title is never a URL or DOI -- these show up in imprint/
+    copyright front-matter text and can otherwise fuzzy-match the TOC-line
+    pattern (a run of digits at the end looks like a "title ... page
+    number" line). Deliberately does NOT use a generic dot-count heuristic
+    (unlike a similar check in scripts/ground_truth_helper.py, written for
+    different input) -- a real TOC dot-leader line ("Title ..... 12") also
+    has several dots, so that would reject genuine entries too.
+    """
+    lowered = line.lower()
+    return "doi.org" in lowered or "http://" in lowered or "https://" in lowered or "www." in lowered
+
 
 @dataclass(frozen=True)
 class TocEntry:
@@ -46,6 +95,18 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
     """Scan the front ~max_front_fraction and back ~max_back_fraction of
     pages for TOC-style lines ("<title> ... <printed page number>").
 
+    A page is only trusted as a real chapter listing when at least
+    _TOC_MIN_LINES_PER_PAGE of its lines structurally match the TOC-line
+    pattern at all (see comment on the constant) -- this is a purely
+    structural/typographic signal (does this page look like a listing?),
+    checked BEFORE any content filtering, so one bad line doesn't disqualify
+    an otherwise-genuine listing page. Among qualifying pages, only the
+    FIRST (near-)contiguous cluster is used (see _TOC_PAGE_CLUSTER_GAP) --
+    a book has one real table of contents, not several. Within that
+    cluster, individual lines that look like a URL/DOI, or whose captured
+    number is an implausible page number for this PDF's actual length, are
+    still excluded from the final result.
+
     Returns entries in the order found; each entry's `printed_page_number`
     is a target to later locate by content search (see Task 6) — never an
     index to jump to directly.
@@ -55,25 +116,38 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
         return []
     front_count = max(1, int(total * max_front_fraction))
     back_count = max(1, int(total * max_back_fraction))
-    scan_indices = list(range(min(front_count, total))) + list(range(max(0, total - back_count), total))
-    scan_indices = sorted(set(scan_indices))
+    scan_indices = sorted(set(range(min(front_count, total))) | set(range(max(0, total - back_count), total)))
+    max_plausible_page_number = total * _TOC_MAX_PAGE_NUMBER_RATIO
+
+    raw_matches_by_page: dict[int, list[re.Match]] = {}
+    for page_index in scan_indices:
+        raw_matches = [
+            m for line in pages[page_index].splitlines()
+            if (m := _TOC_LINE_RE.match(line.strip())) is not None
+        ]
+        if len(raw_matches) >= _TOC_MIN_LINES_PER_PAGE:
+            raw_matches_by_page[page_index] = raw_matches
+
+    qualifying_pages = sorted(raw_matches_by_page)
+    first_cluster: list[int] = []
+    for page_index in qualifying_pages:
+        if first_cluster and page_index - first_cluster[-1] > _TOC_PAGE_CLUSTER_GAP:
+            break
+        first_cluster.append(page_index)
 
     entries: list[TocEntry] = []
-    for page_index in scan_indices:
-        for line in pages[page_index].splitlines():
-            m = _TOC_LINE_RE.match(line.strip())
-            if not m:
+    for page_index in first_cluster:
+        for m in raw_matches_by_page[page_index]:
+            stripped_line = m.group(0)
+            if _looks_like_url_or_doi(stripped_line):
                 continue
             title = m.group("title").strip(" .")
             if len(title) < 3:
                 continue
-            entries.append(
-                TocEntry(
-                    title=title,
-                    printed_page_number=int(m.group("page")),
-                    source_page_index=page_index,
-                )
-            )
+            page_number = int(m.group("page"))
+            if page_number > max_plausible_page_number:
+                continue
+            entries.append(TocEntry(title=title, printed_page_number=page_number, source_page_index=page_index))
     return entries
 
 
@@ -249,6 +323,14 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
     return seen
 
 
+# A trailing page with fewer than this many stripped characters is treated
+# as a blank/divider page (e.g. forcing the next chapter onto a recto page)
+# rather than real chapter content -- same threshold and rationale as
+# scripts/ground_truth_helper.py's build_draft, which needed the identical
+# trim when constructing ground truth by hand from real books.
+_TRAILING_BLANK_PAGE_MAX_CHARS = 150
+
+
 def analyze_attachment(pages: list[str]) -> dict:
     """Orchestrate TOC detection, content-based localization, printed-page
     extraction, and author NER into the per-attachment output described in
@@ -278,6 +360,14 @@ def analyze_attachment(pages: list[str]) -> dict:
         end_index = (located[i + 1][1].index - 1) if i + 1 < len(located) else (total_pages - 1)
         if end_index < start_index:
             continue  # degenerate/ambiguous overlap — skip rather than guess
+
+        # Back off past trailing blank/divider pages (e.g. a blank page
+        # forcing the next chapter to start on a recto page) -- these
+        # belong to neither neighboring chapter. Mirrors the proven
+        # build_draft logic in scripts/ground_truth_helper.py, which needed
+        # the identical fix when building ground truth by hand.
+        while end_index > start_index and len(pages[end_index].strip()) < _TRAILING_BLANK_PAGE_MAX_CHARS:
+            end_index -= 1
 
         start_printed = extract_printed_page_number(pages[start_index])
         end_printed = extract_printed_page_number(pages[end_index])

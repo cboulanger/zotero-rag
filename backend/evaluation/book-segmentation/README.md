@@ -91,37 +91,47 @@ this table as a snapshot to compare future runs against, not a guarantee):
 
 | Book (title / filename) | Language | Type | Precision | Recall | Found / Expected |
 | --- | --- | --- | --- | --- | --- |
-| Transformations of European Welfare States and Social Rights (`9783031466373.pdf`) | en | native | 0.09 | 0.18 | 2/22 found, 2/11 expected |
-| Violence, Imagination, and Resistance (`9781771993661.pdf`) | en | native | 0.33 | 0.30 | 3/9 found, 3/10 expected |
-| 20 ans de transparence à Genève (`9783907297339.pdf`) | fr | native | 0.14 | 0.18 | 2/14 found, 2/11 expected |
-| Accueillir des publics migrants et immigrés (`9782375460122.pdf`) | fr | native | 0.00 | 0.00 | 0/17 found, 0/16 expected |
-| Recht in der Krise — APARIUZ XXIII (`9783907297285.pdf`) | de | native | 0.12 | 0.15 | 2/16 found, 2/13 expected |
-| Recht umkämpft (`9783847432364.pdf`) | de | native | 0.69 | 0.52 | 11/16 found, 11/21 expected |
-| Jahrbuch für Rechtssoziologie und Rechtstheorie IV (`9783322969828.pdf`) | de | scan | 0.50 | 0.62 | 15/30 found, 15/24 expected |
+| Transformations of European Welfare States and Social Rights (`9783031466373.pdf`) | en | native | 0.78 | 0.64 | 7/9 found, 7/11 expected |
+| Violence, Imagination, and Resistance (`9781771993661.pdf`) | en | native | 0.90 | 0.90 | 9/10 found, 9/10 expected |
+| 20 ans de transparence à Genève (`9783907297339.pdf`) | fr | native | 0.71 | 0.45 | 5/7 found, 5/11 expected |
+| Accueillir des publics migrants et immigrés (`9782375460122.pdf`) | fr | native | 0.00 | 0.00 | 0/0 found, 0/16 expected |
+| Recht in der Krise — APARIUZ XXIII (`9783907297285.pdf`) | de | native | 0.50 | 0.54 | 7/14 found, 7/13 expected |
+| Recht umkämpft (`9783847432364.pdf`) | de | native | 0.89 | 0.76 | 16/18 found, 16/21 expected |
+| Jahrbuch für Rechtssoziologie und Rechtstheorie IV (`9783322969828.pdf`) | de | scan | 0.63 | 0.71 | 17/27 found, 17/24 expected |
 
 `Accueillir des publics migrants et immigrés` is the one book currently at
 0% recall — a known, unfixed limitation of `locate_chapter_start`'s
 fuzzy-matching heuristic (no signal available to disambiguate its specific
 chapter titles from surrounding text), tracked as an accepted gap rather than
-a regression.
+a regression. It now finds zero candidates rather than many wrong ones
+(`find_toc_candidates`'s noise filters correctly reject its front-matter
+listing pages), which is a smaller failure mode but doesn't fix the
+underlying recall gap.
 
-**Why precision looks low even when the algorithm "works":** across the
-found ranges above, only ~28% are an exact match against ground truth with
-no confidence filtering at all. Splitting the misses further: about a third
-(33 of 89 wrong ranges, in one measurement) actually have the *correct*
-`pdf_start_index` — `locate_chapter_start` found the right opening page, but
-the resulting range's end boundary is wrong because it's derived from the
-*next* chapter's location, not this chapter's own match quality. The rest
-(56 of 89) are matched to a genuinely wrong page — most commonly because
-`find_toc_candidates` extracted a non-chapter line (a running header
-fragment, a repeated DOI, a publisher imprint) as if it were a real chapter
-title, and it happened to fuzzy-match some page confidently. That second
-category is what `analyze_attachment`'s per-chapter `confidence` score
-(`match_confidence` in `chapter_segmentation.py`) **cannot** see — a
-confidently-wrong match to a bogus title looks identical, locally, to a
-confidently-right one. Raising `chapter_upload.py`'s `confidence_threshold`
-(now defaulting to 0.98, up from an inert 0.8 default that never actually
-filtered anything back when confidence was a flat constant) roughly doubles
-precision among chapters that clear the bar (28% → 45%) while keeping 89% of
-genuinely correct chapters — a real, measured improvement, but not a fix for
-TOC-extraction noise, which is the next planned piece of work.
+**What changed since the table above first went in** (see git history on
+`chapter_segmentation.py` for the full sequence): `find_toc_candidates` used
+to accept *any* line anywhere in the front/back scan region that loosely
+matched "title ... page number" — on one book this pulled 143 candidate
+"chapters" out of a back-of-book alphabetical index and a book's own
+per-chapter sub-outlines, for 11 real chapters. It now requires a page to
+have several such lines before trusting any of them (a real listing looks
+like a listing), keeps only the first such page-cluster in the document (a
+book has one table of contents, not several), and drops individual lines
+that are a URL/DOI or have an implausible page number (a copyright year,
+a law-citation reference). Separately, `analyze_attachment` now trims a
+chapter's computed end boundary past trailing blank/divider pages, fixing a
+systematic off-by-one on books that force chapters to start on a recto page
+— the same fix `scripts/ground_truth_helper.py` already needed when this
+evaluation set's own ground truth was built by hand.
+
+Combined effect across the 7-book set: aggregate precision went from ~28%
+to ~72%, aggregate recall from ~31% to ~58%, with no book's recall newly
+regressing to zero. `chapter_upload.py`'s `confidence_threshold` default
+was re-calibrated afterward (0.98 → 0.96) since the previous calibration
+was against the old, much noisier candidate set — the new default lifts
+precision among chapters that clear the bar to ~82% while keeping 90% of
+genuinely correct chapters. **Re-run the calibration sweep in this file's
+git history (or re-derive it against `analyze_attachment`'s output) any
+time `find_toc_candidates`, `locate_chapter_start`, or `match_confidence`
+change, or the evaluation set grows** — these numbers are a snapshot tied
+to the current heuristics, not a permanent constant.

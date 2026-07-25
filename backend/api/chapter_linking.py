@@ -194,13 +194,18 @@ class SegmentUploadRequest(BaseModel):
     analyses: list[dict]
     committed: bool = False
     # Calibrated against the real 7-book evaluation set (backend/evaluation/
-    # book-segmentation/README.md "Current results"): raising this from a
-    # previous 0.8 default to 0.98 roughly doubles precision among chapters
-    # that clear the bar (28% -> 45%) while keeping 89% of genuinely correct
-    # chapters. Higher still (0.99+) loses recall fast for no further
-    # precision gain. Re-calibrate if match_confidence's formula changes or
-    # the evaluation set grows meaningfully.
-    confidence_threshold: float = 0.98
+    # book-segmentation/README.md "Current results"): 0.96 dominates every
+    # higher value in the sweep (0.97, 0.98, ...) on both precision AND
+    # recall simultaneously once find_toc_candidates' noise-reduction
+    # filters were added -- it lifts precision among chapters that clear
+    # the bar from a no-filter baseline of ~72% to ~82%, while keeping 90%
+    # of genuinely correct chapters. Re-calibrate (see backend/evaluation/
+    # book-segmentation/README.md's "Running an evaluation" section) if
+    # match_confidence's formula changes, find_toc_candidates changes, or
+    # the evaluation set grows meaningfully -- this value is not stable
+    # across such changes, it was re-picked once already after the noise
+    # filters made the previous 0.98 calibration stale.
+    confidence_threshold: float = 0.96
     target_collection: str = "Book Chapters"
     max_items: int | None = None
 

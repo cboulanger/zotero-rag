@@ -20,6 +20,14 @@ from backend.services.chapter_segmentation import run as analyze_run
 
 
 class TestFindTocCandidates(unittest.TestCase):
+    # Padded well past any page number used in these fixtures' TOC lines --
+    # find_toc_candidates rejects a printed page number that looks
+    # implausible relative to the PDF's actual total page count (see
+    # _TOC_MAX_PAGE_NUMBER_RATIO), so tiny fixtures need enough filler pages
+    # for their own realistic-looking page numbers (e.g. 89) not to trip
+    # that guard by accident.
+    _FILLER_PAGES = ["Just filler body text, nothing TOC-like here."] * 100
+
     def test_finds_dotted_leader_entries(self):
         pages = [
             "CONTENTS\n"
@@ -27,7 +35,7 @@ class TestFindTocCandidates(unittest.TestCase):
             "Comparing Citation Styles ..... 45\n"
             "Zotero in Practice ..... 89\n",
             "Some front-matter page with no TOC pattern at all.",
-        ]
+        ] + self._FILLER_PAGES
         entries = find_toc_candidates(pages)
         self.assertEqual(len(entries), 3)
         self.assertEqual(entries[0], TocEntry(title="Introduction to Reference Management", printed_page_number=1, source_page_index=0))
@@ -40,11 +48,63 @@ class TestFindTocCandidates(unittest.TestCase):
         self.assertEqual(entries, [])
 
     def test_matches_whitespace_leaders_too(self):
-        pages = ["Bibliographic Software Overview          12"]
+        # Three dotted/whitespace-leader lines on the same page -- meets
+        # _TOC_MIN_LINES_PER_PAGE, so all three are trusted as real entries
+        # (an isolated single line on a page would now be discarded as
+        # noise -- see test_ignores_isolated_lines_on_ordinary_pages below).
+        pages = [
+            "Bibliographic Software Overview          12\n"
+            "Comparing Citation Managers          30\n"
+            "Zotero in Practice          55\n"
+        ] + self._FILLER_PAGES
         entries = find_toc_candidates(pages)
-        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries), 3)
         self.assertEqual(entries[0].title, "Bibliographic Software Overview")
         self.assertEqual(entries[0].printed_page_number, 12)
+
+    def test_ignores_isolated_lines_on_ordinary_pages(self):
+        # Only 1-2 matching lines on a page (below _TOC_MIN_LINES_PER_PAGE)
+        # -- a citation, footnote reference, or running header that happens
+        # to fit the dotted/whitespace-leader pattern, not a real chapter
+        # listing. These must be discarded, not returned as entries.
+        pages = [
+            "Some ordinary content page mentioning a reference.          12",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual(entries, [])
+
+    def test_ignores_implausible_page_numbers(self):
+        # A publication year embedded in copyright/imprint text ("Opladen
+        # (c) Publisher          2025") looks like a TOC line but its
+        # "page number" is wildly larger than the PDF's actual length --
+        # found empirically in a real evaluation book. All three lines
+        # qualify for _TOC_MIN_LINES_PER_PAGE, but only the two with
+        # plausible page numbers should survive.
+        pages = [
+            "Publisher Imprint Line          2025\n"
+            "Introduction to the Subject          1\n"
+            "Comparing Citation Styles          45\n"
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        titles = [e.title for e in entries]
+        self.assertNotIn("Publisher Imprint Line", titles)
+        self.assertIn("Introduction to the Subject", titles)
+        self.assertIn("Comparing Citation Styles", titles)
+
+    def test_ignores_url_and_doi_lines(self):
+        # A repeated DOI/URL line in front matter can otherwise fit the
+        # dotted/whitespace-leader pattern (found empirically in a real
+        # evaluation book, repeated 5 times) -- never a real chapter title.
+        pages = [
+            "https://doi.org/10.1234/example.5678\n"
+            "Introduction to the Subject          1\n"
+            "Comparing Citation Styles          45\n"
+            "Zotero in Practice          89\n"
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        titles = [e.title for e in entries]
+        self.assertFalse(any("doi.org" in t for t in titles))
+        self.assertIn("Introduction to the Subject", titles)
 
 
 class TestLocateChapterStart(unittest.TestCase):
@@ -182,10 +242,17 @@ class TestExtractAuthorsNear(unittest.TestCase):
 class TestAnalyzeAttachment(unittest.TestCase):
     def _fake_book_pages(self) -> list[str]:
         return [
-            # page 0: TOC
+            # page 0: TOC. A third entry ("Appendix") is included solely so
+            # this page meets find_toc_candidates' _TOC_MIN_LINES_PER_PAGE
+            # (a real TOC page has several entries; below that count, the
+            # page's lines are now discarded as noise) -- no page below
+            # actually contains "Appendix" text, so locate_chapter_start
+            # simply never finds it and it's silently dropped, same as any
+            # other unlocatable TOC entry.
             "CONTENTS\n"
             "Introduction ..... 1\n"
-            "Comparing Citation Styles ..... 3\n",
+            "Comparing Citation Styles ..... 3\n"
+            "Appendix ..... 5\n",
             # page 1: printed page "1" — Introduction body
             "Introduction\nJane Author\n\nThis book explores reference management.\n\n1",
             # page 2: continuation of Introduction, printed page "2"
@@ -195,8 +262,13 @@ class TestAnalyzeAttachment(unittest.TestCase):
             # chapter title word ties with the real chapter-start page
             # (both score 100 via rapidfuzz partial_ratio) and neither can
             # be trusted, which is correct behavior but not what this
-            # fixture is testing.
-            "...continued text follows here.\n\n2",
+            # fixture is testing. Padded past 150 stripped characters so
+            # analyze_attachment's trailing-blank-page trim (meant for real
+            # divider pages) doesn't mistake this genuine body-text
+            # continuation page for one and clip the chapter short.
+            "...continued text follows here, with enough body content on this "
+            "page that it clearly reads as a real continuation of the "
+            "chapter rather than a blank divider page between sections.\n\n2",
             # page 3: printed page "3" — chapter start
             # NOTE: a blank line separates the title from "John Smith" here
             # (unlike the spec's literal single "\n"). Verified against the
@@ -211,8 +283,11 @@ class TestAnalyzeAttachment(unittest.TestCase):
             # its own entity. This is the smallest change that makes the
             # literal spec assertion pass against the real model.
             "Comparing Citation Styles\n\nJohn Smith\n\nThis chapter examines APA and MLA.\n\n3",
-            # page 4: continuation, printed page "4"
-            "...continued chapter text.\n\n4",
+            # page 4: continuation, printed page "4". Padded past 150
+            # stripped characters for the same reason as page 2 above.
+            "...continued chapter text, with enough body content on this "
+            "final page that it clearly reads as a real continuation of "
+            "the chapter rather than a blank divider page.\n\n4",
         ]
 
     def test_detects_two_chapters_with_pdf_indices(self):
