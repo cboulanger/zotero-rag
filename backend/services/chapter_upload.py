@@ -6,6 +6,8 @@ import io
 
 from pypdf import PdfReader, PdfWriter
 
+from backend.db.vector_store import _extract_lastnames
+
 
 def slice_pdf_range(content: bytes, pdf_start_index: int, pdf_end_index: int) -> bytes:
     """Return a standalone PDF (bytes) containing pages
@@ -55,3 +57,41 @@ def build_book_section_item_data(template: dict, book_data: dict, chapter: dict)
         for first, last in (_split_name(name) for name in chapter.get("authors", []))
     ]
     return item
+
+
+def author_year_label(authors: list[str], date: str) -> str:
+    """Build a short author-year label for a per-book subcollection name,
+    e.g. "Miller (2023)" or "Smith et al. (1999)" (3+ authors). Reuses the
+    existing lastname-extraction helper already used for Qdrant author
+    filtering, for consistency with how author names are normalized
+    elsewhere in this codebase.
+    """
+    lastnames = _extract_lastnames(authors)
+    year = date.strip().split("-")[0] if date else "n.d."
+    if not lastnames:
+        return f"Unknown ({year})"
+    first = lastnames[0].capitalize()
+    label = first if len(lastnames) == 1 else f"{first} et al."
+    return f"{label} ({year})"
+
+
+def ensure_target_collection(zotero_write_client, top_level_name: str, subcollection_name: str) -> tuple[str, str]:
+    """Find-or-create the top-level collection and its per-book
+    subcollection, returning (top_level_key, subcollection_key). Idempotent:
+    re-running against an already-processed book reuses both collections.
+    """
+    top_matches = [c for c in zotero_write_client.collections() if c["data"]["name"] == top_level_name]
+    if top_matches:
+        top_key = top_matches[0]["key"]
+    else:
+        resp = zotero_write_client.create_collection([{"name": top_level_name}])
+        top_key = list(resp["successful"].values())[0]["key"]
+
+    sub_matches = [c for c in zotero_write_client.collections_sub(top_key) if c["data"]["name"] == subcollection_name]
+    if sub_matches:
+        sub_key = sub_matches[0]["key"]
+    else:
+        resp = zotero_write_client.create_collection([{"name": subcollection_name, "parentCollection": top_key}])
+        sub_key = list(resp["successful"].values())[0]["key"]
+
+    return top_key, sub_key
