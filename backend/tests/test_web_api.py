@@ -124,6 +124,23 @@ class TestZoteroWebAPIGetLibraryItemsSince(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 5)
 
 
+class TestZoteroWebAPIGetItem(unittest.IsolatedAsyncioTestCase):
+    async def test_get_item_success(self):
+        item = {"key": "ITEM1", "data": {"itemType": "book", "title": "A Book"}}
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(200, item))
+
+        result = await api.get_item("u12345", "ITEM1", "user")
+        self.assertEqual(result, item)
+
+    async def test_get_item_not_found_returns_none(self):
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(404, {}))
+
+        result = await api.get_item("u12345", "MISSING", "user")
+        self.assertIsNone(result)
+
+
 class TestZoteroWebAPIGetItemChildren(unittest.IsolatedAsyncioTestCase):
     async def test_get_item_children_success(self):
         children = [{"key": "CHILD1", "data": {"itemType": "attachment"}}]

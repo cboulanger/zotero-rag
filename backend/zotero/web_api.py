@@ -147,6 +147,21 @@ class ZoteroWebAPI:
         logger.info("Retrieved %d items from library %s", len(all_items), library_id)
         return all_items
 
+    async def get_item(
+        self,
+        library_id: str,
+        item_key: str,
+        library_type: str = "user",
+    ) -> Optional[dict[str, Any]]:
+        """Return a single item by key, or None if not found."""
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/items/{item_key}"
+        async with self.session.get(url, params={"format": "json"}) as resp:
+            if resp.status != 200:
+                logger.debug("get_item %s: HTTP %s", item_key, resp.status)
+                return None
+            return await resp.json()
+
     async def get_item_children(
         self,
         library_id: str,
