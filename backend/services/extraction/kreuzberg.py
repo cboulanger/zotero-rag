@@ -67,22 +67,30 @@ class KreuzbergExtractor(DocumentExtractor):
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
         self._ocr_enabled = ocr_enabled
-        self._config: dict[str, Any] = {
-            "chunking": {
-                "max_characters": max_chunk_size,
-                "overlap": chunk_overlap,
-            },
-            "force_ocr": ocr_enabled,
-        }
+        self._max_chunk_size = max_chunk_size
+        self._chunk_overlap = chunk_overlap
         logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
             f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled})"
         )
 
+    def _build_config(self, ocr_language: str | None) -> dict[str, Any]:
+        config: dict[str, Any] = {
+            "chunking": {
+                "max_characters": self._max_chunk_size,
+                "overlap": self._chunk_overlap,
+            },
+            "force_ocr": self._ocr_enabled,
+        }
+        if ocr_language:
+            config["ocr"] = {"language": ocr_language}
+        return config
+
     async def extract_and_chunk(
         self,
         content: bytes,
         mime_type: str,
+        ocr_language: str | None = None,
     ) -> list[ExtractionChunk]:
         """
         Send document bytes to the kreuzberg sidecar and return extraction chunks.
@@ -90,21 +98,25 @@ class KreuzbergExtractor(DocumentExtractor):
         Args:
             content: Raw document bytes.
             mime_type: MIME type of the document (e.g. "application/pdf").
+            ocr_language: Optional per-request OCR language override (e.g. "deu").
+                When omitted, the sidecar's default OCR language is used.
 
         Returns:
             List of ExtractionChunk objects, empty if extraction fails.
         """
         url = f"{self._kreuzberg_url}/extract"
         timeout = _compute_timeout(len(content), mime_type)
+        config = self._build_config(ocr_language)
         logger.debug(
-            f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s"
+            f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s "
+            f"ocr_language={ocr_language or '(sidecar default)'}"
         )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     url,
                     files={"files": ("document", content, mime_type)},
-                    data={"config": json.dumps(self._config)},
+                    data={"config": json.dumps(config)},
                 )
                 response.raise_for_status()
         except httpx.ConnectError as exc:
