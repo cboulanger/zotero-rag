@@ -27,6 +27,11 @@ async def _main(args: argparse.Namespace) -> int:
 
     item_keys = args.item_keys.split(",") if args.item_keys else None
 
+    llm_service = None
+    if args.llm_fallback:
+        from backend.dependencies import make_llm_service
+        llm_service = make_llm_service()
+
     bar = tqdm(total=100, unit="%", desc="Analyzing")
 
     def on_progress(progress: float, message: str) -> None:
@@ -43,6 +48,7 @@ async def _main(args: argparse.Namespace) -> int:
         max_items=args.max_items,
         relink=args.relink,
         progress_callback=on_progress,
+        llm_service=llm_service,
     )
     bar.close()
 
@@ -61,6 +67,12 @@ def main() -> int:
     parser.add_argument("--api-key", required=True, help="Read-only Zotero API key")
     parser.add_argument("--item-keys", default=None, help="Comma-separated list to restrict to specific book items")
     parser.add_argument("--relink", action="store_true", help="Re-analyze books that already have X-Contains")
+    parser.add_argument(
+        "--llm-fallback",
+        action="store_true",
+        help="Enable the LLM-based fallback for chapters the heuristic pass finds "
+             "nothing or is ambiguous about (slower, calls a configured LLM API)",
+    )
     parser.add_argument("--max-items", type=int, default=None, help="Cap the number of book items processed (testing/debugging)")
     parser.add_argument("--output", default=None, help="Write JSON output to this path instead of stdout")
     args = parser.parse_args()
