@@ -201,8 +201,12 @@ class ChapterStartMatch:
 
     index: int
     score: float  # winning cluster's best rapidfuzz partial_ratio, 0-100
-    margin: float  # score minus the runner-up cluster's score; equals score
-    # itself when there was no competing cluster at all (uncontested match)
+    margin: float  # _candidate_ranking_key(best) minus the runner-up cluster's
+    # ranking key -- NOT plain score minus score. When either cluster is
+    # author_confirmed, up to _AUTHOR_CONFIRMED_BONUS is folded into this
+    # number, so a large margin doesn't necessarily mean a large raw title-
+    # score gap. Equals _candidate_ranking_key(best) itself when there was no
+    # competing cluster at all (uncontested match).
     author_confirmed: bool = False
 
 
@@ -215,6 +219,13 @@ class ChapterStartCandidate:
 
     index: int
     score: float
+    # True if any raw candidate merged into this cluster had an author's last
+    # name near its head -- since a cluster can span several pages (see
+    # _LOCATE_CLUSTER_GAP), this is an OR across the whole cluster, so the
+    # specific page ultimately returned (the cluster's earliest index) is not
+    # guaranteed to itself contain the author-name evidence. Acceptable: the
+    # bonus only breaks ties/ambiguity between clusters, it doesn't affect the
+    # stored score.
     author_confirmed: bool
 
 
