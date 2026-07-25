@@ -1,14 +1,16 @@
 """Unit tests for backend.services.chapter_upload."""
 
+import asyncio
 import io
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pypdf import PdfReader, PdfWriter
 
 from backend.services.chapter_upload import slice_pdf_range
 from backend.services.chapter_upload import build_book_section_item_data
 from backend.services.chapter_upload import author_year_label, ensure_target_collection
+from backend.services.chapter_upload import run as upload_run
 
 
 def _make_test_pdf(num_pages: int) -> bytes:
@@ -89,6 +91,78 @@ class TestEnsureTargetCollection(unittest.TestCase):
         self.assertEqual(top_key, "TOPKEY01")
         self.assertEqual(sub_key, "SUBKEY01")
         zot.create_collection.assert_not_called()
+
+
+class TestUploadRun(unittest.TestCase):
+    def _book_and_analysis(self):
+        book_item = {
+            "key": "BOOK1",
+            "data": {
+                "key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management",
+                "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Editor"}],
+                "publisher": "Big Press", "place": "Berlin", "date": "2019", "ISBN": "978-0", "language": "en",
+                "extra": "",
+            },
+        }
+        analysis = {
+            "item_key": "BOOK1", "attachment_key": "ATT1",
+            "chapters": [
+                {"title": "Comparing Citation Styles", "authors": ["John Smith"], "pdf_start_index": 2,
+                 "pdf_end_index": 4, "citation_pages": "45-67", "confidence": 0.93, "page_mapping_confidence": "high"},
+            ],
+        }
+        return book_item, analysis
+
+    def test_dry_run_creates_nothing(self):
+        book_item, analysis = self._book_and_analysis()
+        zot = MagicMock()
+        zot.item.return_value = book_item
+        result = asyncio.run(upload_run(
+            zotero_write_client=zot, zotero_read_client=MagicMock(get_attachment_file=MagicMock()),
+            slug="groups/1", analyses=[analysis], commit=False, confidence_threshold=0.8,
+            target_collection="Book Chapters", max_items=None,
+        ))
+        zot.create_items.assert_not_called()
+        self.assertEqual(len(result["would_create"]), 1)
+
+    def test_commit_creates_and_links(self):
+        book_item, analysis = self._book_and_analysis()
+        zot = MagicMock()
+        zot.item.return_value = book_item
+        zot.item_template.return_value = {"itemType": "bookSection", "title": "", "bookTitle": "", "editor": [],
+                                           "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
+                                           "pages": "", "creators": []}
+        zot.create_items.return_value = {"successful": {"0": {"key": "CHAP1"}}}
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+        read_client = MagicMock()
+        read_client.get_attachment_file = unittest.mock.AsyncMock(return_value=b"%PDF-1.4 fake")
+
+        with patch("backend.services.chapter_upload.slice_pdf_range", return_value=b"sliced bytes"):
+            result = asyncio.run(upload_run(
+                zotero_write_client=zot, zotero_read_client=read_client,
+                slug="groups/1", analyses=[analysis], commit=True, confidence_threshold=0.8,
+                target_collection="Book Chapters", max_items=None,
+            ))
+        zot.create_items.assert_called()
+        zot.attachment_simple.assert_called()
+        self.assertEqual(len(result["created"]), 1)
+        self.assertEqual(result["created"][0]["chapter_key"], "CHAP1")
+
+    def test_below_threshold_is_skipped(self):
+        book_item, analysis = self._book_and_analysis()
+        analysis["chapters"][0]["confidence"] = 0.5
+        zot = MagicMock()
+        zot.item.return_value = book_item
+
+        result = asyncio.run(upload_run(
+            zotero_write_client=zot, zotero_read_client=MagicMock(),
+            slug="groups/1", analyses=[analysis], commit=True, confidence_threshold=0.8,
+            target_collection="Book Chapters", max_items=None,
+        ))
+        zot.create_items.assert_not_called()
+        self.assertEqual(len(result["skipped_low_confidence"]), 1)
 
 
 if __name__ == "__main__":
