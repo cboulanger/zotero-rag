@@ -8,6 +8,7 @@ from backend.services.chapter_segmentation import (
     TocEntry,
     extract_page_texts_from_pdf_bytes,
     find_toc_candidates,
+    llm_extract_toc_entries,
     _toc_scan_indices,
 )
 from backend.services.chapter_segmentation import (
@@ -120,6 +121,43 @@ class TestFindTocCandidates(unittest.TestCase):
         titles = [e.title for e in entries]
         self.assertFalse(any("doi.org" in t for t in titles))
         self.assertIn("Introduction to the Subject", titles)
+
+
+class TestLlmExtractTocEntries(unittest.IsolatedAsyncioTestCase):
+    def _fake_llm(self, response: str):
+        llm = MagicMock()
+        llm.generate = AsyncMock(return_value=response)
+        return llm
+
+    async def test_parses_chapter_list_from_llm_response(self):
+        response = (
+            '[{"title": "Introduction", "authors": ["Jane Author"], "printed_page_number": 1}, '
+            '{"title": "Comparing Citation Styles", "authors": [], "printed_page_number": null}]'
+        )
+        llm = self._fake_llm(response)
+        pages = ["Front matter page with an irregularly formatted chapter listing."] * 5
+        entries = await llm_extract_toc_entries(pages, llm)
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].title, "Introduction")
+        self.assertEqual(entries[0].authors, ("Jane Author",))
+        self.assertEqual(entries[0].printed_page_number, 1)
+        self.assertEqual(entries[1].printed_page_number, -1)  # null -> sentinel, unused downstream
+
+    async def test_returns_empty_list_on_malformed_response(self):
+        llm = self._fake_llm("not json at all")
+        entries = await llm_extract_toc_entries(["some front matter"] * 5, llm)
+        self.assertEqual(entries, [])
+
+    async def test_skips_entries_with_too_short_title(self):
+        llm = self._fake_llm('[{"title": "Hi", "authors": [], "printed_page_number": 1}]')
+        entries = await llm_extract_toc_entries(["front matter"] * 5, llm)
+        self.assertEqual(entries, [])
+
+    async def test_returns_empty_list_for_empty_pages(self):
+        llm = self._fake_llm("[]")
+        entries = await llm_extract_toc_entries([], llm)
+        self.assertEqual(entries, [])
+        llm.generate.assert_not_called()
 
 
 class TestTocScanIndices(unittest.TestCase):

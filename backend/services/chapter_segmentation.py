@@ -10,6 +10,7 @@ never assumed from position.
 """
 
 import io
+import logging
 import re
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -19,6 +20,10 @@ from pypdf import PdfReader
 from rapidfuzz import fuzz
 
 from backend.services.chapter_link_store import parse_links
+from backend.services.llm import LLMService
+from backend.utils.llm_json import parse_json_array, parse_json_object
+
+logger = logging.getLogger(__name__)
 
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
@@ -162,6 +167,63 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
             if page_number > max_plausible_page_number:
                 continue
             entries.append(TocEntry(title=title, printed_page_number=page_number, source_page_index=page_index))
+    return entries
+
+
+_LLM_TOC_EXTRACTION_PROMPT = """\
+You are reading the front and back matter of a scanned/extracted book to \
+find its table of contents. Some layouts don't use simple dotted leaders \
+(e.g. "Title ..... 12") -- read the text directly rather than pattern-matching.
+
+{page_blocks}
+
+Return ONLY a JSON array, one entry per real chapter -- skip \
+acknowledgements, bibliography, index, and part-divider pages:
+[{{"title": "...", "authors": ["First Last", ...], "printed_page_number": 12}}]
+
+If a chapter's printed page number is not visible in this text, use null \
+for printed_page_number. If authors are not identifiable, use an empty list."""
+
+
+async def llm_extract_toc_entries(pages: list[str], llm_service: LLMService) -> list[TocEntry]:
+    """Reads the same front/back-matter page range find_toc_candidates
+    already scans (_toc_scan_indices), sends their raw text verbatim to the
+    LLM, and asks it to return the book's chapter listing as it actually
+    appears -- for layouts too irregular for the regex (no dot leaders,
+    multi-column, unconventional spacing/punctuation) but readable by
+    inspection. Never asks the LLM for a physical page index -- only
+    title/authors/printed_page_number, exactly like a regex-found TocEntry,
+    so the result flows into the SAME locate_chapter_start content-search
+    step used for every other TOC entry (design spec §4).
+    """
+    scan_indices = sorted(_toc_scan_indices(pages))
+    if not scan_indices:
+        return []
+    page_blocks = "\n\n".join(f"[PAGE {i}]\n{pages[i]}" for i in scan_indices)
+    prompt = _LLM_TOC_EXTRACTION_PROMPT.format(page_blocks=page_blocks)
+
+    try:
+        raw = await llm_service.generate(prompt=prompt, max_tokens=1024, temperature=0.0)
+        items = parse_json_array(raw)
+    except Exception:
+        logger.warning("llm_extract_toc_entries: LLM call or JSON parse failed", exc_info=True)
+        return []
+
+    entries: list[TocEntry] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if len(title) < 3:
+            continue
+        authors = tuple(str(a) for a in (item.get("authors") or []) if str(a).strip())
+        printed = item.get("printed_page_number")
+        printed_page_number = int(printed) if isinstance(printed, (int, float)) else -1
+        # source_page_index is a sentinel here -- unlike a regex-found entry,
+        # an LLM-extracted entry has no single "the TOC line was on this
+        # page" origin; the orchestration layer excludes the whole scanned
+        # front/back-matter range instead (see _toc_scan_indices).
+        entries.append(TocEntry(title=title, printed_page_number=printed_page_number, source_page_index=-1, authors=authors))
     return entries
 
 
