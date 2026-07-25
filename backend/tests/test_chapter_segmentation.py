@@ -374,6 +374,10 @@ class TestAnalyzeAttachment(unittest.TestCase):
         result = analyze_attachment(self._fake_book_pages())
         self.assertIn("John Smith", result["chapters"][1]["authors"])
 
+    def test_chapters_default_to_heuristic_source(self):
+        result = analyze_attachment(self._fake_book_pages())
+        self.assertTrue(all(c["source"] == "heuristic" for c in result["chapters"]))
+
 
 class TestRun(unittest.TestCase):
     def test_skips_already_linked_book(self):

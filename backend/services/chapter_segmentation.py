@@ -410,30 +410,40 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
 _TRAILING_BLANK_PAGE_MAX_CHARS = 150
 
 
-def analyze_attachment(pages: list[str]) -> dict:
-    """Orchestrate TOC detection, content-based localization, printed-page
-    extraction, and author NER into the per-attachment output described in
-    design spec §5.
-
-    Returns a dict matching the script 1 output schema (minus item_key/
-    attachment_key/has_text_layer/needs_ocr, which the caller — run(), Task
-    9 — fills in from Zotero/Kreuzberg context, not from page text alone).
-    """
-    total_pages = len(pages)
-    toc_entries = find_toc_candidates(pages)
-
-    chapters: list[dict] = []
-    toc_page_indices = {e.source_page_index for e in toc_entries}
+def _locate_toc_entries(
+    pages: list[str], toc_entries: list[TocEntry], exclude_indices: set[int]
+) -> tuple[list[tuple[TocEntry, ChapterStartMatch]], list[TocEntry]]:
+    """Attempts locate_chapter_start for every entry. Returns (located pairs
+    sorted by match index, entries that failed to locate at all -- either
+    zero candidates cleared the score threshold, or a genuine unresolved
+    ambiguity). Passes each entry's own authors through (empty for
+    regex-found entries) for author-aware disambiguation."""
     located: list[tuple[TocEntry, ChapterStartMatch]] = []
+    unlocated: list[TocEntry] = []
     for entry in toc_entries:
-        match = locate_chapter_start(pages, entry.title, exclude_indices=toc_page_indices)
+        match = locate_chapter_start(pages, entry.title, exclude_indices=exclude_indices, authors=entry.authors)
         if match is not None:
             located.append((entry, match))
-
-    # Cluster into contiguous ranges, ordered by PDF index (not TOC order,
-    # which is printed-page order and could disagree if TOC entries were
-    # matched to pages out of sequence).
+        else:
+            unlocated.append(entry)
     located.sort(key=lambda pair: pair[1].index)
+    return located, unlocated
+
+
+def _chapters_from_located(
+    pages: list[str],
+    located: list[tuple[TocEntry, ChapterStartMatch]],
+    entry_source: dict[TocEntry, str] | None = None,
+) -> list[dict]:
+    """Turns located (entry, match) pairs into the final chapter dict list:
+    clusters each entry's page range against its neighbor, trims trailing
+    blank/divider pages, extracts citation_pages and confidence. entry_source
+    marks which TocEntry objects were LLM-sourced (default "heuristic" for
+    any entry not present in the mapping) -- see design spec §7.
+    """
+    entry_source = entry_source or {}
+    total_pages = len(pages)
+    chapters: list[dict] = []
     for i, (entry, match) in enumerate(located):
         start_index = match.index
         end_index = (located[i + 1][1].index - 1) if i + 1 < len(located) else (total_pages - 1)
@@ -465,7 +475,24 @@ def analyze_attachment(pages: list[str]) -> dict:
             "citation_pages": citation_pages,
             "confidence": match_confidence(match.score, match.margin),
             "page_mapping_confidence": page_mapping_confidence,
+            "source": entry_source.get(entry, "heuristic"),
         })
+    return chapters
+
+
+def analyze_attachment(pages: list[str]) -> dict:
+    """Orchestrate TOC detection, content-based localization, printed-page
+    extraction, and author NER into the per-attachment output described in
+    design spec §5. Pure and synchronous -- unchanged behavior/speed from
+    before the LLM fallback project; every chapter now also carries
+    "source": "heuristic" (see design spec §7).
+    """
+    total_pages = len(pages)
+    toc_entries = find_toc_candidates(pages)
+    toc_page_indices = {e.source_page_index for e in toc_entries}
+
+    located, _unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+    chapters = _chapters_from_located(pages, located)
 
     segmentation_confidence = "high" if chapters else "low"
     return {
