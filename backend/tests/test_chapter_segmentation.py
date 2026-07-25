@@ -79,15 +79,38 @@ class TestLocateChapterStart(unittest.TestCase):
 
     def test_rejects_ambiguous_tie(self):
         # Empirically, both pages score >= _LOCATE_SCORE_THRESHOLD (80) for
-        # this title -- page 0 scores 100.0, page 1 scores ~97.96 -- a margin
-        # of ~2 that is well under _LOCATE_MARGIN_REQUIRED. Neither candidate
-        # can be trusted, so the function must return None.
+        # this title -- page 0 scores 100.0, page 5 scores ~97.96 -- a margin
+        # of ~2 that is well under _LOCATE_MARGIN_REQUIRED. They're placed
+        # farther apart than _LOCATE_CLUSTER_GAP so they form two separate
+        # clusters (genuine competing candidates), not one merged location.
+        # Neither candidate can be trusted, so the function must return None.
         pages = [
             "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines APA style only.",
+            "Unrelated filler page one.",
+            "Unrelated filler page two.",
+            "Unrelated filler page three.",
+            "Unrelated filler page four.",
             "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
         ]
         index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
         self.assertIsNone(index)
+
+    def test_treats_nearby_repeated_header_as_one_location(self):
+        # Real books often repeat a chapter's title in the running header on
+        # several of the chapter's OWN pages (found empirically in an
+        # evaluation book: the same title scored 100.0 on both the opening
+        # page and a later page of the same short chapter, with a gap in
+        # between where an intervening page didn't score highly). These
+        # nearby repeats must be treated as ONE candidate location -- not
+        # rejected as an ambiguous tie between two different chapters -- so
+        # the earliest (opening) page should still be returned.
+        pages = [
+            "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines APA style.",
+            "Some body text continues the discussion of citation formats here.",
+            "Comparing Citation Styles16\n\nMore body text about citation formats continues.",
+        ]
+        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertEqual(index, 0)
 
 
 class TestExtractPrintedPageNumber(unittest.TestCase):

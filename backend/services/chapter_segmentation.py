@@ -84,8 +84,16 @@ _LOCATE_SCORE_THRESHOLD = 80.0  # rapidfuzz partial_ratio, 0-100
 # title, scoring 100 despite being meaningless) -- require this many
 # stripped characters before a page is even considered a candidate.
 _LOCATE_MIN_HEAD_CHARS = 20
-# top candidate must beat the runner-up by this much
+# Top candidate cluster must beat the runner-up cluster by this much -- a
+# single qualifying cluster is never rejected on margin grounds alone.
 _LOCATE_MARGIN_REQUIRED = 8.0
+# A running header often repeats a chapter's title on several of its OWN
+# pages (e.g. the title appears on both the opening page and a later page of
+# the same chapter, with a gap where an intervening page didn't score highly
+# -- empirically observed as a real 2-page gap in an evaluation book). Pages
+# this close together are treated as one location, not competing candidates,
+# so the chapter's own repeated header is never mistaken for ambiguity.
+_LOCATE_CLUSTER_GAP = 3
 
 
 def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> int | None:
@@ -93,13 +101,13 @@ def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]
 
     This is a content lookup, not an index computation: it never assumes the
     TOC's printed page number corresponds to this page's index. Skips pages
-    whose head text is too short to score reliably, and requires the best
-    match to beat the runner-up by a margin (not just clear the threshold) --
-    returns None if no page qualifies or the top match is ambiguous.
+    whose head text is too short to score reliably. Qualifying pages within
+    _LOCATE_CLUSTER_GAP of each other are merged into one candidate location
+    (a chapter's own running header can repeat the title on several of its
+    pages) -- returns the earliest page of the best-scoring cluster, or None
+    if no page qualifies or the top cluster is ambiguous against a runner-up.
     """
-    best_index: int | None = None
-    best_score = 0.0
-    runner_up_score = 0.0
+    candidates: list[tuple[int, float]] = []
     for index, text in enumerate(pages):
         if index in exclude_indices:
             continue
@@ -109,15 +117,42 @@ def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]
         if len(head.strip()) < _LOCATE_MIN_HEAD_CHARS:
             continue
         score = fuzz.partial_ratio(title.lower(), head.lower())
-        if score > best_score:
-            runner_up_score = best_score
-            best_score = score
-            best_index = index
-        elif score > runner_up_score:
-            runner_up_score = score
-    if best_score >= _LOCATE_SCORE_THRESHOLD and best_score - runner_up_score >= _LOCATE_MARGIN_REQUIRED:
-        return best_index
-    return None
+        if score >= _LOCATE_SCORE_THRESHOLD:
+            candidates.append((index, score))
+    if not candidates:
+        return None
+
+    candidates.sort()
+    clusters: list[tuple[int, float]] = []  # (first_index, max_score) per cluster
+    # Deliberately transitive (chained off the previous candidate, not the
+    # cluster's first index): real academic books often repeat a running
+    # header on every other page for a chapter's ENTIRE span (confirmed
+    # empirically on an evaluation book with a 21-page chapter repeating its
+    # title every 2 pages throughout) -- bounding a cluster's total width to
+    # _LOCATE_CLUSTER_GAP would fracture that single chapter into many
+    # same-scoring "clusters" and wrongly reject it as ambiguous. The
+    # trade-off (accepted after evaluation-harness testing showed the
+    # bounded variant regressed real recall to zero on that book) is a
+    # theoretical risk of transitively bridging two genuinely different,
+    # far-apart chapters if a spurious mid-range match happens to chain
+    # them together -- not observed in this project's evaluation set.
+    cluster_start, cluster_max = candidates[0]
+    prev_index = candidates[0][0]
+    for index, score in candidates[1:]:
+        if index - prev_index <= _LOCATE_CLUSTER_GAP:
+            cluster_max = max(cluster_max, score)
+        else:
+            clusters.append((cluster_start, cluster_max))
+            cluster_start, cluster_max = index, score
+        prev_index = index
+    clusters.append((cluster_start, cluster_max))
+
+    clusters.sort(key=lambda cluster: cluster[1], reverse=True)
+    best_index, best_score = clusters[0]
+    runner_up_score = clusters[1][1] if len(clusters) > 1 else 0.0
+    if len(clusters) > 1 and best_score - runner_up_score < _LOCATE_MARGIN_REQUIRED:
+        return None
+    return best_index
 
 
 def extract_printed_page_number(page_text: str) -> str | None:
