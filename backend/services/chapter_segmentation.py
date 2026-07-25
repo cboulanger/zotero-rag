@@ -133,6 +133,10 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
     """Run spaCy NER on the opening text of a chapter-start page to extract
     candidate author names. Best-effort: returns an empty list rather than
     raising when nothing plausible is found.
+
+    Known limitation: the small spaCy model (en_core_web_sm) can misclassify
+    bare acronyms (e.g. "MLA", "APA") as PERSON entities -- this is a
+    best-effort heuristic, not a guarantee.
     """
     doc = _get_nlp()(page_text[:max_chars])
     seen: list[str] = []
