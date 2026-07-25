@@ -104,3 +104,24 @@ this table as a snapshot to compare future runs against, not a guarantee):
 fuzzy-matching heuristic (no signal available to disambiguate its specific
 chapter titles from surrounding text), tracked as an accepted gap rather than
 a regression.
+
+**Why precision looks low even when the algorithm "works":** across the
+found ranges above, only ~28% are an exact match against ground truth with
+no confidence filtering at all. Splitting the misses further: about a third
+(33 of 89 wrong ranges, in one measurement) actually have the *correct*
+`pdf_start_index` — `locate_chapter_start` found the right opening page, but
+the resulting range's end boundary is wrong because it's derived from the
+*next* chapter's location, not this chapter's own match quality. The rest
+(56 of 89) are matched to a genuinely wrong page — most commonly because
+`find_toc_candidates` extracted a non-chapter line (a running header
+fragment, a repeated DOI, a publisher imprint) as if it were a real chapter
+title, and it happened to fuzzy-match some page confidently. That second
+category is what `analyze_attachment`'s per-chapter `confidence` score
+(`match_confidence` in `chapter_segmentation.py`) **cannot** see — a
+confidently-wrong match to a bogus title looks identical, locally, to a
+confidently-right one. Raising `chapter_upload.py`'s `confidence_threshold`
+(now defaulting to 0.98, up from an inert 0.8 default that never actually
+filtered anything back when confidence was a flat constant) roughly doubles
+precision among chapters that clear the bar (28% → 45%) while keeping 89% of
+genuinely correct chapters — a real, measured improvement, but not a fix for
+TOC-extraction noise, which is the next planned piece of work.

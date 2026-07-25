@@ -64,7 +64,9 @@ def main() -> int:
     parser.add_argument("--api-key", required=True, help="Write-scoped Zotero API key")
     parser.add_argument("--input", required=True, help="Script 1's output JSON")
     parser.add_argument("--commit", action="store_true", help="Actually write to Zotero (default: dry-run preview)")
-    parser.add_argument("--confidence-threshold", type=float, default=0.8)
+    # See backend/api/chapter_linking.py's SegmentUploadRequest for how this
+    # default was calibrated against the real evaluation set.
+    parser.add_argument("--confidence-threshold", type=float, default=0.98)
     parser.add_argument("--target-collection", default="Book Chapters")
     parser.add_argument("--max-items", type=int, default=None)
     parser.add_argument("--output", default=None)

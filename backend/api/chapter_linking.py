@@ -193,7 +193,14 @@ class SegmentUploadRequest(BaseModel):
     api_key: str
     analyses: list[dict]
     committed: bool = False
-    confidence_threshold: float = 0.8
+    # Calibrated against the real 7-book evaluation set (backend/evaluation/
+    # book-segmentation/README.md "Current results"): raising this from a
+    # previous 0.8 default to 0.98 roughly doubles precision among chapters
+    # that clear the bar (28% -> 45%) while keeping 89% of genuinely correct
+    # chapters. Higher still (0.99+) loses recall fast for no further
+    # precision gain. Re-calibrate if match_confidence's formula changes or
+    # the evaluation set grows meaningfully.
+    confidence_threshold: float = 0.98
     target_collection: str = "Book Chapters"
     max_items: int | None = None
 

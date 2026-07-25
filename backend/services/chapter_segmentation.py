@@ -96,7 +96,20 @@ _LOCATE_MARGIN_REQUIRED = 8.0
 _LOCATE_CLUSTER_GAP = 3
 
 
-def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> int | None:
+@dataclass(frozen=True)
+class ChapterStartMatch:
+    """Result of a successful locate_chapter_start lookup, carrying the raw
+    signal needed to derive a real per-chapter confidence (see
+    match_confidence) rather than a flat constant.
+    """
+
+    index: int
+    score: float  # winning cluster's best rapidfuzz partial_ratio, 0-100
+    margin: float  # score minus the runner-up cluster's score; equals score
+    # itself when there was no competing cluster at all (uncontested match)
+
+
+def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> ChapterStartMatch | None:
     """Find the PDF page index whose text most plausibly begins with `title`.
 
     This is a content lookup, not an index computation: it never assumes the
@@ -150,9 +163,47 @@ def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]
     clusters.sort(key=lambda cluster: cluster[1], reverse=True)
     best_index, best_score = clusters[0]
     runner_up_score = clusters[1][1] if len(clusters) > 1 else 0.0
-    if len(clusters) > 1 and best_score - runner_up_score < _LOCATE_MARGIN_REQUIRED:
+    margin = best_score - runner_up_score
+    if len(clusters) > 1 and margin < _LOCATE_MARGIN_REQUIRED:
         return None
-    return best_index
+    return ChapterStartMatch(index=best_index, score=best_score, margin=margin)
+
+
+# How much extra margin (beyond the minimum _LOCATE_MARGIN_REQUIRED) counts
+# as "fully certain" for confidence purposes -- chosen so an uncontested
+# match (margin == score, since runner_up defaults to 0.0) with a decent raw
+# score reaches the certainty ceiling comfortably, while a match that only
+# barely cleared the ambiguity guard against a real rival does not.
+_CONFIDENCE_MARGIN_SATURATION = 20.0
+# A match that reached this point already cleared every locate_chapter_start
+# guard (min length, score threshold, ambiguity margin) -- confidence never
+# drops below this floor, it only scales how much *better* than bare-minimum
+# the match was. Note the bare-minimum case (score=80, margin=8, the
+# smallest a contested match can have) actually computes to ~0.62, not this
+# floor itself -- the floor is a hard lower bound, not a value ever hit in
+# practice, since a contested match's margin can never go below
+# _LOCATE_MARGIN_REQUIRED and an uncontested match's margin equals its score
+# (>=80, already at the saturation ceiling).
+_CONFIDENCE_FLOOR = 0.5
+
+
+def match_confidence(score: float, margin: float) -> float:
+    """Blend match quality (how well the text matched) and match certainty
+    (how clearly it beat any rival candidate) into the single float
+    downstream consumers (chapter_upload's confidence_threshold gate) use to
+    triage proposed chapters -- replaces a previous flat 0.9 constant that
+    could not distinguish a clean, uncontested match from one that barely
+    survived the ambiguity guard against a real rival.
+
+    Score contributes 40% of the ceiling above the floor, margin 60% --
+    weighted toward margin because an ambiguous match with a strong rival is
+    a bigger real-world risk (found empirically: several evaluation-book
+    misdetections were high-scoring matches with a close runner-up) than a
+    merely mediocre but uncontested score.
+    """
+    score_component = (score - _LOCATE_SCORE_THRESHOLD) / (100.0 - _LOCATE_SCORE_THRESHOLD)
+    margin_component = min(margin / _CONFIDENCE_MARGIN_SATURATION, 1.0)
+    return round(_CONFIDENCE_FLOOR + (1.0 - _CONFIDENCE_FLOOR) * (0.4 * score_component + 0.6 * margin_component), 2)
 
 
 def extract_printed_page_number(page_text: str) -> str | None:
@@ -212,18 +263,19 @@ def analyze_attachment(pages: list[str]) -> dict:
 
     chapters: list[dict] = []
     toc_page_indices = {e.source_page_index for e in toc_entries}
-    located: list[tuple[TocEntry, int]] = []
+    located: list[tuple[TocEntry, ChapterStartMatch]] = []
     for entry in toc_entries:
-        index = locate_chapter_start(pages, entry.title, exclude_indices=toc_page_indices)
-        if index is not None:
-            located.append((entry, index))
+        match = locate_chapter_start(pages, entry.title, exclude_indices=toc_page_indices)
+        if match is not None:
+            located.append((entry, match))
 
     # Cluster into contiguous ranges, ordered by PDF index (not TOC order,
     # which is printed-page order and could disagree if TOC entries were
     # matched to pages out of sequence).
-    located.sort(key=lambda pair: pair[1])
-    for i, (entry, start_index) in enumerate(located):
-        end_index = (located[i + 1][1] - 1) if i + 1 < len(located) else (total_pages - 1)
+    located.sort(key=lambda pair: pair[1].index)
+    for i, (entry, match) in enumerate(located):
+        start_index = match.index
+        end_index = (located[i + 1][1].index - 1) if i + 1 < len(located) else (total_pages - 1)
         if end_index < start_index:
             continue  # degenerate/ambiguous overlap — skip rather than guess
 
@@ -242,7 +294,7 @@ def analyze_attachment(pages: list[str]) -> dict:
             "pdf_start_index": start_index,
             "pdf_end_index": end_index,
             "citation_pages": citation_pages,
-            "confidence": 0.9,  # single confirmed TOC->content match; see Known limitations
+            "confidence": match_confidence(match.score, match.margin),
             "page_mapping_confidence": page_mapping_confidence,
         })
 

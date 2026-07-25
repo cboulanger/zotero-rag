@@ -12,6 +12,7 @@ from backend.services.chapter_segmentation import (
 from backend.services.chapter_segmentation import (
     extract_printed_page_number,
     locate_chapter_start,
+    match_confidence,
 )
 from backend.services.chapter_segmentation import extract_authors_near
 from backend.services.chapter_segmentation import analyze_attachment
@@ -53,13 +54,16 @@ class TestLocateChapterStart(unittest.TestCase):
             "Some unrelated front matter.",
             "Comparing Citation Styles\nBy Jane Author\n\nThis chapter examines...",
         ]
-        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices={0})
-        self.assertEqual(index, 2)
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices={0})
+        self.assertEqual(match.index, 2)
+        self.assertEqual(match.score, 100.0)
+        # Uncontested (only one qualifying cluster) -- margin equals score.
+        self.assertEqual(match.margin, 100.0)
 
     def test_returns_none_when_no_good_match(self):
         pages = ["Nothing related to the query here at all, just filler prose."]
-        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
-        self.assertIsNone(index)
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertIsNone(match)
 
     def test_rejects_sparse_page_despite_high_raw_score(self):
         # Empirically (see rapidfuzz.fuzz.partial_ratio), a near-blank head
@@ -74,8 +78,8 @@ class TestLocateChapterStart(unittest.TestCase):
             "Some unrelated front matter.",
             "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines...",
         ]
-        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
-        self.assertEqual(index, 2)
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertEqual(match.index, 2)
 
     def test_rejects_ambiguous_tie(self):
         # Empirically, both pages score >= _LOCATE_SCORE_THRESHOLD (80) for
@@ -92,8 +96,8 @@ class TestLocateChapterStart(unittest.TestCase):
             "Unrelated filler page four.",
             "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
         ]
-        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
-        self.assertIsNone(index)
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertIsNone(match)
 
     def test_treats_nearby_repeated_header_as_one_location(self):
         # Real books often repeat a chapter's title in the running header on
@@ -109,8 +113,39 @@ class TestLocateChapterStart(unittest.TestCase):
             "Some body text continues the discussion of citation formats here.",
             "Comparing Citation Styles16\n\nMore body text about citation formats continues.",
         ]
-        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
-        self.assertEqual(index, 0)
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertEqual(match.index, 0)
+        # Uncontested (the repeated-header page merged into the same
+        # cluster, not a rival) -- margin equals score, same as any other
+        # single-cluster match.
+        self.assertEqual(match.margin, match.score)
+
+
+class TestMatchConfidence(unittest.TestCase):
+    def test_uncontested_high_score_is_near_ceiling(self):
+        # Uncontested match (margin == score) at a perfect score should be
+        # the most trustworthy case there is.
+        self.assertEqual(match_confidence(score=100.0, margin=100.0), 1.0)
+
+    def test_bare_minimum_match_sits_near_the_low_end(self):
+        # Just clearing the score threshold (80) with the bare minimum
+        # margin (8, the smallest a contested match can have) is the lowest
+        # confidence value actually reachable in practice (~0.62 -- the
+        # nominal 0.5 floor is a hard bound, never actually hit), reflecting
+        # a real rival almost as strong as the winner.
+        confidence = match_confidence(score=80.0, margin=8.0)
+        self.assertGreaterEqual(confidence, 0.5)
+        self.assertLess(confidence, 0.65)
+
+    def test_higher_margin_increases_confidence_at_same_score(self):
+        low_margin = match_confidence(score=90.0, margin=8.0)
+        high_margin = match_confidence(score=90.0, margin=20.0)
+        self.assertLess(low_margin, high_margin)
+
+    def test_higher_score_increases_confidence_at_same_margin(self):
+        low_score = match_confidence(score=80.0, margin=15.0)
+        high_score = match_confidence(score=100.0, margin=15.0)
+        self.assertLess(low_score, high_score)
 
 
 class TestExtractPrintedPageNumber(unittest.TestCase):
