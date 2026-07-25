@@ -15,9 +15,11 @@ from backend.services.chapter_segmentation import (
     ChapterStartCandidate,
     ChapterStartMatch,
     extract_printed_page_number,
+    llm_disambiguate_chapter_start,
     locate_chapter_start,
     locate_chapter_start_candidates,
     match_confidence,
+    _LOCATE_MARGIN_REQUIRED,
 )
 from backend.services.chapter_segmentation import _chapters_from_located
 from backend.services.chapter_segmentation import extract_authors_near
@@ -167,6 +169,47 @@ class TestLlmExtractTocEntries(unittest.IsolatedAsyncioTestCase):
         entries = await llm_extract_toc_entries(["front matter"] * 5, llm)
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].authors, ())
+
+
+class TestLlmDisambiguateChapterStart(unittest.IsolatedAsyncioTestCase):
+    def _fake_llm(self, response: str):
+        llm = MagicMock()
+        llm.generate = AsyncMock(return_value=response)
+        return llm
+
+    async def test_picks_chosen_candidate(self):
+        candidates = [
+            ChapterStartCandidate(index=0, score=95.0, author_confirmed=False),
+            ChapterStartCandidate(index=5, score=93.0, author_confirmed=False),
+        ]
+        pages = ["Comparing Citation Styles by Jane Doe..."] * 6
+        llm = self._fake_llm('{"chosen_candidate": 2}')
+        match = await llm_disambiguate_chapter_start(pages, "Comparing Citation Styles", (), candidates, llm)
+        self.assertIsNotNone(match)
+        self.assertEqual(match.index, 5)
+        self.assertEqual(match.score, 93.0)
+        self.assertEqual(match.margin, _LOCATE_MARGIN_REQUIRED)
+
+    async def test_returns_none_when_llm_picks_none(self):
+        candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
+        pages = ["some text"] * 2
+        llm = self._fake_llm('{"chosen_candidate": null}')
+        match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
+        self.assertIsNone(match)
+
+    async def test_returns_none_on_out_of_range_choice(self):
+        candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
+        pages = ["some text"] * 2
+        llm = self._fake_llm('{"chosen_candidate": 5}')
+        match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
+        self.assertIsNone(match)
+
+    async def test_returns_none_on_malformed_response(self):
+        candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
+        pages = ["some text"] * 2
+        llm = self._fake_llm("not json")
+        match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
+        self.assertIsNone(match)
 
 
 class TestTocScanIndices(unittest.TestCase):

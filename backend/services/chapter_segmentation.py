@@ -392,6 +392,59 @@ def locate_chapter_start(
     return ChapterStartMatch(index=best.index, score=best.score, margin=margin, author_confirmed=best.author_confirmed)
 
 
+_LLM_DISAMBIGUATION_PROMPT = """\
+A chapter titled "{title}"{author_clause} could not be confidently located \
+because more than one page in this book plausibly matches. Below are the \
+competing candidate pages -- pick which one is the chapter's TRUE opening \
+page (its title page, not a continuation page repeating the same running \
+header).
+
+{candidate_blocks}
+
+Return ONLY JSON: {{"chosen_candidate": <candidate number>}} or \
+{{"chosen_candidate": null}} if none of them are actually the right page."""
+
+
+async def llm_disambiguate_chapter_start(
+    pages: list[str],
+    title: str,
+    authors: tuple[str, ...],
+    candidates: list[ChapterStartCandidate],
+    llm_service: LLMService,
+) -> ChapterStartMatch | None:
+    """Shows the LLM each competing candidate's page index + a short
+    snippet (page head, matching the ~200-char window locate_chapter_start
+    itself scores against) and asks it to pick which one is the chapter's
+    true opening page, or none. A small, bounded prompt -- a handful of
+    short snippets, never whole-book text -- since locate_chapter_start_candidates
+    has already narrowed the field to the real contenders (design spec §6).
+    """
+    author_clause = f" by {', '.join(authors)}" if authors else ""
+    candidate_blocks = "\n\n".join(
+        f"[CANDIDATE {n}] page {c.index}:\n{pages[c.index][:300]}"
+        for n, c in enumerate(candidates, start=1)
+    )
+    prompt = _LLM_DISAMBIGUATION_PROMPT.format(title=title, author_clause=author_clause, candidate_blocks=candidate_blocks)
+
+    try:
+        raw = await llm_service.generate(prompt=prompt, max_tokens=64, temperature=0.0)
+        data = parse_json_object(raw)
+    except Exception:
+        logger.warning("llm_disambiguate_chapter_start: LLM call or JSON parse failed", exc_info=True)
+        return None
+
+    chosen = data.get("chosen_candidate")
+    if not isinstance(chosen, int) or not (1 <= chosen <= len(candidates)):
+        return None
+    winner = candidates[chosen - 1]
+    # Deliberately conservative: margin is pinned at exactly the minimum
+    # required to clear locate_chapter_start's own ambiguity guard, never
+    # higher -- the LLM resolved WHICH candidate is right, it did not make
+    # the underlying textual match itself any less genuinely contested
+    # (design spec §6).
+    return ChapterStartMatch(index=winner.index, score=winner.score, margin=_LOCATE_MARGIN_REQUIRED, author_confirmed=winner.author_confirmed)
+
+
 # How much extra margin (beyond the minimum _LOCATE_MARGIN_REQUIRED) counts
 # as "fully certain" for confidence purposes -- chosen so an uncontested
 # match (margin == score, since runner_up defaults to 0.0) with a decent raw
