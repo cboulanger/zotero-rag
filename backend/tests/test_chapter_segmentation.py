@@ -12,11 +12,13 @@ from backend.services.chapter_segmentation import (
 )
 from backend.services.chapter_segmentation import (
     ChapterStartCandidate,
+    ChapterStartMatch,
     extract_printed_page_number,
     locate_chapter_start,
     locate_chapter_start_candidates,
     match_confidence,
 )
+from backend.services.chapter_segmentation import _chapters_from_located
 from backend.services.chapter_segmentation import extract_authors_near
 from backend.services.chapter_segmentation import analyze_attachment
 from backend.services.chapter_segmentation import run as analyze_run
@@ -377,6 +379,24 @@ class TestAnalyzeAttachment(unittest.TestCase):
     def test_chapters_default_to_heuristic_source(self):
         result = analyze_attachment(self._fake_book_pages())
         self.assertTrue(all(c["source"] == "heuristic" for c in result["chapters"]))
+
+
+class TestChaptersFromLocated(unittest.TestCase):
+    def test_entry_source_maps_llm_entries_and_defaults_others_to_heuristic(self):
+        pages = [
+            "Introduction\nJane Author\n\nBody text.\n\n1",
+            "Comparing Citation Styles\n\nJohn Smith\n\nBody text.\n\n2",
+        ]
+        llm_entry = TocEntry(title="Introduction", printed_page_number=1, source_page_index=-1)
+        heuristic_entry = TocEntry(title="Comparing Citation Styles", printed_page_number=2, source_page_index=0)
+        located = [
+            (llm_entry, ChapterStartMatch(index=0, score=100.0, margin=20.0)),
+            (heuristic_entry, ChapterStartMatch(index=1, score=100.0, margin=20.0)),
+        ]
+        chapters = _chapters_from_located(pages, located, entry_source={llm_entry: "llm"})
+        sources = {c["title"]: c["source"] for c in chapters}
+        self.assertEqual(sources["Introduction"], "llm")
+        self.assertEqual(sources["Comparing Citation Styles"], "heuristic")
 
 
 class TestRun(unittest.TestCase):

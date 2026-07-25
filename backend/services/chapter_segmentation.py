@@ -426,6 +426,8 @@ def _locate_toc_entries(
             located.append((entry, match))
         else:
             unlocated.append(entry)
+    # Order by PDF page index (not TOC order, which is printed-page order
+    # and could disagree if entries were matched to pages out of sequence).
     located.sort(key=lambda pair: pair[1].index)
     return located, unlocated
 
