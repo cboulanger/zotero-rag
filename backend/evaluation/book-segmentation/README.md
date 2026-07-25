@@ -105,9 +105,41 @@ real evaluation set.
 
 ## Current results
 
-A heuristic-vs-LLM-fallback comparison table will be added here after the
-first real run of `scripts/evaluate_chapter_segmentation_llm_fallback.py`
-(see "LLM-fallback evaluation" above).
+**First real run of `scripts/evaluate_chapter_segmentation_llm_fallback.py`**
+(against the KISSKI-backed `apple-silicon-kisski` preset): precision/recall
+came back **identical to the pure-heuristic baseline** below for all 7 books
+— the LLM fallback did not change a single result on this run, for two
+distinct reasons observed directly in the logs:
+
+- **The configured default preset model returned repeated `500`
+  (`InternalServerError`) responses** from the KISSKI Chat-AI endpoint for
+  every LLM call attempted — a remote-service issue, not a bug in this
+  project's code (the fallback still degraded gracefully every time, per
+  its design). Re-running against a smaller, working model
+  (`meta-llama-3.1-8b-instruct`, confirmed reachable via
+  `scripts/test_kisski_api.py`) eliminated the `500`s.
+- With that smaller model actually responding, **`llm_disambiguate_chapter_start`
+  fired 11 times across the set but every single response failed to parse**
+  — instead of the requested `{"chosen_candidate": ...}` JSON, the model
+  repeatedly hallucinated a fictitious tool call (e.g. `"I'll use the
+  book_chapter_finder tool to find the correct page... tool call:
+  book_chapter_finder(CANDIDATE 1, CANDIDATE 2, ...)"`). Each failure was
+  caught and logged exactly as designed, falling back to the heuristic
+  result rather than crashing or corrupting output — but the fallback also
+  provided zero net benefit in this run.
+- `llm_extract_toc_entries` fired once (for `9782375460122.pdf`, the book
+  already at 0% heuristic recall below) and also failed to parse for the
+  same reason, so it likewise contributed nothing this run.
+
+**Takeaway:** the orchestration/error-handling contract (spec §11 — never
+worse than the heuristic baseline) held up empirically, but disambiguation
+prompt-following was unreliable on the smaller model tried here. Before
+relying on this fallback for real gains, try a model from `KISSKI_RAG_MODELS`
+better known for instruction-following on structured-output tasks (e.g.
+`llama-3.3-70b-instruct` per `scripts/test_kisski_api.py`), or once the
+default `mistral-large-3-675b-instruct-2512` model is confirmed reachable
+again. Re-run this script any time the prompt, model choice, or heuristic
+changes to check whether the fallback has become net-helpful.
 
 Snapshot from running the harness above, one row per evaluation book
 (regenerate anytime — these numbers shift as the heuristics evolve, so treat
