@@ -101,7 +101,10 @@ class TestUploadRun(unittest.TestCase):
                 "key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management",
                 "creators": [{"creatorType": "author", "firstName": "Jane", "lastName": "Editor"}],
                 "publisher": "Big Press", "place": "Berlin", "date": "2019", "ISBN": "978-0", "language": "en",
-                "extra": "",
+                # Distinctive marker line: if the chapter's extra were (buggily)
+                # computed from the BOOK's extra, this would leak into the
+                # chapter's update payload — see test_commit_creates_and_links.
+                "extra": "X-Citekey: bookMarker2019",
             },
         }
         analysis = {
@@ -149,10 +152,23 @@ class TestUploadRun(unittest.TestCase):
         zot.attachment_simple.assert_called()
         self.assertEqual(len(result["created"]), 1)
         self.assertEqual(result["created"][0]["chapter_key"], "CHAP1")
+        # update_item is called exactly twice per committed chapter: first for
+        # the chapter (extra + collection membership folded into one PATCH),
+        # then for the book.
+        self.assertEqual(zot.update_item.call_count, 2)
+        chapter_update_extra = zot.update_item.call_args_list[0][0][0]["data"]["extra"]
+        book_update_extra = zot.update_item.call_args_list[1][0][0]["data"]["extra"]
         # The chapter's own X-Contained-By is written from its own (empty)
-        # extra, not inherited from the book's extra — update_item's first
-        # call is for the chapter, the second for the book (see run()).
-        self.assertIn("X-Contained-By", zot.update_item.call_args_list[0][0][0]["data"]["extra"])
+        # extra, not inherited from the book's extra. contained_by=book_id is a
+        # literal, so asserting its presence alone can't distinguish a
+        # wrong-source read — instead assert the book's distinctive marker line
+        # did NOT leak into the chapter's extra.
+        self.assertIn("X-Contained-By", chapter_update_extra)
+        self.assertNotIn("bookMarker2019", chapter_update_extra)
+        # The book's own update writes X-Contains / X-Chapter-Pdf-Range, never
+        # the chapter-side X-Contained-By. Guards against aliasing the two
+        # items' extra fields (the fixed non-aliasing bug).
+        self.assertNotIn("X-Contained-By", book_update_extra)
 
     def test_below_threshold_is_skipped(self):
         book_item, analysis = self._book_and_analysis()

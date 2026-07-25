@@ -183,17 +183,30 @@ async def run(
                 book_id = format_chapter_id(slug, book_key)
                 chapter_extra = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
                 chapter_item["data"]["extra"] = chapter_extra
-                zotero_write_client.update_item(chapter_item)
 
-                new_chapter_ids.append(chapter_id)
-                pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
-
+                # Resolve the per-book target subcollection and fold membership
+                # into the SAME update_item PATCH as the extra-field write.
+                # pyzotero's update_item and addto_collection are both item
+                # PATCHes that bump the server-side version and both derive
+                # their If-Unmodified-Since-Version header from
+                # payload["version"]; update_item returns the raw response
+                # without refreshing the local dict's cached version, so
+                # issuing them as two separate calls makes the second send a
+                # now-stale version and 412 against real pyzotero. Reordering
+                # does not help (both calls bump the version); one combined
+                # PATCH sidesteps the staleness entirely.
                 label = author_year_label(
                     [c.get("lastName", "") for c in book_data.get("creators", [])],
                     book_data.get("date", ""),
                 )
                 _, sub_key = ensure_target_collection(zotero_write_client, target_collection, label)
-                zotero_write_client.addto_collection(sub_key, chapter_item)
+                existing_collections = chapter_item["data"].get("collections", [])
+                if sub_key not in existing_collections:
+                    chapter_item["data"]["collections"] = [*existing_collections, sub_key]
+                zotero_write_client.update_item(chapter_item)
+
+                new_chapter_ids.append(chapter_id)
+                pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
 
                 created.append({"book_key": book_key, "chapter_key": chapter_key})
             except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
