@@ -23,7 +23,7 @@ from backend.services.chapter_link_store import parse_links
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
 # prose sentences ending in a number don't false-positive.
-_TOC_LINE_RE = re.compile(r"^(?P<title>.{3,120}?)[.\s]{2,}(?P<page>\d{1,4})\s*$")
+_TOC_LINE_RE = re.compile(r"^(?P<title>.{3,120}?)[.\s]{1,}(?P<page>\d{1,4})\s*$")
 
 
 @dataclass(frozen=True)
