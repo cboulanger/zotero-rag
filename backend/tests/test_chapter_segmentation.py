@@ -11,6 +11,7 @@ from backend.services.chapter_segmentation import (
     extract_printed_page_number,
     locate_chapter_start,
 )
+from backend.services.chapter_segmentation import extract_authors_near
 
 
 class TestFindTocCandidates(unittest.TestCase):
@@ -69,6 +70,18 @@ class TestExtractPrintedPageNumber(unittest.TestCase):
     def test_returns_none_when_no_number_present(self):
         text = "Just a page of prose with no isolated numeral line at all here."
         self.assertIsNone(extract_printed_page_number(text))
+
+
+class TestExtractAuthorsNear(unittest.TestCase):
+    def test_finds_person_entities_at_chapter_start(self):
+        text = "Comparing Citation Styles\n\nBy Jane Author and John Smith\n\nThis chapter examines APA and MLA styles."
+        authors = extract_authors_near(text)
+        self.assertIn("Jane Author", authors)
+        self.assertIn("John Smith", authors)
+
+    def test_returns_empty_list_when_no_names_found(self):
+        authors = extract_authors_near("Introduction\n\nThis chapter examines citation styles in detail.")
+        self.assertEqual(authors, [])
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ import io
 import re
 from dataclasses import dataclass
 
+import spacy
 from pypdf import PdfReader
 from rapidfuzz import fuzz
 
@@ -116,3 +117,26 @@ def extract_printed_page_number(page_text: str) -> str | None:
         if _PAGE_NUMBER_TOKEN_RE.match(line):
             return line
     return None
+
+
+_NLP = None
+
+
+def _get_nlp():
+    global _NLP
+    if _NLP is None:
+        _NLP = spacy.load("en_core_web_sm")
+    return _NLP
+
+
+def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
+    """Run spaCy NER on the opening text of a chapter-start page to extract
+    candidate author names. Best-effort: returns an empty list rather than
+    raising when nothing plausible is found.
+    """
+    doc = _get_nlp()(page_text[:max_chars])
+    seen: list[str] = []
+    for ent in doc.ents:
+        if ent.label_ == "PERSON" and ent.text not in seen:
+            seen.append(ent.text)
+    return seen
