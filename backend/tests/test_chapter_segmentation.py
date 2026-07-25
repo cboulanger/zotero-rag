@@ -182,7 +182,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, no TOC pattern here at all."],
+            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
         ):
             result = asyncio.run(analyze_run(
                 zotero_client=zotero_client,

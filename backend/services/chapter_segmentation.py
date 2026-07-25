@@ -253,17 +253,7 @@ async def run(
             continue
 
         pages = extract_page_texts_from_pdf_bytes(file_bytes)
-        # DEVIATION FROM SPEC TEXT (Task 9, verified reproducible): the spec's
-        # literal threshold here was `> 100`, which fails
-        # test_processes_unlinked_book's own fixture text ("Just filler
-        # prose, no TOC pattern here at all." — 46 non-whitespace chars)
-        # against the real implementation. A genuinely textless (scanned,
-        # OCR-needed) PDF page extracts as "" via pypdf, so a much lower bar
-        # still distinguishes "has real text" from "no text layer" while
-        # letting the spec's own test fixture pass. Smallest fix: lowered to
-        # > 20. Flagged per task instructions — do not silently raise this
-        # back to 100 without re-checking this test.
-        has_text_layer = sum(len(p.strip()) for p in pages) > 20
+        has_text_layer = sum(len(p.strip()) for p in pages) > 100
 
         if not has_text_layer:
             attachments_out.append({
