@@ -7,6 +7,10 @@ from backend.services.chapter_segmentation import (
     extract_page_texts_from_pdf_bytes,
     find_toc_candidates,
 )
+from backend.services.chapter_segmentation import (
+    extract_printed_page_number,
+    locate_chapter_start,
+)
 
 
 class TestFindTocCandidates(unittest.TestCase):
@@ -35,6 +39,36 @@ class TestFindTocCandidates(unittest.TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].title, "Bibliographic Software Overview")
         self.assertEqual(entries[0].printed_page_number, 12)
+
+
+class TestLocateChapterStart(unittest.TestCase):
+    def test_finds_matching_page_by_content(self):
+        pages = [
+            "CONTENTS\nComparing Citation Styles ..... 3\n",  # TOC page itself
+            "Some unrelated front matter.",
+            "Comparing Citation Styles\nBy Jane Author\n\nThis chapter examines...",
+        ]
+        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices={0})
+        self.assertEqual(index, 2)
+
+    def test_returns_none_when_no_good_match(self):
+        pages = ["Nothing related to the query here at all, just filler prose."]
+        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertIsNone(index)
+
+
+class TestExtractPrintedPageNumber(unittest.TestCase):
+    def test_finds_arabic_footer_number(self):
+        text = "Comparing Citation Styles\nBy Jane Author\n\nBody text here.\n\n45"
+        self.assertEqual(extract_printed_page_number(text), "45")
+
+    def test_finds_roman_numeral_header(self):
+        text = "xii\nPreface\n\nBody text of the preface."
+        self.assertEqual(extract_printed_page_number(text), "xii")
+
+    def test_returns_none_when_no_number_present(self):
+        text = "Just a page of prose with no isolated numeral line at all here."
+        self.assertIsNone(extract_printed_page_number(text))
 
 
 if __name__ == "__main__":

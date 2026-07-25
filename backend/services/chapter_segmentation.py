@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 
 from pypdf import PdfReader
+from rapidfuzz import fuzz
 
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
@@ -70,3 +71,48 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
                 )
             )
     return entries
+
+
+_PAGE_NUMBER_TOKEN_RE = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,7}$", re.IGNORECASE)
+_LOCATE_SCORE_THRESHOLD = 80.0  # rapidfuzz partial_ratio, 0-100
+
+
+def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> int | None:
+    """Find the PDF page index whose text most plausibly begins with `title`.
+
+    This is a content lookup, not an index computation: it never assumes the
+    TOC's printed page number corresponds to this page's index. Returns the
+    best-scoring page index at/above the match threshold, or None if no page
+    scores highly enough.
+    """
+    best_index: int | None = None
+    best_score = 0.0
+    for index, text in enumerate(pages):
+        if index in exclude_indices:
+            continue
+        # Only the page's opening ~200 characters are compared — a chapter
+        # title appears at the START of its page, not buried mid-page.
+        head = text[:200]
+        score = fuzz.partial_ratio(title.lower(), head.lower())
+        if score > best_score:
+            best_score = score
+            best_index = index
+    if best_score >= _LOCATE_SCORE_THRESHOLD:
+        return best_index
+    return None
+
+
+def extract_printed_page_number(page_text: str) -> str | None:
+    """Read the printed page number actually shown on a page, by looking for
+    an isolated numeral/roman-numeral line near the top or bottom of the
+    page's text (a running header/footer). Returns None if no such line is
+    found — callers must treat this as "unknown", never guess.
+    """
+    lines = [ln.strip() for ln in page_text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    candidates = lines[:2] + lines[-2:]
+    for line in candidates:
+        if _PAGE_NUMBER_TOKEN_RE.match(line):
+            return line
+    return None
