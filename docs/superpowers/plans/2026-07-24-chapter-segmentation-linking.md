@@ -3521,7 +3521,7 @@ git commit -m "feat: suppress a book's pages covered by a linked chapter during 
 
 ### Task 30: Ground-truth accuracy scoring harness against real evaluation data (§5, §12)
 
-Unlike the original draft of this task, the ground-truth data already exists — six real, hand-verified OA books (English/French/German, various publishers) live in `backend/evaluation/book-segmentation/`, each with a `<name>.expected.json` built by directly inspecting the real PDF (TOC page cross-referenced against actual chapter-start pages, page-numbering offset verified per book — not guessed). A seventh, non-OA scanned book (`9783322969828.pdf`) is documented in that directory's README but intentionally has no `.expected.json` yet (see Known limitations below). This task writes the scoring harness that runs against that real data.
+Unlike the original draft of this task, the ground-truth data already exists — seven real, hand-verified books (English/French/German, various publishers) live in `backend/evaluation/book-segmentation/`, each with a `<name>.expected.json` built by directly inspecting the real PDF (TOC page cross-referenced against actual chapter-start pages, page-numbering offset verified per book — not guessed). `manifest.json` is the single source of truth for the set (no README table); six entries are `oa: true` and auto-fetchable via `scripts/fetch_evaluation_pdfs.py`, the seventh (`9783322969828.pdf`, a 1976 scanned/OCR'd yearbook) is `oa: false` and must be acquired manually via its DOI (that script prints the DOI and save path when the file is missing). This task writes the scoring harness that runs against that real data.
 
 **Files:**
 - Test: `tests/test_chapter_segmentation_accuracy.py`
@@ -3613,7 +3613,7 @@ git add tests/test_chapter_segmentation_accuracy.py
 git commit -m "test: add accuracy scoring harness against real evaluation books"
 ```
 
-**Known limitation (documented in `backend/evaluation/book-segmentation/README.md`, not fixed here):** the seventh book, `9783322969828.pdf` (a 1976 scanned/OCR'd Springer yearbook, `OA: No`), has no `.expected.json` — it isn't auto-fetchable, and its OCR-quality text needs validating against the real OCR pipeline (script 2, Task 19-20) rather than plain `pypdf` extraction before ground truth can be built for it confidently. Building that one book's ground truth, and wiring a manual-acquisition path into this harness, is a reasonable follow-up once script 2 exists — not required for this task.
+**Known limitation:** the seventh book, `9783322969828.pdf` (a 1976 scanned/OCR'd Springer yearbook, `oa: false`), *does* have a real `.expected.json` — its ground truth was built the same way as the other six (direct TOC cross-reference, offset verification), and its existing embedded text layer turned out to be good enough for `pypdf` extraction directly, no OCR needed. But it can never be auto-fetched (see `scripts/fetch_evaluation_pdfs.py`'s DOI-printing fallback), so this harness will only actually exercise that book on a machine where someone has manually placed the file after acquiring it via institutional access — CI and fresh clones will see six-book results, not seven, until that happens. Nothing to fix here; just don't be surprised if the seventh book's `precision=.../recall=...` line is silently absent from the test output on a machine that never fetched it.
 
 ---
 

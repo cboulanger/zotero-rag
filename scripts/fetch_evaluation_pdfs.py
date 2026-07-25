@@ -3,10 +3,14 @@
 
 The PDFs themselves are gitignored (backend/evaluation/book-segmentation/*.pdf)
 so they aren't shipped in the repo. This script reads
-backend/evaluation/book-segmentation/manifest.json and downloads each entry
-with "oa": true into that same directory if not already present. Entries with
-"oa": false (e.g. the one non-OA scanned fixture) are skipped with a message —
-they must be supplied manually and can never be legally auto-downloaded.
+backend/evaluation/book-segmentation/manifest.json (the single source of
+truth for this evaluation set — see that directory's README) and downloads
+each entry with "oa": true into that same directory if not already present.
+
+Non-OA books ("oa": false) are perfectly welcome in the manifest — they just
+can't be auto-downloaded. If one is missing locally, this script prints its
+DOI and the exact path to save it to, so you can fetch it manually through
+your institution's legal access and drop it in yourself.
 
 Usage:
     uv run python scripts/fetch_evaluation_pdfs.py
@@ -32,7 +36,7 @@ def fetch_all(eval_dir: Path, force: bool) -> int:
             target = eval_dir / book["filename"]
             if not book["oa"]:
                 if not target.exists():
-                    missing_non_oa.append(book["filename"])
+                    missing_non_oa.append(book)
                 continue
             if target.exists() and not force:
                 print(f"[skip] {book['filename']} already present")
@@ -44,9 +48,15 @@ def fetch_all(eval_dir: Path, force: bool) -> int:
             print(f"        wrote {len(response.content):,} bytes")
 
     if missing_non_oa:
-        print("\nNot auto-downloaded (OA: No — acquire manually if you need them):")
-        for name in missing_non_oa:
-            print(f"  - {name}")
+        print("\nNot auto-downloaded (OA: No — legally cannot be fetched automatically).")
+        print("Download each one manually via your institution's access to the DOI below,")
+        print(f"then place it at the path shown, and re-run this script (or just run the tests):\n")
+        for book in missing_non_oa:
+            doi = book.get("doi")
+            doi_url = f"https://doi.org/{doi}" if doi else "(no DOI on file — see manifest.json)"
+            print(f"  - {book['filename']}")
+            print(f"      DOI: {doi_url}")
+            print(f"      Save to: {eval_dir / book['filename']}")
 
     return 0
 

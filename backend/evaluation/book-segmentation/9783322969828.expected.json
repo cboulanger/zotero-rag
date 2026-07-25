@@ -1,0 +1,28 @@
+{
+  "chapters": [
+    {"title": "Einleitung der Herausgeber", "authors": ["Manfred Rehbinder"], "pdf_start_index": 7, "pdf_end_index": 12, "citation_pages": "7-12"},
+    {"title": "The relationship between judicial and political branches of government", "authors": ["Torstein Eckhoff"], "pdf_start_index": 14, "pdf_end_index": 23, "citation_pages": "14-23"},
+    {"title": "Trial courts and their work in the modern world", "authors": ["Lawrence M. Friedman"], "pdf_start_index": 24, "pdf_end_index": 37, "citation_pages": "25-38"},
+    {"title": "Economic development and litigation: The case of Spain", "authors": ["Jose Juan Toharia"], "pdf_start_index": 38, "pdf_end_index": 81, "citation_pages": "39-82"},
+    {"title": "Der Anteil gerichtlicher Verfahren bei der Austragung sozialer Konflikte", "authors": ["Erhard Blankenburg"], "pdf_start_index": 83, "pdf_end_index": 96, "citation_pages": "84-97"},
+    {"title": "Political justice and system maintenance: An overview of some major variables", "authors": ["Joel B. Grossman"], "pdf_start_index": 97, "pdf_end_index": 119, "citation_pages": "99-121"},
+    {"title": "Zum Problem der Klassenjustiz", "authors": ["Thomas Raiser"], "pdf_start_index": 120, "pdf_end_index": 133, "citation_pages": "123-136"},
+    {"title": "Eine entscheidungstheoretische Konzeption des Justizverfahrens", "authors": ["Johann J. Hagen"], "pdf_start_index": 135, "pdf_end_index": 151, "citation_pages": "138-154"},
+    {"title": "Criminal courts as organizational phenomena", "authors": ["Herbert Jacob"], "pdf_start_index": 152, "pdf_end_index": 169, "citation_pages": "155-172"},
+    {"title": "The choice between litigation and arbitration", "authors": ["Britt-Mari Blegvad"], "pdf_start_index": 171, "pdf_end_index": 181, "citation_pages": "174-184"},
+    {"title": "Judicial decision-making and administrative tasks", "authors": ["Jeffrey Jowell"], "pdf_start_index": 182, "pdf_end_index": 202, "citation_pages": "185-205"},
+    {"title": "Civil trial and social justice in Italy. A sociological analysis of the proceedings under art. 28 of the Workers' Statute", "authors": ["Ernesto Ugo Savona"], "pdf_start_index": 203, "pdf_end_index": 211, "citation_pages": "207-215"},
+    {"title": "Social reform groups and the legal system: Enforcement problems", "authors": ["Joel F. Handler"], "pdf_start_index": 213, "pdf_end_index": 238, "citation_pages": "218-243"},
+    {"title": "The distribution of advantages in the litigation process", "authors": ["Marc Galanter"], "pdf_start_index": 239, "pdf_end_index": 264, "citation_pages": "245-270"},
+    {"title": "Defamation: Reputation and encounter", "authors": ["P.S.C. Lewis"], "pdf_start_index": 265, "pdf_end_index": 278, "citation_pages": "271-284"},
+    {"title": "Citizen participation in the administration of justice: Research and policy in Poland", "authors": ["Maria Borucka-Arctowa"], "pdf_start_index": 280, "pdf_end_index": 293, "citation_pages": "286-299"},
+    {"title": "The function of the lay judge in Czechoslovakia", "authors": ["Zdenek Krystufek"], "pdf_start_index": 294, "pdf_end_index": 299, "citation_pages": "301-306"},
+    {"title": "Die rechtliche Erheblichkeit gesellschaftlicher Unwissenheit", "authors": ["Jutta Limbach"], "pdf_start_index": 300, "pdf_end_index": 312, "citation_pages": "307-319"},
+    {"title": "Sachverständigengutachten und Urteilsfindung im Zivilprozeß", "authors": ["Helmut Pieper"], "pdf_start_index": 313, "pdf_end_index": 334, "citation_pages": "321-342"},
+    {"title": "Das Problem des Musterprozesses", "authors": ["Peter Arens"], "pdf_start_index": 336, "pdf_end_index": 347, "citation_pages": "344-355"},
+    {"title": "Das rechtliche Verfahren in der Rechtsethnologie: Versuch zu einem interkulturell anwendbaren Bezugsrahmen", "authors": ["Franz von Benda-Beckmann"], "pdf_start_index": 348, "pdf_end_index": 367, "citation_pages": "357-376"},
+    {"title": "Zugangsbarrieren zur Justiz", "authors": ["Rolf Bender", "Christoph Strecker"], "pdf_start_index": 368, "pdf_end_index": 385, "citation_pages": "377-394"},
+    {"title": "Die Kosten der Rechtsverfolgung als Zugangsbarriere der Rechtspflege", "authors": ["Manfred Rehbinder"], "pdf_start_index": 386, "pdf_end_index": 404, "citation_pages": "395-413"},
+    {"title": "\"Kommunikation\" als Untersuchungsgegenstand und Forschungsinstrument", "authors": ["Gisela Zenz"], "pdf_start_index": 405, "pdf_end_index": 416, "citation_pages": "415-426"}
+  ]
+}
