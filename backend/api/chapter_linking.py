@@ -8,13 +8,17 @@ run() function exists; this task only wires up the shared job registry and
 its polling endpoint.
 """
 
+import asyncio
 import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from backend.services.chapter_link_store import parse_library_slug
+from backend.services.chapter_segmentation import run as analyze_run
 from backend.services.job_tracker import JobTracker
+from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -55,3 +59,38 @@ async def get_job_status(job_id: str) -> JobStatusResponse:
         result=job.result,
         error=job.error,
     )
+
+
+class AnalyzeRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    item_keys: list[str] | None = None
+    relink: bool = False
+    max_items: int | None = None
+
+
+@router.post("/chapter-linking/analyze", summary="Analyze book PDFs for chapter-segmentation candidates")
+async def start_analyze(request: AnalyzeRequest) -> dict:
+    library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
+    client = ZoteroWebAPI(api_key=request.api_key)
+    job_id = tracker.create()
+
+    async def _task() -> None:
+        try:
+            result = await analyze_run(
+                zotero_client=client,
+                library_id=library_id,
+                library_type=library_type,
+                slug=request.library_slug,
+                item_keys=request.item_keys,
+                max_items=request.max_items,
+                relink=request.relink,
+                progress_callback=lambda p, m: tracker.update(job_id, progress=p, message=m),
+            )
+            tracker.update(job_id, result=result)
+        except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised
+            logger.exception("chapter-linking analyze job %s failed", job_id)
+            tracker.update(job_id, error=str(exc))
+
+    asyncio.create_task(_task())
+    return {"job_id": job_id}
