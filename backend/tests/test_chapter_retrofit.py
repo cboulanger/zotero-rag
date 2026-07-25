@@ -82,6 +82,37 @@ class TestRetrofitRun(unittest.TestCase):
         self.assertEqual(result["linked"][0]["book_key"], "BOOK1")
         zot.update_item.assert_called()
 
+    def test_book_write_succeeds_but_chapter_write_fails_reports_failed(self):
+        zot = MagicMock()
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        zot.everything.return_value = all_items
+        zot.item.side_effect = lambda key: next(i for i in all_items if i["key"] == key)
+        # First update_item call (the book, written first) succeeds; the
+        # second call (the chapter) raises, simulating a version conflict.
+        zot.update_item.side_effect = [None, Exception("boom")]
+
+        result = retrofit_run(
+            zotero_write_client=zot,
+            slug="groups/1",
+            item_keys=None,
+            max_items=None,
+        )
+
+        self.assertEqual(result["linked"], [])
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["chapter_key"], "CHAP1")
+        self.assertEqual(result["failed"][0]["book_key"], "BOOK1")
+        self.assertIn("boom", result["failed"][0]["error"])
+
+        # Confirm the book write was attempted before the chapter write
+        # that raised: update_item's first call must have been for BOOK1.
+        first_call_arg = zot.update_item.call_args_list[0].args[0]
+        self.assertEqual(first_call_arg["data"]["key"], "BOOK1")
+        self.assertEqual(zot.update_item.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

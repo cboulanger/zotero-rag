@@ -138,6 +138,7 @@ def run(
     linked: list[dict] = []
     ambiguous: list[dict] = []
     no_match: list[str] = []
+    failed: list[dict] = []
 
     for chapter in unlinked_chapters:
         chapter_key = chapter["data"]["key"]
@@ -157,14 +158,26 @@ def run(
         chapter_id = format_chapter_id(slug, chapter_key)
         book_id = format_chapter_id(slug, match.book_key)
 
-        chapter["data"]["extra"] = write_links(chapter["data"].get("extra", ""), contained_by=book_id)
-        zotero_write_client.update_item(chapter)
+        try:
+            # Write the book side (X-Contains) FIRST. If this fails, the
+            # chapter is left untouched and still shows up as "unlinked" on
+            # the next run. If it succeeds but the chapter write below then
+            # fails, the next run will re-match this chapter and re-write
+            # X-Contains — a no-op thanks to the deterministic ordering
+            # below — and simply retry the chapter write. This makes the
+            # two-write sequence self-healing instead of leaving a
+            # permanent one-sided link.
+            existing_links = parse_links(book_item["data"].get("extra", ""))
+            new_contains = list(dict.fromkeys([*existing_links.contains, chapter_id]))
+            book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
+            zotero_write_client.update_item(book_item)
 
-        existing_links = parse_links(book_item["data"].get("extra", ""))
-        new_contains = list({*existing_links.contains, chapter_id})
-        book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
-        zotero_write_client.update_item(book_item)
+            chapter["data"]["extra"] = write_links(chapter["data"].get("extra", ""), contained_by=book_id)
+            zotero_write_client.update_item(chapter)
+        except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
+            failed.append({"chapter_key": chapter_key, "book_key": match.book_key, "error": str(exc)})
+            continue
 
         linked.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
 
-    return {"linked": linked, "ambiguous": ambiguous, "no_match": no_match}
+    return {"linked": linked, "ambiguous": ambiguous, "no_match": no_match, "failed": failed}
