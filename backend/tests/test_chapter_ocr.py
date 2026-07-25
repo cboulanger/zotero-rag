@@ -78,6 +78,83 @@ class TestOcrRun(unittest.TestCase):
         # (BOOK1) — /items/{key}/file requires the attachment's key.
         zotero_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
 
+    def test_cache_hit_short_circuits_before_fetching_item(self):
+        import asyncio
+
+        fixture_bytes = b"%PDF-1.4 one page fake"
+        content_hash = hashlib.sha256(fixture_bytes).hexdigest()
+
+        zotero_client = AsyncMock()
+        zotero_client.get_attachment_file.return_value = fixture_bytes
+
+        extractor = AsyncMock()
+
+        with TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            save_ocr_cache(cache_dir, content_hash, detected_language="fra", pages=["cached page one"])
+
+            result = asyncio.run(ocr_run(
+                zotero_client=zotero_client,
+                extractor=extractor,
+                library_id="1",
+                library_type="group",
+                attachment_specs=[{"item_key": "BOOK1", "attachment_key": "ATT1"}],
+                max_items=None,
+                cache_dir=cache_dir,
+                progress_callback=lambda p, m: None,
+            ))
+
+        self.assertEqual(len(result["results"]), 1)
+        entry = result["results"][0]
+        self.assertTrue(entry["ocr_succeeded"])
+        self.assertEqual(entry["detected_language"], "fra")
+        self.assertEqual(entry["char_count"], len("cached page one"))
+        # Cache hit must short-circuit before ever fetching the item or extracting.
+        zotero_client.get_item.assert_not_called()
+        extractor.extract_and_chunk.assert_not_called()
+
+    def test_one_attachment_failure_does_not_abort_the_batch(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_attachment_file.side_effect = [
+            b"%PDF-1.4 fake book one",
+            b"%PDF-1.4 fake book two",
+        ]
+        zotero_client.get_item.return_value = {"data": {"title": "", "language": "en"}}
+
+        extractor = AsyncMock()
+        extractor.extract_and_chunk.side_effect = [
+            RuntimeError("Kreuzberg sidecar timeout"),
+            [MagicMock(text="OCR'd page text")],
+        ]
+
+        with TemporaryDirectory() as tmp, unittest.mock.patch(
+            "backend.services.chapter_ocr.PdfReader"
+        ) as mock_reader_cls, unittest.mock.patch(
+            "backend.services.chapter_ocr.slice_single_page_pdf", return_value=b"single page bytes"
+        ):
+            mock_reader_cls.return_value.pages = [MagicMock()]  # one page
+            result = asyncio.run(ocr_run(
+                zotero_client=zotero_client,
+                extractor=extractor,
+                library_id="1",
+                library_type="group",
+                attachment_specs=[
+                    {"item_key": "BOOK1", "attachment_key": "ATT1"},
+                    {"item_key": "BOOK2", "attachment_key": "ATT2"},
+                ],
+                max_items=None,
+                cache_dir=Path(tmp),
+                progress_callback=lambda p, m: None,
+            ))
+
+        self.assertEqual(len(result["results"]), 2)
+        first, second = result["results"]
+        self.assertFalse(first["ocr_succeeded"])
+        self.assertIn("error", first)
+        self.assertTrue(second["ocr_succeeded"])
+
 
 if __name__ == "__main__":
     unittest.main()

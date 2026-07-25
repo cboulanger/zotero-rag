@@ -11,11 +11,14 @@ any ambiguity in how Kreuzberg's own chunking groups multi-page text.
 import hashlib
 import io
 import json
+import logging
 from pathlib import Path
 from typing import Callable, Optional
 
 from langdetect import DetectorFactory, LangDetectException, detect
 from pypdf import PdfReader, PdfWriter
+
+logger = logging.getLogger(__name__)
 
 # Deterministic detection (langdetect is otherwise seeded from wall-clock time).
 DetectorFactory.seed = 0
@@ -119,25 +122,39 @@ async def run(
             })
             continue
 
-        item = await zotero_client.get_item(library_id, item_key, library_type=library_type)
-        language = detect_language(item["data"].get("language"), item["data"].get("title", ""))
+        try:
+            item = await zotero_client.get_item(library_id, item_key, library_type=library_type)
+            language = detect_language(item["data"].get("language"), item["data"].get("title", ""))
 
-        reader = PdfReader(io.BytesIO(file_bytes))
-        page_texts: list[str] = []
-        for page_index in range(len(reader.pages)):
-            single_page_bytes = slice_single_page_pdf(file_bytes, page_index)
-            chunks = await extractor.extract_and_chunk(single_page_bytes, "application/pdf", ocr_language=language)
-            page_texts.append(" ".join(c.text for c in chunks))
+            reader = PdfReader(io.BytesIO(file_bytes))
+            page_texts: list[str] = []
+            for page_index in range(len(reader.pages)):
+                single_page_bytes = slice_single_page_pdf(file_bytes, page_index)
+                chunks = await extractor.extract_and_chunk(
+                    single_page_bytes, "application/pdf", ocr_language=language
+                )
+                page_texts.append(" ".join(c.text for c in chunks))
 
-        cache_path = save_ocr_cache(cache_dir, content_hash, detected_language=language, pages=page_texts)
-        results.append({
-            "item_key": item_key,
-            "attachment_key": attachment_key,
-            "detected_language": language,
-            "ocr_succeeded": True,
-            "char_count": sum(len(p) for p in page_texts),
-            "cache_path": str(cache_path),
-        })
+            cache_path = save_ocr_cache(cache_dir, content_hash, detected_language=language, pages=page_texts)
+            results.append({
+                "item_key": item_key,
+                "attachment_key": attachment_key,
+                "detected_language": language,
+                "ocr_succeeded": True,
+                "char_count": sum(len(p) for p in page_texts),
+                "cache_path": str(cache_path),
+            })
+        except Exception as exc:
+            # A failure on one attachment (e.g. a Kreuzberg sidecar timeout partway
+            # through a large scanned book) must not discard other already-cached
+            # results or abort the rest of the batch — see design spec §6.
+            logger.error(f"OCR failed for item {item_key} attachment {attachment_key}: {exc}")
+            results.append({
+                "item_key": item_key,
+                "attachment_key": attachment_key,
+                "ocr_succeeded": False,
+                "error": str(exc),
+            })
 
     progress_callback(1.0, "Done")
     return {"results": results}
