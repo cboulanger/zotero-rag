@@ -30,6 +30,7 @@ from backend.services.extraction import DocumentExtractor, create_document_extra
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker
+from backend.services.chapter_link_store import parse_links
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -914,6 +915,7 @@ class DocumentProcessor:
             item_type=item["data"].get("itemType"),
             tags=self._extract_tags(item["data"]),
         )
+        item_extra = item["data"].get("extra", "")
 
         is_standalone_attachment = item["data"].get("itemType") == "attachment"
         if is_standalone_attachment:
@@ -962,6 +964,7 @@ class DocumentProcessor:
                     item_version=item_version,
                     attachment_version=attachment_version,
                     item_modified=item_modified,
+                    item_extra=item_extra,
                 )
                 total_chunks += result.chunks_written
 
@@ -1055,6 +1058,8 @@ class DocumentProcessor:
         attachment_version: int,
         item_modified: str,
         on_progress: Optional[Callable[[str], None]] = None,
+        item_extra: str = "",
+        total_pdf_pages: Optional[int] = None,
     ) -> AttachmentProcessingResult:
         """
         Extract, embed, and store chunks for a single attachment.
@@ -1195,9 +1200,40 @@ class DocumentProcessor:
             f"chunks={len(chunk_texts)}"
         )
 
+        suppressed_pages: set[int] = set()
+        if doc_metadata.item_type == "book" and item_extra:
+            links = parse_links(item_extra)
+            valid_ranges: list[tuple[int, int]] = []
+            for chapter_id, (start, end) in links.pdf_ranges.items():
+                if total_pdf_pages is not None and end >= total_pdf_pages:
+                    logger.warning(
+                        f"Skipping suppression for {doc_metadata.item_key}: "
+                        f"chapter {chapter_id} range end {end} exceeds page count {total_pdf_pages}"
+                    )
+                    valid_ranges = []
+                    break
+                valid_ranges.append((start, end))
+            else:
+                # No `break` triggered — check for overlaps before trusting any range.
+                sorted_ranges = sorted(valid_ranges)
+                for (s1, e1), (s2, e2) in zip(sorted_ranges, sorted_ranges[1:]):
+                    if s2 <= e1:
+                        logger.warning(
+                            f"Skipping suppression for {doc_metadata.item_key}: "
+                            f"overlapping chapter ranges {(s1, e1)} and {(s2, e2)}"
+                        )
+                        valid_ranges = []
+                        break
+            for start, end in valid_ranges:
+                # pdf_start_index/pdf_end_index are 0-based PDF indices;
+                # ExtractionChunk.page_number is 1-based (kreuzberg's "first_page").
+                suppressed_pages.update(range(start + 1, end + 2))
+
         # Build DocumentChunk objects with full metadata
         doc_chunks = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            if chunk.page_number is not None and chunk.page_number in suppressed_pages:
+                continue
             chunk_id = f"{library_id}:{item_key}:{attachment_key}:{i}"
 
             chunk_metadata = ChunkMetadata(

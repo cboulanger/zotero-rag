@@ -2090,5 +2090,58 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
         self.assertEqual(result["chunks_added"], 0)
 
 
+class TestChapterSuppression(unittest.TestCase):
+    """A book item linked to a chapter covering pages 2-4 (0-based PDF index)
+    should not index chunks whose page_number falls in that range."""
+
+    def setUp(self):
+        self.zotero_client = MagicMock()
+        self.embedding_service = MagicMock()
+        self.embedding_service.embed_batch = AsyncMock(return_value=[[0.1] * 8] * 5)
+        self.vector_store = MagicMock()
+        # Reach the fresh-extraction chunk-building loop: without these stubs the
+        # bare MagicMock returns truthy dedup hits and diverts into the
+        # same-library / cross-library duplicate paths (matches the mock-setup
+        # convention used by every other TestCase in this file).
+        self.vector_store.check_duplicate.return_value = None
+        self.vector_store.find_cross_library_duplicate.return_value = None
+        self.extractor = AsyncMock()
+        self.processor = DocumentProcessor(
+            zotero_client=self.zotero_client,
+            embedding_service=self.embedding_service,
+            vector_store=self.vector_store,
+            document_extractor=self.extractor,
+        )
+
+    def test_suppresses_pages_within_linked_chapter_range(self):
+        import asyncio
+
+        from backend.models.document import DocumentMetadata
+
+        # Pages (1-based, matching ExtractionChunk.page_number convention)
+        # 1 and 5 are book residual content; 2-4 fall inside a linked chapter's
+        # 0-based PDF range [1, 3] -> 1-based page_number 2, 3, 4.
+        self.extractor.extract_and_chunk.return_value = _make_extraction_chunks(
+            ("front matter", 1), ("chapter page a", 2), ("chapter page b", 3),
+            ("chapter page c", 4), ("back matter", 5),
+        )
+        doc_metadata = DocumentMetadata(
+            library_id="1", item_key="BOOK1", title="Handbook", authors=[], year=2019,
+            item_type="book", attachment_key="ATT1",
+        )
+        # Extra field: chapter groups/1:CHAP1 covers PDF pages 1-3 (0-based).
+        book_extra = "X-Contains: groups/1:CHAP1\nX-Chapter-Pdf-Range: groups/1:CHAP1:1-3"
+
+        result = asyncio.run(self.processor._process_attachment_bytes(
+            file_bytes=b"fake pdf bytes", mime_type="application/pdf", doc_metadata=doc_metadata,
+            item_version=1, attachment_version=1, item_modified="2026-01-01T00:00:00Z",
+            item_extra=book_extra, total_pdf_pages=5,
+        ))
+
+        stored_chunks = self.vector_store.add_chunks_batch.call_args[0][0]
+        stored_pages = sorted(c.metadata.page_number for c in stored_chunks)
+        self.assertEqual(stored_pages, [1, 5])
+
+
 if __name__ == "__main__":
     unittest.main()
