@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 from backend.models.conversation import ChatTurn
 from backend.models.filters import MetadataFilters
 from backend.services.base_agent import AgentResult, BaseAgent, QueryPlan
-from backend.services.query_router import QueryRouter, _parse_json
+from backend.services.query_router import QueryRouter
 
 
 # ---------------------------------------------------------------------------
@@ -33,39 +33,6 @@ def _make_router(json_response: str) -> QueryRouter:
     llm.generate = AsyncMock(return_value=json_response)
     return QueryRouter(llm)
 
-
-# ---------------------------------------------------------------------------
-# _parse_json
-# ---------------------------------------------------------------------------
-
-class TestParseJson(unittest.TestCase):
-
-    def test_plain_json(self):
-        data = _parse_json('{"agents": ["rag"], "year_min": null}')
-        self.assertEqual(data["agents"], ["rag"])
-
-    def test_strips_markdown_fence(self):
-        raw = '```json\n{"agents": ["metadata"]}\n```'
-        data = _parse_json(raw)
-        self.assertEqual(data["agents"], ["metadata"])
-
-    def test_strips_plain_code_fence(self):
-        raw = '```\n{"agents": ["rag", "metadata"]}\n```'
-        data = _parse_json(raw)
-        self.assertEqual(data["agents"], ["rag", "metadata"])
-
-    def test_json_with_leading_text(self):
-        raw = 'Here is the answer: {"agents": ["rag"]}'
-        data = _parse_json(raw)
-        self.assertEqual(data["agents"], ["rag"])
-
-    def test_raises_on_no_braces(self):
-        with self.assertRaises(ValueError):
-            _parse_json("no json here at all")
-
-    def test_raises_on_invalid_json(self):
-        with self.assertRaises(Exception):
-            _parse_json("{bad json}")
 
 
 # ---------------------------------------------------------------------------

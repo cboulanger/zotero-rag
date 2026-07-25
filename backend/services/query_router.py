@@ -8,7 +8,6 @@ Falls back to a RAG-only plan on any parse failure.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from backend.models.filters import CitationTarget, MetadataFilters
 from backend.models.trace import LLMCallTrace, RoutingTrace
 from backend.services.base_agent import BaseAgent, QueryPlan
 from backend.services.llm import LLMService
+from backend.utils.llm_json import parse_json_object
 
 if TYPE_CHECKING:
     from backend.services.trace_collector import TraceCollector
@@ -153,7 +153,7 @@ class QueryRouter:
         try:
             raw = await self._llm.generate(prompt=prompt, max_tokens=256, temperature=0.0)
             duration_ms = int((time.monotonic() - t0) * 1000)
-            data = _parse_json(raw)
+            data = parse_json_object(raw)
 
             selected = [n for n in data.get("agents", ["rag"]) if n in valid_names]
             if not selected:
@@ -222,22 +222,3 @@ def _render_conversation_history(history: list[ChatTurn], max_chars: int) -> str
         total += len(block)
     kept.reverse()
     return "\n\n".join(kept)
-
-
-def _parse_json(text: str) -> dict:
-    """Extract and parse the first JSON object found in *text*."""
-    text = text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(
-            line for line in lines
-            if not line.startswith("```")
-        ).strip()
-
-    # Find the outermost { ... }
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1:
-        raise ValueError(f"No JSON object found in router response: {text!r}")
-    return json.loads(text[start: end + 1])
