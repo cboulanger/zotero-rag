@@ -61,6 +61,34 @@ class TestLocateChapterStart(unittest.TestCase):
         index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
         self.assertIsNone(index)
 
+    def test_rejects_sparse_page_despite_high_raw_score(self):
+        # Empirically (see rapidfuzz.fuzz.partial_ratio), a near-blank head
+        # like "Cit" scores 100 against "Comparing Citation Styles" because
+        # partial_ratio finds a perfect alignment for the short substring --
+        # the same degenerate score as the genuine, well-formed chapter
+        # opening on page 2. Without a minimum-length gate, the first-seen
+        # (blank) page wins the tie. With the gate, the blank page is
+        # excluded and the genuine page is the only remaining candidate.
+        pages = [
+            "Cit",  # stray near-blank page; partial_ratio scores this 100
+            "Some unrelated front matter.",
+            "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines...",
+        ]
+        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertEqual(index, 2)
+
+    def test_rejects_ambiguous_tie(self):
+        # Empirically, both pages score >= _LOCATE_SCORE_THRESHOLD (80) for
+        # this title -- page 0 scores 100.0, page 1 scores ~97.96 -- a margin
+        # of ~2 that is well under _LOCATE_MARGIN_REQUIRED. Neither candidate
+        # can be trusted, so the function must return None.
+        pages = [
+            "Comparing Citation Styles\n\nBy Jane Author\n\nThis chapter examines APA style only.",
+            "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
+        ]
+        index = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertIsNone(index)
+
 
 class TestExtractPrintedPageNumber(unittest.TestCase):
     def test_finds_arabic_footer_number(self):
@@ -103,7 +131,14 @@ class TestAnalyzeAttachment(unittest.TestCase):
             # page 1: printed page "1" — Introduction body
             "Introduction\nJane Author\n\nThis book explores reference management.\n\n1",
             # page 2: continuation of Introduction, printed page "2"
-            "...continued introduction text.\n\n2",
+            # NOTE: deliberately avoids repeating the word "introduction"
+            # here -- with locate_chapter_start's ambiguity-margin guard, a
+            # continuation page that happens to literally contain the
+            # chapter title word ties with the real chapter-start page
+            # (both score 100 via rapidfuzz partial_ratio) and neither can
+            # be trusted, which is correct behavior but not what this
+            # fixture is testing.
+            "...continued text follows here.\n\n2",
             # page 3: printed page "3" — chapter start
             # NOTE: a blank line separates the title from "John Smith" here
             # (unlike the spec's literal single "\n"). Verified against the

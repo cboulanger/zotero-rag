@@ -79,29 +79,43 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
 
 _PAGE_NUMBER_TOKEN_RE = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,7}$", re.IGNORECASE)
 _LOCATE_SCORE_THRESHOLD = 80.0  # rapidfuzz partial_ratio, 0-100
+# rapidfuzz partial_ratio is unreliable on very short strings (a near-blank
+# page's head can trivially "perfectly align" with a short substring of the
+# title, scoring 100 despite being meaningless) -- require this many
+# stripped characters before a page is even considered a candidate.
+_LOCATE_MIN_HEAD_CHARS = 20
+# top candidate must beat the runner-up by this much
+_LOCATE_MARGIN_REQUIRED = 8.0
 
 
 def locate_chapter_start(pages: list[str], title: str, exclude_indices: set[int]) -> int | None:
     """Find the PDF page index whose text most plausibly begins with `title`.
 
     This is a content lookup, not an index computation: it never assumes the
-    TOC's printed page number corresponds to this page's index. Returns the
-    best-scoring page index at/above the match threshold, or None if no page
-    scores highly enough.
+    TOC's printed page number corresponds to this page's index. Skips pages
+    whose head text is too short to score reliably, and requires the best
+    match to beat the runner-up by a margin (not just clear the threshold) --
+    returns None if no page qualifies or the top match is ambiguous.
     """
     best_index: int | None = None
     best_score = 0.0
+    runner_up_score = 0.0
     for index, text in enumerate(pages):
         if index in exclude_indices:
             continue
         # Only the page's opening ~200 characters are compared — a chapter
         # title appears at the START of its page, not buried mid-page.
         head = text[:200]
+        if len(head.strip()) < _LOCATE_MIN_HEAD_CHARS:
+            continue
         score = fuzz.partial_ratio(title.lower(), head.lower())
         if score > best_score:
+            runner_up_score = best_score
             best_score = score
             best_index = index
-    if best_score >= _LOCATE_SCORE_THRESHOLD:
+        elif score > runner_up_score:
+            runner_up_score = score
+    if best_score >= _LOCATE_SCORE_THRESHOLD and best_score - runner_up_score >= _LOCATE_MARGIN_REQUIRED:
         return best_index
     return None
 
