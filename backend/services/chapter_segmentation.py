@@ -144,3 +144,64 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
         if ent.label_ == "PERSON" and ent.text not in seen:
             seen.append(ent.text)
     return seen
+
+
+def analyze_attachment(pages: list[str]) -> dict:
+    """Orchestrate TOC detection, content-based localization, printed-page
+    extraction, and author NER into the per-attachment output described in
+    design spec §5.
+
+    Returns a dict matching the script 1 output schema (minus item_key/
+    attachment_key/has_text_layer/needs_ocr, which the caller — run(), Task
+    9 — fills in from Zotero/Kreuzberg context, not from page text alone).
+    """
+    total_pages = len(pages)
+    toc_entries = find_toc_candidates(pages)
+
+    chapters: list[dict] = []
+    toc_page_indices = {e.source_page_index for e in toc_entries}
+    located: list[tuple[TocEntry, int]] = []
+    for entry in toc_entries:
+        index = locate_chapter_start(pages, entry.title, exclude_indices=toc_page_indices)
+        if index is not None:
+            located.append((entry, index))
+
+    # Cluster into contiguous ranges, ordered by PDF index (not TOC order,
+    # which is printed-page order and could disagree if TOC entries were
+    # matched to pages out of sequence).
+    located.sort(key=lambda pair: pair[1])
+    for i, (entry, start_index) in enumerate(located):
+        end_index = (located[i + 1][1] - 1) if i + 1 < len(located) else (total_pages - 1)
+        if end_index < start_index:
+            continue  # degenerate/ambiguous overlap — skip rather than guess
+
+        start_printed = extract_printed_page_number(pages[start_index])
+        end_printed = extract_printed_page_number(pages[end_index])
+        if start_printed is not None and end_printed is not None:
+            citation_pages = f"{start_printed}-{end_printed}"
+            page_mapping_confidence = "high"
+        else:
+            citation_pages = None
+            page_mapping_confidence = "unmappable"
+
+        chapters.append({
+            "title": entry.title,
+            "authors": extract_authors_near(pages[start_index]),
+            "pdf_start_index": start_index,
+            "pdf_end_index": end_index,
+            "citation_pages": citation_pages,
+            "confidence": 0.9,  # single confirmed TOC->content match; see Known limitations
+            "page_mapping_confidence": page_mapping_confidence,
+        })
+
+    segmentation_confidence = "high" if chapters else "low"
+    return {
+        "total_pdf_pages": total_pages,
+        "segmentation_confidence": segmentation_confidence,
+        "chapters": chapters,
+        "diagnostics": {
+            "toc_pages_scanned": sorted(toc_page_indices),
+            "toc_matches_found": len(toc_entries),
+            "toc_matches_located": len(located),
+        },
+    }
