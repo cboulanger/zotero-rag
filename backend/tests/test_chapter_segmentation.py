@@ -159,6 +159,15 @@ class TestLlmExtractTocEntries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entries, [])
         llm.generate.assert_not_called()
 
+    async def test_ignores_non_list_authors_instead_of_corrupting(self):
+        # A malformed LLM response giving a plain string instead of a list
+        # (e.g. "authors": "Jane Doe") must not be iterated character-by-
+        # character -- it should be treated as no author info at all.
+        llm = self._fake_llm('[{"title": "Introduction", "authors": "Jane Doe", "printed_page_number": 1}]')
+        entries = await llm_extract_toc_entries(["front matter"] * 5, llm)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].authors, ())
+
 
 class TestTocScanIndices(unittest.TestCase):
     def test_scans_front_and_back_fractions(self):

@@ -216,8 +216,16 @@ async def llm_extract_toc_entries(pages: list[str], llm_service: LLMService) -> 
         title = str(item.get("title") or "").strip()
         if len(title) < 3:
             continue
-        authors = tuple(str(a) for a in (item.get("authors") or []) if str(a).strip())
+        raw_authors = item.get("authors")
+        # Guard against a malformed LLM response giving a plain string
+        # instead of a list (e.g. "authors": "Jane Doe") -- iterating a
+        # string yields one entry per character, silently corrupting
+        # author-aware disambiguation downstream.
+        authors = tuple(str(a).strip() for a in raw_authors if str(a).strip()) if isinstance(raw_authors, list) else ()
         printed = item.get("printed_page_number")
+        # -1 is a sentinel for "unknown" (LLM returned null or an
+        # unparseable value) -- never a real printed page number, and
+        # currently unread by any downstream consumer (see TocEntry).
         printed_page_number = int(printed) if isinstance(printed, (int, float)) else -1
         # source_page_index is a sentinel here -- unlike a regex-found entry,
         # an LLM-extracted entry has no single "the TOC line was on this
