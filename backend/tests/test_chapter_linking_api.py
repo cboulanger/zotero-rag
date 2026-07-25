@@ -43,6 +43,34 @@ class TestAnalyzeEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("job_id", response.json())
 
+    @patch("backend.api.chapter_linking.make_llm_service")
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_passes_llm_service_when_fallback_enabled(self, mock_run, mock_web_api, mock_make_llm_service):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        fake_llm = object()
+        mock_make_llm_service.return_value = fake_llm
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key", "enable_llm_fallback": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_make_llm_service.assert_called_once()
+        self.assertIs(mock_run.call_args.kwargs["llm_service"], fake_llm)
+
+    @patch("backend.api.chapter_linking.make_llm_service")
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_skips_llm_service_by_default(self, mock_run, mock_web_api, mock_make_llm_service):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_make_llm_service.assert_not_called()
+        self.assertIsNone(mock_run.call_args.kwargs["llm_service"])
+
 
 class TestRetrofitEndpoint(unittest.TestCase):
     def setUp(self):

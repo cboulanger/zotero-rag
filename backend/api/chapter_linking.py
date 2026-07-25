@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from pyzotero import zotero
 
+from backend.dependencies import make_llm_service
 from backend.services.chapter_link_store import parse_library_slug
 from backend.services.chapter_ocr import run as ocr_run
 from backend.services.chapter_retrofit import run as retrofit_run
@@ -73,6 +74,7 @@ class AnalyzeRequest(BaseModel):
     item_keys: list[str] | None = None
     relink: bool = False
     max_items: int | None = None
+    enable_llm_fallback: bool = False
 
 
 class JobIdResponse(BaseModel):
@@ -85,6 +87,7 @@ class JobIdResponse(BaseModel):
 async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
     library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
     client = ZoteroWebAPI(api_key=request.api_key)
+    llm_service = make_llm_service() if request.enable_llm_fallback else None
     job_id = tracker.create()
 
     async def _task() -> None:
@@ -98,6 +101,7 @@ async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
                 max_items=request.max_items,
                 relink=request.relink,
                 progress_callback=lambda p, m: tracker.update(job_id, progress=p, message=m),
+                llm_service=llm_service,
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised
