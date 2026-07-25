@@ -83,7 +83,31 @@ failure modes") will keep failing this assertion until someone improves the
 underlying heuristic; that failure is expected, not a sign something else is
 broken.
 
+### LLM-fallback evaluation
+
+`scripts/evaluate_chapter_segmentation_llm_fallback.py` runs the same
+evaluation set through `analyze_attachment_with_llm_fallback` instead of
+the pure-heuristic `analyze_attachment` (see
+`docs/superpowers/specs/2026-07-25-llm-chapter-segmentation-fallback-design.md`).
+Unlike the harness above, this requires a real, working LLM (reads normal
+app settings/API keys) and costs a paid API call per book, so it's a
+manual script, not a pytest test:
+
+```bash
+uv run python scripts/evaluate_chapter_segmentation_llm_fallback.py
+```
+
+It prints the same precision/recall table format as the harness above, plus
+per-book counts of how often each fallback path (`llm_toc_extraction_used`,
+`llm_disambiguation_used`) actually fired. Run it after any prompt or
+heuristic change to check whether the fallback is still net-helpful on the
+real evaluation set.
+
 ## Current results
+
+A heuristic-vs-LLM-fallback comparison table will be added here after the
+first real run of `scripts/evaluate_chapter_segmentation_llm_fallback.py`
+(see "LLM-fallback evaluation" above).
 
 Snapshot from running the harness above, one row per evaluation book
 (regenerate anytime — these numbers shift as the heuristics evolve, so treat
