@@ -171,6 +171,15 @@ class TestLlmExtractTocEntries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].authors, ())
 
+    async def test_passes_is_valid_check_for_json_array_shape(self):
+        # Lets an AutoSelectLLMService rotate to a different model when one
+        # hallucinates a non-JSON response instead of raising an exception.
+        llm = self._fake_llm('[{"title": "Introduction", "authors": [], "printed_page_number": 1}]')
+        await llm_extract_toc_entries(["front matter"] * 5, llm)
+        is_valid = llm.generate.call_args.kwargs["is_valid"]
+        self.assertTrue(is_valid('[{"title": "x"}]'))
+        self.assertFalse(is_valid("I'll call a tool instead"))
+
 
 class TestLlmDisambiguateChapterStart(unittest.IsolatedAsyncioTestCase):
     def _fake_llm(self, response: str):
@@ -220,6 +229,15 @@ class TestLlmDisambiguateChapterStart(unittest.IsolatedAsyncioTestCase):
         llm = self._fake_llm("not json")
         match = await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
         self.assertIsNone(match)
+
+    async def test_passes_is_valid_check_for_json_object_shape(self):
+        candidates = [ChapterStartCandidate(index=0, score=95.0, author_confirmed=False)]
+        pages = ["some text"] * 2
+        llm = self._fake_llm('{"chosen_candidate": 1}')
+        await llm_disambiguate_chapter_start(pages, "Title", (), candidates, llm)
+        is_valid = llm.generate.call_args.kwargs["is_valid"]
+        self.assertTrue(is_valid('{"chosen_candidate": 1}'))
+        self.assertFalse(is_valid("I'll call a tool instead"))
 
 
 class TestTocScanIndices(unittest.TestCase):

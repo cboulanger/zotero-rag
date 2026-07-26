@@ -25,6 +25,28 @@ from backend.utils.llm_json import parse_json_array, parse_json_object
 
 logger = logging.getLogger(__name__)
 
+
+def _parses_as_json_array(raw: str) -> bool:
+    """is_valid check for LLMService.generate() (see AutoSelectLLMService):
+    lets model-rotation retry a different candidate when a model returns
+    something other than the requested JSON array (e.g. a hallucinated
+    tool-call instead of JSON), not just on an outright exception."""
+    try:
+        parse_json_array(raw)
+        return True
+    except Exception:
+        return False
+
+
+def _parses_as_json_object(raw: str) -> bool:
+    """Same as _parses_as_json_array, for the JSON-object-shaped prompts."""
+    try:
+        parse_json_object(raw)
+        return True
+    except Exception:
+        return False
+
+
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
 # prose sentences ending in a number don't false-positive.
@@ -203,7 +225,7 @@ async def llm_extract_toc_entries(pages: list[str], llm_service: LLMService) -> 
     prompt = _LLM_TOC_EXTRACTION_PROMPT.format(page_blocks=page_blocks)
 
     try:
-        raw = await llm_service.generate(prompt=prompt, max_tokens=1024, temperature=0.0)
+        raw = await llm_service.generate(prompt=prompt, max_tokens=1024, temperature=0.0, is_valid=_parses_as_json_array)
         items = parse_json_array(raw)
     except Exception:
         logger.warning("llm_extract_toc_entries: LLM call or JSON parse failed", exc_info=True)
@@ -428,7 +450,7 @@ async def llm_disambiguate_chapter_start(
     prompt = _LLM_DISAMBIGUATION_PROMPT.format(title=title, author_clause=author_clause, candidate_blocks=candidate_blocks)
 
     try:
-        raw = await llm_service.generate(prompt=prompt, max_tokens=64, temperature=0.0)
+        raw = await llm_service.generate(prompt=prompt, max_tokens=64, temperature=0.0, is_valid=_parses_as_json_object)
         data = parse_json_object(raw)
     except Exception:
         logger.warning("llm_disambiguate_chapter_start: LLM call or JSON parse failed", exc_info=True)
