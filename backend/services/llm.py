@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from backend.config.settings import Settings
 from backend.services.embeddings import env_var_to_header, docs_url_for_key
@@ -34,7 +34,8 @@ class LLMService(ABC):
         self,
         prompt: str,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        is_valid: Optional[Callable[[str], bool]] = None,
     ) -> str:
         """
         Generate text completion for a prompt.
@@ -43,6 +44,13 @@ class LLMService(ABC):
             prompt: Input prompt text.
             max_tokens: Maximum tokens to generate.
             temperature: Sampling temperature.
+            is_valid: Optional caller-supplied check on the raw response
+                (e.g. "does this parse as the JSON shape I expect?").
+                Single-model implementations accept and ignore this -- it
+                exists purely so a caller can opt into AutoSelectLLMService's
+                model-rotation-on-bad-response behavior (see that class)
+                without every call site needing to know which concrete
+                LLMService it was handed.
 
         Returns:
             Generated text completion.
@@ -162,9 +170,12 @@ class LocalLLMService(LLMService):
         self,
         prompt: str,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        is_valid: Optional[Callable[[str], bool]] = None,
     ) -> str:
-        """Generate text using local model."""
+        """Generate text using local model. `is_valid` is accepted for
+        interface compatibility but ignored -- a single fixed local model
+        has no alternative to rotate to."""
         self._load_model()
 
         # Use config defaults if not specified
@@ -334,9 +345,13 @@ class RemoteLLMService(LLMService):
         self,
         prompt: str,
         max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
+        temperature: Optional[float] = None,
+        is_valid: Optional[Callable[[str], bool]] = None,
     ) -> str:
-        """Generate text using remote API."""
+        """Generate text using remote API. `is_valid` is accepted for
+        interface compatibility but ignored -- a single fixed remote model
+        has no alternative to rotate to; see AutoSelectLLMService for the
+        implementation that actually honors it."""
         # Use config defaults if not specified
         if max_tokens is None:
             max_tokens = 512
@@ -415,9 +430,76 @@ class RemoteLLMService(LLMService):
 class MockLLMService(LLMService):
     """Returns a canned response. Used when TESTING=true — no model or API key needed."""
 
-    async def generate(self, prompt: str, max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> str:
+    async def generate(
+        self,
+        prompt: str,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        is_valid: Optional[Callable[[str], bool]] = None,
+    ) -> str:
         logger.info("MockLLMService: returning canned response")
         return "This is a mock response generated in testing mode."
+
+
+class AutoSelectLLMService(LLMService):
+    """Wraps an ordered list of candidate model names (most-available/
+    least-busy first) and retries .generate() against the next candidate
+    whenever a call either raises (network error, remote 500, context-
+    length overflow, etc.) or -- when the caller supplies `is_valid` --
+    returns a response the caller can't actually use (e.g. a model
+    hallucinating a fictitious tool call instead of the requested JSON).
+
+    Never hardcodes a model name itself: candidates are resolved by the
+    caller (see make_llm_service's auto_select_model path) from whatever
+    the active preset/provider actually reports as available, so this
+    class works for any provider with more than one selectable model, not
+    just KISSKI.
+    """
+
+    def __init__(self, candidates: List[str], service_factory: Callable[[str], LLMService]):
+        if not candidates:
+            raise ValueError("AutoSelectLLMService requires at least one candidate model")
+        self._candidates = candidates
+        self._services = {name: service_factory(name) for name in candidates}
+        self._last_used_model: Optional[str] = None
+
+    @property
+    def model_name(self) -> str:
+        return self._last_used_model or f"auto({len(self._candidates)} candidates)"
+
+    async def generate(
+        self,
+        prompt: str,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        is_valid: Optional[Callable[[str], bool]] = None,
+    ) -> str:
+        last_exc: Optional[Exception] = None
+        last_failed_model: Optional[str] = None
+        for name in self._candidates:
+            service = self._services[name]
+            try:
+                raw = await service.generate(prompt=prompt, max_tokens=max_tokens, temperature=temperature)
+            except Exception as exc:  # noqa: BLE001 — try the next candidate
+                logger.warning("AutoSelectLLMService: model %r failed, trying next candidate: %s", name, exc)
+                last_exc = exc
+                last_failed_model = name
+                continue
+            if is_valid is not None and not is_valid(raw):
+                logger.warning("AutoSelectLLMService: model %r returned an unusable response, trying next candidate", name)
+                last_exc = None
+                last_failed_model = name
+                continue
+            self._last_used_model = name
+            return raw
+        # Both branches below surface how many models were tried and which
+        # one failed last -- a bare re-raise of the last exception would
+        # otherwise look like a single-model failure to anything that only
+        # logs str(exc) (e.g. this app's job-status error field).
+        detail = f"all {len(self._candidates)} candidate models exhausted (last tried: {last_failed_model!r})"
+        if last_exc is not None:
+            raise RuntimeError(f"AutoSelectLLMService: {detail}: {last_exc}") from last_exc
+        raise RuntimeError(f"AutoSelectLLMService: {detail}, all returned unusable responses")
 
 
 def create_llm_service(

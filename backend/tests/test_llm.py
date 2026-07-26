@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import os
 
 from backend.services.llm import (
+    AutoSelectLLMService,
     LLMService,
     LocalLLMService,
     RemoteLLMService,
@@ -337,6 +338,81 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         call_args = mock_client.chat.completions.create.call_args
         self.assertEqual(call_args.kwargs["temperature"], 0.7)  # From preset
         self.assertEqual(call_args.kwargs["max_tokens"], 512)  # Default
+
+
+class TestAutoSelectLLMService(unittest.IsolatedAsyncioTestCase):
+    """Tests for the model-rotation-on-failure LLMService wrapper."""
+
+    def _fake_service(self, *, response: str = None, raises: Exception = None) -> Mock:
+        service = Mock()
+        if raises is not None:
+            service.generate = AsyncMock(side_effect=raises)
+        else:
+            service.generate = AsyncMock(return_value=response)
+        return service
+
+    async def test_uses_first_candidate_when_it_succeeds(self):
+        services = {"a": self._fake_service(response="ok"), "b": self._fake_service(response="unused")}
+        wrapper = AutoSelectLLMService(["a", "b"], service_factory=lambda name: services[name])
+        result = await wrapper.generate(prompt="hi", max_tokens=10, temperature=0.0)
+        self.assertEqual(result, "ok")
+        services["b"].generate.assert_not_called()
+        self.assertEqual(wrapper.model_name, "a")
+
+    async def test_retries_next_candidate_on_exception(self):
+        services = {
+            "a": self._fake_service(raises=RuntimeError("500 error")),
+            "b": self._fake_service(response="from b"),
+        }
+        wrapper = AutoSelectLLMService(["a", "b"], service_factory=lambda name: services[name])
+        result = await wrapper.generate(prompt="hi", max_tokens=10, temperature=0.0)
+        self.assertEqual(result, "from b")
+        self.assertEqual(wrapper.model_name, "b")
+
+    async def test_retries_next_candidate_on_invalid_response(self):
+        services = {
+            "a": self._fake_service(response="I'll call a tool instead of JSON"),
+            "b": self._fake_service(response='{"chosen_candidate": 1}'),
+        }
+        wrapper = AutoSelectLLMService(["a", "b"], service_factory=lambda name: services[name])
+        result = await wrapper.generate(
+            prompt="hi", max_tokens=10, temperature=0.0,
+            is_valid=lambda raw: raw.strip().startswith("{"),
+        )
+        self.assertEqual(result, '{"chosen_candidate": 1}')
+        self.assertEqual(wrapper.model_name, "b")
+
+    async def test_raises_last_exception_when_all_candidates_fail(self):
+        services = {
+            "a": self._fake_service(raises=RuntimeError("first failure")),
+            "b": self._fake_service(raises=RuntimeError("second failure")),
+        }
+        wrapper = AutoSelectLLMService(["a", "b"], service_factory=lambda name: services[name])
+        with self.assertRaises(RuntimeError) as ctx:
+            await wrapper.generate(prompt="hi", max_tokens=10, temperature=0.0)
+        message = str(ctx.exception)
+        self.assertIn("2 candidate models exhausted", message)
+        self.assertIn("'b'", message)
+        self.assertIn("second failure", message)
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError)
+        self.assertEqual(str(ctx.exception.__cause__), "second failure")
+
+    async def test_raises_when_all_candidates_return_invalid_response(self):
+        services = {"a": self._fake_service(response="not json"), "b": self._fake_service(response="also not json")}
+        wrapper = AutoSelectLLMService(["a", "b"], service_factory=lambda name: services[name])
+        with self.assertRaises(RuntimeError):
+            await wrapper.generate(
+                prompt="hi", max_tokens=10, temperature=0.0,
+                is_valid=lambda raw: raw.strip().startswith("{"),
+            )
+
+    def test_requires_at_least_one_candidate(self):
+        with self.assertRaises(ValueError):
+            AutoSelectLLMService([], service_factory=lambda name: self._fake_service(response="x"))
+
+    def test_model_name_before_any_call_reports_candidate_count(self):
+        wrapper = AutoSelectLLMService(["a", "b", "c"], service_factory=lambda name: self._fake_service(response="x"))
+        self.assertEqual(wrapper.model_name, "auto(3 candidates)")
 
 
 if __name__ == "__main__":
