@@ -171,7 +171,7 @@ uv run python scripts/upload_chapters.py \
 ```
 
 `--input` is Script 1's output. Chapters below `--confidence-threshold`
-(default `0.96`, calibrated against a hand-verified evaluation set — see
+(default `0.90`, calibrated against a hand-verified evaluation set — see
 [backend/evaluation/book-segmentation/README.md](../backend/evaluation/book-segmentation/README.md))
 are skipped rather than uploaded with a guessed boundary — the dry-run
 output lists them separately (`skipped_low_confidence`) so you can review

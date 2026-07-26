@@ -105,117 +105,92 @@ real evaluation set.
 
 ## Current results
 
-**LLM-fallback evaluation, first meaningful run** (KISSKI-backed
-`apple-silicon-kisski` preset). Two attempts were needed to get a usable
-signal:
-
-1. **Naive first attempt** — just calling `make_llm_service()` with the
-   preset's configured default model failed on every single LLM call with a
-   `500 InternalServerError`. Cross-checking against KISSKI's live
-   `/v1/models` endpoint (via this project's own
-   `backend.utils.kisski.fetch_kisski_rag_models()`) showed the configured
-   default, `mistral-large-3-675b-instruct-2512`, **is not currently in
-   KISSKI's live model list at all** — it's likely been renamed or retired
-   upstream. This is a preset-configuration staleness issue, not a bug in
-   the fallback code itself (worth updating `apple-silicon-kisski`'s
-   `KISSKI_RAG_MODELS` default separately from this feature). The fallback's
-   own error handling degraded gracefully every time, as designed.
-2. **Systematic retry across live, available models** — using
-   `fetch_kisski_rag_models()` to get every text-generation-suitable model
-   or the endpoint currently reports (already filters out code-only models),
-   excluding any at `"very busy"`, ordered most-available-first, and retrying
-   each LLM call against the next candidate model whenever a call raised an
-   error *or* returned a response that failed to parse as the expected JSON
-   shape (this happened once, for one book, purely due to one model's
-   context-window limit — the retry moved on to the next model and
-   succeeded). This is real signal, not a fluke of one lucky model choice.
-
-Aggregate result across the 7-book set, LLM fallback vs. the pure-heuristic
-baseline below: **precision essentially unchanged (71.8% → 71.7%), recall up
-~9.5 points (57.5% → 67.0%)** — the fallback found real chapters the
-heuristic missed without meaningfully increasing false positives. Per book:
-
-| Book (filename) | Heuristic P/R | LLM-fallback P/R | Fallback paths fired |
-| --- | --- | --- | --- |
-| `9783031466373.pdf` | 0.78 / 0.64 | 0.67 / 0.73 | disambiguation ×3 |
-| `9781771993661.pdf` | 0.90 / 0.90 | 0.90 / 0.90 | none (heuristic already unambiguous) |
-| `9783907297339.pdf` | 0.71 / 0.45 | 0.88 / 0.64 | disambiguation ×1 |
-| `9782375460122.pdf` | 0.00 / 0.00 | 0.25 / 0.06 | TOC extraction |
-| `9783907297285.pdf` | 0.50 / 0.54 | 0.47 / 0.54 | disambiguation ×1 |
-| `9783847432364.pdf` | 0.89 / 0.76 | 0.85 / 0.81 | disambiguation ×3 |
-| `9783322969828.pdf` | 0.63 / 0.71 | 0.73 / 0.92 | disambiguation ×3 |
-
-`9782375460122.pdf` (the persistent 0%-recall book, see below) improved from
-0/16 to a still-poor 1/16 via TOC extraction — a marginal gain, not a fix;
-this book's underlying difficulty remains open. `9783031466373.pdf` and
-`9783907297285.pdf` show the fallback isn't free of trade-offs either: the
-former traded some precision for a real recall gain, and the latter's
-disambiguation pick didn't change the outcome (a resolved "ambiguous" match
-that scored the same as what the heuristic guard had already rejected).
-
-**Takeaway:** with a model that's actually live and responds in the expected
-JSON shape, the fallback is net-positive on this evaluation set — mainly by
-resolving genuine start-page ambiguities the heuristic correctly refused to
-guess at. The retry-across-models approach prototyped for this run has
-since been promoted into the general `LLMService` abstraction
-(`AutoSelectLLMService`, `backend/services/llm.py`) and is no longer ad
-hoc: pass `--auto-select-model` to
-`scripts/evaluate_chapter_segmentation_llm_fallback.py` (or the
-`--llm-fallback` CLI/`enable_llm_fallback` API paths) to retry across the
-active preset's live, non-"very busy" models automatically, never a
-hardcoded model name. The preset's stale default model
-(`mistral-large-3-675b-instruct-2512`, not currently in KISSKI's live
-list) is still worth fixing separately. Re-run whenever the prompt, model
-choice, or heuristic changes to check whether the fallback is still
-net-helpful.
-
 Snapshot from running the harness above, one row per evaluation book
 (regenerate anytime — these numbers shift as the heuristics evolve, so treat
 this table as a snapshot to compare future runs against, not a guarantee):
 
 | Book (title / filename) | Language | Type | Precision | Recall | Found / Expected |
 | --- | --- | --- | --- | --- | --- |
-| Transformations of European Welfare States and Social Rights (`9783031466373.pdf`) | en | native | 0.78 | 0.64 | 7/9 found, 7/11 expected |
-| Violence, Imagination, and Resistance (`9781771993661.pdf`) | en | native | 0.90 | 0.90 | 9/10 found, 9/10 expected |
-| 20 ans de transparence à Genève (`9783907297339.pdf`) | fr | native | 0.71 | 0.45 | 5/7 found, 5/11 expected |
-| Accueillir des publics migrants et immigrés (`9782375460122.pdf`) | fr | native | 0.00 | 0.00 | 0/0 found, 0/16 expected |
-| Recht in der Krise — APARIUZ XXIII (`9783907297285.pdf`) | de | native | 0.50 | 0.54 | 7/14 found, 7/13 expected |
-| Recht umkämpft (`9783847432364.pdf`) | de | native | 0.89 | 0.76 | 16/18 found, 16/21 expected |
-| Jahrbuch für Rechtssoziologie und Rechtstheorie IV (`9783322969828.pdf`) | de | scan | 0.63 | 0.71 | 17/27 found, 17/24 expected |
+| Transformations of European Welfare States and Social Rights (`9783031466373.pdf`) | en | native | 1.00 | 1.00 | 11/11 found, 11/11 expected |
+| Violence, Imagination, and Resistance (`9781771993661.pdf`) | en | native | 1.00 | 1.00 | 10/10 found, 10/10 expected |
+| 20 ans de transparence à Genève (`9783907297339.pdf`) | fr | native | 1.00 | 1.00 | 11/11 found, 11/11 expected |
+| Accueillir des publics migrants et immigrés (`9782375460122.pdf`) | fr | native | 0.78 | 0.82 | 14/18 found, 14/17 expected |
+| Recht in der Krise — APARIUZ XXIII (`9783907297285.pdf`) | de | native | 0.69 | 0.69 | 9/13 found, 9/13 expected |
+| Recht umkämpft (`9783847432364.pdf`) | de | native | 0.95 | 0.95 | 20/21 found, 20/21 expected |
+| Jahrbuch für Rechtssoziologie und Rechtstheorie IV (`9783322969828.pdf`) | de | scan | 0.96 | 0.92 | 22/23 found, 22/24 expected |
 
-`Accueillir des publics migrants et immigrés` is the one book currently at
-0% recall — a known, unfixed limitation of `locate_chapter_start`'s
-fuzzy-matching heuristic (no signal available to disambiguate its specific
-chapter titles from surrounding text), tracked as an accepted gap rather than
-a regression. It now finds zero candidates rather than many wrong ones
-(`find_toc_candidates`'s noise filters correctly reject its front-matter
-listing pages), which is a smaller failure mode but doesn't fix the
-underlying recall gap.
+Aggregate (micro): **precision 0.91, recall 0.91** across 107 expected
+chapters. The heuristic pipeline's main mechanisms, in the order they run
+(see `chapter_segmentation.py` for the full details on each):
 
-**What changed since the table above first went in** (see git history on
-`chapter_segmentation.py` for the full sequence): `find_toc_candidates` used
-to accept *any* line anywhere in the front/back scan region that loosely
-matched "title ... page number" — on one book this pulled 143 candidate
-"chapters" out of a back-of-book alphabetical index and a book's own
-per-chapter sub-outlines, for 11 real chapters. It now requires a page to
-have several such lines before trusting any of them (a real listing looks
-like a listing), keeps only the first such page-cluster in the document (a
-book has one table of contents, not several), and drops individual lines
-that are a URL/DOI or have an implausible page number (a copyright year,
-a law-citation reference). Separately, `analyze_attachment` now trims a
-chapter's computed end boundary past trailing blank/divider pages, fixing a
-systematic off-by-one on books that force chapters to start on a recto page
-— the same fix `scripts/ground_truth_helper.py` already needed when this
-evaluation set's own ground truth was built by hand.
+- `find_toc_candidates` counts only lines that survive the content filters
+  (URL/DOI, implausible page numbers) toward the "does this page look like
+  a listing" density test, so an imprint/metadata page can't shadow the
+  real TOC; it accepts roman-numeral page fields for front-matter entries
+  ("Foreword vii"), merges wrapped multi-line titles into alternative
+  "variant" readings (the page number sits on the last physical line only),
+  adopts the preceding line's text when the page number sits on a bare
+  dot-leader line of its own, extends the TOC cluster onto a following page
+  holding just the listing's last couple of entries, and recognizes the
+  author-line convention ("MOTS ET CHIFFRES ... / par Mustapha Harzoune
+  .... 16") where only `par`/`by`-marked entries are chapter-level.
+- `locate_chapter_start` strips repeated running headers (detected
+  digit-insensitively across the book) before scoring a page's head, so a
+  book that stamps every page with a long header doesn't hide its titles.
+- `_locate_toc_entries` picks, per entry, whichever variant reading locates
+  most trustworthily (ranked by `min(score, margin)` — certainty, not raw
+  score), excludes "secondary listing" pages (part-divider pages and
+  cover/blurb pages that quote several chapter titles) and everything on or
+  before the TOC itself (except for roman-paginated front-matter entries),
+  and finally resolves per-entry ambiguity with TOC-order constraints: an
+  entry's candidates are pruned to the interval between its already-located
+  neighbors, which cleanly separates Introduction/Conclusion pairs sharing
+  the book's own title as a suffix.
+- `_chapters_from_located` keeps part dividers and standard back-matter
+  sections (Index, Contributors, Sommaire, ...) as located *boundaries*
+  without emitting them as chapters, and trims chapter ends past trailing
+  blank pages and known non-content (TOC/listing) pages.
 
-Combined effect across the 7-book set: aggregate precision went from ~28%
-to ~72%, aggregate recall from ~31% to ~58%, with no book's recall newly
-regressing to zero. `chapter_upload.py`'s `confidence_threshold` default
-was re-calibrated afterward (0.98 → 0.96) since the previous calibration
-was against the old, much noisier candidate set — the new default lifts
-precision among chapters that clear the bar to ~82% while keeping 90% of
-genuinely correct chapters. **Re-run the calibration sweep in this file's
-git history (or re-derive it against `analyze_attachment`'s output) any
-time `find_toc_candidates`, `locate_chapter_start`, or `match_confidence`
-change, or the evaluation set grows** — these numbers are a snapshot tied
-to the current heuristics, not a permanent constant.
+Known remaining misses, all understood and accepted for now:
+
+- `9782375460122.pdf`: three chapters end on image-only pages that pypdf
+  extracts as empty text — the text heuristic cannot distinguish them from
+  blank divider pages, so those ends are one page short.
+- `9783907297285.pdf`: this book's hand-verified ground truth attaches each
+  trailing part-divider page ("Teil 2: ...") to the preceding chapter,
+  while `9783322969828.pdf`'s ground truth excludes divider pages from
+  chapters — the two conventions are mutually exclusive for a single
+  heuristic, and the current behavior matches the latter (more common)
+  book. Its first chapter also opens with a per-chapter half-title page two
+  pages before the body, which the locate step returns instead of the
+  ground truth's body page.
+- `9783322969828.pdf` (scan): one chapter's TOC line is OCR-garbled beyond
+  what the fuzzy matcher recovers.
+
+`chapter_upload.py`'s `confidence_threshold` default was re-calibrated
+against this snapshot (now `0.90`): with ~91% of all proposed chapters
+already exactly correct, the sweep shows the threshold no longer buys
+precision (0.91 → 0.93 across the whole range) while anything above ~0.94
+sharply cuts how many correct chapters survive — the remaining errors are
+end-boundary quirks that the start-match confidence cannot see. **Re-run
+the calibration sweep (or re-derive it against `analyze_attachment`'s
+output) any time `find_toc_candidates`, `locate_chapter_start`, or
+`match_confidence` change, or the evaluation set grows** — these numbers
+are a snapshot tied to the current heuristics, not a permanent constant.
+
+### LLM-fallback status
+
+With the heuristics above, a full run of
+`scripts/evaluate_chapter_segmentation_llm_fallback.py --auto-select-model`
+(KISSKI-backed preset) reports **identical numbers to the pure-heuristic
+harness, with neither fallback path firing on any book**: TOC extraction
+never triggers because the regex path now finds a usable listing everywhere,
+and per-entry ambiguity is resolved heuristically by the TOC-order
+constraints before the LLM would be consulted. The disambiguation fallback
+still exists for the case ordering genuinely cannot solve (all of an
+ambiguous entry's candidates conflicting with its located neighbors — a
+disordered TOC), and TOC extraction still covers books whose listing the
+regex can't parse at all; neither case occurs in the current evaluation
+set. Re-run after any prompt or heuristic change to check whether that is
+still true — if the heuristic path regresses, the fallback is the safety
+net that should catch it.

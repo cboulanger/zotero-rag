@@ -13,7 +13,10 @@ import hashlib
 import io
 import logging
 import re
-from dataclasses import dataclass
+import unicodedata
+from collections import Counter
+from functools import lru_cache
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -52,8 +55,39 @@ def _parses_as_json_object(raw: str) -> bool:
 
 # Matches "<title> <dots-or-spaces> <page number>" — a classic TOC line.
 # Requires at least 2 separator characters (dots or spaces) so ordinary
-# prose sentences ending in a number don't false-positive.
-_TOC_LINE_RE = re.compile(r"^(?P<title>.{3,120}?)[.\s]{1,}(?P<page>\d{1,4})\s*$")
+# prose sentences ending in a number don't false-positive. The page may
+# also be a lowercase roman numeral ("Foreword vii") -- front-matter
+# sections are paginated that way; see _parse_toc_page_number for the
+# strict validation that keeps ordinary words made of roman letters
+# ("civil", "mix") from being read as page numbers.
+_TOC_LINE_RE = re.compile(r"^(?P<title>.{3,120}?)[.\s]{1,}(?P<page>\d{1,4}|[ivxlcdm]{1,6}|[IVXLCDM]{1,6})\s*$")
+
+# Strict roman-numeral shape -- "vii"/"XI" pass, letter-soup like "civil"
+# (c-i-v-i-l, an ordinary word whose letters all happen to be roman digits)
+# does not. All-lowercase or all-uppercase only (the regex alternatives
+# above never capture a mixed-case run).
+_STRICT_ROMAN_RE = re.compile(r"^m{0,3}(cm|cd|d?c{0,3})(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$")
+_ROMAN_VALUES = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+# A roman-paginated TOC entry beyond this value is front matter no longer --
+# real books' roman pagination covers a few dozen pages at most; anything
+# larger is almost certainly a mis-read word.
+_ROMAN_PAGE_MAX_VALUE = 50
+
+
+def _parse_toc_page_number(raw: str) -> int | None:
+    """The integer value of a TOC line's captured page field, or None if the
+    field is not a plausible page number (an invalid or implausibly large
+    roman numeral)."""
+    if raw.isdigit():
+        return int(raw)
+    lowered = raw.lower()
+    if not _STRICT_ROMAN_RE.match(lowered) or not lowered:
+        return None
+    total = 0
+    for ch, nxt in zip(lowered, lowered[1:] + " "):
+        value = _ROMAN_VALUES[ch]
+        total += -value if nxt != " " and _ROMAN_VALUES.get(nxt, 0) > value else value
+    return total if total <= _ROMAN_PAGE_MAX_VALUE else None
 
 # A real chapter TOC page has several title-like lines close together; a
 # back-of-book subject index, a bibliography, or an ordinary content page
@@ -91,6 +125,23 @@ _TOC_MAX_PAGE_NUMBER_RATIO = 2.0
 # back-of-book index that would otherwise dominate with pure noise.
 _TOC_PAGE_CLUSTER_GAP = 2
 
+# How many preceding TOC-page lines may be merged into a wrapped entry's
+# title. Real evaluation books wrap long titles over up to 4 physical lines
+# (3 continuation lines + the final page-number line, e.g. Springer's
+# "A Double Helix: The Intertwined History / of the Marginalisation ... /
+# Activist Lawyers ... / of the Welfare State in England and Wales 83").
+_TOC_MAX_CONTINUATION_LINES = 3
+
+# Some TOCs (notably French/OpenEdition-style) attach each chapter's page
+# number to an author line under the wrapped title ("MOTS ET CHIFFRES ... /
+# par Mustapha Harzoune .... 16") while ALSO listing every sub-heading with
+# its own page number. When several entries carry this author-line marker,
+# it is the TOC's chapter-level convention: only those entries are chapters,
+# everything else on the listing is a sub-heading. "et <Name>" continues a
+# multi-author list ("par Stéphanie Alexandre / et Lucie Daudin .... 117").
+_TOC_AUTHOR_MARKER_RE = re.compile(r"^(?:par|by|et)\s+(?P<names>[A-ZÀ-Þ].+)$")
+_TOC_AUTHOR_MARKER_MIN_ENTRIES = 3
+
 
 def _toc_scan_indices(pages: list[str], max_front_fraction: float = 0.15, max_back_fraction: float = 0.05) -> set[int]:
     """The front/back-matter page-index range both find_toc_candidates
@@ -126,6 +177,20 @@ class TocEntry:
     # docs/superpowers/specs/2026-07-25-llm-chapter-segmentation-fallback-design.md §4)
     # -- a regex-found TOC line has no author info, so heuristic-found entries always
     # leave this empty. Feeds locate_chapter_start's author-aware disambiguation (§5).
+    printed_roman: bool = False  # True when the TOC listed this entry with a
+    # roman-numeral page ("Foreword vii") -- i.e. it lives in the book's
+    # roman-paginated FRONT matter, so the usual "chapters start after the
+    # table of contents" exclusion must not apply to it.
+    title_variants: tuple[str, ...] = ()  # longer alternative readings of `title`,
+    # built by prepending the preceding non-matching TOC-page line(s): a long
+    # title wrapped over several lines puts its page number on the LAST line
+    # only, so the regex captures just that tail fragment ("Gaze", "in der
+    # Krise") -- far too generic to locate reliably. Which reading is correct
+    # can't be known from the TOC page alone (the preceding line may be a
+    # previous entry's author line or a part header), so ALL of them are
+    # carried and _locate_toc_entries picks whichever variant actually
+    # locates best in the book body. Empty for LLM-extracted entries, whose
+    # titles are already read whole.
 
 
 def extract_page_texts_from_pdf_bytes(content: bytes) -> list[str]:
@@ -142,16 +207,17 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
     pages for TOC-style lines ("<title> ... <printed page number>").
 
     A page is only trusted as a real chapter listing when at least
-    _TOC_MIN_LINES_PER_PAGE of its lines structurally match the TOC-line
-    pattern at all (see comment on the constant) -- this is a purely
-    structural/typographic signal (does this page look like a listing?),
-    checked BEFORE any content filtering, so one bad line doesn't disqualify
-    an otherwise-genuine listing page. Among qualifying pages, only the
-    FIRST (near-)contiguous cluster is used (see _TOC_PAGE_CLUSTER_GAP) --
-    a book has one real table of contents, not several. Within that
-    cluster, individual lines that look like a URL/DOI, or whose captured
-    number is an implausible page number for this PDF's actual length, are
-    still excluded from the final result.
+    _TOC_MIN_LINES_PER_PAGE of its lines match the TOC-line pattern AND
+    survive the per-line content filters (URL/DOI lines, implausible page
+    numbers, too-short titles). Filtering must happen before this count:
+    an imprint/metadata page full of "DOI: ... 7527" / "Année d'édition:
+    2017" lines structurally resembles a listing but contributes no valid
+    entries -- counting its raw matches let such a page qualify as the
+    book's "first TOC cluster" and shadow the real table of contents
+    (found empirically on a French evaluation book). Among qualifying
+    pages, only the FIRST (near-)contiguous cluster is used (see
+    _TOC_PAGE_CLUSTER_GAP) -- a book has one real table of contents, not
+    several.
 
     Returns entries in the order found; each entry's `printed_page_number`
     is a target to later locate by content search (see Task 6) — never an
@@ -163,35 +229,124 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
     scan_indices = sorted(_toc_scan_indices(pages, max_front_fraction, max_back_fraction))
     max_plausible_page_number = total * _TOC_MAX_PAGE_NUMBER_RATIO
 
-    raw_matches_by_page: dict[int, list[re.Match]] = {}
-    for page_index in scan_indices:
-        raw_matches = [
-            m for line in pages[page_index].splitlines()
-            if (m := _TOC_LINE_RE.match(line.strip())) is not None
-        ]
-        if len(raw_matches) >= _TOC_MIN_LINES_PER_PAGE:
-            raw_matches_by_page[page_index] = raw_matches
+    def _valid_entries(page_index: int) -> list[TocEntry]:
+        out: list[TocEntry] = []
+        lines = [ln.strip() for ln in pages[page_index].splitlines()]
+        for i, line in enumerate(lines):
+            m = _TOC_LINE_RE.match(line)
+            if m is None:
+                continue
+            if _looks_like_url_or_doi(m.group(0)):
+                continue
+            title = m.group("title").strip(" .")
+            page_number = _parse_toc_page_number(m.group("page"))
+            if page_number is None or page_number > max_plausible_page_number:
+                continue
+            if len(title) < 3:
+                # A bare dot-leader line (".......... 60") carries only the
+                # page number -- its entry's title sits entirely on the
+                # preceding line(s) (seen in a real French TOC where the
+                # wrapped title and author lines are each too long to share
+                # the leader line). Adopt the preceding line as the title
+                # so the continuation-merging below can extend it further.
+                if i == 0 or not re.fullmatch(r"[.\s…·]*\d{1,4}", line):
+                    continue
+                prev = lines[i - 1]
+                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or len(prev) > 120:
+                    continue
+                title = prev.strip(" .")
+                if len(title) < 3:
+                    continue
+                i = i - 1  # continuation merging walks up from the adopted title line
+            # A wrapped title puts its page number on the last line only, so
+            # `title` may be just the tail fragment. Collect up to
+            # _TOC_MAX_CONTINUATION_LINES preceding lines as progressively
+            # longer alternative readings -- stopping at another TOC-style
+            # line (the previous entry), a blank line, or a URL/DOI line.
+            # Which reading is right is decided later, by which one actually
+            # locates in the body (see _locate_toc_entries).
+            variants: list[str] = []
+            prefix_parts: list[str] = []
+            for j in range(i - 1, max(i - 1 - _TOC_MAX_CONTINUATION_LINES, -1), -1):
+                prev = lines[j]
+                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or len(prev) > 120:
+                    break
+                if _PART_DIVIDER_RE.match(prev) or _normalized_title(prev) in _BACK_MATTER_TITLES:
+                    # A part header ("Part I ...", "Teil 2: ...") or the
+                    # listing's own heading ("CONTENTS", "Sommaire")
+                    # separates entries; neither is ever the opening of the
+                    # NEXT entry's wrapped title. Merging a part header in
+                    # produced variants that located on the part-divider
+                    # page itself and displaced the real chapter (seen on a
+                    # real evaluation book).
+                    break
+                prefix_parts.insert(0, prev)
+                variants.append(" ".join(prefix_parts + [title]).strip(" ."))
+            out.append(TocEntry(
+                title=title, printed_page_number=page_number, source_page_index=page_index,
+                printed_roman=not m.group("page").isdigit(),
+                title_variants=tuple(variants),
+            ))
+        return out
 
-    qualifying_pages = sorted(raw_matches_by_page)
+    entries_by_page: dict[int, list[TocEntry]] = {}
+    for page_index in scan_indices:
+        page_entries = _valid_entries(page_index)
+        if len(page_entries) >= _TOC_MIN_LINES_PER_PAGE:
+            entries_by_page[page_index] = page_entries
+
     first_cluster: list[int] = []
-    for page_index in qualifying_pages:
+    for page_index in sorted(entries_by_page):
         if first_cluster and page_index - first_cluster[-1] > _TOC_PAGE_CLUSTER_GAP:
             break
         first_cluster.append(page_index)
 
-    entries: list[TocEntry] = []
-    for page_index in first_cluster:
-        for m in raw_matches_by_page[page_index]:
-            stripped_line = m.group(0)
-            if _looks_like_url_or_doi(stripped_line):
+    # A listing's LAST page often holds only its final one or two entries --
+    # below the density threshold on its own, but a genuine continuation of
+    # an already-trusted cluster (a real evaluation book's last two chapters
+    # sat alone on the TOC's second page and were silently lost). Extend the
+    # cluster forward through adjacent pages that still contribute at least
+    # TWO valid entries -- one lone matching line is indistinguishable from
+    # an ordinary body page's incidental "text ... number" line, and
+    # swallowing the first content page as "TOC" costs a whole chapter
+    # (observed on a real evaluation book).
+    while first_cluster:
+        extended = False
+        for page_index in range(first_cluster[-1] + 1, first_cluster[-1] + 1 + _TOC_PAGE_CLUSTER_GAP):
+            if page_index in entries_by_page or page_index >= total:
                 continue
-            title = m.group("title").strip(" .")
-            if len(title) < 3:
-                continue
-            page_number = int(m.group("page"))
-            if page_number > max_plausible_page_number:
-                continue
-            entries.append(TocEntry(title=title, printed_page_number=page_number, source_page_index=page_index))
+            trailing_entries = _valid_entries(page_index)
+            if len(trailing_entries) >= 2:
+                entries_by_page[page_index] = trailing_entries
+                first_cluster.append(page_index)
+                extended = True
+                break
+        if not extended:
+            break
+
+    entries = [entry for page_index in first_cluster for entry in entries_by_page[page_index]]
+
+    # Author-line convention (see _TOC_AUTHOR_MARKER_RE): when several
+    # entries are "par/by <Name>" lines, those mark the chapter-level
+    # entries and every other line is a sub-heading -- keep only the
+    # chapters, and read the author names straight off the marker line.
+    marker_entries = []
+    for entry in entries:
+        # The marker may only become visible in a longer reading (e.g. the
+        # base title is a wrapped author list's tail, "Szejnman", and the
+        # variant restores "par Bénédicte Frocaut et Noémie Szejnman").
+        m = next(
+            (m for t in (entry.title, *entry.title_variants) if (m := _TOC_AUTHOR_MARKER_RE.match(t)) is not None),
+            None,
+        )
+        if m is None:
+            continue
+        authors = tuple(
+            name.strip() for name in re.split(r"\s+et\s+|\s+and\s+|,|\bpar\b", m.group("names")) if name.strip()
+        )
+        marker_entries.append(replace(entry, authors=authors))
+    if len(marker_entries) >= _TOC_AUTHOR_MARKER_MIN_ENTRIES:
+        return marker_entries
     return entries
 
 
@@ -258,6 +413,57 @@ async def llm_extract_toc_entries(pages: list[str], llm_service: LLMService) -> 
         # front/back-matter range instead (see _toc_scan_indices).
         entries.append(TocEntry(title=title, printed_page_number=printed_page_number, source_page_index=-1, authors=authors))
     return entries
+
+
+# Running-header detection: a line whose digit-stripped, whitespace-collapsed
+# form recurs near the top of at least this fraction of the book's pages is a
+# running header (book/series title, "NN | Publisher, Year ..."), not page
+# content. Found empirically: one evaluation book prefixes EVERY page with a
+# ~150-character two-line header, which consumed locate_chapter_start's whole
+# head window so no chapter title was ever visible to the matcher.
+_RUNNING_HEADER_MIN_FRACTION = 0.2
+_RUNNING_HEADER_MIN_PAGES = 5
+_RUNNING_HEADER_SCAN_LINES = 5  # only lines this close to the top can qualify
+_RUNNING_HEADER_MIN_NORM_CHARS = 8  # ignore short/near-empty lines (bare page numbers)
+
+
+def _normalize_header_line(line: str) -> str:
+    """Digits removed (page numbers vary per page), whitespace collapsed,
+    lowercased -- so the same running header is recognized on every page."""
+    return re.sub(r"\s+", " ", re.sub(r"\d+", "", line)).strip().lower()
+
+
+@lru_cache(maxsize=8)
+def _running_header_lines(pages_key: tuple[str, ...]) -> frozenset[str]:
+    """The set of normalized line forms that qualify as running headers for
+    this book. Cached on the pages tuple -- every locate call for the same
+    book reuses one computation."""
+    counts: Counter[str] = Counter()
+    for text in pages_key:
+        seen_on_page: set[str] = set()
+        for line in text.splitlines()[:_RUNNING_HEADER_SCAN_LINES]:
+            norm = _normalize_header_line(line)
+            if len(norm) >= _RUNNING_HEADER_MIN_NORM_CHARS and norm not in seen_on_page:
+                seen_on_page.add(norm)
+                counts[norm] += 1
+    threshold = max(_RUNNING_HEADER_MIN_PAGES, int(len(pages_key) * _RUNNING_HEADER_MIN_FRACTION))
+    return frozenset(norm for norm, count in counts.items() if count >= threshold)
+
+
+def _strip_running_headers(text: str, header_lines: frozenset[str]) -> str:
+    """Drop leading lines that are running headers (or bare page-number
+    noise attached to them) so the returned text starts at real content."""
+    if not header_lines:
+        return text
+    lines = text.splitlines()
+    start = 0
+    for i, line in enumerate(lines[:_RUNNING_HEADER_SCAN_LINES]):
+        norm = _normalize_header_line(line)
+        if norm in header_lines or len(norm) == 0:
+            start = i + 1
+        else:
+            break
+    return "\n".join(lines[start:])
 
 
 _PAGE_NUMBER_TOKEN_RE = re.compile(r"^[0-9]{1,4}$|^[ivxlcdm]{1,7}$", re.IGNORECASE)
@@ -344,13 +550,17 @@ def locate_chapter_start_candidates(
     validated by hand while building this project's evaluation set.
     """
     last_names = tuple(a.split()[-1].lower() for a in authors if a.strip())
+    header_lines = _running_header_lines(tuple(pages))
     raw_candidates: list[tuple[int, float, bool]] = []
     for index, text in enumerate(pages):
         if index in exclude_indices:
             continue
         # Only the page's opening ~200 characters are compared — a chapter
         # title appears at the START of its page, not buried mid-page.
-        head = text[:200]
+        # Running headers are stripped first: a book that stamps every page
+        # with a long header would otherwise fill this window with header
+        # text and hide the actual title from the matcher.
+        head = _strip_running_headers(text, header_lines)[:200]
         if len(head.strip()) < _LOCATE_MIN_HEAD_CHARS:
             continue
         head_lower = head.lower()
@@ -551,6 +761,56 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
     return seen
 
 
+# Entries that are structural markers, not chapters: part dividers
+# ("Teil 1: ...", "Part II ...", "PARTIE I. ...") and standard back-matter
+# lists (index, contributors, bibliography, ...). They are still LOCATED --
+# a part divider bounds its neighboring chapters' page ranges -- but never
+# emitted as chapters themselves. Forewords/prefaces/afterwords are NOT
+# here: they carry real authored content and the evaluation ground truth
+# counts them as chapters.
+_PART_DIVIDER_RE = re.compile(
+    r"^(?:teil|part|partie|section|abschnitt)\b[\s.:]*(?:[0-9]+|[ivxlcdm]+)?\b", re.IGNORECASE
+)
+_ROMAN_PREFIX_RE = re.compile(r"^[IVXLCDM]+\.\s")
+_BACK_MATTER_TITLES = {
+    "contributors", "notes on contributors", "about the authors", "about the contributors",
+    "index", "indexes", "name index", "subject index",
+    "register", "sachregister", "personenregister", "namensregister",
+    "bibliography", "bibliographie", "literatur", "literaturverzeichnis", "references",
+    "quellenverzeichnis", "acknowledgments", "acknowledgements", "danksagung", "remerciements",
+    "glossary", "glossar", "glossaire", "abbreviations", "abkurzungsverzeichnis", "abkurzungen",
+    "list of figures", "list of tables", "tabellenverzeichnis", "abbildungsverzeichnis",
+    "les auteurs", "auteurs", "autorinnen und autoren", "die autorinnen und autoren",
+    "verzeichnis der autorinnen und autoren", "zu den autorinnen und autoren",
+    "liste des auteurs", "memento", "autorinnenverzeichnis", "autorenverzeichnis",
+    # The table of contents can list ITSELF (and does, in a real evaluation
+    # book: "Sommaire .... VII").
+    "contents", "table of contents", "inhalt", "inhaltsverzeichnis", "inhaltsubersicht",
+    "sommaire", "table des matieres",
+}
+
+
+def _normalized_title(title: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", title.lower())
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", stripped)).strip()
+
+
+def _is_part_divider(title: str) -> bool:
+    return _PART_DIVIDER_RE.match(title) is not None
+
+
+def _is_back_matter(title: str) -> bool:
+    normalized = _normalized_title(title)
+    if normalized in _BACK_MATTER_TITLES:
+        return True
+    # Author-marker TOCs (see _TOC_AUTHOR_MARKER_RE) fold the author into
+    # the entry title ("MÉMENTO par Lucie Daudin") -- test the part before
+    # the marker too.
+    stripped = re.split(r"\b(?:par|by)\b", normalized, maxsplit=1)[0].strip()
+    return stripped in _BACK_MATTER_TITLES
+
+
 # A trailing page with fewer than this many stripped characters is treated
 # as a blank/divider page (e.g. forcing the next chapter onto a recto page)
 # rather than real chapter content -- same threshold and rationale as
@@ -559,32 +819,154 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
 _TRAILING_BLANK_PAGE_MAX_CHARS = 150
 
 
+# A page qualifies as a secondary listing (see _secondary_listing_pages)
+# when at least this many distinct TOC entries' titles appear on it at this
+# fuzzy score. Long readings only -- short/generic fragments would match
+# ordinary body pages and mark them as listings by accident.
+_LISTING_PAGE_MIN_ENTRIES = 3
+_LISTING_PAGE_SCORE_THRESHOLD = 90.0
+_LISTING_PAGE_MIN_TITLE_CHARS = 15
+_LISTING_PAGE_BODY_WINDOW = 2000
+
+
+def _secondary_listing_pages(pages: list[str], toc_entries: list[TocEntry], exclude_indices: set[int]) -> set[int]:
+    """Pages outside the TOC itself whose text contains several different
+    TOC entries' titles: a part-divider page listing that part's chapters, a
+    series/half-title page or back cover listing the whole book's
+    contributions. Such a page fuzzy-matches many entries and either
+    competes with the true opening page (ambiguity) or -- sitting directly
+    before it, as part dividers do -- merges into the same candidate
+    cluster and displaces the returned start index one page early (both
+    observed on real evaluation books). Never a chapter opening itself, so
+    exclude it from location entirely."""
+    header_lines = _running_header_lines(tuple(pages))
+    counts: Counter[int] = Counter()
+    for entry in toc_entries:
+        reading = max((entry.title, *entry.title_variants), key=len)
+        if len(reading) < _LISTING_PAGE_MIN_TITLE_CHARS:
+            continue
+        reading_lower = reading.lower()
+        for index, text in enumerate(pages):
+            if index in exclude_indices:
+                continue
+            body = _strip_running_headers(text, header_lines)[:_LISTING_PAGE_BODY_WINDOW].lower()
+            if len(body.strip()) < _LOCATE_MIN_HEAD_CHARS:
+                continue
+            if fuzz.partial_ratio(reading_lower, body) >= _LISTING_PAGE_SCORE_THRESHOLD:
+                counts[index] += 1
+    return {index for index, count in counts.items() if count >= _LISTING_PAGE_MIN_ENTRIES}
+
+
 def _locate_toc_entries(
     pages: list[str], toc_entries: list[TocEntry], exclude_indices: set[int]
-) -> tuple[list[tuple[TocEntry, ChapterStartMatch]], list[TocEntry]]:
+) -> tuple[list[tuple[TocEntry, ChapterStartMatch]], list[TocEntry], set[int]]:
     """Attempts locate_chapter_start for every entry. Returns (located pairs
     sorted by match index, entries that failed to locate at all -- either
     zero candidates cleared the score threshold, or a genuine unresolved
-    ambiguity). Passes each entry's own authors through (empty for
-    regex-found entries) for author-aware disambiguation."""
-    located: list[tuple[TocEntry, ChapterStartMatch]] = []
-    unlocated: list[TocEntry] = []
+    ambiguity, and the full set of non-content page indices used as location
+    excludes: the caller-provided excludes plus detected secondary listing
+    pages -- _chapters_from_located trims these off chapter ends too).
+    Passes each entry's own authors through (empty for regex-found entries)
+    for author-aware disambiguation.
+
+    Two structural constraints sharpen the raw per-entry lookup:
+
+    - Chapters cannot start on or before the table of contents itself, so
+      when the TOC sits in the front matter every page up to it is excluded
+      -- this removes cover/half-title pages (which repeat the book title,
+      and with it any chapter title that embeds the book title) from the
+      candidate pool entirely.
+    - TOC listing order is book order. An entry left ambiguous by the
+      per-entry lookup is retried against only the candidates that fall
+      strictly between its nearest successfully-located neighbors in TOC
+      order -- an Introduction/Conclusion pair sharing one title suffix is
+      unambiguous once each is pinned to its own side of the book. The
+      margin is pinned to the bare minimum (same convention as
+      llm_disambiguate_chapter_start): ordering resolved WHICH candidate,
+      it did not make the textual match less contested.
+    """
+    exclude_indices = exclude_indices | _secondary_listing_pages(pages, toc_entries, exclude_indices)
+    front_toc_pages = [e.source_page_index for e in toc_entries if 0 <= e.source_page_index < len(pages) // 2]
+    pre_toc_pages = set(range(max(front_toc_pages) + 1)) if front_toc_pages else set()
+
+    def _entry_excludes(entry: TocEntry) -> set[int]:
+        # Roman-paginated entries (Foreword, Avant-propos, ...) live in the
+        # front matter BEFORE the table of contents -- only they may locate
+        # on pre-TOC pages.
+        return exclude_indices if entry.printed_roman else exclude_indices | pre_toc_pages
+
+    resolved: list[tuple[TocEntry, ChapterStartMatch] | None] = []
     for entry in toc_entries:
-        match = locate_chapter_start(pages, entry.title, exclude_indices=exclude_indices, authors=entry.authors)
-        if match is not None:
-            located.append((entry, match))
+        # Try the entry's own (possibly tail-fragment) title plus every
+        # longer wrapped-title reading (see TocEntry.title_variants), and
+        # keep whichever locates most TRUSTWORTHILY -- ranked by
+        # min(score, margin), i.e. how certain the localization is, not raw
+        # score alone. A short tail fragment can score a perfect 100 on a
+        # wrong page (a back-cover blurb containing the fragment) while
+        # barely clearing the ambiguity margin; the full wrapped title
+        # scoring 95 uncontested on the true opening page is far stronger
+        # evidence (both cases observed on real evaluation books). Ties fall
+        # back to score, then length -- the longer reading matched more
+        # actual page evidence and reads better as a chapter title.
+        best: tuple[tuple[float, float, int], str, ChapterStartMatch] | None = None
+        for variant_title in (entry.title, *entry.title_variants):
+            match = locate_chapter_start(pages, variant_title, exclude_indices=_entry_excludes(entry), authors=entry.authors)
+            if match is None:
+                continue
+            score = match.score + (_AUTHOR_CONFIRMED_BONUS if match.author_confirmed else 0.0)
+            key = (min(score, match.margin), score, len(variant_title))
+            if best is None or key > best[0]:
+                best = (key, variant_title, match)
+        if best is not None:
+            _, winning_title, match = best
+            resolved.append((replace(entry, title=winning_title) if winning_title != entry.title else entry, match))
         else:
+            resolved.append(None)
+
+    # Second pass: ordering-based disambiguation for the entries the
+    # independent lookup left ambiguous (see docstring).
+    unlocated: list[TocEntry] = []
+    for k, entry in enumerate(toc_entries):
+        if resolved[k] is not None:
+            continue
+        lower = max((pair[1].index for pair in resolved[:k] if pair is not None), default=-1)
+        upper = min((pair[1].index for pair in resolved[k + 1:] if pair is not None), default=len(pages))
+        best_feasible: tuple[float, int, str, ChapterStartCandidate] | None = None
+        for variant_title in (entry.title, *entry.title_variants):
+            candidates = locate_chapter_start_candidates(pages, variant_title, exclude_indices=_entry_excludes(entry), authors=entry.authors)
+            feasible = [c for c in candidates if lower < c.index < upper]
+            if len(feasible) < 2 and len(feasible) == len(candidates):
+                continue  # ordering added no information; the first pass already ruled
+            for c in feasible:
+                # Ties on ranking go to the EARLIEST feasible page: within
+                # the feasible interval, a same-scoring later page is a
+                # running header or reference repeating the title, never a
+                # page before the chapter began.
+                key = (_candidate_ranking_key(c), -c.index, len(variant_title))
+                if best_feasible is None or key > (best_feasible[0], -best_feasible[3].index, best_feasible[1]):
+                    best_feasible = (key[0], len(variant_title), variant_title, c)
+        if best_feasible is None:
             unlocated.append(entry)
+            continue
+        _, _, winning_title, winner = best_feasible
+        match = ChapterStartMatch(
+            index=winner.index, score=winner.score, margin=_LOCATE_MARGIN_REQUIRED,
+            author_confirmed=winner.author_confirmed,
+        )
+        resolved[k] = (replace(entry, title=winning_title) if winning_title != entry.title else entry, match)
+
+    located = [pair for pair in resolved if pair is not None]
     # Order by PDF page index (not TOC order, which is printed-page order
     # and could disagree if entries were matched to pages out of sequence).
     located.sort(key=lambda pair: pair[1].index)
-    return located, unlocated
+    return located, unlocated, exclude_indices
 
 
 def _chapters_from_located(
     pages: list[str],
     located: list[tuple[TocEntry, ChapterStartMatch]],
     entry_source: dict[TocEntry, str] | None = None,
+    non_content_pages: set[int] | None = None,
 ) -> list[dict]:
     """Turns located (entry, match) pairs into the final chapter dict list:
     clusters each entry's page range against its neighbor, trims trailing
@@ -593,9 +975,23 @@ def _chapters_from_located(
     any entry not present in the mapping) -- see design spec §7.
     """
     entry_source = entry_source or {}
+    non_content_pages = non_content_pages or set()
     total_pages = len(pages)
+    header_lines = _running_header_lines(tuple(pages))
+    # Roman-numeral prefixes ("II. Politische und soziale Determinanten...")
+    # mark part dividers only when a minority of entries carry them -- a book
+    # that numbers its actual chapters with roman numerals would prefix most
+    # entries, and skipping those would discard the whole book.
+    roman_prefixed = sum(1 for entry, _ in located if _ROMAN_PREFIX_RE.match(entry.title))
+    roman_marks_dividers = 0 < roman_prefixed <= len(located) // 2
     chapters: list[dict] = []
     for i, (entry, match) in enumerate(located):
+        if _is_part_divider(entry.title) or _is_back_matter(entry.title) or (
+            roman_marks_dividers and _ROMAN_PREFIX_RE.match(entry.title)
+        ):
+            # Structural marker: bounds its neighbors (via its position in
+            # `located`) but is not itself a chapter.
+            continue
         start_index = match.index
         end_index = (located[i + 1][1].index - 1) if i + 1 < len(located) else (total_pages - 1)
         if end_index < start_index:
@@ -606,7 +1002,17 @@ def _chapters_from_located(
         # belong to neither neighboring chapter. Mirrors the proven
         # build_draft logic in scripts/ground_truth_helper.py, which needed
         # the identical fix when building ground truth by hand.
-        while end_index > start_index and len(pages[end_index].strip()) < _TRAILING_BLANK_PAGE_MAX_CHARS:
+        # Measured on header-stripped text: a book that stamps every page
+        # with a long running header would otherwise make even a genuinely
+        # blank divider page look like it has content. Known non-content
+        # pages (the TOC itself, detected listing/part-divider pages) are
+        # trimmed regardless of how much text they carry -- a dense
+        # part-divider page that lists its part's chapters belongs to no
+        # chapter, but has far too much text for the blank-page test.
+        while end_index > start_index and (
+            end_index in non_content_pages
+            or len(_strip_running_headers(pages[end_index], header_lines).strip()) < _TRAILING_BLANK_PAGE_MAX_CHARS
+        ):
             end_index -= 1
 
         start_printed = extract_printed_page_number(pages[start_index])
@@ -642,8 +1048,8 @@ def analyze_attachment(pages: list[str]) -> dict:
     toc_entries = find_toc_candidates(pages)
     toc_page_indices = {e.source_page_index for e in toc_entries}
 
-    located, _unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
-    chapters = _chapters_from_located(pages, located)
+    located, _unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+    chapters = _chapters_from_located(pages, located, non_content_pages=non_content_pages)
 
     segmentation_confidence = "high" if chapters else "low"
     return {
@@ -670,8 +1076,8 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
     """
     toc_entries = find_toc_candidates(pages)
     toc_page_indices = {e.source_page_index for e in toc_entries}
-    located, unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
-    heuristic_chapters = _chapters_from_located(pages, located)
+    located, unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+    heuristic_chapters = _chapters_from_located(pages, located, non_content_pages=non_content_pages)
 
     entry_source: dict[TocEntry, str] = {}
     llm_toc_extraction_used = False
@@ -690,7 +1096,7 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
             # equal entry is still processed independently; do not "fix" by
             # deduplicating toc_entries, that would drop a real chapter.
             entry_source = {e: "llm" for e in toc_entries}
-            located, unlocated = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
+            located, unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=toc_page_indices)
             llm_toc_extraction_used = True
 
     disambiguation_count = 0
@@ -710,7 +1116,7 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
 
     if llm_toc_extraction_used or disambiguation_count:
         located.sort(key=lambda pair: pair[1].index)
-        chapters = _chapters_from_located(pages, located, entry_source=entry_source)
+        chapters = _chapters_from_located(pages, located, entry_source=entry_source, non_content_pages=non_content_pages)
     else:
         # Nothing changed since heuristic_chapters was computed above (no
         # LLM path fired) -- reuse it instead of re-running clustering/NER

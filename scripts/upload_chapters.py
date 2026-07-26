@@ -66,7 +66,7 @@ def main() -> int:
     parser.add_argument("--commit", action="store_true", help="Actually write to Zotero (default: dry-run preview)")
     # See backend/api/chapter_linking.py's SegmentUploadRequest for how this
     # default was calibrated against the real evaluation set.
-    parser.add_argument("--confidence-threshold", type=float, default=0.96)
+    parser.add_argument("--confidence-threshold", type=float, default=0.90)
     parser.add_argument("--target-collection", default="Book Chapters")
     parser.add_argument("--max-items", type=int, default=None)
     parser.add_argument("--output", default=None)

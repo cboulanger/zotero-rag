@@ -47,7 +47,12 @@ class TestFindTocCandidates(unittest.TestCase):
         ] + self._FILLER_PAGES
         entries = find_toc_candidates(pages)
         self.assertEqual(len(entries), 3)
-        self.assertEqual(entries[0], TocEntry(title="Introduction to Reference Management", printed_page_number=1, source_page_index=0))
+        self.assertEqual(entries[0].title, "Introduction to Reference Management")
+        self.assertEqual(entries[0].printed_page_number, 1)
+        self.assertEqual(entries[0].source_page_index, 0)
+        # The listing's own "CONTENTS" heading is never merged into a
+        # wrapped-title variant (see _TOC_MAX_CONTINUATION_LINES walk).
+        self.assertEqual(entries[0].title_variants, ())
         self.assertEqual(entries[2].title, "Zotero in Practice")
         self.assertEqual(entries[2].printed_page_number, 89)
 
@@ -96,13 +101,17 @@ class TestFindTocCandidates(unittest.TestCase):
         # A publication year embedded in copyright/imprint text ("Opladen
         # (c) Publisher          2025") looks like a TOC line but its
         # "page number" is wildly larger than the PDF's actual length --
-        # found empirically in a real evaluation book. All three lines
-        # qualify for _TOC_MIN_LINES_PER_PAGE, but only the two with
-        # plausible page numbers should survive.
+        # found empirically in a real evaluation book. Only lines with
+        # plausible page numbers count toward _TOC_MIN_LINES_PER_PAGE (an
+        # imprint page full of filtered lines must not qualify as the TOC,
+        # see test_metadata_page_of_filtered_lines_does_not_shadow_real_toc)
+        # -- three valid lines keep this page qualifying, and the imprint
+        # line is still dropped from the result.
         pages = [
             "Publisher Imprint Line          2025\n"
             "Introduction to the Subject          1\n"
             "Comparing Citation Styles          45\n"
+            "Zotero in Practice          89\n"
         ] + self._FILLER_PAGES
         entries = find_toc_candidates(pages)
         titles = [e.title for e in entries]
@@ -124,6 +133,161 @@ class TestFindTocCandidates(unittest.TestCase):
         titles = [e.title for e in entries]
         self.assertFalse(any("doi.org" in t for t in titles))
         self.assertIn("Introduction to the Subject", titles)
+
+    def test_metadata_page_of_filtered_lines_does_not_shadow_real_toc(self):
+        # An imprint/metadata page whose lines ALL fail the content filters
+        # (years, DOI numbers) must not qualify as the "first TOC cluster"
+        # and shadow the real table of contents further in -- the per-line
+        # filters run BEFORE the per-page density count (found empirically:
+        # a French evaluation book's page-1 metadata block hid its real TOC
+        # on pages 5-8).
+        pages = [
+            "Fancy Book Title Page",
+            "DOI : 10.4000/books.example          7527\n"
+            "Année d'édition :          2017\n"
+            "Date de mise en ligne : 21 mai          2019\n",
+            "Some other front matter.",
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 12\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual([e.source_page_index for e in entries], [3, 3, 3])
+        self.assertIn("Comparing Citation Styles", [e.title for e in entries])
+
+    def test_wrapped_title_builds_variants_from_preceding_lines(self):
+        # A long title wrapped over several lines carries its page number on
+        # the LAST line only -- the preceding lines are offered as
+        # progressively longer variant readings for the locate step to
+        # arbitrate. The walk stops at another entry's line.
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Making Terrorism: Security Practices and the Production of Terror\n"
+            "Activities in Canada ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        wrapped = next(e for e in entries if e.title == "Activities in Canada")
+        self.assertIn(
+            "Making Terrorism: Security Practices and the Production of Terror Activities in Canada",
+            wrapped.title_variants,
+        )
+        # The walk stopped at the previous entry's own line -- it is never
+        # part of a variant.
+        self.assertFalse(any("Reference Management" in v for v in wrapped.title_variants))
+
+    def test_wrapped_title_walk_stops_at_part_headers(self):
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Part II Gendered Violence and Racial Subjugation\n"
+            "Activities in Canada ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        wrapped = next(e for e in entries if e.title == "Activities in Canada")
+        self.assertFalse(any("Part II" in v for v in wrapped.title_variants))
+
+    def test_roman_numeral_page_numbers_accepted_for_front_matter(self):
+        # "Foreword vii" is a real front-matter TOC entry; the entry is
+        # flagged printed_roman so localization may search pre-TOC pages.
+        pages = [
+            "CONTENTS\n"
+            "Foreword vii\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        foreword = next(e for e in entries if e.title == "Foreword")
+        self.assertEqual(foreword.printed_page_number, 7)
+        self.assertTrue(foreword.printed_roman)
+        self.assertFalse(next(e for e in entries if e.title == "Zotero in Practice").printed_roman)
+
+    def test_ordinary_words_of_roman_letters_are_not_page_numbers(self):
+        # "civil" is c-i-v-i-l -- every letter a roman digit, but not a
+        # valid roman numeral. A TOC line ending in such a word must not
+        # become an entry with a hallucinated page number.
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "A Treatise on Matters          civil\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertFalse(any("Treatise" in e.title for e in entries))
+
+    def test_bare_page_number_line_adopts_preceding_title_line(self):
+        # Some TOC layouts put the dot leader + page number on a line of its
+        # own, with the title (and author) lines above it.
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Comparing Citation Styles\n"
+            "................................. 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        adopted = next((e for e in entries if e.title == "Comparing Citation Styles"), None)
+        self.assertIsNotNone(adopted)
+        self.assertEqual(adopted.printed_page_number, 45)
+
+    def test_author_marker_toc_keeps_only_chapter_level_entries(self):
+        # French/OpenEdition-style TOC: each chapter's page number sits on a
+        # "par <Author>" line under the wrapped title, while sub-headings
+        # also carry page numbers. With 3+ marker entries, only they are
+        # chapters -- and the author names are read off the marker line.
+        pages = [
+            "SOMMAIRE\n"
+            "MODE D'EMPLOI\n"
+            "par Lucie Daudin .................. 9\n"
+            "UNE SOUS-PARTIE QUELCONQUE .................. 11\n"
+            "FRANCE, SOCIÉTÉ MULTICULTURELLE\n"
+            "par Patrick Simon .................. 29\n"
+            "AUTRE SOUS-PARTIE .................. 31\n"
+            "LANGUES ET POLITIQUES PUBLIQUES\n"
+            "par Alexandra Filhon .................. 38\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual(len(entries), 3)
+        self.assertTrue(all(e.title.startswith("par ") for e in entries))
+        simon = next(e for e in entries if "Patrick Simon" in e.title)
+        self.assertEqual(simon.authors, ("Patrick Simon",))
+        self.assertTrue(any("FRANCE, SOCIÉTÉ MULTICULTURELLE" in v for v in simon.title_variants))
+
+    def test_toc_continuation_page_with_few_entries_joins_cluster(self):
+        # The listing's last page may hold only its final two entries --
+        # below the density threshold on its own, but a genuine continuation
+        # of the already-trusted cluster.
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 60\n",
+            "Final Thoughts on Reference Management ..... 75\n"
+            "Closing Remarks and Outlook ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertIn("Closing Remarks and Outlook", [e.title for e in entries])
+
+    def test_single_stray_line_does_not_extend_toc_cluster(self):
+        # One lone matching line on the page after the TOC is
+        # indistinguishable from an ordinary body page's incidental
+        # "text ... number" line -- swallowing it as "TOC" would cost the
+        # first chapter (its opening page becomes excluded from location).
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 60\n",
+            "Ordinary body text that happens to end with a number          12\n"
+            "and then continues with completely ordinary prose afterwards.",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual({e.source_page_index for e in entries}, {0})
 
 
 class TestLlmExtractTocEntries(unittest.IsolatedAsyncioTestCase):
@@ -342,6 +506,27 @@ class TestLocateChapterStart(unittest.TestCase):
         # Sorted best-first.
         self.assertGreaterEqual(candidates[0].score, candidates[1].score)
 
+    def test_running_headers_are_stripped_before_matching(self):
+        # A book that stamps every page with a long running header (page
+        # number + publisher + book title) would otherwise fill the whole
+        # head window locate_chapter_start scores against, hiding the actual
+        # chapter title (found empirically on a real evaluation book whose
+        # ~150-character header made every chapter unlocatable). The header
+        # varies only in its page number, so digit-insensitive detection
+        # recognizes it on every page.
+        def page(n: int, body: str) -> str:
+            return (
+                f"{n} | Presses de l'exemple, 2017. <http://www.example.fr/presses/>\n"
+                "Accueillir des publics divers. Une perspective de bibliothèque\n"
+                + body
+            )
+
+        pages = [page(i + 1, "Ordinary body text for this page, nothing special here at all.") for i in range(10)]
+        pages[6] = page(7, "Comparing Citation Styles\npar Jane Doe\n\nThis chapter examines citation styles.")
+        match = locate_chapter_start(pages, "Comparing Citation Styles", exclude_indices=set())
+        self.assertIsNotNone(match)
+        self.assertEqual(match.index, 6)
+
     def test_author_confirmation_resolves_ambiguous_tie(self):
         # Same near-tie shape as test_rejects_ambiguous_tie, but the true
         # chapter's page also has its author's last name near the top --
@@ -498,6 +683,75 @@ class TestAnalyzeAttachment(unittest.TestCase):
         result = analyze_attachment(self._fake_book_pages())
         self.assertTrue(all(c["source"] == "heuristic" for c in result["chapters"]))
 
+    def test_part_dividers_and_back_matter_bound_but_are_not_chapters(self):
+        # "Part I ..." divider pages and standard back-matter sections
+        # (Index, Contributors) are located -- so they bound their
+        # neighbors' page ranges -- but never emitted as chapters.
+        # Filler is varied per page (by words, not digits -- running-header
+        # detection is digit-insensitive): byte-identical opening lines
+        # across many pages would (correctly) be detected as a running
+        # header and stripped, which is not what this test is about.
+        def filler(n: int) -> str:
+            topic = ["archives", "borrowing", "cataloguing", "digitisation", "editions",
+                     "facsimiles", "gazettes", "holdings", "incunabula", "journals"][n]
+            return (f"This page carries plenty of ordinary body text about {topic}, continuing "
+                    f"the chapter well past the blank-page threshold and discussing {topic} "
+                    "in enough detail that nothing gets trimmed by accident. ") * 2
+
+        pages = [
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 1\n"
+            "Part I Foundations of the Field ..... 3\n"
+            "Comparing Citation Styles ..... 5\n"
+            "Index ..... 9\n",
+            "Introduction to Reference Management\nBy Jane Author\n\n" + filler(1),  # 1
+            filler(2) + "\n2",  # 2
+            "Part I Foundations of the Field",  # 3 -- divider page
+            filler(4) + "\n4",  # 4 (padding)
+            "Comparing Citation Styles\n\nBy John Smith\n\n" + filler(5),  # 5
+            filler(6) + "\n6",  # 6
+            filler(7) + "\n7",  # 7
+            filler(8) + "\n8",  # 8
+            "Index\n\naardvark, 12\nzotero, 45\n" + filler(9),  # 9
+        ]
+        result = analyze_attachment(pages)
+        titles = [c["title"] for c in result["chapters"]]
+        self.assertNotIn("Part I Foundations of the Field", titles)
+        self.assertNotIn("Index", titles)
+        ranges = {c["title"]: (c["pdf_start_index"], c["pdf_end_index"]) for c in result["chapters"]}
+        # The divider bounds the Introduction's end; the Index bounds the
+        # second chapter's end.
+        self.assertEqual(ranges["Introduction to Reference Management"], (1, 2))
+        self.assertEqual(ranges["Comparing Citation Styles"], (5, 8))
+
+    def test_toc_order_resolves_shared_title_suffix_ambiguity(self):
+        # Introduction and Conclusion sharing one distinctive suffix (the
+        # book's own title) are individually ambiguous -- each matches both
+        # pages -- but TOC order pins the Introduction to the earlier page
+        # and the Conclusion to the later one.
+        filler = ("Plenty of ordinary body text continues the chapter here, "
+                  "well past the blank-page threshold so nothing is trimmed. ") * 3
+        pages = [
+            "CONTENTS\n"
+            "Introduction: Transformations of Reference Management ..... 1\n"
+            "A Middle Chapter About Citation Tools ..... 5\n"
+            "Conclusion: Transformations of Reference Management ..... 9\n",
+            "Introduction: Transformations of Reference Management\n\nBy Jane Author\n\n" + filler,  # 1
+            filler + "\n2",
+            filler + "\n3",
+            filler + "\n4",
+            "A Middle Chapter About Citation Tools\n\nBy John Smith\n\n" + filler,  # 5
+            filler + "\n6",
+            filler + "\n7",
+            filler + "\n8",
+            "Conclusion: Transformations of Reference Management\n\nBy Jane Author\n\n" + filler,  # 9
+            filler + "\n10",
+        ]
+        result = analyze_attachment(pages)
+        ranges = {c["title"]: c["pdf_start_index"] for c in result["chapters"]}
+        self.assertEqual(ranges.get("Introduction: Transformations of Reference Management"), 1)
+        self.assertEqual(ranges.get("Conclusion: Transformations of Reference Management"), 9)
+
 
 class TestAnalyzeAttachmentWithLlmFallback(unittest.IsolatedAsyncioTestCase):
     def _fake_llm(self, toc_response: str | None = None, disambiguation_response: str | None = None):
@@ -560,17 +814,30 @@ class TestAnalyzeAttachmentWithLlmFallback(unittest.IsolatedAsyncioTestCase):
         llm.generate.assert_not_called()
 
     async def test_llm_disambiguation_resolves_ambiguous_chapter(self):
-        filler = ["Unrelated filler page.", "Unrelated filler page.", "Unrelated filler page.", "Unrelated filler page."]
+        # An entry ambiguous between two locations is normally resolved
+        # heuristically by TOC-order constraints (see _locate_toc_entries's
+        # second pass), so the LLM path only fires when ordering CANNOT
+        # help: here the TOC lists "Comparing Citation Styles" between two
+        # entries whose located pages (3 and 4) leave no room, while its
+        # own two candidate pages (6 and 12) both sit outside that interval
+        # -- a disordered/incorrect TOC only the LLM can arbitrate.
+        filler = "Unrelated body filler text, nothing chapter-related here."
         pages = [
             "CONTENTS\n"
-            "Introduction ..... 1\n"
-            "Comparing Citation Styles ..... 10\n"
-            "Appendix ..... 20\n",
-            "Introduction\nJane Author\n\nThis book explores reference management.\n\n1",
-            "Comparing Citation Styles\n\nBy Jane Doe\n\nThis chapter examines APA style only.",
-            *filler,
-            "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",
+            "Alpha Overview ..... 1\n"
+            "Comparing Citation Styles ..... 5\n"
+            "Omega Summary ..... 9\n",
+            filler,
+            filler,
+            "Alpha Overview\n\nBy Jane Author\n\nThis opening chapter surveys the field.",  # index 3
+            "Omega Summary\n\nBy Jane Author\n\nThis closing chapter wraps everything up.",  # index 4
+            filler,
+            "Comparing Citation Styles\n\nBy Jane Doe\n\nThis chapter examines APA style only.",  # index 6
+            *([filler] * 5),  # indices 7-11
+            "Comparing Citation Style\n\nBy John Smith\n\nAnother chapter about MLA style.",  # index 12
+            *([filler] * 7),  # indices 13-19
         ]
+        self.assertEqual(len(pages), 20)
         llm = self._fake_llm(disambiguation_response='{"chosen_candidate": 1}')
         result = await analyze_attachment_with_llm_fallback(pages, llm)
         self.assertFalse(result["diagnostics"]["llm_toc_extraction_used"])
