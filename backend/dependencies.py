@@ -7,6 +7,7 @@ factory, consumed via FastAPI's Depends() injection.
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -16,7 +17,8 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.services.access_gate import is_loopback, passes_gate
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
-from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
+from backend.services.llm import AutoSelectLLMService, LLMService, create_llm_service, RemoteLLMService
+from backend.utils.kisski import fetch_kisski_rag_models
 from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
 from backend.zotero.group_roles import get_admin_role_cache
 
@@ -132,8 +134,47 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
     )
 
 
-def make_llm_service(client_api_keys: dict[str, str] | None = None, model_name_override: str | None = None) -> LLMService:
-    """Create an LLMService from current settings, overriding API key with client-supplied value."""
+def _resolve_auto_select_candidates(preset, api_key: str | None) -> list[str]:
+    """Ordered candidate model names for auto_select_model mode, most-
+    available first. Never hardcodes a model name: if the active preset
+    exposes a live models-status endpoint (currently only KISSKI presets
+    set `models_status_url`), fetches live demand/availability and drops
+    anything reported "very busy"; otherwise falls back to the preset's
+    own static `model_names` list, in its configured order. This is the
+    same opt-in check `backend/api/config.py`'s get_config/get_models_status
+    already use -- reused here rather than inventing a new provider-plugin
+    abstraction for the (currently single) case that supports it.
+    """
+    if preset.llm.models_status_url and api_key:
+        base_url = preset.llm.model_kwargs.get("base_url", "")
+        if base_url:
+            try:
+                live_models = fetch_kisski_rag_models(base_url, api_key)
+            except Exception as exc:
+                logger.warning(
+                    "auto_select_model: could not fetch live models from %s, falling back to static list: %s",
+                    base_url, exc,
+                )
+            else:
+                candidates = [m.id for m in live_models if m.availability != "very busy"]
+                if candidates:
+                    return candidates
+    return list(preset.llm.model_names)
+
+
+def make_llm_service(
+    client_api_keys: dict[str, str] | None = None,
+    model_name_override: str | None = None,
+    auto_select_model: bool = False,
+) -> LLMService:
+    """Create an LLMService from current settings, overriding API key with client-supplied value.
+
+    `auto_select_model=True` returns an AutoSelectLLMService instead of a
+    single fixed-model service: it resolves the current preset's available
+    models (see _resolve_auto_select_candidates) and retries `.generate()`
+    across them on failure or an unusable response. `model_name_override`
+    is ignored in this mode -- auto-selection decides the model itself.
+    """
     settings = get_settings()
     if settings.testing:
         from backend.services.llm import MockLLMService
@@ -141,6 +182,14 @@ def make_llm_service(client_api_keys: dict[str, str] | None = None, model_name_o
     preset = settings.get_hardware_preset()
     api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
     client_key = (client_api_keys or {}).get(api_key_env) or None
+
+    if auto_select_model:
+        fetch_key = client_key or os.environ.get(api_key_env)
+        candidates = _resolve_auto_select_candidates(preset, fetch_key)
+        return AutoSelectLLMService(
+            candidates,
+            service_factory=lambda name: create_llm_service(settings, api_key=client_key, model_name_override=name),
+        )
     return create_llm_service(settings, api_key=client_key, model_name_override=model_name_override)
 
 
