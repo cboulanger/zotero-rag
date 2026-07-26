@@ -10,9 +10,17 @@ a paid API call per book -- not a pytest test, run manually:
 
     uv run python scripts/evaluate_chapter_segmentation_llm_fallback.py
 
+Pass --auto-select-model to retry across the active preset's available
+models (most-available first, resolved live -- never a hardcoded model
+name) instead of a single fixed model, useful when the preset's configured
+default model is unreachable or overloaded:
+
+    uv run python scripts/evaluate_chapter_segmentation_llm_fallback.py --auto-select-model
+
 See docs/superpowers/specs/2026-07-25-llm-chapter-segmentation-fallback-design.md §10.
 """
 
+import argparse
 import asyncio
 import json
 import sys
@@ -51,13 +59,13 @@ def _available_books() -> list[tuple[Path, Path]]:
     return pairs
 
 
-async def _main() -> int:
+async def _main(auto_select_model: bool) -> int:
     pairs = _available_books()
     if not pairs:
         print("No evaluation PDFs present -- run: uv run python scripts/fetch_evaluation_pdfs.py")
         return 1
 
-    llm_service = make_llm_service()
+    llm_service = make_llm_service(auto_select_model=auto_select_model)
 
     for pdf_path, expected_path in pairs:
         expected = json.loads(expected_path.read_text(encoding="utf-8"))["chapters"]
@@ -81,4 +89,13 @@ async def _main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(_main()))
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument(
+        "--auto-select-model",
+        action="store_true",
+        help="Retry across the active preset's available models (most-available "
+             "first, resolved live) on error or an unusable response, instead of "
+             "a single fixed model.",
+    )
+    args = parser.parse_args()
+    raise SystemExit(asyncio.run(_main(auto_select_model=args.auto_select_model)))

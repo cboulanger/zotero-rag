@@ -30,7 +30,7 @@ async def _main(args: argparse.Namespace) -> int:
     llm_service = None
     if args.llm_fallback:
         from backend.dependencies import make_llm_service
-        llm_service = make_llm_service()
+        llm_service = make_llm_service(auto_select_model=args.auto_select_model)
 
     bar = tqdm(total=100, unit="%", desc="Analyzing")
 
@@ -73,9 +73,19 @@ def main() -> int:
         help="Enable the LLM-based fallback for chapters the heuristic pass finds "
              "nothing or is ambiguous about (slower, calls a configured LLM API)",
     )
+    parser.add_argument(
+        "--auto-select-model",
+        action="store_true",
+        help="With --llm-fallback, retry across the active preset's available models "
+             "(most-available first) on error or an unusable response, instead of "
+             "using a single fixed model. Never a hardcoded model name -- resolved "
+             "live from the preset/provider at run time.",
+    )
     parser.add_argument("--max-items", type=int, default=None, help="Cap the number of book items processed (testing/debugging)")
     parser.add_argument("--output", default=None, help="Write JSON output to this path instead of stdout")
     args = parser.parse_args()
+    if args.auto_select_model and not args.llm_fallback:
+        parser.error("--auto-select-model has no effect without --llm-fallback")
     return asyncio.run(_main(args))
 
 
