@@ -156,14 +156,18 @@ that scored the same as what the heuristic guard had already rejected).
 **Takeaway:** with a model that's actually live and responds in the expected
 JSON shape, the fallback is net-positive on this evaluation set — mainly by
 resolving genuine start-page ambiguities the heuristic correctly refused to
-guess at. The retry-across-models approach used here (fetch live models,
-filter by availability, retry on failure or unparseable response) was ad hoc
-for this evaluation run, not added to the committed
-`scripts/evaluate_chapter_segmentation_llm_fallback.py` (which still uses
-the single configured preset model, per the design spec) — consider
-promoting it into that script, or fixing the preset's default model list,
-as a follow-up. Re-run whenever the prompt, model choice, or heuristic
-changes to check whether the fallback is still net-helpful.
+guess at. The retry-across-models approach prototyped for this run has
+since been promoted into the general `LLMService` abstraction
+(`AutoSelectLLMService`, `backend/services/llm.py`) and is no longer ad
+hoc: pass `--auto-select-model` to
+`scripts/evaluate_chapter_segmentation_llm_fallback.py` (or the
+`--llm-fallback` CLI/`enable_llm_fallback` API paths) to retry across the
+active preset's live, non-"very busy" models automatically, never a
+hardcoded model name. The preset's stale default model
+(`mistral-large-3-675b-instruct-2512`, not currently in KISSKI's live
+list) is still worth fixing separately. Re-run whenever the prompt, model
+choice, or heuristic changes to check whether the fallback is still
+net-helpful.
 
 Snapshot from running the harness above, one row per evaluation book
 (regenerate anytime — these numbers shift as the heuristics evolve, so treat
