@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """CLI for script 3: retrofit-link existing, separately-catalogued book and
-bookSection items.
+bookSection items. Defaults to dry-run -- pass --commit to actually write.
 
 Usage:
     uv run python scripts/retrofit_chapter_links.py --library-slug groups/6297749 \
-        --api-key <write-scoped-zotero-key> --output .local/retrofit.json
+        --api-key <write-scoped-zotero-key> --output .local/retrofit.json --commit
 """
 
 import argparse
@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--api-key", required=True, help="Write-scoped Zotero API key")
     parser.add_argument("--item-keys", default=None, help="Comma-separated bookSection item keys to restrict to")
     parser.add_argument("--max-items", type=int, default=None)
+    parser.add_argument("--commit", action="store_true", help="Actually write to Zotero (default: dry-run preview)")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -38,14 +39,18 @@ def main() -> int:
         slug=args.library_slug,
         item_keys=item_keys,
         max_items=args.max_items,
+        commit=args.commit,
     )
 
-    output = json.dumps(result, indent=2)
-    if args.output:
-        Path(args.output).write_text(output, encoding="utf-8")
-        print(f"Wrote {len(result['linked'])} link(s), {len(result['ambiguous'])} ambiguous, {len(result['no_match'])} unmatched to {args.output}")
+    if not args.commit:
+        print(f"DRY RUN: would link {len(result['would_link'])} chapter(s). Pass --commit to apply.")
     else:
-        print(output)
+        print(f"Wrote {len(result['linked'])} link(s).")
+    print(f"{len(result['ambiguous'])} ambiguous, {len(result['no_match'])} unmatched.")
+
+    if args.output:
+        Path(args.output).write_text(json.dumps(result, indent=2), encoding="utf-8")
+        print(f"Wrote full result to {args.output}")
     return 0
 
 

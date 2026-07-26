@@ -113,9 +113,13 @@ def run(
     slug: str,
     item_keys: list[str] | None,
     max_items: int | None,
+    commit: bool = False,
 ) -> dict:
     """Core logic for script 3 (retrofit_chapter_links). Synchronous —
-    pyzotero's client is itself synchronous. See design spec §7.
+    pyzotero's client is itself synchronous. Defaults to dry-run — `commit`
+    must be explicitly True to write the `X-Contains`/`X-Contained-By`
+    links to Zotero (mirrors chapter_upload.py's script 4 convention). See
+    design spec §7.
     """
     # zot.items() alone returns only the first page — everything() is
     # required to auto-paginate through the full library.
@@ -136,6 +140,7 @@ def run(
     ]
 
     linked: list[dict] = []
+    would_link: list[dict] = []
     ambiguous: list[dict] = []
     no_match: list[str] = []
     failed: list[dict] = []
@@ -152,6 +157,10 @@ def run(
         match = find_best_book_match(book_title, year, book_candidates)
         if match is None:
             ambiguous.append({"chapter_key": chapter_key, "candidates": book_candidates})
+            continue
+
+        if not commit:
+            would_link.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
             continue
 
         book_item = zotero_write_client.item(match.book_key)
@@ -180,4 +189,4 @@ def run(
 
         linked.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
 
-    return {"linked": linked, "ambiguous": ambiguous, "no_match": no_match, "failed": failed}
+    return {"linked": linked, "would_link": would_link, "ambiguous": ambiguous, "no_match": no_match, "failed": failed}

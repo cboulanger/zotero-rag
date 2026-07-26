@@ -685,6 +685,72 @@ class TestRun(unittest.TestCase):
         mock_fallback.assert_called_once()
         self.assertEqual(result["attachments"][0]["item_key"], "BOOK0003")
 
+    def test_reads_ocr_cache_when_no_text_layer_and_cache_hit(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0004", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0003", "itemType": "attachment", "contentType": "application/pdf"}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["", ""],  # no text layer -- scanned PDF
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.load_cached_ocr",
+            return_value={"detected_language": "eng", "pages": ["Just filler prose, no TOC pattern here at all. " * 3]},
+        ) as mock_load_cache:
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+                ocr_cache_dir=unittest.mock.ANY,
+            ))
+        mock_load_cache.assert_called_once()
+        self.assertTrue(result["attachments"][0]["has_text_layer"])
+        self.assertFalse(result["attachments"][0]["needs_ocr"])
+
+    def test_still_reports_needs_ocr_when_no_cache_dir_given(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0005", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0004", "itemType": "attachment", "contentType": "application/pdf"}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["", ""],
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.load_cached_ocr",
+        ) as mock_load_cache:
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+            ))
+        mock_load_cache.assert_not_called()
+        self.assertFalse(result["attachments"][0]["has_text_layer"])
+        self.assertTrue(result["attachments"][0]["needs_ocr"])
+
 
 if __name__ == "__main__":
     unittest.main()

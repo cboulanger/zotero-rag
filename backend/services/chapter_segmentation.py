@@ -9,10 +9,12 @@ that actually appears on a page (TOC entries, header/footer numerals) —
 never assumed from position.
 """
 
+import hashlib
 import io
 import logging
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Optional
 
 import spacy
@@ -20,6 +22,7 @@ from pypdf import PdfReader
 from rapidfuzz import fuzz
 
 from backend.services.chapter_link_store import parse_links
+from backend.services.chapter_ocr import load_cached_ocr
 from backend.services.llm import LLMService
 from backend.utils.llm_json import parse_json_array, parse_json_object
 
@@ -739,11 +742,18 @@ async def run(
     relink: bool,
     progress_callback: Callable[[float, str], None],
     llm_service: Optional[LLMService] = None,
+    ocr_cache_dir: Optional[Path] = None,
 ) -> dict:
     """Core logic for script 1 (analyze_book_chapters). Scans `book`-type
     items in the library (or the explicit `item_keys` list), skips already-
     linked ones unless `relink`, downloads each PDF attachment, and runs
     analyze_attachment on its page text. See design spec §5.
+
+    If a PDF has no extractable text layer and `ocr_cache_dir` is given,
+    checks script 2's (chapter_ocr.py) on-disk cache -- keyed by the same
+    content hash -- for already-OCR'd page text before falling back to
+    reporting `needs_ocr: True`. This is what lets a re-run of this script
+    pick up chapters from a book that was OCR'd since the previous run.
     """
     items = await zotero_client.get_library_items_since(library_id, library_type=library_type)
     books = [i for i in items if i["data"].get("itemType") == "book"]
@@ -773,6 +783,13 @@ async def run(
 
         pages = extract_page_texts_from_pdf_bytes(file_bytes)
         has_text_layer = sum(len(p.strip()) for p in pages) > 100
+
+        if not has_text_layer and ocr_cache_dir is not None:
+            content_hash = hashlib.sha256(file_bytes).hexdigest()
+            cached = load_cached_ocr(ocr_cache_dir, content_hash)
+            if cached is not None:
+                pages = cached["pages"]
+                has_text_layer = sum(len(p.strip()) for p in pages) > 100
 
         if not has_text_layer:
             attachments_out.append({

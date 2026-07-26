@@ -78,6 +78,7 @@ Key flags:
 | `--item-keys <a,b,c>` | Restrict to specific book item keys instead of scanning the whole library |
 | `--llm-fallback` | Enable the LLM-based fallback for chapters the text heuristics find nothing or are ambiguous about (slower, calls a configured LLM API — see [Presets](presets.md)) |
 | `--auto-select-model` | With `--llm-fallback`: retry across the active preset's currently-available models instead of a single fixed one, useful if the preset's default model is temporarily overloaded or unreachable |
+| `--cache-dir` | Directory to check for already-OCR'd page text (default `data/ocr_cache`, same as Script 2's `--cache-dir`) — lets a re-run after OCR-ing a scanned book pick up its text automatically instead of reporting `needs_ocr` again |
 | `--max-items <N>` | Cap how many books are processed |
 
 The output JSON (written to `--output`, or printed to stdout) has one
@@ -108,13 +109,11 @@ uv run python scripts/ocr_attachments.py \
 
 `--input` is Script 1's output — only its `needs_ocr: true` entries are
 processed. `--cache-dir` (default `data/ocr_cache`) is where the OCR'd
-per-page text is cached, keyed by the PDF's content hash.
-
-**Current limitation:** this script prepares OCR'd text for future use —
-re-running Script 1 on the same book does **not** yet automatically read
-this cache back in for chapter detection. For now, treat a scanned book
-still reported as `needs_ocr: true` after this step as a known gap in the
-automated pipeline, not a failure of this script.
+per-page text is cached, keyed by the PDF's content hash. Re-running
+**Script 1** afterward (with the same `--cache-dir`, the default) reads
+this cache back in automatically for any book still lacking a text layer,
+so chapters detectable from the OCR'd text now show up without any extra
+flag — see "Typical workflow" below.
 
 ### 3. Retrofit-link (`retrofit_chapter_links.py`)
 
@@ -123,19 +122,30 @@ For libraries that already have separately-catalogued `book` and
 existed) — matches each unlinked chapter to its book by title/year
 similarity and writes the `X-Contains`/`X-Contained-By` link. Deliberately
 biased toward precision: an ambiguous or low-confidence match is reported
-for manual review rather than linked.
+for manual review rather than linked. **Defaults to a dry run** — pass
+`--commit` to actually write to Zotero.
 
 ```bash
+# Preview first (no changes made)
 uv run python scripts/retrofit_chapter_links.py \
   --library-slug groups/6297749 \
   --api-key <write-scoped-zotero-key> \
   --output .local/retrofit.json
+
+# Then actually write the links
+uv run python scripts/retrofit_chapter_links.py \
+  --library-slug groups/6297749 \
+  --api-key <write-scoped-zotero-key> \
+  --output .local/retrofit.json \
+  --commit
 ```
 
-The output reports three buckets: `linked` (auto-linked, with a match
-score), `ambiguous` (multiple similarly-plausible book candidates — needs
-a human to pick), and `no_match` (no book found at all). Only `linked`
-pairs are written to Zotero; nothing else is touched.
+The output reports four buckets: `linked` (written this run, with a match
+score — empty unless `--commit` was passed), `would_link` (what `--commit`
+would write, populated only in dry-run mode), `ambiguous` (multiple
+similarly-plausible book candidates — needs a human to pick), and
+`no_match` (no book found at all). Only confident matches are ever
+written; ambiguous and unmatched chapters are always left untouched.
 
 ### 4. Segment & upload (`upload_chapters.py`)
 
@@ -175,15 +185,16 @@ For a library with mostly born-digital (not scanned) books:
 1. Run **Script 1** and inspect the output — check `needs_ocr` counts and
    the chapter confidence scores.
 2. If some books need OCR, run **Script 2**, then re-run **Script 1**
-   against just those items (`--item-keys`) — see Script 2's current
-   limitation note above; this step may not yet pick up the OCR'd text.
+   against just those items (`--item-keys`) — it picks up the OCR'd text
+   from Script 2's cache automatically (same default `--cache-dir`).
 3. Run **Script 4 without `--commit`** first and review the dry-run
    summary (how many chapters would be created, how many skipped as
    low-confidence).
 4. Run **Script 4 with `--commit`** once satisfied.
 5. Separately, if the library already had some hand-catalogued chapters
-   before this feature existed, run **Script 3** once to link those up
-   too (independent of the analyze/upload flow above).
+   before this feature existed, run **Script 3** (dry-run first, then
+   `--commit`) once to link those up too (independent of the
+   analyze/upload flow above).
 
 ## Running via the API
 
@@ -194,6 +205,8 @@ a `job_id` immediately: `POST /api/chapter-linking/analyze`,
 `GET /api/chapter-linking/jobs/{job_id}` for progress and the final
 result. This is the same request/response shape as the CLI's flags
 (e.g. the analyze endpoint's JSON body takes `library_slug`, `api_key`,
-`item_keys`, `relink`, `max_items`, `enable_llm_fallback`, and
-`auto_select_model`) — useful for driving this from an external scheduler
-or admin tool instead of a shell.
+`item_keys`, `relink`, `max_items`, `enable_llm_fallback`,
+`auto_select_model`, and `ocr_cache_dir`; the retrofit-link endpoint's body
+takes a `committed` flag, mirroring the CLI's `--commit` and defaulting to
+the same dry-run behavior) — useful for driving this from an external
+scheduler or admin tool instead of a shell.

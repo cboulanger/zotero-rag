@@ -76,6 +76,7 @@ class TestRetrofitRun(unittest.TestCase):
             slug="groups/1",
             item_keys=None,
             max_items=None,
+            commit=True,
         )
         self.assertEqual(len(result["linked"]), 1)
         self.assertEqual(result["linked"][0]["chapter_key"], "CHAP1")
@@ -99,6 +100,7 @@ class TestRetrofitRun(unittest.TestCase):
             slug="groups/1",
             item_keys=None,
             max_items=None,
+            commit=True,
         )
 
         self.assertEqual(result["linked"], [])
@@ -112,6 +114,28 @@ class TestRetrofitRun(unittest.TestCase):
         first_call_arg = zot.update_item.call_args_list[0].args[0]
         self.assertEqual(first_call_arg["data"]["key"], "BOOK1")
         self.assertEqual(zot.update_item.call_count, 2)
+
+    def test_defaults_to_dry_run_and_writes_nothing(self):
+        zot = MagicMock()
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        zot.everything.return_value = all_items
+        zot.item.side_effect = lambda key: next(i for i in all_items if i["key"] == key)
+
+        result = retrofit_run(
+            zotero_write_client=zot,
+            slug="groups/1",
+            item_keys=None,
+            max_items=None,
+        )
+
+        zot.update_item.assert_not_called()
+        self.assertEqual(result["linked"], [])
+        self.assertEqual(len(result["would_link"]), 1)
+        self.assertEqual(result["would_link"][0]["chapter_key"], "CHAP1")
+        self.assertEqual(result["would_link"][0]["book_key"], "BOOK1")
 
 
 if __name__ == "__main__":

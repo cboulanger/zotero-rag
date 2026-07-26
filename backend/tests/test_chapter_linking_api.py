@@ -98,6 +98,17 @@ class TestAnalyzeEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         mock_make_llm_service.assert_called_once_with(auto_select_model=False)
 
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_passes_ocr_cache_dir_through_with_default(self, mock_run, mock_web_api):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(str(mock_run.call_args.kwargs["ocr_cache_dir"]), "data/ocr_cache")
+
 
 class TestRetrofitEndpoint(unittest.TestCase):
     def setUp(self):
@@ -106,13 +117,35 @@ class TestRetrofitEndpoint(unittest.TestCase):
     @patch("backend.api.chapter_linking.zotero")
     @patch("backend.api.chapter_linking.retrofit_run")
     def test_returns_job_id_immediately(self, mock_run, mock_zotero_module):
-        mock_run.return_value = {"linked": [], "ambiguous": [], "no_match": []}
+        mock_run.return_value = {"linked": [], "would_link": [], "ambiguous": [], "no_match": []}
         response = self.client.post(
             "/api/chapter-linking/retrofit-link",
             json={"library_slug": "groups/1", "api_key": "fake-write-key"},
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("job_id", response.json())
+
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.retrofit_run")
+    def test_defaults_to_dry_run(self, mock_run, mock_zotero_module):
+        mock_run.return_value = {"linked": [], "would_link": [], "ambiguous": [], "no_match": []}
+        response = self.client.post(
+            "/api/chapter-linking/retrofit-link",
+            json={"library_slug": "groups/1", "api_key": "fake-write-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(mock_run.call_args.kwargs["commit"])
+
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.retrofit_run")
+    def test_passes_committed_flag_through(self, mock_run, mock_zotero_module):
+        mock_run.return_value = {"linked": [], "would_link": [], "ambiguous": [], "no_match": []}
+        response = self.client.post(
+            "/api/chapter-linking/retrofit-link",
+            json={"library_slug": "groups/1", "api_key": "fake-write-key", "committed": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(mock_run.call_args.kwargs["commit"])
 
 
 class TestOcrEndpoint(unittest.TestCase):

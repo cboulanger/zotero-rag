@@ -49,6 +49,7 @@ async def _main(args: argparse.Namespace) -> int:
         relink=args.relink,
         progress_callback=on_progress,
         llm_service=llm_service,
+        ocr_cache_dir=Path(args.cache_dir),
     )
     bar.close()
 
@@ -82,6 +83,14 @@ def main() -> int:
              "live from the preset/provider at run time.",
     )
     parser.add_argument("--max-items", type=int, default=None, help="Cap the number of book items processed (testing/debugging)")
+    parser.add_argument(
+        "--cache-dir",
+        default="data/ocr_cache",
+        help="Directory to check for already-OCR'd page text (script 2's cache) for "
+             "scanned PDFs with no text layer -- same default as ocr_attachments.py's "
+             "--cache-dir, so re-running this script after OCR-ing a book picks it up "
+             "automatically",
+    )
     parser.add_argument("--output", default=None, help="Write JSON output to this path instead of stdout")
     args = parser.parse_args()
     if args.auto_select_model and not args.llm_fallback:

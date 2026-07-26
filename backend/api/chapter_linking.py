@@ -80,6 +80,9 @@ class AnalyzeRequest(BaseModel):
     # instead of a single fixed model. Never a hardcoded model name --
     # resolved live from the preset/provider (see make_llm_service).
     auto_select_model: bool = False
+    # Same default as OcrRequest.cache_dir -- lets a re-run after the /ocr
+    # endpoint pick up already-OCR'd page text automatically.
+    ocr_cache_dir: str = "data/ocr_cache"
 
 
 class JobIdResponse(BaseModel):
@@ -116,6 +119,7 @@ async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
                 relink=request.relink,
                 progress_callback=lambda p, m: tracker.update(job_id, progress=p, message=m),
                 llm_service=llm_service,
+                ocr_cache_dir=_Path(request.ocr_cache_dir),
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised
@@ -176,12 +180,13 @@ class RetrofitLinkRequest(BaseModel):
     api_key: str
     item_keys: list[str] | None = None
     max_items: int | None = None
+    committed: bool = False
 
 
 @router.post(
     "/chapter-linking/retrofit-link",
     response_model=JobIdResponse,
-    summary="Retrofit-link existing book/bookSection item pairs",
+    summary="Retrofit-link existing book/bookSection item pairs (dry-run by default)",
 )
 async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
     library_type, numeric_id, _library_id = parse_library_slug(request.library_slug)
@@ -196,6 +201,7 @@ async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
                 slug=request.library_slug,
                 item_keys=request.item_keys,
                 max_items=request.max_items,
+                commit=request.committed,
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001
