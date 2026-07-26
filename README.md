@@ -30,6 +30,7 @@ Most document-chat tools require you to manually upload PDFs to a cloud service.
 - **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete. See [Fix Unavailable Attachments](docs/fix-unavailable-attachments.md).
 - **Automatic (scheduled) indexing, administered from the plugin** — enable a single toggle in Preferences to have the server keep your libraries indexed on a recurring schedule, with no need to keep Zotero open or index manually. Group admins can additionally pause, resume, trigger, or monitor indexing runs for the whole server entirely from the plugin UI — no shell or server access required. Server operators can alternatively drive the same indexer headlessly via script or cron. See [Automatic Indexing Setup](docs/auto-indexing-setup.md) (or [Cron / Headless Indexing](docs/cron-indexing.md) for the server-side script).
 - **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code. See [Presets](docs/presets.md).
+- **Book/chapter linking** — for edited-volume libraries, an admin-run maintenance pipeline detects chapter boundaries inside a book's PDF and links book and chapter items so retrieval and citations prefer the specific chapter over the whole book, instead of both competing as duplicate results. See [Chapter Segmentation & Book/Chapter Linking](docs/chapter-segmentation.md).
 
 ## Why THIS Zotero RAG?
 
@@ -183,6 +184,7 @@ Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be th
 - **[Automatic (scheduled) indexing setup](docs/auto-indexing-setup.md)**
 - **[Public web interface](docs/public-web-interface.md)**
 - **[Fix unavailable attachments](docs/fix-unavailable-attachments.md)**
+- **[Chapter segmentation & book/chapter linking](docs/chapter-segmentation.md)**
 
 ## Developer Documentation
 
