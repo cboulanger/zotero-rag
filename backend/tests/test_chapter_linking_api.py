@@ -71,6 +71,33 @@ class TestAnalyzeEndpoint(unittest.TestCase):
         mock_make_llm_service.assert_not_called()
         self.assertIsNone(mock_run.call_args.kwargs["llm_service"])
 
+    @patch("backend.api.chapter_linking.make_llm_service")
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_passes_auto_select_model_flag_through(self, mock_run, mock_web_api, mock_make_llm_service):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={
+                "library_slug": "groups/1", "api_key": "fake-key",
+                "enable_llm_fallback": True, "auto_select_model": True,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_make_llm_service.assert_called_once_with(auto_select_model=True)
+
+    @patch("backend.api.chapter_linking.make_llm_service")
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_auto_select_model_defaults_to_false(self, mock_run, mock_web_api, mock_make_llm_service):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key", "enable_llm_fallback": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_make_llm_service.assert_called_once_with(auto_select_model=False)
+
 
 class TestRetrofitEndpoint(unittest.TestCase):
     def setUp(self):

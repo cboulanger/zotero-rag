@@ -75,6 +75,11 @@ class AnalyzeRequest(BaseModel):
     relink: bool = False
     max_items: int | None = None
     enable_llm_fallback: bool = False
+    # With enable_llm_fallback: retry across the active preset's available
+    # models (most-available first) on error or an unusable response,
+    # instead of a single fixed model. Never a hardcoded model name --
+    # resolved live from the preset/provider (see make_llm_service).
+    auto_select_model: bool = False
 
 
 class JobIdResponse(BaseModel):
@@ -87,11 +92,20 @@ class JobIdResponse(BaseModel):
 async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
     library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
     client = ZoteroWebAPI(api_key=request.api_key)
-    llm_service = make_llm_service() if request.enable_llm_fallback else None
     job_id = tracker.create()
 
     async def _task() -> None:
         try:
+            # make_llm_service(auto_select_model=True) can synchronously call
+            # a live models-status endpoint (e.g. KISSKI, via httpx.post) --
+            # run it in a thread so it never blocks the event loop (this task
+            # already runs off the request/response path via
+            # asyncio.create_task below, but it still executes on the same
+            # event loop once scheduled).
+            llm_service = (
+                await asyncio.to_thread(make_llm_service, auto_select_model=request.auto_select_model)
+                if request.enable_llm_fallback else None
+            )
             result = await analyze_run(
                 zotero_client=client,
                 library_id=library_id,
