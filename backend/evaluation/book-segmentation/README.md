@@ -105,41 +105,65 @@ real evaluation set.
 
 ## Current results
 
-**First real run of `scripts/evaluate_chapter_segmentation_llm_fallback.py`**
-(against the KISSKI-backed `apple-silicon-kisski` preset): precision/recall
-came back **identical to the pure-heuristic baseline** below for all 7 books
-— the LLM fallback did not change a single result on this run, for two
-distinct reasons observed directly in the logs:
+**LLM-fallback evaluation, first meaningful run** (KISSKI-backed
+`apple-silicon-kisski` preset). Two attempts were needed to get a usable
+signal:
 
-- **The configured default preset model returned repeated `500`
-  (`InternalServerError`) responses** from the KISSKI Chat-AI endpoint for
-  every LLM call attempted — a remote-service issue, not a bug in this
-  project's code (the fallback still degraded gracefully every time, per
-  its design). Re-running against a smaller, working model
-  (`meta-llama-3.1-8b-instruct`, confirmed reachable via
-  `scripts/test_kisski_api.py`) eliminated the `500`s.
-- With that smaller model actually responding, **`llm_disambiguate_chapter_start`
-  fired 11 times across the set but every single response failed to parse**
-  — instead of the requested `{"chosen_candidate": ...}` JSON, the model
-  repeatedly hallucinated a fictitious tool call (e.g. `"I'll use the
-  book_chapter_finder tool to find the correct page... tool call:
-  book_chapter_finder(CANDIDATE 1, CANDIDATE 2, ...)"`). Each failure was
-  caught and logged exactly as designed, falling back to the heuristic
-  result rather than crashing or corrupting output — but the fallback also
-  provided zero net benefit in this run.
-- `llm_extract_toc_entries` fired once (for `9782375460122.pdf`, the book
-  already at 0% heuristic recall below) and also failed to parse for the
-  same reason, so it likewise contributed nothing this run.
+1. **Naive first attempt** — just calling `make_llm_service()` with the
+   preset's configured default model failed on every single LLM call with a
+   `500 InternalServerError`. Cross-checking against KISSKI's live
+   `/v1/models` endpoint (via this project's own
+   `backend.utils.kisski.fetch_kisski_rag_models()`) showed the configured
+   default, `mistral-large-3-675b-instruct-2512`, **is not currently in
+   KISSKI's live model list at all** — it's likely been renamed or retired
+   upstream. This is a preset-configuration staleness issue, not a bug in
+   the fallback code itself (worth updating `apple-silicon-kisski`'s
+   `KISSKI_RAG_MODELS` default separately from this feature). The fallback's
+   own error handling degraded gracefully every time, as designed.
+2. **Systematic retry across live, available models** — using
+   `fetch_kisski_rag_models()` to get every text-generation-suitable model
+   or the endpoint currently reports (already filters out code-only models),
+   excluding any at `"very busy"`, ordered most-available-first, and retrying
+   each LLM call against the next candidate model whenever a call raised an
+   error *or* returned a response that failed to parse as the expected JSON
+   shape (this happened once, for one book, purely due to one model's
+   context-window limit — the retry moved on to the next model and
+   succeeded). This is real signal, not a fluke of one lucky model choice.
 
-**Takeaway:** the orchestration/error-handling contract (spec §11 — never
-worse than the heuristic baseline) held up empirically, but disambiguation
-prompt-following was unreliable on the smaller model tried here. Before
-relying on this fallback for real gains, try a model from `KISSKI_RAG_MODELS`
-better known for instruction-following on structured-output tasks (e.g.
-`llama-3.3-70b-instruct` per `scripts/test_kisski_api.py`), or once the
-default `mistral-large-3-675b-instruct-2512` model is confirmed reachable
-again. Re-run this script any time the prompt, model choice, or heuristic
-changes to check whether the fallback has become net-helpful.
+Aggregate result across the 7-book set, LLM fallback vs. the pure-heuristic
+baseline below: **precision essentially unchanged (71.8% → 71.7%), recall up
+~9.5 points (57.5% → 67.0%)** — the fallback found real chapters the
+heuristic missed without meaningfully increasing false positives. Per book:
+
+| Book (filename) | Heuristic P/R | LLM-fallback P/R | Fallback paths fired |
+| --- | --- | --- | --- |
+| `9783031466373.pdf` | 0.78 / 0.64 | 0.67 / 0.73 | disambiguation ×3 |
+| `9781771993661.pdf` | 0.90 / 0.90 | 0.90 / 0.90 | none (heuristic already unambiguous) |
+| `9783907297339.pdf` | 0.71 / 0.45 | 0.88 / 0.64 | disambiguation ×1 |
+| `9782375460122.pdf` | 0.00 / 0.00 | 0.25 / 0.06 | TOC extraction |
+| `9783907297285.pdf` | 0.50 / 0.54 | 0.47 / 0.54 | disambiguation ×1 |
+| `9783847432364.pdf` | 0.89 / 0.76 | 0.85 / 0.81 | disambiguation ×3 |
+| `9783322969828.pdf` | 0.63 / 0.71 | 0.73 / 0.92 | disambiguation ×3 |
+
+`9782375460122.pdf` (the persistent 0%-recall book, see below) improved from
+0/16 to a still-poor 1/16 via TOC extraction — a marginal gain, not a fix;
+this book's underlying difficulty remains open. `9783031466373.pdf` and
+`9783907297285.pdf` show the fallback isn't free of trade-offs either: the
+former traded some precision for a real recall gain, and the latter's
+disambiguation pick didn't change the outcome (a resolved "ambiguous" match
+that scored the same as what the heuristic guard had already rejected).
+
+**Takeaway:** with a model that's actually live and responds in the expected
+JSON shape, the fallback is net-positive on this evaluation set — mainly by
+resolving genuine start-page ambiguities the heuristic correctly refused to
+guess at. The retry-across-models approach used here (fetch live models,
+filter by availability, retry on failure or unparseable response) was ad hoc
+for this evaluation run, not added to the committed
+`scripts/evaluate_chapter_segmentation_llm_fallback.py` (which still uses
+the single configured preset model, per the design spec) — consider
+promoting it into that script, or fixing the preset's default model list,
+as a follow-up. Re-run whenever the prompt, model choice, or heuristic
+changes to check whether the fallback is still net-helpful.
 
 Snapshot from running the harness above, one row per evaluation book
 (regenerate anytime — these numbers shift as the heuristics evolve, so treat
