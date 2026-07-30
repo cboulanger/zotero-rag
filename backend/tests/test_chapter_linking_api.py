@@ -170,6 +170,28 @@ class TestRetrofitEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(mock_run.call_args.kwargs["would_link"])
 
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.retrofit_run")
+    def test_passes_target_collection_through(self, mock_run, mock_zotero_module):
+        mock_run.return_value = {"linked": [], "would_link": [], "ambiguous": [], "no_match": [], "failed": []}
+        response = self.client.post(
+            "/api/chapter-linking/retrofit-link",
+            json={"library_slug": "groups/1", "api_key": "fake-write-key", "target_collection": "Book Chapters"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_run.call_args.kwargs["target_collection"], "Book Chapters")
+
+    @patch("backend.api.chapter_linking.zotero")
+    @patch("backend.api.chapter_linking.retrofit_run")
+    def test_target_collection_defaults_to_none(self, mock_run, mock_zotero_module):
+        mock_run.return_value = {"linked": [], "would_link": [], "ambiguous": [], "no_match": [], "failed": []}
+        response = self.client.post(
+            "/api/chapter-linking/retrofit-link",
+            json={"library_slug": "groups/1", "api_key": "fake-write-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(mock_run.call_args.kwargs["target_collection"])
+
 
 class TestOcrEndpoint(unittest.TestCase):
     def setUp(self):

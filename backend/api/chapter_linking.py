@@ -187,6 +187,10 @@ class RetrofitLinkRequest(BaseModel):
     # re-fetching and re-matching the whole library -- see run()'s
     # docstring in backend/services/chapter_retrofit.py.
     would_link: list[dict] | None = None
+    # File each linked chapter into a '<name>/<Author (Year)>' subcollection
+    # (created if absent). Off by default -- see chapter_retrofit.commit_links()'s
+    # docstring for why this is opt-in rather than always-on.
+    target_collection: str | None = None
 
 
 @router.post(
@@ -209,6 +213,7 @@ async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
                 max_items=request.max_items,
                 commit=request.committed,
                 would_link=request.would_link,
+                target_collection=request.target_collection,
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001
