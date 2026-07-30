@@ -68,3 +68,5 @@ node_modules
 
 # Claude Code local (per-developer) settings — not shared project config
 .claude/settings.local.json
+# Superpowers brainstorming scratch
+.superpowers/
