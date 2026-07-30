@@ -196,6 +196,44 @@ class TestUploadRun(unittest.TestCase):
         self.assertEqual(len(result["created"]), 2)
         read_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
 
+    def test_commit_sets_native_relations_on_chapter_and_book(self):
+        book_item, analysis = self._book_and_analysis()
+        zot = MagicMock()
+        zot.item.return_value = book_item
+
+        def item_template_side_effect(item_type, **kwargs):
+            if item_type == "attachment":
+                return {"itemType": "attachment", "linkMode": kwargs.get("linkmode", ""), "title": "",
+                        "filename": "", "contentType": "", "parentItem": ""}
+            return {"itemType": "bookSection", "title": "", "bookTitle": "",
+                    "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
+                    "pages": "", "creators": []}
+
+        zot.item_template.side_effect = item_template_side_effect
+        zot.create_items.side_effect = [
+            {"successful": {"0": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}}},
+            {"successful": {"0": {"key": "ATT1", "data": {"key": "ATT1"}}}},
+        ]
+        zot.upload_attachments.return_value = {"success": [{"key": "ATT1"}], "failure": [], "unchanged": []}
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+        read_client = MagicMock()
+        read_client.get_attachment_file = unittest.mock.AsyncMock(return_value=b"%PDF-1.4 fake")
+
+        with patch("backend.services.chapter_upload.slice_pdf_range", return_value=b"sliced bytes"):
+            result = asyncio.run(upload_run(
+                zotero_write_client=zot, zotero_read_client=read_client,
+                slug="groups/1", analyses=[analysis], commit=True, confidence_threshold=0.8,
+                target_collection="Book Chapters", max_items=None,
+            ))
+
+        chapter_key = result["created"][0]["chapter_key"]
+        chapter_update_relations = zot.update_item.call_args_list[0][0][0]["data"]["relations"]
+        book_update_relations = zot.update_item.call_args_list[1][0][0]["data"]["relations"]
+        self.assertIn("http://zotero.org/groups/1/items/BOOK1", chapter_update_relations["dc:relation"])
+        self.assertIn(f"http://zotero.org/groups/1/items/{chapter_key}", book_update_relations["dc:relation"])
+
     def test_below_threshold_is_skipped(self):
         book_item, analysis = self._book_and_analysis()
         analysis["chapters"][0]["confidence"] = 0.5

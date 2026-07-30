@@ -9,12 +9,14 @@ from pathlib import Path
 from pypdf import PdfReader, PdfWriter
 
 from backend.services.chapter_link_store import (
+    add_related_item,
     author_year_label,
     ensure_target_collection,
     format_chapter_id,
     parse_library_slug,
     parse_links,
     write_links,
+    zotero_item_uri,
 )
 
 
@@ -123,6 +125,7 @@ async def run(
             continue
 
         new_chapter_ids: list[str] = []
+        new_chapter_keys: list[str] = []
         pdf_ranges: dict[str, tuple[int, int]] = {}
 
         # Download the book's PDF attachment ONCE per book, not once per
@@ -189,6 +192,13 @@ async def run(
                 book_id = format_chapter_id(slug, book_key)
                 chapter_extra = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
                 chapter_item["data"]["extra"] = chapter_extra
+                # Also set a native Zotero "relations" (dc:relation) connection
+                # -- the "Related" tab in the Zotero client -- independent of
+                # the Extra-field convention above and never read back by this
+                # pipeline's own logic (see chapter_link_store.add_related_item).
+                chapter_item["data"]["relations"] = add_related_item(
+                    chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
+                )
 
                 # Resolve the per-book target subcollection and fold membership
                 # into the SAME update_item PATCH as the extra-field write.
@@ -212,6 +222,7 @@ async def run(
                 zotero_write_client.update_item(chapter_item)
 
                 new_chapter_ids.append(chapter_id)
+                new_chapter_keys.append(chapter_key)
                 pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
 
                 created.append({"book_key": book_key, "chapter_key": chapter_key})
@@ -226,6 +237,10 @@ async def run(
             book_item["data"]["extra"] = write_links(
                 book_item["data"].get("extra", ""), contains=merged_contains, pdf_ranges=merged_ranges
             )
+            book_relations = book_item["data"].get("relations", {})
+            for new_chapter_key in new_chapter_keys:
+                book_relations = add_related_item(book_relations, zotero_item_uri(slug, new_chapter_key))
+            book_item["data"]["relations"] = book_relations
             zotero_write_client.update_item(book_item)
 
     return {
