@@ -180,6 +180,61 @@ class TestCommitLinks(unittest.TestCase):
         self.assertIn("http://zotero.org/groups/1/items/CHAP1", book_update["data"]["relations"]["dc:relation"])
         self.assertIn("http://zotero.org/groups/1/items/BOOK1", chapter_update["data"]["relations"]["dc:relation"])
 
+    def test_target_collection_none_by_default_no_collection_calls(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+
+        commit_links(zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+
+        zot.collections.assert_not_called()
+        zot.create_collection.assert_not_called()
+        self.assertNotIn("collections", chapter_item["data"])
+
+    def test_target_collection_given_files_chapter_into_subcollection(self):
+        zot = MagicMock()
+        book_item = {
+            "key": "BOOK1",
+            "data": {"key": "BOOK1", "extra": "", "creators": [{"lastName": "Miller"}], "date": "2020"},
+        }
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+
+        commit_links(
+            zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}],
+            target_collection="My Collection",
+        )
+
+        # ensure_target_collection calls create_collection twice: once for
+        # the top-level "My Collection", once for the "Miller (2020)" sub.
+        self.assertEqual(zot.create_collection.call_count, 2)
+        self.assertIn("collections", chapter_item["data"])
+        self.assertNotIn("collections", book_item["data"])
+        # Extra + relations + collections all folded into the SAME single
+        # update_item(chapter_item) call -- confirmed by the call count
+        # staying at 2 total (one for the book, one for the chapter).
+        self.assertEqual(zot.update_item.call_count, 2)
+
+    def test_collection_resolution_failure_isolated_as_per_entry_failure(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": "", "creators": [], "date": "2020"}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+        zot.collections.side_effect = Exception("network error")
+
+        result = commit_links(
+            zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}],
+            target_collection="My Collection",
+        )
+
+        self.assertEqual(result["linked"], [])
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertIn("network error", result["failed"][0]["error"])
+
 
 class TestRetrofitRun(unittest.TestCase):
     def test_links_confident_match_and_skips_ambiguous(self):
@@ -325,6 +380,23 @@ class TestRetrofitRun(unittest.TestCase):
         zot.everything.assert_not_called()
         zot.item.assert_not_called()
         self.assertEqual(result, {"linked": [], "failed": [], "would_link": [], "ambiguous": [], "no_match": []})
+
+    def test_target_collection_threaded_through_to_commit_links(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+
+        retrofit_run(
+            zotero_write_client=zot, slug="groups/1", item_keys=None, max_items=None,
+            commit=True, would_link=[{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}],
+            target_collection="My Collection",
+        )
+
+        self.assertIn("collections", chapter_item["data"])
 
 
 if __name__ == "__main__":

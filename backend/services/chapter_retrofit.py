@@ -9,7 +9,15 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz
 
-from backend.services.chapter_link_store import add_related_item, format_chapter_id, parse_links, write_links, zotero_item_uri
+from backend.services.chapter_link_store import (
+    add_related_item,
+    author_year_label,
+    ensure_target_collection,
+    format_chapter_id,
+    parse_links,
+    write_links,
+    zotero_item_uri,
+)
 
 _SCORE_THRESHOLD = 90.0  # rapidfuzz token_sort_ratio, 0-100
 # NOTE: _MARGIN_REQUIRED increased from 5.0 to 11.0 to catch ambiguous cases
@@ -154,7 +162,9 @@ def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: 
     return {"would_link": would_link, "ambiguous": ambiguous, "no_match": no_match}
 
 
-def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict:
+def commit_links(
+    zotero_write_client, slug: str, would_link: list[dict], target_collection: str | None = None,
+) -> dict:
     """Writes X-Contains/X-Contained-By links for an already-computed
     would_link list (find_matches()'s output, or a prior dry run's saved
     JSON replayed via the CLI's --input / the API's would_link field).
@@ -163,6 +173,14 @@ def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict
     matches fast (design spec §7's write ordering/self-healing behavior is
     unchanged: book side written first, so a chapter-write failure after a
     successful book write just re-writes a no-op X-Contains on retry).
+
+    If `target_collection` is given, the CHAPTER side of each written link
+    is additionally filed into a `<target_collection>/<Author (Year)>`
+    subcollection (created if absent, reused otherwise), mirroring
+    chapter_upload.py's own collection-filing scheme -- the book's own
+    collection membership is left untouched. Off by default: a retrofit
+    run links items the caller has already organized themselves, so
+    moving them into a new collection structure is opt-in only.
     """
     linked: list[dict] = []
     failed: list[dict] = []
@@ -190,6 +208,15 @@ def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict
             chapter_item["data"]["relations"] = add_related_item(
                 chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
             )
+            if target_collection is not None:
+                label = author_year_label(
+                    [c.get("lastName", "") for c in book_item["data"].get("creators", [])],
+                    book_item["data"].get("date", ""),
+                )
+                _, sub_key = ensure_target_collection(zotero_write_client, target_collection, label)
+                existing_collections = chapter_item["data"].get("collections", [])
+                if sub_key not in existing_collections:
+                    chapter_item["data"]["collections"] = [*existing_collections, sub_key]
             zotero_write_client.update_item(chapter_item)
         except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
             failed.append({
@@ -212,6 +239,7 @@ def run(
     max_items: int | None,
     commit: bool = False,
     would_link: list[dict] | None = None,
+    target_collection: str | None = None,
 ) -> dict:
     """Core logic for script 3 (retrofit_chapter_links). Synchronous --
     pyzotero's client is itself synchronous. Defaults to dry-run -- `commit`
@@ -236,9 +264,14 @@ def run(
     would_link legitimately means "a prior dry run already determined
     there's nothing to link" and replaying that is correct. Only
     would_link=None triggers a fresh match.
+
+    `target_collection`, when given, is passed straight through to
+    commit_links() -- see its docstring for the opt-in collection-filing
+    behavior. Has no effect when commit=False (a dry run never writes
+    anything, including collection membership).
     """
     if commit and would_link is not None:
-        result = commit_links(zotero_write_client, slug, would_link)
+        result = commit_links(zotero_write_client, slug, would_link, target_collection)
         return {**result, "would_link": [], "ambiguous": [], "no_match": []}
 
     all_items = zotero_write_client.everything(zotero_write_client.items())
@@ -250,5 +283,5 @@ def run(
             "ambiguous": matches["ambiguous"], "no_match": matches["no_match"], "failed": [],
         }
 
-    result = commit_links(zotero_write_client, slug, matches["would_link"])
+    result = commit_links(zotero_write_client, slug, matches["would_link"], target_collection)
     return {**result, "would_link": [], "ambiguous": matches["ambiguous"], "no_match": matches["no_match"]}
