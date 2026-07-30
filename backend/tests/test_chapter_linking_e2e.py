@@ -395,3 +395,53 @@ def test_retrofit_link_dummy_entries(zot, cleanup, tmp_path):
 
     unmatched_item = zot.item(unmatched_key)
     assert "X-Contained-By" not in unmatched_item["data"].get("extra", "")
+
+
+@pytest.mark.timeout(90)  # overrides pyproject.toml's global 30s -- real network + subprocess calls
+def test_retrofit_link_replays_dry_run_via_input(zot, cleanup, tmp_path):
+    """--input replays a prior dry run's would_link matches into --commit,
+    without this script re-deriving them itself -- Task 6/7's optimization,
+    exercised through the real CLI + a real Zotero library."""
+    item_keys, _collection_keys = cleanup
+
+    book_title = _unique("Dummy Replay Book")
+    book_template = zot.item_template("book")
+    book_template["title"] = book_title
+    book_template["date"] = "2022"
+    book_template["tags"] = [{"tag": _TEST_TAG}]
+    book_resp = zot.create_items([book_template])
+    book_key = list(book_resp["successful"].values())[0]["key"]
+    item_keys.append(book_key)
+
+    chapter_title = _unique("Dummy Replay Chapter")
+    chapter_template = zot.item_template("bookSection")
+    chapter_template["title"] = chapter_title
+    chapter_template["bookTitle"] = book_title
+    chapter_template["date"] = "2022"
+    chapter_template["tags"] = [{"tag": _TEST_TAG}]
+    chapter_resp = zot.create_items([chapter_template])
+    chapter_key = list(chapter_resp["successful"].values())[0]["key"]
+    item_keys.append(chapter_key)
+
+    dryrun_output = tmp_path / "retrofit_replay_dry.json"
+    _run_script(
+        "retrofit_chapter_links.py",
+        ["--item-keys", chapter_key, "--output", str(dryrun_output)],
+    )
+    dry_result = json.loads(dryrun_output.read_text())
+    assert chapter_key in {e["chapter_key"] for e in dry_result["would_link"]}
+
+    commit_output = tmp_path / "retrofit_replay_commit.json"
+    _run_script(
+        "retrofit_chapter_links.py",
+        ["--input", str(dryrun_output), "--commit", "--output", str(commit_output)],
+    )
+    commit_result = json.loads(commit_output.read_text())
+    assert not commit_result["failed"], commit_result["failed"]
+    assert chapter_key in {e["chapter_key"] for e in commit_result["linked"]}
+
+    chapter_item = zot.item(chapter_key)
+    assert f"{LIBRARY_SLUG}:{book_key}" in chapter_item["data"]["extra"]
+
+    book_item = zot.item(book_key)
+    assert f"{LIBRARY_SLUG}:{chapter_key}" in book_item["data"]["extra"]
