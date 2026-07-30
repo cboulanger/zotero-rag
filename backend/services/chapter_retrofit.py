@@ -154,6 +154,46 @@ def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: 
     return {"would_link": would_link, "ambiguous": ambiguous, "no_match": no_match}
 
 
+def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict:
+    """Writes X-Contains/X-Contained-By links for an already-computed
+    would_link list (find_matches()'s output, or a prior dry run's saved
+    JSON replayed via the CLI's --input / the API's would_link field).
+    Re-fetches only the two specific items involved in EACH link -- never
+    the whole library -- which is what makes replaying a prior dry run's
+    matches fast (design spec §7's write ordering/self-healing behavior is
+    unchanged: book side written first, so a chapter-write failure after a
+    successful book write just re-writes a no-op X-Contains on retry).
+    """
+    linked: list[dict] = []
+    failed: list[dict] = []
+
+    for entry in would_link:
+        chapter_key = entry["chapter_key"]
+        book_key = entry["book_key"]
+        score = entry["score"]
+
+        try:
+            book_item = zotero_write_client.item(book_key)
+            chapter_item = zotero_write_client.item(chapter_key)
+
+            existing_links = parse_links(book_item["data"].get("extra", ""))
+            chapter_id = format_chapter_id(slug, chapter_key)
+            book_id = format_chapter_id(slug, book_key)
+            new_contains = list(dict.fromkeys([*existing_links.contains, chapter_id]))
+            book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
+            zotero_write_client.update_item(book_item)
+
+            chapter_item["data"]["extra"] = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
+            zotero_write_client.update_item(chapter_item)
+        except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
+            failed.append({"chapter_key": chapter_key, "book_key": book_key, "error": str(exc)})
+            continue
+
+        linked.append({"chapter_key": chapter_key, "book_key": book_key, "score": score})
+
+    return {"linked": linked, "failed": failed}
+
+
 def run(
     *,
     zotero_write_client,

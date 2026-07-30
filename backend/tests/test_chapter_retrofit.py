@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from backend.services.chapter_retrofit import find_best_book_match, find_matches, locate_chapter_pdf_range
+from backend.services.chapter_retrofit import find_best_book_match, find_matches, commit_links, locate_chapter_pdf_range
 from backend.services.chapter_retrofit import run as retrofit_run
 
 
@@ -98,6 +98,54 @@ class TestFindMatches(unittest.TestCase):
         ]
         result = find_matches(all_items, item_keys=None, max_items=None)
         self.assertEqual(result["no_match"], ["CHAP1"])
+
+
+class TestCommitLinks(unittest.TestCase):
+    def test_writes_links_without_full_fetch(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+
+        result = commit_links(zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+
+        zot.everything.assert_not_called()
+        self.assertEqual(result["linked"], [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+        self.assertEqual(zot.update_item.call_count, 2)
+        first_call_arg = zot.update_item.call_args_list[0].args[0]
+        self.assertEqual(first_call_arg["data"]["key"], "BOOK1")
+
+    def test_write_failure_is_isolated_per_entry(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+        zot.update_item.side_effect = [None, Exception("boom")]
+
+        result = commit_links(zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+
+        self.assertEqual(result["linked"], [])
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["chapter_key"], "CHAP1")
+        self.assertIn("boom", result["failed"][0]["error"])
+
+    def test_multiple_entries_each_processed_independently(self):
+        zot = MagicMock()
+        items = {
+            "BOOK1": {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}},
+            "CHAP1": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}},
+            "BOOK2": {"key": "BOOK2", "data": {"key": "BOOK2", "extra": ""}},
+            "CHAP2": {"key": "CHAP2", "data": {"key": "CHAP2", "extra": ""}},
+        }
+        zot.item.side_effect = lambda key: items[key]
+
+        result = commit_links(zot, "groups/1", [
+            {"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0},
+            {"chapter_key": "CHAP2", "book_key": "BOOK2", "score": 0.95},
+        ])
+
+        self.assertEqual(len(result["linked"]), 2)
+        self.assertEqual({e["chapter_key"] for e in result["linked"]}, {"CHAP1", "CHAP2"})
 
 
 class TestRetrofitRun(unittest.TestCase):
