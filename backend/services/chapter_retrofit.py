@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz
 
-from backend.services.chapter_link_store import format_chapter_id, parse_links, write_links
+from backend.services.chapter_link_store import add_related_item, format_chapter_id, parse_links, write_links, zotero_item_uri
 
 _SCORE_THRESHOLD = 90.0  # rapidfuzz token_sort_ratio, 0-100
 # NOTE: _MARGIN_REQUIRED increased from 5.0 to 11.0 to catch ambiguous cases
@@ -181,9 +181,15 @@ def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict
             book_id = format_chapter_id(slug, book_key)
             new_contains = list(dict.fromkeys([*existing_links.contains, chapter_id]))
             book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
+            book_item["data"]["relations"] = add_related_item(
+                book_item["data"].get("relations", {}), zotero_item_uri(slug, chapter_key)
+            )
             zotero_write_client.update_item(book_item)
 
             chapter_item["data"]["extra"] = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
+            chapter_item["data"]["relations"] = add_related_item(
+                chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
+            )
             zotero_write_client.update_item(chapter_item)
         except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
             failed.append({

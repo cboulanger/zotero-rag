@@ -167,6 +167,19 @@ class TestCommitLinks(unittest.TestCase):
         self.assertEqual(result["failed"][0]["book_key"], "?")
         self.assertIn("book_key", result["failed"][0]["error"])
 
+    def test_sets_native_relations_on_both_items(self):
+        zot = MagicMock()
+        book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
+        chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
+        zot.item.side_effect = lambda key: {"BOOK1": book_item, "CHAP1": chapter_item}[key]
+
+        commit_links(zot, "groups/1", [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+
+        book_update = zot.update_item.call_args_list[0].args[0]
+        chapter_update = zot.update_item.call_args_list[1].args[0]
+        self.assertIn("http://zotero.org/groups/1/items/CHAP1", book_update["data"]["relations"]["dc:relation"])
+        self.assertIn("http://zotero.org/groups/1/items/BOOK1", chapter_update["data"]["relations"]["dc:relation"])
+
 
 class TestRetrofitRun(unittest.TestCase):
     def test_links_confident_match_and_skips_ambiguous(self):
