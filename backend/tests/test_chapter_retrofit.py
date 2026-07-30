@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import MagicMock
 
-from backend.services.chapter_retrofit import find_best_book_match, locate_chapter_pdf_range
+from backend.services.chapter_retrofit import find_best_book_match, find_matches, locate_chapter_pdf_range
 from backend.services.chapter_retrofit import run as retrofit_run
 
 
@@ -59,6 +59,45 @@ class TestLocateChapterPdfRange(unittest.TestCase):
         chapter_text = "This is about astrophysics and black holes entirely."
         result = locate_chapter_pdf_range(chapter_text, book_pages)
         self.assertIsNone(result)
+
+
+class TestFindMatches(unittest.TestCase):
+    def test_matches_without_touching_zotero_client(self):
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        result = find_matches(all_items, item_keys=None, max_items=None)
+        self.assertEqual(len(result["would_link"]), 1)
+        self.assertEqual(result["would_link"][0]["chapter_key"], "CHAP1")
+        self.assertEqual(result["would_link"][0]["book_key"], "BOOK1")
+        self.assertEqual(result["ambiguous"], [])
+        self.assertEqual(result["no_match"], [])
+
+    def test_already_linked_chapter_is_excluded(self):
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": "X-Contained-By: groups/1:BOOK1"}},
+        ]
+        result = find_matches(all_items, item_keys=None, max_items=None)
+        self.assertEqual(result["would_link"], [])
+
+    def test_item_keys_restricts_which_chapters_are_considered(self):
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP2", "data": {"key": "CHAP2", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        result = find_matches(all_items, item_keys=["CHAP2"], max_items=None)
+        self.assertEqual({e["chapter_key"] for e in result["would_link"]}, {"CHAP2"})
+
+    def test_no_book_title_is_no_match(self):
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "", "date": "2019", "extra": ""}},
+        ]
+        result = find_matches(all_items, item_keys=None, max_items=None)
+        self.assertEqual(result["no_match"], ["CHAP1"])
 
 
 class TestRetrofitRun(unittest.TestCase):

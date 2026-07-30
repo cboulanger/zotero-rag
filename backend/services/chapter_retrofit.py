@@ -107,6 +107,53 @@ def _year_from_date(date_str: str | None) -> int | None:
     return None
 
 
+def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: int | None) -> dict:
+    """Pure matching logic: given an already-fetched full-library item list
+    (see run()'s zotero_write_client.everything(...) call — the caller's
+    job, not this function's), finds book/chapter matches. Returns
+    {"would_link": [...], "ambiguous": [...], "no_match": [...]} — the same
+    three buckets run()'s dry-run output already has (run() adds the
+    "linked"/"failed" keys around this). Never touches Zotero and never
+    writes; see commit_links for that half of script 3 (design spec §7).
+    """
+    books = [i for i in all_items if i["data"].get("itemType") == "book"]
+    chapters = [i for i in all_items if i["data"].get("itemType") == "bookSection"]
+
+    unlinked_chapters = [c for c in chapters if not parse_links(c["data"].get("extra", "")).contained_by]
+    if item_keys is not None:
+        wanted = set(item_keys)
+        unlinked_chapters = [c for c in unlinked_chapters if c["data"]["key"] in wanted]
+    if max_items is not None:
+        unlinked_chapters = unlinked_chapters[:max_items]
+
+    book_candidates = [
+        {"key": b["data"]["key"], "title": b["data"].get("title", ""), "year": _year_from_date(b["data"].get("date"))}
+        for b in books
+    ]
+
+    would_link: list[dict] = []
+    ambiguous: list[dict] = []
+    no_match: list[str] = []
+
+    for chapter in unlinked_chapters:
+        chapter_key = chapter["data"]["key"]
+        book_title = chapter["data"].get("bookTitle", "")
+        year = _year_from_date(chapter["data"].get("date"))
+
+        if not book_title or not book_candidates:
+            no_match.append(chapter_key)
+            continue
+
+        match = find_best_book_match(book_title, year, book_candidates)
+        if match is None:
+            ambiguous.append({"chapter_key": chapter_key, "candidates": book_candidates})
+            continue
+
+        would_link.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
+
+    return {"would_link": would_link, "ambiguous": ambiguous, "no_match": no_match}
+
+
 def run(
     *,
     zotero_write_client,
