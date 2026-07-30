@@ -140,6 +140,24 @@ uv run python scripts/retrofit_chapter_links.py \
   --commit
 ```
 
+A `--commit` run always re-fetches and re-matches the whole library from
+scratch, same as a dry run — this is what a large library's `everything()`
+call can make slow (the fuzzy matching itself is fast; the full-library
+fetch dominates). To skip straight to writing a dry run's already-reviewed
+matches instead, pass `--input` pointing at that dry run's `--output` file:
+
+```bash
+uv run python scripts/retrofit_chapter_links.py \
+  --library-slug groups/6297749 \
+  --api-key <write-scoped-zotero-key> \
+  --input .local/retrofit.json \
+  --commit
+```
+
+`--input` re-fetches only the two specific items involved in each link (to
+get their current version before writing), never the whole library, and is
+only valid together with `--commit` — a dry run always matches fresh.
+
 The output reports four buckets: `linked` (written this run, with a match
 score — empty unless `--commit` was passed), `would_link` (what `--commit`
 would write, populated only in dry-run mode), `ambiguous` (multiple
@@ -208,5 +226,8 @@ result. This is the same request/response shape as the CLI's flags
 `item_keys`, `relink`, `max_items`, `enable_llm_fallback`,
 `auto_select_model`, and `ocr_cache_dir`; the retrofit-link endpoint's body
 takes a `committed` flag, mirroring the CLI's `--commit` and defaulting to
-the same dry-run behavior) — useful for driving this from an external
-scheduler or admin tool instead of a shell.
+the same dry-run behavior, plus an optional `would_link` field mirroring
+the CLI's `--input`: pass a prior dry run's `would_link` response array
+alongside `committed: true` to skip straight to writing those matches
+instead of re-fetching and re-matching the whole library) — useful for
+driving this from an external scheduler or admin tool instead of a shell.
