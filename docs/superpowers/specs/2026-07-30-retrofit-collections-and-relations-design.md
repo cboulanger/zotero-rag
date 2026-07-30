@@ -299,3 +299,31 @@ unaffected.
   unaffected by this change; the two link representations
   (`Extra`-field and native `relations`) are deliberately redundant, not
   cross-validated.
+
+## Addendum: implementation deviated from "write both sides" (2026-07-30)
+
+Live E2E testing (the real `test-rag-plugin` group, not the mocked unit
+suite) surfaced a Zotero API behavior this design didn't account for:
+**PATCHing item A's `relations` to add a `dc:relation` pointing at item B
+makes Zotero's server auto-mirror the reverse relation onto item B**,
+bumping B's version as a side effect of A's own PATCH — confirmed by a
+standalone script that wrote only to A and then re-fetched B, which
+already carried the mirrored link with no write of its own. The design
+above (and its exact-code snippets in "New relations-writing logic," steps
+3-8) call for computing and PATCHing `relations` explicitly on **both**
+`book_item` and `chapter_item` for every link. Implemented literally, this
+races the server's own mirrored write: the second explicit PATCH is built
+from an item dict fetched *before* the first PATCH's side effect landed,
+so it carries a stale `version` and gets rejected with a 412 ("Item has
+been modified since specified version") — deterministically, on every real
+link, not intermittently. The mocked unit tests never caught this because
+mocks don't reproduce server-side auto-mirroring.
+
+The actual implementation (`chapter_upload.py`'s `run()`,
+`chapter_retrofit.py`'s `commit_links()`) writes `relations` explicitly on
+only **one** side of each pair — the side whose PATCH happens first — and
+re-fetches the other item immediately before *its* PATCH, picking up both
+the current version and the already-mirrored relation for free. The net
+result for a Zotero user is identical to the original design (both items
+end up cross-linked in the Related tab); only the write strategy changed.
+See the code comments at each re-fetch site for the mechanical detail.

@@ -1211,3 +1211,18 @@ Expected: PASS — this plan touches no `bin/` or `plugin/` files.
 
 Run: `uv run pytest backend/tests/test_chapter_linking_e2e.py -v -s -m integration`
 Expected: PASS — all four tests in the file (`test_analyze_and_upload_chapters`, `test_ocr_attachments`, `test_retrofit_link_dummy_entries`, `test_retrofit_link_replays_dry_run_via_input`, `test_retrofit_link_with_target_collection`), against the dedicated `test-rag-plugin` group — safe to mutate freely per CLAUDE.md, no confirmation needed before running (unlike a real personal library).
+
+---
+
+## Post-implementation note
+
+Live E2E testing (Task 8/10) caught a bug this plan's Task 4/5 code
+snippets don't reflect: Zotero's API auto-mirrors a `relations` write onto
+the item it points at, so writing both sides explicitly (as shown above)
+races the server's own mirrored write and 412s deterministically on every
+real link. The actual committed code writes only one side per pair and
+re-fetches the other immediately before its own PATCH instead. See the
+design spec's "Addendum: implementation deviated from 'write both sides'"
+section (`docs/superpowers/specs/2026-07-30-retrofit-collections-and-relations-design.md`)
+for the full explanation — the task snippets above are left unchanged as a
+record of what was originally planned.
