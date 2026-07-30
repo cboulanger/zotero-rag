@@ -9,7 +9,7 @@ distinguished only by the `-profile "$ZOTERO_PLUGIN_PROFILE_PATH"` argument
 on its command line, so process selection must match on that, not on the
 process name alone.
 
-Run with: uv run pytest tests/test_zotero_plugin_dev.py
+Run with: uv run pytest backend/tests/test_zotero_plugin_dev.py
 """
 
 import importlib.util
@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "zotero_plugin.py"
 
 

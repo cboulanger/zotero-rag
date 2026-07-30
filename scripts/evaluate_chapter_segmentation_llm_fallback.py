@@ -2,7 +2,7 @@
 """Runs the chapter-segmentation evaluation set (see backend/evaluation/
 book-segmentation/) through analyze_attachment_with_llm_fallback instead of
 the pure-heuristic analyze_attachment, and prints the same precision/recall
-table format tests/test_chapter_segmentation_accuracy.py already uses, plus
+table format backend/tests/test_chapter_segmentation_accuracy.py already uses, plus
 per-book fallback-usage counts.
 
 Requires a real, working LLM (reads normal app settings/API keys) and costs
@@ -38,10 +38,10 @@ _EVAL_DIR = Path(__file__).resolve().parent.parent / "backend" / "evaluation" / 
 
 
 def _load_manifest_books() -> list[dict]:
-    # Mirrors tests/test_chapter_segmentation_accuracy.py's identically-named
+    # Mirrors backend/tests/test_chapter_segmentation_accuracy.py's identically-named
     # helper -- kept as a separate copy rather than importing across the
-    # tests/scripts boundary (tests/ is deliberately not a runtime dependency
-    # of anything under scripts/).
+    # tests/scripts boundary (backend/tests/ is deliberately not a runtime
+    # dependency of anything under scripts/).
     books = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))["books"]
     local_manifest_path = _EVAL_DIR / "manifest.local.json"
     if local_manifest_path.exists():

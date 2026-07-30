@@ -43,7 +43,7 @@ and resolves the libraries to index from those keys automatically.
    - via the plugin's Preferences pane ("Automatic indexing"), or
    - on the host with:
      ```bash
-     uv run python bin/autoindex_add_key.py <read-only-key>
+     uv run python scripts/autoindex_add_key.py <read-only-key>
      ```
    Each key is validated (must be read-only), its target libraries are resolved,
    and it is stored encrypted.
@@ -178,10 +178,16 @@ node bin/container.mjs restart
 ```
 
 Users then add their read-only keys via the plugin's "Automatic indexing"
-preferences, or you can add one directly inside the container:
+preferences, or you can add one yourself. Unlike `index_libraries.py`,
+`autoindex_add_key.py` lives in `scripts/`, not `bin/`, so it isn't shipped in
+the container image — run it from the host checkout instead of `podman exec`,
+pointing `DATA_PATH` at the same directory the container has bind-mounted at
+its own fixed `DATA_PATH=/data`:
 
 ```bash
-podman exec zotero-rag python bin/autoindex_add_key.py <read-only-key>
+set -a; source .env.deploy-myserver; set +a
+export DATA_PATH="$DEPLOY_DATA_DIR"
+uv run python scripts/autoindex_add_key.py <read-only-key>
 ```
 
 ### Scheduling inside the container host
@@ -392,7 +398,9 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 The store has no usable keys. Add at least one read-only Zotero key via the
 plugin's "Automatic indexing" preferences or:
 ```bash
-uv run python bin/autoindex_add_key.py <read-only-key>
+uv run python scripts/autoindex_add_key.py <read-only-key>
 ```
+(for a containerized deployment, run this from the host checkout, not
+`podman exec` — see "Running Inside a Container" above.)
 If keys were recently pruned, check `key_issues` in `cron_status.json` for the
 reason (revoked, expired, or downgraded to write scope).

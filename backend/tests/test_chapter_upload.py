@@ -32,7 +32,7 @@ class TestSlicePdfRange(unittest.TestCase):
 
 class TestBuildBookSectionItemData(unittest.TestCase):
     def test_inherits_book_metadata(self):
-        template = {"itemType": "bookSection", "title": "", "bookTitle": "", "editor": [], "publisher": "",
+        template = {"itemType": "bookSection", "title": "", "bookTitle": "", "publisher": "",
                     "place": "", "date": "", "ISBN": "", "language": "", "pages": "", "creators": []}
         book_data = {
             "title": "Handbook of Reference Management",
@@ -45,13 +45,17 @@ class TestBuildBookSectionItemData(unittest.TestCase):
         result = build_book_section_item_data(template, book_data, chapter)
         self.assertEqual(result["title"], "Comparing Citation Styles")
         self.assertEqual(result["bookTitle"], "Handbook of Reference Management")
-        self.assertEqual(result["editor"], book_data["creators"])
+        self.assertNotIn("editor", result)  # Zotero has no standalone "editor" item field
         self.assertEqual(result["publisher"], "Big Press")
         self.assertEqual(result["pages"], "45-67")
-        self.assertEqual(result["creators"][0]["lastName"], "Smith")
+        # The chapter's own author comes first, then the book's creators
+        # re-typed as "editor" (Zotero only supports "editor" as a
+        # creatorType within "creators", not a separate item field).
+        self.assertEqual(result["creators"][0], {"creatorType": "author", "firstName": "John", "lastName": "Smith"})
+        self.assertEqual(result["creators"][1], {"creatorType": "editor", "firstName": "Jane", "lastName": "Editor"})
 
     def test_leaves_pages_blank_when_citation_pages_missing(self):
-        template = {"itemType": "bookSection", "title": "", "bookTitle": "", "editor": [], "publisher": "",
+        template = {"itemType": "bookSection", "title": "", "bookTitle": "", "publisher": "",
                     "place": "", "date": "", "ISBN": "", "language": "", "pages": "", "creators": []}
         book_data = {"title": "T", "creators": [], "publisher": "", "place": "", "date": "", "ISBN": "", "language": ""}
         chapter = {"title": "C", "authors": [], "citation_pages": None}
@@ -132,10 +136,25 @@ class TestUploadRun(unittest.TestCase):
         book_item, analysis = self._book_and_analysis()
         zot = MagicMock()
         zot.item.return_value = book_item
-        zot.item_template.return_value = {"itemType": "bookSection", "title": "", "bookTitle": "", "editor": [],
-                                           "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
-                                           "pages": "", "creators": []}
-        zot.create_items.return_value = {"successful": {"0": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}}}
+
+        def item_template_side_effect(item_type, **kwargs):
+            if item_type == "attachment":
+                return {"itemType": "attachment", "linkMode": kwargs.get("linkmode", ""), "title": "",
+                        "filename": "", "contentType": "", "parentItem": ""}
+            return {"itemType": "bookSection", "title": "", "bookTitle": "",
+                    "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
+                    "pages": "", "creators": []}
+
+        zot.item_template.side_effect = item_template_side_effect
+        # First create_items call creates the bookSection, the second (inside
+        # the attachment-upload block) creates the not-yet-uploaded attachment
+        # item -- see chapter_upload.py's NOTE on why attachment_simple() (a
+        # single-step helper) can't be used here.
+        zot.create_items.side_effect = [
+            {"successful": {"0": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}}},
+            {"successful": {"0": {"key": "ATT1", "data": {"key": "ATT1"}}}},
+        ]
+        zot.upload_attachments.return_value = {"success": [{"key": "ATT1"}], "failure": [], "unchanged": []}
         zot.collections.return_value = []
         zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
         zot.collections_sub.return_value = []
@@ -148,8 +167,8 @@ class TestUploadRun(unittest.TestCase):
                 slug="groups/1", analyses=[analysis], commit=True, confidence_threshold=0.8,
                 target_collection="Book Chapters", max_items=None,
             ))
-        zot.create_items.assert_called()
-        zot.attachment_simple.assert_called()
+        self.assertEqual(zot.create_items.call_count, 2)
+        zot.upload_attachments.assert_called()
         self.assertEqual(len(result["created"]), 1)
         self.assertEqual(result["created"][0]["chapter_key"], "CHAP1")
         # update_item is called exactly twice per committed chapter: first for

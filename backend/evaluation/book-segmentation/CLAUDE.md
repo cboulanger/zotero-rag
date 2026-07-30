@@ -19,8 +19,9 @@ the regression is tracked instead of silently re-discovered later.
   → add it to `manifest.local.json` instead (create the file if it doesn't
   exist yet; same schema as `manifest.json`, see below). This file is
   gitignored — it never leaves your machine — but the test harness
-  (`tests/test_chapter_segmentation_accuracy.py`) reads it exactly like the
-  committed manifest, so it still gets exercised in your own local runs.
+  (`backend/tests/test_chapter_segmentation_accuracy.py`) reads it exactly
+  like the committed manifest, so it still gets exercised in your own local
+  runs.
 
 `manifest.local.json` schema — identical to `manifest.json`'s `"books"` list:
 

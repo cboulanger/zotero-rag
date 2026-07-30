@@ -11,13 +11,19 @@ via the plugin's Preferences — an embedding/LLM provider key (e.g.
 KISSKI_API_KEY, used for that preset's X-Kisski-Api-Key header).
 
 Usage:
-    uv run python bin/debug_get_zotero_key.py                    # print the first Zotero key
-    uv run python bin/debug_get_zotero_key.py --list              # list all entries, no key values
-    uv run python bin/debug_get_zotero_key.py --user 3866263      # Zotero key for a specific user id
-    uv run python bin/debug_get_zotero_key.py --embedding-key     # the stored provider key instead (e.g. KISSKI_API_KEY)
+    uv run python scripts/debug_get_zotero_key.py                    # print the first Zotero key
+    uv run python scripts/debug_get_zotero_key.py --list              # list all entries, no key values
+    uv run python scripts/debug_get_zotero_key.py --user 3866263      # Zotero key for a specific user id
+    uv run python scripts/debug_get_zotero_key.py --embedding-key     # the stored provider key instead (e.g. KISSKI_API_KEY)
 
 Requires AUTOINDEX_SECRET to be set (see .env) and at least one key already
-stored (added via the plugin's Preferences, or `bin/autoindex_add_key.py`).
+stored (added via the plugin's Preferences, or `scripts/autoindex_add_key.py`).
+
+For a deployed server (not local dev): not shipped in the Docker image (see
+CLAUDE.md's "bin/ vs scripts/" note), so run this from a full host checkout
+instead of `podman exec`, after sourcing the deploy env file for
+AUTOINDEX_SECRET and setting `DATA_PATH="$DEPLOY_DATA_DIR"` (see
+`scripts/autoindex_add_key.py`'s docstring for the full rationale).
 """
 
 import argparse

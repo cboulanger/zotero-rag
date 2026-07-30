@@ -47,13 +47,13 @@ process and known failure modes. Short version:
 
 ## Running an evaluation
 
-The harness lives at `tests/test_chapter_segmentation_accuracy.py` (repo root
-`tests/`, deliberately outside `backend/tests/` and `pyproject.toml`'s
-`testpaths`, so it never runs as part of the default `uv run pytest`). Run it
+The harness lives at `backend/tests/test_chapter_segmentation_accuracy.py`,
+marked `@pytest.mark.integration` so it never runs as part of the default
+`uv run pytest` / `npm test` (see `pyproject.toml`'s `addopts`). Run it
 directly:
 
 ```bash
-uv run pytest tests/test_chapter_segmentation_accuracy.py -q -s
+uv run pytest backend/tests/test_chapter_segmentation_accuracy.py -q -s
 ```
 
 `-s` is required to see the per-book summary lines (`pytest` swallows `print`

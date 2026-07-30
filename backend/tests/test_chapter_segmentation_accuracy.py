@@ -9,18 +9,32 @@ locally yet (covers "not fetched yet", the non-OA scans that can never be
 auto-fetched, and any manifest.local.json entries a developer hasn't placed
 the PDF for) — this is real, checkable state, not a placeholder standing in
 for unwritten logic.
+
+Marked "integration" so it's excluded from the default `uv run pytest` /
+`npm test` run (see pyproject.toml's addopts) -- this is a reported, not
+gated, benchmark (design spec §12: probabilistic, not pass/fail), not
+something that should ever block CI. Run it directly:
+
+    uv run pytest backend/tests/test_chapter_segmentation_accuracy.py -q -s
+
+`-s` is required to see the per-book summary lines (pytest swallows `print`
+output by default).
 """
 
 import json
 import unittest
 from pathlib import Path
 
+import pytest
+
 from backend.services.chapter_segmentation import (
     analyze_attachment,
     extract_page_texts_from_pdf_bytes,
 )
 
-_EVAL_DIR = Path(__file__).parent.parent / "backend" / "evaluation" / "book-segmentation"
+pytestmark = pytest.mark.integration
+
+_EVAL_DIR = Path(__file__).parent.parent / "evaluation" / "book-segmentation"
 
 
 def _load_manifest_books() -> list[dict]:

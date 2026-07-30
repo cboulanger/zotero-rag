@@ -1,10 +1,22 @@
 """Onboard a read-only Zotero key for auto-indexing without the plugin.
 
 Usage:
-    uv run python bin/autoindex_add_key.py <read-only-key>
+    uv run python scripts/autoindex_add_key.py <read-only-key>
 
 Validates the key (must be read-only), resolves its target libraries, and stores
 it encrypted in the auto-index key store. Requires AUTOINDEX_SECRET to be set.
+
+Not shipped in the Docker image (see CLAUDE.md's "bin/ vs scripts/" note) --
+run this from a full host checkout (the same one used for
+`node bin/container.mjs`/`bin/deploy.mjs`), not via `podman exec`. Source the
+deploy env file for AUTOINDEX_SECRET, then point DATA_PATH at
+DEPLOY_DATA_DIR (the container sees the same directory bind-mounted at the
+fixed in-container path `/data`, set via `DATA_PATH=/data` -- DEPLOY_DATA_DIR
+is the host-side path to that same directory):
+
+    set -a; source .local/.env.deploy.<target>; set +a
+    export DATA_PATH="$DEPLOY_DATA_DIR"
+    uv run python scripts/autoindex_add_key.py <read-only-key>
 """
 
 import asyncio
@@ -18,7 +30,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 async def _main(argv: list[str]) -> int:
     if len(argv) != 1:
-        print("Usage: uv run python bin/autoindex_add_key.py <read-only-key>")
+        print("Usage: uv run python scripts/autoindex_add_key.py <read-only-key>")
         return 2
     api_key = argv[0].strip()
 

@@ -6,7 +6,7 @@
  * (which may contain secrets) is routed through a root-only --env-file instead, so
  * secret VALUES never appear in the unit, and that the env file is mode 0600.
  *
- * Run: node --test test/
+ * Run: node --test bin/tests/*.test.mjs
  */
 
 import { test } from 'node:test';
@@ -26,7 +26,7 @@ const {
   writeServiceEnvFile,
   buildLegacyUnitContent,
   buildQuadletContent,
-} = await import('../bin/container.mjs');
+} = await import('../container.mjs');
 
 const SECRET = 'super-secret-key-123';
 

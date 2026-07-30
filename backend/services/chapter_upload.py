@@ -49,21 +49,31 @@ def build_book_section_item_data(template: dict, book_data: dict, chapter: dict)
     Never derives `pages` from pdf_start_index/pdf_end_index — only from
     `citation_pages`, left blank when that's None (unmappable printed
     numbers) rather than guessed from a different number space.
+
+    The book's own creators become the chapter's "editor" creators. Zotero
+    has no standalone "editor" item field (a real API call rejects one with
+    "Invalid property 'editor'") -- "editor" is only valid as a creatorType
+    entry inside the shared "creators" array, alongside the chapter's own
+    "author" entries.
     """
     item = dict(template)
     item["title"] = chapter["title"]
     item["bookTitle"] = book_data.get("title", "")
-    item["editor"] = book_data.get("creators", [])
     item["publisher"] = book_data.get("publisher", "")
     item["place"] = book_data.get("place", "")
     item["date"] = book_data.get("date", "")
     item["ISBN"] = book_data.get("ISBN", "")
     item["language"] = book_data.get("language", "")
     item["pages"] = chapter.get("citation_pages") or ""
-    item["creators"] = [
+    authors = [
         {"creatorType": "author", "firstName": first, "lastName": last}
         for first, last in (_split_name(name) for name in chapter.get("authors", []))
     ]
+    editors = [
+        {**{k: v for k, v in creator.items() if k != "creatorType"}, "creatorType": "editor"}
+        for creator in book_data.get("creators", [])
+    ]
+    item["creators"] = authors + editors
     return item
 
 
@@ -172,7 +182,27 @@ async def run(
                 tmp_path = Path(tempfile.gettempdir()) / f"{chapter_key}.pdf"
                 try:
                     tmp_path.write_bytes(sliced)
-                    zotero_write_client.attachment_simple([str(tmp_path)], parentid=chapter_key)
+                    # NOTE: attachment_simple() sends str(path) verbatim as
+                    # the Zotero "filename" field, which the API rejects
+                    # ("cannot contain a directory path") for any non-bare
+                    # filename -- and tempfile.gettempdir() is always an
+                    # absolute path. Create the attachment item with just the
+                    # bare filename, then upload the actual bytes via
+                    # upload_attachments(basedir=...), which resolves the
+                    # local file path separately from the server-side field.
+                    attachment_template = zotero_write_client.item_template("attachment", linkmode="imported_file")
+                    attachment_template["title"] = tmp_path.name
+                    attachment_template["filename"] = tmp_path.name
+                    attachment_template["contentType"] = "application/pdf"
+                    attachment_template["parentItem"] = chapter_key
+                    attach_resp = zotero_write_client.create_items([attachment_template])
+                    attachment_item = list(attach_resp["successful"].values())[0]
+                    upload_resp = zotero_write_client.upload_attachments(
+                        [{"key": attachment_item["key"], "filename": tmp_path.name}],
+                        basedir=str(tmp_path.parent),
+                    )
+                    if upload_resp["failure"]:
+                        raise RuntimeError(f"attachment upload failed: {upload_resp['failure']}")
                 finally:
                     tmp_path.unlink(missing_ok=True)
 

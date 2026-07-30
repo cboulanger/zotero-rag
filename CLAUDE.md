@@ -129,7 +129,15 @@ The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `ind
 The cron job no longer uses a static slugs file or a global `ZOTERO_API_KEY`. Instead, indexing targets come from the encrypted auto-index key store at `<data_path>/system/autoindex_keys.json`. The same personal Zotero API key a user enters in the plugin's setup wizard (or Preferences) also authenticates their normal plugin use — auto-indexing is just an on/off toggle reusing that key, not a separate credential. Keys are added by users via the plugin (Preferences → Automatic indexing) or on the server with:
 
 ```bash
-uv run python bin/autoindex_add_key.py <read-only-zotero-api-key>
+# From the host checkout used for node bin/container.mjs / bin/deploy.mjs --
+# scripts/autoindex_add_key.py isn't shipped in the Docker image (see "bin/
+# vs scripts/" under Project Structure below), so run it here, not via
+# `podman exec`. Source the deploy env file for AUTOINDEX_SECRET, then point
+# DATA_PATH at the same host directory the container has bind-mounted at
+# its own fixed DATA_PATH=/data:
+set -a; source .local/.env.deploy.<target>; set +a
+export DATA_PATH="$DEPLOY_DATA_DIR"
+uv run python scripts/autoindex_add_key.py <read-only-zotero-api-key>
 ```
 
 Only **read-only** Zotero API keys are accepted; write-scoped keys are rejected at submission time.
@@ -152,9 +160,12 @@ file), and the matching `AUTOINDEX_SECRET` lives in that same deploy env file.
 Decrypting the store gives the read-only Zotero keys already on file for
 auto-indexing — useful when you need a read-only key (e.g. for the admin
 scheduler endpoints below) and don't want to ask the user for a fresh one.
-Easiest done from inside the running container via `podman exec`, which
-already has `AUTOINDEX_SECRET` in its env and the data volume mounted — see
-`backend/services/autoindex_key_store.py`'s `AutoIndexKeyStore.iter_decrypted()`.
+Use `scripts/debug_get_zotero_key.py` from the host checkout (see
+`backend/services/autoindex_key_store.py`'s `AutoIndexKeyStore.iter_decrypted()`
+for what it wraps) — **not** `podman exec`, since `scripts/` isn't shipped in
+the Docker image; source the deploy env file and set
+`DATA_PATH="$DEPLOY_DATA_DIR"` first, same as `scripts/autoindex_add_key.py`
+above.
 
 **Key validation and pruning:**
 
@@ -320,14 +331,14 @@ Both the read-only Zotero identity key and any remote-model provider key
 (e.g. `KISSKI_API_KEY`) the user has configured are stored encrypted in
 `data/system/autoindex_keys.json`, decryptable with `AUTOINDEX_SECRET` (see
 "Debugging the cron indexer" above for the store's normal purpose). Use
-`bin/debug_get_zotero_key.py` to extract them for debugging — it prints only
-the requested key to stdout, so pipe it directly into a variable rather than
-echoing it:
+`scripts/debug_get_zotero_key.py` to extract them for debugging — it prints
+only the requested key to stdout, so pipe it directly into a variable rather
+than echoing it:
 
 ```bash
-ZOTERO_KEY=$(uv run python bin/debug_get_zotero_key.py)
-KISSKI_HEADER=$(uv run python bin/debug_get_zotero_key.py --embedding-key)  # prints "KISSKI_API_KEY=<value>"
-uv run python bin/debug_get_zotero_key.py --list   # see what's available first, no key values printed
+ZOTERO_KEY=$(uv run python scripts/debug_get_zotero_key.py)
+KISSKI_HEADER=$(uv run python scripts/debug_get_zotero_key.py --embedding-key)  # prints "KISSKI_API_KEY=<value>"
+uv run python scripts/debug_get_zotero_key.py --list   # see what's available first, no key values printed
 ```
 
 If no key is stored yet (e.g. a fresh dev profile), the plugin's own
@@ -463,10 +474,18 @@ called too early.
 ### Python Tests
 
 - Use Python's built-in `unittest` framework
-- Test files should be named `test_*.py` and placed in a `tests/` directory
-- Run tests with: `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
+- Test files should be named `test_*.py` and placed in `backend/tests/` — the
+  only Python test directory in this project (`pyproject.toml`'s `testpaths`)
+- Run tests with: `npm test` / `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
 - Aim for comprehensive coverage of all library methods and services
 - Write tests before or alongside implementation (TDD encouraged)
+- Tests that hit real external services (a live Zotero library, a paid LLM
+  API) belong in `backend/tests/` like everything else, but marked
+  `@pytest.mark.integration` (or `api`/`container`, see existing markers in
+  `pyproject.toml`) so `addopts` excludes them from the default run — reach
+  them with `npm run test:integration` / `uv run pytest -m integration -v -s`.
+  Don't create a separate directory to keep a slow/live test out of the
+  default run; the marker already does that.
 
 ### Container Smoke Test
 
@@ -495,8 +514,11 @@ This verifies that:
 ### Node.js Tests
 
 - Use Node.js built-in test runner (available in Node 23)
-- Test files should be named `*.test.js` or placed in a `test/` directory
-- Run tests with: `node --test`
+- Test files are named `*.test.js` (plugin) or `*.test.mjs` (root-level
+  tooling scripts) and live next to what they test — there is no root-level
+  test directory:
+  - `plugin/test/` — the Zotero plugin's own UI/API tests. Run with `npm run test:plugin` (`node --test plugin/test/*.test.js`)
+  - `bin/tests/` — tests for root-level Node tooling (`bin/container.mjs`, `bin/deploy.mjs`). Run with `npm run test:node` (`node --test bin/tests/*.test.mjs`)
 - Test all plugin UI interactions and API communication logic
 
 ## Code Organization
@@ -507,6 +529,35 @@ This verifies that:
 - **DRY Principle**: Avoid code duplication by extracting common functionality into shared utilities
 
 ## Project Structure
+
+### `bin/` vs `scripts/`
+
+Both hold executable tooling, but the split is deliberate and load-bearing,
+not cosmetic:
+
+- **`bin/`** — only what the *running application itself* needs, because
+  `Dockerfile` copies `bin/` (alongside `backend/`) into the production image
+  (`COPY bin/ ./bin/`) — there is no equivalent `COPY scripts/` line. Two
+  things currently live here for that reason: `container.mjs`/`deploy.mjs`
+  (the Node CLI that builds/deploys that same image from the host) and
+  `index_libraries.py`, which the running backend spawns itself as a
+  subprocess (`backend/services/autoindex_scheduler.py`, `backend/api/autoindex.py`)
+  and which the external cron job execs inside the container — if it weren't
+  in the image, both would break.
+- **`scripts/`** — everything else: dev server management, build/release,
+  git hooks, diagnostics/evaluation, one-off maintenance, and admin CLIs that
+  a human runs by hand (e.g. `autoindex_add_key.py`, `debug_get_zotero_key.py`)
+  — even ones normally run against a *deployed* server, since nothing in
+  `backend/` ever calls them, only an admin does. Because `scripts/` isn't in
+  the image, admin scripts that target a live deployment run from the host
+  checkout (the same one used for `node bin/container.mjs`), not via
+  `podman exec` — see "Debugging the cron indexer" above for the pattern
+  (source the deploy env file, then `export DATA_PATH="$DEPLOY_DATA_DIR"`).
+
+Before adding a new file to `bin/`, ask: does the running container's own
+code (not a human, not cron-via-exec-into-a-shell) actually spawn or import
+this at runtime? If not, it belongs in `scripts/`, even if an admin runs it
+against production.
 
 ### Backend (Python/FastAPI)
 
