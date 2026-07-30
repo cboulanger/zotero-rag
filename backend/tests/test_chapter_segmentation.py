@@ -1001,7 +1001,17 @@ class TestRun(unittest.TestCase):
         ), unittest.mock.patch(
             "backend.services.chapter_segmentation.load_cached_ocr",
             return_value={"detected_language": "eng", "pages": ["Just filler prose, no TOC pattern here at all. " * 3]},
-        ) as mock_load_cache:
+        ) as mock_load_cache, unittest.mock.patch(
+            # This test exercises the separate needs_ocr/load_cached_ocr path,
+            # not the analysis cache -- ocr_cache_dir=ANY above is a truthy
+            # placeholder, not a real Path, so both analysis-cache touchpoints
+            # (the pre-download check and the post-analysis save) must be
+            # neutralized rather than dereference it.
+            "backend.services.chapter_segmentation.load_cached_analysis",
+            return_value=None,
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.save_analysis_cache",
+        ):
             result = asyncio.run(analyze_run(
                 zotero_client=zotero_client,
                 library_id="1",
@@ -1048,6 +1058,111 @@ class TestRun(unittest.TestCase):
         mock_load_cache.assert_not_called()
         self.assertFalse(result["attachments"][0]["has_text_layer"])
         self.assertTrue(result["attachments"][0]["needs_ocr"])
+
+    def test_analysis_cache_hit_skips_download(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0006", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0005", "itemType": "attachment", "contentType": "application/pdf", "version": 7}},
+        ]
+        cached_entry = {
+            "item_key": "BOOK0006", "attachment_key": "ATT0005", "has_text_layer": True,
+            "needs_ocr": False, "total_pdf_pages": 3, "segmentation_confidence": "high",
+            "chapters": [], "diagnostics": {},
+        }
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.load_cached_analysis",
+            return_value=cached_entry,
+        ) as mock_load:
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+                ocr_cache_dir=unittest.mock.ANY,
+            ))
+        mock_load.assert_called_once_with(unittest.mock.ANY, "BOOK0006", "ATT0005", 7, "heuristic")
+        zotero_client.get_attachment_file.assert_not_called()
+        self.assertEqual(result["attachments"], [cached_entry])
+
+    def test_analysis_cache_miss_saves_result(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0007", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0006", "itemType": "attachment", "contentType": "application/pdf", "version": 3}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.load_cached_analysis", return_value=None,
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.save_analysis_cache",
+        ) as mock_save:
+            result = asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+                ocr_cache_dir=unittest.mock.ANY,
+            ))
+        mock_save.assert_called_once()
+        saved_args = mock_save.call_args.args
+        self.assertEqual(saved_args[1:4], ("BOOK0007", "ATT0006", 3))
+        self.assertEqual(saved_args[4], "heuristic")
+        self.assertEqual(result["attachments"][0]["item_key"], "BOOK0007")
+
+    def test_no_cache_dir_never_touches_analysis_cache(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK0008", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT0007", "itemType": "attachment", "contentType": "application/pdf", "version": 1}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+        ), unittest.mock.patch(
+            "backend.services.chapter_segmentation.load_cached_analysis",
+        ) as mock_load, unittest.mock.patch(
+            "backend.services.chapter_segmentation.save_analysis_cache",
+        ) as mock_save:
+            asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+            ))
+        mock_load.assert_not_called()
+        mock_save.assert_not_called()
 
 
 if __name__ == "__main__":

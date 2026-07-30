@@ -1203,6 +1203,7 @@ async def run(
 
     attachments_out: list[dict] = []
     total = len(books) or 1
+    analysis_mode = "llm_fallback" if llm_service is not None else "heuristic"
     for i, book in enumerate(books):
         item_key = book["data"]["key"]
         progress_callback(i / total, f"Analyzing {item_key} ({i + 1}/{total})")
@@ -1212,6 +1213,13 @@ async def run(
         if not pdf_attachments:
             continue
         attachment_key = pdf_attachments[0]["data"]["key"]
+        attachment_version = pdf_attachments[0]["data"].get("version", 0)
+
+        if ocr_cache_dir is not None:
+            cached_entry = load_cached_analysis(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode)
+            if cached_entry is not None:
+                attachments_out.append(cached_entry)
+                continue
 
         file_bytes = await zotero_client.get_attachment_file(library_id, attachment_key, library_type=library_type)
         if not file_bytes:
@@ -1240,13 +1248,16 @@ async def run(
             analysis = await analyze_attachment_with_llm_fallback(pages, llm_service)
         else:
             analysis = analyze_attachment(pages)
-        attachments_out.append({
+        result_entry = {
             "item_key": item_key,
             "attachment_key": attachment_key,
             "has_text_layer": True,
             "needs_ocr": False,
             **analysis,
-        })
+        }
+        if ocr_cache_dir is not None:
+            save_analysis_cache(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode, result_entry)
+        attachments_out.append(result_entry)
 
     progress_callback(1.0, "Done")
     return {"slug": slug, "attachments": attachments_out}
