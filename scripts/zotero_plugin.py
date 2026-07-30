@@ -40,19 +40,43 @@ except ImportError:
 
 
 def get_zotero_processes():
-    """Get all running Zotero processes.
+    """Get running Zotero processes that belong to the plugin dev profile only.
+
+    A user may have their own main Zotero instance running at the same time
+    as the dev instance this script launched. Matching by process name alone
+    ('zotero' substring) cannot tell them apart and would stop/kill the
+    user's main instance too. Instead, scope to processes whose command line
+    was launched with `-profile <ZOTERO_PLUGIN_PROFILE_PATH>` -- the same
+    signal documented in CLAUDE.md for manually identifying the dev instance.
+
+    If ZOTERO_PLUGIN_PROFILE_PATH isn't configured, there is no safe way to
+    distinguish the dev instance from any other, so this returns an empty
+    list rather than falling back to a name-based match against everything.
 
     Returns:
-        list: List of psutil.Process objects for Zotero processes
+        list: List of psutil.Process objects for the dev-profile Zotero process(es)
     """
     if psutil is None:
         return []
 
+    profile_path = os.environ.get('ZOTERO_PLUGIN_PROFILE_PATH')
+    if not profile_path:
+        return []
+
     processes = []
     try:
-        for proc in psutil.process_iter(['pid', 'name']):
-            if proc.info['name'] and 'zotero' in proc.info['name'].lower():
-                processes.append(proc)
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                name = proc.info['name']
+                if not name or 'zotero' not in name.lower():
+                    continue
+                cmdline = proc.info['cmdline']
+                if not cmdline:
+                    continue
+                if profile_path in ' '.join(cmdline):
+                    processes.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
         pass
 
@@ -129,6 +153,16 @@ def stop_plugin_server():
     if psutil is None:
         print("[ERROR] psutil not available, cannot stop plugin server", file=sys.stderr)
         return 1
+
+    if not os.environ.get('ZOTERO_PLUGIN_PROFILE_PATH'):
+        print(
+            "[WARN] ZOTERO_PLUGIN_PROFILE_PATH is not set; the dev Zotero "
+            "instance's process cannot be safely identified and will not be "
+            "stopped automatically (avoids matching by name and killing any "
+            "other Zotero instance you may have running). Set it in .env, "
+            "or stop the dev Zotero window manually.",
+            file=sys.stderr,
+        )
 
     # Find the plugin dev server process
     plugin_proc = find_plugin_process()
