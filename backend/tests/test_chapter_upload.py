@@ -189,6 +189,47 @@ class TestUploadRun(unittest.TestCase):
         # items' extra fields (the fixed non-aliasing bug).
         self.assertNotIn("X-Contained-By", book_update_extra)
 
+    def test_commit_downloads_book_pdf_once_for_multiple_chapters(self):
+        book_item, analysis = self._book_and_analysis()
+        analysis["chapters"].append({
+            "title": "Second Chapter", "authors": ["Jane Doe"], "pdf_start_index": 5,
+            "pdf_end_index": 7, "citation_pages": "70-90", "confidence": 0.95, "page_mapping_confidence": "high",
+        })
+        zot = MagicMock()
+        zot.item.return_value = book_item
+
+        def item_template_side_effect(item_type, **kwargs):
+            if item_type == "attachment":
+                return {"itemType": "attachment", "linkMode": kwargs.get("linkmode", ""), "title": "",
+                        "filename": "", "contentType": "", "parentItem": ""}
+            return {"itemType": "bookSection", "title": "", "bookTitle": "",
+                    "publisher": "", "place": "", "date": "", "ISBN": "", "language": "",
+                    "pages": "", "creators": []}
+
+        zot.item_template.side_effect = item_template_side_effect
+        zot.create_items.side_effect = [
+            {"successful": {"0": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}}},
+            {"successful": {"0": {"key": "ATT1", "data": {"key": "ATT1"}}}},
+            {"successful": {"0": {"key": "CHAP2", "data": {"key": "CHAP2", "extra": ""}}}},
+            {"successful": {"0": {"key": "ATT2", "data": {"key": "ATT2"}}}},
+        ]
+        zot.upload_attachments.return_value = {"success": [{"key": "ATT1"}], "failure": [], "unchanged": []}
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+        read_client = MagicMock()
+        read_client.get_attachment_file = unittest.mock.AsyncMock(return_value=b"%PDF-1.4 fake")
+
+        with patch("backend.services.chapter_upload.slice_pdf_range", return_value=b"sliced bytes"):
+            result = asyncio.run(upload_run(
+                zotero_write_client=zot, zotero_read_client=read_client,
+                slug="groups/1", analyses=[analysis], commit=True, confidence_threshold=0.8,
+                target_collection="Book Chapters", max_items=None,
+            ))
+
+        self.assertEqual(len(result["created"]), 2)
+        read_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
+
     def test_below_threshold_is_skipped(self):
         book_item, analysis = self._book_and_analysis()
         analysis["chapters"][0]["confidence"] = 0.5

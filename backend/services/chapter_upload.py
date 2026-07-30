@@ -161,17 +161,30 @@ async def run(
 
         new_chapter_ids: list[str] = []
         pdf_ranges: dict[str, tuple[int, int]] = {}
+
+        # Download the book's PDF attachment ONCE per book, not once per
+        # chapter -- this used to sit inside the per-chapter loop below and
+        # re-downloaded the same (often large) file for every confident
+        # chapter detected in the same book. A download failure is deferred
+        # and raised inside the loop so it's still reported per-chapter,
+        # isolated the same way any other per-chapter failure already is.
+        book_file_bytes: bytes | None = None
+        book_download_error: str | None = None
+        if confident_chapters:
+            try:
+                book_file_bytes = await zotero_read_client.get_attachment_file(
+                    library_id, attachment_key, library_type=library_type
+                ) if hasattr(zotero_read_client, "get_attachment_file") else None
+            except Exception as exc:  # noqa: BLE001 - reported per chapter below
+                book_download_error = str(exc)
+
         for chapter in confident_chapters:
             # Isolate per-chapter failures so one corrupt PDF / API error does
             # not abort the whole batch (matches chapter_retrofit.run()).
             try:
-                # Fetch the BOOK's PDF ATTACHMENT (not the book item itself) —
-                # analysis["attachment_key"] is the attachment key detected by
-                # script 1.
-                file_bytes = await zotero_read_client.get_attachment_file(
-                    library_id, attachment_key, library_type=library_type
-                ) if hasattr(zotero_read_client, "get_attachment_file") else None
-                sliced = slice_pdf_range(file_bytes or b"", chapter["pdf_start_index"], chapter["pdf_end_index"])
+                if book_download_error is not None:
+                    raise RuntimeError(book_download_error)
+                sliced = slice_pdf_range(book_file_bytes or b"", chapter["pdf_start_index"], chapter["pdf_end_index"])
 
                 template = zotero_write_client.item_template("bookSection")
                 item_data = build_book_section_item_data(template, book_data, chapter)
