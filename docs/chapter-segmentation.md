@@ -158,6 +158,15 @@ uv run python scripts/retrofit_chapter_links.py \
 get their current version before writing), never the whole library, and is
 only valid together with `--commit` — a dry run always matches fresh.
 
+Every written link also sets a native Zotero "Related" connection between
+the two items (visible in the Zotero client's Related tab), independent of
+the `Extra`-field convention above. `--target-collection <name>`
+optionally also files the *chapter* side of each written link into a
+`<name>/<Author (Year)>` subcollection (created if it doesn't exist yet,
+reused otherwise) — the same scheme Script 4 uses for its own newly
+created chapters below, but off by default here, since Script 3 links
+items you've already organized yourself.
+
 The output reports four buckets: `linked` (written this run, with a match
 score — empty unless `--commit` was passed), `would_link` (what `--commit`
 would write, populated only in dry-run mode), `ambiguous` (multiple
@@ -226,8 +235,10 @@ result. This is the same request/response shape as the CLI's flags
 `item_keys`, `relink`, `max_items`, `enable_llm_fallback`,
 `auto_select_model`, and `ocr_cache_dir`; the retrofit-link endpoint's body
 takes a `committed` flag, mirroring the CLI's `--commit` and defaulting to
-the same dry-run behavior, plus an optional `would_link` field mirroring
-the CLI's `--input`: pass a prior dry run's `would_link` response array
+the same dry-run behavior; an optional `would_link` field mirroring the
+CLI's `--input` (pass a prior dry run's `would_link` response array
 alongside `committed: true` to skip straight to writing those matches
-instead of re-fetching and re-matching the whole library) — useful for
-driving this from an external scheduler or admin tool instead of a shell.
+instead of re-fetching and re-matching the whole library); and an optional
+`target_collection` field mirroring the CLI's `--target-collection`) —
+useful for driving this from an external scheduler or admin tool instead
+of a shell.
