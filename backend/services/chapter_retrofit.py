@@ -205,79 +205,36 @@ def run(
     item_keys: list[str] | None,
     max_items: int | None,
     commit: bool = False,
+    would_link: list[dict] | None = None,
 ) -> dict:
-    """Core logic for script 3 (retrofit_chapter_links). Synchronous —
-    pyzotero's client is itself synchronous. Defaults to dry-run — `commit`
+    """Core logic for script 3 (retrofit_chapter_links). Synchronous --
+    pyzotero's client is itself synchronous. Defaults to dry-run -- `commit`
     must be explicitly True to write the `X-Contains`/`X-Contained-By`
     links to Zotero (mirrors chapter_upload.py's script 4 convention). See
     design spec §7.
+
+    If `would_link` is given (e.g. a prior dry run's output, replayed via
+    the CLI's --input flag or the API's `would_link` request field) AND
+    commit=True, this skips the full-library fetch and matching pass
+    entirely and goes straight to commit_links() -- this is what makes a
+    commit run after a dry run fast: the full-library fetch is what
+    dominates a fresh run's cost, not the fuzzy matching itself.
+    `would_link` is ignored when commit=False; a dry run always matches
+    fresh (there is nothing to preview if it just replayed a prior
+    preview).
     """
-    # zot.items() alone returns only the first page — everything() is
-    # required to auto-paginate through the full library.
+    if commit and would_link is not None:
+        result = commit_links(zotero_write_client, slug, would_link)
+        return {**result, "would_link": [], "ambiguous": [], "no_match": []}
+
     all_items = zotero_write_client.everything(zotero_write_client.items())
-    books = [i for i in all_items if i["data"].get("itemType") == "book"]
-    chapters = [i for i in all_items if i["data"].get("itemType") == "bookSection"]
+    matches = find_matches(all_items, item_keys, max_items)
 
-    unlinked_chapters = [c for c in chapters if not parse_links(c["data"].get("extra", "")).contained_by]
-    if item_keys is not None:
-        wanted = set(item_keys)
-        unlinked_chapters = [c for c in unlinked_chapters if c["data"]["key"] in wanted]
-    if max_items is not None:
-        unlinked_chapters = unlinked_chapters[:max_items]
+    if not commit:
+        return {
+            "linked": [], "would_link": matches["would_link"],
+            "ambiguous": matches["ambiguous"], "no_match": matches["no_match"], "failed": [],
+        }
 
-    book_candidates = [
-        {"key": b["data"]["key"], "title": b["data"].get("title", ""), "year": _year_from_date(b["data"].get("date"))}
-        for b in books
-    ]
-
-    linked: list[dict] = []
-    would_link: list[dict] = []
-    ambiguous: list[dict] = []
-    no_match: list[str] = []
-    failed: list[dict] = []
-
-    for chapter in unlinked_chapters:
-        chapter_key = chapter["data"]["key"]
-        book_title = chapter["data"].get("bookTitle", "")
-        year = _year_from_date(chapter["data"].get("date"))
-
-        if not book_title or not book_candidates:
-            no_match.append(chapter_key)
-            continue
-
-        match = find_best_book_match(book_title, year, book_candidates)
-        if match is None:
-            ambiguous.append({"chapter_key": chapter_key, "candidates": book_candidates})
-            continue
-
-        if not commit:
-            would_link.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
-            continue
-
-        book_item = zotero_write_client.item(match.book_key)
-        chapter_id = format_chapter_id(slug, chapter_key)
-        book_id = format_chapter_id(slug, match.book_key)
-
-        try:
-            # Write the book side (X-Contains) FIRST. If this fails, the
-            # chapter is left untouched and still shows up as "unlinked" on
-            # the next run. If it succeeds but the chapter write below then
-            # fails, the next run will re-match this chapter and re-write
-            # X-Contains — a no-op thanks to the deterministic ordering
-            # below — and simply retry the chapter write. This makes the
-            # two-write sequence self-healing instead of leaving a
-            # permanent one-sided link.
-            existing_links = parse_links(book_item["data"].get("extra", ""))
-            new_contains = list(dict.fromkeys([*existing_links.contains, chapter_id]))
-            book_item["data"]["extra"] = write_links(book_item["data"].get("extra", ""), contains=new_contains)
-            zotero_write_client.update_item(book_item)
-
-            chapter["data"]["extra"] = write_links(chapter["data"].get("extra", ""), contained_by=book_id)
-            zotero_write_client.update_item(chapter)
-        except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
-            failed.append({"chapter_key": chapter_key, "book_key": match.book_key, "error": str(exc)})
-            continue
-
-        linked.append({"chapter_key": chapter_key, "book_key": match.book_key, "score": match.score})
-
-    return {"linked": linked, "would_link": would_link, "ambiguous": ambiguous, "no_match": no_match, "failed": failed}
+    result = commit_links(zotero_write_client, slug, matches["would_link"])
+    return {**result, "would_link": [], "ambiguous": matches["ambiguous"], "no_match": matches["no_match"]}
