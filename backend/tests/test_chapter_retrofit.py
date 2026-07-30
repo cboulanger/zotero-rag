@@ -147,6 +147,26 @@ class TestCommitLinks(unittest.TestCase):
         self.assertEqual(len(result["linked"]), 2)
         self.assertEqual({e["chapter_key"] for e in result["linked"]}, {"CHAP1", "CHAP2"})
 
+    def test_malformed_entry_is_isolated_as_failure(self):
+        zot = MagicMock()
+        items = {
+            "BOOK1": {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}},
+            "CHAP1": {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}},
+        }
+        zot.item.side_effect = lambda key: items[key]
+
+        result = commit_links(zot, "groups/1", [
+            {"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0},
+            {"chapter_key": "CHAP2"},  # missing "book_key" -- must not raise
+        ])
+
+        self.assertEqual(len(result["linked"]), 1)
+        self.assertEqual(result["linked"][0]["chapter_key"], "CHAP1")
+        self.assertEqual(len(result["failed"]), 1)
+        self.assertEqual(result["failed"][0]["chapter_key"], "CHAP2")
+        self.assertEqual(result["failed"][0]["book_key"], "?")
+        self.assertIn("book_key", result["failed"][0]["error"])
+
 
 class TestRetrofitRun(unittest.TestCase):
     def test_links_confident_match_and_skips_ambiguous(self):

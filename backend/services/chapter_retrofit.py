@@ -168,11 +168,11 @@ def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict
     failed: list[dict] = []
 
     for entry in would_link:
-        chapter_key = entry["chapter_key"]
-        book_key = entry["book_key"]
-        score = entry["score"]
-
         try:
+            chapter_key = entry["chapter_key"]
+            book_key = entry["book_key"]
+            score = entry["score"]
+
             book_item = zotero_write_client.item(book_key)
             chapter_item = zotero_write_client.item(chapter_key)
 
@@ -186,7 +186,11 @@ def commit_links(zotero_write_client, slug: str, would_link: list[dict]) -> dict
             chapter_item["data"]["extra"] = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
             zotero_write_client.update_item(chapter_item)
         except Exception as exc:  # noqa: BLE001 - report and continue with other chapters
-            failed.append({"chapter_key": chapter_key, "book_key": book_key, "error": str(exc)})
+            failed.append({
+                "chapter_key": entry.get("chapter_key", "?"),
+                "book_key": entry.get("book_key", "?"),
+                "error": str(exc),
+            })
             continue
 
         linked.append({"chapter_key": chapter_key, "book_key": book_key, "score": score})
