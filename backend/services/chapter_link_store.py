@@ -43,6 +43,39 @@ def format_chapter_id(slug: str, item_key: str) -> str:
     return f"{slug}:{item_key}"
 
 
+_DC_RELATION = "dc:relation"
+
+
+def zotero_item_uri(slug: str, item_key: str) -> str:
+    """Zotero's native related-item URI (the "Related" tab in the Zotero
+    client): http://zotero.org/<slug>/items/<item_key>. `slug` is already
+    in the exact "users/<id>" / "groups/<id>" form this URI scheme
+    requires -- no extra API call needed to build it. Distinct from this
+    module's own X-Contains/X-Contained-By Extra-field convention above,
+    which exists for RAG retrieval-suppression and is never derived from
+    or cross-checked against `relations`.
+    """
+    return f"http://zotero.org/{slug}/items/{item_key}"
+
+
+def add_related_item(relations: dict, uri: str) -> dict:
+    """Return a NEW relations dict with `uri` added to
+    relations["dc:relation"], idempotently (no duplicate entries if called
+    again with the same uri) and normalizing Zotero's string-or-list
+    representation of a single relation to a list. Other relation types
+    already present (e.g. owl:sameAs, used by Zotero's own duplicate-merge
+    feature) are left untouched. Does not mutate the input dict.
+    """
+    relations = dict(relations or {})
+    existing = relations.get(_DC_RELATION, [])
+    if isinstance(existing, str):
+        existing = [existing] if existing else []
+    if uri not in existing:
+        existing = [*existing, uri]
+    relations[_DC_RELATION] = existing
+    return relations
+
+
 def parse_links(extra: str) -> ChapterLinks:
     """Extract X-Contained-By / X-Contains / X-Chapter-Pdf-Range from an
     item's Extra field text. Unrelated lines are ignored.

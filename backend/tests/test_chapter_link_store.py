@@ -4,10 +4,12 @@ import unittest
 
 from backend.services.chapter_link_store import (
     ChapterLinks,
+    add_related_item,
     format_chapter_id,
     parse_library_slug,
     parse_links,
     write_links,
+    zotero_item_uri,
 )
 
 
@@ -93,6 +95,54 @@ class TestWriteLinks(unittest.TestCase):
         result = write_links(extra, contains=["groups/1:BBBB2222"])
         self.assertIn("X-Contained-By: groups/1:AAAA1111", result)
         self.assertIn("X-Contains: groups/1:BBBB2222", result)
+
+
+class TestZoteroItemUri(unittest.TestCase):
+    def test_group_slug(self):
+        self.assertEqual(
+            zotero_item_uri("groups/6297749", "ABCD1234"),
+            "http://zotero.org/groups/6297749/items/ABCD1234",
+        )
+
+    def test_user_slug(self):
+        self.assertEqual(
+            zotero_item_uri("users/12345", "WXYZ5678"),
+            "http://zotero.org/users/12345/items/WXYZ5678",
+        )
+
+
+class TestAddRelatedItem(unittest.TestCase):
+    def test_adds_to_empty_relations(self):
+        result = add_related_item({}, "http://zotero.org/groups/1/items/AAAA1111")
+        self.assertEqual(result, {"dc:relation": ["http://zotero.org/groups/1/items/AAAA1111"]})
+
+    def test_idempotent_no_duplicate(self):
+        once = add_related_item({}, "http://zotero.org/groups/1/items/AAAA1111")
+        twice = add_related_item(once, "http://zotero.org/groups/1/items/AAAA1111")
+        self.assertEqual(twice["dc:relation"], ["http://zotero.org/groups/1/items/AAAA1111"])
+
+    def test_normalizes_existing_bare_string_to_list(self):
+        result = add_related_item(
+            {"dc:relation": "http://zotero.org/groups/1/items/OLD0000"},
+            "http://zotero.org/groups/1/items/NEW1111",
+        )
+        self.assertEqual(
+            result["dc:relation"],
+            ["http://zotero.org/groups/1/items/OLD0000", "http://zotero.org/groups/1/items/NEW1111"],
+        )
+
+    def test_preserves_unrelated_relation_types(self):
+        result = add_related_item(
+            {"owl:sameAs": ["http://zotero.org/groups/1/items/DUPE0000"]},
+            "http://zotero.org/groups/1/items/NEW1111",
+        )
+        self.assertEqual(result["owl:sameAs"], ["http://zotero.org/groups/1/items/DUPE0000"])
+        self.assertEqual(result["dc:relation"], ["http://zotero.org/groups/1/items/NEW1111"])
+
+    def test_does_not_mutate_input(self):
+        original = {"dc:relation": ["http://zotero.org/groups/1/items/OLD0000"]}
+        add_related_item(original, "http://zotero.org/groups/1/items/NEW1111")
+        self.assertEqual(original["dc:relation"], ["http://zotero.org/groups/1/items/OLD0000"])
 
 
 if __name__ == "__main__":
