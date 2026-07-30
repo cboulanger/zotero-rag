@@ -1,10 +1,13 @@
 """Unit tests for backend.services.chapter_link_store."""
 
 import unittest
+from unittest.mock import MagicMock
 
 from backend.services.chapter_link_store import (
     ChapterLinks,
     add_related_item,
+    author_year_label,
+    ensure_target_collection,
     format_chapter_id,
     parse_library_slug,
     parse_links,
@@ -143,6 +146,39 @@ class TestAddRelatedItem(unittest.TestCase):
         original = {"dc:relation": ["http://zotero.org/groups/1/items/OLD0000"]}
         add_related_item(original, "http://zotero.org/groups/1/items/NEW1111")
         self.assertEqual(original["dc:relation"], ["http://zotero.org/groups/1/items/OLD0000"])
+
+
+class TestAuthorYearLabel(unittest.TestCase):
+    def test_single_author(self):
+        self.assertEqual(author_year_label(["Jane Miller"], "2023"), "Miller (2023)")
+
+    def test_two_or_more_authors_uses_et_al(self):
+        self.assertEqual(author_year_label(["Jane Smith", "John Doe", "Amy Lee"], "1999"), "Smith et al. (1999)")
+
+    def test_no_authors_falls_back_to_untitled(self):
+        self.assertEqual(author_year_label([], "2020"), "Unknown (2020)")
+
+
+class TestEnsureTargetCollection(unittest.TestCase):
+    def test_creates_top_level_and_subcollection_when_absent(self):
+        zot = MagicMock()
+        zot.collections.return_value = []
+        zot.create_collection.return_value = {"successful": {"0": {"key": "TOPKEY01"}}}
+        zot.collections_sub.return_value = []
+
+        top_key, sub_key = ensure_target_collection(zot, "Book Chapters", "Miller (2023)")
+        zot.create_collection.assert_called()
+        self.assertEqual(top_key, "TOPKEY01")
+
+    def test_reuses_existing_collections(self):
+        zot = MagicMock()
+        zot.collections.return_value = [{"key": "TOPKEY01", "data": {"name": "Book Chapters"}}]
+        zot.collections_sub.return_value = [{"key": "SUBKEY01", "data": {"name": "Miller (2023)"}}]
+
+        top_key, sub_key = ensure_target_collection(zot, "Book Chapters", "Miller (2023)")
+        self.assertEqual(top_key, "TOPKEY01")
+        self.assertEqual(sub_key, "SUBKEY01")
+        zot.create_collection.assert_not_called()
 
 
 if __name__ == "__main__":
