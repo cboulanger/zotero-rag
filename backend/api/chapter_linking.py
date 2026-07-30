@@ -181,6 +181,12 @@ class RetrofitLinkRequest(BaseModel):
     item_keys: list[str] | None = None
     max_items: int | None = None
     committed: bool = False
+    # A prior dry run's `would_link` list (this endpoint's own response
+    # shape, see JobStatusResponse.result). When given together with
+    # committed=True, chapter_retrofit.run() replays it instead of
+    # re-fetching and re-matching the whole library -- see run()'s
+    # docstring in backend/services/chapter_retrofit.py.
+    would_link: list[dict] | None = None
 
 
 @router.post(
@@ -202,6 +208,7 @@ async def start_retrofit_link(request: RetrofitLinkRequest) -> JobIdResponse:
                 item_keys=request.item_keys,
                 max_items=request.max_items,
                 commit=request.committed,
+                would_link=request.would_link,
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001
