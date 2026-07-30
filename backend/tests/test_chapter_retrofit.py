@@ -297,6 +297,22 @@ class TestRetrofitRun(unittest.TestCase):
         zot.update_item.assert_not_called()
         self.assertEqual(result["would_link"][0]["chapter_key"], "CHAP1")
 
+    def test_commit_with_empty_would_link_list_short_circuits_to_noop(self):
+        zot = MagicMock()
+
+        result = retrofit_run(
+            zotero_write_client=zot,
+            slug="groups/1",
+            item_keys=None,
+            max_items=None,
+            commit=True,
+            would_link=[],
+        )
+
+        zot.everything.assert_not_called()
+        zot.item.assert_not_called()
+        self.assertEqual(result, {"linked": [], "failed": [], "would_link": [], "ambiguous": [], "no_match": []})
+
 
 if __name__ == "__main__":
     unittest.main()

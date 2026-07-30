@@ -222,6 +222,14 @@ def run(
     `would_link` is ignored when commit=False; a dry run always matches
     fresh (there is nothing to preview if it just replayed a prior
     preview).
+
+    Note `would_link=[]` (an empty list) still counts as "given" here --
+    it takes the same fast path as a non-empty list, short-circuiting to
+    an all-empty no-op result via commit_links(..., []) rather than
+    falling back to a fresh full match. This is intentional: an empty
+    would_link legitimately means "a prior dry run already determined
+    there's nothing to link" and replaying that is correct. Only
+    would_link=None triggers a fresh match.
     """
     if commit and would_link is not None:
         result = commit_links(zotero_write_client, slug, would_link)
