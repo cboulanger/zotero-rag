@@ -4,11 +4,16 @@ import unittest
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
 from backend.services.chapter_segmentation import (
     TocEntry,
     extract_page_texts_from_pdf_bytes,
     find_toc_candidates,
     llm_extract_toc_entries,
+    load_cached_analysis,
+    save_analysis_cache,
     _toc_scan_indices,
     analyze_attachment_with_llm_fallback,
 )
@@ -862,6 +867,32 @@ class TestChaptersFromLocated(unittest.TestCase):
         sources = {c["title"]: c["source"] for c in chapters}
         self.assertEqual(sources["Introduction"], "llm")
         self.assertEqual(sources["Comparing Citation Styles"], "heuristic")
+
+
+class TestAnalysisCache(unittest.TestCase):
+    def test_round_trip(self):
+        with TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            entry = {"item_key": "B1", "attachment_key": "A1", "chapters": []}
+            save_analysis_cache(cache_dir, "B1", "A1", 5, "heuristic", entry)
+            result = load_cached_analysis(cache_dir, "B1", "A1", 5, "heuristic")
+            self.assertEqual(result, entry)
+
+    def test_returns_none_when_not_cached(self):
+        with TemporaryDirectory() as tmp:
+            self.assertIsNone(load_cached_analysis(Path(tmp), "B1", "A1", 5, "heuristic"))
+
+    def test_different_version_is_a_cache_miss(self):
+        with TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            save_analysis_cache(cache_dir, "B1", "A1", 5, "heuristic", {"chapters": []})
+            self.assertIsNone(load_cached_analysis(cache_dir, "B1", "A1", 6, "heuristic"))
+
+    def test_different_mode_is_a_cache_miss(self):
+        with TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            save_analysis_cache(cache_dir, "B1", "A1", 5, "heuristic", {"chapters": []})
+            self.assertIsNone(load_cached_analysis(cache_dir, "B1", "A1", 5, "llm_fallback"))
 
 
 class TestRun(unittest.TestCase):

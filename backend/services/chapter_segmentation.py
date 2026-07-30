@@ -11,6 +11,7 @@ never assumed from position.
 
 import hashlib
 import io
+import json
 import logging
 import re
 import unicodedata
@@ -200,6 +201,35 @@ def extract_page_texts_from_pdf_bytes(content: bytes) -> list[str]:
     """
     reader = PdfReader(io.BytesIO(content))
     return [page.extract_text() or "" for page in reader.pages]
+
+
+def _analysis_cache_path(cache_dir: Path, item_key: str, attachment_key: str, version: int, mode: str) -> Path:
+    return cache_dir / f"{item_key}-{attachment_key}-v{version}-{mode}.analysis.json"
+
+
+def load_cached_analysis(cache_dir: Path, item_key: str, attachment_key: str, version: int, mode: str) -> Optional[dict]:
+    """Cached run()-entry (has_text_layer/needs_ocr/chapters/diagnostics)
+    for this exact attachment VERSION and analysis `mode` ("heuristic" or
+    "llm_fallback"), or None on a cache miss. Keyed by the attachment's own
+    Zotero version (not a content hash) so a hit never requires downloading
+    the PDF at all -- unlike chapter_ocr.py's content-hash cache, which can
+    only short-circuit AFTER the download since the hash needs the bytes.
+    `mode` is part of the key so a heuristic-only cache entry is never
+    served back when the caller now wants the LLM fallback applied (a
+    heuristic pass that found zero chapters must not silently shadow a
+    later --llm-fallback run against the same unchanged attachment).
+    """
+    path = _analysis_cache_path(cache_dir, item_key, attachment_key, version, mode)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_analysis_cache(cache_dir: Path, item_key: str, attachment_key: str, version: int, mode: str, entry: dict) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = _analysis_cache_path(cache_dir, item_key, attachment_key, version, mode)
+    path.write_text(json.dumps(entry), encoding="utf-8")
+    return path
 
 
 def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_back_fraction: float = 0.05) -> list[TocEntry]:
