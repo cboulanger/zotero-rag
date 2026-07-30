@@ -196,7 +196,14 @@ class TestUploadRun(unittest.TestCase):
         self.assertEqual(len(result["created"]), 2)
         read_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
 
-    def test_commit_sets_native_relations_on_chapter_and_book(self):
+    def test_commit_sets_native_relations_on_chapter(self):
+        # Only the CHAPTER side is written explicitly. Zotero's API
+        # auto-mirrors a relation onto the item it points at, so the book
+        # side is expected to pick up the reverse link server-side, not via
+        # a second manual write here (see the re-fetch-before-final-PATCH
+        # comment in chapter_upload.run()) -- a MagicMock has no such
+        # auto-mirroring, so this test only asserts the one write this
+        # code path actually performs.
         book_item, analysis = self._book_and_analysis()
         zot = MagicMock()
         zot.item.return_value = book_item
@@ -228,11 +235,12 @@ class TestUploadRun(unittest.TestCase):
                 target_collection="Book Chapters", max_items=None,
             ))
 
-        chapter_key = result["created"][0]["chapter_key"]
         chapter_update_relations = zot.update_item.call_args_list[0][0][0]["data"]["relations"]
-        book_update_relations = zot.update_item.call_args_list[1][0][0]["data"]["relations"]
         self.assertIn("http://zotero.org/groups/1/items/BOOK1", chapter_update_relations["dc:relation"])
-        self.assertIn(f"http://zotero.org/groups/1/items/{chapter_key}", book_update_relations["dc:relation"])
+        # Book's own update_item call re-fetches the item and never sets
+        # "relations" itself -- see run()'s re-fetch comment.
+        book_update_data = zot.update_item.call_args_list[1][0][0]["data"]
+        self.assertNotIn("relations", book_update_data)
 
     def test_below_threshold_is_skipped(self):
         book_item, analysis = self._book_and_analysis()

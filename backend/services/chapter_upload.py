@@ -125,7 +125,6 @@ async def run(
             continue
 
         new_chapter_ids: list[str] = []
-        new_chapter_keys: list[str] = []
         pdf_ranges: dict[str, tuple[int, int]] = {}
 
         # Download the book's PDF attachment ONCE per book, not once per
@@ -222,7 +221,6 @@ async def run(
                 zotero_write_client.update_item(chapter_item)
 
                 new_chapter_ids.append(chapter_id)
-                new_chapter_keys.append(chapter_key)
                 pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
 
                 created.append({"book_key": book_key, "chapter_key": chapter_key})
@@ -231,16 +229,21 @@ async def run(
                 continue
 
         if new_chapter_ids:
+            # Re-fetch the book right before this PATCH: each chapter's own
+            # update_item() call above (setting chapter->book in `relations`)
+            # made Zotero's API auto-mirror the reverse book->chapter relation
+            # onto the book server-side, bumping its version -- the `book_item`
+            # fetched at the top of this loop is now stale, and a PATCH built
+            # from it would 412. Re-fetching also means the book's `relations`
+            # here already reflects every chapter's auto-mirrored link, so no
+            # manual book-side relations write is needed at all.
+            book_item = zotero_write_client.item(book_key)
             existing = parse_links(book_item["data"].get("extra", ""))
             merged_contains = list(dict.fromkeys([*existing.contains, *new_chapter_ids]))
             merged_ranges = {**existing.pdf_ranges, **pdf_ranges}
             book_item["data"]["extra"] = write_links(
                 book_item["data"].get("extra", ""), contains=merged_contains, pdf_ranges=merged_ranges
             )
-            book_relations = book_item["data"].get("relations", {})
-            for new_chapter_key in new_chapter_keys:
-                book_relations = add_related_item(book_relations, zotero_item_uri(slug, new_chapter_key))
-            book_item["data"]["relations"] = book_relations
             zotero_write_client.update_item(book_item)
 
     return {

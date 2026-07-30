@@ -167,7 +167,13 @@ class TestCommitLinks(unittest.TestCase):
         self.assertEqual(result["failed"][0]["book_key"], "?")
         self.assertIn("book_key", result["failed"][0]["error"])
 
-    def test_sets_native_relations_on_both_items(self):
+    def test_sets_native_relations_on_book_only_relies_on_server_auto_mirror(self):
+        # Only the BOOK side is written explicitly. Zotero's API auto-mirrors
+        # a relation onto the item it points at, so the chapter side is
+        # expected to pick up the reverse link server-side (via the re-fetch
+        # right before the chapter's own PATCH), not via a second manual
+        # write here -- a MagicMock has no such auto-mirroring, so this test
+        # only asserts the one write this code path actually performs.
         zot = MagicMock()
         book_item = {"key": "BOOK1", "data": {"key": "BOOK1", "extra": ""}}
         chapter_item = {"key": "CHAP1", "data": {"key": "CHAP1", "extra": ""}}
@@ -178,7 +184,7 @@ class TestCommitLinks(unittest.TestCase):
         book_update = zot.update_item.call_args_list[0].args[0]
         chapter_update = zot.update_item.call_args_list[1].args[0]
         self.assertIn("http://zotero.org/groups/1/items/CHAP1", book_update["data"]["relations"]["dc:relation"])
-        self.assertIn("http://zotero.org/groups/1/items/BOOK1", chapter_update["data"]["relations"]["dc:relation"])
+        self.assertNotIn("relations", chapter_update["data"])
 
     def test_target_collection_none_by_default_no_collection_calls(self):
         zot = MagicMock()

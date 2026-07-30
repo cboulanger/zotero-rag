@@ -204,10 +204,17 @@ def commit_links(
             )
             zotero_write_client.update_item(book_item)
 
+            # Re-fetch the chapter right before its own PATCH: the book's
+            # update_item() call above (setting book->chapter in `relations`)
+            # made Zotero's API auto-mirror the reverse chapter->book relation
+            # onto the chapter server-side, bumping its version -- the
+            # `chapter_item` fetched at the top of this iteration is now
+            # stale, and a PATCH built from it would 412. Re-fetching also
+            # means `chapter_item["data"]["relations"]` here already reflects
+            # the auto-mirrored link, so no manual chapter-side relations
+            # write is needed at all.
+            chapter_item = zotero_write_client.item(chapter_key)
             chapter_item["data"]["extra"] = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
-            chapter_item["data"]["relations"] = add_related_item(
-                chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
-            )
             if target_collection is not None:
                 label = author_year_label(
                     [c.get("lastName", "") for c in book_item["data"].get("creators", [])],
