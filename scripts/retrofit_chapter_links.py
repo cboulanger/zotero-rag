@@ -38,6 +38,13 @@ def main() -> int:
              "commit pass instead of re-fetching and re-matching the whole library. Only "
              "valid together with --commit.",
     )
+    parser.add_argument(
+        "--target-collection", default=None,
+        help="File each linked chapter into a '<name>/<Author (Year)>' subcollection "
+             "(created if absent). Off by default -- a retrofit run links items the "
+             "library owner has already organized themselves, so filing into a new "
+             "collection structure is opt-in only.",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -57,6 +64,7 @@ def main() -> int:
         max_items=args.max_items,
         commit=args.commit,
         would_link=would_link,
+        target_collection=args.target_collection,
     )
 
     if not args.commit:
