@@ -464,6 +464,36 @@ class TestReviewEndpoints(unittest.TestCase):
         self.assertEqual(body["executed"], [])
         self.assertEqual(len(body["failed"]), 1)
 
+    def test_send_to_review_flips_bucket(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "chapter:BOOK1:2-4", "type": "chapter", "bucket": "commit", "payload": {}},
+        ])
+        response = self.client.post(
+            "/api/chapter-linking/review/chapter:BOOK1:2-4/send-to-review", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        entry = review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "chapter:BOOK1:2-4")
+        self.assertEqual(entry["bucket"], "review")
+        self.assertEqual(entry["status"], "pending")
+
+    def test_send_to_review_rejects_review_bucket_entries(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "chapter:BOOK1:2-4", "type": "chapter", "bucket": "review", "payload": {}},
+        ])
+        response = self.client.post(
+            "/api/chapter-linking/review/chapter:BOOK1:2-4/send-to-review", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_send_to_review_unknown_queue_id_returns_404(self):
+        self._override_admin()
+        response = self.client.post(
+            "/api/chapter-linking/review/does-not-exist/send-to-review", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

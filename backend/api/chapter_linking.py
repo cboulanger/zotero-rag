@@ -468,3 +468,22 @@ async def reject_review_entry(
         raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
     review_queue_store.set_status(path, library_slug, queue_id, "rejected")
     return {"queue_id": queue_id, "status": "rejected"}
+
+
+@router.post(
+    "/chapter-linking/review/{queue_id}/send-to-review",
+    summary="Move one pending commit-queue entry to the review queue (admin only)",
+)
+async def send_entry_to_review(
+    queue_id: str,
+    library_slug: str,
+    identity: ZoteroIdentity | None = Depends(require_authorized_group_admin),
+) -> dict:
+    path = get_settings().review_queue_path
+    entry = review_queue_store.get_entry(path, library_slug, queue_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
+    if entry["bucket"] != "commit":
+        raise HTTPException(status_code=400, detail="Only commit-bucket entries can be sent to review")
+    review_queue_store.set_bucket(path, library_slug, queue_id, "review")
+    return {"queue_id": queue_id, "bucket": "review"}
