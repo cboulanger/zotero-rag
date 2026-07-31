@@ -213,11 +213,22 @@ during the initial live test.
      "needs verification" note above about local mirroring behavior.
 
 6. **Create New Book Item**: creates a local `book` item with `title =
-   chapter.bookTitle`, and `publisher`/`place`/`date`/`ISBN`/`language`
-   copied over from the chapter item where present (the chapter's own
-   creators are chapter authors, not book editors, so the new book item is
-   created with no creators — the user fills those in manually afterward).
-   Then runs the same link-write as step 5 against the new item.
+   chapter.bookTitle`, `publisher`/`place`/`date`/`ISBN`/`language` copied
+   over from the chapter item where present, and creators built from the
+   chapter's own `editor`-type creators (Zotero's schema allows
+   `creatorType: "editor"` on `bookSection` items —
+   `resource/schema/system-107.sql:807-815`,
+   `itemTypeCreatorTypes(itemTypeID=3, creatorTypeID=3)` — and
+   `segment-upload` already writes a book's creators onto its generated
+   chapters this way, per `docs/chapter-segmentation.md`'s "metadata …
+   inherited from the book" note, so a chapter catalogued from an edited
+   volume typically already carries its book's editor(s) under this
+   role). The chapter's `author`-type creators (the chapter's own authors)
+   are excluded — they copy across as `editor` on the new book item,
+   keeping the same creator type. If the chapter has no `editor`-type
+   creators at all, the new book item is created with no creators and the
+   user fills those in manually. Then runs the same link-write as step 5
+   against the new item.
 
 ### New shared helper: library slug
 
