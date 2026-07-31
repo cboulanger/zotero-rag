@@ -2,14 +2,18 @@
 
 import asyncio
 import io
+import tempfile
 import unittest
+from pathlib import Path as _TestPath
 from unittest.mock import MagicMock, patch
 
 from pypdf import PdfReader, PdfWriter
 
+from backend.config.settings import get_settings, reset_settings
 from backend.services.chapter_upload import slice_pdf_range
 from backend.services.chapter_upload import build_book_section_item_data
 from backend.services.chapter_upload import run as upload_run
+from backend.services.review_queue_store import get_entry
 
 
 def _make_test_pdf(num_pages: int) -> bytes:
@@ -64,6 +68,15 @@ class TestBuildBookSectionItemData(unittest.TestCase):
 
 
 class TestUploadRun(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        reset_settings()
+        get_settings().review_queue_path = _TestPath(self.tmp.name) / "review_queue.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        reset_settings()
+
     def _book_and_analysis(self):
         book_item = {
             "key": "BOOK1",
@@ -195,6 +208,43 @@ class TestUploadRun(unittest.TestCase):
 
         self.assertEqual(len(result["created"]), 2)
         read_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
+
+    def test_dry_run_upserts_confident_chapter_as_commit_bucket(self):
+        book_item, analysis = self._book_and_analysis()
+        zot = MagicMock()
+        zot.item.return_value = book_item
+
+        asyncio.run(upload_run(
+            zotero_write_client=zot, zotero_read_client=MagicMock(get_attachment_file=MagicMock()),
+            slug="groups/1", analyses=[analysis], commit=False, confidence_threshold=0.8,
+            target_collection="Book Chapters", max_items=None,
+        ))
+
+        entry = get_entry(get_settings().review_queue_path, "groups/1", "chapter:BOOK1:2-4")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["type"], "chapter")
+        self.assertEqual(entry["bucket"], "commit")
+        self.assertEqual(entry["payload"]["book_key"], "BOOK1")
+        self.assertEqual(entry["payload"]["attachment_key"], "ATT1")
+        self.assertEqual(entry["payload"]["title"], "Comparing Citation Styles")
+        self.assertEqual(entry["payload"]["target_collection"], "Book Chapters")
+
+    def test_low_confidence_chapter_upserted_as_review_bucket_in_both_dry_run_and_commit(self):
+        book_item, analysis = self._book_and_analysis()
+        analysis["chapters"][0]["confidence"] = 0.5  # below the 0.8 threshold used below
+        zot = MagicMock()
+        zot.item.return_value = book_item
+
+        asyncio.run(upload_run(
+            zotero_write_client=zot, zotero_read_client=MagicMock(get_attachment_file=MagicMock()),
+            slug="groups/1", analyses=[analysis], commit=False, confidence_threshold=0.8,
+            target_collection="Book Chapters", max_items=None,
+        ))
+
+        entry = get_entry(get_settings().review_queue_path, "groups/1", "chapter:BOOK1:2-4")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["bucket"], "review")
+        self.assertEqual(entry["payload"]["confidence"], 0.5)
 
     def test_commit_sets_native_relations_on_chapter(self):
         # Only the CHAPTER side is written explicitly. Zotero's API

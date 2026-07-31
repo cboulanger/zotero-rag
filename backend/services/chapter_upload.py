@@ -8,6 +8,8 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 
+from backend.config.settings import get_settings
+from backend.services import review_queue_store
 from backend.services.chapter_link_store import (
     add_related_item,
     author_year_label,
@@ -108,6 +110,8 @@ async def run(
     created: list[dict] = []
     skipped_low_confidence: list[dict] = []
     failed: list[dict] = []
+    review_entries: list[dict] = []
+    commit_entries: list[dict] = []
 
     for analysis in analyses:
         book_key = analysis["item_key"]
@@ -119,7 +123,27 @@ async def run(
         low_confidence = [c for c in analysis.get("chapters", []) if c["confidence"] < confidence_threshold]
         skipped_low_confidence.extend({"book_key": book_key, "title": c["title"]} for c in low_confidence)
 
+        def _chapter_payload(c: dict) -> dict:
+            return {
+                "book_key": book_key, "attachment_key": attachment_key,
+                "title": c["title"], "authors": c.get("authors", []),
+                "pdf_start_index": c["pdf_start_index"], "pdf_end_index": c["pdf_end_index"],
+                "citation_pages": c.get("citation_pages"), "confidence": c["confidence"],
+                "target_collection": target_collection,
+            }
+
+        review_entries.extend(
+            {"queue_id": f"chapter:{book_key}:{c['pdf_start_index']}-{c['pdf_end_index']}",
+             "type": "chapter", "bucket": "review", "payload": _chapter_payload(c)}
+            for c in low_confidence
+        )
+
         if not commit:
+            commit_entries.extend(
+                {"queue_id": f"chapter:{book_key}:{c['pdf_start_index']}-{c['pdf_end_index']}",
+                 "type": "chapter", "bucket": "commit", "payload": _chapter_payload(c)}
+                for c in confident_chapters
+            )
             would_create.extend({"book_key": book_key, "title": c["title"], "pdf_start_index": c["pdf_start_index"],
                                   "pdf_end_index": c["pdf_end_index"]} for c in confident_chapters)
             continue
@@ -245,6 +269,9 @@ async def run(
                 book_item["data"].get("extra", ""), contains=merged_contains, pdf_ranges=merged_ranges
             )
             zotero_write_client.update_item(book_item)
+
+    if review_entries or commit_entries:
+        review_queue_store.upsert_many(get_settings().review_queue_path, slug, review_entries + commit_entries)
 
     return {
         "would_create": would_create,
