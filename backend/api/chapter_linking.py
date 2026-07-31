@@ -376,6 +376,7 @@ async def _apply_entry(
             item_keys=[payload["book_key"]],
             max_items=None,
             relink=False,
+            ocr_cache_dir=_Path("data/ocr_cache"),
             progress_callback=lambda p, m: None,
         )
         return {"ocr": ocr_result, "analysis": analyze_result}

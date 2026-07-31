@@ -380,13 +380,14 @@ class TestReviewEndpoints(unittest.TestCase):
              "payload": {"book_key": "BOOK1", "attachment_key": "ATT1"}},
         ])
         with patch("backend.api.chapter_linking.ocr_run", new=AsyncMock(return_value={"results": []})), \
-             patch("backend.api.chapter_linking.analyze_run", new=AsyncMock(return_value={"slug": "groups/1", "attachments": []})):
+             patch("backend.api.chapter_linking.analyze_run", new=AsyncMock(return_value={"slug": "groups/1", "attachments": []})) as mock_analyze:
             response = self.client.post(
                 "/api/chapter-linking/review/ocr:ATT1/approve",
                 json={"library_slug": "groups/1", "api_key": "WRITE-KEY"},
             )
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "ocr:ATT1"))
+        self.assertEqual(mock_analyze.call_args.kwargs["ocr_cache_dir"], Path("data/ocr_cache"))
 
     def test_approve_unknown_queue_id_returns_404(self):
         self._override_admin()
