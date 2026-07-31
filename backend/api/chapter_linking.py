@@ -421,6 +421,38 @@ async def approve_review_entry(
     return {"queue_id": queue_id, "status": "approved", "result": result}
 
 
+class ReviewExecuteRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    queue_ids: list[str]
+
+
+@router.post(
+    "/chapter-linking/review/execute",
+    summary="Execute (commit) a batch of pending commit-queue entries (admin only)",
+)
+async def execute_review_entries(
+    request: ReviewExecuteRequest,
+    identity: ZoteroIdentity | None = Depends(require_authorized_group_admin),
+) -> dict:
+    path = get_settings().review_queue_path
+    executed: list[str] = []
+    failed: list[dict] = []
+    for queue_id in request.queue_ids:
+        entry = review_queue_store.get_entry(path, request.library_slug, queue_id)
+        if entry is None or entry["bucket"] != "commit" or entry["status"] != "pending":
+            failed.append({"queue_id": queue_id, "error": "not a pending commit-bucket entry"})
+            continue
+        try:
+            await _apply_entry(entry, request.library_slug, request.api_key)
+        except Exception as exc:  # noqa: BLE001 — isolate per-item, matches commit_links()'s own convention
+            failed.append({"queue_id": queue_id, "error": str(exc)})
+            continue
+        review_queue_store.set_status(path, request.library_slug, queue_id, "approved")
+        executed.append(queue_id)
+    return {"executed": executed, "failed": failed}
+
+
 @router.post(
     "/chapter-linking/review/{queue_id}/reject",
     summary="Reject one pending review-queue entry (admin only, no Zotero write)",

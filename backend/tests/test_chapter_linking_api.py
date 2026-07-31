@@ -416,6 +416,54 @@ class TestReviewEndpoints(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_execute_runs_each_commit_entry_and_marks_approved(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "commit",
+             "payload": {"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 0.95}},
+        ])
+        with patch("backend.api.chapter_linking.commit_links", return_value={"linked": [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 0.95}], "failed": []}):
+            response = self.client.post(
+                "/api/chapter-linking/review/execute",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "queue_ids": ["match:CHAP1"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["executed"], ["match:CHAP1"])
+        self.assertEqual(body["failed"], [])
+        entry = review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "match:CHAP1")
+        self.assertEqual(entry["status"], "approved")
+
+    def test_execute_isolates_per_item_failures(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "commit",
+             "payload": {"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 0.95}},
+        ])
+        with patch("backend.api.chapter_linking.commit_links", side_effect=RuntimeError("boom")):
+            response = self.client.post(
+                "/api/chapter-linking/review/execute",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "queue_ids": ["match:CHAP1"]},
+            )
+        body = response.json()
+        self.assertEqual(body["executed"], [])
+        self.assertEqual(len(body["failed"]), 1)
+        self.assertEqual(body["failed"][0]["queue_id"], "match:CHAP1")
+
+    def test_execute_rejects_review_bucket_entries(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "review",
+             "payload": {"chapter_key": "CHAP1", "candidates": []}},
+        ])
+        response = self.client.post(
+            "/api/chapter-linking/review/execute",
+            json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "queue_ids": ["match:CHAP1"]},
+        )
+        body = response.json()
+        self.assertEqual(body["executed"], [])
+        self.assertEqual(len(body["failed"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
