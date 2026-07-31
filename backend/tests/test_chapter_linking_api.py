@@ -1,12 +1,20 @@
 """Unit tests for backend.api.chapter_linking (job-polling endpoint)."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from backend.api import chapter_linking
+from backend.config.settings import get_settings, reset_settings
+from backend.dependencies import require_authorized_group_admin
 from backend.main import app
+from backend.services import review_queue_store
+from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
+from backend.zotero.group_roles import reset_admin_role_cache
+from backend.zotero.key_validator import KeyValidation
 
 
 class TestJobPolling(unittest.TestCase):
@@ -231,6 +239,67 @@ class TestSegmentUploadEndpoint(unittest.TestCase):
         self.assertIn("job_id", response.json())
         _, kwargs = mock_run.call_args
         self.assertFalse(kwargs["commit"])
+
+
+class TestReviewEndpoints(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+        s = get_settings()
+        s.data_path = Path(self.tmp.name)
+        s.review_queue_path = Path(self.tmp.name) / "review_queue.json"
+        s.authorized_group_id = 999
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
+        self.tmp.cleanup()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+
+    def _override_admin(self):
+        app.dependency_overrides[require_authorized_group_admin] = lambda: ZoteroIdentity(
+            user_id=1, username="admin", targets=["groups/1"]
+        )
+
+    def test_lists_pending_entries_for_library(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "ocr:ATT1", "type": "ocr", "bucket": "review", "payload": {"book_key": "BOOK1", "attachment_key": "ATT1"}},
+        ])
+        response = self.client.get("/api/chapter-linking/review/pending", params={"library_slug": "groups/1"})
+        self.assertEqual(response.status_code, 200)
+        entries = response.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["queue_id"], "ocr:ATT1")
+
+    def test_filters_by_bucket(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "ocr:ATT1", "type": "ocr", "bucket": "review", "payload": {}},
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "commit", "payload": {}},
+        ])
+        response = self.client.get(
+            "/api/chapter-linking/review/pending", params={"library_slug": "groups/1", "bucket": "commit"}
+        )
+        entries = response.json()["entries"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["queue_id"], "match:CHAP1")
+
+    def test_rejects_non_admin(self):
+        get_settings().api_host = "rag.example.com"
+        validation = KeyValidation(user_id=1, username="u", targets=["users/1", "groups/999"], read_only=True)
+        with patch("backend.services.zotero_identity.validate_key", new=AsyncMock(return_value=validation)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            response = self.client.get(
+                "/api/chapter-linking/review/pending",
+                params={"library_slug": "groups/1"},
+                headers={"X-Zotero-API-Key": "K"},
+            )
+        self.assertEqual(response.status_code, 403)
 
 
 if __name__ == "__main__":

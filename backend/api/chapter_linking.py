@@ -13,18 +13,21 @@ import logging
 from pathlib import Path as _Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from pyzotero import zotero
 
-from backend.dependencies import make_llm_service
+from backend.config.settings import get_settings
+from backend.dependencies import make_llm_service, require_authorized_group_admin
+from backend.services import review_queue_store
 from backend.services.chapter_link_store import parse_library_slug
 from backend.services.chapter_ocr import run as ocr_run
-from backend.services.chapter_retrofit import run as retrofit_run
+from backend.services.chapter_retrofit import commit_links, run as retrofit_run
 from backend.services.chapter_segmentation import run as analyze_run
 from backend.services.chapter_upload import run as upload_run
 from backend.services.extraction import create_document_extractor
 from backend.services.job_tracker import JobTracker
+from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
@@ -277,3 +280,16 @@ async def start_segment_upload(request: SegmentUploadRequest) -> JobIdResponse:
 
     asyncio.create_task(_task())
     return JobIdResponse(job_id=job_id)
+
+
+@router.get(
+    "/chapter-linking/review/pending",
+    summary="List pending chapter-review queue entries for a library (admin only)",
+)
+async def list_pending_review(
+    library_slug: str,
+    bucket: str | None = None,
+    identity: ZoteroIdentity | None = Depends(require_authorized_group_admin),
+) -> dict:
+    entries = review_queue_store.list_pending(get_settings().review_queue_path, library_slug, bucket=bucket)
+    return {"entries": entries}
