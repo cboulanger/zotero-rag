@@ -31,6 +31,15 @@ admin-triggered pass using the CLI commands and web UI below.
 
 ## Quick start
 
+**The easiest way to run this is from the browser:** open **`/admin/run`**,
+enter the library slug and API key (optionally cap how many books to
+process with "max items"), and click **Run pipeline**. It drives the same
+four steps below in the right order — including the OCR follow-up, if any
+book needs it — and redirects to `/admin/review` when done. Use the CLI
+commands instead when you need flags this page doesn't expose (confidence
+thresholds, a non-default target collection, LLM fallback) or want to script
+a run.
+
 Four commands populate two review queues; you then resolve everything
 from a web page instead of hand-editing JSON files or tuning thresholds
 blindly. Replace `groups/6297749` and `<api-key>` throughout.

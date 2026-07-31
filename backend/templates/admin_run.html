@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Run Chapter-Linking Pipeline — Zotero RAG</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  .credentials { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; align-items: center; }
+  .credentials input { padding: 0.4rem; font-family: inherit; border: 1px solid #ccc; border-radius: 4px; }
+  .credentials input[name="library_slug"] { width: 14rem; }
+  .credentials input[name="api_key"] { width: 20rem; }
+  .credentials input[name="max_items"] { width: 6rem; }
+  .credentials button { padding: 0.4rem 1rem; background: #1a5c9e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  .credentials button:disabled { background: #999; cursor: default; }
+  ol#stages { list-style: none; margin: 0; padding: 0; }
+  ol#stages li { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.5rem 0; border-bottom: 1px solid #eee; }
+  ol#stages li .glyph { width: 1.2rem; text-align: center; }
+  ol#stages li .label { min-width: 14rem; font-weight: bold; }
+  ol#stages li .detail { color: #555; font-size: 0.9rem; }
+  ol#stages li.error .detail { color: #c00; }
+  .error { color: #c00; }
+  .empty { color: #777; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Run Chapter-Linking Pipeline</h1>
+<p><a href="/admin/review">&rarr; Review queue</a></p>
+
+<div class="credentials">
+  <input type="text" name="library_slug" placeholder="groups/6297749">
+  <input type="password" name="api_key" placeholder="Zotero API key">
+  <input type="number" name="max_items" placeholder="max items" min="1">
+  <button id="run-btn">Run pipeline</button>
+</div>
+
+<ol id="stages"></ol>
+<p id="status"></p>
+
+<script>
+function credentials() {
+  return {
+    slug: document.querySelector('input[name="library_slug"]').value.trim(),
+    apiKey: document.querySelector('input[name="api_key"]').value.trim(),
+    maxItems: document.querySelector('input[name="max_items"]').value.trim(),
+  };
+}
+
+async function apiFetch(path, options = {}) {
+  const { apiKey } = credentials();
+  const headers = Object.assign({ "Content-Type": "application/json", "X-Zotero-API-Key": apiKey }, options.headers || {});
+  const response = await fetch(path, Object.assign({}, options, { headers }));
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.detail || `Request failed (${response.status})`);
+  }
+  return body;
+}
+
+function setStatus(message, isError) {
+  const el = document.getElementById("status");
+  el.textContent = message || "";
+  el.className = isError ? "error" : "";
+}
+
+function addStageRow(label) {
+  const li = document.createElement("li");
+  li.innerHTML = `<span class="glyph">&hellip;</span><span class="label">${label}</span><span class="detail"></span>`;
+  document.getElementById("stages").appendChild(li);
+  return li;
+}
+
+function setRowState(row, glyph, detail, isError) {
+  row.querySelector(".glyph").textContent = glyph;
+  row.querySelector(".detail").textContent = detail || "";
+  row.classList.toggle("error", !!isError);
+}
+
+async function pollJob(jobId, row) {
+  for (;;) {
+    const job = await apiFetch(`/api/chapter-linking/jobs/${jobId}`);
+    if (job.status === "processing") {
+      setRowState(row, "⏳", job.message ? `${job.message} (${Math.round(job.progress * 100)}%)` : "");
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      continue;
+    }
+    if (job.status === "error") {
+      setRowState(row, "✗", job.error, true);
+      throw new Error(job.error || "Job failed");
+    }
+    setRowState(row, "✓", job.message || "Done");
+    return job.result;
+  }
+}
+
+async function runStage(label, path, body) {
+  const row = addStageRow(label);
+  const { job_id } = await apiFetch(path, { method: "POST", body: JSON.stringify(body) });
+  return pollJob(job_id, row);
+}
+
+async function runPipeline() {
+  const { slug, apiKey, maxItems } = credentials();
+  if (!slug || !apiKey) { setStatus("Enter a library slug and API key first.", true); return; }
+  const max_items = maxItems ? parseInt(maxItems, 10) : null;
+
+  document.getElementById("stages").innerHTML = "";
+  document.getElementById("run-btn").disabled = true;
+  setStatus("");
+
+  try {
+    const analyzeResult = await runStage("Analyze", "/api/chapter-linking/analyze", {
+      library_slug: slug, api_key: apiKey, max_items,
+    });
+    let attachments = analyzeResult.attachments;
+
+    const needsOcr = attachments.filter((a) => a.needs_ocr);
+    if (needsOcr.length > 0) {
+      await runStage(`OCR (${needsOcr.length} book${needsOcr.length === 1 ? "" : "s"})`, "/api/chapter-linking/ocr", {
+        library_slug: slug, api_key: apiKey,
+        attachment_specs: needsOcr.map((a) => ({ item_key: a.item_key, attachment_key: a.attachment_key })),
+      });
+      const reanalyzeResult = await runStage("Re-analyze OCR'd books", "/api/chapter-linking/analyze", {
+        library_slug: slug, api_key: apiKey,
+        item_keys: needsOcr.map((a) => a.item_key),
+      });
+      const byKey = new Map(reanalyzeResult.attachments.map((a) => [a.item_key, a]));
+      attachments = attachments.map((a) => byKey.get(a.item_key) || a);
+    }
+
+    await runStage("Segment & upload", "/api/chapter-linking/segment-upload", {
+      library_slug: slug, api_key: apiKey, analyses: attachments, committed: false, max_items,
+    });
+
+    await runStage("Retrofit-link", "/api/chapter-linking/retrofit-link", {
+      library_slug: slug, api_key: apiKey, committed: false, max_items,
+    });
+
+    setStatus("Pipeline complete. Redirecting to the review queue…");
+    window.location.href = `/admin/review?library_slug=${encodeURIComponent(slug)}`;
+  } catch (err) {
+    setStatus(err.message, true);
+    document.getElementById("run-btn").disabled = false;
+  }
+}
+
+document.getElementById("run-btn").addEventListener("click", runPipeline);
+</script>
+</body>
+</html>

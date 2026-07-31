@@ -29,6 +29,7 @@
 </head>
 <body>
 <h1>Chapter Review Queue</h1>
+<p><a href="/admin/run">&larr; Run pipeline</a></p>
 
 <div class="credentials">
   <input type="text" name="library_slug" placeholder="groups/6297749">
@@ -295,6 +296,11 @@ function switchView(view) {
   state.tab = tabs.querySelector("button").dataset.type;
   [...tabs.querySelectorAll("button")].forEach((b, i) => b.classList.toggle("active", i === 0));
   loadEntries();
+}
+
+const _prefillSlug = new URLSearchParams(window.location.search).get("library_slug");
+if (_prefillSlug) {
+  document.querySelector('input[name="library_slug"]').value = _prefillSlug;
 }
 
 document.getElementById("load-btn").addEventListener("click", loadEntries);
