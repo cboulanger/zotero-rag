@@ -265,3 +265,12 @@ full design.
 
 The same functionality is available via `GET/POST
 /api/chapter-linking/review/*` for scripting or a future non-web client.
+
+**Known limitation:** triggering "Run OCR" on a `needs_ocr` entry runs
+OCR and re-analyzes the book, but does not automatically re-populate the
+chapter/commit queue from the result — that requires a separate
+`upload_chapters.py --dry-run` (or `POST /chapter-linking/segment-upload`)
+pass over the freshly-OCR'd book afterward. Closing this loop
+automatically would require extending the queue entry's stored payload
+with the `confidence_threshold`/`target_collection` the eventual upload
+pass should use, which isn't implemented yet.
