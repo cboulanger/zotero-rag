@@ -419,3 +419,20 @@ async def approve_review_entry(
     if entry["type"] != "ocr":
         review_queue_store.set_status(path, request.library_slug, queue_id, "approved")
     return {"queue_id": queue_id, "status": "approved", "result": result}
+
+
+@router.post(
+    "/chapter-linking/review/{queue_id}/reject",
+    summary="Reject one pending review-queue entry (admin only, no Zotero write)",
+)
+async def reject_review_entry(
+    queue_id: str,
+    library_slug: str,
+    identity: ZoteroIdentity | None = Depends(require_authorized_group_admin),
+) -> dict:
+    path = get_settings().review_queue_path
+    entry = review_queue_store.get_entry(path, library_slug, queue_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
+    review_queue_store.set_status(path, library_slug, queue_id, "rejected")
+    return {"queue_id": queue_id, "status": "rejected"}

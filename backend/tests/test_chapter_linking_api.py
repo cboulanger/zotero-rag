@@ -397,6 +397,25 @@ class TestReviewEndpoints(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_reject_marks_entry_rejected(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "ocr:ATT1", "type": "ocr", "bucket": "review", "payload": {}},
+        ])
+        response = self.client.post(
+            "/api/chapter-linking/review/ocr:ATT1/reject", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        entry = review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "ocr:ATT1")
+        self.assertEqual(entry["status"], "rejected")
+
+    def test_reject_unknown_queue_id_returns_404(self):
+        self._override_admin()
+        response = self.client.post(
+            "/api/chapter-linking/review/does-not-exist/reject", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()
