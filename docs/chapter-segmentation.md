@@ -242,3 +242,26 @@ instead of re-fetching and re-matching the whole library); and an optional
 `target_collection` field mirroring the CLI's `--target-collection`) —
 useful for driving this from an external scheduler or admin tool instead
 of a shell.
+
+## Reviewing uncertain and confident results
+
+Every dry-run/analyze invocation of the four scripts above (CLI or API)
+automatically feeds two persistent, per-library queues: a **review
+queue** for items that need a human decision (low-confidence chapter
+boundaries, ambiguous retrofit matches, `needs_ocr` attachments) and a
+**commit queue** for items a real `--commit` run would already write on
+its own, for a final look before it happens.
+
+An admin can act on both from `/admin/review`: enter a library slug and
+an admin Zotero API key (must belong to an owner/admin of the server's
+`AUTHORIZED_GROUP_ID`), then switch between the **Needs Review** view
+(approve as-is, edit page range/title/candidate then approve, reject, or
+trigger OCR) and the **Ready to Commit** view (select confident items and
+"Execute Selected", or "Send to Review" to defer one instead). Approving
+or executing an entry writes to Zotero immediately, using the exact same
+logic the scripts themselves use — see
+`docs/superpowers/specs/2026-07-30-chapter-review-ui-design.md` for the
+full design.
+
+The same functionality is available via `GET/POST
+/api/chapter-linking/review/*` for scripting or a future non-web client.
