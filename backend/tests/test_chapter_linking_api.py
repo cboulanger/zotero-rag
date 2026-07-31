@@ -397,6 +397,21 @@ class TestReviewEndpoints(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_approve_already_approved_entry_returns_409(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "review",
+             "payload": {"chapter_key": "CHAP1", "candidates": [{"key": "BOOK1", "title": "T", "year": 2020}]}},
+        ])
+        review_queue_store.set_status(get_settings().review_queue_path, "groups/1", "match:CHAP1", "approved")
+        with patch("backend.api.chapter_linking.commit_links") as mock_commit:
+            response = self.client.post(
+                "/api/chapter-linking/review/match:CHAP1/approve",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "book_key": "BOOK1"},
+            )
+        self.assertEqual(response.status_code, 409)
+        mock_commit.assert_not_called()
+
     def test_reject_marks_entry_rejected(self):
         self._override_admin()
         review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [

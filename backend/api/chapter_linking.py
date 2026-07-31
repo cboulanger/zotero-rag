@@ -407,6 +407,8 @@ async def approve_review_entry(
     entry = review_queue_store.get_entry(path, request.library_slug, queue_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
+    if entry["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Queue entry {queue_id!r} is already {entry['status']!r}")
     try:
         result = await _apply_entry(
             entry, request.library_slug, request.api_key,
