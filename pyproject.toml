@@ -45,6 +45,18 @@ eval = [
     "ir-datasets>=0.5.5",
 ]
 
+# Console-script aliases for the chapter-segmentation admin CLI (see
+# docs/chapter-segmentation.md). `uv run <alias> --flags` works exactly like
+# any installed CLI tool -- no `--` separator needed (unlike `npm run task --
+# --flags`) -- and decouples documented command names from scripts/*.py's
+# actual file paths: if a script moves/is renamed later, only the mapping
+# below needs updating, not every example in the docs.
+[project.scripts]
+chapter-analyze = "scripts.analyze_book_chapters:main"
+chapter-ocr = "scripts.ocr_attachments:main"
+chapter-retrofit-link = "scripts.retrofit_chapter_links:main"
+chapter-segment-upload = "scripts.upload_chapters:main"
+
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 python_files = "test_*.py"
