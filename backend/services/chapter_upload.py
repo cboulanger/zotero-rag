@@ -2,6 +2,7 @@
 bookSection items. See design spec §8.
 """
 
+import asyncio
 import io
 import tempfile
 from pathlib import Path
@@ -82,6 +83,95 @@ def build_book_section_item_data(template: dict, book_data: dict, chapter: dict)
     return item
 
 
+def _create_chapter_item(zotero_write_client, book_data: dict, chapter: dict, sliced_pdf_bytes: bytes) -> dict:
+    """Create the chapter's own bookSection item and upload its sliced PDF as
+    an attachment. Entirely synchronous (pyzotero) -- callers running inside
+    an async context MUST invoke this via `asyncio.to_thread()` to avoid
+    blocking the event loop. Returns the created chapter item dict.
+    """
+    template = zotero_write_client.item_template("bookSection")
+    item_data = build_book_section_item_data(template, book_data, chapter)
+    resp = zotero_write_client.create_items([item_data])
+    created_item = list(resp["successful"].values())[0]
+    chapter_key = created_item["key"]
+
+    tmp_path = Path(tempfile.gettempdir()) / f"{chapter_key}.pdf"
+    try:
+        tmp_path.write_bytes(sliced_pdf_bytes)
+        # NOTE: attachment_simple() sends str(path) verbatim as
+        # the Zotero "filename" field, which the API rejects
+        # ("cannot contain a directory path") for any non-bare
+        # filename -- and tempfile.gettempdir() is always an
+        # absolute path. Create the attachment item with just the
+        # bare filename, then upload the actual bytes via
+        # upload_attachments(basedir=...), which resolves the
+        # local file path separately from the server-side field.
+        attachment_template = zotero_write_client.item_template("attachment", linkmode="imported_file")
+        attachment_template["title"] = tmp_path.name
+        attachment_template["filename"] = tmp_path.name
+        attachment_template["contentType"] = "application/pdf"
+        attachment_template["parentItem"] = chapter_key
+        attach_resp = zotero_write_client.create_items([attachment_template])
+        attachment_item = list(attach_resp["successful"].values())[0]
+        upload_resp = zotero_write_client.upload_attachments(
+            [{"key": attachment_item["key"], "filename": tmp_path.name}],
+            basedir=str(tmp_path.parent),
+        )
+        if upload_resp["failure"]:
+            raise RuntimeError(f"attachment upload failed: {upload_resp['failure']}")
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return created_item
+
+
+def _link_and_collect_chapter(
+    zotero_write_client, chapter_item: dict, slug: str, book_key: str, book_data: dict, target_collection: str
+) -> dict:
+    """Write the chapter's X-Contained-By link (Extra field + native
+    relations), assign it to the per-book target subcollection, and PATCH the
+    result back to Zotero in a single update_item call. Entirely synchronous
+    (pyzotero) -- callers running inside an async context MUST invoke this
+    via `asyncio.to_thread()` to avoid blocking the event loop. Returns the
+    (mutated) chapter item dict.
+    """
+    chapter_key = chapter_item["key"]
+    # Write the chapter side (X-Contained-By) from the CHAPTER's own
+    # extra -- never the book's extra.
+    book_id = format_chapter_id(slug, book_key)
+    chapter_extra = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
+    chapter_item["data"]["extra"] = chapter_extra
+    # Also set a native Zotero "relations" (dc:relation) connection
+    # -- the "Related" tab in the Zotero client -- independent of
+    # the Extra-field convention above and never read back by this
+    # pipeline's own logic (see chapter_link_store.add_related_item).
+    chapter_item["data"]["relations"] = add_related_item(
+        chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
+    )
+
+    # Resolve the per-book target subcollection and fold membership
+    # into the SAME update_item PATCH as the extra-field write.
+    # pyzotero's update_item and addto_collection are both item
+    # PATCHes that bump the server-side version and both derive
+    # their If-Unmodified-Since-Version header from
+    # payload["version"]; update_item returns the raw response
+    # without refreshing the local dict's cached version, so
+    # issuing them as two separate calls makes the second send a
+    # now-stale version and 412 against real pyzotero. Reordering
+    # does not help (both calls bump the version); one combined
+    # PATCH sidesteps the staleness entirely.
+    label = author_year_label(
+        [c.get("lastName", "") for c in book_data.get("creators", [])],
+        book_data.get("date", ""),
+    )
+    _, sub_key = ensure_target_collection(zotero_write_client, target_collection, label)
+    existing_collections = chapter_item["data"].get("collections", [])
+    if sub_key not in existing_collections:
+        chapter_item["data"]["collections"] = [*existing_collections, sub_key]
+    zotero_write_client.update_item(chapter_item)
+    return chapter_item
+
+
 async def run(
     *,
     zotero_write_client,
@@ -116,7 +206,7 @@ async def run(
     for analysis in analyses:
         book_key = analysis["item_key"]
         attachment_key = analysis.get("attachment_key", "")
-        book_item = zotero_write_client.item(book_key)
+        book_item = await asyncio.to_thread(zotero_write_client.item, book_key)
         book_data = book_item["data"]
 
         confident_chapters = [c for c in analysis.get("chapters", []) if c["confidence"] >= confidence_threshold]
@@ -175,74 +265,21 @@ async def run(
                     raise RuntimeError(book_download_error)
                 sliced = slice_pdf_range(book_file_bytes or b"", chapter["pdf_start_index"], chapter["pdf_end_index"])
 
-                template = zotero_write_client.item_template("bookSection")
-                item_data = build_book_section_item_data(template, book_data, chapter)
-                resp = zotero_write_client.create_items([item_data])
-                created_item = list(resp["successful"].values())[0]
+                created_item = await asyncio.to_thread(
+                    _create_chapter_item, zotero_write_client, book_data, chapter, sliced
+                )
                 chapter_key = created_item["key"]
-
-                tmp_path = Path(tempfile.gettempdir()) / f"{chapter_key}.pdf"
-                try:
-                    tmp_path.write_bytes(sliced)
-                    # NOTE: attachment_simple() sends str(path) verbatim as
-                    # the Zotero "filename" field, which the API rejects
-                    # ("cannot contain a directory path") for any non-bare
-                    # filename -- and tempfile.gettempdir() is always an
-                    # absolute path. Create the attachment item with just the
-                    # bare filename, then upload the actual bytes via
-                    # upload_attachments(basedir=...), which resolves the
-                    # local file path separately from the server-side field.
-                    attachment_template = zotero_write_client.item_template("attachment", linkmode="imported_file")
-                    attachment_template["title"] = tmp_path.name
-                    attachment_template["filename"] = tmp_path.name
-                    attachment_template["contentType"] = "application/pdf"
-                    attachment_template["parentItem"] = chapter_key
-                    attach_resp = zotero_write_client.create_items([attachment_template])
-                    attachment_item = list(attach_resp["successful"].values())[0]
-                    upload_resp = zotero_write_client.upload_attachments(
-                        [{"key": attachment_item["key"], "filename": tmp_path.name}],
-                        basedir=str(tmp_path.parent),
-                    )
-                    if upload_resp["failure"]:
-                        raise RuntimeError(f"attachment upload failed: {upload_resp['failure']}")
-                finally:
-                    tmp_path.unlink(missing_ok=True)
-
-                # Write the chapter side (X-Contained-By) from the CHAPTER's own
-                # extra — never the book's extra.
-                chapter_item = created_item
                 chapter_id = format_chapter_id(slug, chapter_key)
-                book_id = format_chapter_id(slug, book_key)
-                chapter_extra = write_links(chapter_item["data"].get("extra", ""), contained_by=book_id)
-                chapter_item["data"]["extra"] = chapter_extra
-                # Also set a native Zotero "relations" (dc:relation) connection
-                # -- the "Related" tab in the Zotero client -- independent of
-                # the Extra-field convention above and never read back by this
-                # pipeline's own logic (see chapter_link_store.add_related_item).
-                chapter_item["data"]["relations"] = add_related_item(
-                    chapter_item["data"].get("relations", {}), zotero_item_uri(slug, book_key)
-                )
 
-                # Resolve the per-book target subcollection and fold membership
-                # into the SAME update_item PATCH as the extra-field write.
-                # pyzotero's update_item and addto_collection are both item
-                # PATCHes that bump the server-side version and both derive
-                # their If-Unmodified-Since-Version header from
-                # payload["version"]; update_item returns the raw response
-                # without refreshing the local dict's cached version, so
-                # issuing them as two separate calls makes the second send a
-                # now-stale version and 412 against real pyzotero. Reordering
-                # does not help (both calls bump the version); one combined
-                # PATCH sidesteps the staleness entirely.
-                label = author_year_label(
-                    [c.get("lastName", "") for c in book_data.get("creators", [])],
-                    book_data.get("date", ""),
+                chapter_item = await asyncio.to_thread(
+                    _link_and_collect_chapter,
+                    zotero_write_client,
+                    created_item,
+                    slug,
+                    book_key,
+                    book_data,
+                    target_collection,
                 )
-                _, sub_key = ensure_target_collection(zotero_write_client, target_collection, label)
-                existing_collections = chapter_item["data"].get("collections", [])
-                if sub_key not in existing_collections:
-                    chapter_item["data"]["collections"] = [*existing_collections, sub_key]
-                zotero_write_client.update_item(chapter_item)
 
                 new_chapter_ids.append(chapter_id)
                 pdf_ranges[chapter_id] = (chapter["pdf_start_index"], chapter["pdf_end_index"])
@@ -261,14 +298,14 @@ async def run(
             # from it would 412. Re-fetching also means the book's `relations`
             # here already reflects every chapter's auto-mirrored link, so no
             # manual book-side relations write is needed at all.
-            book_item = zotero_write_client.item(book_key)
+            book_item = await asyncio.to_thread(zotero_write_client.item, book_key)
             existing = parse_links(book_item["data"].get("extra", ""))
             merged_contains = list(dict.fromkeys([*existing.contains, *new_chapter_ids]))
             merged_ranges = {**existing.pdf_ranges, **pdf_ranges}
             book_item["data"]["extra"] = write_links(
                 book_item["data"].get("extra", ""), contains=merged_contains, pdf_ranges=merged_ranges
             )
-            zotero_write_client.update_item(book_item)
+            await asyncio.to_thread(zotero_write_client.update_item, book_item)
 
     if review_entries or commit_entries:
         review_queue_store.upsert_many(get_settings().review_queue_path, slug, review_entries + commit_entries)
