@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chapter Review Queue — Zotero RAG</title>
+<style>
+  body { font-family: Georgia, serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.25rem; }
+  .credentials { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .credentials input { padding: 0.4rem; font-family: inherit; border: 1px solid #ccc; border-radius: 4px; }
+  .credentials input[name="library_slug"] { width: 14rem; }
+  .credentials input[name="api_key"] { width: 20rem; }
+  .credentials button { padding: 0.4rem 1rem; background: #1a5c9e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+  nav.views, nav.tabs { margin-bottom: 1rem; }
+  nav.views button, nav.tabs button {
+    padding: 0.4rem 0.9rem; margin-right: 0.4rem; border: 1px solid #1a5c9e; background: #fff;
+    color: #1a5c9e; border-radius: 4px; cursor: pointer; font-family: inherit;
+  }
+  nav.views button.active, nav.tabs button.active { background: #1a5c9e; color: #fff; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 2rem; font-size: 0.9rem; }
+  th, td { border-bottom: 1px solid #ddd; padding: 0.5rem; text-align: left; vertical-align: top; }
+  th { color: #555; font-weight: normal; }
+  input.edit-field { width: 100%; box-sizing: border-box; padding: 0.2rem; font-family: inherit; }
+  button.row-action { margin-right: 0.3rem; padding: 0.3rem 0.6rem; cursor: pointer; }
+  .error { color: #c00; }
+  .empty { color: #777; font-style: italic; }
+</style>
+</head>
+<body>
+<h1>Chapter Review Queue</h1>
+
+<div class="credentials">
+  <input type="text" name="library_slug" placeholder="groups/6297749">
+  <input type="password" name="api_key" placeholder="Admin Zotero API key">
+  <button id="load-btn">Load</button>
+</div>
+
+<nav class="views">
+  <button id="view-review" class="active">Needs Review</button>
+  <button id="view-commit">Ready to Commit</button>
+</nav>
+
+<nav class="tabs" id="review-tabs">
+  <button data-type="chapter" class="active">Chapters</button>
+  <button data-type="match">Ambiguous Matches</button>
+  <button data-type="ocr">Needs OCR</button>
+</nav>
+
+<nav class="tabs" id="commit-tabs" style="display:none;">
+  <button data-type="chapter" class="active">Chapters</button>
+  <button data-type="match">Matches</button>
+</nav>
+
+<div id="commit-toolbar" style="display:none; margin-bottom: 1rem;">
+  <button id="execute-btn">Execute Selected</button>
+</div>
+
+<div id="content"></div>
+<p id="status"></p>
+
+<script>
+const state = { view: "review", tab: "chapter", entries: [] };
+
+function credentials() {
+  return {
+    slug: document.querySelector('input[name="library_slug"]').value.trim(),
+    apiKey: document.querySelector('input[name="api_key"]').value.trim(),
+  };
+}
+
+async function apiFetch(path, options = {}) {
+  const { apiKey } = credentials();
+  const headers = Object.assign({ "Content-Type": "application/json", "X-Zotero-API-Key": apiKey }, options.headers || {});
+  const response = await fetch(path, Object.assign({}, options, { headers }));
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.detail || `Request failed (${response.status})`);
+  }
+  return body;
+}
+
+function setStatus(message, isError) {
+  const el = document.getElementById("status");
+  el.textContent = message || "";
+  el.className = isError ? "error" : "";
+}
+
+async function loadEntries() {
+  const { slug } = credentials();
+  if (!slug) { setStatus("Enter a library slug first.", true); return; }
+  try {
+    const data = await apiFetch(`/api/chapter-linking/review/pending?library_slug=${encodeURIComponent(slug)}&bucket=${state.view}`);
+    state.entries = data.entries;
+    render();
+    setStatus("");
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+function entriesForTab() {
+  return state.entries.filter((e) => e.type === state.tab);
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text ?? "";
+  return div.innerHTML;
+}
+
+function readerUrl(slug, itemKey, attachmentKey) {
+  return `https://www.zotero.org/${slug}/items/${itemKey}/attachment/${attachmentKey}/reader`;
+}
+
+function itemUrl(slug, itemKey) {
+  return `https://www.zotero.org/${slug}/items/${itemKey}`;
+}
+
+function render() {
+  const container = document.getElementById("content");
+  const entries = entriesForTab();
+  if (entries.length === 0) {
+    container.innerHTML = '<p class="empty">Nothing pending.</p>';
+    return;
+  }
+  if (state.tab === "chapter") container.innerHTML = renderChapterTable(entries);
+  else if (state.tab === "match") container.innerHTML = renderMatchTable(entries);
+  else container.innerHTML = renderOcrTable(entries);
+}
+
+function renderChapterTable(entries) {
+  const { slug } = credentials();
+  const rows = entries.map((e) => {
+    const p = e.payload;
+    const checkbox = state.view === "commit" ? `<input type="checkbox" class="select-box" data-id="${e.queue_id}" checked>` : "";
+    const actions = state.view === "commit"
+      ? `<button class="row-action" onclick="sendToReview('${e.queue_id}')">Send to Review</button>`
+      : `<button class="row-action" onclick="approveChapter('${e.queue_id}')">Approve</button>
+         <button class="row-action" onclick="rejectEntry('${e.queue_id}')">Reject</button>`;
+    return `<tr data-queue-id="${e.queue_id}">
+      <td>${checkbox}</td>
+      <td><input class="edit-field" data-field="title" value="${escapeHtml(p.title)}"></td>
+      <td><input class="edit-field" data-field="pdf_start_index" value="${p.pdf_start_index}" style="width:4rem"></td>
+      <td><input class="edit-field" data-field="pdf_end_index" value="${p.pdf_end_index}" style="width:4rem"></td>
+      <td>${p.confidence.toFixed(2)}</td>
+      <td><a href="${readerUrl(slug, p.book_key, p.attachment_key)}" target="_blank">reader</a></td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join("");
+  return `<table><tr><th></th><th>Title</th><th>Start</th><th>End</th><th>Conf.</th><th></th><th></th></tr>${rows}</table>`;
+}
+
+function renderMatchTable(entries) {
+  const { slug } = credentials();
+  const rows = entries.map((e) => {
+    const p = e.payload;
+    const checkbox = state.view === "commit" ? `<input type="checkbox" class="select-box" data-id="${e.queue_id}" checked>` : "";
+    let candidateCell;
+    let actions;
+    if (state.view === "review") {
+      candidateCell = (p.candidates || []).map((c) =>
+        `<label><input type="radio" name="cand-${e.queue_id}" value="${c.key}"> ${escapeHtml(c.title)} (${c.year ?? "?"}) <a href="${itemUrl(slug, c.key)}" target="_blank">view</a></label><br>`
+      ).join("");
+      actions = `<button class="row-action" onclick="approveMatch('${e.queue_id}')">Approve</button>
+                 <button class="row-action" onclick="rejectEntry('${e.queue_id}')">Reject</button>`;
+    } else {
+      candidateCell = `${escapeHtml(p.book_key)} (score ${p.score.toFixed(2)}) <a href="${itemUrl(slug, p.book_key)}" target="_blank">view</a>`;
+      actions = `<button class="row-action" onclick="sendToReview('${e.queue_id}')">Send to Review</button>`;
+    }
+    return `<tr data-queue-id="${e.queue_id}">
+      <td>${checkbox}</td>
+      <td>${escapeHtml(p.chapter_key)} <a href="${itemUrl(slug, p.chapter_key)}" target="_blank">view</a></td>
+      <td>${candidateCell}</td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join("");
+  return `<table><tr><th></th><th>Chapter</th><th>Candidate(s)</th><th></th></tr>${rows}</table>`;
+}
+
+function renderOcrTable(entries) {
+  const { slug } = credentials();
+  const rows = entries.map((e) => {
+    const p = e.payload;
+    return `<tr data-queue-id="${e.queue_id}">
+      <td>${escapeHtml(p.book_key)} <a href="${itemUrl(slug, p.book_key)}" target="_blank">view</a></td>
+      <td><a href="${readerUrl(slug, p.book_key, p.attachment_key)}" target="_blank">reader</a></td>
+      <td><button class="row-action" onclick="runOcr('${e.queue_id}')">Run OCR</button></td>
+    </tr>`;
+  }).join("");
+  return `<table><tr><th>Book</th><th></th><th></th></tr>${rows}</table>`;
+}
+
+function editedChapterFields(queueId) {
+  const row = document.querySelector(`tr[data-queue-id="${queueId}"]`);
+  const fields = {};
+  row.querySelectorAll(".edit-field").forEach((input) => { fields[input.dataset.field] = input.value; });
+  return fields;
+}
+
+async function approveChapter(queueId) {
+  const { slug, apiKey } = credentials();
+  const fields = editedChapterFields(queueId);
+  try {
+    await apiFetch(`/api/chapter-linking/review/${queueId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        library_slug: slug, api_key: apiKey, title: fields.title,
+        pdf_start_index: fields.pdf_start_index ? parseInt(fields.pdf_start_index, 10) : null,
+        pdf_end_index: fields.pdf_end_index ? parseInt(fields.pdf_end_index, 10) : null,
+      }),
+    });
+    setStatus(`Approved ${queueId}`);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function approveMatch(queueId) {
+  const { slug, apiKey } = credentials();
+  const picked = document.querySelector(`input[name="cand-${queueId}"]:checked`);
+  try {
+    await apiFetch(`/api/chapter-linking/review/${queueId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ library_slug: slug, api_key: apiKey, book_key: picked ? picked.value : null }),
+    });
+    setStatus(`Approved ${queueId}`);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function runOcr(queueId) {
+  const { slug, apiKey } = credentials();
+  try {
+    await apiFetch(`/api/chapter-linking/review/${queueId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ library_slug: slug, api_key: apiKey }),
+    });
+    setStatus(`OCR started for ${queueId}`);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function rejectEntry(queueId) {
+  const { slug } = credentials();
+  try {
+    await apiFetch(`/api/chapter-linking/review/${queueId}/reject?library_slug=${encodeURIComponent(slug)}`, { method: "POST" });
+    setStatus(`Rejected ${queueId}`);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function sendToReview(queueId) {
+  const { slug } = credentials();
+  try {
+    await apiFetch(`/api/chapter-linking/review/${queueId}/send-to-review?library_slug=${encodeURIComponent(slug)}`, { method: "POST" });
+    setStatus(`Moved ${queueId} to review`);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function executeSelected() {
+  const { slug, apiKey } = credentials();
+  const ids = [...document.querySelectorAll(".select-box:checked")].map((cb) => cb.dataset.id);
+  if (ids.length === 0) { setStatus("Nothing selected.", true); return; }
+  try {
+    const result = await apiFetch("/api/chapter-linking/review/execute", {
+      method: "POST",
+      body: JSON.stringify({ library_slug: slug, api_key: apiKey, queue_ids: ids }),
+    });
+    setStatus(`Executed ${result.executed.length}, failed ${result.failed.length}`, result.failed.length > 0);
+    await loadEntries();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+function switchView(view) {
+  state.view = view;
+  document.getElementById("view-review").classList.toggle("active", view === "review");
+  document.getElementById("view-commit").classList.toggle("active", view === "commit");
+  document.getElementById("review-tabs").style.display = view === "review" ? "block" : "none";
+  document.getElementById("commit-tabs").style.display = view === "commit" ? "block" : "none";
+  document.getElementById("commit-toolbar").style.display = view === "commit" ? "block" : "none";
+  const tabs = document.getElementById(view === "review" ? "review-tabs" : "commit-tabs");
+  state.tab = tabs.querySelector("button").dataset.type;
+  [...tabs.querySelectorAll("button")].forEach((b, i) => b.classList.toggle("active", i === 0));
+  loadEntries();
+}
+
+document.getElementById("load-btn").addEventListener("click", loadEntries);
+document.getElementById("execute-btn").addEventListener("click", executeSelected);
+document.getElementById("view-review").addEventListener("click", () => switchView("review"));
+document.getElementById("view-commit").addEventListener("click", () => switchView("commit"));
+[...document.querySelectorAll("#review-tabs button, #commit-tabs button")].forEach((btn) => {
+  btn.addEventListener("click", () => {
+    state.tab = btn.dataset.type;
+    const parent = btn.parentElement;
+    [...parent.querySelectorAll("button")].forEach((b) => b.classList.toggle("active", b === btn));
+    render();
+  });
+});
+</script>
+</body>
+</html>
