@@ -207,21 +207,47 @@ before deciding whether to lower the threshold. `--target-collection`
 
 ## Typical workflow
 
-For a library with mostly born-digital (not scanned) books:
+For a library with mostly born-digital (not scanned) books, using the
+`/admin/review` UI (see "Reviewing uncertain and confident results"
+below) instead of blindly committing everything above a fixed threshold:
 
-1. Run **Script 1** and inspect the output — check `needs_ocr` counts and
-   the chapter confidence scores.
-2. If some books need OCR, run **Script 2**, then re-run **Script 1**
-   against just those items (`--item-keys`) — it picks up the OCR'd text
-   from Script 2's cache automatically (same default `--cache-dir`).
-3. Run **Script 4 without `--commit`** first and review the dry-run
-   summary (how many chapters would be created, how many skipped as
-   low-confidence).
-4. Run **Script 4 with `--commit`** once satisfied.
-5. Separately, if the library already had some hand-catalogued chapters
-   before this feature existed, run **Script 3** (dry-run first, then
-   `--commit`) once to link those up too (independent of the
-   analyze/upload flow above).
+1. Run **Script 1** (read-only key) — automatically queues `needs_ocr`
+   books for review.
+2. Run **Script 4 without `--commit`** (dry-run) — automatically queues
+   every detected chapter: low-confidence ones for review, confident
+   ones for commit. (A dry-run only reads from Zotero, so a read-only
+   key works here too, despite Script 4 needing a write-scoped key once
+   `--commit` is actually passed.)
+3. Run **Script 3 without `--commit`** (dry-run) — automatically queues
+   ambiguous matches for review and confident matches for commit, the
+   same way, for any hand-catalogued chapters not yet linked to their
+   book.
+4. Open **`/admin/review`** with a write-scoped admin key and work
+   through the queues it just populated: approve/edit low-confidence
+   chapters, resolve ambiguous matches, trigger OCR for scanned books,
+   and "Execute Selected" on the confident items in "Ready to Commit"
+   (or "Send to Review" to hold one back despite passing the threshold).
+   Each approve/execute action writes to Zotero immediately for just
+   that item — there's no need to re-run Script 3/4 with `--commit` at
+   all once you're working from the queue.
+5. For a book that needed OCR: "Run OCR" in the admin page resolves the
+   `needs_ocr` entry but does **not** itself produce new chapter
+   entries (see the "Known limitation" note below) — re-run **Script 4**
+   as a dry-run for that book afterward (`--item-keys`) to queue its
+   chapters for review.
+
+Prefer scripting/automation over the admin UI (e.g. a scheduled full
+pass with no human in the loop)? Skip step 4 and just run Script 3/4
+with `--commit` directly, the same as before this review UI existed. An
+individual entry an admin already approved/rejected in the queue won't
+be resurrected by a later dry run (it's left alone rather than
+re-upserted), but **approving one chapter of a multi-chapter book
+writes that book's `X-Contains` link immediately** — and Script 1 skips
+already-linked books by default (`--relink` re-analyzes them). So a
+book with some chapters approved via the queue and others still
+pending review won't get those pending ones refreshed by a plain
+re-run of Script 1; pass `--relink --item-keys <that book>` if you need
+fresh analyze data for its remaining chapters.
 
 ## Running via the API
 
