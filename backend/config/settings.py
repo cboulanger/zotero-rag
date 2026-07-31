@@ -149,6 +149,11 @@ class Settings(BaseSettings):
         description="Path to the encrypted auto-index keys JSON. Defaults to "
                     "<data_path>/system/autoindex_keys.json.",
     )
+    review_queue_path: Optional[Path] = Field(
+        default=None,
+        description="Path to the chapter-review queue JSON. Defaults to "
+                    "<data_path>/system/review_queue.json.",
+    )
     autoindex_interval_minutes: Optional[int] = Field(
         default=None,
         gt=0,
@@ -216,7 +221,7 @@ class Settings(BaseSettings):
     # Application version
     version: str = Field(default=__version__, description="Backend version")
 
-    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", "autoindex_keys_path", mode="before")
+    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", "autoindex_keys_path", "review_queue_path", mode="before")
     @classmethod
     def expand_path(cls, v):
         """Expand user home directory in paths."""
@@ -240,6 +245,8 @@ class Settings(BaseSettings):
             self.registrations_path = self.data_path / "system" / "registrations.json"
         if self.autoindex_keys_path is None:
             self.autoindex_keys_path = self.data_path / "system" / "autoindex_keys.json"
+        if self.review_queue_path is None:
+            self.review_queue_path = self.data_path / "system" / "review_queue.json"
         return self
 
     @field_validator("log_level")
@@ -267,6 +274,8 @@ class Settings(BaseSettings):
             self.registrations_path.parent.mkdir(parents=True, exist_ok=True)
         if self.autoindex_keys_path:
             self.autoindex_keys_path.parent.mkdir(parents=True, exist_ok=True)
+        if self.review_queue_path:
+            self.review_queue_path.parent.mkdir(parents=True, exist_ok=True)
 
     def get_api_key(self, env_var_name: str) -> Optional[str]:
         """
