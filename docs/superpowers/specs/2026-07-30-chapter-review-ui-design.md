@@ -105,7 +105,7 @@ New routes on the existing `backend/api/chapter_linking.py` router, gated by the
 
 `analyze_book_chapters.py`, `retrofit_chapter_links.py` (dry-run path), and `upload_chapters.py` (dry-run path) — both their CLI entry points and API job equivalents — each get one added call at the end of their existing run, upserting into `review_queue_store`:
 
-- **Uncertain → `bucket: "review"`**: `needs_ocr` + low-confidence chapters (from analyze), `ambiguous` matches (from retrofit), `skipped_low_confidence` (from upload).
+- **Uncertain → `bucket: "review"`**: `needs_ocr` (from analyze — it has no confidence-threshold concept of its own, so this is its only contribution), `ambiguous` matches (from retrofit), `skipped_low_confidence` (from upload).
 - **Confident → `bucket: "commit"`**: chapters upload's dry run would create (above `--confidence-threshold`, i.e. everything in its dry-run output *not* in `skipped_low_confidence`), and retrofit's `would_link` matches.
 
 Purely additive; no existing flag, output shape, or default behavior changes. Note the confident-chapter bucket is sourced from **upload's** dry run, not analyze's raw output — analyze has no concept of a confidence threshold on its own (that's `upload_chapters.py`'s `--confidence-threshold` flag), so it only ever contributes to the review bucket (`needs_ocr` / low-confidence).
