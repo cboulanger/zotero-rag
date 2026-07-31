@@ -14,6 +14,8 @@
   .credentials input[name="max_items"] { width: 6rem; }
   .credentials button { padding: 0.4rem 1rem; background: #1a5c9e; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
   .credentials button:disabled { background: #999; cursor: default; }
+  .credentials label { display: flex; align-items: center; gap: 0.3rem; font-size: 0.9rem; }
+  .credentials label.disabled { color: #999; }
   ol#stages { list-style: none; margin: 0; padding: 0; }
   ol#stages li { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.5rem 0; border-bottom: 1px solid #eee; }
   ol#stages li .glyph { width: 1.2rem; text-align: center; }
@@ -32,6 +34,8 @@
   <input type="text" name="library_slug" placeholder="groups/6297749">
   <input type="password" name="api_key" placeholder="Zotero API key">
   <input type="number" name="max_items" placeholder="max items" min="1">
+  <label><input type="checkbox" name="llm_fallback"> LLM fallback</label>
+  <label id="auto-select-label" class="disabled"><input type="checkbox" name="auto_select_model" disabled> Auto-select model</label>
   <button id="run-btn">Run pipeline</button>
 </div>
 
@@ -44,8 +48,19 @@ function credentials() {
     slug: document.querySelector('input[name="library_slug"]').value.trim(),
     apiKey: document.querySelector('input[name="api_key"]').value.trim(),
     maxItems: document.querySelector('input[name="max_items"]').value.trim(),
+    llmFallback: document.querySelector('input[name="llm_fallback"]').checked,
+    autoSelectModel: document.querySelector('input[name="auto_select_model"]').checked,
   };
 }
+
+const llmFallbackCheckbox = document.querySelector('input[name="llm_fallback"]');
+const autoSelectCheckbox = document.querySelector('input[name="auto_select_model"]');
+const autoSelectLabel = document.getElementById("auto-select-label");
+llmFallbackCheckbox.addEventListener("change", () => {
+  autoSelectCheckbox.disabled = !llmFallbackCheckbox.checked;
+  autoSelectLabel.classList.toggle("disabled", !llmFallbackCheckbox.checked);
+  if (!llmFallbackCheckbox.checked) autoSelectCheckbox.checked = false;
+});
 
 async function apiFetch(path, options = {}) {
   const { apiKey } = credentials();
@@ -101,7 +116,7 @@ async function runStage(label, path, body) {
 }
 
 async function runPipeline() {
-  const { slug, apiKey, maxItems } = credentials();
+  const { slug, apiKey, maxItems, llmFallback, autoSelectModel } = credentials();
   if (!slug || !apiKey) { setStatus("Enter a library slug and API key first.", true); return; }
   const max_items = maxItems ? parseInt(maxItems, 10) : null;
 
@@ -112,6 +127,7 @@ async function runPipeline() {
   try {
     const analyzeResult = await runStage("Analyze", "/api/chapter-linking/analyze", {
       library_slug: slug, api_key: apiKey, max_items,
+      enable_llm_fallback: llmFallback, auto_select_model: llmFallback && autoSelectModel,
     });
     let attachments = analyzeResult.attachments;
 
@@ -124,6 +140,7 @@ async function runPipeline() {
       const reanalyzeResult = await runStage("Re-analyze OCR'd books", "/api/chapter-linking/analyze", {
         library_slug: slug, api_key: apiKey,
         item_keys: needsOcr.map((a) => a.item_key),
+        enable_llm_fallback: llmFallback, auto_select_model: llmFallback && autoSelectModel,
       });
       const byKey = new Map(reanalyzeResult.attachments.map((a) => [a.item_key, a]));
       attachments = attachments.map((a) => byKey.get(a.item_key) || a);
