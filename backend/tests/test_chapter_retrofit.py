@@ -1,10 +1,14 @@
 """Unit tests for backend.services.chapter_retrofit."""
 
+import tempfile
 import unittest
+from pathlib import Path as _TestPath
 from unittest.mock import MagicMock
 
+from backend.config.settings import get_settings, reset_settings
 from backend.services.chapter_retrofit import find_best_book_match, find_matches, commit_links, locate_chapter_pdf_range
 from backend.services.chapter_retrofit import run as retrofit_run
+from backend.services.review_queue_store import get_entry
 
 
 class TestFindBestBookMatch(unittest.TestCase):
@@ -243,6 +247,15 @@ class TestCommitLinks(unittest.TestCase):
 
 
 class TestRetrofitRun(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        reset_settings()
+        get_settings().review_queue_path = _TestPath(self.tmp.name) / "review_queue.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        reset_settings()
+
     def test_links_confident_match_and_skips_ambiguous(self):
         zot = MagicMock()
         all_items = [
@@ -403,6 +416,43 @@ class TestRetrofitRun(unittest.TestCase):
         )
 
         self.assertIn("collections", chapter_item["data"])
+
+    def test_dry_run_upserts_would_link_as_commit_bucket(self):
+        zot = MagicMock()
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Handbook of Reference Management", "date": "2019", "extra": ""}},
+        ]
+        zot.everything.return_value = all_items
+
+        retrofit_run(zotero_write_client=zot, slug="groups/1", item_keys=None, max_items=None, commit=False)
+
+        entry = get_entry(get_settings().review_queue_path, "groups/1", "match:CHAP1")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["bucket"], "commit")
+        self.assertEqual(entry["payload"]["book_key"], "BOOK1")
+
+    def test_dry_run_upserts_ambiguous_as_review_bucket(self):
+        zot = MagicMock()
+        # NOTE: uses the same close-title pattern as
+        # TestFindBestBookMatch.test_ambiguous_close_scores_returns_none
+        # ("Studies in Modern History" vs "...Vol 2" -> token_sort_ratio
+        # margin ~10.7, just under _MARGIN_REQUIRED=11.0). A pair like
+        # "Same Title" / "Same Title Vol 2" produces a much larger margin
+        # (~23) and would resolve as a confident match, not ambiguous.
+        all_items = [
+            {"key": "BOOK1", "data": {"key": "BOOK1", "itemType": "book", "title": "Studies in Modern History", "date": "2020", "extra": ""}},
+            {"key": "BOOK2", "data": {"key": "BOOK2", "itemType": "book", "title": "Studies in Modern History Vol 2", "date": "2020", "extra": ""}},
+            {"key": "CHAP1", "data": {"key": "CHAP1", "itemType": "bookSection", "bookTitle": "Studies in Modern History", "date": "2020", "extra": ""}},
+        ]
+        zot.everything.return_value = all_items
+
+        retrofit_run(zotero_write_client=zot, slug="groups/1", item_keys=None, max_items=None, commit=False)
+
+        entry = get_entry(get_settings().review_queue_path, "groups/1", "match:CHAP1")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["bucket"], "review")
+        self.assertEqual(len(entry["payload"]["candidates"]), 2)
 
 
 if __name__ == "__main__":

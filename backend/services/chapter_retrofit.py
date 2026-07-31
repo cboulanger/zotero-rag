@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz
 
+from backend.config.settings import get_settings
+from backend.services import review_queue_store
 from backend.services.chapter_link_store import (
     add_related_item,
     author_year_label,
@@ -285,6 +287,19 @@ def run(
     matches = find_matches(all_items, item_keys, max_items)
 
     if not commit:
+        review_entries = [
+            {"queue_id": f"match:{a['chapter_key']}", "type": "match", "bucket": "review",
+             "payload": {"chapter_key": a["chapter_key"], "candidates": a["candidates"], "target_collection": target_collection}}
+            for a in matches["ambiguous"]
+        ]
+        commit_entries = [
+            {"queue_id": f"match:{m['chapter_key']}", "type": "match", "bucket": "commit",
+             "payload": {"chapter_key": m["chapter_key"], "book_key": m["book_key"], "score": m["score"],
+                         "target_collection": target_collection}}
+            for m in matches["would_link"]
+        ]
+        if review_entries or commit_entries:
+            review_queue_store.upsert_many(get_settings().review_queue_path, slug, review_entries + commit_entries)
         return {
             "linked": [], "would_link": matches["would_link"],
             "ambiguous": matches["ambiguous"], "no_match": matches["no_match"], "failed": [],
