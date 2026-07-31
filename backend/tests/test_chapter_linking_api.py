@@ -487,6 +487,17 @@ class TestReviewEndpoints(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_send_to_review_rejects_already_approved_commit_entries(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "chapter:BOOK1:2-4", "type": "chapter", "bucket": "commit", "payload": {}},
+        ])
+        review_queue_store.set_status(get_settings().review_queue_path, "groups/1", "chapter:BOOK1:2-4", "approved")
+        response = self.client.post(
+            "/api/chapter-linking/review/chapter:BOOK1:2-4/send-to-review", params={"library_slug": "groups/1"}
+        )
+        self.assertEqual(response.status_code, 400)
+
     def test_send_to_review_unknown_queue_id_returns_404(self):
         self._override_admin()
         response = self.client.post(

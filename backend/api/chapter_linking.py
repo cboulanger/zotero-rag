@@ -483,7 +483,7 @@ async def send_entry_to_review(
     entry = review_queue_store.get_entry(path, library_slug, queue_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
-    if entry["bucket"] != "commit":
-        raise HTTPException(status_code=400, detail="Only commit-bucket entries can be sent to review")
+    if entry["bucket"] != "commit" or entry["status"] != "pending":
+        raise HTTPException(status_code=400, detail="Only pending commit-bucket entries can be sent to review")
     review_queue_store.set_bucket(path, library_slug, queue_id, "review")
     return {"queue_id": queue_id, "bucket": "review"}
