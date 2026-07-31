@@ -4,9 +4,13 @@ import unittest
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
+import tempfile
 from pathlib import Path
+from pathlib import Path as _TestPath
 from tempfile import TemporaryDirectory
 
+from backend.config.settings import get_settings, reset_settings
+from backend.services.review_queue_store import get_entry
 from backend.services.chapter_segmentation import (
     TocEntry,
     extract_page_texts_from_pdf_bytes,
@@ -896,6 +900,15 @@ class TestAnalysisCache(unittest.TestCase):
 
 
 class TestRun(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        reset_settings()
+        get_settings().review_queue_path = _TestPath(self.tmp.name) / "review_queue.json"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        reset_settings()
+
     def test_skips_already_linked_book(self):
         import asyncio
 
@@ -947,6 +960,39 @@ class TestRun(unittest.TestCase):
         self.assertEqual(result["attachments"][0]["item_key"], "BOOK0002")
         self.assertTrue(result["attachments"][0]["has_text_layer"])
         zotero_client.get_attachment_file.assert_called_once_with("1", "ATT0001", library_type="group")
+
+    def test_needs_ocr_attachment_is_upserted_into_review_queue(self):
+        import asyncio
+
+        zotero_client = AsyncMock()
+        zotero_client.get_library_items_since.return_value = [
+            {"data": {"key": "BOOK9", "itemType": "book", "extra": ""}},
+        ]
+        zotero_client.get_item_children.return_value = [
+            {"data": {"key": "ATT9", "itemType": "attachment", "contentType": "application/pdf"}},
+        ]
+        zotero_client.get_attachment_file.return_value = b"%PDF-1.4 no text layer"
+
+        with unittest.mock.patch(
+            "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
+            return_value=[""],
+        ):
+            asyncio.run(analyze_run(
+                zotero_client=zotero_client,
+                library_id="1",
+                library_type="group",
+                slug="groups/1",
+                item_keys=None,
+                max_items=None,
+                relink=False,
+                progress_callback=lambda p, m: None,
+            ))
+
+        entry = get_entry(get_settings().review_queue_path, "groups/1", "ocr:ATT9")
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["type"], "ocr")
+        self.assertEqual(entry["bucket"], "review")
+        self.assertEqual(entry["payload"], {"book_key": "BOOK9", "attachment_key": "ATT9"})
 
     def test_uses_llm_fallback_when_llm_service_provided(self):
         import asyncio

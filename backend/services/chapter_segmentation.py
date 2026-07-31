@@ -25,6 +25,8 @@ import spacy
 from pypdf import PdfReader
 from rapidfuzz import fuzz
 
+from backend.config.settings import get_settings
+from backend.services import review_queue_store
 from backend.services.chapter_link_store import parse_links
 from backend.services.chapter_ocr import load_cached_ocr
 from backend.services.llm import LLMService
@@ -1258,6 +1260,19 @@ async def run(
         if ocr_cache_dir is not None:
             save_analysis_cache(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode, result_entry)
         attachments_out.append(result_entry)
+
+    ocr_entries = [
+        {
+            "queue_id": f"ocr:{a['attachment_key']}",
+            "type": "ocr",
+            "bucket": "review",
+            "payload": {"book_key": a["item_key"], "attachment_key": a["attachment_key"]},
+        }
+        for a in attachments_out
+        if a.get("needs_ocr")
+    ]
+    if ocr_entries:
+        review_queue_store.upsert_many(get_settings().review_queue_path, slug, ocr_entries)
 
     progress_callback(1.0, "Done")
     return {"slug": slug, "attachments": attachments_out}
