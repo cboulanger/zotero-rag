@@ -301,6 +301,101 @@ class TestReviewEndpoints(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 403)
 
+    def test_approve_chapter_entry_calls_upload_run_and_marks_approved(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "chapter:BOOK1:2-4", "type": "chapter", "bucket": "review",
+             "payload": {"book_key": "BOOK1", "attachment_key": "ATT1", "title": "T", "authors": [],
+                         "pdf_start_index": 2, "pdf_end_index": 4, "citation_pages": None,
+                         "confidence": 0.7, "target_collection": "Book Chapters"}},
+        ])
+        with patch("backend.api.chapter_linking.upload_run", new=AsyncMock(
+            return_value={"created": [{"book_key": "BOOK1", "chapter_key": "CHAP1"}], "failed": []}
+        )) as mock_upload:
+            response = self.client.post(
+                "/api/chapter-linking/review/chapter:BOOK1:2-4/approve",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "approved")
+        mock_upload.assert_called_once()
+        call_kwargs = mock_upload.call_args.kwargs
+        self.assertEqual(call_kwargs["confidence_threshold"], 0.0)
+        self.assertEqual(call_kwargs["analyses"][0]["chapters"][0]["title"], "T")
+        entry = review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "chapter:BOOK1:2-4")
+        self.assertEqual(entry["status"], "approved")
+
+    def test_approve_chapter_entry_applies_edits(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "chapter:BOOK1:2-4", "type": "chapter", "bucket": "review",
+             "payload": {"book_key": "BOOK1", "attachment_key": "ATT1", "title": "Original", "authors": [],
+                         "pdf_start_index": 2, "pdf_end_index": 4, "citation_pages": None,
+                         "confidence": 0.7, "target_collection": "Book Chapters"}},
+        ])
+        with patch("backend.api.chapter_linking.upload_run", new=AsyncMock(
+            return_value={"created": [], "failed": []}
+        )) as mock_upload:
+            self.client.post(
+                "/api/chapter-linking/review/chapter:BOOK1:2-4/approve",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "title": "Edited Title", "pdf_end_index": 5},
+            )
+        chapter = mock_upload.call_args.kwargs["analyses"][0]["chapters"][0]
+        self.assertEqual(chapter["title"], "Edited Title")
+        self.assertEqual(chapter["pdf_start_index"], 2)
+        self.assertEqual(chapter["pdf_end_index"], 5)
+
+    def test_approve_match_entry_requires_book_key_for_ambiguous(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "review",
+             "payload": {"chapter_key": "CHAP1", "candidates": [{"key": "BOOK1", "title": "T", "year": 2020}]}},
+        ])
+        response = self.client.post(
+            "/api/chapter-linking/review/match:CHAP1/approve",
+            json={"library_slug": "groups/1", "api_key": "WRITE-KEY"},
+        )
+        self.assertEqual(response.status_code, 502)
+
+    def test_approve_match_entry_with_book_key_calls_commit_links(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "match:CHAP1", "type": "match", "bucket": "review",
+             "payload": {"chapter_key": "CHAP1", "candidates": [{"key": "BOOK1", "title": "T", "year": 2020}]}},
+        ])
+        with patch("backend.api.chapter_linking.commit_links", return_value={"linked": [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}], "failed": []}) as mock_commit:
+            response = self.client.post(
+                "/api/chapter-linking/review/match:CHAP1/approve",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY", "book_key": "BOOK1"},
+            )
+        self.assertEqual(response.status_code, 200)
+        mock_commit.assert_called_once()
+        would_link = mock_commit.call_args.args[2]
+        self.assertEqual(would_link, [{"chapter_key": "CHAP1", "book_key": "BOOK1", "score": 1.0}])
+
+    def test_approve_ocr_entry_runs_ocr_and_reanalyzes_then_removes_entry(self):
+        self._override_admin()
+        review_queue_store.upsert_many(get_settings().review_queue_path, "groups/1", [
+            {"queue_id": "ocr:ATT1", "type": "ocr", "bucket": "review",
+             "payload": {"book_key": "BOOK1", "attachment_key": "ATT1"}},
+        ])
+        with patch("backend.api.chapter_linking.ocr_run", new=AsyncMock(return_value={"results": []})), \
+             patch("backend.api.chapter_linking.analyze_run", new=AsyncMock(return_value={"slug": "groups/1", "attachments": []})):
+            response = self.client.post(
+                "/api/chapter-linking/review/ocr:ATT1/approve",
+                json={"library_slug": "groups/1", "api_key": "WRITE-KEY"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(review_queue_store.get_entry(get_settings().review_queue_path, "groups/1", "ocr:ATT1"))
+
+    def test_approve_unknown_queue_id_returns_404(self):
+        self._override_admin()
+        response = self.client.post(
+            "/api/chapter-linking/review/does-not-exist/approve",
+            json={"library_slug": "groups/1", "api_key": "WRITE-KEY"},
+        )
+        self.assertEqual(response.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

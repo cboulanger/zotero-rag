@@ -293,3 +293,128 @@ async def list_pending_review(
 ) -> dict:
     entries = review_queue_store.list_pending(get_settings().review_queue_path, library_slug, bucket=bucket)
     return {"entries": entries}
+
+
+async def _apply_entry(
+    entry: dict,
+    slug: str,
+    api_key: str,
+    *,
+    title: str | None = None,
+    authors: list[str] | None = None,
+    pdf_start_index: int | None = None,
+    pdf_end_index: int | None = None,
+    book_key: str | None = None,
+) -> dict:
+    """Dispatch one queue entry (from review_queue_store.get_entry) to the
+    existing per-batch service logic, scoped to just this one item. Shared
+    by the approve and execute endpoints -- execute never passes any of
+    the optional edit kwargs (bucket="commit" entries are never edited,
+    design spec §4/§6). Raises on failure; callers decide whether that
+    becomes an HTTPException (approve) or a per-item failure entry
+    (execute).
+    """
+    payload = entry["payload"]
+    library_type, numeric_id, library_id = parse_library_slug(slug)
+
+    if entry["type"] == "chapter":
+        write_client = zotero.Zotero(library_id=numeric_id, library_type=library_type, api_key=api_key)
+        read_client = ZoteroWebAPI(api_key=api_key)
+        chapter = {
+            "title": title if title is not None else payload["title"],
+            "authors": authors if authors is not None else payload.get("authors", []),
+            "pdf_start_index": pdf_start_index if pdf_start_index is not None else payload["pdf_start_index"],
+            "pdf_end_index": pdf_end_index if pdf_end_index is not None else payload["pdf_end_index"],
+            "citation_pages": payload.get("citation_pages"),
+            "confidence": payload.get("confidence", 1.0),
+        }
+        analyses = [{"item_key": payload["book_key"], "attachment_key": payload["attachment_key"], "chapters": [chapter]}]
+        result = await upload_run(
+            zotero_write_client=write_client,
+            zotero_read_client=read_client,
+            slug=slug,
+            analyses=analyses,
+            commit=True,
+            confidence_threshold=0.0,
+            target_collection=payload.get("target_collection") or "Book Chapters",
+            max_items=None,
+        )
+        if result["failed"]:
+            raise RuntimeError(result["failed"][0]["error"])
+        return {"created": result["created"]}
+
+    if entry["type"] == "match":
+        write_client = zotero.Zotero(library_id=numeric_id, library_type=library_type, api_key=api_key)
+        chosen_book_key = book_key or payload.get("book_key")
+        if not chosen_book_key:
+            raise ValueError("book_key is required to approve an ambiguous match")
+        would_link = [{"chapter_key": payload["chapter_key"], "book_key": chosen_book_key, "score": payload.get("score", 1.0)}]
+        result = await asyncio.to_thread(commit_links, write_client, slug, would_link, payload.get("target_collection"))
+        if result["failed"]:
+            raise RuntimeError(result["failed"][0]["error"])
+        return {"linked": result["linked"]}
+
+    if entry["type"] == "ocr":
+        read_client = ZoteroWebAPI(api_key=api_key)
+        extractor = create_document_extractor(backend="kreuzberg", ocr_enabled=True)
+        ocr_result = await ocr_run(
+            zotero_client=read_client,
+            extractor=extractor,
+            library_id=library_id,
+            library_type=library_type,
+            attachment_specs=[{"item_key": payload["book_key"], "attachment_key": payload["attachment_key"]}],
+            max_items=None,
+            cache_dir=_Path("data/ocr_cache"),
+            progress_callback=lambda p, m: None,
+        )
+        review_queue_store.remove_entry(get_settings().review_queue_path, slug, entry["queue_id"])
+        analyze_result = await analyze_run(
+            zotero_client=read_client,
+            library_id=library_id,
+            library_type=library_type,
+            slug=slug,
+            item_keys=[payload["book_key"]],
+            max_items=None,
+            relink=False,
+            progress_callback=lambda p, m: None,
+        )
+        return {"ocr": ocr_result, "analysis": analyze_result}
+
+    raise ValueError(f"unknown queue entry type: {entry['type']!r}")
+
+
+class ReviewApproveRequest(BaseModel):
+    library_slug: str
+    api_key: str
+    title: str | None = None
+    authors: list[str] | None = None
+    pdf_start_index: int | None = None
+    pdf_end_index: int | None = None
+    book_key: str | None = None
+
+
+@router.post(
+    "/chapter-linking/review/{queue_id}/approve",
+    summary="Approve one pending review-queue entry (admin only)",
+)
+async def approve_review_entry(
+    queue_id: str,
+    request: ReviewApproveRequest,
+    identity: ZoteroIdentity | None = Depends(require_authorized_group_admin),
+) -> dict:
+    path = get_settings().review_queue_path
+    entry = review_queue_store.get_entry(path, request.library_slug, queue_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Queue entry {queue_id!r} not found")
+    try:
+        result = await _apply_entry(
+            entry, request.library_slug, request.api_key,
+            title=request.title, authors=request.authors,
+            pdf_start_index=request.pdf_start_index, pdf_end_index=request.pdf_end_index,
+            book_key=request.book_key,
+        )
+    except Exception as exc:  # noqa: BLE001 — surfaced as a 502, not silently swallowed
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if entry["type"] != "ocr":
+        review_queue_store.set_status(path, request.library_slug, queue_id, "approved")
+    return {"queue_id": queue_id, "status": "approved", "result": result}
