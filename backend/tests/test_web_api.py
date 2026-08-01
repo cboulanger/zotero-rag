@@ -124,6 +124,34 @@ class TestZoteroWebAPIGetLibraryItemsSince(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 5)
 
 
+class TestZoteroWebAPIRaiseOnError(unittest.IsolatedAsyncioTestCase):
+    async def test_get_library_items_since_raises_on_http_error_when_requested(self):
+        from backend.zotero.web_api import LibraryFetchError
+
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(500, {}))
+
+        with self.assertRaises(LibraryFetchError):
+            await api.get_library_items_since("u12345", "user", raise_on_error=True)
+
+    async def test_get_library_items_since_default_still_returns_partial_on_error(self):
+        """Existing callers that don't pass raise_on_error keep today's behavior."""
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(500, {}))
+
+        result = await api.get_library_items_since("u12345", "user")
+        self.assertEqual(result, [])
+
+    async def test_get_library_items_since_raises_on_non_list_body_when_requested(self):
+        from backend.zotero.web_api import LibraryFetchError
+
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(200, {"not": "a list"}))
+
+        with self.assertRaises(LibraryFetchError):
+            await api.get_library_items_since("u12345", "user", raise_on_error=True)
+
+
 class TestZoteroWebAPIGetItem(unittest.IsolatedAsyncioTestCase):
     async def test_get_item_success(self):
         item = {"key": "ITEM1", "data": {"itemType": "book", "title": "A Book"}}

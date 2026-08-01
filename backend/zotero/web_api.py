@@ -19,6 +19,10 @@ ZOTERO_API_BASE = "https://api.zotero.org"
 _PAGE_SIZE = 100
 
 
+class LibraryFetchError(Exception):
+    """Raised by ZoteroWebAPI methods when raise_on_error=True and a fetch fails."""
+
+
 class ZoteroWebAPI:
     """
     Client for the Zotero web API (api.zotero.org).
@@ -107,11 +111,17 @@ class ZoteroWebAPI:
         since_version: Optional[int] = None,
         limit: Optional[int] = None,
         start: int = 0,
+        raise_on_error: bool = False,
     ) -> list[dict[str, Any]]:
         """Fetch items with automatic pagination.
 
         If *limit* is given, at most that many items are returned (no pagination
         beyond the first page). If *limit* is None, all pages are fetched.
+
+        If *raise_on_error* is True, a non-200 response or a non-list response
+        body raises LibraryFetchError instead of silently returning whatever
+        was accumulated so far. Defaults to False so every existing caller's
+        behavior is unchanged.
         """
         await self._ensure_session()
         url = f"{self._base_url(library_id, library_type)}/items"
@@ -131,9 +141,17 @@ class ZoteroWebAPI:
                 await self._handle_rate_limit(resp)
                 if resp.status != 200:
                     logger.error("get_library_items_since failed: HTTP %s", resp.status)
+                    if raise_on_error:
+                        raise LibraryFetchError(
+                            f"get_library_items_since failed: HTTP {resp.status}"
+                        )
                     break
                 items = await resp.json()
                 if not isinstance(items, list):
+                    if raise_on_error:
+                        raise LibraryFetchError(
+                            "get_library_items_since: non-list response body"
+                        )
                     break
                 all_items.extend(items)
 
