@@ -202,5 +202,50 @@ class TestZoteroLibraryCacheSyncErrors(unittest.IsolatedAsyncioTestCase):
             cache.close()
 
 
+class TestZoteroLibraryCacheGetAllItems(unittest.IsolatedAsyncioTestCase):
+    async def test_get_all_items_returns_everything_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = [
+                _item("AAAA", 1, "book"),
+                _item("BBBB", 2, "bookSection"),
+                _item("CCCC", 3, "note"),
+            ]
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            items = await cache.get_all_items()
+            self.assertEqual({item["key"] for item in items}, {"AAAA", "BBBB", "CCCC"})
+            cache.close()
+
+    async def test_get_all_items_filters_by_item_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = [
+                _item("AAAA", 1, "book"),
+                _item("BBBB", 2, "bookSection"),
+                _item("CCCC", 3, "note"),
+            ]
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            items = await cache.get_all_items(item_types=["bookSection"])
+            self.assertEqual([item["key"] for item in items], ["BBBB"])
+            cache.close()
+
+    async def test_get_all_items_syncs_on_every_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = []
+            client.get_deleted_item_keys.return_value = []
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            await cache.get_all_items()
+            await cache.get_all_items()
+            self.assertEqual(client.get_library_items_since.await_count, 2)
+            cache.close()
+
+
 if __name__ == "__main__":
     unittest.main()
