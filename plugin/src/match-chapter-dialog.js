@@ -82,6 +82,13 @@ var MatchChapterDialog = {
 			radioCell.appendChild(radio);
 			row.appendChild(radioCell);
 
+			row.style.cursor = 'pointer';
+			row.addEventListener('click', (e) => {
+				if (e.target === radio) return;
+				radio.checked = true;
+				this.selectedBookKey = candidate.key;
+			});
+
 			[candidate.title, candidate.creators, candidate.year != null ? String(candidate.year) : '', String(candidate.score)]
 				.forEach(text => {
 					const cell = document.createElementNS('http://www.w3.org/1999/xhtml', 'td');
