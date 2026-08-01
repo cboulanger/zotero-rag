@@ -265,12 +265,23 @@ async def fetch_crossref_chapters(
 ### 5.3 `ZoteroCatalogMetadataStrategy` — same-library exact `bookTitle` lookup
 
 The cheapest of the three strategies: it makes **zero additional network
-calls**. `run()` already fetches the library's full item list once
-(`items = await zotero_client.get_library_items_since(...)`, before
-filtering to `books`) — this strategy just also looks at that same list's
-`bookSection` items, which is a discovery use of the same idea
-`chapter-retrofit-link` already applies as a *linking* operation (see the
-non-goal in §2 explaining why the two are kept separate).
+calls**. `run()` fetches the library's full item list through a
+`ZoteroLibraryCache` (see
+`docs/superpowers/specs/2026-08-01-zotero-library-sync-cache-design.md`)
+instead of a raw `zotero_client.get_library_items_since(...)` call — the
+first `run()` invocation for a given library does a full fetch and every
+later one does a cheap version-based incremental sync instead of
+re-downloading the whole library. This matters because `run()` is invoked far
+more often than "once per library": every `POST /chapter-linking/analyze`
+request triggers a fresh `run()` call, and so does every `"ocr"`-type entry
+processed in a `/chapter-linking/review/execute` batch (one `run()` call per
+queue entry) — today, each of those independently re-downloads the entire
+library just to filter it down to `books`/`bookSection` items, which is
+exactly the wasteful pattern this cache module exists to remove (see §9).
+This strategy just also looks at that same cached item list's `bookSection`
+items, which is a discovery use of the same idea `chapter-retrofit-link`
+already applies as a *linking* operation (see the non-goal in §2 explaining
+why the two are kept separate).
 
 ```python
 def find_zotero_catalog_candidates(
@@ -614,17 +625,30 @@ async def run(
     enable_crossref: bool = True,
     crossref_cache_dir: Optional[Path] = None,  # defaults to Settings' path when None
     crossref_contact_email: Optional[str] = None,
+    zotero_cache_dir: Optional[Path] = None,  # defaults to Settings().zotero_cache_path when None
 ) -> dict:
 ```
 
-When called, `run()` builds a `BookContext` per book from the Zotero item
-data already fetched, constructs one shared `httpx.AsyncClient` for the
-whole run (not per-book), builds `book_sections_by_title` once from the
-same already-fetched `items` list (§5.3) and constructs one
-`ZoteroCatalogMetadataStrategy` from it for the whole run, and calls
-`analyze_attachment_with_strategies` instead of `analyze_attachment` /
+`zotero_cache_dir` has no CLI/API opt-out flag (unlike `enable_crossref`): it
+has no external-network or privacy surface of its own — it only changes how
+the library's own already-authorized data is fetched from Zotero — so unlike
+Crossref there is no reason a deployment would want to disable it.
+
+When called, `run()` constructs one `ZoteroLibraryCache` for the whole run —
+wrapping the already-injected `zotero_client` rather than a new client, per
+`docs/superpowers/specs/2026-08-01-zotero-library-sync-cache-design.md` — and
+gets the library's item list via `await cache.get_all_items()` instead of
+calling `zotero_client.get_library_items_since(...)` directly. It then builds
+a `BookContext` per book from that same item data, constructs one shared
+`httpx.AsyncClient` for the whole run (not per-book), builds
+`book_sections_by_title` once from the same cached `items` list (§5.3) and
+constructs one `ZoteroCatalogMetadataStrategy` from it for the whole run, and
+calls `analyze_attachment_with_strategies` instead of `analyze_attachment` /
 `analyze_attachment_with_llm_fallback` directly — those two remain reachable
 only via direct import (tests, evaluation scripts), not through `run()`.
+This integration depends on `backend/zotero/library_cache.py` already
+existing (implemented by the companion spec's own plan), not on any new code
+introduced here.
 
 - **CLI** (`scripts/analyze_book_chapters.py`): new `--no-crossref` flag
   (Crossref on by default — see rationale below) and `--crossref-contact-email`
@@ -680,7 +704,15 @@ than an open-ended "later":
   approach) for libraries where a cataloguer's `bookTitle` entry has a minor
   typo or abbreviation relative to the book's own `title` field — deliberately
   not in Phase 1, which requires an exact match only, per the explicit
-  no-fuzzy-matching requirement for this strategy.
+  no-fuzzy-matching requirement for this strategy; and migrating
+  `chapter_retrofit.py`'s own independent full-library `bookSection` fetch to
+  the same `ZoteroLibraryCache` §9 wires into `chapter_segmentation.run()` —
+  today it performs a second, entirely separate full download of the
+  library, duplicating the exact inefficiency this design's cache
+  integration just removed for `run()`. Deferred rather than done now
+  because §2 explicitly keeps `chapter-retrofit-link` out of this design's
+  scope; worth revisiting once the cache has proven itself at its one
+  adopted call site.
 
 ## 11. Error handling
 
@@ -748,6 +780,14 @@ than an open-ended "later":
   fixture pages; confirms `source`/`diagnostics` fields are populated
   correctly for each strategy-derived case (outline-only, crossref-only,
   zotero_catalog-only, and both merged combinations).
+- `run()`-level tests exercise a real `ZoteroLibraryCache` backed by a
+  temp-directory SQLite file (via `Settings().zotero_cache_path` pointed at
+  a `TemporaryDirectory` in test setup) rather than mocking the cache itself
+  — only the underlying `ZoteroWebAPI`-shaped `zotero_client` is mocked
+  (`get_library_items_since`/`get_deleted_item_keys`), the same network
+  boundary every existing `run()` test already mocks. This matches how
+  `ocr_cache_dir`/`crossref_cache_dir` tests already exercise the real
+  filesystem rather than mocking those caching layers.
 - **New evaluation script** `scripts/evaluate_chapter_segmentation_strategies.py`,
   following the existing `evaluate_chapter_segmentation_llm_fallback.py`
   pattern (not a pytest test — costs real Crossref calls, though free and
