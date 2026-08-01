@@ -201,11 +201,15 @@ class ZoteroWebAPI:
         library_id: str,
         library_type: str = "user",
         since_version: int = 0,
+        raise_on_error: bool = False,
     ) -> list[str]:
         """Return item keys deleted from Zotero since *since_version*.
 
         Calls GET /{kind}/{id}/deleted?since=version and returns the "items" list.
-        Returns an empty list on error so callers can treat this as best-effort.
+        Returns an empty list on error so callers can treat this as best-effort,
+        unless *raise_on_error* is True, in which case LibraryFetchError is
+        raised instead. Defaults to False so every existing caller's behavior
+        is unchanged.
         """
         await self._ensure_session()
         url = f"{self._base_url(library_id, library_type)}/deleted"
@@ -215,6 +219,8 @@ class ZoteroWebAPI:
                 data = await resp.json()
                 return data.get("items", [])
             logger.warning("get_deleted_item_keys failed: HTTP %s", resp.status)
+            if raise_on_error:
+                raise LibraryFetchError(f"get_deleted_item_keys failed: HTTP {resp.status}")
             return []
 
     async def get_attachment_file(

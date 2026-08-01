@@ -124,6 +124,31 @@ class TestZoteroWebAPIGetLibraryItemsSince(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 5)
 
 
+class TestZoteroWebAPIGetDeletedItemKeys(unittest.IsolatedAsyncioTestCase):
+    async def test_get_deleted_item_keys_success(self):
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(200, {"items": ["AAAA", "BBBB"]}))
+
+        result = await api.get_deleted_item_keys("u12345", "user", since_version=5)
+        self.assertEqual(result, ["AAAA", "BBBB"])
+
+    async def test_get_deleted_item_keys_error_returns_empty_by_default(self):
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(500, {}))
+
+        result = await api.get_deleted_item_keys("u12345", "user", since_version=5)
+        self.assertEqual(result, [])
+
+    async def test_get_deleted_item_keys_raises_on_error_when_requested(self):
+        from backend.zotero.web_api import LibraryFetchError
+
+        api = ZoteroWebAPI(api_key="testkey")
+        api.session = _make_session(_make_response(500, {}))
+
+        with self.assertRaises(LibraryFetchError):
+            await api.get_deleted_item_keys("u12345", "user", since_version=5, raise_on_error=True)
+
+
 class TestZoteroWebAPIRaiseOnError(unittest.IsolatedAsyncioTestCase):
     async def test_get_library_items_since_raises_on_http_error_when_requested(self):
         from backend.zotero.web_api import LibraryFetchError
