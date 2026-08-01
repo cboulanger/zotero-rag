@@ -3,7 +3,7 @@
  * This file imports and exposes the toolkit for use in the plugin
  */
 
-import { BasicTool, UITool, ProgressWindowHelper, VirtualizedTableHelper } from 'zotero-plugin-toolkit';
+import { BasicTool, UITool, ProgressWindowHelper, VirtualizedTableHelper, ExtraFieldTool } from 'zotero-plugin-toolkit';
 
 export { VirtualizedTableHelper };
 
@@ -19,11 +19,13 @@ export function createToolkit(config) {
 	const basicTool = new BasicTool();
 	const uiTool = new UITool();
 	const progressHelper = new ProgressWindowHelper(config.id, 'Zotero RAG');
+	const extraField = new ExtraFieldTool(basicTool);
 
 	return {
 		basicTool,
 		uiTool,
 		progressHelper,
+		extraField,
 
 		/**
 		 * Show an alert dialog using Services.prompt

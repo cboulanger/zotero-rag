@@ -34,7 +34,7 @@ var ZoteroPluginToolkit = (() => {
   };
 
   // node_modules/zotero-plugin-toolkit/dist/index.js
-  var version = "5.1.0-beta.12";
+  var version = "5.1.2";
   var DebugBridge = class DebugBridge2 {
     static version = 2;
     static passwordPref = "extensions.zotero.debug-bridge.password";
@@ -221,10 +221,6 @@ If you do not know what it is, please click Cancel to deny.`);
     */
     _basicOptions;
     _console;
-    /**
-    * @deprecated Use `patcherManager` instead.
-    */
-    patchSign = "zotero-plugin-toolkit@3.0.0";
     static _version = version;
     /**
     * Get version - checks subclass first, then falls back to parent
@@ -371,20 +367,6 @@ If you do not know what it is, please click Cancel to deny.`);
         if (_Zotero) Zotero.logError(e);
         else console.error(e);
       }
-    }
-    /**
-    * Patch a function
-    * @deprecated Use {@link PatchHelper} instead.
-    * @param object The owner of the function
-    * @param funcSign The signature of the function(function name)
-    * @param ownerSign The signature of patch owner to avoid patching again
-    * @param patcher The new wrapper of the patched function
-    */
-    patch(object, funcSign, ownerSign, patcher) {
-      if (object[funcSign][ownerSign]) throw new Error(`${String(funcSign)} re-patched`);
-      this.log("patching", funcSign, `by ${ownerSign}`);
-      object[funcSign] = patcher(object[funcSign]);
-      object[funcSign][ownerSign] = true;
     }
     /**
     * Add a Zotero event listener callback
@@ -2627,168 +2609,6 @@ html {
       if (allowOverwrite || !this[attribute]) this[attribute] = value;
     }
   };
-  var MenuManager = class extends ManagerTool {
-    ui;
-    constructor(base) {
-      super(base);
-      this.ui = new UITool(this);
-    }
-    /**
-    * Insert an menu item/menu(with popup)/menuseprator into a menupopup
-    * @remarks
-    * options:
-    * ```ts
-    * export interface MenuitemOptions {
-    *   tag: "menuitem" | "menu" | "menuseparator";
-    *   id?: string;
-    *   label?: string;
-    *   // data url (chrome://xxx.png) or base64 url (data:image/png;base64,xxx)
-    *   icon?: string;
-    *   class?: string;
-    *   styles?: { [key: string]: string };
-    *   hidden?: boolean;
-    *   disabled?: boolean;
-    *   oncommand?: string;
-    *   commandListener?: EventListenerOrEventListenerObject;
-    *   // Attributes below are used when type === "menu"
-    *   popupId?: string;
-    *   onpopupshowing?: string;
-    *   subElementOptions?: Array<MenuitemOptions>;
-    * }
-    * ```
-    * @param menuPopup
-    * @param options
-    * @param insertPosition
-    * @param anchorElement The menuitem will be put before/after `anchorElement`. If not set, put at start/end of the menupopup.
-    * @example
-    * Insert menuitem with icon into item menupopup
-    * ```ts
-    * // base64 or chrome:// url
-    * const menuIcon = "chrome://addontemplate/content/icons/favicon@0.5x.png";
-    * ztoolkit.Menu.register("item", {
-    *   tag: "menuitem",
-    *   id: "zotero-itemmenu-addontemplate-test",
-    *   label: "Addon Template: Menuitem",
-    *   oncommand: "alert('Hello World! Default Menuitem.')",
-    *   icon: menuIcon,
-    * });
-    * ```
-    * @example
-    * Insert menu into file menupopup
-    * ```ts
-    * ztoolkit.Menu.register(
-    *   "menuFile",
-    *   {
-    *     tag: "menu",
-    *     label: "Addon Template: Menupopup",
-    *     subElementOptions: [
-    *       {
-    *         tag: "menuitem",
-    *         label: "Addon Template",
-    *         oncommand: "alert('Hello World! Sub Menuitem.')",
-    *       },
-    *     ],
-    *   },
-    *   "before",
-    *   Zotero.getMainWindow().document.querySelector(
-    *     "#zotero-itemmenu-addontemplate-test"
-    *   )
-    * );
-    * ```
-    */
-    register(menuPopup, options, insertPosition = "after", anchorElement) {
-      let popup;
-      if (typeof menuPopup === "string") popup = this.getGlobal("document").querySelector(MenuSelector[menuPopup]);
-      else popup = menuPopup;
-      if (!popup) return false;
-      const doc = popup.ownerDocument;
-      const genMenuElement = (menuitemOption) => {
-        const elementOption = {
-          tag: menuitemOption.tag,
-          id: menuitemOption.id,
-          namespace: "xul",
-          attributes: {
-            label: menuitemOption.label || "",
-            hidden: Boolean(menuitemOption.hidden),
-            disabled: Boolean(menuitemOption.disabled),
-            class: menuitemOption.class || "",
-            oncommand: menuitemOption.oncommand || ""
-          },
-          classList: menuitemOption.classList,
-          styles: menuitemOption.styles || {},
-          listeners: [],
-          children: []
-        };
-        if (menuitemOption.icon) {
-          if (!this.getGlobal("Zotero").isMac) if (menuitemOption.tag === "menu") elementOption.attributes.class += " menu-iconic";
-          else elementOption.attributes.class += " menuitem-iconic";
-          elementOption.styles["list-style-image"] = `url(${menuitemOption.icon})`;
-        }
-        if (menuitemOption.commandListener) elementOption.listeners?.push({
-          type: "command",
-          listener: menuitemOption.commandListener
-        });
-        if (menuitemOption.tag === "menuitem") {
-          elementOption.attributes.type = menuitemOption.type || "";
-          elementOption.attributes.checked = menuitemOption.checked || false;
-        }
-        const menuItem = this.ui.createElement(doc, menuitemOption.tag, elementOption);
-        if (menuitemOption.isHidden || menuitemOption.getVisibility) popup?.addEventListener("popupshowing", async (ev) => {
-          let hidden;
-          if (menuitemOption.isHidden) hidden = await menuitemOption.isHidden(menuItem, ev);
-          else if (menuitemOption.getVisibility) {
-            const visible = await menuitemOption.getVisibility(menuItem, ev);
-            hidden = typeof visible === "undefined" ? void 0 : !visible;
-          }
-          if (typeof hidden === "undefined") return;
-          if (hidden) menuItem.setAttribute("hidden", "true");
-          else menuItem.removeAttribute("hidden");
-        });
-        if (menuitemOption.isDisabled) popup?.addEventListener("popupshowing", async (ev) => {
-          const disabled = await menuitemOption.isDisabled(menuItem, ev);
-          if (typeof disabled === "undefined") return;
-          if (disabled) menuItem.setAttribute("disabled", "true");
-          else menuItem.removeAttribute("disabled");
-        });
-        if ((menuitemOption.tag === "menuitem" || menuitemOption.tag === "menuseparator") && menuitemOption.onShowing) popup?.addEventListener("popupshowing", async (ev) => {
-          await menuitemOption.onShowing(menuItem, ev);
-        });
-        if (menuitemOption.tag === "menu") {
-          const subPopup = this.ui.createElement(doc, "menupopup", {
-            id: menuitemOption.popupId,
-            attributes: { onpopupshowing: menuitemOption.onpopupshowing || "" }
-          });
-          menuitemOption.children?.forEach((childOption) => {
-            subPopup.append(genMenuElement(childOption));
-          });
-          menuItem.append(subPopup);
-        }
-        return menuItem;
-      };
-      const topMenuItem = genMenuElement(options);
-      if (popup.childElementCount) {
-        if (!anchorElement) anchorElement = insertPosition === "after" ? popup.lastElementChild : popup.firstElementChild;
-        anchorElement[insertPosition](topMenuItem);
-      } else popup.appendChild(topMenuItem);
-    }
-    unregister(menuId) {
-      this.getGlobal("document").querySelector(`#${menuId}`)?.remove();
-    }
-    unregisterAll() {
-      this.ui.unregisterAll();
-    }
-  };
-  var MenuSelector = /* @__PURE__ */ (function(MenuSelector$1) {
-    MenuSelector$1["menuFile"] = "#menu_FilePopup";
-    MenuSelector$1["menuEdit"] = "#menu_EditPopup";
-    MenuSelector$1["menuView"] = "#menu_viewPopup";
-    MenuSelector$1["menuGo"] = "#menu_goPopup";
-    MenuSelector$1["menuTools"] = "#menu_ToolsPopup";
-    MenuSelector$1["menuHelp"] = "#menu_HelpPopup";
-    MenuSelector$1["collection"] = "#zotero-collectionmenu";
-    MenuSelector$1["item"] = "#zotero-itemmenu";
-    return MenuSelector$1;
-  })(MenuSelector || {});
   var Prompt = class {
     ui;
     base;
@@ -3463,12 +3283,8 @@ html {
     async replaceExtraFields(item, fields, options = {}) {
       const { save = true } = options;
       const kvs = [];
-      if (fields.has("__nonStandard__")) {
-        kvs.push(...fields.get("__nonStandard__"));
-        fields.delete("__nonStandard__");
-      }
       fields.forEach((values, key) => {
-        values.forEach((v) => kvs.push(`${key}: ${v}`));
+        key === "__nonStandard__" ? kvs.push(...fields.get("__nonStandard__")) : values.forEach((v) => kvs.push(`${key}: ${v}`));
       });
       item.setField("extra", kvs.join("\n"));
       if (save) await item.saveTx();
@@ -3532,37 +3348,6 @@ html {
       return windowReaders;
     }
     /**
-    * Get Reader tabpanel deck element.
-    * @deprecated - use item pane api
-    * @alpha
-    */
-    getReaderTabPanelDeck() {
-      const deck = this.getGlobal("window").document.querySelector(".notes-pane-deck")?.previousElementSibling;
-      return deck;
-    }
-    /**
-    * Add a reader tabpanel deck selection change observer.
-    * @deprecated - use item pane api
-    * @alpha
-    * @param callback
-    */
-    async addReaderTabPanelDeckObserver(callback) {
-      await waitUtilAsync(() => !!this.getReaderTabPanelDeck());
-      const deck = this.getReaderTabPanelDeck();
-      const observer = new (this.getGlobal("MutationObserver"))(async (mutations) => {
-        mutations.forEach(async (mutation) => {
-          const target = mutation.target;
-          if (target.classList.contains("zotero-view-tabbox") || target.tagName === "deck") callback();
-        });
-      });
-      observer.observe(deck, {
-        attributes: true,
-        attributeFilter: ["selectedIndex"],
-        subtree: true
-      });
-      return observer;
-    }
-    /**
     * Get the selected annotation data.
     * @param reader Target reader
     * @returns The selected annotation data.
@@ -3588,7 +3373,6 @@ html {
     FieldHooks = new FieldHookManager(this);
     Keyboard = new KeyboardManager(this);
     Prompt = new PromptManager(this);
-    Menu = new MenuManager(this);
     Clipboard = makeHelperTool(ClipboardHelper, this);
     FilePicker = makeHelperTool(FilePickerHelper, this);
     Patch = makeHelperTool(PatchHelper, this);
@@ -3613,10 +3397,12 @@ html {
     const basicTool2 = new BasicTool();
     const uiTool = new UITool();
     const progressHelper = new ProgressWindowHelper(config.id, "Zotero RAG");
+    const extraField = new ExtraFieldTool(basicTool2);
     return {
       basicTool: basicTool2,
       uiTool,
       progressHelper,
+      extraField,
       /**
        * Show an alert dialog using Services.prompt
        * @param {string} message - Dialog message
