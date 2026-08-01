@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from backend.zotero.library_cache import SyncResult, ZoteroLibraryCache
+from backend.zotero.library_cache import LibrarySyncError, SyncResult, ZoteroLibraryCache
+from backend.zotero.web_api import LibraryFetchError
 
 
 def _item(key: str, version: int, item_type: str, **data_fields) -> dict:
@@ -160,6 +161,45 @@ class TestZoteroLibraryCacheSync(unittest.IsolatedAsyncioTestCase):
         client.get_deleted_item_keys.assert_not_awaited()
         self.assertTrue(result.was_full_sync)
         self.assertEqual(result.library_version, 9)
+
+
+class TestZoteroLibraryCacheSyncErrors(unittest.IsolatedAsyncioTestCase):
+    async def test_sync_raises_library_sync_error_and_leaves_state_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = [_item("AAAA", 3, "book")]
+            client.get_deleted_item_keys.return_value = []
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            await cache.sync()  # establishes version 3, one item stored
+
+            client.get_library_items_since.side_effect = LibraryFetchError("HTTP 500")
+            with self.assertRaises(LibrarySyncError):
+                await cache.sync()
+
+            self.assertEqual(cache._stored_version(), 3)
+            items = cache._query_items(None)
+            self.assertEqual([item["key"] for item in items], ["AAAA"])
+            cache.close()
+
+    async def test_sync_raises_when_deleted_keys_fetch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = [_item("AAAA", 3, "book")]
+            client.get_deleted_item_keys.return_value = []
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            await cache.sync()
+
+            client.get_library_items_since.return_value = []
+            client.get_deleted_item_keys.side_effect = LibraryFetchError("HTTP 500")
+            with self.assertRaises(LibrarySyncError):
+                await cache.sync()
+
+            self.assertEqual(cache._stored_version(), 3)
+            cache.close()
 
 
 if __name__ == "__main__":
