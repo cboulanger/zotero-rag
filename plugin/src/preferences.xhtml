@@ -96,6 +96,24 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Book & Chapter Tools -->
+  <html:fieldset class="settings-group">
+    <html:legend>Book &amp; Chapter Tools</html:legend>
+
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-min-book-pages">Minimum book pages for "Segment Book":</html:label>
+      <html:input id="zotero-rag-min-book-pages"
+                  type="number"
+                  min="1"
+                  class="setting-input-small"/>
+    </html:div>
+
+    <html:div class="setting-description">
+      "Segment Book" (right-click menu / Tools menu) refuses to run against a PDF attachment
+      with fewer pages than this. Checked locally, never sent to the backend.
+    </html:div>
+  </html:fieldset>
+
   <!-- Retrieval Tuning -->
   <html:fieldset class="settings-group">
     <html:legend>Retrieval Tuning</html:legend>

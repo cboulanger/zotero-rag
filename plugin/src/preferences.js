@@ -11,11 +11,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const backendURL = Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || '';
 	const zoteroApiKey = Zotero.Prefs.get('extensions.zotero-rag.zoteroApiKey', true) || '';
 	const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
+	const minBookPages = Zotero.Prefs.get('extensions.zotero-rag.minBookPages', true) || 50;
 
 	// Show stored value; leave blank so the placeholder shows when nothing is saved
 	doc.getElementById('zotero-rag-backend-url').value = backendURL;
 	doc.getElementById('zotero-rag-zotero-api-key').value = zoteroApiKey;
 	doc.getElementById('zotero-rag-max-queries').value = maxQueries;
+	doc.getElementById('zotero-rag-min-book-pages').value = minBookPages;
 
 	const zoteroApiKeyStatus = doc.getElementById('zotero-rag-zotero-api-key-status');
 
@@ -116,6 +118,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		if (value >= 1 && value <= 10) {
 			Zotero.Prefs.set('extensions.zotero-rag.maxQueries', value, true);
 			this.maxConcurrentQueries = value;
+		}
+	});
+
+	doc.getElementById('zotero-rag-min-book-pages').addEventListener('change', (e) => {
+		const value = parseInt(/** @type {HTMLInputElement} */ (e.target).value);
+		if (value >= 1) {
+			Zotero.Prefs.set('extensions.zotero-rag.minBookPages', value, true);
 		}
 	});
 
