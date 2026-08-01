@@ -12,12 +12,14 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const zoteroApiKey = Zotero.Prefs.get('extensions.zotero-rag.zoteroApiKey', true) || '';
 	const maxQueries = Zotero.Prefs.get('extensions.zotero-rag.maxQueries', true) || 5;
 	const minBookPages = Zotero.Prefs.get('extensions.zotero-rag.minBookPages', true) || 50;
+	const minMatchScore = Zotero.Prefs.get('extensions.zotero-rag.minMatchScore', true) || 40;
 
 	// Show stored value; leave blank so the placeholder shows when nothing is saved
 	doc.getElementById('zotero-rag-backend-url').value = backendURL;
 	doc.getElementById('zotero-rag-zotero-api-key').value = zoteroApiKey;
 	doc.getElementById('zotero-rag-max-queries').value = maxQueries;
 	doc.getElementById('zotero-rag-min-book-pages').value = minBookPages;
+	doc.getElementById('zotero-rag-min-match-score').value = minMatchScore;
 
 	const zoteroApiKeyStatus = doc.getElementById('zotero-rag-zotero-api-key-status');
 
@@ -125,6 +127,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		const value = parseInt(/** @type {HTMLInputElement} */ (e.target).value);
 		if (value >= 1) {
 			Zotero.Prefs.set('extensions.zotero-rag.minBookPages', value, true);
+		}
+	});
+
+	doc.getElementById('zotero-rag-min-match-score').addEventListener('change', (e) => {
+		const value = parseInt(/** @type {HTMLInputElement} */ (e.target).value);
+		if (value >= 0 && value <= 100) {
+			Zotero.Prefs.set('extensions.zotero-rag.minMatchScore', value, true);
 		}
 	});
 

@@ -320,7 +320,9 @@ var ChapterActions = {
 
 			const chapterTitle = chapterItem.getField('bookTitle') || '';
 			const chapterYear = this.extractYear(chapterItem.getField('date'));
-			const candidates = FuzzyMatch.rankCandidates(chapterTitle, chapterYear, books, 5);
+			const minScore = Zotero.Prefs.get('extensions.zotero-rag.minMatchScore', true) || 40;
+			const candidates = FuzzyMatch.rankCandidates(chapterTitle, chapterYear, books, 5)
+				.filter(c => c.score >= minScore);
 
 			window.openDialog(
 				'chrome://zotero-rag/content/match-chapter-dialog.xhtml',

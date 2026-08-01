@@ -112,6 +112,20 @@
       "Segment Book" (right-click menu / Tools menu) refuses to run against a PDF attachment
       with fewer pages than this. Checked locally, never sent to the backend.
     </html:div>
+
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-min-match-score">Minimum score for "Match Chapter" suggestions:</html:label>
+      <html:input id="zotero-rag-min-match-score"
+                  type="number"
+                  min="0"
+                  max="100"
+                  class="setting-input-small"/>
+    </html:div>
+
+    <html:div class="setting-description">
+      "Match Chapter" hides candidate books scoring below this (0-100). Checked locally,
+      never sent to the backend.
+    </html:div>
   </html:fieldset>
 
   <!-- Retrieval Tuning -->
