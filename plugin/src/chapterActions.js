@@ -180,7 +180,8 @@ var ChapterActions = {
 		});
 		if (!response.ok) {
 			const errBody = await response.json().catch(() => ({}));
-			throw new Error(errBody.detail || `POST /api/chapter-linking/${path}: HTTP ${response.status}`);
+			const detail = typeof errBody.detail === 'string' ? errBody.detail : (errBody.detail ? JSON.stringify(errBody.detail) : null);
+			throw new Error(detail || `POST /api/chapter-linking/${path}: HTTP ${response.status}`);
 		}
 		const data = await response.json();
 		return data.job_id;
@@ -194,9 +195,12 @@ var ChapterActions = {
 	 */
 	async pollChapterLinkingJob(backendURL, jobId, onProgress) {
 		const POLL_INTERVAL_MS = 3000;
+		const POLL_TIMEOUT_MS = 30 * 1000;
 		while (true) {
 			await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
-			const response = await fetch(`${backendURL}/api/chapter-linking/jobs/${jobId}`);
+			const response = await fetch(`${backendURL}/api/chapter-linking/jobs/${jobId}`, {
+				signal: AbortSignal.timeout(POLL_TIMEOUT_MS),
+			});
 			if (!response.ok) {
 				throw new Error(`GET /api/chapter-linking/jobs/${jobId}: HTTP ${response.status}`);
 			}
@@ -228,7 +232,7 @@ var ChapterActions = {
 		const pageCount = await this.getPageCount(attachmentID);
 		const minPages = Zotero.Prefs.get('extensions.zotero-rag.minBookPages', true) || 50;
 		if (pageCount == null || pageCount < minPages) {
-			plugin.showError('No book-type attachment found');
+			plugin.showError(`PDF has ${pageCount ?? 'an unknown number of'} pages; Segment Book requires at least ${minPages}.`);
 			return;
 		}
 
@@ -301,27 +305,31 @@ var ChapterActions = {
 			return;
 		}
 
-		const s = new Zotero.Search();
-		s.libraryID = chapterItem.libraryID;
-		s.addCondition('itemType', 'is', 'book');
-		const ids = await s.search();
-		const books = Zotero.Items.get(ids).map(b => ({
-			key: b.key,
-			title: b.getField('title') || '',
-			year: this.extractYear(b.getField('date')),
-			creators: b.getCreators().map(c => [c.firstName, c.lastName].filter(Boolean).join(' ')).join('; '),
-			_item: b,
-		}));
+		try {
+			const s = new Zotero.Search();
+			s.libraryID = chapterItem.libraryID;
+			s.addCondition('itemType', 'is', 'book');
+			const ids = await s.search();
+			const books = Zotero.Items.get(ids).map(b => ({
+				key: b.key,
+				title: b.getField('title') || '',
+				year: this.extractYear(b.getField('date')),
+				creators: b.getCreators().map(c => [c.firstName, c.lastName].filter(Boolean).join(' ')).join('; '),
+				_item: b,
+			}));
 
-		const chapterTitle = chapterItem.getField('bookTitle') || '';
-		const chapterYear = this.extractYear(chapterItem.getField('date'));
-		const candidates = FuzzyMatch.rankCandidates(chapterTitle, chapterYear, books, 5);
+			const chapterTitle = chapterItem.getField('bookTitle') || '';
+			const chapterYear = this.extractYear(chapterItem.getField('date'));
+			const candidates = FuzzyMatch.rankCandidates(chapterTitle, chapterYear, books, 5);
 
-		window.openDialog(
-			'chrome://zotero-rag/content/match-chapter-dialog.xhtml',
-			'zotero-rag-match-chapter',
-			'chrome,centerscreen,resizable=yes,width=640,height=480',
-			{ plugin, chapterItem, chapterTitle, candidates }
-		);
+			window.openDialog(
+				'chrome://zotero-rag/content/match-chapter-dialog.xhtml',
+				'zotero-rag-match-chapter',
+				'chrome,centerscreen,resizable=yes,width=640,height=480',
+				{ plugin, chapterItem, chapterTitle, candidates }
+			);
+		} catch (err) {
+			plugin.showError(`Match Chapter failed: ${err.message}`);
+		}
 	},
 };
