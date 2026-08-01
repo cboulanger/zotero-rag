@@ -14,7 +14,6 @@ import io
 import json
 import logging
 import re
-import unicodedata
 from collections import Counter
 from functools import lru_cache
 from dataclasses import dataclass, replace
@@ -27,6 +26,13 @@ from rapidfuzz import fuzz
 
 from backend.config.settings import get_settings
 from backend.services import review_queue_store
+from backend.services.chapter_common import (
+    _BACK_MATTER_TITLES,
+    _PART_DIVIDER_RE,
+    _is_back_matter,
+    _is_part_divider,
+    _normalized_title,
+)
 from backend.services.chapter_link_store import parse_links
 from backend.services.chapter_ocr import load_cached_ocr
 from backend.services.llm import LLMService
@@ -799,48 +805,10 @@ def extract_authors_near(page_text: str, max_chars: int = 500) -> list[str]:
 # a part divider bounds its neighboring chapters' page ranges -- but never
 # emitted as chapters themselves. Forewords/prefaces/afterwords are NOT
 # here: they carry real authored content and the evaluation ground truth
-# counts them as chapters.
-_PART_DIVIDER_RE = re.compile(
-    r"^(?:teil|part|partie|section|abschnitt)\b[\s.:]*(?:[0-9]+|[ivxlcdm]+)?\b", re.IGNORECASE
-)
+# counts them as chapters. See backend/services/chapter_common.py for
+# _is_part_divider/_is_back_matter/_normalized_title (shared with the
+# chapter-evidence strategies).
 _ROMAN_PREFIX_RE = re.compile(r"^[IVXLCDM]+\.\s")
-_BACK_MATTER_TITLES = {
-    "contributors", "notes on contributors", "about the authors", "about the contributors",
-    "index", "indexes", "name index", "subject index",
-    "register", "sachregister", "personenregister", "namensregister",
-    "bibliography", "bibliographie", "literatur", "literaturverzeichnis", "references",
-    "quellenverzeichnis", "acknowledgments", "acknowledgements", "danksagung", "remerciements",
-    "glossary", "glossar", "glossaire", "abbreviations", "abkurzungsverzeichnis", "abkurzungen",
-    "list of figures", "list of tables", "tabellenverzeichnis", "abbildungsverzeichnis",
-    "les auteurs", "auteurs", "autorinnen und autoren", "die autorinnen und autoren",
-    "verzeichnis der autorinnen und autoren", "zu den autorinnen und autoren",
-    "liste des auteurs", "memento", "autorinnenverzeichnis", "autorenverzeichnis",
-    # The table of contents can list ITSELF (and does, in a real evaluation
-    # book: "Sommaire .... VII").
-    "contents", "table of contents", "inhalt", "inhaltsverzeichnis", "inhaltsubersicht",
-    "sommaire", "table des matieres",
-}
-
-
-def _normalized_title(title: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", title.lower())
-    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", stripped)).strip()
-
-
-def _is_part_divider(title: str) -> bool:
-    return _PART_DIVIDER_RE.match(title) is not None
-
-
-def _is_back_matter(title: str) -> bool:
-    normalized = _normalized_title(title)
-    if normalized in _BACK_MATTER_TITLES:
-        return True
-    # Author-marker TOCs (see _TOC_AUTHOR_MARKER_RE) fold the author into
-    # the entry title ("MÉMENTO par Lucie Daudin") -- test the part before
-    # the marker too.
-    stripped = re.split(r"\b(?:par|by)\b", normalized, maxsplit=1)[0].strip()
-    return stripped in _BACK_MATTER_TITLES
 
 
 # A trailing page with fewer than this many stripped characters is treated

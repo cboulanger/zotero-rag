@@ -11,6 +11,7 @@ from rapidfuzz import fuzz
 
 from backend.config.settings import get_settings
 from backend.services import review_queue_store
+from backend.services.chapter_common import year_from_date
 from backend.services.chapter_link_store import (
     add_related_item,
     author_year_label,
@@ -108,15 +109,6 @@ def locate_chapter_pdf_range(chapter_text: str, book_pages: list[str]) -> tuple[
     return (best_start, end)
 
 
-def _year_from_date(date_str: str | None) -> int | None:
-    if not date_str:
-        return None
-    for token in date_str.replace("-", " ").split():
-        if token.isdigit() and len(token) == 4:
-            return int(token)
-    return None
-
-
 def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: int | None) -> dict:
     """Pure matching logic: given an already-fetched full-library item list
     (see run()'s zotero_write_client.everything(...) call — the caller's
@@ -137,7 +129,7 @@ def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: 
         unlinked_chapters = unlinked_chapters[:max_items]
 
     book_candidates = [
-        {"key": b["data"]["key"], "title": b["data"].get("title", ""), "year": _year_from_date(b["data"].get("date"))}
+        {"key": b["data"]["key"], "title": b["data"].get("title", ""), "year": year_from_date(b["data"].get("date"))}
         for b in books
     ]
 
@@ -148,7 +140,7 @@ def find_matches(all_items: list[dict], item_keys: list[str] | None, max_items: 
     for chapter in unlinked_chapters:
         chapter_key = chapter["data"]["key"]
         book_title = chapter["data"].get("bookTitle", "")
-        year = _year_from_date(chapter["data"].get("date"))
+        year = year_from_date(chapter["data"].get("date"))
 
         if not book_title or not book_candidates:
             no_match.append(chapter_key)
