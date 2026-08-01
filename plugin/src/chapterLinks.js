@@ -37,7 +37,7 @@ var ChapterLinks = {
 	 * @returns {boolean}
 	 */
 	hasContainedByLink(item) {
-		return !!item.getExtraField('X-Contained-By');
+		return /^X-Contained-By:/m.test(item.getField('extra') || '');
 	},
 
 	/**

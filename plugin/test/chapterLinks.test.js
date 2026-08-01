@@ -66,10 +66,12 @@ test('getZoteroSlug returns groups/<id> for a group library', () => {
 	assert.strictEqual(ChapterLinks.getZoteroSlug(5), 'groups/6297749');
 });
 
-test('hasContainedByLink reflects the native Extra field', () => {
+test('hasContainedByLink reflects the item\'s raw Extra field, not the native schema-restricted getExtraField', () => {
 	const ChapterLinks = loadChapterLinks({ Libraries: {}, Users: {}, Groups: {} });
-	assert.strictEqual(ChapterLinks.hasContainedByLink({ getExtraField: () => '' }), false);
-	assert.strictEqual(ChapterLinks.hasContainedByLink({ getExtraField: () => 'users/42:BOOK1' }), true);
+	assert.strictEqual(ChapterLinks.hasContainedByLink({ getField: () => '' }), false);
+	assert.strictEqual(ChapterLinks.hasContainedByLink({ getField: () => 'Citation Key: foo2020' }), false);
+	assert.strictEqual(ChapterLinks.hasContainedByLink({ getField: () => 'X-Contained-By: users/42:BOOK1' }), true);
+	assert.strictEqual(ChapterLinks.hasContainedByLink({ getField: () => 'Citation Key: foo2020\nX-Contained-By: users/42:BOOK1' }), true);
 });
 
 test('writeLink sets X-Contains/X-Contained-By and native relations both ways', async () => {

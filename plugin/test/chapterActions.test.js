@@ -53,8 +53,8 @@ test('computeEnablement enables Segment Book only for a single book item', () =>
 
 test('computeEnablement enables Match Chapter only for a single unlinked bookSection item', () => {
 	const ChapterActions = loadChapterActions({});
-	const unlinked = { itemType: 'bookSection', getExtraField: () => '' };
-	const linked = { itemType: 'bookSection', getExtraField: () => 'users/42:BOOK1' };
+	const unlinked = { itemType: 'bookSection', getField: () => '' };
+	const linked = { itemType: 'bookSection', getField: () => 'X-Contained-By: users/42:BOOK1' };
 	assertEnablement(ChapterActions.computeEnablement([unlinked]), false, true);
 	assertEnablement(ChapterActions.computeEnablement([linked]), false, false);
 });
