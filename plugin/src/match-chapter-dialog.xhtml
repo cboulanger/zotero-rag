@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<?xml-stylesheet href="chrome://global/skin/" type="text/css"?>
+<?xml-stylesheet href="chrome://zotero/skin/zotero.css" type="text/css"?>
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:xul="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul">
+
+<head>
+  <title>Match Chapter - Zotero RAG</title>
+  <meta charset="utf-8"/>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero/content/include.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load include.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/match-chapter-dialog.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load match-chapter-dialog.js:", e);
+      }
+      if (window.MatchChapterDialog) window.MatchChapterDialog.init();
+    });
+  </script>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; }
+    .dialog-container { display: flex; flex-direction: column; height: 100%; padding: 12px 12px 0; box-sizing: border-box; }
+    .dialog-header { flex-shrink: 0; margin-bottom: 8px; }
+    .dialog-header p { margin: 2px 0; color: #555; font-size: 12px; line-height: 1.5; }
+    #chapter-title { font-weight: bold; color: #333; margin: 0 0 2px 0; font-size: 13px; }
+    #candidates-table-container { flex: 1; min-height: 0; overflow: auto; border: 1px solid #ccc; border-radius: 4px; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; }
+    th { position: sticky; top: 0; background: #f5f5f5; }
+    .dialog-buttons { display: flex; align-items: center; gap: 8px; padding: 10px 0 12px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    #status-bar { flex: 1; font-size: 11px; color: #666; min-height: 15px; }
+    .dialog-button { padding: 6px 16px; min-height: 32px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; }
+    .dialog-button:hover { background: #e5e5e5; }
+    .dialog-button.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
+    .dialog-button.primary:hover { background: #0052a3; }
+  </style>
+</head>
+
+<body>
+  <div class="dialog-container">
+    <div class="dialog-header">
+      <p id="chapter-title"></p>
+      <p>Chapter's own book title: <span id="chapter-book-title"></span></p>
+      <p>Pick the matching book below, reject all, or create a new book item from this chapter's metadata.</p>
+    </div>
+
+    <div id="candidates-table-container">
+      <table>
+        <thead>
+          <tr><th></th><th>Title</th><th>Creators</th><th>Year</th><th>Score</th></tr>
+        </thead>
+        <tbody id="candidates-body"></tbody>
+      </table>
+    </div>
+
+    <div class="dialog-buttons">
+      <div id="status-bar"></div>
+      <button id="reject-btn" type="button" class="dialog-button">Reject All</button>
+      <button id="create-btn" type="button" class="dialog-button">Create New Book Item</button>
+      <button id="link-btn" type="button" class="dialog-button primary">Link Selected</button>
+    </div>
+  </div>
+</body>
+</html>
