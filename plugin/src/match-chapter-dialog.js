@@ -19,24 +19,36 @@ var MatchChapterDialog = {
 	selectedBookKey: null,
 
 	init() {
-		if (!window.arguments || !window.arguments[0]) {
-			console.error('No arguments passed to Match Chapter dialog');
-			return;
+		try {
+			if (!window.arguments || !window.arguments[0]) {
+				console.error('No arguments passed to Match Chapter dialog');
+				return;
+			}
+			const args = window.arguments[0];
+			this.plugin = args.plugin;
+			this.chapterItem = args.chapterItem;
+			this.chapterTitle = args.chapterTitle;
+			this.candidates = args.candidates;
+
+			document.getElementById('chapter-title').textContent = this.chapterItem.getField('title');
+			document.getElementById('chapter-book-title').textContent = this.chapterTitle || '(none set on this chapter)';
+
+			this._renderCandidates();
+
+			document.getElementById('link-btn').addEventListener('click', () => this._onLinkSelected());
+			document.getElementById('reject-btn').addEventListener('click', () => window.close());
+			document.getElementById('create-btn').addEventListener('click', () => this._onCreateNewBook());
+		} catch (err) {
+			console.error('Failed to initialize Match Chapter dialog:', err);
 		}
-		const args = window.arguments[0];
-		this.plugin = args.plugin;
-		this.chapterItem = args.chapterItem;
-		this.chapterTitle = args.chapterTitle;
-		this.candidates = args.candidates;
+	},
 
-		document.getElementById('chapter-title').textContent = this.chapterItem.getField('title');
-		document.getElementById('chapter-book-title').textContent = this.chapterTitle || '(none set on this chapter)';
-
-		this._renderCandidates();
-
-		document.getElementById('link-btn').addEventListener('click', () => this._onLinkSelected());
-		document.getElementById('reject-btn').addEventListener('click', () => window.close());
-		document.getElementById('create-btn').addEventListener('click', () => this._onCreateNewBook());
+	/**
+	 * @param {string} text
+	 */
+	_setStatus(text) {
+		const statusBar = document.getElementById('status-bar');
+		if (statusBar) statusBar.textContent = text || '';
 	},
 
 	_renderCandidates() {
@@ -70,27 +82,40 @@ var MatchChapterDialog = {
 			Services.prompt.alert(window, 'Zotero RAG', 'Select a candidate first.');
 			return;
 		}
-		const candidate = this.candidates.find(c => c.key === this.selectedBookKey);
-		await this.plugin.chapterLinks.writeLink(this.plugin.toolkit.extraField, candidate._item, this.chapterItem);
-		window.close();
+		try {
+			this._setStatus('Linking…');
+			const candidate = this.candidates.find(c => c.key === this.selectedBookKey);
+			await this.plugin.chapterLinks.writeLink(this.plugin.toolkit.extraField, candidate._item, this.chapterItem);
+			window.close();
+		} catch (err) {
+			this._setStatus('');
+			this.plugin.showError(`Failed to link chapter: ${err.message}`);
+		}
 	},
 
 	async _onCreateNewBook() {
-		const bookItem = new Zotero.Item('book');
-		bookItem.libraryID = this.chapterItem.libraryID;
-		bookItem.setField('title', this.chapterTitle || this.chapterItem.getField('title'));
-		for (const field of ['publisher', 'place', 'date', 'ISBN', 'language']) {
-			const value = this.chapterItem.getField(field);
-			if (value) bookItem.setField(field, value);
-		}
-		const editorTypeID = Zotero.CreatorTypes.getID('editor');
-		const editors = this.chapterItem.getCreators().filter(c => c.creatorTypeID === editorTypeID);
-		if (editors.length) {
-			bookItem.setCreators(editors);
-		}
-		await bookItem.saveTx();
+		try {
+			this._setStatus('Creating book item…');
+			const bookItem = new Zotero.Item('book');
+			bookItem.libraryID = this.chapterItem.libraryID;
+			bookItem.setField('title', this.chapterTitle || this.chapterItem.getField('title'));
+			for (const field of ['publisher', 'place', 'date', 'ISBN', 'language']) {
+				const value = this.chapterItem.getField(field);
+				if (value) bookItem.setField(field, value);
+			}
+			const editorTypeID = Zotero.CreatorTypes.getID('editor');
+			const editors = this.chapterItem.getCreators().filter(c => c.creatorTypeID === editorTypeID);
+			if (editors.length) {
+				bookItem.setCreators(editors);
+			}
+			await bookItem.saveTx();
 
-		await this.plugin.chapterLinks.writeLink(this.plugin.toolkit.extraField, bookItem, this.chapterItem);
-		window.close();
+			this._setStatus('Linking…');
+			await this.plugin.chapterLinks.writeLink(this.plugin.toolkit.extraField, bookItem, this.chapterItem);
+			window.close();
+		} catch (err) {
+			this._setStatus('');
+			this.plugin.showError(`Failed to create and link book: ${err.message}`);
+		}
 	},
 };
