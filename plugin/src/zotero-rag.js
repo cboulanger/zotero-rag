@@ -234,6 +234,12 @@ class ZoteroRAGPlugin {
 			this.log('WARNING: Toolkit bundle not loaded');
 		}
 
+		// Expose ChapterLinks on the instance so dialog windows (which run in
+		// their own separate JS global scope and don't have chapterLinks.js
+		// loaded into it) can reach it via their passed-in `plugin` reference.
+		// @ts-ignore - ChapterLinks is a global loaded by bootstrap.js
+		this.chapterLinks = (typeof ChapterLinks !== 'undefined') ? ChapterLinks : null;
+
 		// Load backend URL from preferences (default: localhost:8119)
 		this.backendURL = (Zotero.Prefs.get('extensions.zotero-rag.backendURL', true) || 'http://localhost:8119').replace(/\/+$/, '');
 
@@ -498,6 +504,9 @@ class ZoteroRAGPlugin {
 				return result;
 			};
 		}
+
+		// @ts-ignore - ChapterActions is a global loaded by bootstrap.js
+		if (typeof ChapterActions !== 'undefined') ChapterActions.addToWindow(window, this);
 	}
 
 	/**
@@ -542,6 +551,9 @@ class ZoteroRAGPlugin {
 			pane.onCollectionSelected = pane._zoteroRagOrigOnCollectionSelected;
 			delete pane._zoteroRagOrigOnCollectionSelected;
 		}
+
+		// @ts-ignore - ChapterActions is a global loaded by bootstrap.js
+		if (typeof ChapterActions !== 'undefined') ChapterActions.removeFromWindow(window);
 	}
 
 	/**

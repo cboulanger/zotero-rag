@@ -47,6 +47,13 @@ async function startup({ id, version, rootURI }) {
 	// "needs_client_evidence" protocol.
 	Services.scriptloader.loadSubScript(rootURI + 'mentions.js');
 
+	// Book/chapter menu actions (Segment Book / Match Chapter) — loaded
+	// before zotero-rag.js, which calls ChapterActions.addToWindow() /
+	// removeFromWindow() and references the ChapterLinks global directly.
+	Services.scriptloader.loadSubScript(rootURI + 'fuzzyMatch.js');
+	Services.scriptloader.loadSubScript(rootURI + 'chapterLinks.js');
+	Services.scriptloader.loadSubScript(rootURI + 'chapterActions.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
