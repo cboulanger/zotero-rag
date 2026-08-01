@@ -35,6 +35,8 @@
     .dialog-header { flex-shrink: 0; margin-bottom: 8px; }
     .dialog-header p { margin: 2px 0; color: #555; font-size: 12px; line-height: 1.5; }
     #chapter-title { font-weight: bold; color: #333; margin: 0 0 2px 0; font-size: 13px; }
+    #chapter-citation { font-size: 12px; color: #333; margin: 2px 0 6px; }
+    #chapter-citation .csl-entry { margin: 0; }
     #candidates-table-container { flex: 1; min-height: 0; overflow: auto; border: 1px solid #ccc; border-radius: 4px; }
     table { width: 100%; border-collapse: collapse; font-size: 12px; }
     th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; }
@@ -55,7 +57,8 @@
   <div class="dialog-container">
     <div class="dialog-header">
       <p id="chapter-title"></p>
-      <p>Chapter's own book title: <span id="chapter-book-title"></span></p>
+      <p>Full citation (compare against the candidates' creators below):</p>
+      <div id="chapter-citation" class="csl-bib-container"></div>
       <p>Pick the matching book below, reject all, or create a new book item from this chapter's metadata.</p>
     </div>
 

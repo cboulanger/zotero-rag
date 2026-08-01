@@ -31,7 +31,7 @@ var MatchChapterDialog = {
 			this.candidates = args.candidates;
 
 			document.getElementById('chapter-title').textContent = this.chapterItem.getField('title');
-			document.getElementById('chapter-book-title').textContent = this.chapterTitle || '(none set on this chapter)';
+			this._renderChapterCitation();
 
 			this._renderCandidates();
 
@@ -56,6 +56,37 @@ var MatchChapterDialog = {
 	_setStatus(text) {
 		const statusBar = document.getElementById('status-bar');
 		if (statusBar) statusBar.textContent = text || '';
+	},
+
+	/**
+	 * Renders the chapter's full bibliographic entry (authors, editors,
+	 * book title, publisher, etc.) using the user's current Quick Copy
+	 * citation style, so it can be compared at a glance against each
+	 * candidate's "Creators" column. Falls back to the raw bookTitle field
+	 * if the configured Quick Copy format isn't a bibliography style (e.g.
+	 * an export translator) or rendering otherwise fails.
+	 */
+	_renderChapterCitation() {
+		const container = document.getElementById('chapter-citation');
+		try {
+			const format = Zotero.QuickCopy.unserializeSetting(Zotero.Prefs.get('export.quickCopy.setting'));
+			if (format.mode !== 'bibliography') throw new Error('Quick Copy format is not a bibliography style');
+			const result = Zotero.QuickCopy.getContentFromItems([this.chapterItem], format);
+			if (!result || !result.html) throw new Error('No bibliography HTML returned');
+			// CSL bibliography HTML may contain HTML named entities (e.g. &nbsp;)
+			// that aren't valid in this strict XHTML document (no DTD declares
+			// them), so assigning to innerHTML directly throws an XML parsing
+			// error. Parse it as HTML instead (which resolves those entities to
+			// literal characters) and import the resulting nodes.
+			const htmlDoc = new DOMParser().parseFromString(`<!DOCTYPE html><html><body>${result.html}</body></html>`, 'text/html');
+			container.textContent = '';
+			for (const node of htmlDoc.body.childNodes) {
+				container.appendChild(document.importNode(node, true));
+			}
+		} catch (err) {
+			console.error('Failed to render chapter citation, falling back to bookTitle:', err);
+			container.textContent = this.chapterTitle || '(none set on this chapter)';
+		}
 	},
 
 	_renderCandidates() {
