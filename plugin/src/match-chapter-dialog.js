@@ -35,8 +35,15 @@ var MatchChapterDialog = {
 
 			this._renderCandidates();
 
-			document.getElementById('link-btn').addEventListener('click', () => this._onLinkSelected());
-			document.getElementById('reject-btn').addEventListener('click', () => window.close());
+			const linkBtn = document.getElementById('link-btn');
+			const rejectBtn = document.getElementById('reject-btn');
+			if (this.candidates.length === 0) {
+				linkBtn.disabled = true;
+				rejectBtn.textContent = 'Close';
+			}
+
+			linkBtn.addEventListener('click', () => this._onLinkSelected());
+			rejectBtn.addEventListener('click', () => window.close());
 			document.getElementById('create-btn').addEventListener('click', () => this._onCreateNewBook());
 		} catch (err) {
 			console.error('Failed to initialize Match Chapter dialog:', err);
@@ -54,6 +61,15 @@ var MatchChapterDialog = {
 	_renderCandidates() {
 		const tbody = document.getElementById('candidates-body');
 		tbody.textContent = '';
+		if (this.candidates.length === 0) {
+			const row = document.createElementNS('http://www.w3.org/1999/xhtml', 'tr');
+			const cell = document.createElementNS('http://www.w3.org/1999/xhtml', 'td');
+			cell.setAttribute('colspan', '5');
+			cell.textContent = 'No matching books found in this library.';
+			row.appendChild(cell);
+			tbody.appendChild(row);
+			return;
+		}
 		this.candidates.forEach((candidate) => {
 			const row = document.createElementNS('http://www.w3.org/1999/xhtml', 'tr');
 
