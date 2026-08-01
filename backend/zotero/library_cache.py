@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import aiohttp
+
 from backend.zotero.web_api import LibraryFetchError, ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
@@ -113,9 +115,20 @@ class ZoteroLibraryCache:
         added = sum(1 for key in fetched_keys if key not in existing)
         updated = len(fetched_keys) - added
 
+        if is_full:
+            # A full fetch is a complete inventory of the remote library, so
+            # any key currently cached but absent from the fetch was deleted
+            # remotely. Reconcile locally instead of trusting whatever
+            # deleted_keys was passed in (sync() always passes [] for a full
+            # sync, since there's no since_version to ask the deleted-items
+            # endpoint about).
+            all_existing_rows = self._conn.execute("SELECT key FROM items").fetchall()
+            all_existing_keys = {row[0] for row in all_existing_rows}
+            deleted_keys = list(all_existing_keys - set(fetched_keys))
+
         max_version_seen = max(
             (item.get("version", 0) for item in items),
-            default=0 if is_full else stored_version,
+            default=stored_version,
         )
 
         with self._conn:
@@ -143,6 +156,17 @@ class ZoteroLibraryCache:
         )
 
     async def sync(self, force_full: bool = False) -> SyncResult:
+        """Bring the local cache up to date with the remote library.
+
+        Performs a full sync if the cache is empty or force_full=True
+        (fetches every item and reconciles local deletions against what
+        the fetch returned), otherwise an incremental sync using the
+        stored high-water-mark version (fetches only changed items plus
+        an explicit deleted-keys check). Raises LibrarySyncError if the
+        remote fetch fails or the network is unreachable partway through
+        -- the cache is left at its last-known-good state, never partially
+        written.
+        """
         async with self._lock:
             stored_version = await asyncio.to_thread(self._stored_version)
             is_full = force_full or stored_version == 0
@@ -169,7 +193,7 @@ class ZoteroLibraryCache:
                         since_version=stored_version,
                         raise_on_error=True,
                     )
-            except LibraryFetchError as exc:
+            except (LibraryFetchError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 raise LibrarySyncError(
                     f"sync failed for {self.library_type}/{self.library_id}: {exc}"
                 ) from exc
@@ -179,6 +203,13 @@ class ZoteroLibraryCache:
             )
 
     async def get_all_items(self, item_types: Optional[list[str]] = None) -> list[dict[str, Any]]:
+        """Return all cached items, syncing with the remote library first.
+
+        If item_types is given, only items whose data.itemType is in that
+        list are returned; otherwise every cached item is returned. Calls
+        sync() on every invocation, so repeated calls stay up to date but
+        each one costs a network round-trip.
+        """
         await self.sync()
         async with self._lock:
             return await asyncio.to_thread(self._query_items, item_types)

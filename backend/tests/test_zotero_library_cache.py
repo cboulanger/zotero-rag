@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import aiohttp
+
 from backend.zotero.library_cache import LibrarySyncError, SyncResult, ZoteroLibraryCache
 from backend.zotero.web_api import LibraryFetchError
 
@@ -162,6 +164,51 @@ class TestZoteroLibraryCacheSync(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.was_full_sync)
         self.assertEqual(result.library_version, 9)
 
+    async def test_force_full_reconciles_deletion_of_key_missing_from_fetch(self):
+        client = AsyncMock()
+        client.get_library_items_since.return_value = [
+            _item("AAAA", 4, "book"),
+            _item("BBBB", 5, "bookSection"),
+        ]
+        client.get_deleted_item_keys.return_value = []
+        cache = self._make_cache(client)
+        await cache.sync()  # first, full sync caches AAAA and BBBB at version 5
+        client.get_library_items_since.reset_mock()
+        client.get_deleted_item_keys.reset_mock()
+
+        # BBBB is now missing from the full fetch -> it was deleted remotely.
+        client.get_library_items_since.return_value = [_item("AAAA", 6, "book")]
+        result = await cache.sync(force_full=True)
+
+        client.get_deleted_item_keys.assert_not_awaited()
+        self.assertEqual(result.deleted, 1)
+        self.assertEqual(result.library_version, 6)
+        items = await cache.get_all_items()
+        self.assertEqual({item["key"] for item in items}, {"AAAA"})
+
+    async def test_force_full_empty_fetch_preserves_version_and_clears_cache(self):
+        client = AsyncMock()
+        client.get_library_items_since.return_value = [
+            _item("AAAA", 4, "book"),
+            _item("BBBB", 5, "bookSection"),
+        ]
+        client.get_deleted_item_keys.return_value = []
+        cache = self._make_cache(client)
+        await cache.sync()  # first, full sync establishes version 5
+        client.get_library_items_since.reset_mock()
+        client.get_deleted_item_keys.reset_mock()
+
+        # Remote library is now empty (or a transient issue returned nothing).
+        client.get_library_items_since.return_value = []
+        result = await cache.sync(force_full=True)
+
+        client.get_deleted_item_keys.assert_not_awaited()
+        # library_version must NOT reset to 0 (the "never synced" sentinel).
+        self.assertEqual(result.library_version, 5)
+        self.assertEqual(result.deleted, 2)
+        items = await cache.get_all_items()
+        self.assertEqual(items, [])
+
 
 class TestZoteroLibraryCacheSyncErrors(unittest.IsolatedAsyncioTestCase):
     async def test_sync_raises_library_sync_error_and_leaves_state_unchanged(self):
@@ -175,6 +222,25 @@ class TestZoteroLibraryCacheSyncErrors(unittest.IsolatedAsyncioTestCase):
             await cache.sync()  # establishes version 3, one item stored
 
             client.get_library_items_since.side_effect = LibraryFetchError("HTTP 500")
+            with self.assertRaises(LibrarySyncError):
+                await cache.sync()
+
+            self.assertEqual(cache._stored_version(), 3)
+            items = cache._query_items(None)
+            self.assertEqual([item["key"] for item in items], ["AAAA"])
+            cache.close()
+
+    async def test_sync_raises_library_sync_error_on_aiohttp_client_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = AsyncMock()
+            client.get_library_items_since.return_value = [_item("AAAA", 3, "book")]
+            client.get_deleted_item_keys.return_value = []
+            cache = ZoteroLibraryCache(
+                client=client, library_id="u123", library_type="user", cache_path=Path(tmp)
+            )
+            await cache.sync()  # establishes version 3, one item stored
+
+            client.get_library_items_since.side_effect = aiohttp.ClientError("connection reset")
             with self.assertRaises(LibrarySyncError):
                 await cache.sync()
 
