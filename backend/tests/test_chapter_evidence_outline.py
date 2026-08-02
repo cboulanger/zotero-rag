@@ -2,6 +2,7 @@
 
 import io
 import unittest
+from unittest.mock import MagicMock, patch
 
 from pypdf import PdfWriter
 
@@ -82,6 +83,29 @@ class TestExtractOutlineCandidates(unittest.TestCase):
         candidates = extract_outline_candidates(buf.getvalue())
         titles = [c.title for c in candidates]
         self.assertNotIn("Nested Chapter", titles)
+
+    def test_skips_entry_with_none_title_instead_of_literal_none_string(self):
+        # pypdf's Destination.title is typed Optional[str] -- a malformed or
+        # corrupted outline entry can yield item.title is None. Exercised via
+        # a mocked PdfReader since pypdf's own outline-parsing path normally
+        # defaults a missing /Title to "" rather than None, making this hard
+        # to reproduce through PdfWriter/PdfReader alone.
+        none_title_item = MagicMock(title=None)
+        real_item = MagicMock(title="Chapter Two")
+        mock_reader = MagicMock()
+        mock_reader.outline = [none_title_item, real_item, MagicMock(title="Chapter Three")]
+        mock_reader.pages = list(range(30))
+        mock_reader.get_destination_page_number.side_effect = [0, 10, 20]
+
+        with patch(
+            "backend.services.chapter_evidence.outline_strategy.PdfReader",
+            return_value=mock_reader,
+        ):
+            candidates = extract_outline_candidates(b"irrelevant -- reader is mocked")
+
+        titles = [c.title for c in candidates]
+        self.assertNotIn("None", titles)
+        self.assertEqual(titles, ["Chapter Two", "Chapter Three"])
 
 
 class TestOutlineStructureStrategy(unittest.TestCase):

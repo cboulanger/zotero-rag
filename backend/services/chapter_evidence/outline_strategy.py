@@ -45,7 +45,7 @@ def extract_outline_candidates(content: bytes) -> list[ChapterCandidate]:
             page_index = reader.get_destination_page_number(item)
         except Exception:
             continue
-        title = str(item.title).strip()
+        title = (item.title or "").strip()
         if not title or _is_part_divider(title) or _is_back_matter(title):
             continue
         entries.append(ChapterCandidate(title=title, pdf_page_index=page_index, source="outline"))
