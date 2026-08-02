@@ -199,6 +199,79 @@ output) any time `find_toc_candidates`, `locate_chapter_start`, or
 `match_confidence` change, or the evaluation set grows** — these numbers
 are a snapshot tied to the current heuristics, not a permanent constant.
 
+### Strategy-pipeline status
+
+Snapshot from `uv run python scripts/evaluate_chapter_segmentation_strategies.py`
+(regenerate anytime -- these numbers move with the strategies/fusion logic):
+
+| Book (filename) | Precision | Recall | Found / Expected | Strategies used |
+| --- | --- | --- | --- | --- |
+| `9783031466373.pdf` | 0.69 | 0.82 | 9/13 found, 9/11 expected | crossref, outline, outline+crossref |
+| `9781771993661.pdf` | 1.00 | 1.00 | 10/10 found, 10/10 expected | (falls back to heuristic) |
+| `9783907297339.pdf` | 0.82 | 0.82 | 9/11 found, 9/11 expected | outline |
+| `9782375460122.pdf` | 0.78 | 0.82 | 14/18 found, 14/17 expected | (falls back to heuristic) |
+| `9783907297285.pdf` | 0.64 | 0.69 | 9/14 found, 9/13 expected | outline |
+| `9783847432364.pdf` | 0.76 | 0.62 | 13/17 found, 13/21 expected | crossref |
+| `9783322969828.pdf` | 0.95 | 0.75 | 18/19 found, 18/24 expected | crossref |
+
+Aggregate (micro): **precision 0.80, recall 0.77** across 107 expected
+chapters -- below the pure-heuristic baseline's 0.91/0.91 above, so on this
+evaluation set the strategies are currently a net *regression* when they
+fire, not an improvement. `analyze_attachment_with_strategies` only falls
+back to the pure-heuristic pipeline when a book's merged candidate list is
+completely empty (two books above), never when it's merely wrong -- so a
+confidently-incomplete or imprecise outline/Crossref result is trusted over
+what the heuristic pipeline would have found instead. Root causes found
+and fixed so far (see `extract_outline_candidates` in
+`backend/services/chapter_evidence/outline_strategy.py` and
+`_is_non_chapter_structural_title` in `backend/services/chapter_common.py`
+for the code, `backend/tests/test_chapter_evidence_outline.py` /
+`test_chapter_segmentation_strategies.py` for regression coverage):
+
+- **Real chapters nested one level under unlabeled "Part I/II/III" outline
+  nodes.** The top-level-only read used to silently accept whatever
+  front/back matter survived around the part dividers as "the chapter
+  list" (a sparse-but-non-empty result, so the empty-merge fallback never
+  triggered) -- now rejected outright the moment a part-divider entry is
+  found to have nested children, deferring correctly to the heuristic
+  fallback. Recovered both books that hit this to their pre-regression
+  1.00/1.00 and 0.78/0.82 scores.
+- **PDF-outline-specific bookmark vocabulary** (Cover, Half Title, Title,
+  Copyright, Backcover, Impressum, German "...verzeichnis" compound nouns,
+  and the book's own title used as its own bookmark) was leaking through as
+  false-positive chapters -- none of it appears in a printed table of
+  contents, which is what the back-matter title list was originally built
+  from.
+- **Trailing-page trim over-reach for outline-sourced chapters.** The
+  generic "front matter through the printed TOC" exclusion region (built to
+  constrain where a *not-yet-located* chapter may start) was also being
+  used to trim chapter *ends* -- collapsing a chapter's real content down
+  to a single page whenever its true end fell inside that broad region
+  (e.g. a Foreword that legitimately lives in the front matter).
+
+Known remaining gaps, not yet fixed:
+
+- A book-specific structural section label with no generic vocabulary
+  match (e.g. "Gastbeiträge: ..." -- German for "guest contributions",
+  grouping several chapters that follow it) still leaks through as a false
+  chapter on `9783907297285.pdf`.
+- Crossref-sourced candidates (all three `crossref`-only/mixed books above)
+  show real boundary drift of several pages against the book's own printed
+  headers, and occasional extra/missing candidates relative to Crossref's
+  own indexed chapter count for the ISBN -- not yet root-caused.
+- Even where the located start page is correct, `_chapters_from_located`'s
+  blank-page/trim heuristics still occasionally over- or under-shoot a
+  chapter's end by a few pages for outline-sourced chapters -- the same
+  class of imprecision the pure-heuristic pipeline already has (see "Known
+  remaining misses" above), now also affecting the strategy pipeline's
+  outline path.
+
+**Given this net regression, `analyze_book_chapters.py`/the `/api/analyze`
+endpoint should not be pointed at the strategy pipeline for production use
+until Crossref drift is root-caused and the remaining gaps above are
+closed** -- re-run this evaluation after any further change to the
+outline/Crossref/fusion logic.
+
 ### LLM-fallback status
 
 With the heuristics above, a full run of
