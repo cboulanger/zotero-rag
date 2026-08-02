@@ -8,7 +8,7 @@ import logging
 
 from pypdf import PdfReader
 
-from backend.services.chapter_common import _is_back_matter, _is_part_divider
+from backend.services.chapter_common import _is_non_chapter_structural_title, _is_part_divider
 from backend.services.chapter_evidence.types import ChapterCandidate
 
 logger = logging.getLogger(__name__)
@@ -20,15 +20,26 @@ _MAX_PAGES_PER_ENTRY = 150
 
 def extract_outline_candidates(content: bytes) -> list[ChapterCandidate]:
     """Reads the PDF's embedded outline/bookmark catalog and returns one
-    ChapterCandidate per TOP-LEVEL entry that survives the
-    _is_part_divider/_is_back_matter filters, each with pdf_page_index
-    resolved directly -- no content search needed. Nested (child) outline
-    entries are not surfaced as separate chapters (see design spec 5.1's
-    top-level-only limitation). Returns [] if the PDF has no outline
-    catalog, reading it raises (malformed/encrypted PDF), the filtered
-    result has fewer than 2 entries, or the average pages-per-entry ratio
-    is implausible (a sparse top level usually means real chapters are
-    nested one level down, e.g. under Part dividers) -- never raises.
+    ChapterCandidate per TOP-LEVEL entry, each with pdf_page_index resolved
+    directly -- no content search needed. Nested (child) outline entries
+    are not surfaced as separate chapters (see design spec 5.1's
+    top-level-only limitation).
+
+    Entries recognized as structural (_is_non_chapter_structural_title --
+    part dividers, standard back-matter sections, PDF production/
+    front-matter bookmarks like "Cover"/"Copyright") ARE included in the
+    returned list -- downstream (chapter_segmentation._chapters_from_located)
+    relies on their page position to correctly bound neighboring real
+    chapters, exactly as it already does for the pure-heuristic TOC-scan
+    path. They are excluded only from the "how many real chapters does the
+    top level contain" plausibility count below.
+
+    Returns [] if the PDF has no outline catalog, reading it raises
+    (malformed/encrypted PDF), a part-divider entry has nested children
+    (the real chapters live one level down, so the top level is not
+    trustworthy AT ALL -- not merely sparse), the count of non-structural
+    entries is fewer than 2, or the average pages-per-non-structural-entry
+    ratio is implausible -- never raises.
     """
     try:
         reader = PdfReader(io.BytesIO(content))
@@ -38,7 +49,8 @@ def extract_outline_candidates(content: bytes) -> list[ChapterCandidate]:
         return []
 
     entries: list[ChapterCandidate] = []
-    for item in outline:
+    real_chapter_count = 0
+    for index, item in enumerate(outline):
         if isinstance(item, list):
             continue  # nested (child) entries -- not surfaced in Phase 1
         try:
@@ -46,21 +58,39 @@ def extract_outline_candidates(content: bytes) -> list[ChapterCandidate]:
         except Exception:
             continue
         title = (item.title or "").strip()
-        if not title or _is_part_divider(title) or _is_back_matter(title):
+        if not title:
             continue
+        if (
+            _is_part_divider(title)
+            and index + 1 < len(outline)
+            and isinstance(outline[index + 1], list)
+            and outline[index + 1]
+        ):
+            # This part divider has nested children -- the real chapters
+            # live one level down, so the top level is not a trustworthy
+            # chapter list at all (not merely sparse). Bail out entirely
+            # rather than return whatever front/back matter survives
+            # around the part dividers.
+            logger.info(
+                "extract_outline_candidates: chapters nested under part divider %r, rejecting",
+                title,
+            )
+            return []
+        if not _is_non_chapter_structural_title(title):
+            real_chapter_count += 1
         entries.append(ChapterCandidate(title=title, pdf_page_index=page_index, source="outline"))
 
-    if len(entries) < _MIN_ENTRIES:
-        logger.info("extract_outline_candidates: too few top-level entries (%d), rejecting", len(entries))
+    if real_chapter_count < _MIN_ENTRIES:
+        logger.info("extract_outline_candidates: too few real top-level entries (%d), rejecting", real_chapter_count)
         return []
 
     total_pages = len(reader.pages)
-    pages_per_entry = total_pages / len(entries)
+    pages_per_entry = total_pages / real_chapter_count
     if not (_MIN_PAGES_PER_ENTRY <= pages_per_entry <= _MAX_PAGES_PER_ENTRY):
         logger.info(
             "extract_outline_candidates: implausible pages-per-entry ratio %.1f "
-            "(%d entries, %d pages), rejecting",
-            pages_per_entry, len(entries), total_pages,
+            "(%d real entries, %d pages), rejecting",
+            pages_per_entry, real_chapter_count, total_pages,
         )
         return []
 

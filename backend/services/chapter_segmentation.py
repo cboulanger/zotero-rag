@@ -31,6 +31,7 @@ from backend.services.chapter_common import (
     _BACK_MATTER_TITLES,
     _PART_DIVIDER_RE,
     _is_back_matter,
+    _is_non_chapter_structural_title,
     _is_part_divider,
     _normalized_title,
     year_from_date,
@@ -995,7 +996,7 @@ def _chapters_from_located(
     roman_marks_dividers = 0 < roman_prefixed <= len(located) // 2
     chapters: list[dict] = []
     for i, (entry, match) in enumerate(located):
-        if _is_part_divider(entry.title) or _is_back_matter(entry.title) or (
+        if _is_non_chapter_structural_title(entry.title) or (
             roman_marks_dividers and _ROMAN_PREFIX_RE.match(entry.title)
         ):
             # Structural marker: bounds its neighbors (via its position in
@@ -1018,8 +1019,21 @@ def _chapters_from_located(
         # trimmed regardless of how much text they carry -- a dense
         # part-divider page that lists its part's chapters belongs to no
         # chapter, but has far too much text for the blank-page test.
+        #
+        # non_content_pages membership is skipped for outline-sourced
+        # entries: it is built from _toc_scan_indices, a broad "front
+        # matter through the printed TOC" search-exclusion region meant to
+        # constrain WHERE a not-yet-located chapter may be found -- not a
+        # per-page content classifier. A chapter whose start already comes
+        # straight from the PDF's own outline (e.g. a Vorwort/Foreword
+        # genuinely living inside that same front-matter span) would
+        # otherwise have its own real body pages wrongly trimmed away.
+        # Genuinely blank trailing pages are still caught by the
+        # char-length check either way.
+        source = entry_source.get(entry, "heuristic")
+        skip_non_content_check = str(source).startswith("outline")
         while end_index > start_index and (
-            end_index in non_content_pages
+            (not skip_non_content_check and end_index in non_content_pages)
             or len(_strip_running_headers(pages[end_index], header_lines).strip()) < _TRAILING_BLANK_PAGE_MAX_CHARS
         ):
             end_index -= 1
@@ -1151,6 +1165,12 @@ _OUTLINE_CONFIDENCE = 0.98  # exceeds chapter_upload.py's calibrated
 # straight to commit rather than the review queue. See design spec 2026-08-01
 # section 7.
 
+# A half-title/title page bookmark commonly repeats the book's own title
+# verbatim -- it never appears in a printed table of contents (so
+# _is_back_matter/_is_production_bookmark can't recognize it by generic
+# vocabulary alone) but is never a real chapter either.
+_BOOK_TITLE_BOOKMARK_FUZZ_THRESHOLD = 90.0
+
 
 def build_book_context(book_data: dict) -> BookContext:
     """Builds a BookContext from a Zotero `book` item's `data` dict, for
@@ -1200,6 +1220,12 @@ async def analyze_attachment_with_strategies(
     unchanged, for any book none of the three new strategies cover.
     """
     outline_candidates = extract_outline_candidates(file_bytes)
+    normalized_book_title = _normalized_title(context.title)
+    outline_candidates = [
+        c for c in outline_candidates
+        if fuzz.token_sort_ratio(_normalized_title(c.title), normalized_book_title)
+        < _BOOK_TITLE_BOOKMARK_FUZZ_THRESHOLD
+    ]
 
     crossref_candidates: list[ChapterCandidate] = []
     if crossref_strategy is not None and crossref_strategy.applicable(context):

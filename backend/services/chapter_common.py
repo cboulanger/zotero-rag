@@ -52,6 +52,42 @@ def _is_back_matter(title: str) -> bool:
     return stripped in _BACK_MATTER_TITLES
 
 
+# PDF outline bookmarks commonly label production/front-matter pages (a
+# scanned cover, a copyright page) that never appear as a line in a printed
+# table of contents -- _BACK_MATTER_TITLES was built from real TOC phrasing
+# and doesn't cover them.
+_PRODUCTION_BOOKMARK_TITLES = {
+    "cover", "front cover", "back cover", "backcover",
+    "half title", "half title page", "title", "title page",
+    "copyright", "copyright page", "imprint", "impressum",
+    "mentions legales", "sigles et acronymes",
+    "liste des illustrations", "liste des tableaux", "liste des cartes",
+    "table des illustrations",
+}
+
+
+def _is_production_bookmark(title: str) -> bool:
+    """True for common PDF outline production/front-matter bookmark labels,
+    plus German compound nouns ending in "verzeichnis" ("...directory/
+    register/list") -- always a structural list (Personenverzeichnis,
+    HerausgeberInnenverzeichnis, ...), never a real chapter title, and too
+    many specific variants exist to enumerate individually.
+    """
+    normalized = _normalized_title(title)
+    if normalized in _PRODUCTION_BOOKMARK_TITLES:
+        return True
+    return normalized.endswith("verzeichnis")
+
+
+def _is_non_chapter_structural_title(title: str) -> bool:
+    """True for any title that is a structural marker rather than a real
+    chapter -- a part divider, standard back-matter section, or PDF
+    production/front-matter bookmark. Such entries bound their neighbors'
+    page ranges but are never themselves emitted as a chapter (see
+    chapter_segmentation._chapters_from_located)."""
+    return _is_part_divider(title) or _is_back_matter(title) or _is_production_bookmark(title)
+
+
 def year_from_date(date_str: str | None) -> int | None:
     """Extracts a 4-digit year token from a Zotero `date` field string
     ("2019-05", "May 2019", ...). Returns None on anything unparseable --

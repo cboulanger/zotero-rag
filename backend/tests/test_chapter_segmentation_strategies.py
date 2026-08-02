@@ -122,6 +122,29 @@ class TestAnalyzeAttachmentWithStrategiesOutlineOnly(unittest.IsolatedAsyncioTes
         self.assertEqual(result["diagnostics"]["strategies_used"], ["outline"])
 
 
+class TestAnalyzeAttachmentWithStrategiesOutlineBookTitleBookmark(unittest.IsolatedAsyncioTestCase):
+    async def test_excludes_outline_entry_matching_the_books_own_title(self):
+        # A half-title/title page bookmark commonly repeats the book's own
+        # title verbatim -- it never appears in a printed table of
+        # contents (so _is_back_matter/_is_production_bookmark can't
+        # recognize it by generic vocabulary) but is never a real chapter
+        # either. Reproduces a real false-positive found evaluating
+        # against 9783907297339.pdf and 9783907297285.pdf, where the
+        # book's own title as its first bookmark otherwise leaks straight
+        # into the final chapter list.
+        pdf_bytes = _pdf_with_outline(
+            20, [("A Book About Citation Tools", 2), ("Introduction", 5), ("Comparing Citation Styles", 12)]
+        )
+        result = await analyze_attachment_with_strategies(
+            _TWO_CHAPTER_PAGES, pdf_bytes, _context(title="A Book About Citation Tools"),
+            _FakeMetadataStrategy([]), crossref_strategy=None,
+        )
+        titles = [c["title"] for c in result["chapters"]]
+        self.assertNotIn("A Book About Citation Tools", titles)
+        self.assertIn("Introduction", titles)
+        self.assertIn("Comparing Citation Styles", titles)
+
+
 class TestAnalyzeAttachmentWithStrategiesCrossrefOnly(unittest.IsolatedAsyncioTestCase):
     async def test_crossref_only_localizes_via_content_search(self):
         pdf_bytes = _blank_pdf(20)  # no outline
