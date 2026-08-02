@@ -86,6 +86,8 @@ class AnalyzeRequest(BaseModel):
     # Same default as OcrRequest.cache_dir -- lets a re-run after the /ocr
     # endpoint pick up already-OCR'd page text automatically.
     ocr_cache_dir: str = "data/ocr_cache"
+    enable_crossref: bool = True
+    crossref_contact_email: str | None = None
 
 
 class JobIdResponse(BaseModel):
@@ -123,6 +125,8 @@ async def start_analyze(request: AnalyzeRequest) -> JobIdResponse:
                 progress_callback=lambda p, m: tracker.update(job_id, progress=p, message=m),
                 llm_service=llm_service,
                 ocr_cache_dir=_Path(request.ocr_cache_dir),
+                enable_crossref=request.enable_crossref,
+                crossref_contact_email=request.crossref_contact_email,
             )
             tracker.update(job_id, result=result)
         except Exception as exc:  # noqa: BLE001 — surfaced via job status, not re-raised

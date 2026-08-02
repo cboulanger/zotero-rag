@@ -117,6 +117,39 @@ class TestAnalyzeEndpoint(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(str(mock_run.call_args.kwargs["ocr_cache_dir"]), "data/ocr_cache")
 
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_enable_crossref_defaults_to_true(self, mock_run, mock_web_api):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(mock_run.call_args.kwargs["enable_crossref"])
+
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_enable_crossref_can_be_disabled(self, mock_run, mock_web_api):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key", "enable_crossref": False},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(mock_run.call_args.kwargs["enable_crossref"])
+
+    @patch("backend.api.chapter_linking.ZoteroWebAPI")
+    @patch("backend.api.chapter_linking.analyze_run", new_callable=AsyncMock)
+    def test_crossref_contact_email_passed_through(self, mock_run, mock_web_api):
+        mock_run.return_value = {"slug": "groups/1", "attachments": []}
+        response = self.client.post(
+            "/api/chapter-linking/analyze",
+            json={"library_slug": "groups/1", "api_key": "fake-key", "crossref_contact_email": "me@example.com"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_run.call_args.kwargs["crossref_contact_email"], "me@example.com")
+
 
 class TestRetrofitEndpoint(unittest.TestCase):
     def setUp(self):
