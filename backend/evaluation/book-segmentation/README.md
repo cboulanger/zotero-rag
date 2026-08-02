@@ -103,6 +103,27 @@ per-book counts of how often each fallback path (`llm_toc_extraction_used`,
 heuristic change to check whether the fallback is still net-helpful on the
 real evaluation set.
 
+### Strategy-pipeline evaluation
+
+`scripts/evaluate_chapter_segmentation_strategies.py` runs the same
+evaluation set through `analyze_attachment_with_strategies` (see
+`docs/superpowers/specs/2026-08-01-chapter-segmentation-strategy-pipeline-design.md`)
+instead of the pure-heuristic `analyze_attachment` -- i.e. with the PDF
+outline read and Crossref-by-ISBN lookup strategies active (the evaluation
+manifest names each PDF after its own ISBN-13, which doubles as the ISBN
+this script passes in). Not a pytest test -- makes real, free, cached
+Crossref API calls:
+
+```bash
+uv run python scripts/evaluate_chapter_segmentation_strategies.py
+```
+
+Prints the same precision/recall table format as the harnesses above, plus
+each book's `strategies_used` diagnostic. Run after any change to the
+outline/Crossref/fusion logic to check whether the new strategies are
+net-helpful on the real evaluation set, the same operational pattern the
+LLM-fallback evaluation script above already established.
+
 ## Current results
 
 Snapshot from running the harness above, one row per evaluation book
