@@ -21,6 +21,9 @@ class TestNormalizeIsbn(unittest.TestCase):
     def test_falls_back_to_isbn10(self):
         self.assertEqual(normalize_isbn("0-306-40615-2"), "0306406152")
 
+    def test_normalizes_lowercase_isbn10_check_digit(self):
+        self.assertEqual(normalize_isbn("030640615x"), "030640615X")
+
     def test_picks_isbn13_over_isbn10_when_both_present(self):
         self.assertEqual(normalize_isbn("0306406152; 978-3-031-46637-3"), "9783031466373")
 
@@ -90,6 +93,29 @@ class TestFetchCrossrefChapters(unittest.IsolatedAsyncioTestCase):
             second = await fetch_crossref_chapters("9783031466373", http_client, cache_dir=cache_dir, contact_email=None)
             self.assertEqual(len(second), 1)
             http_client.get.assert_called_once()  # still once -- cache hit, no new call
+
+    async def test_corrupted_cache_file_is_treated_as_miss(self):
+        with TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            cache_path = cache_dir / "9783031466373.json"
+            cache_path.write_text("not valid json {{{", encoding="utf-8")
+
+            http_client = AsyncMock()
+            http_client.get = AsyncMock(return_value=_crossref_response([
+                {
+                    "type": "book-chapter", "title": ["Introduction"],
+                    "author": [{"given": "Jane", "family": "Author"}],
+                    "page": "1-20", "DOI": "10.1/ch1",
+                },
+            ]))
+
+            result = await fetch_crossref_chapters(
+                "9783031466373", http_client, cache_dir=cache_dir, contact_email=None
+            )
+
+            http_client.get.assert_called_once()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].title, "Introduction")
 
     async def test_empty_result_is_still_cached(self):
         with TemporaryDirectory() as tmp:

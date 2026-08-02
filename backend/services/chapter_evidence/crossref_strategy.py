@@ -35,7 +35,7 @@ def normalize_isbn(raw: str) -> Optional[str]:
             return c
     for c in stripped:
         if len(c) == 10 and c[:-1].isdigit() and (c[-1].isdigit() or c[-1].upper() == "X"):
-            return c
+            return c[:-1] + c[-1].upper()
     return None
 
 
@@ -49,15 +49,19 @@ def _load_cache(cache_dir: Optional[Path], isbn: str) -> Optional[list[ChapterCa
     path = _cache_path(cache_dir, isbn)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return [
-        ChapterCandidate(
-            title=c["title"], authors=tuple(c["authors"]),
-            printed_page_number=c["printed_page_number"], pdf_page_index=c["pdf_page_index"],
-            chapter_doi=c["chapter_doi"], source=c["source"], metadata_confidence=c["metadata_confidence"],
-        )
-        for c in data["chapters"]
-    ]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [
+            ChapterCandidate(
+                title=c["title"], authors=tuple(c["authors"]),
+                printed_page_number=c["printed_page_number"], pdf_page_index=c["pdf_page_index"],
+                chapter_doi=c["chapter_doi"], source=c["source"], metadata_confidence=c["metadata_confidence"],
+            )
+            for c in data["chapters"]
+        ]
+    except Exception:
+        logger.warning("_load_cache: corrupted cache file for ISBN %s, treating as miss", isbn, exc_info=True)
+        return None
 
 
 def _save_cache(cache_dir: Optional[Path], isbn: str, candidates: list[ChapterCandidate]) -> None:
