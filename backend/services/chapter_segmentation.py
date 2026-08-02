@@ -32,7 +32,12 @@ from backend.services.chapter_common import (
     _is_back_matter,
     _is_part_divider,
     _normalized_title,
+    year_from_date,
 )
+from backend.services.chapter_evidence.fusion import merge_candidates, merge_metadata_sources
+from backend.services.chapter_evidence.outline_strategy import extract_outline_candidates
+from backend.services.chapter_evidence.crossref_strategy import normalize_isbn
+from backend.services.chapter_evidence.types import BookContext, ChapterCandidate, MetadataStrategy
 from backend.services.chapter_link_store import parse_links
 from backend.services.chapter_ocr import load_cached_ocr
 from backend.services.llm import LLMService
@@ -1133,6 +1138,135 @@ async def analyze_attachment_with_llm_fallback(pages: list[str], llm_service: LL
             "toc_matches_located": len(located),
             "llm_toc_extraction_used": llm_toc_extraction_used,
             "llm_disambiguation_used": disambiguation_count,
+        },
+    }
+
+
+_OUTLINE_CONFIDENCE = 0.98  # exceeds chapter_upload.py's calibrated
+# confidence_threshold (0.90), so outline-sourced chapters typically route
+# straight to commit rather than the review queue. See design spec 2026-08-01
+# section 7.
+
+
+def build_book_context(book_data: dict) -> BookContext:
+    """Builds a BookContext from a Zotero `book` item's `data` dict, for
+    passing into analyze_attachment_with_strategies. See design spec
+    2026-08-01 section 3."""
+    editors = tuple(
+        f"{c.get('firstName', '')} {c.get('lastName', '')}".strip()
+        for c in book_data.get("creators", [])
+        if c.get("creatorType") == "editor"
+    )
+    return BookContext(
+        item_key=book_data["key"],
+        isbn=normalize_isbn(book_data.get("ISBN", "")),
+        title=book_data.get("title", ""),
+        editors=editors,
+        publisher=book_data.get("publisher") or None,
+        year=year_from_date(book_data.get("date")),
+    )
+
+
+def _candidate_to_toc_entry(candidate: ChapterCandidate) -> TocEntry:
+    return TocEntry(
+        title=candidate.title,
+        authors=candidate.authors,
+        printed_page_number=candidate.printed_page_number if candidate.printed_page_number is not None else -1,
+        source_page_index=-1,
+    )
+
+
+async def analyze_attachment_with_strategies(
+    pages: list[str],
+    file_bytes: bytes,
+    context: BookContext,
+    zotero_catalog_strategy: MetadataStrategy,
+    crossref_strategy: Optional[MetadataStrategy] = None,
+    *,
+    llm_service: Optional[LLMService] = None,
+) -> dict:
+    """Runs the PDF-outline read, (if given) the Crossref-by-ISBN strategy,
+    and the Zotero-catalog strategy, merges their results (design spec
+    2026-08-01 sections 6 and 8). If the merge is non-empty, localizes any
+    candidate still missing pdf_page_index via the existing
+    locate_chapter_start, builds chapter dicts via the existing
+    _chapters_from_located, and overrides confidence per section 7. If the
+    merge is empty, delegates to analyze_attachment_with_llm_fallback (when
+    llm_service is given) or analyze_attachment -- i.e. today's behavior,
+    unchanged, for any book none of the three new strategies cover.
+    """
+    outline_candidates = extract_outline_candidates(file_bytes)
+
+    crossref_candidates: list[ChapterCandidate] = []
+    if crossref_strategy is not None and crossref_strategy.applicable(context):
+        crossref_candidates = await crossref_strategy.fetch(context)
+
+    zotero_catalog_candidates: list[ChapterCandidate] = []
+    if zotero_catalog_strategy.applicable(context):
+        zotero_catalog_candidates = await zotero_catalog_strategy.fetch(context)
+
+    metadata_candidates = merge_metadata_sources([crossref_candidates, zotero_catalog_candidates])
+    merged = merge_candidates(outline_candidates, metadata_candidates)
+
+    diagnostics_extra = {
+        "outline_candidates_found": len(outline_candidates),
+        "crossref_candidates_found": len(crossref_candidates),
+        "crossref_isbn_used": context.isbn if crossref_strategy is not None else None,
+        "zotero_catalog_candidates_found": len(zotero_catalog_candidates),
+    }
+
+    if not merged:
+        if llm_service is not None:
+            result = await analyze_attachment_with_llm_fallback(pages, llm_service)
+        else:
+            result = analyze_attachment(pages)
+        result["diagnostics"].update(diagnostics_extra)
+        result["diagnostics"]["strategies_used"] = []
+        return result
+
+    pre_located = [c for c in merged if c.pdf_page_index is not None]
+    needs_location = [c for c in merged if c.pdf_page_index is None]
+
+    entry_to_candidate: dict[TocEntry, ChapterCandidate] = {}
+    toc_entries: list[TocEntry] = []
+    for candidate in needs_location:
+        entry = _candidate_to_toc_entry(candidate)
+        toc_entries.append(entry)
+        entry_to_candidate[entry] = candidate
+
+    exclude_indices = _toc_scan_indices(pages)
+    located, _unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=exclude_indices)
+
+    for candidate in pre_located:
+        entry = _candidate_to_toc_entry(candidate)
+        entry_to_candidate[entry] = candidate
+        located.append((
+            entry,
+            ChapterStartMatch(index=candidate.pdf_page_index, score=100.0, margin=_CONFIDENCE_MARGIN_SATURATION),
+        ))
+
+    located.sort(key=lambda pair: pair[1].index)
+    entry_source = {entry: candidate.source for entry, candidate in entry_to_candidate.items()}
+    index_to_confidence = {match.index: entry_to_candidate[entry].metadata_confidence for entry, match in located}
+
+    chapters = _chapters_from_located(pages, located, entry_source=entry_source, non_content_pages=non_content_pages)
+    for chapter in chapters:
+        if chapter["source"].startswith("outline"):
+            chapter["confidence"] = _OUTLINE_CONFIDENCE
+        else:
+            mc = index_to_confidence.get(chapter["pdf_start_index"], 1.0)
+            chapter["confidence"] = round(mc * chapter["confidence"], 2)
+
+    diagnostics_extra["strategies_used"] = sorted({c.source for c in merged})
+    return {
+        "total_pdf_pages": len(pages),
+        "segmentation_confidence": "high" if chapters else "low",
+        "chapters": chapters,
+        "diagnostics": {
+            "toc_pages_scanned": sorted(exclude_indices),
+            "toc_matches_found": len(toc_entries) + len(pre_located),
+            "toc_matches_located": len(located),
+            **diagnostics_extra,
         },
     }
 
