@@ -5,6 +5,7 @@ section 5.3.
 """
 
 from backend.services.chapter_common import year_from_date
+from backend.services.chapter_evidence.crossref_strategy import normalize_isbn
 from backend.services.chapter_evidence.types import BookContext, ChapterCandidate, _first_page_number
 
 _BASE_SCORE = 0.6
@@ -30,8 +31,8 @@ def score_zotero_catalog_candidate(book_section_data: dict, context: BookContext
     empirically calibrated -- see design spec 5.3 for the recalibration
     plan.
     """
-    candidate_isbn = (book_section_data.get("ISBN") or "").replace("-", "").strip()
-    context_isbn = (context.isbn or "").replace("-", "").strip()
+    candidate_isbn = normalize_isbn(book_section_data.get("ISBN") or "")
+    context_isbn = normalize_isbn(context.isbn or "") if context.isbn else None
     if candidate_isbn and context_isbn and candidate_isbn == context_isbn:
         return 1.0
 
@@ -90,7 +91,9 @@ def find_zotero_catalog_candidates(
         existing = deduped.get(c.title)
         if existing is None or c.metadata_confidence > existing.metadata_confidence:
             deduped[c.title] = c
-    return list(deduped.values())
+    result = list(deduped.values())
+    result.sort(key=lambda c: (c.printed_page_number is None, c.printed_page_number or 0))
+    return result
 
 
 class ZoteroCatalogMetadataStrategy:

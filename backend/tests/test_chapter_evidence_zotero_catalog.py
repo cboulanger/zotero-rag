@@ -72,6 +72,13 @@ class TestScoreZoteroCatalogCandidate(unittest.TestCase):
         )["data"]
         self.assertEqual(score_zotero_catalog_candidate(candidate, context), 1.0)
 
+    def test_multi_valued_candidate_isbn_still_matches(self):
+        context = self._context(isbn="9783031466373")
+        candidate = _book_section(
+            "Ch1", "Some Book", isbn="0306406152; 978-3-031-46637-3",
+        )["data"]
+        self.assertEqual(score_zotero_catalog_candidate(candidate, context), 1.0)
+
 
 class TestFindZoteroCatalogCandidates(unittest.TestCase):
     def _context(self, title="Some Book", **overrides):
@@ -109,6 +116,26 @@ class TestFindZoteroCatalogCandidates(unittest.TestCase):
         result = find_zotero_catalog_candidates(self._context(isbn="9783031466373"), index)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].metadata_confidence, 1.0)
+
+    def test_dedup_winner_is_repositioned_by_page_order(self):
+        # Sorted by page: Introduction(page=1, weak), Methods(page=20),
+        # Introduction(page=300, strong, matching ISBN). Dedup keeps the
+        # page=300 "Introduction" (higher confidence), but the final list
+        # must still be in ascending page order -- not stuck at the
+        # page=1 insertion slot.
+        intro_weak = _book_section("Introduction", "Some Book", pages="1")
+        methods = _book_section("Methods", "Some Book", pages="20")
+        intro_strong = _book_section(
+            "Introduction", "Some Book", pages="300", isbn="9783031466373",
+        )
+        index = {"Some Book": [intro_weak, methods, intro_strong]}
+        result = find_zotero_catalog_candidates(self._context(isbn="9783031466373"), index)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0].title, "Methods")
+        self.assertEqual(result[0].printed_page_number, 20)
+        self.assertEqual(result[1].title, "Introduction")
+        self.assertEqual(result[1].printed_page_number, 300)
+        self.assertEqual(result[1].metadata_confidence, 1.0)
 
 
 class TestZoteroCatalogMetadataStrategy(unittest.IsolatedAsyncioTestCase):
