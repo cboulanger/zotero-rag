@@ -20,6 +20,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 
+import httpx
 import spacy
 from pypdf import PdfReader
 from rapidfuzz import fuzz
@@ -34,14 +35,17 @@ from backend.services.chapter_common import (
     _normalized_title,
     year_from_date,
 )
+from backend.services.chapter_evidence.crossref_strategy import CrossrefMetadataStrategy
 from backend.services.chapter_evidence.fusion import merge_candidates, merge_metadata_sources
 from backend.services.chapter_evidence.outline_strategy import extract_outline_candidates
 from backend.services.chapter_evidence.crossref_strategy import normalize_isbn
 from backend.services.chapter_evidence.types import BookContext, ChapterCandidate, MetadataStrategy
+from backend.services.chapter_evidence.zotero_catalog_strategy import ZoteroCatalogMetadataStrategy
 from backend.services.chapter_link_store import parse_links
 from backend.services.chapter_ocr import load_cached_ocr
 from backend.services.llm import LLMService
 from backend.utils.llm_json import parse_json_array, parse_json_object
+from backend.zotero.library_cache import ZoteroLibraryCache
 
 logger = logging.getLogger(__name__)
 
@@ -1283,11 +1287,18 @@ async def run(
     progress_callback: Callable[[float, str], None],
     llm_service: Optional[LLMService] = None,
     ocr_cache_dir: Optional[Path] = None,
+    enable_crossref: bool = True,
+    crossref_cache_dir: Optional[Path] = None,
+    crossref_contact_email: Optional[str] = None,
+    zotero_cache_dir: Optional[Path] = None,
 ) -> dict:
     """Core logic for script 1 (analyze_book_chapters). Scans `book`-type
     items in the library (or the explicit `item_keys` list), skips already-
     linked ones unless `relink`, downloads each PDF attachment, and runs
-    analyze_attachment on its page text. See design spec §5.
+    analyze_attachment_with_strategies on its page text. See design spec
+    2026-07-24 section 5, 2026-08-01 section 9, and
+    2026-08-01-zotero-library-sync-cache-design.md for the ZoteroLibraryCache
+    used below to fetch the item list.
 
     If a PDF has no extractable text layer and `ocr_cache_dir` is given,
     checks script 2's (chapter_ocr.py) on-disk cache -- keyed by the same
@@ -1295,7 +1306,18 @@ async def run(
     reporting `needs_ocr: True`. This is what lets a re-run of this script
     pick up chapters from a book that was OCR'd since the previous run.
     """
-    items = await zotero_client.get_library_items_since(library_id, library_type=library_type)
+    if zotero_cache_dir is None:
+        zotero_cache_dir = get_settings().zotero_cache_path
+    zotero_cache = ZoteroLibraryCache(
+        client=zotero_client,
+        library_id=library_id,
+        library_type=library_type,
+        cache_path=zotero_cache_dir,
+    )
+    try:
+        items = await zotero_cache.get_all_items()
+    finally:
+        zotero_cache.close()
     books = [i for i in items if i["data"].get("itemType") == "book"]
     if item_keys is not None:
         wanted = set(item_keys)
@@ -1305,63 +1327,86 @@ async def run(
     if max_items is not None:
         books = books[:max_items]
 
+    book_sections_by_title: dict[str, list[dict]] = {}
+    for item in items:
+        if item["data"].get("itemType") != "bookSection":
+            continue
+        if parse_links(item["data"].get("extra", "")).contained_by:
+            continue
+        title = item["data"].get("bookTitle", "").strip()
+        if title:
+            book_sections_by_title.setdefault(title, []).append(item)
+    zotero_catalog_strategy = ZoteroCatalogMetadataStrategy(book_sections_by_title)
+
+    if crossref_cache_dir is None:
+        crossref_cache_dir = get_settings().crossref_cache_path
+    if crossref_contact_email is None:
+        crossref_contact_email = get_settings().crossref_contact_email
+
     attachments_out: list[dict] = []
     total = len(books) or 1
     analysis_mode = "llm_fallback" if llm_service is not None else "heuristic"
-    for i, book in enumerate(books):
-        item_key = book["data"]["key"]
-        progress_callback(i / total, f"Analyzing {item_key} ({i + 1}/{total})")
 
-        children = await zotero_client.get_item_children(library_id, item_key, library_type=library_type)
-        pdf_attachments = [c for c in children if c["data"].get("contentType") == "application/pdf"]
-        if not pdf_attachments:
-            continue
-        attachment_key = pdf_attachments[0]["data"]["key"]
-        attachment_version = pdf_attachments[0]["data"].get("version", 0)
+    async with httpx.AsyncClient() as http_client:
+        crossref_strategy = (
+            CrossrefMetadataStrategy(http_client, crossref_cache_dir, crossref_contact_email)
+            if enable_crossref else None
+        )
+        for i, book in enumerate(books):
+            item_key = book["data"]["key"]
+            progress_callback(i / total, f"Analyzing {item_key} ({i + 1}/{total})")
 
-        if ocr_cache_dir is not None:
-            cached_entry = load_cached_analysis(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode)
-            if cached_entry is not None:
-                attachments_out.append(cached_entry)
+            children = await zotero_client.get_item_children(library_id, item_key, library_type=library_type)
+            pdf_attachments = [c for c in children if c["data"].get("contentType") == "application/pdf"]
+            if not pdf_attachments:
+                continue
+            attachment_key = pdf_attachments[0]["data"]["key"]
+            attachment_version = pdf_attachments[0]["data"].get("version", 0)
+
+            if ocr_cache_dir is not None:
+                cached_entry = load_cached_analysis(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode)
+                if cached_entry is not None:
+                    attachments_out.append(cached_entry)
+                    continue
+
+            file_bytes = await zotero_client.get_attachment_file(library_id, attachment_key, library_type=library_type)
+            if not file_bytes:
                 continue
 
-        file_bytes = await zotero_client.get_attachment_file(library_id, attachment_key, library_type=library_type)
-        if not file_bytes:
-            continue
+            pages = extract_page_texts_from_pdf_bytes(file_bytes)
+            has_text_layer = sum(len(p.strip()) for p in pages) > 100
 
-        pages = extract_page_texts_from_pdf_bytes(file_bytes)
-        has_text_layer = sum(len(p.strip()) for p in pages) > 100
+            if not has_text_layer and ocr_cache_dir is not None:
+                content_hash = hashlib.sha256(file_bytes).hexdigest()
+                cached = load_cached_ocr(ocr_cache_dir, content_hash)
+                if cached is not None:
+                    pages = cached["pages"]
+                    has_text_layer = sum(len(p.strip()) for p in pages) > 100
 
-        if not has_text_layer and ocr_cache_dir is not None:
-            content_hash = hashlib.sha256(file_bytes).hexdigest()
-            cached = load_cached_ocr(ocr_cache_dir, content_hash)
-            if cached is not None:
-                pages = cached["pages"]
-                has_text_layer = sum(len(p.strip()) for p in pages) > 100
+            if not has_text_layer:
+                attachments_out.append({
+                    "item_key": item_key,
+                    "attachment_key": attachment_key,
+                    "has_text_layer": False,
+                    "needs_ocr": True,
+                })
+                continue
 
-        if not has_text_layer:
-            attachments_out.append({
+            book_context = build_book_context(book["data"])
+            analysis = await analyze_attachment_with_strategies(
+                pages, file_bytes, book_context, zotero_catalog_strategy,
+                crossref_strategy=crossref_strategy, llm_service=llm_service,
+            )
+            result_entry = {
                 "item_key": item_key,
                 "attachment_key": attachment_key,
-                "has_text_layer": False,
-                "needs_ocr": True,
-            })
-            continue
-
-        if llm_service is not None:
-            analysis = await analyze_attachment_with_llm_fallback(pages, llm_service)
-        else:
-            analysis = analyze_attachment(pages)
-        result_entry = {
-            "item_key": item_key,
-            "attachment_key": attachment_key,
-            "has_text_layer": True,
-            "needs_ocr": False,
-            **analysis,
-        }
-        if ocr_cache_dir is not None:
-            save_analysis_cache(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode, result_entry)
-        attachments_out.append(result_entry)
+                "has_text_layer": True,
+                "needs_ocr": False,
+                **analysis,
+            }
+            if ocr_cache_dir is not None:
+                save_analysis_cache(ocr_cache_dir, item_key, attachment_key, attachment_version, analysis_mode, result_entry)
+            attachments_out.append(result_entry)
 
     ocr_entries = [
         {
