@@ -1345,7 +1345,7 @@ async def run(
 
     attachments_out: list[dict] = []
     total = len(books) or 1
-    analysis_mode = "llm_fallback" if llm_service is not None else "heuristic"
+    analysis_mode = "strategies_llm" if llm_service is not None else "strategies"
 
     async with httpx.AsyncClient() as http_client:
         crossref_strategy = (

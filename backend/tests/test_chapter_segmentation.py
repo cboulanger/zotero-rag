@@ -1191,7 +1191,7 @@ class TestRun(unittest.TestCase):
                 progress_callback=lambda p, m: None,
                 ocr_cache_dir=unittest.mock.ANY,
             ))
-        mock_load.assert_called_once_with(unittest.mock.ANY, "BOOK0006", "ATT0005", 7, "heuristic")
+        mock_load.assert_called_once_with(unittest.mock.ANY, "BOOK0006", "ATT0005", 7, "strategies")
         zotero_client.get_attachment_file.assert_not_called()
         self.assertEqual(result["attachments"], [cached_entry])
 
@@ -1229,7 +1229,7 @@ class TestRun(unittest.TestCase):
         mock_save.assert_called_once()
         saved_args = mock_save.call_args.args
         self.assertEqual(saved_args[1:4], ("BOOK0007", "ATT0006", 3))
-        self.assertEqual(saved_args[4], "heuristic")
+        self.assertEqual(saved_args[4], "strategies")
         self.assertEqual(result["attachments"][0]["item_key"], "BOOK0007")
 
     def test_no_cache_dir_never_touches_analysis_cache(self):
