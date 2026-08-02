@@ -55,6 +55,7 @@ def _merge_two_metadata_lists(
         merged.append(winner)
     merged.extend(c for i, c in enumerate(primary) if i not in matched_primary)
     merged.extend(c for j, c in enumerate(secondary) if j not in matched_secondary)
+    merged.sort(key=lambda c: (c.printed_page_number is None, c.printed_page_number or 0))
     return merged
 
 

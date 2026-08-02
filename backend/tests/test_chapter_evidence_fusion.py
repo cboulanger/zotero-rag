@@ -47,6 +47,29 @@ class TestMergeMetadataSources(unittest.TestCase):
         titles = {c.title for c in result}
         self.assertEqual(titles, {"Chapter One", "Totally Different Chapter"})
 
+    def test_non_contiguous_matches_preserve_book_order(self):
+        # Regression test: an unmatched entry that belongs between two matched
+        # chapters must stay in its book position instead of being pushed to
+        # the tail of the merged list (see fusion.py's _merge_two_metadata_lists).
+        # Titles are chosen distinct enough (per rapidfuzz.token_sort_ratio) to
+        # avoid an unrelated false-positive fuzzy match between the two
+        # non-corresponding entries ("Chapter Two" vs "Chapter Three" style
+        # titles score ~75, above the alignment threshold, and would collapse
+        # into a single false match instead of exercising the ordering bug).
+        crossref = [
+            ChapterCandidate(title="Introduction to the Subject", source="crossref", printed_page_number=1),
+            ChapterCandidate(title="Concluding Remarks and Future Work", source="crossref", printed_page_number=30),
+        ]
+        catalog = [
+            ChapterCandidate(title="Introduction to the Subject", source="zotero_catalog", printed_page_number=1),
+            ChapterCandidate(title="Historical Background and Context", source="zotero_catalog", printed_page_number=15),
+        ]
+        result = merge_metadata_sources([crossref, catalog])
+        self.assertEqual(
+            [c.title for c in result],
+            ["Introduction to the Subject", "Historical Background and Context", "Concluding Remarks and Future Work"],
+        )
+
 
 class TestMergeCandidates(unittest.TestCase):
     def test_passthrough_when_metadata_empty(self):
