@@ -154,6 +154,17 @@ class Settings(BaseSettings):
         description="Path to the chapter-review queue JSON. Defaults to "
                     "<data_path>/system/review_queue.json.",
     )
+    crossref_contact_email: Optional[str] = Field(
+        default=None,
+        description="Contact email sent as Crossref's 'mailto' polite-pool "
+                    "parameter. Optional -- omitted requests use Crossref's "
+                    "public pool.",
+    )
+    crossref_cache_path: Optional[Path] = Field(
+        default=None,
+        description="Directory for cached Crossref chapter lookups, keyed by "
+                    "ISBN. Defaults to <data_path>/system/crossref_cache.",
+    )
     zotero_cache_path: Optional[Path] = Field(
         default=None,
         description="Directory for per-library Zotero item sync caches (SQLite). "
@@ -226,7 +237,7 @@ class Settings(BaseSettings):
     # Application version
     version: str = Field(default=__version__, description="Backend version")
 
-    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", "autoindex_keys_path", "review_queue_path", "zotero_cache_path", mode="before")
+    @field_validator("data_path", "model_weights_path", "vector_db_path", "log_file", "registrations_path", "autoindex_keys_path", "review_queue_path", "crossref_cache_path", "zotero_cache_path", mode="before")
     @classmethod
     def expand_path(cls, v):
         """Expand user home directory in paths."""
@@ -252,6 +263,8 @@ class Settings(BaseSettings):
             self.autoindex_keys_path = self.data_path / "system" / "autoindex_keys.json"
         if self.review_queue_path is None:
             self.review_queue_path = self.data_path / "system" / "review_queue.json"
+        if self.crossref_cache_path is None:
+            self.crossref_cache_path = self.data_path / "system" / "crossref_cache"
         if self.zotero_cache_path is None:
             self.zotero_cache_path = self.data_path / "zotero_cache"
         return self
