@@ -1212,6 +1212,26 @@ async def analyze_attachment_with_strategies(
     metadata_candidates = merge_metadata_sources([crossref_candidates, zotero_catalog_candidates])
     merged = merge_candidates(outline_candidates, metadata_candidates)
 
+    # Two distinct ChapterCandidates that share (title, authors,
+    # printed_page_number, pdf_page_index) would otherwise each convert to
+    # an identical TocEntry below and get independently localized -- since
+    # they typically represent two metadata strategies that independently
+    # found the SAME real chapter but whose differing relative order
+    # against another same-titled chapter elsewhere in the book defeated
+    # merge_metadata_sources'/merge_candidates' fuzzy alignment, this would
+    # otherwise silently produce duplicate/overlapping rows in the final
+    # chapter list. Collapse them here, keeping the higher-confidence one --
+    # the same tie-break convention already used in
+    # zotero_catalog_strategy.find_zotero_catalog_candidates's own
+    # title-based dedup.
+    deduped_merged: dict[tuple, ChapterCandidate] = {}
+    for candidate in merged:
+        key = (candidate.title, candidate.authors, candidate.printed_page_number, candidate.pdf_page_index)
+        existing = deduped_merged.get(key)
+        if existing is None or candidate.metadata_confidence > existing.metadata_confidence:
+            deduped_merged[key] = candidate
+    merged = list(deduped_merged.values())
+
     diagnostics_extra = {
         "outline_candidates_found": len(outline_candidates),
         "crossref_candidates_found": len(crossref_candidates),
@@ -1231,27 +1251,34 @@ async def analyze_attachment_with_strategies(
     pre_located = [c for c in merged if c.pdf_page_index is not None]
     needs_location = [c for c in merged if c.pdf_page_index is None]
 
-    entry_to_candidate: dict[TocEntry, ChapterCandidate] = {}
+    entry_to_candidate: dict[int, ChapterCandidate] = {}  # keyed by id(entry),
+    # not the TocEntry value itself -- TocEntry is a frozen/hashable
+    # dataclass, so two distinct candidates that happen to project to an
+    # equal TocEntry (e.g. two genuinely different already-located chapters
+    # sharing a title) would otherwise silently collide as dict keys.
+    # _locate_toc_entries never copies these synthetic entries (their
+    # title_variants is always empty, so its title-rewrite branch never
+    # triggers), so id(entry) reliably identifies each one.
     toc_entries: list[TocEntry] = []
     for candidate in needs_location:
         entry = _candidate_to_toc_entry(candidate)
         toc_entries.append(entry)
-        entry_to_candidate[entry] = candidate
+        entry_to_candidate[id(entry)] = candidate
 
     exclude_indices = _toc_scan_indices(pages)
     located, _unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=exclude_indices)
 
     for candidate in pre_located:
         entry = _candidate_to_toc_entry(candidate)
-        entry_to_candidate[entry] = candidate
+        entry_to_candidate[id(entry)] = candidate
         located.append((
             entry,
             ChapterStartMatch(index=candidate.pdf_page_index, score=100.0, margin=_CONFIDENCE_MARGIN_SATURATION),
         ))
 
     located.sort(key=lambda pair: pair[1].index)
-    entry_source = {entry: candidate.source for entry, candidate in entry_to_candidate.items()}
-    index_to_confidence = {match.index: entry_to_candidate[entry].metadata_confidence for entry, match in located}
+    entry_source = {entry: entry_to_candidate[id(entry)].source for entry, _match in located}
+    index_to_confidence = {match.index: entry_to_candidate[id(entry)].metadata_confidence for entry, match in located}
 
     chapters = _chapters_from_located(pages, located, entry_source=entry_source, non_content_pages=non_content_pages)
     for chapter in chapters:

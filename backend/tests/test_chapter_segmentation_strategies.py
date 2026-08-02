@@ -173,6 +173,114 @@ class TestAnalyzeAttachmentWithStrategiesZoteroCatalogOnly(unittest.IsolatedAsyn
         self.assertEqual(result["diagnostics"]["strategies_used"], ["zotero_catalog"])
 
 
+class TestAnalyzeAttachmentWithStrategiesMultiStrategyFusion(unittest.IsolatedAsyncioTestCase):
+    async def test_crossref_and_zotero_catalog_fuse_with_corroboration(self):
+        """Crossref finds only "Introduction" (DOI-backed, confidence 1.0);
+        the Zotero-catalog strategy independently finds BOTH "Introduction"
+        (weaker, confidence 0.6) and "Comparing Citation Styles" (catalog-
+        only). This exercises both strategies contributing simultaneously --
+        never tested anywhere in the plan's test suite despite the design
+        spec's testing section requiring it -- and covers two distinct
+        fusion behaviors in one scenario:
+
+        - "Introduction" is corroborated by both sources; _merge_two_metadata_lists
+          is winner-take-all on metadata_confidence, so the stronger
+          Crossref candidate's `source` ("crossref") must win over the
+          weaker catalog one, not be silently overwritten by whichever
+          strategy happened to run/insert last.
+        - "Comparing Citation Styles" is catalog-only and must still survive
+          fusion untouched (source "zotero_catalog"), proving corroboration
+          on one chapter doesn't cost coverage of another.
+        """
+        pdf_bytes = _blank_pdf(20)  # no outline
+        crossref_candidates = [
+            ChapterCandidate(
+                title="Introduction", authors=("Jane Author",), printed_page_number=1,
+                chapter_doi="10.1/ch1", source="crossref", metadata_confidence=1.0,
+            ),
+        ]
+        catalog_candidates = [
+            ChapterCandidate(
+                title="Introduction", authors=("Jane Author",), printed_page_number=1,
+                source="zotero_catalog", metadata_confidence=0.6,
+            ),
+            ChapterCandidate(
+                title="Comparing Citation Styles", authors=("John Smith",), printed_page_number=5,
+                source="zotero_catalog", metadata_confidence=0.6,
+            ),
+        ]
+        result = await analyze_attachment_with_strategies(
+            _TWO_CHAPTER_PAGES, pdf_bytes, _context(isbn="9783031466373"),
+            _FakeMetadataStrategy(catalog_candidates), crossref_strategy=_FakeMetadataStrategy(crossref_candidates),
+        )
+        chapters = sorted(result["chapters"], key=lambda c: c["pdf_start_index"])
+        self.assertEqual(len(chapters), 2)
+        titles = [c["title"] for c in chapters]
+        self.assertEqual(titles, ["Introduction", "Comparing Citation Styles"])
+        self.assertEqual(result["diagnostics"]["strategies_used"], ["crossref", "zotero_catalog"])
+        # Corroboration on "Introduction": the stronger, DOI-backed Crossref
+        # candidate's data must win, not the weaker catalog one.
+        self.assertEqual(chapters[0]["source"], "crossref")
+        # "Comparing Citation Styles" is catalog-only -- must still survive.
+        self.assertEqual(chapters[1]["source"], "zotero_catalog")
+
+    async def test_dedup_prevents_duplicate_rows_when_ordering_defeats_alignment(self):
+        """Reproduces the original bug scenario: Crossref and the
+        Zotero-catalog strategy both find the same two real chapters, but
+        return them in a DIFFERENT relative order -- _align's greedy,
+        monotonic-order matching pairs "Introduction" across the two lists
+        but then cannot pair "Comparing Citation Styles" (it would need to
+        match backwards), so merge_metadata_sources leaves it as two
+        separate ChapterCandidates, both missing pdf_page_index, both
+        projecting to an identical TocEntry. Without the Part-1 dedup fix,
+        this produces two overlapping rows for the same chapter and lets
+        the weaker (last-inserted) candidate silently win the
+        entry_to_candidate lookup; with the fix, exactly one row survives
+        and it carries the stronger (DOI-backed, higher-confidence)
+        candidate's data.
+        """
+        pdf_bytes = _blank_pdf(20)  # no outline
+        # Crossref returns "Comparing Citation Styles" BEFORE "Introduction"
+        # -- the reverse of catalog order below -- which is what defeats
+        # _align's monotonic greedy matching for the second title.
+        crossref_candidates = [
+            ChapterCandidate(
+                title="Comparing Citation Styles", authors=("John Smith",), printed_page_number=5,
+                chapter_doi="10.1/ch2", source="crossref", metadata_confidence=1.0,
+            ),
+            ChapterCandidate(
+                title="Introduction", authors=("Jane Author",), printed_page_number=1,
+                chapter_doi="10.1/ch1", source="crossref", metadata_confidence=1.0,
+            ),
+        ]
+        catalog_candidates = [
+            ChapterCandidate(
+                title="Introduction", authors=("Jane Author",), printed_page_number=1,
+                source="zotero_catalog", metadata_confidence=0.6,
+            ),
+            ChapterCandidate(
+                title="Comparing Citation Styles", authors=("John Smith",), printed_page_number=5,
+                source="zotero_catalog", metadata_confidence=0.6,
+            ),
+        ]
+        result = await analyze_attachment_with_strategies(
+            _TWO_CHAPTER_PAGES, pdf_bytes, _context(isbn="9783031466373"),
+            _FakeMetadataStrategy(catalog_candidates), crossref_strategy=_FakeMetadataStrategy(crossref_candidates),
+        )
+        chapters = sorted(result["chapters"], key=lambda c: c["pdf_start_index"])
+        # The bug produced two rows (one per source) for whichever title
+        # _align failed to pair. The fix collapses them back to one.
+        self.assertEqual(len(chapters), 2)
+        titles = [c["title"] for c in chapters]
+        self.assertEqual(titles, ["Introduction", "Comparing Citation Styles"])
+        self.assertEqual(len(titles), len(set(titles)))
+        # Each surviving row must carry the STRONGER (Crossref, DOI-backed)
+        # candidate's source -- confirming the dedup kept the winner, not
+        # just an arbitrary last-inserted candidate.
+        for chapter in chapters:
+            self.assertEqual(chapter["source"], "crossref")
+
+
 class TestBuildBookContext(unittest.TestCase):
     def test_builds_context_from_book_data(self):
         book_data = {
