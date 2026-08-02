@@ -50,6 +50,8 @@ async def _main(args: argparse.Namespace) -> int:
         progress_callback=on_progress,
         llm_service=llm_service,
         ocr_cache_dir=Path(args.cache_dir),
+        enable_crossref=not args.no_crossref,
+        crossref_contact_email=args.crossref_contact_email,
     )
     bar.close()
 
@@ -81,6 +83,17 @@ def main() -> int:
              "(most-available first) on error or an unusable response, instead of "
              "using a single fixed model. Never a hardcoded model name -- resolved "
              "live from the preset/provider at run time.",
+    )
+    parser.add_argument(
+        "--no-crossref",
+        action="store_true",
+        help="Disable the Crossref-by-ISBN chapter-lookup strategy (on by default -- "
+             "free, cached, but makes an external network call per book with an ISBN)",
+    )
+    parser.add_argument(
+        "--crossref-contact-email",
+        default=None,
+        help="Contact email sent as Crossref's 'mailto' polite-pool parameter (optional)",
     )
     parser.add_argument("--max-items", type=int, default=None, help="Cap the number of book items processed (testing/debugging)")
     parser.add_argument(
