@@ -1291,7 +1291,23 @@ async def analyze_attachment_with_strategies(
         toc_entries.append(entry)
         entry_to_candidate[id(entry)] = candidate
 
-    exclude_indices = _toc_scan_indices(pages)
+    # _toc_scan_indices' blind 15%-front/5%-back page fraction is only a
+    # SEARCH region for find_toc_candidates -- not a reliable "definitely
+    # non-chapter-content" region on its own. analyze_attachment/
+    # analyze_attachment_with_llm_fallback never use it directly as
+    # exclude_indices either; they derive it from where a real printed TOC
+    # was actually found (find_toc_candidates' source_page_index), which is
+    # typically just 1-2 pages, not up to 15% of the whole book. Using the
+    # blind fraction here excluded real early chapter starts on several
+    # evaluation books whose front matter is much shorter than 15% of total
+    # length (see docs/superpowers/plans/2026-08-01-chapter-segmentation-strategy-pipeline.md).
+    # Fall back to the blind fraction only when no real TOC page was found
+    # at all, matching analyze_attachment_with_llm_fallback's own fallback
+    # for the same situation.
+    heuristic_toc_entries = find_toc_candidates(pages)
+    exclude_indices = (
+        {e.source_page_index for e in heuristic_toc_entries} if heuristic_toc_entries else _toc_scan_indices(pages)
+    )
     located, _unlocated, non_content_pages = _locate_toc_entries(pages, toc_entries, exclude_indices=exclude_indices)
 
     for candidate in pre_located:

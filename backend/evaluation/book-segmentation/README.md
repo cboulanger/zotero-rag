@@ -206,26 +206,29 @@ Snapshot from `uv run python scripts/evaluate_chapter_segmentation_strategies.py
 
 | Book (filename) | Precision | Recall | Found / Expected | Strategies used |
 | --- | --- | --- | --- | --- |
-| `9783031466373.pdf` | 0.69 | 0.82 | 9/13 found, 9/11 expected | crossref, outline, outline+crossref |
+| `9783031466373.pdf` | 0.83 | 0.91 | 10/12 found, 10/11 expected | crossref, outline, outline+crossref |
 | `9781771993661.pdf` | 1.00 | 1.00 | 10/10 found, 10/10 expected | (falls back to heuristic) |
 | `9783907297339.pdf` | 0.82 | 0.82 | 9/11 found, 9/11 expected | outline |
 | `9782375460122.pdf` | 0.78 | 0.82 | 14/18 found, 14/17 expected | (falls back to heuristic) |
 | `9783907297285.pdf` | 0.64 | 0.69 | 9/14 found, 9/13 expected | outline |
-| `9783847432364.pdf` | 0.76 | 0.62 | 13/17 found, 13/21 expected | crossref |
-| `9783322969828.pdf` | 0.95 | 0.75 | 18/19 found, 18/24 expected | crossref |
+| `9783847432364.pdf` | 0.80 | 0.76 | 16/20 found, 16/21 expected | crossref |
+| `9783322969828.pdf` | 0.96 | 0.96 | 23/24 found, 23/24 expected | crossref |
 
-Aggregate (micro): **precision 0.80, recall 0.77** across 107 expected
-chapters -- below the pure-heuristic baseline's 0.91/0.91 above, so on this
-evaluation set the strategies are currently a net *regression* when they
-fire, not an improvement. `analyze_attachment_with_strategies` only falls
-back to the pure-heuristic pipeline when a book's merged candidate list is
-completely empty (two books above), never when it's merely wrong -- so a
-confidently-incomplete or imprecise outline/Crossref result is trusted over
-what the heuristic pipeline would have found instead. Root causes found
-and fixed so far (see `extract_outline_candidates` in
-`backend/services/chapter_evidence/outline_strategy.py` and
-`_is_non_chapter_structural_title` in `backend/services/chapter_common.py`
-for the code, `backend/tests/test_chapter_evidence_outline.py` /
+Aggregate (micro): **precision 0.83, recall 0.85** across 107 expected
+chapters -- still below the pure-heuristic baseline's 0.91/0.91 above, so on
+this evaluation set the strategies remain a net *regression* when they fire,
+not an improvement, though a much smaller one than the previous snapshot.
+`analyze_attachment_with_strategies` only falls back to the pure-heuristic
+pipeline when a book's merged candidate list is completely empty (two books
+above), never when it's merely wrong -- so a confidently-incomplete or
+imprecise outline/Crossref result is trusted over what the heuristic
+pipeline would have found instead. Root causes found and fixed so far (see
+`extract_outline_candidates` in
+`backend/services/chapter_evidence/outline_strategy.py`,
+`_is_non_chapter_structural_title` in `backend/services/chapter_common.py`,
+and `analyze_attachment_with_strategies`'s `exclude_indices` computation in
+`backend/services/chapter_segmentation.py` for the code,
+`backend/tests/test_chapter_evidence_outline.py` /
 `test_chapter_segmentation_strategies.py` for regression coverage):
 
 - **Real chapters nested one level under unlabeled "Part I/II/III" outline
@@ -248,29 +251,58 @@ for the code, `backend/tests/test_chapter_evidence_outline.py` /
   used to trim chapter *ends* -- collapsing a chapter's real content down
   to a single page whenever its true end fell inside that broad region
   (e.g. a Foreword that legitimately lives in the front matter).
+- **Crossref/Zotero-catalog candidates were localized against a blind
+  15%-of-total-pages front exclusion zone, not the book's actual printed
+  TOC.** `analyze_attachment_with_strategies` fed metadata-sourced
+  candidates needing content-search localization through
+  `_toc_scan_indices(pages)` -- a fixed front-15%/back-5% page-fraction
+  region meant only as a *search window* for `find_toc_candidates`, never
+  as a "definitely non-chapter-content" guarantee. On books whose front
+  matter is much shorter than 15% of total length (all three
+  `crossref`-touched books above run 226-419 pages with a 1-2 page printed
+  TOC), this blindly excluded real early chapter starts from the candidate
+  pool entirely (silently dropped as unlocated) and pushed others onto a
+  later page sharing the same running header. Fixed by deriving
+  `exclude_indices` from `find_toc_candidates(pages)`'s own detected TOC
+  page(s) instead -- the same source `analyze_attachment`/
+  `analyze_attachment_with_llm_fallback` already use -- falling back to the
+  blind fraction only when no real TOC page is found at all. Recovered
+  `9783322969828.pdf` to near-parity with the heuristic baseline (0.95/0.75
+  -> 0.96/0.96) and substantially improved the other two Crossref-touched
+  books.
 
 Known remaining gaps, not yet fixed:
 
 - A book-specific structural section label with no generic vocabulary
   match (e.g. "Gastbeiträge: ..." -- German for "guest contributions",
   grouping several chapters that follow it) still leaks through as a false
-  chapter on `9783907297285.pdf`.
-- Crossref-sourced candidates (all three `crossref`-only/mixed books above)
-  show real boundary drift of several pages against the book's own printed
-  headers, and occasional extra/missing candidates relative to Crossref's
-  own indexed chapter count for the ISBN -- not yet root-caused.
+  chapter on `9783907297285.pdf`. The same class of gap causes "Preface" (a
+  real outline bookmark, not counted as a ground-truth chapter) to leak
+  through as a false positive on `9783031466373.pdf`.
+- **Short/generic Crossref chapter titles are bad content-search targets**
+  and can tie 100%-confidence matches across multiple unrelated pages (e.g.
+  Crossref's title for a real chapter on `9783847432364.pdf` is the
+  truncated "Commons." -- a citation-list mention of the same word on two
+  unrelated later chapters' pages ties it for best match, and even the
+  author-aware disambiguation pass can't break the tie because that same
+  co-author's name also happens to appear near those pages). TOC-order
+  interval pruning (`_locate_toc_entries`'s second pass) narrows the
+  candidate pool but the ambiguity guard still requires a comparison
+  against the ORIGINAL (unpruned) candidate count, so a genuinely narrowed
+  single feasible candidate is not always trusted; not yet root-caused
+  further. This mirrors the pre-existing "very short/generic entries are
+  bad fuzzy-match search targets" caveat already documented for building
+  ground truth (see `backend/evaluation/book-segmentation/CLAUDE.md`).
 - Even where the located start page is correct, `_chapters_from_located`'s
   blank-page/trim heuristics still occasionally over- or under-shoot a
-  chapter's end by a few pages for outline-sourced chapters -- the same
-  class of imprecision the pure-heuristic pipeline already has (see "Known
-  remaining misses" above), now also affecting the strategy pipeline's
-  outline path.
+  chapter's end by a few pages for outline- and Crossref-sourced chapters
+  alike -- the same class of imprecision the pure-heuristic pipeline
+  already has (see "Known remaining misses" above).
 
 **Given this net regression, `analyze_book_chapters.py`/the `/api/analyze`
 endpoint should not be pointed at the strategy pipeline for production use
-until Crossref drift is root-caused and the remaining gaps above are
-closed** -- re-run this evaluation after any further change to the
-outline/Crossref/fusion logic.
+until the remaining gaps above are closed** -- re-run this evaluation after
+any further change to the outline/Crossref/fusion logic.
 
 ### LLM-fallback status
 

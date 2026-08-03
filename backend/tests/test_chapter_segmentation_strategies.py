@@ -171,6 +171,66 @@ class TestAnalyzeAttachmentWithStrategiesCrossrefOnly(unittest.IsolatedAsyncioTe
         self.assertEqual(result["diagnostics"]["strategies_used"], ["crossref"])
 
 
+_LONG_BOOK_FILLER = "Unrelated body filler text, nothing chapter-related in this passage."
+
+# 40 pages -- large enough that _toc_scan_indices' blind 15%-of-total front
+# fraction excludes indices 0-5, even though the book's REAL printed table
+# of contents lives on a single early page (1) and its first real chapter
+# starts on page 4, well after that TOC page but still inside the blind
+# 15% zone. Reproduces a real regression found evaluating against
+# 9783847432364.pdf (365 pages, front matter only 7 pages, but the blind
+# 15% fraction excluded pages 0-53 -- swallowing three real chapter starts
+# and causing a fourth to be mis-located onto a later page carrying the
+# same running header) -- see
+# docs/superpowers/plans/2026-08-01-chapter-segmentation-strategy-pipeline.md.
+_LONG_BOOK_PAGES = [
+    _LONG_BOOK_FILLER,  # 0
+    (
+        "Contents\n"
+        "Introduction .......... 3\n"
+        "Second Chapter .......... 10\n"
+        "Third Chapter .......... 30\n"
+    ),  # 1 -- the book's real (and only) printed TOC page
+    _LONG_BOOK_FILLER,  # 2
+    _LONG_BOOK_FILLER,  # 3
+    "Introduction\nJane Author\n\nBody text opening the chapter.\n\n3",  # 4
+    "...continued introduction text with real body content here.\n\n4",  # 5
+    "...more continued introduction text with real body content.\n\n5",  # 6
+    "...final continued introduction text with real body content.\n\n6",  # 7
+    _LONG_BOOK_FILLER,  # 8
+    _LONG_BOOK_FILLER,  # 9
+    "Second Chapter\n\nJohn Smith\n\nBody text opening this chapter.\n\n10",  # 10
+    "...continued second chapter text with real body content here.\n\n11",  # 11
+    "...more continued second chapter text with real body content.\n\n12",  # 12
+    "...final continued second chapter text with real body content.\n\n13",  # 13
+] + [_LONG_BOOK_FILLER] * 26  # 14-39, 40 pages total
+
+
+class TestAnalyzeAttachmentWithStrategiesExcludeIndices(unittest.IsolatedAsyncioTestCase):
+    async def test_early_real_chapter_not_excluded_by_blind_front_fraction(self):
+        pdf_bytes = _blank_pdf(40)  # no outline
+        crossref_candidates = [
+            ChapterCandidate(
+                title="Introduction", authors=("Jane Author",), printed_page_number=3,
+                chapter_doi="10.1/ch1", source="crossref", metadata_confidence=1.0,
+            ),
+            ChapterCandidate(
+                title="Second Chapter", authors=("John Smith",), printed_page_number=10,
+                chapter_doi="10.1/ch2", source="crossref", metadata_confidence=1.0,
+            ),
+        ]
+        result = await analyze_attachment_with_strategies(
+            _LONG_BOOK_PAGES, pdf_bytes, _context(isbn="9783031466373"),
+            _FakeMetadataStrategy([]), crossref_strategy=_FakeMetadataStrategy(crossref_candidates),
+        )
+        chapters = sorted(result["chapters"], key=lambda c: c["pdf_start_index"])
+        titles = [c["title"] for c in chapters]
+        self.assertIn("Introduction", titles)
+        introduction = next(c for c in chapters if c["title"] == "Introduction")
+        self.assertEqual(introduction["pdf_start_index"], 4)
+        self.assertIn("Second Chapter", titles)
+
+
 class TestAnalyzeAttachmentWithStrategiesZoteroCatalogOnly(unittest.IsolatedAsyncioTestCase):
     async def test_weak_catalog_confidence_pulls_final_confidence_down(self):
         pdf_bytes = _blank_pdf(8)  # no outline
