@@ -15,6 +15,25 @@ class TestMergeMetadataSources(unittest.TestCase):
     def test_all_empty_returns_empty(self):
         self.assertEqual(merge_metadata_sources([[], []]), [])
 
+    def test_single_source_is_sorted_by_printed_page_number(self):
+        # A real Crossref API response is not guaranteed to list chapters in
+        # book order (found empirically -- see
+        # docs/superpowers/plans/2026-08-01-chapter-segmentation-strategy-pipeline.md).
+        # chapter_segmentation._locate_toc_entries' second-pass ordering-based
+        # disambiguation assumes list POSITION mirrors book order (mirroring
+        # find_toc_candidates' own regex-scan entries, which are naturally
+        # read top-to-bottom off the printed TOC) -- with only one metadata
+        # source, _merge_two_metadata_lists' own sort never runs, so an
+        # unsorted single source silently broke that assumption and caused
+        # genuinely locatable chapters to be wrongly reported as ambiguous.
+        candidates = [
+            ChapterCandidate(title="Third Chapter", source="crossref", printed_page_number=30),
+            ChapterCandidate(title="First Chapter", source="crossref", printed_page_number=1),
+            ChapterCandidate(title="Second Chapter", source="crossref", printed_page_number=15),
+        ]
+        result = merge_metadata_sources([candidates])
+        self.assertEqual([c.title for c in result], ["First Chapter", "Second Chapter", "Third Chapter"])
+
     def test_higher_confidence_candidate_wins_aligned_pair(self):
         crossref = [ChapterCandidate(title="Introduction to the Subject", source="crossref", metadata_confidence=1.0)]
         catalog = [ChapterCandidate(title="Introduction to the Subject", source="zotero_catalog", metadata_confidence=0.6)]

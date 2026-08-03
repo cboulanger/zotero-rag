@@ -90,6 +90,17 @@ def _parse_crossref_item(item: dict) -> Optional[ChapterCandidate]:
     titles = item.get("title") or []
     if not titles:
         return None
+    # Crossref splits a chapter's real printed heading into separate title/
+    # subtitle fields (e.g. title "Re:Law.", subtitle "Recht überdenken und
+    # neu gestalten" for a heading actually printed as "Re:Law. Recht
+    # überdenken und neu gestalten") -- title[0] alone is a short, truncated,
+    # much more ambiguous content-search target than the full heading a
+    # PDF-outline bookmark would supply for the same chapter (see
+    # extract_outline_candidates), and can even fuzzy-match a brief in-body
+    # mention of the same short phrase elsewhere in the book. Appending the
+    # subtitle when present restores the full heading.
+    subtitles = item.get("subtitle") or []
+    title = f"{titles[0]} {subtitles[0]}" if subtitles else titles[0]
     authors = tuple(
         f"{a.get('given', '')} {a.get('family', '')}".strip()
         for a in item.get("author", []) if a.get("family")
@@ -97,7 +108,7 @@ def _parse_crossref_item(item: dict) -> Optional[ChapterCandidate]:
     page = item.get("page")
     printed_page_number = _first_page_number(page) if page else None
     return ChapterCandidate(
-        title=titles[0], authors=authors, printed_page_number=printed_page_number,
+        title=title, authors=authors, printed_page_number=printed_page_number,
         chapter_doi=item.get("DOI"), source="crossref",
     )
 
@@ -120,7 +131,7 @@ async def fetch_crossref_chapters(
 
     params: dict[str, str | int] = {
         "filter": f"isbn:{isbn}",
-        "select": "DOI,title,author,page,type,container-title",
+        "select": "DOI,title,subtitle,author,page,type,container-title",
         "rows": 100,
     }
     if contact_email:

@@ -211,13 +211,13 @@ Snapshot from `uv run python scripts/evaluate_chapter_segmentation_strategies.py
 | `9783907297339.pdf` | 0.82 | 0.82 | 9/11 found, 9/11 expected | outline |
 | `9782375460122.pdf` | 0.78 | 0.82 | 14/18 found, 14/17 expected | (falls back to heuristic) |
 | `9783907297285.pdf` | 0.64 | 0.69 | 9/14 found, 9/13 expected | outline |
-| `9783847432364.pdf` | 0.80 | 0.76 | 16/20 found, 16/21 expected | crossref |
+| `9783847432364.pdf` | 0.95 | 0.95 | 20/21 found, 20/21 expected | crossref |
 | `9783322969828.pdf` | 0.96 | 0.96 | 23/24 found, 23/24 expected | crossref |
 
-Aggregate (micro): **precision 0.83, recall 0.85** across 107 expected
+Aggregate (micro): **precision 0.86, recall 0.89** across 107 expected
 chapters -- still below the pure-heuristic baseline's 0.91/0.91 above, so on
 this evaluation set the strategies remain a net *regression* when they fire,
-not an improvement, though a much smaller one than the previous snapshot.
+not an improvement, though a much smaller one than the previous snapshots.
 `analyze_attachment_with_strategies` only falls back to the pure-heuristic
 pipeline when a book's merged candidate list is completely empty (two books
 above), never when it's merely wrong -- so a confidently-incomplete or
@@ -226,10 +226,15 @@ pipeline would have found instead. Root causes found and fixed so far (see
 `extract_outline_candidates` in
 `backend/services/chapter_evidence/outline_strategy.py`,
 `_is_non_chapter_structural_title` in `backend/services/chapter_common.py`,
-and `analyze_attachment_with_strategies`'s `exclude_indices` computation in
-`backend/services/chapter_segmentation.py` for the code,
+`analyze_attachment_with_strategies`'s `exclude_indices` computation and
+`merge_metadata_sources`'s single-source sort in
+`backend/services/chapter_segmentation.py`/`fusion.py`, and
+`_parse_crossref_item`'s subtitle handling in
+`backend/services/chapter_evidence/crossref_strategy.py` for the code,
 `backend/tests/test_chapter_evidence_outline.py` /
-`test_chapter_segmentation_strategies.py` for regression coverage):
+`test_chapter_segmentation_strategies.py` /
+`test_chapter_evidence_fusion.py` / `test_chapter_evidence_crossref.py` for
+regression coverage):
 
 - **Real chapters nested one level under unlabeled "Part I/II/III" outline
   nodes.** The top-level-only read used to silently accept whatever
@@ -270,6 +275,35 @@ and `analyze_attachment_with_strategies`'s `exclude_indices` computation in
   `9783322969828.pdf` to near-parity with the heuristic baseline (0.95/0.75
   -> 0.96/0.96) and substantially improved the other two Crossref-touched
   books.
+- **A single metadata source's candidate list is not guaranteed to be in
+  book order.** `merge_metadata_sources` only sorted by
+  `printed_page_number` when actually merging TWO non-empty sources
+  (`_merge_two_metadata_lists`'s own final sort); with a single source --
+  the common case for a Crossref-only book -- the list passed straight
+  through in whatever order the Crossref API happened to return it.
+  `_locate_toc_entries`'s second-pass "TOC order is book order" ambiguity
+  disambiguation relies on list POSITION (not `printed_page_number` value)
+  mirroring book order, so an out-of-order single source silently broke
+  its `lower`/`upper` bound computation and made a genuinely locatable
+  chapter (e.g. a short, ambiguous title with real page-order neighbors
+  that should have pinned it down) fall through as unresolved instead.
+  Fixed by sorting a single source the same way a merged pair already is.
+- **Crossref splits a chapter's real printed heading into separate
+  title/subtitle fields, and `_parse_crossref_item` was discarding the
+  subtitle.** A truncated title (e.g. "Commons." instead of the real
+  "Commons. Was wir brauchen und was uns gemeinsam ist") is a much weaker,
+  more ambiguous content-search target than the full heading a PDF-outline
+  bookmark supplies for the same chapter -- it can tie or even out-score
+  its own true opening page against a brief in-body mention of the same
+  short phrase in a nearby, unrelated chapter, and because
+  `locate_chapter_start_candidates` transitively chains same-title matches
+  within a small page gap (deliberately, to keep a long chapter's own
+  repeating running header as one cluster -- see its docstring), a
+  spurious short mention 2-3 pages before the real opening page can chain
+  onto it and report the earlier, wrong page as the location. Fixed by
+  requesting Crossref's `subtitle` field and appending it to `title[0]`
+  when present, restoring the full heading. Recovered `9783847432364.pdf`
+  from 0.80/0.76 to 0.95/0.95 (20/21 chapters now exactly correct).
 
 Known remaining gaps, not yet fixed:
 
@@ -279,20 +313,20 @@ Known remaining gaps, not yet fixed:
   chapter on `9783907297285.pdf`. The same class of gap causes "Preface" (a
   real outline bookmark, not counted as a ground-truth chapter) to leak
   through as a false positive on `9783031466373.pdf`.
-- **Short/generic Crossref chapter titles are bad content-search targets**
-  and can tie 100%-confidence matches across multiple unrelated pages (e.g.
-  Crossref's title for a real chapter on `9783847432364.pdf` is the
-  truncated "Commons." -- a citation-list mention of the same word on two
-  unrelated later chapters' pages ties it for best match, and even the
-  author-aware disambiguation pass can't break the tie because that same
-  co-author's name also happens to appear near those pages). TOC-order
-  interval pruning (`_locate_toc_entries`'s second pass) narrows the
-  candidate pool but the ambiguity guard still requires a comparison
-  against the ORIGINAL (unpruned) candidate count, so a genuinely narrowed
-  single feasible candidate is not always trusted; not yet root-caused
-  further. This mirrors the pre-existing "very short/generic entries are
-  bad fuzzy-match search targets" caveat already documented for building
-  ground truth (see `backend/evaluation/book-segmentation/CLAUDE.md`).
+- **The last located chapter in a book has no "next entry" to bound its
+  end**, so `_chapters_from_located` defaults to the last PDF page and
+  trims backward only past pages its blank-page/non-content checks
+  recognize. A publisher's back-cover blurb or colophon page (ISBN,
+  website, marketing copy -- real, non-blank text, so the blank-page check
+  doesn't fire) is not detected as non-chapter content, over-extending the
+  final chapter by a few pages on both `9783847432364.pdf` (350-364 found
+  vs. 350-361 expected) and `9783322969828.pdf` (405-418 found vs. 405-416
+  expected). Crossref's own "Back Matter" candidate (present in both
+  books' raw results, see `crossref_candidates_found` in diagnostics)
+  would be the right boundary if it could be located, but "Back Matter" is
+  a generic schema label, not literal text printed anywhere in either
+  book, so it never resolves to a page and can't serve as one; not yet
+  root-caused further.
 - Even where the located start page is correct, `_chapters_from_located`'s
   blank-page/trim heuristics still occasionally over- or under-shoot a
   chapter's end by a few pages for outline- and Crossref-sourced chapters

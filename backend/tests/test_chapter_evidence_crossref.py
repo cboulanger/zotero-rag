@@ -63,6 +63,43 @@ class TestFetchCrossrefChapters(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result[0].source, "crossref")
         self.assertEqual(result[0].metadata_confidence, 1.0)
 
+    async def test_appends_subtitle_to_the_truncated_crossref_title(self):
+        # Crossref splits a chapter's real (often colon/period-separated)
+        # printed heading into separate title/subtitle fields -- using only
+        # title[0] silently truncates it (e.g. "Re:Law." instead of the
+        # real "Re:Law. Recht überdenken und neu gestalten"). A short,
+        # truncated title is a much weaker/more ambiguous content-search
+        # target: it can fuzzy-match a brief in-body mention of the same
+        # short phrase in an unrelated, nearby chapter almost as well as the
+        # real chapter-opening page, and unlike a long title, the
+        # transitive clustering gap can then bridge that spurious mention
+        # into the real page as if they were one continuous chapter run.
+        # Reproduces a real mislocation found evaluating against
+        # 9783847432364.pdf -- see
+        # docs/superpowers/plans/2026-08-01-chapter-segmentation-strategy-pipeline.md.
+        items = [
+            {
+                "type": "book-chapter", "title": ["Re:Law."], "subtitle": ["Recht überdenken und neu gestalten"],
+                "author": [], "page": "205-228", "DOI": "10.1/ch1",
+            },
+        ]
+        http_client = AsyncMock()
+        http_client.get = AsyncMock(return_value=_crossref_response(items))
+        result = await fetch_crossref_chapters("9783031466373", http_client, cache_dir=None, contact_email=None)
+        self.assertEqual(result[0].title, "Re:Law. Recht überdenken und neu gestalten")
+
+    async def test_no_subtitle_leaves_title_unchanged(self):
+        items = [
+            {
+                "type": "book-chapter", "title": ["Trans Soldat*innen und ein neues Gemeinsames"],
+                "author": [], "page": "73-92", "DOI": "10.1/ch1",
+            },
+        ]
+        http_client = AsyncMock()
+        http_client.get = AsyncMock(return_value=_crossref_response(items))
+        result = await fetch_crossref_chapters("9783031466373", http_client, cache_dir=None, contact_email=None)
+        self.assertEqual(result[0].title, "Trans Soldat*innen und ein neues Gemeinsames")
+
     async def test_returns_empty_list_for_unregistered_isbn(self):
         http_client = AsyncMock()
         http_client.get = AsyncMock(return_value=_crossref_response([]))

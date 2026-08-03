@@ -71,6 +71,14 @@ def merge_metadata_sources(strategy_results: list[list[ChapterCandidate]]) -> li
     result = list(non_empty[0])
     for next_list in non_empty[1:]:
         result = _merge_two_metadata_lists(result, next_list)
+    if len(non_empty) == 1:
+        # _merge_two_metadata_lists sorts its own output by
+        # printed_page_number -- do the same here so a single source's
+        # result carries the same book-order guarantee (chapter_segmentation.
+        # _locate_toc_entries' second-pass disambiguation relies on list
+        # position mirroring book order; a real Crossref response is not
+        # guaranteed to list chapters in book order).
+        result.sort(key=lambda c: (c.printed_page_number is None, c.printed_page_number or 0))
     return result
 
 
