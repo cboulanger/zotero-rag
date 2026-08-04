@@ -42,16 +42,25 @@ async def _main() -> int:
         # packs, falling back to title-based detection.
         language = detect_language(book.get("language"), book.get("title", ""))
         print(f"{pdf_path.name}: OCR-ing {len(pages)} pages (language={language}) ...", flush=True)
-        page_texts = await ocr_pdf_pages(
-            file_bytes,
-            extractor=extractor,
-            cache_dir=OCR_CACHE_DIR,
-            language=language,
-            on_page=lambda done, total: print(
-                f"  {pdf_path.name}: {done}/{total} pages", flush=True
-            ) if done % 25 == 0 or done == total else None,
-        )
-        print(f"{pdf_path.name}: done, {sum(len(p) for p in page_texts)} chars cached")
+        try:
+            page_texts = await ocr_pdf_pages(
+                file_bytes,
+                extractor=extractor,
+                cache_dir=OCR_CACHE_DIR,
+                language=language,
+                on_page=lambda done, total: print(
+                    f"  {pdf_path.name}: {done}/{total} pages", flush=True
+                ) if done % 25 == 0 or done == total else None,
+            )
+        except Exception as exc:
+            # A transient sidecar failure on one book must not strand the
+            # remaining books for the rest of a multi-hour unattended run --
+            # ocr_pdf_pages only writes its cache entry after the full
+            # per-page loop succeeds, so this book simply stays uncached
+            # and gets retried whole on the next invocation of this script.
+            print(f"{pdf_path.name}: FAILED ({exc}) -- skipping, will retry on next run", flush=True)
+            continue
+        print(f"{pdf_path.name}: done, {sum(len(p) for p in page_texts)} chars cached", flush=True)
     return 0
 
 
