@@ -221,6 +221,36 @@ def extract_page_texts_from_pdf_bytes(content: bytes) -> list[str]:
     return [page.extract_text() or "" for page in reader.pages]
 
 
+# Calibrated against the 17-book evaluation set (see backend/evaluation/
+# book-segmentation/README.md): healthy books have >=90% "longish" pages
+# (>500 stripped chars) and 0% of them degenerate (<3 newlines); un-OCR'd
+# scans have ~0% longish pages; the two known degenerate-text-layer books
+# (whole page extracted as one absolutely-positioned line) sit at 97-99%
+# degenerate. Both thresholds have a wide margin on real data.
+_OCR_MIN_SUBSTANTIAL_PAGE_CHARS = 500
+_OCR_MIN_SUBSTANTIAL_PAGE_FRACTION = 0.1
+_OCR_DEGENERATE_MAX_NEWLINES = 3
+_OCR_DEGENERATE_MAX_FRACTION = 0.5
+
+
+def pages_need_ocr(pages: list[str]) -> bool:
+    """True when this page text cannot be analyzed and the PDF should go
+    through the OCR route instead: either there is (almost) no text layer
+    at all, or the text layer is degenerate -- each page extracted as one
+    giant line with no line structure (seen with absolutely-positioned /
+    rotated text runs), which defeats every line-oriented heuristic in this
+    module. Replaces the old `total chars > 100` has-text-layer check,
+    which a 411-page scan with two stray text pages slipped past.
+    """
+    if not pages:
+        return True
+    substantial = [p.strip() for p in pages if len(p.strip()) > _OCR_MIN_SUBSTANTIAL_PAGE_CHARS]
+    if len(substantial) < _OCR_MIN_SUBSTANTIAL_PAGE_FRACTION * len(pages):
+        return True
+    degenerate = [p for p in substantial if p.count("\n") < _OCR_DEGENERATE_MAX_NEWLINES]
+    return len(degenerate) > _OCR_DEGENERATE_MAX_FRACTION * len(substantial)
+
+
 def _analysis_cache_path(cache_dir: Path, item_key: str, attachment_key: str, version: int, mode: str) -> Path:
     return cache_dir / f"{item_key}-{attachment_key}-v{version}-{mode}.analysis.json"
 

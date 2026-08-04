@@ -20,6 +20,7 @@ from backend.services.chapter_segmentation import (
     find_toc_candidates,
     llm_extract_toc_entries,
     load_cached_analysis,
+    pages_need_ocr,
     save_analysis_cache,
     _toc_scan_indices,
     analyze_attachment_with_llm_fallback,
@@ -1400,6 +1401,46 @@ class TestRun(unittest.TestCase):
                 enable_crossref=False,
             ))
         self.assertIsNone(result["attachments"][0]["diagnostics"]["crossref_isbn_used"])
+
+
+class TestPagesNeedOcr(unittest.TestCase):
+    """pages_need_ocr must catch three real failure shapes found in the
+    evaluation set (see backend/evaluation/book-segmentation/README.md):
+    scans with no text layer, scans with a trivial amount of stray text,
+    and PDFs whose text layer extracts as one giant line per page."""
+
+    def _healthy_page(self) -> str:
+        # ~35 lines of ~40 chars: realistic body page, plenty of newlines.
+        return ("Dies ist eine gewoehnliche Textzeile ohne Nummer\n" * 35)
+
+    def test_empty_page_list_needs_ocr(self):
+        self.assertTrue(pages_need_ocr([]))
+
+    def test_scan_without_text_layer_needs_ocr(self):
+        self.assertTrue(pages_need_ocr([""] * 300))
+
+    def test_scan_with_trivial_stray_text_needs_ocr(self):
+        # Mirrors dnb-36942798X.pdf: 411 pages, only 2 carry any text
+        # (2,366 chars total) -- more than the old >100-chars check allowed,
+        # but obviously still an un-OCR'd scan.
+        pages = [""] * 409 + [self._healthy_page()] * 2
+        self.assertTrue(pages_need_ocr(pages))
+
+    def test_normal_book_does_not_need_ocr(self):
+        self.assertFalse(pages_need_ocr([self._healthy_page()] * 40))
+
+    def test_one_giant_line_pages_need_ocr(self):
+        # Mirrors 9783789057366.pdf / 9780367439712.pdf: pages have plenty
+        # of text but essentially no newlines (one absolutely-positioned
+        # run per page), so no line-oriented parsing can work.
+        giant = "Wort " * 400  # ~2000 chars, zero newlines
+        self.assertTrue(pages_need_ocr([giant] * 40))
+
+    def test_few_degenerate_pages_among_healthy_ones_is_fine(self):
+        # A handful of single-line pages (e.g. a part-divider printed
+        # sideways) must not condemn a healthy book to OCR.
+        pages = [self._healthy_page()] * 36 + ["Wort " * 400] * 4
+        self.assertFalse(pages_need_ocr(pages))
 
 
 if __name__ == "__main__":
