@@ -28,40 +28,15 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from backend.evaluation.harness import analysis_pages_for, available_books
 from backend.services.chapter_evidence.crossref_strategy import CrossrefMetadataStrategy
 from backend.services.chapter_evidence.types import BookContext
 from backend.services.chapter_evidence.zotero_catalog_strategy import ZoteroCatalogMetadataStrategy
-from backend.services.chapter_segmentation import (
-    analyze_attachment_with_strategies,
-    extract_page_texts_from_pdf_bytes,
-)
-
-_EVAL_DIR = Path(__file__).resolve().parent.parent / "backend" / "evaluation" / "book-segmentation"
-
-
-def _load_manifest_books() -> list[dict]:
-    # Mirrors evaluate_chapter_segmentation_llm_fallback.py's identically-named
-    # helper -- kept as a separate copy, same rationale (backend/tests/ is not
-    # a runtime dependency of anything under scripts/).
-    books = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))["books"]
-    local_manifest_path = _EVAL_DIR / "manifest.local.json"
-    if local_manifest_path.exists():
-        books = books + json.loads(local_manifest_path.read_text(encoding="utf-8"))["books"]
-    return books
-
-
-def _available_books() -> list[tuple[Path, Path, dict]]:
-    triples = []
-    for book in _load_manifest_books():
-        pdf_path = _EVAL_DIR / book["filename"]
-        expected_path = _EVAL_DIR / (Path(book["filename"]).stem + ".expected.json")
-        if pdf_path.exists() and expected_path.exists():
-            triples.append((pdf_path, expected_path, book))
-    return triples
+from backend.services.chapter_segmentation import analyze_attachment_with_strategies
 
 
 async def _main(enable_crossref: bool) -> int:
-    triples = _available_books()
+    triples = available_books()
     if not triples:
         print("No evaluation PDFs present -- run: uv run python scripts/fetch_evaluation_pdfs.py")
         return 1
@@ -76,7 +51,11 @@ async def _main(enable_crossref: bool) -> int:
         for pdf_path, expected_path, book in triples:
             expected = json.loads(expected_path.read_text(encoding="utf-8"))["chapters"]
             file_bytes = pdf_path.read_bytes()
-            pages = extract_page_texts_from_pdf_bytes(file_bytes)
+            pages = analysis_pages_for(file_bytes)
+            if pages is None:
+                print(f"{pdf_path.name}: SKIPPED (needs OCR — populate the cache with: "
+                      f"uv run python scripts/ocr_evaluation_pdfs.py)")
+                continue
             # The evaluation manifest names each PDF after its own ISBN-13
             # (see backend/evaluation/book-segmentation/README.md), so the
             # filename stem doubles as the ISBN BookContext needs.
