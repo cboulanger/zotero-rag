@@ -78,6 +78,43 @@ def slice_single_page_pdf(content: bytes, page_index: int) -> bytes:
     return buffer.getvalue()
 
 
+async def ocr_pdf_pages(
+    content: bytes,
+    *,
+    extractor,
+    cache_dir: Path,
+    language: str,
+    on_page: Optional[Callable[[int, int], None]] = None,
+) -> list[str]:
+    """OCR every page of `content` via the Kreuzberg sidecar, returning one
+    text string per physical page (index 0 = first page, matching pypdf's
+    indexing used throughout chapter_segmentation.py). Results are cached in
+    `cache_dir` keyed by the PDF's own content hash -- a later call with the
+    same bytes returns the cached pages without touching the extractor.
+    `on_page(pages_done, total_pages)` is called after each page for
+    progress reporting on long books.
+    """
+    content_hash = hashlib.sha256(content).hexdigest()
+    cached = load_cached_ocr(cache_dir, content_hash)
+    if cached is not None:
+        return cached["pages"]
+
+    reader = PdfReader(io.BytesIO(content))
+    total_pages = len(reader.pages)
+    page_texts: list[str] = []
+    for page_index in range(total_pages):
+        single_page_bytes = slice_single_page_pdf(content, page_index)
+        chunks = await extractor.extract_and_chunk(
+            single_page_bytes, "application/pdf", ocr_language=language
+        )
+        page_texts.append(" ".join(c.text for c in chunks))
+        if on_page is not None:
+            on_page(page_index + 1, total_pages)
+
+    save_ocr_cache(cache_dir, content_hash, detected_language=language, pages=page_texts)
+    return page_texts
+
+
 async def run(
     *,
     zotero_client,
@@ -126,16 +163,10 @@ async def run(
             item = await zotero_client.get_item(library_id, item_key, library_type=library_type)
             language = detect_language(item["data"].get("language"), item["data"].get("title", ""))
 
-            reader = PdfReader(io.BytesIO(file_bytes))
-            page_texts: list[str] = []
-            for page_index in range(len(reader.pages)):
-                single_page_bytes = slice_single_page_pdf(file_bytes, page_index)
-                chunks = await extractor.extract_and_chunk(
-                    single_page_bytes, "application/pdf", ocr_language=language
-                )
-                page_texts.append(" ".join(c.text for c in chunks))
-
-            cache_path = save_ocr_cache(cache_dir, content_hash, detected_language=language, pages=page_texts)
+            page_texts = await ocr_pdf_pages(
+                file_bytes, extractor=extractor, cache_dir=cache_dir, language=language,
+            )
+            cache_path = _cache_path(cache_dir, content_hash)
             results.append({
                 "item_key": item_key,
                 "attachment_key": attachment_key,

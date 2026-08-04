@@ -1,16 +1,21 @@
 """Unit tests for backend.services.chapter_ocr."""
 
 import hashlib
+import io
 import json
+import tempfile
 import unittest
 import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, MagicMock
 
+from pypdf import PdfWriter
+
 from backend.services.chapter_ocr import (
     detect_language,
     load_cached_ocr,
+    ocr_pdf_pages,
     save_ocr_cache,
 )
 from backend.services.chapter_ocr import run as ocr_run
@@ -154,6 +159,55 @@ class TestOcrRun(unittest.TestCase):
         self.assertFalse(first["ocr_succeeded"])
         self.assertIn("error", first)
         self.assertTrue(second["ocr_succeeded"])
+
+
+def _two_page_pdf_bytes() -> bytes:
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    writer.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+class TestOcrPdfPages(unittest.IsolatedAsyncioTestCase):
+    async def test_ocrs_each_page_individually_and_caches_by_content_hash(self):
+        pdf_bytes = _two_page_pdf_bytes()
+        extractor = AsyncMock()
+        extractor.extract_and_chunk.side_effect = [
+            [MagicMock(text="page one text")],
+            [MagicMock(text="page two text")],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            pages = await ocr_pdf_pages(
+                pdf_bytes, extractor=extractor, cache_dir=cache_dir, language="deu",
+            )
+            self.assertEqual(pages, ["page one text", "page two text"])
+            self.assertEqual(extractor.extract_and_chunk.await_count, 2)
+            # one page-sliced PDF per call, never the whole book at once
+            for call in extractor.extract_and_chunk.await_args_list:
+                self.assertEqual(call.kwargs.get("ocr_language"), "deu")
+            self.assertEqual(len(list(cache_dir.glob("*.json"))), 1)
+
+            # Second call with identical bytes: served from cache, extractor untouched.
+            pages_again = await ocr_pdf_pages(
+                pdf_bytes, extractor=extractor, cache_dir=cache_dir, language="deu",
+            )
+            self.assertEqual(pages_again, ["page one text", "page two text"])
+            self.assertEqual(extractor.extract_and_chunk.await_count, 2)
+
+    async def test_reports_per_page_progress(self):
+        pdf_bytes = _two_page_pdf_bytes()
+        extractor = AsyncMock()
+        extractor.extract_and_chunk.return_value = [MagicMock(text="x")]
+        seen: list[tuple[int, int]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            await ocr_pdf_pages(
+                pdf_bytes, extractor=extractor, cache_dir=Path(tmp), language="eng",
+                on_page=lambda done, total: seen.append((done, total)),
+            )
+        self.assertEqual(seen, [(1, 2), (2, 2)])
 
 
 if __name__ == "__main__":
