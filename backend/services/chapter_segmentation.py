@@ -212,13 +212,28 @@ class TocEntry:
     # titles are already read whole.
 
 
-def extract_page_texts_from_pdf_bytes(content: bytes) -> list[str]:
+def extract_page_texts_from_pdf_bytes(content: bytes, layout: bool = False) -> list[str]:
     """Return one text string per physical PDF page, in index order (index 0
     = first page). Uses pypdf directly rather than Kreuzberg's chunking,
     which does not guarantee a clean 1:1 page<->chunk mapping.
+
+    With `layout=True`, uses pypdf's layout extraction mode, which preserves
+    horizontal whitespace -- on TOC pages typeset as a title column plus a
+    page-number column, this keeps each entry on one physical line where the
+    default mode scrambles them (numbers on their own lines, or glued onto
+    the next title). Slower, and it can throw on individual pages (e.g.
+    rotated text), so per-page failures degrade to an empty string.
     """
     reader = PdfReader(io.BytesIO(content))
-    return [page.extract_text() or "" for page in reader.pages]
+    if not layout:
+        return [page.extract_text() or "" for page in reader.pages]
+    texts: list[str] = []
+    for page in reader.pages:
+        try:
+            texts.append(page.extract_text(extraction_mode="layout") or "")
+        except Exception:
+            texts.append("")
+    return texts
 
 
 # Calibrated against the 17-book evaluation set (see backend/evaluation/
@@ -249,6 +264,31 @@ def pages_need_ocr(pages: list[str]) -> bool:
         return True
     degenerate = [p for p in substantial if p.count("\n") < _OCR_DEGENERATE_MAX_NEWLINES]
     return len(degenerate) > _OCR_DEGENERATE_MAX_FRACTION * len(substantial)
+
+
+def extract_page_texts_for_analysis(content: bytes) -> tuple[list[str], bool]:
+    """Page texts to feed the segmentation heuristics, plus whether the
+    layout-mode fallback was used.
+
+    Default-mode pypdf extraction is kept whenever it already yields a
+    detectable TOC (so books that work today are byte-for-byte unaffected).
+    When it doesn't, the pages are re-extracted in layout mode and adopted
+    if a TOC becomes detectable that way -- verified on real evaluation
+    books whose two-column TOC the default mode scrambles beyond
+    recognition (see backend/evaluation/book-segmentation/README.md).
+    OCR-shaped input (see pages_need_ocr) skips the layout attempt: a book
+    with no usable text layer cannot be rescued by a different text
+    extraction mode, only by actual OCR.
+    """
+    pages = extract_page_texts_from_pdf_bytes(content)
+    if pages_need_ocr(pages):
+        return pages, False
+    if find_toc_candidates(pages):
+        return pages, False
+    layout_pages = extract_page_texts_from_pdf_bytes(content, layout=True)
+    if find_toc_candidates(layout_pages):
+        return layout_pages, True
+    return pages, False
 
 
 def _analysis_cache_path(cache_dir: Path, item_key: str, attachment_key: str, version: int, mode: str) -> Path:

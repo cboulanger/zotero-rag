@@ -17,6 +17,7 @@ from backend.services.review_queue_store import get_entry
 from backend.services.chapter_segmentation import (
     TocEntry,
     extract_page_texts_from_pdf_bytes,
+    extract_page_texts_for_analysis,
     find_toc_candidates,
     llm_extract_toc_entries,
     load_cached_analysis,
@@ -952,6 +953,69 @@ class TestAnalysisCache(unittest.TestCase):
             cache_dir = Path(tmp)
             save_analysis_cache(cache_dir, "B1", "A1", 5, "heuristic", {"chapters": []})
             self.assertIsNone(load_cached_analysis(cache_dir, "B1", "A1", 5, "llm_fallback"))
+
+
+# Fake page sets for extract_page_texts_for_analysis. 10 pages total, so
+# find_toc_candidates' front window (15%) is exactly page 0 and printed page
+# numbers up to 2*10=20 are plausible. The "default mode" pages are healthy
+# multi-line text with NO TOC-shaped lines; the "layout mode" pages carry a
+# classic 3-entry dot-leader TOC on page 0.
+_BODY_PAGE = "Dies ist eine gewoehnliche Textzeile ohne Nummer\n" * 35
+_DEFAULT_MODE_PAGES = [_BODY_PAGE] * 10
+_LAYOUT_MODE_PAGES = [
+    "Inhalt\n"
+    "Erstes Kapitel .......... 5\n"
+    "Zweites Kapitel .......... 9\n"
+    "Drittes Kapitel .......... 15\n"
+] + [_BODY_PAGE] * 9
+_TOC_DEFAULT_PAGES = [_LAYOUT_MODE_PAGES[0]] + [_BODY_PAGE] * 9
+
+
+class TestExtractPageTextsForAnalysis(unittest.TestCase):
+    """The layout fallback must only fire when default-mode extraction hides
+    the TOC: default-found TOC -> default pages untouched (protects the
+    existing 7-book baseline); no TOC either way -> default pages; OCR-shaped
+    input -> default pages without even attempting the (slow) layout pass."""
+
+    def test_keeps_default_pages_when_default_mode_finds_toc(self):
+        def fake_extract(content, layout=False):
+            if layout:
+                raise AssertionError("layout extraction must not run when default mode already finds a TOC")
+            return _TOC_DEFAULT_PAGES
+
+        with unittest.mock.patch("backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes", side_effect=fake_extract):
+            pages, layout_used = extract_page_texts_for_analysis(b"%PDF-fake")
+        self.assertEqual(pages, _TOC_DEFAULT_PAGES)
+        self.assertFalse(layout_used)
+
+    def test_falls_back_to_layout_pages_when_only_layout_mode_finds_toc(self):
+        def fake_extract(content, layout=False):
+            return _LAYOUT_MODE_PAGES if layout else _DEFAULT_MODE_PAGES
+
+        with unittest.mock.patch("backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes", side_effect=fake_extract):
+            pages, layout_used = extract_page_texts_for_analysis(b"%PDF-fake")
+        self.assertEqual(pages, _LAYOUT_MODE_PAGES)
+        self.assertTrue(layout_used)
+
+    def test_keeps_default_pages_when_neither_mode_finds_toc(self):
+        def fake_extract(content, layout=False):
+            return _DEFAULT_MODE_PAGES
+
+        with unittest.mock.patch("backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes", side_effect=fake_extract):
+            pages, layout_used = extract_page_texts_for_analysis(b"%PDF-fake")
+        self.assertEqual(pages, _DEFAULT_MODE_PAGES)
+        self.assertFalse(layout_used)
+
+    def test_skips_layout_attempt_entirely_for_ocr_shaped_input(self):
+        def fake_extract(content, layout=False):
+            if layout:
+                raise AssertionError("layout extraction must not run for pages that need OCR")
+            return [""] * 300
+
+        with unittest.mock.patch("backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes", side_effect=fake_extract):
+            pages, layout_used = extract_page_texts_for_analysis(b"%PDF-fake")
+        self.assertEqual(pages, [""] * 300)
+        self.assertFalse(layout_used)
 
 
 class TestRun(unittest.TestCase):
