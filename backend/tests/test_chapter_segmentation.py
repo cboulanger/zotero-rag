@@ -62,7 +62,12 @@ def _pdf_with_outline(num_pages: int, entries: list[tuple[str, int]]) -> bytes:
     return buf.getvalue()
 
 
-_FILLER = "Unrelated body filler text, nothing chapter-related in this passage at all."
+# Repeated (not a single short line) so this filler page clears
+# pages_need_ocr's per-page "substantial" (>500 chars) and "not degenerate"
+# (>=3 newlines) thresholds -- a single short line reads as OCR-shaped input
+# and short-circuits run() into the needs_ocr branch before any chapter
+# segmentation strategy runs.
+_FILLER = "Unrelated body filler text, nothing chapter-related in this passage at all.\n" * 8
 
 # Same 20-page, indices-5-and-12 fixture as
 # test_chapter_segmentation_strategies.py's _TWO_CHAPTER_PAGES (Task 8) --
@@ -1018,6 +1023,14 @@ class TestExtractPageTextsForAnalysis(unittest.TestCase):
         self.assertFalse(layout_used)
 
 
+# Single-page "has real text, but nothing chapter-shaped in it" fixture for
+# TestRun cases that don't care about chapter content, only that the
+# attachment clears pages_need_ocr and reaches the analysis strategies.
+# Needs >500 chars and >=3 newlines per pages_need_ocr's thresholds -- a
+# short one-liner reads as OCR-shaped input (see TestPagesNeedOcr below).
+_SUBSTANTIAL_FILLER_PAGE = "Just filler prose, no TOC pattern here at all.\n" * 12
+
+
 class TestRun(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1064,7 +1077,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+            return_value=[_SUBSTANTIAL_FILLER_PAGE],
         ):
             result = asyncio.run(analyze_run(
                 zotero_client=zotero_client,
@@ -1129,7 +1142,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+            return_value=[_SUBSTANTIAL_FILLER_PAGE],
         ), unittest.mock.patch(
             "backend.services.chapter_segmentation.analyze_attachment_with_llm_fallback",
             new_callable=AsyncMock,
@@ -1166,7 +1179,7 @@ class TestRun(unittest.TestCase):
             return_value=["", ""],  # no text layer -- scanned PDF
         ), unittest.mock.patch(
             "backend.services.chapter_segmentation.load_cached_ocr",
-            return_value={"detected_language": "eng", "pages": ["Just filler prose, no TOC pattern here at all. " * 3]},
+            return_value={"detected_language": "eng", "pages": [_SUBSTANTIAL_FILLER_PAGE]},
         ) as mock_load_cache, unittest.mock.patch(
             # This test exercises the separate needs_ocr/load_cached_ocr path,
             # not the analysis cache -- ocr_cache_dir=ANY above is a truthy
@@ -1274,7 +1287,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, no TOC pattern here at all. " * 3],
+            return_value=[_SUBSTANTIAL_FILLER_PAGE],
         ), unittest.mock.patch(
             "backend.services.chapter_segmentation.load_cached_analysis", return_value=None,
         ), unittest.mock.patch(
@@ -1421,7 +1434,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, nothing chapter-related here at all. " * 5] * 3,
+            return_value=["Just filler prose, nothing chapter-related here at all.\n" * 12] * 3,
         ):
             result = asyncio.run(analyze_run(
                 zotero_client=zotero_client,
@@ -1451,7 +1464,7 @@ class TestRun(unittest.TestCase):
 
         with unittest.mock.patch(
             "backend.services.chapter_segmentation.extract_page_texts_from_pdf_bytes",
-            return_value=["Just filler prose, nothing chapter-related here at all. " * 5] * 3,
+            return_value=["Just filler prose, nothing chapter-related here at all.\n" * 12] * 3,
         ):
             result = asyncio.run(analyze_run(
                 zotero_client=zotero_client,

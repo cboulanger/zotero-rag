@@ -1512,17 +1512,15 @@ async def run(
             if not file_bytes:
                 continue
 
-            pages = extract_page_texts_from_pdf_bytes(file_bytes)
-            has_text_layer = sum(len(p.strip()) for p in pages) > 100
+            pages, layout_mode_used = extract_page_texts_for_analysis(file_bytes)
 
-            if not has_text_layer and ocr_cache_dir is not None:
+            if pages_need_ocr(pages) and ocr_cache_dir is not None:
                 content_hash = hashlib.sha256(file_bytes).hexdigest()
                 cached = load_cached_ocr(ocr_cache_dir, content_hash)
                 if cached is not None:
                     pages = cached["pages"]
-                    has_text_layer = sum(len(p.strip()) for p in pages) > 100
 
-            if not has_text_layer:
+            if pages_need_ocr(pages):
                 attachments_out.append({
                     "item_key": item_key,
                     "attachment_key": attachment_key,
@@ -1541,6 +1539,7 @@ async def run(
                 "attachment_key": attachment_key,
                 "has_text_layer": True,
                 "needs_ocr": False,
+                "layout_mode_used": layout_mode_used,
                 **analysis,
             }
             if ocr_cache_dir is not None:
