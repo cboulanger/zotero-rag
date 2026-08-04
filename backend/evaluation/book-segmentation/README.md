@@ -59,10 +59,33 @@ uv run pytest backend/tests/test_chapter_segmentation_accuracy.py -q -s
 `-s` is required to see the per-book summary lines (`pytest` swallows `print`
 output by default). A book is silently skipped, not failed, if its PDF isn't
 present locally yet — run `uv run python scripts/fetch_evaluation_pdfs.py`
-first for the open-access ones, or acquire non-OA books manually (see above).
+first for the open-access ones, or acquire non-OA books manually (see above)
+— or if it needs OCR and the evaluation OCR cache hasn't been populated yet
+(see below).
+
+Pages are loaded via `backend/evaluation/harness.py`'s `analysis_pages_for`,
+the same way production's `chapter_segmentation.run()` loads them: default
+pypdf extraction, falling back to pypdf's `layout` extraction mode when the
+default mode finds no table of contents (recovers books whose two-column
+TOC the default mode scrambles), and finally the evaluation OCR cache
+(`backend/evaluation/book-segmentation/.ocr-cache/`, gitignored,
+content-hash keyed) for books whose text layer is absent or degenerate. A
+book that needs OCR and has no cache entry yet prints `SKIPPED (needs OCR
+...)` and is excluded from that run rather than scored 0.00 -- populate the
+cache first with:
+
+```bash
+uv run python scripts/ocr_evaluation_pdfs.py
+```
+
+This requires the Kreuzberg sidecar container running (see root `CLAUDE.md`'s
+Live Server section). It OCRs every evaluation book whose text layer needs
+it and caches the result by content hash, so a first run over several full
+scanned books can take 1-3 hours but every later run (unchanged PDFs) is
+near-instant, cache-hit-only.
 
 For each book, the test runs `chapter_segmentation.analyze_attachment` over
-the real extracted page text and compares the resulting chapter ranges
+the loaded page text and compares the resulting chapter ranges
 against `<name>.expected.json`:
 
 - **Precision** = correctly-found ranges ÷ all ranges the algorithm returned
@@ -141,7 +164,12 @@ this table as a snapshot to compare future runs against, not a guarantee):
 | Jahrbuch für Rechtssoziologie und Rechtstheorie IV (`9783322969828.pdf`) | de | scan | 0.96 | 0.92 | 22/23 found, 22/24 expected |
 
 Aggregate (micro): **precision 0.91, recall 0.91** across 107 expected
-chapters. The heuristic pipeline's main mechanisms, in the order they run
+chapters. These 7 books' numbers are unaffected by the layout-mode
+extraction fallback and evaluation OCR cache described in "Diverse
+real-library evaluation set" below -- their default-mode pypdf extraction
+already finds a usable TOC, so neither addition ever fires for them.
+
+The heuristic pipeline's main mechanisms, in the order they run
 (see `chapter_segmentation.py` for the full details on each):
 
 - `find_toc_candidates` counts only lines that survive the content filters
@@ -337,6 +365,156 @@ Known remaining gaps, not yet fixed:
 endpoint should not be pointed at the strategy pipeline for production use
 until the remaining gaps above are closed** -- re-run this evaluation after
 any further change to the outline/Crossref/fusion logic.
+
+### Diverse real-library evaluation set
+
+The 7-book set above is small and, per the design spec's `## 1. Goal`
+motivation, skews toward well-produced academic books with a parseable
+embedded TOC page -- exactly the case the pure-heuristic pipeline already
+handles well (6 of 7 have `embedded_toc: true`; the 7th, a scan, still has a
+regex-detectable printed TOC). It does not exercise the case the
+outline/Crossref/Zotero-catalog strategies were actually built for: books
+from real, diverse personal libraries with no embedded TOC bookmark, no
+Crossref/DOI record, and (for most) no *regex-detectable* printed TOC in
+the raw extracted text -- though, as the investigation below found, several
+of them do have a real printed TOC that only needed a different extraction
+approach to become detectable.
+
+`manifest.local.json` (gitignored, per `CLAUDE.md`'s "no DOI" rule below)
+adds 10 more books sourced directly from a real personal Zotero library,
+selected for the opposite profile of the 7 above: `embedded_toc: false`,
+spanning 1967-2020, native and scanned, German and English, none open
+access, and none with a Crossref-registered DOI at all (checked directly
+against the API, book- or chapter-level):
+
+| Filename | Title | Year | Extraction | Precision | Recall | Found/Expected | Recovery route |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `9783848736829.pdf` | Politik und Recht | 2017 | native | 1.00 | 1.00 | 23/23, 23/23 | layout-mode fallback |
+| `9783492021234.pdf` | Empirische Rechtssoziologie | 1975 | native | 0.27 | 0.29 | 4/15, 4/14 | layout-mode fallback |
+| `9783789016202.pdf` | Rechtsproduktion und Rechtsbewußtsein | 1988 | native | 0.46 | 0.50 | 6/13, 6/12 | layout-mode fallback |
+| `9783899718188.pdf` | Systemtheorie in den Fachwissenschaften | 2011 | native | 0.27 | 0.30 | 3/11, 3/10 | layout-mode fallback |
+| `9780367439712.pdf` | Luhmann and Socio-Legal Research | 2020 | native | 0.36 | 0.42 | 5/14, 5/12 | OCR (degenerate text layer) |
+| `9783789057366.pdf` | Soziologie des Rechts (Festschrift für Erhard Blankenburg) | 1999 | native | 0.00 | 0.00 | 0/2, 0/56 | OCR (degenerate text layer) -- still 0 |
+| `9783465016878.pdf` | Historische Soziologie der Rechtswissenschaft | 1986 | scan | 0.40 | 0.15 | 2/5, 2/13 | OCR (no text layer) |
+| `9781409403906.pdf` | Central and Eastern Europe After Transition | 2010 | scan | 0.10 | 0.08 | 1/10, 1/12 | OCR (no text layer) |
+| `9783848704316.pdf` | Constitutional Jurisprudence | 2016 | scan | 0.00 | 0.00 | 0/0, 0/15 | OCR (no text layer) -- still 0 |
+| `dnb-36942798X.pdf` | Studien und Materialien zur Rechtssoziologie | 1967 | scan | 0.00 | 0.00 | 0/1, 0/18 | OCR (no text layer) -- still 0 |
+
+Aggregate (micro, these 10 books alone): **precision 0.47, recall 0.24**
+(44/94 found correctly, 44/185 expected chapters). These are the same
+numbers whether run through the pure heuristic (`analyze_attachment`,
+`test_chapter_segmentation_accuracy.py`) or the full strategy pipeline
+(`analyze_attachment_with_strategies`, `strategies_used: []` on all 10) --
+none of the 10 has a Crossref record or a usable PDF outline, so the
+strategy pipeline always falls straight back to the same heuristic result
+on this set; the strategies genuinely add nothing here, for better or
+worse.
+
+This is a large change from an earlier, incorrect reading of this same
+sample: all 10 books used to be reported as scoring 0.00/0.00 with
+`toc_matches_found: 0`, taken as evidence that "none of the three
+currently-implemented strategies have any signal to work with on this
+sample at all." That conclusion was wrong -- it measured a text-extraction
+artifact, not an absence of signal:
+
+- **6 of the 10 books have a real, intact printed table of contents.**
+  pypdf's *default* text-extraction mode destroys a two-column TOC layout
+  (page numbers land on their own line, separated from titles, or glue onto
+  the next title: `'7Vorwort'`, `'123III. Recht zwischen den
+  Professionen'`), so `find_toc_candidates`'s `<title> ... <page number>`
+  regex never matches a single physical line and reports zero candidates.
+  `extract_page_texts_for_analysis` (`chapter_segmentation.py`) now retries
+  with pypdf's `layout` extraction mode -- which preserves column
+  alignment -- whenever default-mode extraction finds no TOC, and adopts
+  the layout-mode pages only if THAT finds one. This is a pure fallback:
+  none of the original 7 committed books' scores changed, since their
+  default-mode extraction already found a TOC and the layout attempt never
+  fires for them. Four of the ten books recovered this way -- one to a
+  perfect 1.00/1.00, the other three to partial (0.29-0.50) scores limited
+  by ordinary heuristic imprecision (messy TOC layouts: inline author
+  names, a left-column page-number convention), not a missing signal.
+- **2 of the 10 books have a *degenerate* text layer**
+  (`9783789057366.pdf`, `9780367439712.pdf`): every page extracts as one
+  giant line with essentially no newlines, in *both* default and
+  layout-mode pypdf extraction (pypdf itself warns "Rotated text
+  discovered" while reading them) -- no line-oriented heuristic can work on
+  that shape of text regardless of extraction mode. `pages_need_ocr`
+  (`chapter_segmentation.py`) now detects this case (alongside an
+  absent/near-absent text layer) and routes both books through OCR instead
+  -- the same per-page Kreuzberg OCR path production uses for scans
+  (`chapter_ocr.ocr_pdf_pages`), cached by content hash in the gitignored
+  `backend/evaluation/book-segmentation/.ocr-cache/` and populated by
+  `uv run python scripts/ocr_evaluation_pdfs.py` (run once; re-runs are
+  instant cache hits). OCR recovers usable line structure for one of the
+  two (`9780367439712.pdf`, 0.00 -> 0.42); the other
+  (`9783789057366.pdf`) still scores 0.00 -- see "still 0" below.
+- **The 4 true scans** (`9783465016878.pdf`, `9781409403906.pdf`,
+  `9783848704316.pdf`, `dnb-36942798X.pdf`) had no text layer at all and
+  were never exercised by any evaluation script before this change (the
+  pytest harness and both `scripts/evaluate_chapter_segmentation_*.py`
+  scripts fed raw pypdf text straight into analysis, with no OCR step --
+  unlike production's `run()`, which already had one). They now go through
+  the same OCR-cache route as the two degenerate-text books above. 2 of the
+  4 recover partial signal (0.08-0.15); 2 remain at 0.00 -- see below.
+
+**The 3 books still at 0.00 recall after OCR, with actual root causes**
+(traced by hand -- inspecting the cached OCR text and `find_toc_candidates`'
+raw output directly, not guessed):
+
+- `9783789057366.pdf`: OCR *does* locate the real front-matter TOC page
+  (`find_toc_candidates` finds it), but Tesseract's OCR of the dot-leader
+  lines is badly garbled on this particular scan -- a line that should read
+  something like `"Zueignung .......... 6"` instead OCRs as
+  `"ZUEISNUNG .n...onannnnnennenenennsnnennnnmn nen nn nenn nennen rennen"`.
+  The dot-leader run of characters is essentially noise, and several
+  titles are corrupted too, so almost no entry survives cleanly enough for
+  the content-search localization step to find its real opening page. This
+  is an OCR-quality problem on a specific page layout convention (dense
+  dot leaders), not a missing-TOC problem.
+- `dnb-36942798X.pdf`: `find_toc_candidates` finds 6 "candidates," but they
+  are OCR'd bibliography/citation-index lines from the back of the book
+  (`"Law, Criminology, and Police Science ... 55"`,
+  `"... American Journal of Sociology ... 70"`) -- journal citations that
+  structurally resemble a TOC line ("title ... number") but aren't one.
+  The book's real front-matter TOC apparently didn't survive OCR at a high
+  enough line-density to win the "first qualifying cluster" contest against
+  this back-matter citation list. This is the same "secondary listing wins
+  over the real TOC" failure mode already documented for
+  `9783322969828.pdf` in "Known remaining misses" above, here triggered by
+  OCR degrading the real TOC's density rather than a structural ambiguity.
+- `9783848704316.pdf`: `find_toc_candidates` returns **zero** candidates
+  anywhere in the OCR'd text's front/back scan window -- no page has three
+  or more lines matching the TOC-line pattern at all, even after OCR. Not
+  yet root-caused further (worth checking by hand whether this book's
+  printed TOC uses a structurally different convention the regex can't
+  match at all, versus OCR quality issues specific to its front matter).
+
+These three keep `"heuristic_expected_zero": true` in `manifest.local.json`
+(a known, currently-accepted limitation, re-checked and re-justified with
+real evidence rather than the earlier blanket claim); the other seven of
+the ten are now `false` and are held to the same `recall > 0` regression
+guard as the rest of the evaluation set.
+
+Ground truth for these 10 books was built directly from the PDFs via
+multimodal reading (visually locating each chapter's opening/closing page
+and transcribing its table of contents) rather than `CLAUDE.md`'s
+Crossref-page-range shortcut for OA books, since none of the 10 has any
+Crossref record to shortcut from. Because none has a DOI, all 10 entries
+(and their PDFs) live only in the gitignored `manifest.local.json`/`*.pdf`
+-- but the 10 `.expected.json` ground-truth files themselves (titles,
+authors, and page indices only, no copyrighted text) are committed here, so
+anyone who acquires the same PDFs by ISBN (see filenames) can reuse them
+directly without rebuilding ground truth from scratch.
+
+Two other personal-library PDFs were found and rejected as candidates
+before landing on this set of 10: both turned out to be heavily abridged
+excerpts of much larger books (missing whole chapters, or missing
+everything past a certain page, likely a photocopied subset rather than a
+full digitization) rather than complete books -- a real, if narrower,
+failure mode of sourcing evaluation data this way, distinct from either
+`embedded_toc` value and worth checking for (compare the file's actual page
+count against its own printed page numbers near the front and back) before
+investing time in transcribing ground truth for a new candidate.
 
 ### LLM-fallback status
 

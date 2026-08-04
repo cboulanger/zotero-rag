@@ -36,13 +36,43 @@ the regression is tracked instead of silently re-discovered later.
       "embedded_toc": true,
       "oa": false,
       "doi": null,
-      "download_url": null
+      "download_url": null,
+      "heuristic_expected_zero": false
     }
   ]
 }
 ```
 
 Place the PDF itself directly in this directory (`backend/evaluation/book-segmentation/<filename>`) — both `.gitignore` entries (`*.pdf`, `manifest.local.json`) mean neither the file nor its local-only metadata are ever committed.
+
+`"heuristic_expected_zero"` is optional (defaults to `false` when omitted).
+Set it to `true` only when the book scores exactly zero recall even after
+every available recovery path has been tried and confirmed not to help:
+default extraction, the pypdf layout-mode extraction fallback (recovers a
+real printed TOC that default-mode extraction scrambled), and — for a book
+whose text layer is absent or degenerate (`pages_need_ocr`) — the
+evaluation OCR cache (`uv run python scripts/ocr_evaluation_pdfs.py`,
+requires the Kreuzberg sidecar; see `README.md`'s "Running an evaluation").
+`backend/evaluation/harness.py`'s `analysis_pages_for` is what the test
+harness actually uses to load pages, so it's what a book must fail through
+before the flag is justified. Do not set it just because
+`find_toc_candidates` returns empty on raw default-mode extraction — that
+used to be treated as "no signal at all," but turned out in practice to
+often just mean the TOC needed layout-mode extraction or OCR to become
+visible (see "Diverse real-library evaluation set" in `README.md` for the
+worked example: 7 of 10 books once flagged this way turned out to have real,
+recoverable signal once the right extraction path was tried; only 3 remain
+genuinely at zero, each with a specific, traced root cause documented
+there — an OCR-quality issue, a back-matter false-positive cluster winning
+over a degraded real TOC, and a book with no TOC-line-density anywhere in
+the OCR'd text). `test_chapter_segmentation_accuracy.py` otherwise
+hard-fails any book that scores exactly zero recall, on the assumption
+that's always a code regression — true for the curated, DOI-backed set, and
+now also true for most of the local, no-DOI set. Leave the flag
+`false`/omitted for every other book, including ones the heuristic merely
+scores *low* on (only an unconditional zero is special-cased), and re-check
+it (don't just trust an old value) whenever the extraction/OCR pipeline
+changes or a new evaluation book is added.
 
 ## Step 1: Transcribe the table of contents
 
