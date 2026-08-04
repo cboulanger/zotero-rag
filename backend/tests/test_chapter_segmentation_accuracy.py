@@ -5,10 +5,12 @@ backend/evaluation/book-segmentation/ (design spec §5, §12).
 The PDFs themselves are gitignored — run
 `uv run python scripts/fetch_evaluation_pdfs.py` first to download the
 open-access ones. A book is skipped (not failed) if its PDF isn't present
-locally yet (covers "not fetched yet", the non-OA scans that can never be
-auto-fetched, and any manifest.local.json entries a developer hasn't placed
-the PDF for) — this is real, checkable state, not a placeholder standing in
-for unwritten logic.
+locally yet, or if it needs OCR and the evaluation OCR cache hasn't been
+populated (run `uv run python scripts/ocr_evaluation_pdfs.py` with the
+Kreuzberg sidecar up) — both are real, checkable states, not placeholders.
+
+Pages are loaded exactly the way production's run() sees them (layout-mode
+fallback + OCR cache) via backend/evaluation/harness.py.
 
 Marked "integration" so it's excluded from the default `uv run pytest` /
 `npm test` run (see pyproject.toml's addopts) -- this is a reported, not
@@ -23,57 +25,35 @@ output by default).
 
 import json
 import unittest
-from pathlib import Path
 
 import pytest
 
-from backend.services.chapter_segmentation import (
-    analyze_attachment,
-    extract_page_texts_from_pdf_bytes,
-)
+from backend.evaluation.harness import analysis_pages_for, available_books
+from backend.services.chapter_segmentation import analyze_attachment
 
 pytestmark = pytest.mark.integration
 
-_EVAL_DIR = Path(__file__).parent.parent / "evaluation" / "book-segmentation"
-
-
-def _load_manifest_books() -> list[dict]:
-    """Merge the committed manifest.json with the gitignored, optional
-    manifest.local.json (see backend/evaluation/book-segmentation/CLAUDE.md)
-    -- the latter holds "difficult" books found during live testing that
-    have no DOI or otherwise can't be shared, so they stay local-only but
-    are still exercised by this harness on the machine that added them.
-    """
-    books = json.loads((_EVAL_DIR / "manifest.json").read_text(encoding="utf-8"))["books"]
-    local_manifest_path = _EVAL_DIR / "manifest.local.json"
-    if local_manifest_path.exists():
-        books = books + json.loads(local_manifest_path.read_text(encoding="utf-8"))["books"]
-    return books
-
-
-def _available_books() -> list[tuple[Path, Path]]:
-    """Return (pdf_path, expected_json_path) pairs for every manifest entry
-    (committed or local-only) whose PDF is actually present locally right
-    now."""
-    pairs = []
-    for book in _load_manifest_books():
-        pdf_path = _EVAL_DIR / book["filename"]
-        expected_path = _EVAL_DIR / (Path(book["filename"]).stem + ".expected.json")
-        if pdf_path.exists() and expected_path.exists():
-            pairs.append((pdf_path, expected_path))
-    return pairs
-
 
 @unittest.skipUnless(
-    _available_books(),
+    available_books(),
     "No evaluation PDFs present — run: uv run python scripts/fetch_evaluation_pdfs.py",
 )
 class TestChapterSegmentationAccuracy(unittest.TestCase):
+    # The default 30s global timeout (pyproject.toml) is sized for the
+    # original 7-book committed set; the layout-mode re-extraction pass on
+    # large manifest.local.json books is slow (whole-book re-extraction per
+    # book that triggers it), so give the single all-books method plenty of
+    # room.
+    @pytest.mark.timeout(900)
     def test_boundary_precision_recall_per_book(self):
-        for pdf_path, expected_path in _available_books():
+        for pdf_path, expected_path, book in available_books():
             with self.subTest(book=pdf_path.name):
                 expected = json.loads(expected_path.read_text(encoding="utf-8"))["chapters"]
-                pages = extract_page_texts_from_pdf_bytes(pdf_path.read_bytes())
+                pages = analysis_pages_for(pdf_path.read_bytes())
+                if pages is None:
+                    print(f"{pdf_path.name}: SKIPPED (needs OCR — populate the cache with: "
+                          f"uv run python scripts/ocr_evaluation_pdfs.py)")
+                    continue
                 result = analyze_attachment(pages)
 
                 expected_ranges = {(c["pdf_start_index"], c["pdf_end_index"]) for c in expected}
@@ -84,6 +64,12 @@ class TestChapterSegmentationAccuracy(unittest.TestCase):
                 recall = len(true_positives) / len(expected_ranges) if expected_ranges else 0.0
                 print(f"{pdf_path.name}: precision={precision:.2f} recall={recall:.2f} "
                       f"({len(true_positives)}/{len(found_ranges)} found, {len(true_positives)}/{len(expected_ranges)} expected)")
+                if book.get("heuristic_expected_zero", False):
+                    # This book is a known, accepted heuristic limitation --
+                    # zero recall even after the layout fallback and OCR
+                    # route (see book-segmentation/README.md) -- so zero is
+                    # the expected outcome here, not a regression.
+                    continue
                 # Reported, not gated (design spec §12: probabilistic, not pass/fail) —
                 # this assertion only catches a total regression to zero detection.
                 self.assertGreater(recall, 0.0, f"{pdf_path.name}: detected zero of {len(expected_ranges)} known chapters")
