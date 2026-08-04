@@ -32,6 +32,11 @@ class TestAnalysisPagesFor(unittest.TestCase):
              patch("backend.evaluation.harness.load_cached_ocr", return_value=None):
             self.assertIsNone(analysis_pages_for(b"%PDF-fake"))
 
+    def test_returns_none_when_cached_ocr_pages_are_still_degenerate(self):
+        with patch("backend.evaluation.harness.extract_page_texts_for_analysis", return_value=([""] * 300, False)), \
+             patch("backend.evaluation.harness.load_cached_ocr", return_value={"detected_language": "deu", "pages": [""] * 300}):
+            self.assertIsNone(analysis_pages_for(b"%PDF-fake"))
+
 
 if __name__ == "__main__":
     unittest.main()

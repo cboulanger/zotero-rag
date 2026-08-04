@@ -56,12 +56,12 @@ def available_books() -> list[tuple[Path, Path, dict]]:
 def analysis_pages_for(file_bytes: bytes) -> Optional[list[str]]:
     """Page texts for this PDF the same way production run() would see
     them, or None when the book needs OCR and the eval OCR cache has no
-    entry yet (run scripts/ocr_evaluation_pdfs.py to populate it)."""
+    usable entry yet (run scripts/ocr_evaluation_pdfs.py to populate it)."""
     pages, _layout_used = extract_page_texts_for_analysis(file_bytes)
     if not pages_need_ocr(pages):
         return pages
     content_hash = hashlib.sha256(file_bytes).hexdigest()
     cached = load_cached_ocr(OCR_CACHE_DIR, content_hash)
-    if cached is not None:
+    if cached is not None and not pages_need_ocr(cached["pages"]):
         return cached["pages"]
     return None
