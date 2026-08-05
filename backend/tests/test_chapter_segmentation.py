@@ -226,6 +226,36 @@ class TestFindTocCandidates(unittest.TestCase):
         self.assertEqual([e.source_page_index for e in entries], [3, 3, 3])
         self.assertIn("Comparing Citation Styles", [e.title for e in entries])
 
+    def test_imprint_page_of_copyright_lines_does_not_shadow_real_toc(self):
+        # A copyright/imprint page whose lines are plain boilerplate ("©
+        # 1978 Publisher, City", "Gedruckt 1978 bei ...", "ISBN ...") isn't
+        # a URL/DOI, so _looks_like_url_or_doi doesn't catch it -- but each
+        # line still ends in a trailing number (a street/city code, a
+        # printing detail, an ISBN check digit) and so matches the TOC-line
+        # pattern just as easily as the DOI-block case above (found
+        # empirically: a 1978 German Festschrift's copyright page -- three
+        # such lines -- shadowed its real table of contents three pages
+        # later, since _TOC_MIN_LINES_PER_PAGE is 3). The gap to the real
+        # TOC below is kept > _TOC_PAGE_CLUSTER_GAP (2) so the two pages
+        # form separate clusters rather than merging into one -- otherwise
+        # this reproduces a different (milder) bug than the one observed.
+        pages = [
+            "Fancy Book Title Page",
+            "© 1978 Some Publisher, Berlin 41\n"
+            "Gedruckt 1978 bei Some Printing House, Berlin 61\n"
+            "ISBN 3 428 04224 1\n",
+            "Some other front matter.",
+            "Some more front matter, still no TOC pattern here at all.",
+            "Yet more front matter before the real listing begins.",
+            "CONTENTS\n"
+            "Introduction to Reference Management ..... 12\n"
+            "Comparing Citation Styles ..... 45\n"
+            "Zotero in Practice ..... 89\n",
+        ] + self._FILLER_PAGES
+        entries = find_toc_candidates(pages)
+        self.assertEqual([e.source_page_index for e in entries], [5, 5, 5])
+        self.assertIn("Comparing Citation Styles", [e.title for e in entries])
+
     def test_wrapped_title_builds_variants_from_preceding_lines(self):
         # A long title wrapped over several lines carries its page number on
         # the LAST line only -- the preceding lines are offered as

@@ -187,6 +187,30 @@ def _looks_like_url_or_doi(line: str) -> bool:
     return "doi.org" in lowered or "http://" in lowered or "https://" in lowered or "www." in lowered
 
 
+# Copyright/imprint boilerplate that ends in a trailing number (a street/
+# city code, a printing detail, an ISBN check digit) -- matches the
+# TOC-line pattern just as easily as a URL/DOI line, but isn't caught by
+# _looks_like_url_or_doi. A scanned "©" often OCRs as "@".
+_IMPRINT_LINE_RE = re.compile(
+    r"^\s*[©@]\s*\d{4}\b"
+    r"|^\s*isbn\b"
+    r"|^\s*gedruckt\b"
+    r"|^\s*printed in\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_imprint_line(line: str) -> bool:
+    """A chapter title is never copyright/imprint boilerplate -- these show
+    up on a book's copyright page and can otherwise fuzzy-match the
+    TOC-line pattern closely enough, in aggregate, to outscore the book's
+    real table of contents (found empirically: a 1978 German Festschrift's
+    copyright page -- "© 1978 ...", "Gedruckt 1978 bei ...", "ISBN ..." --
+    formed a 3-line cluster that shadowed the real TOC three pages later).
+    """
+    return bool(_IMPRINT_LINE_RE.search(line))
+
+
 @dataclass(frozen=True)
 class TocEntry:
     title: str
@@ -354,7 +378,7 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
             m = _TOC_LINE_RE.match(line)
             if m is None:
                 continue
-            if _looks_like_url_or_doi(m.group(0)):
+            if _looks_like_url_or_doi(m.group(0)) or _looks_like_imprint_line(m.group(0)):
                 continue
             title = m.group("title").strip(" .")
             page_number = _parse_toc_page_number(m.group("page"))
@@ -370,7 +394,7 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
                 if i == 0 or not re.fullmatch(r"[.\s…·]*\d{1,4}", line):
                     continue
                 prev = lines[i - 1]
-                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or len(prev) > 120:
+                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or _looks_like_imprint_line(prev) or len(prev) > 120:
                     continue
                 title = prev.strip(" .")
                 if len(title) < 3:
@@ -387,7 +411,7 @@ def find_toc_candidates(pages: list[str], max_front_fraction: float = 0.15, max_
             prefix_parts: list[str] = []
             for j in range(i - 1, max(i - 1 - _TOC_MAX_CONTINUATION_LINES, -1), -1):
                 prev = lines[j]
-                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or len(prev) > 120:
+                if not prev or _TOC_LINE_RE.match(prev) or _looks_like_url_or_doi(prev) or _looks_like_imprint_line(prev) or len(prev) > 120:
                     break
                 if _PART_DIVIDER_RE.match(prev) or _normalized_title(prev) in _BACK_MATTER_TITLES:
                     # A part header ("Part I ...", "Teil 2: ...") or the
