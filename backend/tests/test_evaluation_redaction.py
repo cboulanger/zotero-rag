@@ -6,7 +6,8 @@ suite."""
 
 import unittest
 
-from scripts.evaluation_redaction.region_classification import classify_regions
+from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
+from scripts.evaluation_redaction.redact import build_preserve_mask
 
 # Same shape as backend/tests/test_chapter_segmentation.py's
 # TestAnalyzeAttachment._fake_book_pages() -- a proven-working minimal book
@@ -77,6 +78,38 @@ class TestClassifyRegionsHeadingWindows(unittest.TestCase):
             start, end = regions.heading_windows[index]
             production_head = _strip_running_headers(_FAKE_BOOK_PAGES[index], header_lines)[:200]
             self.assertEqual(_FAKE_BOOK_PAGES[index][start:end], production_head)
+
+
+class TestBuildPreserveMask(unittest.TestCase):
+    def test_full_page_is_entirely_preserved(self):
+        regions = RegionMap(full_pages=frozenset({0}), header_lines=frozenset(), heading_windows={})
+        text = "Contents\nIntroduction ..... 1\n"
+        mask = build_preserve_mask(text, 0, regions)
+        self.assertTrue(all(mask))
+
+    def test_heading_window_is_preserved_rest_is_not(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={1: (0, 12)})
+        text = "Introduction\n\nBody prose continues here well past the window."
+        mask = build_preserve_mask(text, 1, regions)
+        self.assertTrue(all(mask[:12]))
+        self.assertFalse(any(mask[12:]))
+
+    def test_running_header_line_preserved_wherever_it_recurs(self):
+        regions = RegionMap(
+            full_pages=frozenset(), heading_windows={},
+            header_lines=frozenset({"my book title"}),
+        )
+        text = "Body text first.\nMy Book Title\nMore body text after.\n"
+        mask = build_preserve_mask(text, 2, regions)
+        header_start = text.index("My Book Title")
+        header_end = header_start + len("My Book Title\n")
+        self.assertTrue(all(mask[header_start:header_end]))
+        self.assertFalse(mask[0])
+
+    def test_ordinary_body_page_with_no_regions_is_entirely_unpreserved(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        mask = build_preserve_mask("Just ordinary body prose.\n", 5, regions)
+        self.assertFalse(any(mask))
 
 
 if __name__ == "__main__":
