@@ -8,6 +8,7 @@ import unittest
 
 from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
 from scripts.evaluation_redaction.redact import build_preserve_mask
+from scripts.evaluation_redaction.wordlists import build_word_pool, locale_for_detected_language, pick_word
 
 # Same shape as backend/tests/test_chapter_segmentation.py's
 # TestAnalyzeAttachment._fake_book_pages() -- a proven-working minimal book
@@ -110,6 +111,43 @@ class TestBuildPreserveMask(unittest.TestCase):
         regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
         mask = build_preserve_mask("Just ordinary body prose.\n", 5, regions)
         self.assertFalse(any(mask))
+
+
+class TestLocaleForDetectedLanguage(unittest.TestCase):
+    def test_maps_known_language_codes(self):
+        self.assertEqual(locale_for_detected_language("deu"), "de_DE")
+        self.assertEqual(locale_for_detected_language("fra"), "fr_FR")
+        self.assertEqual(locale_for_detected_language("spa"), "es_ES")
+        self.assertEqual(locale_for_detected_language("eng"), "en_US")
+
+    def test_falls_back_to_english_for_the_combined_default(self):
+        self.assertEqual(locale_for_detected_language("eng+deu+fra+spa"), "en_US")
+
+
+class TestBuildWordPool(unittest.TestCase):
+    def test_pool_has_real_words_bucketed_by_length(self):
+        pool = build_word_pool("deu")
+        self.assertIn(5, pool)
+        for word in pool[5]:
+            self.assertEqual(len(word), 5)
+
+    def test_unknown_language_falls_back_to_english_pool(self):
+        pool = build_word_pool("xyz")
+        self.assertTrue(pool)
+
+
+class TestPickWord(unittest.TestCase):
+    def test_picks_a_word_of_the_exact_length_when_available(self):
+        pool = {4: ["word"], 5: ["words"]}
+        self.assertEqual(len(pick_word(pool, 4, seed=0)), 4)
+
+    def test_falls_back_to_nearest_length_when_no_exact_match(self):
+        pool = {4: ["word"]}
+        self.assertEqual(pick_word(pool, 9, seed=0), "word")
+
+    def test_deterministic_for_the_same_seed(self):
+        pool = {5: ["reala", "realb", "realc"]}
+        self.assertEqual(pick_word(pool, 5, seed=7), pick_word(pool, 5, seed=7))
 
 
 if __name__ == "__main__":
