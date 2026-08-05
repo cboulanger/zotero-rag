@@ -67,7 +67,7 @@ class TestChapterSegmentationAccuracy(unittest.TestCase):
                 if book.get("heuristic_expected_zero", False):
                     # This book is a known, accepted heuristic limitation --
                     # zero recall even after the layout fallback and OCR
-                    # route (see book-segmentation/README.md) -- so zero is
+                    # route (see book-segmentation/RESULTS.md) -- so zero is
                     # the expected outcome here, not a regression.
                     continue
                 # Reported, not gated (design spec §12: probabilistic, not pass/fail) —

@@ -237,7 +237,7 @@ class SegmentUploadRequest(BaseModel):
     analyses: list[dict]
     committed: bool = False
     # Calibrated against the real 7-book evaluation set (backend/evaluation/
-    # book-segmentation/README.md "Current results"): with the current
+    # book-segmentation/RESULTS.md "Pure-heuristic results"): with the current
     # heuristics ~91% of ALL proposed chapters are already exactly correct,
     # and the sweep shows precision-among-kept barely moves with the
     # threshold (0.91 at 0.5 -> 0.93 at 0.96) while recall of correct

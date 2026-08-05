@@ -237,7 +237,7 @@ def extract_page_texts_from_pdf_bytes(content: bytes, layout: bool = False) -> l
 
 
 # Calibrated against the 17-book evaluation set (see backend/evaluation/
-# book-segmentation/README.md): healthy books have >=90% "longish" pages
+# book-segmentation/RESULTS.md): healthy books have >=90% "longish" pages
 # (>500 stripped chars) and 0% of them degenerate (<3 newlines); un-OCR'd
 # scans have ~0% longish pages; the two known degenerate-text-layer books
 # (whole page extracted as one absolutely-positioned line) sit at 97-99%
@@ -275,7 +275,7 @@ def extract_page_texts_for_analysis(content: bytes) -> tuple[list[str], bool]:
     When it doesn't, the pages are re-extracted in layout mode and adopted
     if a TOC becomes detectable that way -- verified on real evaluation
     books whose two-column TOC the default mode scrambles beyond
-    recognition (see backend/evaluation/book-segmentation/README.md).
+    recognition (see backend/evaluation/book-segmentation/RESULTS.md).
     OCR-shaped input (see pages_need_ocr) skips the layout attempt: a book
     with no usable text layer cannot be rescued by a different text
     extraction mode, only by actual OCR.

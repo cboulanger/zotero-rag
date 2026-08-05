@@ -5,6 +5,39 @@ score a real book with low confidence during live/empirical testing against a
 real Zotero library, and you want to add that book to the evaluation set so
 the regression is tracked instead of silently re-discovered later.
 
+## Document organization in this directory
+
+Three documents, three different lifetimes -- know which one to write to:
+
+- **`README.md`** — permanent reference: what the evaluation set is, its
+  schema, how to fetch/add books, and how to run each evaluation
+  (`test_chapter_segmentation_accuracy.py`, the LLM-fallback script, the
+  strategy-pipeline script). Changes rarely, only when the *procedure*
+  itself changes (a new evaluation script, a new page-loading mechanism,
+  a new manifest field).
+- **`RESULTS.md`** — a snapshot: current precision/recall numbers, per-book
+  `strategies_used`/recovery-route diagnostics, known remaining gaps, and
+  root-cause investigation findings from the last time each evaluation was
+  actually run. Expected to go stale and be regenerated or rewritten
+  whenever the heuristics, strategy pipeline, extraction/OCR path, or
+  evaluation set change. **When you re-run an evaluation and get new
+  numbers, update `RESULTS.md`, not `README.md`** -- even if the new
+  numbers reveal something surprising enough to want a narrative
+  explanation (see `RESULTS.md`'s "Diverse real-library evaluation set"
+  section for a worked example of a fairly involved investigation writeup
+  that still belongs there, not in `README.md`, because it's tied to a
+  specific measured snapshot that will itself go stale).
+- **`CLAUDE.md`** (this file) — permanent workflow reference for adding a
+  new evaluation book by hand (ground-truth transcription, the helper
+  script, verification steps, known failure modes in that *process*, not
+  in the heuristics' results).
+
+If you're unsure which document a change belongs in, ask: would this
+sentence still be true after the next code change to the heuristics, even
+if no evaluation book changed? If yes, `README.md` or `CLAUDE.md`
+(depending on whether it's "what/how" vs. "how to add a book"). If no --
+it's describing a specific run's outcome -- `RESULTS.md`.
+
 ## Step 0: Decide where the book's metadata goes
 
 - **Has a DOI?** → Add it to the committed `manifest.json`, even if the book

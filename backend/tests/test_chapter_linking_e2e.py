@@ -75,7 +75,7 @@ _kind, NUMERIC_ID = LIBRARY_SLUG.split("/", 1)
 LIBRARY_TYPE = "user" if _kind == "users" else "group"
 
 # Small, native-text, English fixture with 1.00 precision/recall in the
-# evaluation set (see backend/evaluation/book-segmentation/README.md) --
+# evaluation set (see backend/evaluation/book-segmentation/RESULTS.md) --
 # open access, so it's safe to upload to the test group.
 _NATIVE_PDF = _EVAL_DIR / "9781771993661.pdf"
 
@@ -215,7 +215,7 @@ def test_analyze_and_upload_chapters(zot, cleanup, tmp_path):
     assert entry["needs_ocr"] is False
     assert len(entry["chapters"]) > 0
     # This fixture is the evaluation set's highest-scoring native-text book
-    # (1.00 precision/recall, see backend/evaluation/book-segmentation/README.md).
+    # (1.00 precision/recall, see backend/evaluation/book-segmentation/RESULTS.md).
     assert any(c["confidence"] >= 0.90 for c in entry["chapters"])
 
     target_collection = _unique("Book Chapters")
