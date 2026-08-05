@@ -43,5 +43,41 @@ class TestClassifyRegionsFullPages(unittest.TestCase):
         self.assertEqual(regions.header_lines, frozenset())
 
 
+class TestClassifyRegionsHeadingWindows(unittest.TestCase):
+    def test_chapter_start_pages_get_a_heading_window(self):
+        regions = classify_regions(_FAKE_BOOK_PAGES)
+        self.assertIn(1, regions.heading_windows)
+        self.assertIn(3, regions.heading_windows)
+
+    def test_heading_window_covers_the_chapter_title(self):
+        regions = classify_regions(_FAKE_BOOK_PAGES)
+        start, end = regions.heading_windows[1]
+        self.assertIn("Introduction", _FAKE_BOOK_PAGES[1][start:end])
+
+    def test_continuation_pages_get_no_heading_window(self):
+        regions = classify_regions(_FAKE_BOOK_PAGES)
+        self.assertNotIn(2, regions.heading_windows)
+        self.assertNotIn(4, regions.heading_windows)
+
+    def test_toc_page_gets_no_heading_window(self):
+        regions = classify_regions(_FAKE_BOOK_PAGES)
+        self.assertNotIn(0, regions.heading_windows)
+
+    def test_heading_window_matches_what_locate_chapter_start_actually_scores(self):
+        # Consistency guard for the literal 200-char window mirrored from
+        # chapter_segmentation.locate_chapter_start_candidates -- if that
+        # literal ever changes, this test catches the drift.
+        from backend.services.chapter_segmentation import (
+            _running_header_lines,
+            _strip_running_headers,
+        )
+        regions = classify_regions(_FAKE_BOOK_PAGES)
+        header_lines = _running_header_lines(tuple(_FAKE_BOOK_PAGES))
+        for index in (1, 3):
+            start, end = regions.heading_windows[index]
+            production_head = _strip_running_headers(_FAKE_BOOK_PAGES[index], header_lines)[:200]
+            self.assertEqual(_FAKE_BOOK_PAGES[index][start:end], production_head)
+
+
 if __name__ == "__main__":
     unittest.main()
