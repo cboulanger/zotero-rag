@@ -27,6 +27,7 @@ from backend.services.chapter_segmentation import (
 
 EVAL_DIR = Path(__file__).resolve().parent / "book-segmentation"
 OCR_CACHE_DIR = EVAL_DIR / ".ocr-cache"
+PUBLIC_CACHE_DIR = EVAL_DIR / "public-cache"
 
 
 def load_manifest_books() -> list[dict]:
@@ -51,6 +52,28 @@ def available_books() -> list[tuple[Path, Path, dict]]:
         if pdf_path.exists() and expected_path.exists():
             triples.append((pdf_path, expected_path, book))
     return triples
+
+
+def available_public_books() -> list[tuple[str, Path, dict]]:
+    """(manifest_key, expected_json_path, manifest_entry) for every manifest
+    book with a public-cache entry -- no PDF or .ocr-cache required."""
+    triples = []
+    for book in load_manifest_books():
+        manifest_key = Path(book["filename"]).stem
+        expected_path = EVAL_DIR / f"{manifest_key}.expected.json"
+        cache_path = PUBLIC_CACHE_DIR / f"{manifest_key}.pages.json"
+        if cache_path.exists() and expected_path.exists():
+            triples.append((manifest_key, expected_path, book))
+    return triples
+
+
+def public_pages_for(manifest_key: str) -> Optional[list[str]]:
+    """Redacted pages for one book from the committed public-cache, or None
+    if no entry exists yet for this key."""
+    cache_path = PUBLIC_CACHE_DIR / f"{manifest_key}.pages.json"
+    if not cache_path.exists():
+        return None
+    return json.loads(cache_path.read_text(encoding="utf-8"))["pages"]
 
 
 def analysis_pages_for(file_bytes: bytes) -> Optional[list[str]]:
