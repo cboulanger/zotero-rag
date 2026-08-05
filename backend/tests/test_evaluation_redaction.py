@@ -7,7 +7,7 @@ suite."""
 import unittest
 
 from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
-from scripts.evaluation_redaction.redact import build_preserve_mask, redact_page
+from scripts.evaluation_redaction.redact import build_preserve_mask, redact_page, redact_book
 from scripts.evaluation_redaction.wordlists import build_word_pool, locale_for_detected_language, pick_word
 
 # Same shape as backend/tests/test_chapter_segmentation.py's
@@ -189,6 +189,23 @@ class TestRedactPage(unittest.TestCase):
         regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
         out = redact_page("xiv", 1, regions, self._POOL, book_salt="book1")
         self.assertEqual(out, "xiv")
+
+
+class TestRedactBook(unittest.TestCase):
+    def test_toc_page_survives_verbatim_chapter_prose_does_not(self):
+        redacted = redact_book(_FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999")
+        self.assertEqual(redacted[0], _FAKE_BOOK_PAGES[0])
+        self.assertNotEqual(redacted[2], _FAKE_BOOK_PAGES[2])
+        self.assertTrue(redacted[2].endswith("\n\n2"))
+
+    def test_boundary_detection_is_unchanged_by_redaction(self):
+        from backend.services.chapter_segmentation import analyze_attachment
+        redacted = redact_book(_FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999")
+        real_result = analyze_attachment(_FAKE_BOOK_PAGES)
+        redacted_result = analyze_attachment(redacted)
+        real_boundaries = {(c["pdf_start_index"], c["pdf_end_index"]) for c in real_result["chapters"]}
+        redacted_boundaries = {(c["pdf_start_index"], c["pdf_end_index"]) for c in redacted_result["chapters"]}
+        self.assertEqual(real_boundaries, redacted_boundaries)
 
 
 if __name__ == "__main__":

@@ -7,8 +7,8 @@ import hashlib
 import re
 
 from backend.services.chapter_segmentation import _normalize_header_line, _PAGE_NUMBER_TOKEN_RE
-from scripts.evaluation_redaction.region_classification import RegionMap
-from scripts.evaluation_redaction.wordlists import pick_word
+from scripts.evaluation_redaction.region_classification import RegionMap, classify_regions
+from scripts.evaluation_redaction.wordlists import pick_word, build_word_pool
 
 _TOKEN_RE = re.compile(r"(?P<word>\w+)|(?P<other>\W+)", re.UNICODE)
 
@@ -69,3 +69,11 @@ def redact_page(text: str, page_index: int, regions: RegionMap, pool: dict[int, 
         )
         out.append(_match_case(pick_word(pool, len(token), seed), token))
     return "".join(out)
+
+
+def redact_book(pages: list[str], detected_language: str, book_salt: str) -> list[str]:
+    """Full per-book redaction pipeline: classify regions once, build the
+    language's word pool once, then redact every page."""
+    regions = classify_regions(pages)
+    pool = build_word_pool(detected_language)
+    return [redact_page(text, index, regions, pool, book_salt) for index, text in enumerate(pages)]
