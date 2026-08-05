@@ -31,6 +31,27 @@ Three documents, three different lifetimes -- know which one to write to:
   new evaluation book by hand (ground-truth transcription, the helper
   script, verification steps, known failure modes in that *process*, not
   in the heuristics' results).
+- **`public-cache/`** — a redacted, git-tracked snapshot of each book's
+  page text (real navigational/bibliographic material verbatim, chapter
+  prose replaced with random real words) — see
+  `docs/superpowers/specs/2026-08-05-evaluation-corpus-redaction-design.md`.
+  Regenerate it with `uv run python scripts/generate_public_evaluation_cache.py`
+  whenever `chapter_segmentation.py` or `chapter_common.py` changes in a way
+  that touches text-matching logic (a new heuristic could read page text
+  outside what the redaction pipeline currently preserves) -- the tool's
+  `--verify` step will refuse to write a stale/incorrect entry, so a clean
+  run is the confirmation that a change didn't need any redaction-pipeline
+  updates. One book in the current evaluation set (`9783031466373`) fails
+  `--verify` permanently: its TOC has an "Index" entry, and per this file's
+  "Known failure modes" section short/generic titles like "Index" are
+  already a known bad fuzzy-match target -- in this specific book, the
+  redacted text on the page before "Index" happens to coincidentally
+  fuzzy-match the word "index" itself just enough to shift where
+  `locate_chapter_start` places it by one page (see spec section 10.3,
+  which anticipated exactly this risk category). No `public-cache/` entry
+  exists for this book; a human would need to decide how to handle it
+  (e.g. a different redaction strategy for that one book) before it could
+  be included.
 
 If you're unsure which document a change belongs in, ask: would this
 sentence still be true after the next code change to the heuristics, even
