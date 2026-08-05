@@ -61,21 +61,33 @@ it's describing a specific run's outcome -- `RESULTS.md`.
 
 ## Step 0: Decide where the book's metadata goes
 
-- **Has a DOI?** → Add it to the committed `manifest.json`, even if the book
-  is not open access. Set `"oa": false`, `"download_url": null`, and fill in
-  `"doi"`. Other developers can then acquire the PDF themselves via
-  institutional access (see the DOI printed by
-  `scripts/fetch_evaluation_pdfs.py` when the file is missing) and the
+- **Has a DOI, OR already has a `public-cache/` entry?** → Add it to the
+  committed `manifest.json`, even if the book is not open access. Set
+  `"oa": false`, `"download_url": null`, and fill in `"doi"` (`null` if none).
+  Either condition alone is enough: a DOI lets other developers acquire the
+  PDF themselves via institutional access (see the DOI printed by
+  `scripts/fetch_evaluation_pdfs.py` when the file is missing) and use the
   ground-truth JSON — which contains no copyrighted text, just page indices
-  and titles — is shared with the team.
-- **No DOI, or can't be identified/shared at all** (e.g. a personal library
+  and titles — directly; a `public-cache/` entry lets them reproduce the
+  accuracy signal via `test_public_evaluation_cache_parity.py` without the
+  PDF at all. A manifest entry that only exists in the gitignored
+  `manifest.local.json` makes any `public-cache/` entry for that book
+  effectively invisible to everyone else — `load_manifest_books()` only
+  merges `manifest.local.json` in on the machine that has it, so a
+  fresh-clone `available_public_books()` would never find the committed
+  cache file (found empirically: 10 books' worth of already-committed
+  `public-cache/` entries were undiscoverable this way until their manifest
+  entries were moved over).
+- **Neither** (no DOI, no `public-cache/` entry yet, e.g. a personal library
   PDF, an internal document, something you can't confirm the provenance of)
   → add it to `manifest.local.json` instead (create the file if it doesn't
   exist yet; same schema as `manifest.json`, see below). This file is
   gitignored — it never leaves your machine — but the test harness
   (`backend/tests/test_chapter_segmentation_accuracy.py`) reads it exactly
   like the committed manifest, so it still gets exercised in your own local
-  runs.
+  runs. Once `scripts/generate_public_evaluation_cache.py --verify` succeeds
+  for such a book, move its entry to `manifest.json` in the same commit that
+  adds its `public-cache/` file, so the two never drift apart.
 
 `manifest.local.json` schema — identical to `manifest.json`'s `"books"` list:
 

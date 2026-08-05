@@ -79,6 +79,109 @@
       "oa": false,
       "doi": "10.3790/978-3-428-44224-9",
       "download_url": null
+    },
+    {
+      "filename": "9783848736829.pdf",
+      "title": "Politik und Recht: Umrisse eines politikwissenschaftlichen Forschungsfeldes",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9783492021234.pdf",
+      "title": "Empirische Rechtssoziologie",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9783789016202.pdf",
+      "title": "Rechtsproduktion und Rechtsbewußtsein",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9783789057366.pdf",
+      "title": "Soziologie des Rechts. Festschrift für Erhard Blankenburg zum 60. Geburtstag",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null,
+      "heuristic_expected_zero": true
+    },
+    {
+      "filename": "9783899718188.pdf",
+      "title": "Systemtheorie in den Fachwissenschaften: Zugänge, Methoden, Probleme",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9780367439712.pdf",
+      "title": "Luhmann and Socio-Legal Research: An Empirical Agenda for Social Systems Theory",
+      "language": "en",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9783465016878.pdf",
+      "title": "Historische Soziologie der Rechtswissenschaft",
+      "language": "de",
+      "extraction_type": "scan",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9781409403906.pdf",
+      "title": "Central and Eastern Europe After Transition: Towards a New Socio-Legal Semantics",
+      "language": "en",
+      "extraction_type": "scan",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null
+    },
+    {
+      "filename": "9783848704316.pdf",
+      "title": "Constitutional Jurisprudence: Function, Impact, and Challenges of Constitutional Courts",
+      "language": "en",
+      "extraction_type": "scan",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null,
+      "heuristic_expected_zero": true
+    },
+    {
+      "filename": "dnb-36942798X.pdf",
+      "title": "Studien und Materialien zur Rechtssoziologie",
+      "language": "de",
+      "extraction_type": "scan",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": null,
+      "download_url": null,
+      "heuristic_expected_zero": true
     }
   ]
 }
