@@ -8,7 +8,13 @@ import unittest
 
 from backend.services.chapter_segmentation import _LISTING_PAGE_BODY_WINDOW
 from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
-from scripts.evaluation_redaction.redact import build_preserve_mask, redact_page, redact_book
+from scripts.evaluation_redaction.redact import (
+    build_preserve_mask,
+    redact_page,
+    redact_book,
+    redact_book_until_stable,
+    _drifted_pages,
+)
 from scripts.evaluation_redaction.wordlists import build_word_pool, locale_for_detected_language, pick_word
 
 # Same shape as backend/tests/test_chapter_segmentation.py's
@@ -191,6 +197,21 @@ class TestRedactPage(unittest.TestCase):
         out = redact_page("xiv", 1, regions, self._POOL, book_salt="book1")
         self.assertEqual(out, "xiv")
 
+    def test_word_straddling_heading_window_boundary_is_preserved_whole(self):
+        # A word token that starts inside a preserved heading window but
+        # extends past its end (e.g. "Introduction" straddling a window
+        # that ends at char 8, mid-word) must stay verbatim in full --
+        # redacting even the in-window portion corrupts exactly the raw
+        # character span locate_chapter_start_candidates reads (found
+        # empirically: a real book's chapter-title word "Berlin" straddled
+        # its heading window right at the 200-char boundary, and redacting
+        # the whole word dropped a borderline fuzzy match below threshold,
+        # changing a detected chapter boundary after redaction).
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={1: (0, 8)})
+        text = "Introduction extra"
+        out = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertEqual(out[:12], "Introduction")
+
 
 class TestRedactPageBeyondListingWindow(unittest.TestCase):
     """chapter_segmentation.py never reads page content past
@@ -237,6 +258,63 @@ class TestRedactBook(unittest.TestCase):
     def test_boundary_detection_is_unchanged_by_redaction(self):
         from backend.services.chapter_segmentation import analyze_attachment
         redacted = redact_book(_FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999")
+        real_result = analyze_attachment(_FAKE_BOOK_PAGES)
+        redacted_result = analyze_attachment(redacted)
+        real_boundaries = {(c["pdf_start_index"], c["pdf_end_index"]) for c in real_result["chapters"]}
+        redacted_boundaries = {(c["pdf_start_index"], c["pdf_end_index"]) for c in redacted_result["chapters"]}
+        self.assertEqual(real_boundaries, redacted_boundaries)
+
+
+class TestDriftedPages(unittest.TestCase):
+    """_drifted_pages powers redact_book_until_stable's retry loop: given
+    each TOC entry's located page index before and after redaction (keyed
+    identically), it must return every page involved in any entry whose
+    location changed -- the page that lost its match, the page that
+    spuriously gained one, or both. Pure dict logic, no fuzzy matching, so
+    it's testable without depending on real (unpredictable) collisions."""
+
+    def test_no_drift_when_maps_are_identical(self):
+        real_map = {"a": 5, "b": 10}
+        redacted_map = {"a": 5, "b": 10}
+        self.assertEqual(_drifted_pages(real_map, redacted_map), set())
+
+    def test_relocated_entry_yields_both_the_old_and_new_page(self):
+        real_map = {"a": 152}
+        redacted_map = {"a": 296}
+        self.assertEqual(_drifted_pages(real_map, redacted_map), {152, 296})
+
+    def test_entry_that_newly_locates_only_in_redacted_yields_that_page(self):
+        real_map = {}
+        redacted_map = {"a": 42}
+        self.assertEqual(_drifted_pages(real_map, redacted_map), {42})
+
+    def test_entry_that_stops_locating_in_redacted_yields_the_real_page(self):
+        real_map = {"a": 42}
+        redacted_map = {}
+        self.assertEqual(_drifted_pages(real_map, redacted_map), {42})
+
+    def test_unrelated_stable_entries_do_not_appear(self):
+        real_map = {"a": 5, "b": 10}
+        redacted_map = {"a": 5, "b": 20}
+        self.assertEqual(_drifted_pages(real_map, redacted_map), {10, 20})
+
+
+class TestRedactBookUntilStable(unittest.TestCase):
+    def test_matches_redact_book_when_already_stable(self):
+        # The proven fixture has no ambiguous/drift-prone entries, so the
+        # first attempt should already be stable -- same output as plain
+        # redact_book, no extra pages forced verbatim.
+        redacted, extra_preserved = redact_book_until_stable(
+            _FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999",
+        )
+        self.assertEqual(extra_preserved, frozenset())
+        self.assertEqual(redacted, redact_book(_FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999"))
+
+    def test_boundary_detection_is_unchanged_by_redaction(self):
+        from backend.services.chapter_segmentation import analyze_attachment
+        redacted, _extra_preserved = redact_book_until_stable(
+            _FAKE_BOOK_PAGES, detected_language="eng", book_salt="9999999",
+        )
         real_result = analyze_attachment(_FAKE_BOOK_PAGES)
         redacted_result = analyze_attachment(redacted)
         real_boundaries = {(c["pdf_start_index"], c["pdf_end_index"]) for c in real_result["chapters"]}

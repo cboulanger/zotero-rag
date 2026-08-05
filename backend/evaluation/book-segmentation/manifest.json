@@ -182,6 +182,16 @@
       "doi": null,
       "download_url": null,
       "heuristic_expected_zero": true
+    },
+    {
+      "filename": "9783899496291.pdf",
+      "title": "Festschrift 200 Jahre Juristische Fakultät der Humboldt-Universität zu Berlin: Geschichte, Gegenwart und Zukunft",
+      "language": "de",
+      "extraction_type": "native",
+      "embedded_toc": false,
+      "oa": false,
+      "doi": "10.1515/9783899496307",
+      "download_url": null
     }
   ]
 }

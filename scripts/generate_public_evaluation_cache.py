@@ -25,7 +25,7 @@ from backend.services.chapter_segmentation import (
     extract_page_texts_for_analysis,
     pages_need_ocr,
 )
-from scripts.evaluation_redaction.redact import redact_book
+from scripts.evaluation_redaction.redact import redact_book_until_stable
 
 CIPHER_VERSION = 1
 
@@ -66,11 +66,20 @@ def _main() -> int:
             raw_pages, _layout_used = extract_page_texts_for_analysis(file_bytes)
             source = "ocr" if pages_need_ocr(raw_pages) else "extracted"
             language = detect_language(book.get("language"), book.get("title", ""))
-            redacted_pages = redact_book(real_pages, detected_language=language, book_salt=manifest_key)
+            redacted_pages, extra_preserved = redact_book_until_stable(
+                real_pages, detected_language=language, book_salt=manifest_key,
+            )
+            if extra_preserved:
+                print(f"{manifest_key}: self-corrected -- forced {len(extra_preserved)} extra page(s) "
+                      f"fully verbatim to resolve a redaction-induced boundary drift: {sorted(extra_preserved)}")
             if not args.no_verify:
+                # Defense in depth: redact_book_until_stable already verifies
+                # internally on every attempt, so this only fires if
+                # max_attempts was exhausted without full convergence.
                 diff = _verify(real_pages, redacted_pages)
                 if diff:
-                    print(f"{manifest_key}: VERIFY FAILED -- redaction changed detected chapter boundaries")
+                    print(f"{manifest_key}: VERIFY FAILED -- redaction changed detected chapter boundaries "
+                          f"even after self-correction")
                     print("\n".join(diff))
                     failures += 1
                     continue
