@@ -6,6 +6,7 @@ suite."""
 
 import unittest
 
+from backend.services.chapter_segmentation import _LISTING_PAGE_BODY_WINDOW
 from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
 from scripts.evaluation_redaction.redact import build_preserve_mask, redact_page, redact_book
 from scripts.evaluation_redaction.wordlists import build_word_pool, locale_for_detected_language, pick_word
@@ -189,6 +190,41 @@ class TestRedactPage(unittest.TestCase):
         regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
         out = redact_page("xiv", 1, regions, self._POOL, book_salt="book1")
         self.assertEqual(out, "xiv")
+
+
+class TestRedactPageBeyondListingWindow(unittest.TestCase):
+    """chapter_segmentation.py never reads page content past
+    _LISTING_PAGE_BODY_WINDOW characters of a page's header-stripped body
+    (the largest fixed window any production heuristic uses -- see
+    _secondary_listing_pages) except to measure the page's total length
+    (the trailing-blank-page trim). Word tokens past that point should get
+    length-preserving filler instead of a real pool word, since nothing
+    downstream reads their content."""
+
+    _POOL = {5: ["reals"]}
+
+    @staticmethod
+    def _long_text(word_count):
+        return " ".join(["words"] * word_count)
+
+    def test_word_before_the_listing_window_cutoff_uses_a_real_pool_word(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        text = self._long_text(_LISTING_PAGE_BODY_WINDOW // 6 + 100)
+        out = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertEqual(out[:5], "reals")
+
+    def test_word_past_the_listing_window_cutoff_is_filler_not_a_pool_word(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        text = self._long_text(_LISTING_PAGE_BODY_WINDOW // 6 + 100)
+        out = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertNotEqual(out[-5:], "reals")
+        self.assertEqual(len(out[-5:]), 5)
+
+    def test_output_length_always_equals_input_length(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        text = self._long_text(_LISTING_PAGE_BODY_WINDOW // 6 + 100)
+        out = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertEqual(len(out), len(text))
 
 
 class TestRedactBook(unittest.TestCase):

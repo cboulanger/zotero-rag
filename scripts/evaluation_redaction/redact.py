@@ -6,11 +6,25 @@ redaction -- see docs/superpowers/specs/
 import hashlib
 import re
 
-from backend.services.chapter_segmentation import _normalize_header_line, _PAGE_NUMBER_TOKEN_RE
-from scripts.evaluation_redaction.region_classification import RegionMap, classify_regions
+from backend.services.chapter_segmentation import _LISTING_PAGE_BODY_WINDOW, _normalize_header_line, _PAGE_NUMBER_TOKEN_RE
+from scripts.evaluation_redaction.region_classification import RegionMap, _header_stripped_offset, classify_regions
 from scripts.evaluation_redaction.wordlists import pick_word, build_word_pool
 
 _TOKEN_RE = re.compile(r"(?P<word>\w+)|(?P<other>\W+)", re.UNICODE)
+
+# Beyond _LISTING_PAGE_BODY_WINDOW characters past the header-stripped start
+# of a page, no production heuristic reads content anymore (see
+# chapter_segmentation._secondary_listing_pages -- the largest fixed window
+# any heuristic uses; locate_chapter_start_candidates' 200-char heading
+# window is smaller and already handled verbatim via heading_windows). Only
+# the page's TOTAL length still matters past that point, for the trailing-
+# blank-page trim in chapter_segmentation._chapters_from_located -- so word
+# tokens past the cutoff get length-preserving filler instead of a real
+# pool word: same effect on every measured heuristic, without generating
+# realistic-looking prose nothing ever reads. "q" is not a roman-numeral
+# letter (chapter_segmentation._PAGE_NUMBER_TOKEN_RE's [ivxlcdm]) or a
+# digit, so a filler run can never be mistaken for a page number.
+_FILLER_CHAR = "q"
 
 
 def build_preserve_mask(text: str, page_index: int, regions: RegionMap) -> list[bool]:
@@ -44,10 +58,13 @@ def _match_case(word: str, original: str) -> str:
 
 def redact_page(text: str, page_index: int, regions: RegionMap, pool: dict[int, list[str]], book_salt: str) -> str:
     """Replaces every word token outside `regions`' preserved spans with a
-    deterministic, same-length (or nearest-length) real word from `pool`;
-    digits, roman-numeral-shaped tokens, and preserved spans pass through
-    unchanged."""
+    deterministic, same-length (or nearest-length) real word from `pool`,
+    up to `_LISTING_PAGE_BODY_WINDOW` characters past the header-stripped
+    start of the page; word tokens beyond that get length-preserving
+    filler instead (see `_FILLER_CHAR`). Digits, roman-numeral-shaped
+    tokens, and preserved spans pass through unchanged everywhere."""
     mask = build_preserve_mask(text, page_index, regions)
+    real_content_cutoff = _header_stripped_offset(text, regions.header_lines) + _LISTING_PAGE_BODY_WINDOW
     out: list[str] = []
     pos = 0
     for match in _TOKEN_RE.finditer(text):
@@ -62,6 +79,9 @@ def redact_page(text: str, page_index: int, regions: RegionMap, pool: dict[int, 
             continue
         if token.isdigit() or _PAGE_NUMBER_TOKEN_RE.match(token):
             out.append(token)  # page-number-shaped token, never prose
+            continue
+        if start >= real_content_cutoff:
+            out.append(_FILLER_CHAR * len(token))  # past every heuristic's read window
             continue
         seed = int.from_bytes(
             hashlib.sha256(f"{book_salt}:{page_index}:{start}:{token.casefold()}".encode("utf-8")).digest()[:8],
