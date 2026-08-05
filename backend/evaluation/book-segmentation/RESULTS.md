@@ -89,6 +89,33 @@ output) any time `find_toc_candidates`, `locate_chapter_start`, or
 `match_confidence` change, or the evaluation set grows** — these numbers
 are a snapshot tied to the current heuristics, not a permanent constant.
 
+### Heuristic fix: copyright/imprint page shadowing the real TOC
+
+Found while trying the pipeline against a new real-world book outside the
+evaluation set at the time (`9783428042241.pdf`, DOI
+10.3790/978-3-428-44224-9, a 1978 German Festschrift, 918 pages): its
+copyright page ("© 1978 Duncker & Humblot, Berlin 41", "Gedruckt 1978 bei
+...", "ISBN 3 428 04224 1") has exactly three lines that structurally
+match the TOC-line pattern (title-like text ending in a trailing number)
+-- enough to form the book's first qualifying "TOC cluster" and
+permanently shadow the real table of contents three pages later, since
+none of the three is a URL/DOI (the only content filter
+`find_toc_candidates` had for this category before). `find_toc_candidates`
+went from 3 junk entries / near-zero detected chapters to 41 real TOC
+entries / 40 correctly detected chapters once a matching
+`_looks_like_imprint_line` filter (`© <year>`, `ISBN`, `Gedruckt`,
+`Printed in`) was added alongside the existing URL/DOI filter
+(`chapter_segmentation.py`).
+
+**Zero regression on the rest of the evaluation set**: re-running
+`test_chapter_segmentation_accuracy.py` after the fix reproduces every
+number in the tables above and below exactly -- none of the other books'
+TOC pages happen to have copyright-page text shaped like this.
+`9783428042241.pdf` has no hand-verified ground truth yet (see
+`CLAUDE.md`'s "Building ground truth"), so it isn't in any table here --
+its 41-entries/40-chapters result is a real, checked improvement, but
+unscored, not a precision/recall number.
+
 ## Strategy-pipeline results
 
 From `uv run python scripts/evaluate_chapter_segmentation_strategies.py`
@@ -231,7 +258,11 @@ any further change to the outline/Crossref/fusion logic.
 ## Diverse real-library evaluation set — results
 
 See `README.md`'s "Evaluation set composition" for what these 10 books are
-and why they're in the set.
+and why they're in the set. They originally lived in the gitignored
+`manifest.local.json` (no DOI); all 10 have since moved into the committed
+`manifest.json`, once each gained a `public-cache/` entry (see
+`CLAUDE.md`'s "Document organization" for the broadened criterion) --
+`manifest.local.json` no longer exists at all as of this snapshot.
 
 | Filename | Precision | Recall | Found / Expected | Recovery route |
 | --- | --- | --- | --- | --- |
@@ -335,8 +366,8 @@ raw output directly, not guessed):
   printed TOC uses a structurally different convention the regex can't
   match at all, versus OCR quality issues specific to its front matter).
 
-These three keep `"heuristic_expected_zero": true` in `manifest.local.json`
-(a known, currently-accepted limitation, re-checked and re-justified with
+These three keep `"heuristic_expected_zero": true` in `manifest.json` (a
+known, currently-accepted limitation, re-checked and re-justified with
 real evidence rather than the earlier blanket claim); the other seven of
 the ten are now `false` and are held to the same `recall > 0` regression
 guard as the rest of the evaluation set.
@@ -360,6 +391,7 @@ net that should catch it.
 
 **Note:** this LLM-fallback run predates the layout-mode fallback and OCR
 route described above and in `README.md` -- it was last run against only
-the 7 committed books, not the 10-book `manifest.local.json` set. Re-run it
-against the full set (after populating the OCR cache) to get current
-numbers for those 10 books.
+the 7 originally-committed books, not the 10 "diverse real-library" books
+(at the time still in `manifest.local.json`; now merged into `manifest.json`,
+see above). Re-run it against the full set (after populating the OCR
+cache) to get current numbers for those 10 books.
