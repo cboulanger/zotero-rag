@@ -7,7 +7,7 @@ suite."""
 import unittest
 
 from scripts.evaluation_redaction.region_classification import classify_regions, RegionMap
-from scripts.evaluation_redaction.redact import build_preserve_mask
+from scripts.evaluation_redaction.redact import build_preserve_mask, redact_page
 from scripts.evaluation_redaction.wordlists import build_word_pool, locale_for_detected_language, pick_word
 
 # Same shape as backend/tests/test_chapter_segmentation.py's
@@ -148,6 +148,47 @@ class TestPickWord(unittest.TestCase):
     def test_deterministic_for_the_same_seed(self):
         pool = {5: ["reala", "realb", "realc"]}
         self.assertEqual(pick_word(pool, 5, seed=7), pick_word(pool, 5, seed=7))
+
+
+class TestRedactPage(unittest.TestCase):
+    _POOL = {4: ["real"], 5: ["reals"], 6: ["length"]}
+
+    def test_preserved_span_survives_unchanged(self):
+        regions = RegionMap(full_pages=frozenset({0}), header_lines=frozenset(), heading_windows={})
+        text = "Contents\nIntroduction ..... 1\n"
+        out = redact_page(text, 0, regions, self._POOL, book_salt="book1")
+        self.assertEqual(out, text)
+
+    def test_digits_and_whitespace_survive_unchanged(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        text = "words 42\nwords\n"
+        out = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertIn("42", out)
+        self.assertEqual(out.count("\n"), text.count("\n"))
+
+    def test_body_word_is_replaced_with_a_same_length_real_word(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        out = redact_page("words", 1, regions, {5: ["reals"]}, book_salt="book1")
+        self.assertEqual(out, "reals")
+
+    def test_same_input_produces_same_output(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        text = "words are here"
+        out1 = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        out2 = redact_page(text, 1, regions, self._POOL, book_salt="book1")
+        self.assertEqual(out1, out2)
+
+    def test_different_book_salt_changes_output(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        pool = {5: ["reala", "realb", "realc", "reald"]}
+        out1 = redact_page("words", 1, regions, pool, book_salt="book1")
+        out2 = redact_page("words", 1, regions, pool, book_salt="book2")
+        self.assertNotEqual(out1, out2)
+
+    def test_roman_numeral_page_number_survives_unchanged(self):
+        regions = RegionMap(full_pages=frozenset(), header_lines=frozenset(), heading_windows={})
+        out = redact_page("xiv", 1, regions, self._POOL, book_salt="book1")
+        self.assertEqual(out, "xiv")
 
 
 if __name__ == "__main__":

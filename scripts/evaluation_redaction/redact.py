@@ -3,8 +3,14 @@ into per-character preserve/redact decisions and applies word-level
 redaction -- see docs/superpowers/specs/
 2026-08-05-evaluation-corpus-redaction-design.md sections 3.1, 5."""
 
-from backend.services.chapter_segmentation import _normalize_header_line
+import hashlib
+import re
+
+from backend.services.chapter_segmentation import _normalize_header_line, _PAGE_NUMBER_TOKEN_RE
 from scripts.evaluation_redaction.region_classification import RegionMap
+from scripts.evaluation_redaction.wordlists import pick_word
+
+_TOKEN_RE = re.compile(r"(?P<word>\w+)|(?P<other>\W+)", re.UNICODE)
 
 
 def build_preserve_mask(text: str, page_index: int, regions: RegionMap) -> list[bool]:
@@ -26,3 +32,40 @@ def build_preserve_mask(text: str, page_index: int, regions: RegionMap) -> list[
                 mask[i] = True
         pos += len(line)
     return mask
+
+
+def _match_case(word: str, original: str) -> str:
+    if original.isupper() and len(original) > 1:
+        return word.upper()
+    if original[:1].isupper():
+        return word[:1].upper() + word[1:]
+    return word
+
+
+def redact_page(text: str, page_index: int, regions: RegionMap, pool: dict[int, list[str]], book_salt: str) -> str:
+    """Replaces every word token outside `regions`' preserved spans with a
+    deterministic, same-length (or nearest-length) real word from `pool`;
+    digits, roman-numeral-shaped tokens, and preserved spans pass through
+    unchanged."""
+    mask = build_preserve_mask(text, page_index, regions)
+    out: list[str] = []
+    pos = 0
+    for match in _TOKEN_RE.finditer(text):
+        token = match.group(0)
+        start = pos
+        pos += len(token)
+        if match.group("word") is None:
+            out.append(token)  # whitespace/punctuation run
+            continue
+        if all(mask[start:pos]):
+            out.append(token)  # inside a preserved span
+            continue
+        if token.isdigit() or _PAGE_NUMBER_TOKEN_RE.match(token):
+            out.append(token)  # page-number-shaped token, never prose
+            continue
+        seed = int.from_bytes(
+            hashlib.sha256(f"{book_salt}:{page_index}:{start}:{token.casefold()}".encode("utf-8")).digest()[:8],
+            "big",
+        )
+        out.append(_match_case(pick_word(pool, len(token), seed), token))
+    return "".join(out)
