@@ -94,7 +94,7 @@ like Zotero item JSON. It is portable to the new repo as-is.
   protocols, calls into the package, and persists results via
   `review_queue_store` / settings-configured cache paths.
 
-## 4. Pluggable OCR backend
+## 4. Pluggable OCR backends
 
 The new package defines a minimal protocol:
 
@@ -113,17 +113,62 @@ whole-document bytes and decides for itself how to talk to its OCR engine
 than the engine core assuming a per-page chunking scheme tied to one
 provider's API shape.
 
-The package ships one reference implementation, `KreuzbergOcrBackend`,
-gated behind an optional extra (`pip install chapter-segmentation[kreuzberg]`,
-`httpx` as an optional dependency) — a self-contained adapter independent of
-zotero-rag's own `backend/services/extraction/kreuzberg.py` (which serves
-the unrelated RAG-indexing/chunking pipeline and must not change). Any
-result caching keyed by content hash (as `chapter_ocr.py` does today) is
-retained inside the package, backend-agnostic.
+The package ships **two** reference implementations, so it has a real
+zero-infrastructure story rather than trading one hard Kreuzberg dependency
+for another:
 
-zotero-rag's orchestrator depends on the package's `[kreuzberg]` extra
-directly for its OCR needs, rather than maintaining its own per-page-slicing
-OCR code.
+### `KreuzbergOcrBackend` (optional extra: `[kreuzberg]`)
+
+A self-contained adapter calling a Kreuzberg sidecar's HTTP API, independent
+of zotero-rag's own `backend/services/extraction/kreuzberg.py` (which serves
+the unrelated RAG-indexing/chunking pipeline and must not change). Gated
+behind `pip install chapter-segmentation[kreuzberg]` (`httpx` as the extra
+dependency). This is what zotero-rag's orchestrator uses in production —
+the sidecar is already part of its deployment, so there is no reason to run
+OCR any other way there.
+
+### `TesseractOcrBackend` (optional extra: `[tesseract]`) — the standalone default
+
+A local-binary adapter with no daemon, no network call, and no container:
+renders each PDF page to a raster image with `pymupdf` (pure Python, no
+external binary) and shells out to the `tesseract` CLI via `pytesseract`
+for text recognition. The only non-Python prerequisite is the `tesseract`
+binary and its language data on `PATH` — a single-line install
+(`apt-get install tesseract-ocr tesseract-ocr-deu tesseract-ocr-fra
+tesseract-ocr-spa` on Debian/Ubuntu CI images, `brew install tesseract
+tesseract-lang` on macOS, or the Windows installer) rather than a
+container image to pull or build. The backend checks `shutil.which("tesseract")`
+at construction time and raises a `RuntimeError` naming the exact install
+command for the current platform, rather than failing deep inside a
+subprocess call with an opaque error.
+
+Language handling needs no new mapping: `detect_language()`'s existing
+output (`"deu"`, `"fra"`, `"spa"`, `"eng"`, or the combined
+`"eng+deu+fra+spa"`) is already Tesseract's own `-l` flag syntax, because
+Kreuzberg's OCR is itself Tesseract under the hood (per the deployment
+notes in zotero-rag's `CLAUDE.md`) — both backends consume the same
+language string unchanged.
+
+A podman-container backend (running a minimal OCR image directly, without
+Kreuzberg's full sidecar) was considered and rejected: it would still need
+image build/pull, port allocation, and health-check/wait-for-ready polling —
+the same category of plumbing zotero-rag's own `bin/container.mjs` already
+carries for the *real* Kreuzberg sidecar — just to reach the same
+underlying engine (Tesseract) one layer removed. The binary backend reaches
+it directly, with substantially less to install, start, or fail in CI.
+
+The standalone CLI (§7) defaults to `TesseractOcrBackend` when no
+`--ocr-backend` flag is given, and to `KreuzbergOcrBackend` when one is
+requested and configured — so `pip install chapter-segmentation[tesseract]`
+plus one OS-level install command is enough to OCR a scanned book with zero
+containers involved. zotero-rag's orchestrator continues to request the
+`[kreuzberg]` extra explicitly, since it already runs that sidecar for other
+purposes.
+
+Any result caching keyed by content hash (as `chapter_ocr.py` does today)
+is retained inside the package, backend-agnostic — a cache entry doesn't
+record which backend produced it, since both are expected to converge on
+the same OCR engine's output.
 
 ## 5. Pluggable LLM client
 
@@ -176,7 +221,8 @@ chapter-segmentation/
 │   ├── common.py
 │   ├── ocr.py                       # OcrBackend Protocol + caching helpers
 │   ├── ocr_backends/
-│   │   └── kreuzberg.py             # optional extra
+│   │   ├── kreuzberg.py             # optional extra: [kreuzberg]
+│   │   └── tesseract.py             # optional extra: [tesseract], standalone default
 │   ├── llm.py                       # LLMClient Protocol
 │   ├── evidence/
 │   │   ├── types.py
@@ -199,7 +245,10 @@ chapter-segmentation/
 `cli.py` is new: a cleaned-up version of the existing evaluation scripts
 (which already operate on a local PDF + manifest entry, with no Zotero
 dependency) becomes the package's first-class standalone entry point — point
-it at a PDF, get chapter candidates back, independent of zotero-rag.
+it at a PDF, get chapter candidates back, independent of zotero-rag. Per §4,
+it defaults to `TesseractOcrBackend`, so a fresh `pip install
+chapter-segmentation[tesseract]` (plus the OS-level `tesseract` binary) is
+enough to OCR a scanned book with no container involved.
 
 ## 8. Dependency and versioning
 
@@ -223,6 +272,19 @@ dependencies once the split lands (pulled in transitively through the new
 package). `spacy` and `pypdf` remain direct zotero-rag dependencies, since
 `backend/services/chunking.py` and the RAG-indexing PDF-splitting path use
 them independently of chapter segmentation.
+
+The new package's own `pyproject.toml` declares the two OCR backends as
+optional extras, so a plain `pip install chapter-segmentation` pulls in
+neither `httpx` nor `pymupdf`/`pytesseract`:
+
+```toml
+[project.optional-dependencies]
+kreuzberg = ["httpx>=0.27"]
+tesseract = ["pytesseract>=0.3", "pymupdf>=1.24", "pillow>=10"]
+```
+
+zotero-rag depends on `chapter-segmentation[kreuzberg]`; the standalone CLI
+install path is `chapter-segmentation[tesseract]`.
 
 ## 9. History migration
 
@@ -249,6 +311,12 @@ implementation plan (`writing-plans`), not this design doc.
   evaluation harness in particular must work purely off the committed
   `public-cache/` corpus with no live Kreuzberg sidecar for the default
   (non-integration) run, matching today's behavior.
+- `TesseractOcrBackend` gets its own integration-marked tests that actually
+  invoke the `tesseract` binary against a small fixture PDF. Because this
+  needs only a CI-installed system package (no sidecar, no network), the
+  new repo's CI workflow can install `tesseract-ocr` + language packs and
+  run these as part of the normal test job — real-OCR coverage in CI that
+  today's Kreuzberg-sidecar-only setup doesn't have.
 - zotero-rag's test suite is updated to import from the new package's
   installed path instead of local `backend.services.chapter_*` modules; the
   thin orchestrator and protocol adapters (§4, §5) get their own new unit
