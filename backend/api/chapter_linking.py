@@ -13,6 +13,7 @@ import logging
 from pathlib import Path as _Path
 from typing import Any
 
+from chapter_segmentation.ocr_backends.kreuzberg import KreuzbergOcrBackend
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from pyzotero import zotero
@@ -25,7 +26,6 @@ from backend.services.chapter_ocr import run as ocr_run
 from backend.services.chapter_retrofit import commit_links, run as retrofit_run
 from backend.services.chapter_segmentation import run as analyze_run
 from backend.services.chapter_upload import run as upload_run
-from backend.services.extraction import create_document_extractor
 from backend.services.job_tracker import JobTracker
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.web_api import ZoteroWebAPI
@@ -158,14 +158,14 @@ class OcrRequest(BaseModel):
 async def start_ocr(request: OcrRequest) -> JobIdResponse:
     library_type, _numeric_id, library_id = parse_library_slug(request.library_slug)
     client = ZoteroWebAPI(api_key=request.api_key)
-    extractor = create_document_extractor(backend="kreuzberg", ocr_enabled=True)
+    ocr_backend = KreuzbergOcrBackend(kreuzberg_url=get_settings().kreuzberg_url)
     job_id = tracker.create()
 
     async def _task() -> None:
         try:
             result = await ocr_run(
                 zotero_client=client,
-                extractor=extractor,
+                ocr_backend=ocr_backend,
                 library_id=library_id,
                 library_type=library_type,
                 attachment_specs=[s.model_dump() for s in request.attachment_specs],
@@ -360,10 +360,10 @@ async def _apply_entry(
 
     if entry["type"] == "ocr":
         read_client = ZoteroWebAPI(api_key=api_key)
-        extractor = create_document_extractor(backend="kreuzberg", ocr_enabled=True)
+        ocr_backend = KreuzbergOcrBackend(kreuzberg_url=get_settings().kreuzberg_url)
         ocr_result = await ocr_run(
             zotero_client=read_client,
-            extractor=extractor,
+            ocr_backend=ocr_backend,
             library_id=library_id,
             library_type=library_type,
             attachment_specs=[{"item_key": payload["book_key"], "attachment_key": payload["attachment_key"]}],
