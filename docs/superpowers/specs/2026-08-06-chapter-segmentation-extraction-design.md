@@ -324,3 +324,92 @@ implementation plan (`writing-plans`), not this design doc.
 - The container smoke test and startup-sequence test are re-run once the
   new git dependency is added, to confirm the built image still resolves
   and installs it correctly.
+
+## 11. Continuous evaluation: a public, prose-free results page
+
+### Goal
+
+The moved `RESULTS.md` (§3) already documents its own weakness in its
+opening paragraph: it is "a snapshot, not permanent documentation ...
+expected to go stale," hand-regenerated (with AI-written analysis prose
+mixed into the same file) whenever someone remembers to. This section adds
+a minimal CI job that regenerates a **numbers-only** results snapshot on
+every push and publishes it as a GitHub Pages site — always current, with
+no narrative or root-cause commentary. `RESULTS.md` keeps its existing role
+as the contributor-facing analysis document (mechanism notes, root-cause
+writeups, known-gap discussion); the two are not the same artifact and
+neither replaces the other.
+
+### Scope: only the network-independent evaluation
+
+CI runs exactly what `backend/tests/test_public_evaluation_cache_parity.py`
+already runs today: `analyze_attachment` (the pure-heuristic engine — no
+Crossref, no Zotero catalog, no LLM) against every book in the committed
+`public-cache/` corpus, via `available_public_books()` /
+`public_pages_for()`. This is a deliberate scope cut: it is the only one of
+the three evaluation modes (pure-heuristic / strategy-pipeline /
+LLM-fallback) that needs no PDFs, no Kreuzberg sidecar, no live network
+call, and no provider API key — so it is the only one that can run
+unattended in public CI with zero secrets and zero flakiness. The
+strategy-pipeline (live Crossref lookups) and LLM-fallback (needs a paid
+provider key) evaluations remain dev-run-only, as documented in
+`README.md` today; extending the public workflow to cover them (e.g. behind
+a committed Crossref response cache) is a possible future iteration, not
+part of this minimal CI.
+
+### Report generator
+
+A new `evaluation/generate_report.py` reuses `available_public_books()` /
+`public_pages_for()` and the same precision/recall computation
+`test_public_evaluation_cache_parity.py` performs per book (the test is
+refactored to import that computation from this module instead of
+recomputing it inline, so the published numbers and the test's own
+diagnostic output can never drift apart). It renders one self-contained
+static `index.html` — a plain f-string template, no templating-engine
+dependency, no LLM call anywhere in the path — containing exactly:
+
+- one row per book: filename, precision, recall, found/expected counts
+- one micro-aggregate row across the whole corpus
+- a footer stamped with the UTC generation time and the git commit SHA it
+  ran against
+
+Nothing else. No mechanism descriptions, no historical commentary, no
+prose of any kind — nothing this script emits is written by an LLM at
+either generation time or in the template itself.
+
+### Workflow
+
+`.github/workflows/publish-results.yml`:
+
+- **Triggers:** `push` to `main`, and `workflow_dispatch` for manual runs.
+- **Steps:** checkout → `astral-sh/setup-uv` → `uv sync` → `uv run python
+  evaluation/generate_report.py --out public/` → `actions/upload-pages-artifact`
+  (path: `public/`) → `actions/deploy-pages`.
+- **Permissions:** `pages: write`, `id-token: write` (required by the
+  official Pages deploy action).
+- **No repository secrets required** — the whole job is network-free, per
+  the scope decision above.
+
+### One-time repository setup (via `gh`)
+
+A fresh repository defaults to no Pages configuration. Once, after the
+repo exists, switch it to deploy from GitHub Actions rather than a branch
+(`gh` is assumed present and authenticated as `cboulanger`):
+
+```bash
+gh api repos/cboulanger/chapter-segmentation/pages -X POST -f build_type=workflow
+```
+
+After the first successful workflow run, the results are published at
+`https://cboulanger.github.io/chapter-segmentation/`. This is a one-time
+setup step for the implementation plan, not something the recurring
+workflow does itself.
+
+### Relationship to the existing `RESULTS.md`
+
+Add one line near the top of the moved `RESULTS.md` pointing at the
+published Pages URL as the always-current numbers source for the
+pure-heuristic corpus, so a reader isn't misled by a stale in-repo table
+when the live page has already moved on. The rest of `RESULTS.md` —
+the strategy-pipeline and LLM-fallback sections, and all mechanism/analysis
+prose — is unaffected by this change.
