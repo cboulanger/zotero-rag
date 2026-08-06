@@ -15,8 +15,7 @@ dependencies = [
     "qdrant-client>=1.12.0",
     "spacy>=3.8.0",
     "pypdf>=5.1.0",
-    "rapidfuzz>=3.10.0",
-    "langdetect>=1.0.9",
+    "chapter-segmentation[kreuzberg] @ git+https://github.com/cboulanger/chapter-segmentation.git@v0.1.0",
     "aiohttp>=3.11.0",
     "httpx>=0.27.0",
     "sse-starlette>=2.2.0",
@@ -79,6 +78,11 @@ timeout = 30
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]
+
+[tool.hatch.metadata]
+# Required for the chapter-segmentation git dependency in [project.dependencies]:
+# hatchling refuses direct git/URL references unless explicitly allowed.
+allow-direct-references = true
 
 [build-system]
 requires = ["hatchling"]

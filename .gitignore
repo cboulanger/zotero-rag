@@ -70,3 +70,4 @@ node_modules
 .claude/settings.local.json
 # Superpowers brainstorming scratch
 .superpowers/
+uv.toml

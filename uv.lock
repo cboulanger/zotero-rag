@@ -355,6 +355,24 @@ wheels = [
 ]
 
 [[package]]
+name = "chapter-segmentation"
+version = "0.1.0"
+source = { git = "https://github.com/cboulanger/chapter-segmentation.git?rev=v0.1.0#a4641850040a5c8cffe6be8afbc28708ac15abf1" }
+dependencies = [
+    { name = "click" },
+    { name = "en-core-web-sm" },
+    { name = "langdetect" },
+    { name = "pypdf" },
+    { name = "rapidfuzz" },
+    { name = "spacy" },
+]
+
+[package.optional-dependencies]
+kreuzberg = [
+    { name = "httpx" },
+]
+
+[[package]]
 name = "charset-normalizer"
 version = "3.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -563,6 +581,14 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e5/81/df4fbe24dff8ba3934af99044188e20a98ed441ad17a274539b74e82e126/einops-0.8.1.tar.gz", hash = "sha256:de5d960a7a761225532e0f1959e5315ebeafc0cd43394732f103ca44b9837e84", size = 54805, upload-time = "2025-02-09T03:17:00.434Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/87/62/9773de14fe6c45c23649e98b83231fffd7b9892b6cf863251dc2afa73643/einops-0.8.1-py3-none-any.whl", hash = "sha256:919387eb55330f5757c6bea9165c5ff5cfe63a642682ea788a6d472576d81737", size = 64359, upload-time = "2025-02-09T03:17:01.998Z" },
+]
+
+[[package]]
+name = "en-core-web-sm"
+version = "3.8.0"
+source = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+wheels = [
+    { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl", hash = "sha256:1932429db727d4bff3deed6b34cfc05df17794f4a52eeb26cf8928f7c1a0fb85" },
 ]
 
 [[package]]
@@ -3462,11 +3488,11 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "anthropic" },
+    { name = "chapter-segmentation", extra = ["kreuzberg"] },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "filelock" },
     { name = "httpx" },
-    { name = "langdetect" },
     { name = "markdown-it-py" },
     { name = "openai" },
     { name = "pikepdf" },
@@ -3480,7 +3506,6 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyzotero" },
     { name = "qdrant-client" },
-    { name = "rapidfuzz" },
     { name = "spacy" },
     { name = "sse-starlette" },
     { name = "tqdm" },
@@ -3513,13 +3538,13 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.11.0" },
     { name = "anthropic", specifier = ">=0.72.0" },
     { name = "bitsandbytes", marker = "sys_platform != 'darwin' and extra == 'local-models'", specifier = ">=0.48.2" },
+    { name = "chapter-segmentation", extras = ["kreuzberg"], git = "https://github.com/cboulanger/chapter-segmentation.git?rev=v0.1.0" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "einops", marker = "extra == 'local-models'", specifier = ">=0.8.1" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filelock", specifier = ">=3.12.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "ir-datasets", marker = "extra == 'eval'", specifier = ">=0.5.5" },
-    { name = "langdetect", specifier = ">=1.0.9" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },
     { name = "openai", specifier = ">=2.7.1" },
     { name = "pikepdf", specifier = ">=10.5.1" },
@@ -3533,7 +3558,6 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyzotero", specifier = ">=1.5.0" },
     { name = "qdrant-client", specifier = ">=1.12.0" },
-    { name = "rapidfuzz", specifier = ">=3.10.0" },
     { name = "sentence-transformers", marker = "extra == 'local-models'", specifier = ">=3.3.0" },
     { name = "spacy", specifier = ">=3.8.0" },
     { name = "sse-starlette", specifier = ">=2.2.0" },
