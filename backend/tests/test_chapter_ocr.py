@@ -1,73 +1,32 @@
-"""Unit tests for backend.services.chapter_ocr."""
+"""Unit tests for backend.services.chapter_ocr (the Zotero-specific batch
+OCR orchestrator -- the OCR engine itself now lives in the standalone
+chapter_segmentation package; its own tests live there)."""
 
+import asyncio
 import hashlib
-import io
-import json
-import tempfile
 import unittest
-import unittest.mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
-from pypdf import PdfWriter
+from chapter_segmentation.ocr import save_ocr_cache
 
-from backend.services.chapter_ocr import (
-    detect_language,
-    load_cached_ocr,
-    ocr_pdf_pages,
-    save_ocr_cache,
-)
 from backend.services.chapter_ocr import run as ocr_run
-
-
-class TestDetectLanguage(unittest.TestCase):
-    def test_uses_item_language_field_if_set(self):
-        self.assertEqual(detect_language(item_language="de", title="Some Title"), "deu")
-
-    def test_detects_from_title_when_no_item_language(self):
-        result = detect_language(item_language=None, title="Einführung in die Zitierweise")
-        self.assertEqual(result, "deu")
-
-    def test_falls_back_to_combined_default_when_undetectable(self):
-        result = detect_language(item_language=None, title="")
-        self.assertEqual(result, "eng+deu+fra+spa")
-
-
-class TestOcrCache(unittest.TestCase):
-    def test_round_trip(self):
-        with TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            save_ocr_cache(cache_dir, "abc123", detected_language="deu", pages=["page one", "page two"])
-            result = load_cached_ocr(cache_dir, "abc123")
-            self.assertEqual(result["detected_language"], "deu")
-            self.assertEqual(result["pages"], ["page one", "page two"])
-
-    def test_returns_none_when_not_cached(self):
-        with TemporaryDirectory() as tmp:
-            self.assertIsNone(load_cached_ocr(Path(tmp), "does-not-exist"))
 
 
 class TestOcrRun(unittest.TestCase):
     def test_ocrs_each_attachment_and_caches_result(self):
-        import asyncio
-
         zotero_client = AsyncMock()
         zotero_client.get_attachment_file.return_value = b"%PDF-1.4 one page fake"
         zotero_client.get_item.return_value = {"data": {"title": "Einführung in die Zitierweise", "language": ""}}
 
-        extractor = AsyncMock()
-        extractor.extract_and_chunk.return_value = [MagicMock(text="OCR'd page text")]
+        ocr_backend = AsyncMock()
+        ocr_backend.ocr_pdf_pages.return_value = ["OCR'd page text"]
 
-        with TemporaryDirectory() as tmp, unittest.mock.patch(
-            "backend.services.chapter_ocr.PdfReader"
-        ) as mock_reader_cls, unittest.mock.patch(
-            "backend.services.chapter_ocr.slice_single_page_pdf", return_value=b"single page bytes"
-        ):
-            mock_reader_cls.return_value.pages = [MagicMock()]  # one page
+        with TemporaryDirectory() as tmp:
             result = asyncio.run(ocr_run(
                 zotero_client=zotero_client,
-                extractor=extractor,
+                ocr_backend=ocr_backend,
                 library_id="1",
                 library_type="group",
                 attachment_specs=[{"item_key": "BOOK1", "attachment_key": "ATT1"}],
@@ -78,21 +37,19 @@ class TestOcrRun(unittest.TestCase):
         self.assertEqual(len(result["results"]), 1)
         self.assertTrue(result["results"][0]["ocr_succeeded"])
         self.assertEqual(result["results"][0]["detected_language"], "deu")
-        # Regression guard for the Task-9-style bug: get_attachment_file must be
-        # called with the attachment's OWN key (ATT1), not the book item's key
-        # (BOOK1) — /items/{key}/file requires the attachment's key.
+        # Regression guard: get_attachment_file must be called with the
+        # attachment's OWN key (ATT1), not the book item's key (BOOK1).
         zotero_client.get_attachment_file.assert_called_once_with("1", "ATT1", library_type="group")
+        ocr_backend.ocr_pdf_pages.assert_awaited_once_with(b"%PDF-1.4 one page fake", language="deu")
 
     def test_cache_hit_short_circuits_before_fetching_item(self):
-        import asyncio
-
         fixture_bytes = b"%PDF-1.4 one page fake"
         content_hash = hashlib.sha256(fixture_bytes).hexdigest()
 
         zotero_client = AsyncMock()
         zotero_client.get_attachment_file.return_value = fixture_bytes
 
-        extractor = AsyncMock()
+        ocr_backend = AsyncMock()
 
         with TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
@@ -100,7 +57,7 @@ class TestOcrRun(unittest.TestCase):
 
             result = asyncio.run(ocr_run(
                 zotero_client=zotero_client,
-                extractor=extractor,
+                ocr_backend=ocr_backend,
                 library_id="1",
                 library_type="group",
                 attachment_specs=[{"item_key": "BOOK1", "attachment_key": "ATT1"}],
@@ -114,13 +71,11 @@ class TestOcrRun(unittest.TestCase):
         self.assertTrue(entry["ocr_succeeded"])
         self.assertEqual(entry["detected_language"], "fra")
         self.assertEqual(entry["char_count"], len("cached page one"))
-        # Cache hit must short-circuit before ever fetching the item or extracting.
+        # Cache hit must short-circuit before ever fetching the item or OCR-ing.
         zotero_client.get_item.assert_not_called()
-        extractor.extract_and_chunk.assert_not_called()
+        ocr_backend.ocr_pdf_pages.assert_not_called()
 
     def test_one_attachment_failure_does_not_abort_the_batch(self):
-        import asyncio
-
         zotero_client = AsyncMock()
         zotero_client.get_attachment_file.side_effect = [
             b"%PDF-1.4 fake book one",
@@ -128,21 +83,16 @@ class TestOcrRun(unittest.TestCase):
         ]
         zotero_client.get_item.return_value = {"data": {"title": "", "language": "en"}}
 
-        extractor = AsyncMock()
-        extractor.extract_and_chunk.side_effect = [
+        ocr_backend = AsyncMock()
+        ocr_backend.ocr_pdf_pages.side_effect = [
             RuntimeError("Kreuzberg sidecar timeout"),
-            [MagicMock(text="OCR'd page text")],
+            ["OCR'd page text"],
         ]
 
-        with TemporaryDirectory() as tmp, unittest.mock.patch(
-            "backend.services.chapter_ocr.PdfReader"
-        ) as mock_reader_cls, unittest.mock.patch(
-            "backend.services.chapter_ocr.slice_single_page_pdf", return_value=b"single page bytes"
-        ):
-            mock_reader_cls.return_value.pages = [MagicMock()]  # one page
+        with TemporaryDirectory() as tmp:
             result = asyncio.run(ocr_run(
                 zotero_client=zotero_client,
-                extractor=extractor,
+                ocr_backend=ocr_backend,
                 library_id="1",
                 library_type="group",
                 attachment_specs=[
@@ -159,55 +109,6 @@ class TestOcrRun(unittest.TestCase):
         self.assertFalse(first["ocr_succeeded"])
         self.assertIn("error", first)
         self.assertTrue(second["ocr_succeeded"])
-
-
-def _two_page_pdf_bytes() -> bytes:
-    writer = PdfWriter()
-    writer.add_blank_page(width=200, height=200)
-    writer.add_blank_page(width=200, height=200)
-    buf = io.BytesIO()
-    writer.write(buf)
-    return buf.getvalue()
-
-
-class TestOcrPdfPages(unittest.IsolatedAsyncioTestCase):
-    async def test_ocrs_each_page_individually_and_caches_by_content_hash(self):
-        pdf_bytes = _two_page_pdf_bytes()
-        extractor = AsyncMock()
-        extractor.extract_and_chunk.side_effect = [
-            [MagicMock(text="page one text")],
-            [MagicMock(text="page two text")],
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            cache_dir = Path(tmp)
-            pages = await ocr_pdf_pages(
-                pdf_bytes, extractor=extractor, cache_dir=cache_dir, language="deu",
-            )
-            self.assertEqual(pages, ["page one text", "page two text"])
-            self.assertEqual(extractor.extract_and_chunk.await_count, 2)
-            # one page-sliced PDF per call, never the whole book at once
-            for call in extractor.extract_and_chunk.await_args_list:
-                self.assertEqual(call.kwargs.get("ocr_language"), "deu")
-            self.assertEqual(len(list(cache_dir.glob("*.json"))), 1)
-
-            # Second call with identical bytes: served from cache, extractor untouched.
-            pages_again = await ocr_pdf_pages(
-                pdf_bytes, extractor=extractor, cache_dir=cache_dir, language="deu",
-            )
-            self.assertEqual(pages_again, ["page one text", "page two text"])
-            self.assertEqual(extractor.extract_and_chunk.await_count, 2)
-
-    async def test_reports_per_page_progress(self):
-        pdf_bytes = _two_page_pdf_bytes()
-        extractor = AsyncMock()
-        extractor.extract_and_chunk.return_value = [MagicMock(text="x")]
-        seen: list[tuple[int, int]] = []
-        with tempfile.TemporaryDirectory() as tmp:
-            await ocr_pdf_pages(
-                pdf_bytes, extractor=extractor, cache_dir=Path(tmp), language="eng",
-                on_page=lambda done, total: seen.append((done, total)),
-            )
-        self.assertEqual(seen, [(1, 2), (2, 2)])
 
 
 if __name__ == "__main__":
