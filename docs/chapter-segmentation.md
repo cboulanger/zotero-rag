@@ -288,7 +288,8 @@ uv run chapter-segment-upload \
 
 `--input` is Analyze's output. Chapters below `--confidence-threshold`
 (default `0.90`, calibrated against a hand-verified evaluation set — see
-[backend/evaluation/book-segmentation/RESULTS.md](../backend/evaluation/book-segmentation/RESULTS.md))
+[RESULTS.md](https://github.com/cboulanger/chapter-segmentation/blob/main/evaluation/RESULTS.md)
+in the `chapter-segmentation` package)
 are skipped rather than uploaded with a guessed boundary — the dry-run
 output lists them separately (`skipped_low_confidence`) so you can review
 before deciding whether to lower the threshold, or resolve them
