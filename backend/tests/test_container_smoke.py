@@ -18,7 +18,11 @@ from typing import Generator
 import httpx
 import pytest
 
-pytestmark = pytest.mark.container
+# Override the global 30s pytest-timeout (pyproject.toml) -- the module-scoped
+# built_image fixture runs a full `podman build`, which on a cold cache now
+# also has to `git clone` the chapter-segmentation dependency during `uv sync`
+# (see Dockerfile's builder stage); that alone can exceed 30s on a slow link.
+pytestmark = [pytest.mark.container, pytest.mark.timeout(300)]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SMOKE_COMPOSE = PROJECT_ROOT / "docker-compose.smoke.yml"

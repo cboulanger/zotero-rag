@@ -6,6 +6,13 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 ARG INSTALL_LOCAL_MODELS=false
 
 WORKDIR /app
+
+# git is required by `uv sync` to resolve the chapter-segmentation dependency,
+# which is pinned to a tag of its git repo (see pyproject.toml) rather than a
+# PyPI release -- the base image does not ship git.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml uv.lock ./
 ENV UV_HTTP_TIMEOUT=120
 RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \

@@ -238,10 +238,10 @@ class TestOcrEndpoint(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
 
-    @patch("backend.api.chapter_linking.create_document_extractor")
+    @patch("backend.api.chapter_linking.KreuzbergOcrBackend")
     @patch("backend.api.chapter_linking.ZoteroWebAPI")
     @patch("backend.api.chapter_linking.ocr_run", new_callable=AsyncMock)
-    def test_returns_job_id_immediately(self, mock_run, mock_web_api, mock_create_extractor):
+    def test_returns_job_id_immediately(self, mock_run, mock_web_api, mock_ocr_backend):
         mock_run.return_value = {"results": []}
         response = self.client.post(
             "/api/chapter-linking/ocr",
