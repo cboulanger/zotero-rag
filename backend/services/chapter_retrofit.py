@@ -9,9 +9,10 @@ from dataclasses import dataclass
 
 from rapidfuzz import fuzz
 
+from chapter_segmentation.common import year_from_date
+
 from backend.config.settings import get_settings
 from backend.services import review_queue_store
-from backend.services.chapter_common import year_from_date
 from backend.services.chapter_link_store import (
     add_related_item,
     author_year_label,
