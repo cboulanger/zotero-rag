@@ -61,6 +61,11 @@ Usage
     # Auto-discover the top N oversized items and reprocess them in one go
     uv run python bin/reindex_oversized_items.py --min-chunks 1000 --top 25 --apply
 
+    # Unattended: keep discovering+reprocessing in batched rounds until none
+    # remain >= --min-chunks. Safe to run as a long-lived background job —
+    # see _loop()'s docstring for batching/exclusion behavior.
+    uv run python bin/reindex_oversized_items.py --loop --min-chunks 1000
+
 Must be run with the same environment as the cron indexer (AUTOINDEX_SECRET,
 QDRANT_URL, etc. set) — e.g. inside the production container via
 `podman exec`, or locally against a dev data dir.
@@ -137,7 +142,14 @@ async def _reprocess_items(
     targets_by_library: dict[str, list[str]],
     vector_store: VectorStore,
     apply: bool,
-) -> None:
+) -> dict[tuple[str, str], str]:
+    """Reprocess the given items. Returns {(library_id, item_key): status},
+    status one of "done", "failed", "not_found", "skipped_no_key" — used by
+    _loop() to permanently exclude items that fail for reasons a retry can't
+    fix (e.g. a 404'd attachment), instead of retrying them every round
+    forever.
+    """
+    results: dict[tuple[str, str], str] = {}
     settings = get_settings()
     store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
     if not store.enabled:
@@ -154,6 +166,8 @@ async def _reprocess_items(
         target = auto_targets.get(slug)
         if not target:
             print(f"[SKIP] No auto-index key found for {slug} (library_id={library_id})")
+            for item_key in item_keys:
+                results[(library_id, item_key)] = "skipped_no_key"
             continue
 
         library_type = _library_type(library_id)
@@ -176,6 +190,7 @@ async def _reprocess_items(
 
                 if item is None:
                     print(f"[SKIP] {library_id}:{item_key} — not found in Zotero (deleted upstream?)")
+                    results[(library_id, item_key)] = "not_found"
                     continue
 
                 title = item["data"].get("title", "Untitled")
@@ -210,18 +225,83 @@ async def _reprocess_items(
                         f"reprocessing produced 0 chunks ({elapsed:.1f}s) — "
                         f"existing {old_count} chunks left untouched"
                     )
+                    results[(library_id, item_key)] = "failed"
                     continue
                 vector_store.delete_chunks_by_ids(old_ids)
                 print(
                     f"[DONE] {library_id}:{item_key} ({title!r}): "
                     f"{old_count} -> {new_count} chunks ({elapsed:.1f}s)"
                 )
+                results[(library_id, item_key)] = "done"
 
         # Refresh library-level chunk total so the plugin's index-status view stays accurate.
         metadata = vector_store.get_library_metadata(library_id)
         if metadata is not None:
             metadata.total_chunks = vector_store.count_library_chunks(library_id)
             vector_store.update_library_metadata(metadata)
+
+    return results
+
+
+async def _loop(
+    vector_store: VectorStore,
+    min_chunks: int,
+    discover_top: int,
+    batch_chunk_budget: int,
+    max_batch_size: int,
+) -> None:
+    """Repeat discovery+reprocess rounds until no oversized items remain.
+
+    Each round: discover candidates (largest first), build a batch of up to
+    `max_batch_size` items — a single huge item fills a round alone, several
+    smaller ones get grouped together up to `batch_chunk_budget` combined old
+    chunks — reprocess that batch, then loop. Items that fail for a reason a
+    retry can't fix (see _reprocess_items's return) are excluded from every
+    later round in this run, so a permanently-undownloadable attachment can't
+    spin the loop forever; it'll be retried the next time this script is run.
+    """
+    permanently_excluded: set[tuple[str, str]] = set()
+    round_num = 0
+    while True:
+        round_num += 1
+        all_candidates = discover_oversized_items(vector_store, min_chunks, discover_top)
+        candidates = [
+            c for c in all_candidates
+            if (c["library_id"], c["item_key"]) not in permanently_excluded
+        ]
+        if not candidates:
+            if all_candidates:
+                print(
+                    f"[LOOP] {len(all_candidates)} candidate(s) remain but all failed earlier "
+                    f"this run and were excluded — stopping after {round_num - 1} round(s)."
+                )
+            else:
+                print(f"[LOOP] No items with >= {min_chunks} chunks remain. Done after {round_num - 1} round(s).")
+            return
+
+        batch = [candidates[0]]
+        total = candidates[0]["chunk_count"]
+        for c in candidates[1:max_batch_size]:
+            if total + c["chunk_count"] > batch_chunk_budget:
+                break
+            batch.append(c)
+            total += c["chunk_count"]
+
+        print(
+            f"\n[LOOP] Round {round_num}: {len(candidates)} candidate(s) available, "
+            f"processing {len(batch)} ({total} chunks total this round)"
+        )
+        for c in batch:
+            print(f"  {c['library_id']:>12}:{c['item_key']}  {c['chunk_count']:>7} chunks  {c['title']!r}")
+
+        targets_by_library: dict[str, list[str]] = {}
+        for c in batch:
+            targets_by_library.setdefault(c["library_id"], []).append(c["item_key"])
+
+        results = await _reprocess_items(targets_by_library, vector_store, apply=True)
+        for key, status in results.items():
+            if status in ("failed", "not_found", "skipped_no_key"):
+                permanently_excluded.add(key)
 
 
 def main():
@@ -236,9 +316,36 @@ def main():
         help="Reprocess this specific item instead of auto-discovering candidates (repeatable)",
     )
     parser.add_argument("--apply", action="store_true", help="Actually delete+reprocess (default: dry run only)")
+    parser.add_argument(
+        "--loop", action="store_true",
+        help="Repeat discovery+reprocess rounds until no candidates >= --min-chunks remain "
+        "(implies --apply; incompatible with --item/--list)",
+    )
+    parser.add_argument(
+        "--max-batch-size", type=int, default=10,
+        help="Max items processed per --loop round (default 10)",
+    )
+    parser.add_argument(
+        "--batch-chunk-budget", type=int, default=50_000,
+        help="Max combined old chunk count per --loop round when batching smaller items; "
+        "a single item already over budget is still processed alone (default 50000)",
+    )
     args = parser.parse_args()
 
     vector_store = make_vector_store()
+
+    if args.loop:
+        if args.item or args.list:
+            print("[ERROR] --loop is incompatible with --item/--list")
+            sys.exit(1)
+        asyncio.run(_loop(
+            vector_store,
+            args.min_chunks,
+            max(args.top, 200),
+            args.batch_chunk_budget,
+            args.max_batch_size,
+        ))
+        return
 
     if args.item:
         targets_by_library: dict[str, list[str]] = {}
