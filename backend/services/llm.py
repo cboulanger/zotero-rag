@@ -377,11 +377,20 @@ class RemoteLLMService(LLMService):
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        self._dump_inference_request(payload)
+        extra_body = self.llm_config.model_kwargs.get("extra_body")
+        self._dump_inference_request({**payload, **({"extra_body": extra_body} if extra_body else {})})
 
-        response = await client.chat.completions.create(**payload)
+        response = await client.chat.completions.create(**payload, extra_body=extra_body)
 
-        generated_text = response.choices[0].message.content
+        choice = response.choices[0]
+        generated_text = choice.message.content
+        if not generated_text:
+            raise RuntimeError(
+                f"Model '{self._model_name}' returned no content "
+                f"(finish_reason={choice.finish_reason!r}) — the completion was likely "
+                "truncated before producing an answer, e.g. by exhausting max_tokens "
+                "while still in an internal reasoning phase"
+            )
         logger.info(f"Generated {len(generated_text)} characters")
         self._dump_inference_response(generated_text)
         return generated_text.strip()
@@ -407,6 +416,12 @@ class RemoteLLMService(LLMService):
         response = await client.messages.create(**payload)
 
         generated_text = response.content[0].text
+        if not generated_text:
+            raise RuntimeError(
+                f"Model '{self._model_name}' returned no text content "
+                f"(stop_reason={response.stop_reason!r}) — the completion was likely "
+                "truncated before producing an answer"
+            )
         logger.info(f"Generated {len(generated_text)} characters")
         self._dump_inference_response(generated_text)
         return generated_text.strip()

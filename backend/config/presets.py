@@ -50,6 +50,10 @@ class LLMConfig(BaseModel):
 # Fallback model list for KISSKI presets — used only when the live API is unreachable.
 # The active preset replaces this list at runtime via fetch_kisski_rag_models().
 # First entry is the default. Update when models are decommissioned on KISSKI.
+# All KISSKI llm.model_kwargs below set extra_body.chat_template_kwargs.enable_thinking=False:
+# several models here (Qwen3.x, deepseek-r1*) run vLLM "thinking" mode by default and will
+# otherwise spend the entire max_tokens budget on hidden reasoning, returning
+# message.content=None with finish_reason="length" instead of an answer.
 KISSKI_RAG_MODELS: List[str] = [
     "mistral-large-3-675b-instruct-2512",   # Mistral Large 3, excellent general-purpose
     "qwen3.5-122b-a10b",                    # large MoE, high quality
@@ -200,6 +204,7 @@ PRESETS = {
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
             },
             models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
@@ -232,6 +237,7 @@ PRESETS = {
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
             },
             models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
@@ -260,6 +266,7 @@ PRESETS = {
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
             },
             models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),
@@ -292,6 +299,7 @@ PRESETS = {
             model_kwargs={
                 "base_url": "https://chat-ai.academiccloud.de/v1",
                 "api_key_env": "KISSKI_API_KEY",
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
             },
             models_status_url="https://chat-ai.academiccloud.de/v1/models",
         ),

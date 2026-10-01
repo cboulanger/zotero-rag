@@ -338,6 +338,95 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args.kwargs["temperature"], 0.7)  # From preset
         self.assertEqual(call_args.kwargs["max_tokens"], 512)  # Default
 
+    async def test_generate_openai_passes_configured_extra_body(self):
+        """model_kwargs['extra_body'] (e.g. to disable KISSKI 'thinking' mode) is forwarded."""
+        preset = HardwarePreset(
+            name="test-openai-extra-body",
+            description="Test OpenAI preset with extra_body",
+            embedding=EmbeddingConfig(model_type="remote", model_name="openai"),
+            llm=LLMConfig(
+                model_type="remote",
+                model_names="qwen3.5-397b-a17b",
+                temperature=0.7,
+                model_kwargs={
+                    "base_url": "https://chat-ai.academiccloud.de/v1",
+                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+                },
+            ),
+            rag=RAGConfig(),
+            memory_budget_gb=1.0,
+        )
+        mock_settings = Mock(spec=Settings)
+        mock_settings.get_hardware_preset.return_value = preset
+        service = RemoteLLMService(mock_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = "Generated answer"
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        call_args = mock_client.chat.completions.create.call_args
+        self.assertEqual(
+            call_args.kwargs["extra_body"],
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        )
+
+    async def test_generate_openai_extra_body_defaults_to_none(self):
+        """Presets with no 'extra_body' in model_kwargs (e.g. real OpenAI) send extra_body=None."""
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = "Generated answer"
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        call_args = mock_client.chat.completions.create.call_args
+        self.assertIsNone(call_args.kwargs["extra_body"])
+
+    async def test_generate_openai_raises_clear_error_on_none_content(self):
+        """A None message.content (e.g. finish_reason='length' mid-reasoning) raises a
+        descriptive RuntimeError instead of crashing with TypeError on len(None)."""
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = None
+        mock_response.choices[0].finish_reason = "length"
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(RuntimeError) as context:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertIn("length", str(context.exception))
+        self.assertIn("gpt-4o-mini", str(context.exception))
+
+    async def test_generate_anthropic_raises_clear_error_on_none_text(self):
+        """Symmetrical guard: a None content[0].text raises a descriptive RuntimeError."""
+        service = RemoteLLMService(self.mock_anthropic_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.content = [Mock()]
+        mock_response.content[0].text = None
+        mock_response.stop_reason = "max_tokens"
+        mock_client.messages.create.return_value = mock_response
+
+        with patch("anthropic.AsyncAnthropic", return_value=mock_client):
+            with self.assertRaises(RuntimeError) as context:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertIn("max_tokens", str(context.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
