@@ -1,3 +1,10 @@
+# [1.44.0](https://github.com/cboulanger/zotero-rag/compare/v1.43.0...v1.44.0) (2026-10-01)
+
+
+### Features
+
+* **scripts:** add targeted reindex for oversized already-indexed items ([146acb7](https://github.com/cboulanger/zotero-rag/commit/146acb7cda6db19e78e26ea5d890e44db2d20812))
+
 # [1.43.0](https://github.com/cboulanger/zotero-rag/compare/v1.42.1...v1.43.0) (2026-10-01)
 
 
