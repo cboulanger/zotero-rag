@@ -25,16 +25,16 @@ duplicate's docstring).
 Usage
 -----
     # Discover candidates (read-only): items with >= 1000 chunks, top 25
-    uv run python scripts/reindex_oversized_items.py --list --min-chunks 1000 --top 25
+    uv run python bin/reindex_oversized_items.py --list --min-chunks 1000 --top 25
 
     # Reprocess specific items (dry run first — reports what would happen)
-    uv run python scripts/reindex_oversized_items.py --item u39226:U9CD3MQI
+    uv run python bin/reindex_oversized_items.py --item u39226:U9CD3MQI
 
     # Apply for real
-    uv run python scripts/reindex_oversized_items.py --item u39226:U9CD3MQI --apply
+    uv run python bin/reindex_oversized_items.py --item u39226:U9CD3MQI --apply
 
     # Auto-discover the top N oversized items and reprocess them in one go
-    uv run python scripts/reindex_oversized_items.py --min-chunks 1000 --top 25 --apply
+    uv run python bin/reindex_oversized_items.py --min-chunks 1000 --top 25 --apply
 
 Must be run with the same environment as the cron indexer (AUTOINDEX_SECRET,
 QDRANT_URL, etc. set) — e.g. inside the production container via

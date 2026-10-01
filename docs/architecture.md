@@ -488,7 +488,7 @@ The `backendURL` preference is the single configuration point for server locatio
   search and reads the on-disk float32 vectors back only to rescore the
   top candidates of each query, instead of forcing the full vector set into
   RAM.
-- `scripts/enable_chunk_quantization.py` applies this to an already-indexed
+- `bin/enable_chunk_quantization.py` applies this to an already-indexed
   collection in place (Qdrant rebuilds segments in the background; the
   collection stays queryable throughout).
 - A Qdrant search that exceeds the configured client timeout raises

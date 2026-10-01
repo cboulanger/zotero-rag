@@ -31,16 +31,16 @@ per-page chunks) if you also want to reduce the number of points.
 Usage
 -----
     # Preview current config + estimated memory impact (no changes)
-    uv run python scripts/enable_chunk_quantization.py --dry-run
+    uv run python bin/enable_chunk_quantization.py --dry-run
 
     # Apply against the local embedded/dev Qdrant
-    uv run python scripts/enable_chunk_quantization.py
+    uv run python bin/enable_chunk_quantization.py
 
     # Apply against a running Qdrant server
-    uv run python scripts/enable_chunk_quantization.py --qdrant-url http://localhost:6333
+    uv run python bin/enable_chunk_quantization.py --qdrant-url http://localhost:6333
 
     # Apply and then poll collection status until segment rebuild finishes
-    uv run python scripts/enable_chunk_quantization.py --qdrant-url http://localhost:6333 --wait
+    uv run python bin/enable_chunk_quantization.py --qdrant-url http://localhost:6333 --wait
 """
 
 import argparse
