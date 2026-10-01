@@ -1,3 +1,17 @@
+# [1.43.0](https://github.com/cboulanger/zotero-rag/compare/v1.42.1...v1.43.0) (2026-10-01)
+
+
+### Bug Fixes
+
+* **chunking:** merge tiny per-page extractor chunks before storage ([e8d9f9f](https://github.com/cboulanger/zotero-rag/commit/e8d9f9f35afea96726831d81d1760a4cf600e3ec))
+* **llm:** disable KISSKI thinking mode and guard against empty completions ([eb72356](https://github.com/cboulanger/zotero-rag/commit/eb72356f3080b1aa7b2cb947c74bf0c05754bbae))
+* **query:** handle Qdrant search timeouts gracefully instead of 500s ([f9f89c1](https://github.com/cboulanger/zotero-rag/commit/f9f89c1ad7af18f8b49dd05d106ea7cd9f7870ab))
+
+
+### Features
+
+* **vector-store:** enable int8 scalar quantization on document_chunks ([1416caa](https://github.com/cboulanger/zotero-rag/commit/1416caa690319d7e3726d1e2a3dda650de3409e2))
+
 ## [1.42.1](https://github.com/cboulanger/zotero-rag/compare/v1.42.0...v1.42.1) (2026-07-24)
 
 
