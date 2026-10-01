@@ -248,6 +248,10 @@ class TestProcessAttachmentBytesRouting(unittest.IsolatedAsyncioTestCase):
 
     async def test_page_numbers_in_stored_chunks_include_offset(self):
         """End-to-end: page numbers stored in vector store must reflect the offset."""
+        # This test checks per-chunk page numbers, which chunk-merging would
+        # obscure by combining these tiny single-char fixture chunks into one —
+        # disable merging so each extractor chunk stays a separate stored chunk.
+        self.proc.chunk_merge_target_size = 0
         pdf = _make_pdf(6)
         threshold = len(pdf) // 2  # force split into ~2 parts
 

@@ -6,11 +6,17 @@ Implements semantic chunking at paragraph and sentence levels using spaCy.
 
 import logging
 import hashlib
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from dataclasses import dataclass
 
 import spacy
 from spacy.language import Language
+
+if TYPE_CHECKING:
+    # Real import is deferred inside coalesce_chunks() to avoid a circular
+    # import: backend.services.extraction.__init__ imports legacy.py, which
+    # imports TextChunker from this module.
+    from backend.services.extraction.base import ExtractionChunk
 
 
 logger = logging.getLogger(__name__)
@@ -304,3 +310,51 @@ def create_simple_chunks(
         start = end - overlap if end - overlap > start else end
 
     return chunks
+
+
+def coalesce_chunks(
+    chunks: "list[ExtractionChunk]", target_size: int = 1500
+) -> "list[ExtractionChunk]":
+    """Merge consecutive extractor chunks up to `target_size` characters each.
+
+    Some extraction backends (e.g. kreuzberg's internal chunker) treat each
+    page as a hard chunk boundary and never pull text from the next page to
+    fill the configured chunk-size budget, even when a page's text is far
+    below it. Left alone, a long book becomes one tiny Qdrant point per page —
+    for a 700-page book that's hundreds of thousands of points, which can
+    make Qdrant queries against the whole collection slow. This groups
+    consecutive chunks up to `target_size` so page-sized fragments get
+    combined into properly-sized chunks, regardless of which extractor
+    produced them.
+
+    A chunk already at or above `target_size` is kept as-is (never split) and
+    never absorbs a neighbor past the limit.
+    """
+    from backend.services.extraction.base import ExtractionChunk
+
+    merged: list[ExtractionChunk] = []
+    buffer_texts: list[str] = []
+    buffer_page: Optional[int] = None
+    buffer_len = 0
+
+    def _flush() -> None:
+        if buffer_texts:
+            merged.append(ExtractionChunk(
+                text="\n\n".join(buffer_texts),
+                page_number=buffer_page,
+                chunk_index=len(merged),
+            ))
+
+    for chunk in chunks:
+        if buffer_texts and buffer_len + len(chunk.text) > target_size:
+            _flush()
+            buffer_texts = []
+            buffer_page = None
+            buffer_len = 0
+        if not buffer_texts:
+            buffer_page = chunk.page_number
+        buffer_texts.append(chunk.text)
+        buffer_len += len(chunk.text)
+
+    _flush()
+    return merged

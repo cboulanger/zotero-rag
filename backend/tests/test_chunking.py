@@ -8,8 +8,10 @@ from pathlib import Path
 from backend.services.chunking import (
     TextChunk,
     TextChunker,
+    coalesce_chunks,
     create_simple_chunks,
 )
+from backend.services.extraction.base import ExtractionChunk
 from backend.services.pdf_extractor import PDFExtractor
 
 
@@ -87,6 +89,61 @@ class TestTextChunk:
         assert "index=5" in repr_str
         assert "page=2" in repr_str
         assert "Short text" in repr_str
+
+
+class TestCoalesceChunks:
+    """Tests for coalesce_chunks — merging many tiny per-page extractor chunks
+    (e.g. kreuzberg's per-page output) into fewer, reasonably-sized chunks."""
+
+    def test_empty_list_returns_empty(self):
+        assert coalesce_chunks([], target_size=500) == []
+
+    def test_merges_consecutive_small_chunks_under_target(self):
+        chunks = [
+            ExtractionChunk(text="a" * 100, page_number=1, chunk_index=0),
+            ExtractionChunk(text="b" * 100, page_number=2, chunk_index=1),
+            ExtractionChunk(text="c" * 100, page_number=3, chunk_index=2),
+        ]
+        merged = coalesce_chunks(chunks, target_size=500)
+
+        assert len(merged) == 1
+        assert merged[0].text == "a" * 100 + "\n\n" + "b" * 100 + "\n\n" + "c" * 100
+        # Keeps the page of the first sub-chunk in the group — a citation
+        # pointing to the start of the merged span.
+        assert merged[0].page_number == 1
+
+    def test_starts_a_new_group_once_target_size_would_be_exceeded(self):
+        chunks = [
+            ExtractionChunk(text="a" * 200, page_number=1, chunk_index=0),
+            ExtractionChunk(text="b" * 200, page_number=2, chunk_index=1),
+            ExtractionChunk(text="c" * 300, page_number=3, chunk_index=2),
+        ]
+        merged = coalesce_chunks(chunks, target_size=500)
+
+        assert len(merged) == 2
+        assert merged[0].page_number == 1  # group: a + b (400 <= 500)
+        assert merged[1].page_number == 3  # c alone (400 + 300 > 500)
+
+    def test_oversized_single_chunk_passes_through_unmerged(self):
+        chunks = [
+            ExtractionChunk(text="x" * 1000, page_number=1, chunk_index=0),
+            ExtractionChunk(text="y" * 50, page_number=2, chunk_index=1),
+        ]
+        merged = coalesce_chunks(chunks, target_size=500)
+
+        assert len(merged) == 2
+        assert merged[0].text == "x" * 1000
+        assert merged[1].text == "y" * 50
+
+    def test_chunk_index_is_sequential_in_output(self):
+        chunks = [
+            ExtractionChunk(text="a" * 300, page_number=1, chunk_index=0),
+            ExtractionChunk(text="b" * 300, page_number=2, chunk_index=1),
+            ExtractionChunk(text="c" * 300, page_number=3, chunk_index=2),
+        ]
+        merged = coalesce_chunks(chunks, target_size=500)
+
+        assert [c.chunk_index for c in merged] == list(range(len(merged)))
 
 
 class TestSimpleChunking:

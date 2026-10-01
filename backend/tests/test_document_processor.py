@@ -146,23 +146,25 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         # Mock vector store - no duplicate
         self.mock_vector_store.check_duplicate.return_value = None
-        self.mock_vector_store.add_chunks_batch.return_value = ["id1", "id2"]
+        self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
 
-        # Mock extractor returning two chunks
+        # Mock extractor returning two small per-page chunks — well under the
+        # default chunk_merge_target_size, so coalesce_chunks() merges them
+        # into a single chunk before embedding/storage.
         self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(
             ("This is page one with some content.", 1),
             ("This is page two with more content.", 2),
         )
 
-        # Mock embeddings
-        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
+        # Mock embeddings — one merged chunk means one embedding is requested
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2, 0.3]]
 
         result = await self.processor.index_library("test_lib")
 
         # Verify results
         self.assertIn("mode", result)
         self.assertEqual(result["items_processed"], 1)
-        self.assertEqual(result["chunks_added"], 2)
+        self.assertEqual(result["chunks_added"], 1)
 
         # Verify extractor was called with correct args
         self.mock_extractor.extract_and_chunk.assert_called_once_with(
@@ -172,10 +174,12 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         # Verify embeddings were generated
         self.mock_embedding_service.embed_batch.assert_called_once()
 
-        # Verify chunks were stored
+        # Verify chunks were stored (merged into one)
         self.mock_vector_store.add_chunks_batch.assert_called_once()
         stored_chunks = self.mock_vector_store.add_chunks_batch.call_args[0][0]
-        self.assertEqual(len(stored_chunks), 2)
+        self.assertEqual(len(stored_chunks), 1)
+        self.assertIn("page one", stored_chunks[0].text)
+        self.assertIn("page two", stored_chunks[0].text)
 
         # Verify deduplication record was added
         self.mock_vector_store.add_deduplication_record.assert_called_once()

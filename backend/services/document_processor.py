@@ -29,7 +29,7 @@ from backend.services.embeddings import (
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
-from backend.services.chunking import TextChunker
+from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -238,6 +238,7 @@ class DocumentProcessor:
         document_extractor: Optional[DocumentExtractor] = None,
         max_chunk_size: int = 512,
         chunk_overlap: int = 50,
+        chunk_merge_target_size: int = 1500,
     ):
         """
         Initialize document processor.
@@ -252,10 +253,14 @@ class DocumentProcessor:
                 document_extractor is None).
             chunk_overlap: Overlap between chunks (used when document_extractor
                 is None).
+            chunk_merge_target_size: Consecutive extractor chunks (e.g. kreuzberg's
+                per-page output) are merged up to this many characters before
+                embedding/storage — see coalesce_chunks().
         """
         self.zotero_client = zotero_client
         self.embedding_service = embedding_service
         self.vector_store = vector_store
+        self.chunk_merge_target_size = chunk_merge_target_size
 
         if document_extractor is None:
             settings = get_settings()
@@ -1176,6 +1181,14 @@ class DocumentProcessor:
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")
             return AttachmentProcessingResult(chunks_written=0, status="skipped_empty")
+
+        chunks_before_merge = len(chunks)
+        chunks = coalesce_chunks(chunks, target_size=self.chunk_merge_target_size)
+        if len(chunks) < chunks_before_merge:
+            logger.info(
+                f"[CHUNK MERGE] {attachment_key}: {chunks_before_merge} -> {len(chunks)} chunks "
+                f"(target_size={self.chunk_merge_target_size})"
+            )
 
         # Generate embeddings
         chunk_texts = [chunk.text for chunk in chunks]
