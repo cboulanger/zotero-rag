@@ -1,3 +1,10 @@
+## [1.44.1](https://github.com/cboulanger/zotero-rag/compare/v1.44.0...v1.44.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* move container-dependent admin scripts from scripts/ to bin/ ([393da9c](https://github.com/cboulanger/zotero-rag/commit/393da9c27d28d40321facdc887d9263cd00be7c8))
+
 # [1.44.0](https://github.com/cboulanger/zotero-rag/compare/v1.43.0...v1.44.0) (2026-10-01)
 
 
