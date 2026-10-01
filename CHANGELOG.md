@@ -1,3 +1,10 @@
+## [1.45.2](https://github.com/cboulanger/zotero-rag/compare/v1.45.1...v1.45.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **reindex:** never delete chunks before confirming replacement content exists ([38d1a7b](https://github.com/cboulanger/zotero-rag/commit/38d1a7b92dcd04431fe10024c28a5dd288441c40))
+
 ## [1.45.1](https://github.com/cboulanger/zotero-rag/compare/v1.45.0...v1.45.1) (2026-10-01)
 
 
