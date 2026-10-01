@@ -481,7 +481,11 @@ class RemoteEmbeddingService(EmbeddingService):
                     f"(HTTP {status_code or '401/403'}): {_extract_error_detail(exc)}"
                 ) from exc
             except InternalServerError as exc:
-                if attempt == max_attempts - 1 or "try again" not in str(exc).lower():
+                # Retry any 5xx — production showed generic "Error code: 500"
+                # responses (no "try again" wording) failing ~1 in 3 calls and
+                # succeeding immediately on retry, i.e. genuinely transient
+                # regardless of message phrasing.
+                if attempt == max_attempts - 1:
                     raise
                 retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(

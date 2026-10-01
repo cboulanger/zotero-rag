@@ -9,6 +9,7 @@ import numpy as np
 
 from openai import (
     AuthenticationError as OpenAIAuthenticationError,
+    InternalServerError as OpenAIInternalServerError,
     PermissionDeniedError as OpenAIPermissionDeniedError,
     RateLimitError as OpenAIRateLimitError,
 )
@@ -395,6 +396,63 @@ class TestEmbeddingRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(sleep_duration, 0.9)  # at least the server-supplied 1 s
         self.assertLess(sleep_duration, 3.0)     # plus small jitter only
         self.assertIsNotNone(result)
+
+
+class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
+    """A 500 from the embedding API must be retried regardless of its message.
+
+    Regression: the retry filter previously only retried InternalServerError
+    when "try again" appeared in the message, on the assumption that's the only
+    transient phrasing KISSKI returns. Production showed a bare generic
+    "Error code: 500" (no "try again" wording) failing roughly 1 in 3 calls and
+    succeeding immediately on the very next identical call — i.e. genuinely
+    transient, but previously raised on the first attempt instead of retrying.
+    """
+
+    def _make_service(self) -> RemoteEmbeddingService:
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="text-embedding-3-small",
+            batch_size=10,
+            cache_enabled=False,
+        )
+        return RemoteEmbeddingService(config, api_key="test-key")
+
+    async def test_generic_500_without_try_again_wording_is_retried(self):
+        service = self._make_service()
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        exc = OpenAIInternalServerError("Error code: 500", response=mock_response, body=None)
+
+        success_raw = MagicMock()
+        success_raw.headers = {}
+        success_raw.parse.return_value = MagicMock(data=[MagicMock(embedding=[0.1, 0.2])])
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(
+                side_effect=[exc, success_raw]
+            )
+            result = await service._create_embeddings_with_backoff(["hello"])
+
+        self.assertIsNotNone(result)
+
+    async def test_generic_500_exhausts_retries_then_raises(self):
+        service = self._make_service()
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        exc = OpenAIInternalServerError("Error code: 500", response=mock_response, body=None)
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(OpenAIInternalServerError):
+                await service._create_embeddings_with_backoff(["hello"])
 
 
 class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
