@@ -3364,7 +3364,7 @@ wheels = [
 
 [[package]]
 name = "zotero-rag"
-version = "1.45.2"
+version = "1.46.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

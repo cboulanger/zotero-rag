@@ -1,3 +1,10 @@
+# [1.46.0](https://github.com/cboulanger/zotero-rag/compare/v1.45.2...v1.46.0) (2026-10-01)
+
+
+### Features
+
+* **reindex:** add --loop mode for unattended batch reprocessing ([1e80a59](https://github.com/cboulanger/zotero-rag/commit/1e80a593589e4fce0b0c25d9b635ec4f3634da9e))
+
 ## [1.45.2](https://github.com/cboulanger/zotero-rag/compare/v1.45.1...v1.45.2) (2026-10-01)
 
 
