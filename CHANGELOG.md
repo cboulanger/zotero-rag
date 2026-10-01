@@ -1,3 +1,10 @@
+# [1.45.0](https://github.com/cboulanger/zotero-rag/compare/v1.44.3...v1.45.0) (2026-10-01)
+
+
+### Features
+
+* **deploy:** forward extra args to container.mjs deploy ([764e241](https://github.com/cboulanger/zotero-rag/commit/764e24169f53416bf81d007f4e7c783c7b361e05))
+
 ## [1.44.3](https://github.com/cboulanger/zotero-rag/compare/v1.44.2...v1.44.3) (2026-10-01)
 
 
