@@ -55,6 +55,39 @@ class TestVectorStore(unittest.TestCase):
         self.assertIn("dedup_count", info)
         self.assertEqual(info["embedding_dim"], 384)
 
+    def test_chunks_collection_created_with_scalar_quantization(self):
+        """New document_chunks collections enable int8 scalar quantization and
+        store original vectors on-disk, so the RAM-resident vector set stays a
+        quarter of its unquantized size as the collection grows into the
+        millions of points (production capacity incident: a 7.24M-point,
+        unquantized, RAM-resident collection on a 15GB host caused severe
+        Qdrant query latency)."""
+        from qdrant_client import QdrantClient
+        from qdrant_client.models import ScalarQuantization
+
+        temp_dir = tempfile.mkdtemp()
+        storage_path = Path(temp_dir) / "qdrant"
+        try:
+            with patch.object(
+                QdrantClient, "create_collection", autospec=True, side_effect=QdrantClient.create_collection
+            ) as mock_create:
+                VectorStore(
+                    storage_path=storage_path,
+                    embedding_dim=384,
+                    embedding_model_name="test-model",
+                    distance=Distance.COSINE,
+                )
+
+            chunks_calls = [
+                c for c in mock_create.call_args_list if c.kwargs.get("collection_name") == VectorStore.CHUNKS_COLLECTION
+            ]
+            self.assertEqual(len(chunks_calls), 1)
+            call = chunks_calls[0]
+            self.assertIsInstance(call.kwargs.get("quantization_config"), ScalarQuantization)
+            self.assertTrue(call.kwargs["vectors_config"].on_disk)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_add_chunk(self):
         """Test adding a single chunk."""
         chunk = DocumentChunk(

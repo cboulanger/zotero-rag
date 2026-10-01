@@ -26,6 +26,9 @@ from qdrant_client.models import (
     MatchAny,
     MatchText,
     Range,
+    ScalarQuantization,
+    ScalarQuantizationConfig,
+    ScalarType,
     SearchParams,
     TextIndexParams,
     TokenizerType,
@@ -41,6 +44,21 @@ logger = logging.getLogger(__name__)
 
 class VectorStoreTimeoutError(RuntimeError):
     """Raised when a Qdrant search request exceeds the configured client timeout."""
+
+
+# int8 scalar quantization cuts the RAM-resident vector set to ~1/4 its
+# unquantized size (original float32 vectors move to on-disk/mmap storage and
+# are only read back to rescore the top candidates of each query). Applied to
+# new document_chunks collections to avoid a repeat of a production incident
+# where a 7.24M-point, unquantized, RAM-resident collection caused Qdrant
+# query latency to spike to 15-40s on a host with limited RAM.
+CHUNKS_QUANTIZATION_CONFIG = ScalarQuantization(
+    scalar=ScalarQuantizationConfig(
+        type=ScalarType.INT8,
+        quantile=0.99,
+        always_ram=True,
+    )
+)
 
 
 def _extract_lastnames(authors: list[str]) -> list[str]:
@@ -177,7 +195,9 @@ class VectorStore:
                 vectors_config=VectorParams(
                     size=self.embedding_dim,
                     distance=self.distance,
+                    on_disk=True,
                 ),
+                quantization_config=CHUNKS_QUANTIZATION_CONFIG,
             )
 
         if self.DEDUP_COLLECTION not in collection_names:
