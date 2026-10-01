@@ -1,6 +1,6 @@
 {
   "name": "zotero-rag",
-  "version": "1.44.1",
+  "version": "1.44.2",
   "description": "A RAG system based on Zotero metadata and attachments",
   "license": "ISC",
   "author": "",

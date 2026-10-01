@@ -1,3 +1,10 @@
+## [1.44.2](https://github.com/cboulanger/zotero-rag/compare/v1.44.1...v1.44.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **document-processor:** add force_extraction to bypass cross-library dedup ([d6b6325](https://github.com/cboulanger/zotero-rag/commit/d6b6325189cfc59bc6f7dc19d914fa1d2f7e1206))
+
 ## [1.44.1](https://github.com/cboulanger/zotero-rag/compare/v1.44.0...v1.44.1) (2026-10-01)
 
 
