@@ -1354,13 +1354,34 @@ class VectorStore:
         if not chunks:
             return 0
 
-        chunk_ids = [c["id"] for c in chunks]
+        return self.delete_chunks_by_ids([c["id"] for c in chunks])
+
+    def delete_chunks_by_ids(self, point_ids: list[str]) -> int:
+        """
+        Delete specific chunks by their Qdrant point IDs.
+
+        Unlike delete_item_chunks (which deletes everything currently stored
+        for an item), this targets an exact, previously-captured set of IDs —
+        used by maintenance reprocessing to remove only the old points after
+        confirming replacement content was written, never the item's whole
+        current state (which may include newly-added points by then). See
+        bin/reindex_oversized_items.py.
+
+        Args:
+            point_ids: Qdrant point IDs to delete.
+
+        Returns:
+            Number of IDs submitted for deletion (not re-verified against
+            Qdrant; deleting an already-absent ID is a no-op).
+        """
+        if not point_ids:
+            return 0
         self.client.delete(
             collection_name=self.CHUNKS_COLLECTION,
-            points_selector=chunk_ids
+            points_selector=point_ids,
         )
-        logger.info(f"Deleted {len(chunk_ids)} chunks for item {item_key}")
-        return len(chunk_ids)
+        logger.info(f"Deleted {len(point_ids)} chunk(s) by explicit ID")
+        return len(point_ids)
 
     def count_library_chunks(self, library_id: str) -> int:
         """

@@ -589,6 +589,38 @@ class TestVectorStore(unittest.TestCase):
         info = self.vector_store.get_collection_info()
         self.assertEqual(info["chunks_count"], 5)
 
+    def test_delete_chunks_by_ids_targets_only_given_points(self):
+        """delete_chunks_by_ids must remove exactly the given point IDs and
+        leave every other point untouched — including other points for the
+        same item_key. This is what makes a safe reindex-then-swap possible:
+        reprocess into fresh points first, and only delete the old ones (by
+        their captured IDs) after confirming the new ones were written,
+        instead of deleting-by-item_key upfront and risking an item left with
+        zero chunks if reprocessing then fails to produce replacements."""
+        chunks = [
+            DocumentChunk(
+                text=f"Chunk {i}",
+                metadata=ChunkMetadata(
+                    chunk_id=f"chunk-{i}",
+                    document_metadata=DocumentMetadata(library_id="1", item_key="ITEM1"),
+                    page_number=1,
+                    text_preview="Chunk",
+                    chunk_index=i,
+                    content_hash=f"hash{i}",
+                ),
+                embedding=[0.1] * 384,
+            )
+            for i in range(3)
+        ]
+        point_ids = self.vector_store.add_chunks_batch(chunks)
+
+        deleted = self.vector_store.delete_chunks_by_ids(point_ids[:2])
+        self.assertEqual(deleted, 2)
+
+        remaining = self.vector_store.get_item_chunks("1", "ITEM1")
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["id"], point_ids[2])
+
 
 if __name__ == "__main__":
     unittest.main()

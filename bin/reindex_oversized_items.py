@@ -9,28 +9,41 @@ would also pick up the fix, but costs roughly one extraction pass over every
 chunk currently in the library (see docs/architecture.md's "Capacity at
 scale" note) — for a library with one 70,000-chunk outlier among thousands of
 small items, that's mostly wasted work. This script targets only the
-oversized items directly, deleting their existing chunks and reprocessing
-just those attachments through the current (chunk-coalescing) pipeline.
+oversized items directly, reprocessing just those attachments through the
+current (chunk-coalescing) pipeline.
 
-It reuses the exact same reprocessing idiom DocumentProcessor's own
-incremental/full sync already uses for a changed item: delete the item's
-existing chunks, then call `_index_item()` again. Deleting the chunks first
-is what makes this safe to re-run on unchanged content — VectorStore.
-check_duplicate()'s same-library-dedup path only skips an item when
-get_item_version() still finds a version for it; with no chunks left, that
-lookup returns None and the duplicate check falls through to fresh
-extraction instead of skipping (see DocumentProcessor._handle_same_library_
-duplicate's docstring).
+It calls `_index_item(..., force_extraction=True)`, which skips both the
+same-library and cross-library dedup lookups (VectorStore.check_duplicate()/
+find_cross_library_duplicate()) and always re-extracts, so it never trusts
+whatever is already stored for this exact item or a sibling copy elsewhere.
+That means it's safe to reprocess *without* deleting the item's existing
+chunks first — the old points and the freshly-added ones can coexist
+(add_chunks_batch always assigns fresh point IDs). This script captures the
+old points' IDs up front and only deletes them *after* confirming
+reprocessing actually produced replacement chunks (see
+VectorStore.delete_chunks_by_ids).
 
-It calls `_index_item(..., force_extraction=True)`, which also skips the
-*cross-library* dedup lookup. Without this, reprocessing a copy of content
-that's duplicated across libraries (same book attached to a personal library
-and a shared group library, for example) doesn't re-extract at all — it just
-cross-copies whatever chunks another library's still-unprocessed copy
-currently has, which can make the chunk count *worse* if that other copy
-hasn't been reprocessed yet. (This happened in production: reprocessing one
-copy of a shared book went from 70,020 to 90,402 chunks because it silently
-copied a sibling library's stale, un-coalesced chunks.) force_extraction
+This matters because reprocessing can legitimately produce zero chunks for
+reasons outside this script's control — most importantly, an attachment
+whose Zotero-hosted file storage has since expired or been removed returns a
+plain 404 from get_attachment_file(), and there's no way to recover its
+content: cross-library dedup can't help either, since matching a sibling
+copy requires a content_hash computed from the downloaded bytes, which were
+never obtained. Deleting first and reprocessing after would permanently
+zero out such an item instead of leaving its last-known-good chunks in
+place. (Hit in production: a delete-then-reprocess run zeroed out two items
+whose attachments now 404 from Zotero's own API — recovered by hand via
+Qdrant's surviving deduplication-collection history, which is not
+guaranteed to be possible in general.)
+
+Cross-library dedup bypass is also why force_extraction is required at all,
+not just an optimization: without it, reprocessing a copy of content that's
+duplicated across libraries (same book attached to a personal library and a
+shared group library, for example) doesn't re-extract — it just cross-copies
+whatever chunks another library's still-unprocessed copy currently has,
+which can make the chunk count *worse* if that other copy hasn't been
+reprocessed yet. (Separately hit in production: reprocessing one copy of a
+shared book went from 70,020 to 90,402 chunks this way.) force_extraction
 guarantees a real extraction + coalesce_chunks pass regardless of what any
 other library currently has stored for the same content.
 
@@ -157,7 +170,8 @@ async def _reprocess_items(
             items_by_key = {item["data"]["key"]: item for item in items if "data" in item}
 
             for item_key in item_keys:
-                old_count = len(vector_store.get_item_chunks(library_id, item_key))
+                old_chunks = vector_store.get_item_chunks(library_id, item_key)
+                old_count = len(old_chunks)
                 item = items_by_key.get(item_key)
 
                 if item is None:
@@ -169,12 +183,35 @@ async def _reprocess_items(
                     print(f"[DRY RUN] {library_id}:{item_key} ({title!r}): {old_count} chunks -> would reprocess")
                     continue
 
+                # Reindex-then-swap, never delete-then-reindex: capture the
+                # existing points' IDs and reprocess *without* deleting first.
+                # force_extraction=True means this never trusts what's already
+                # there, so leaving the old points in place during reprocessing
+                # is harmless (see _process_attachment_bytes). Only delete the
+                # old points afterward, and only if reprocessing actually
+                # produced replacement content — otherwise an attachment that
+                # can no longer be downloaded (e.g. its Zotero file storage
+                # expired/was removed; cross-library dedup can't help either,
+                # since computing a content_hash to match against requires the
+                # bytes) would permanently zero out an item instead of leaving
+                # its last-known-good chunks untouched. Hit in production:
+                # reprocessing two items whose attachments now 404 from
+                # Zotero's own API deleted their chunks upfront with no way to
+                # restore them.
+                old_ids = [c["id"] for c in old_chunks]
                 t0 = time.monotonic()
-                vector_store.delete_item_chunks(library_id, item_key)
                 new_count = await processor._index_item(
                     item, library_id, library_type, force_extraction=True
                 )
                 elapsed = time.monotonic() - t0
+                if new_count == 0:
+                    print(
+                        f"[FAILED] {library_id}:{item_key} ({title!r}): "
+                        f"reprocessing produced 0 chunks ({elapsed:.1f}s) — "
+                        f"existing {old_count} chunks left untouched"
+                    )
+                    continue
+                vector_store.delete_chunks_by_ids(old_ids)
                 print(
                     f"[DONE] {library_id}:{item_key} ({title!r}): "
                     f"{old_count} -> {new_count} chunks ({elapsed:.1f}s)"
