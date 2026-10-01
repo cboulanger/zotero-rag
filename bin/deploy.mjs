@@ -7,11 +7,12 @@
  * using bin/container.mjs deploy with appropriate parameters.
  *
  * Usage:
- *   node bin/deploy.mjs <env-file>
+ *   node bin/deploy.mjs <env-file> [-- extra container.mjs args]
  *
  * Examples:
  *   node bin/deploy.mjs .env.deploy.myserver
  *   node bin/deploy.mjs /path/to/production.env
+ *   node bin/deploy.mjs .env.deploy.myserver --yes   # skip the confirmation prompt
  *
  * Mapping:
  *   DEPLOY_*    → --option flags for the deploy command
@@ -66,7 +67,7 @@ function parseEnvFile(envFilePath) {
 }
 
 function main() {
-  const [envFilePath] = process.argv.slice(2);
+  const [envFilePath, ...extraArgs] = process.argv.slice(2);
 
   if (!envFilePath) {
     console.error('[ERROR] Missing required argument: <env-file>');
@@ -110,7 +111,7 @@ function main() {
     containerEnv.push('--env', 'API_HOST');
   }
 
-  const cmdParts = ['node', 'bin/container.mjs', 'deploy', ...deployOptions, ...containerEnv];
+  const cmdParts = ['node', 'bin/container.mjs', 'deploy', ...deployOptions, ...containerEnv, ...extraArgs];
   const cmd = cmdParts.join(' ');
   console.log(`[INFO] Running: ${cmd}\n`);
 
