@@ -141,6 +141,49 @@ class TestZoteroWebAPIGetItemChildren(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [])
 
 
+class TestZoteroWebAPIGetItemsByKeys(unittest.IsolatedAsyncioTestCase):
+    async def test_get_items_by_keys_passes_comma_joined_itemkey_param(self):
+        items = [{"key": "AAAA", "version": 1, "data": {}}]
+        api = ZoteroWebAPI(api_key="testkey")
+        session = _make_session(_make_response(200, items))
+        api.session = session
+
+        result = await api.get_items_by_keys("u12345", ["AAAA", "BBBB"], "user")
+        self.assertEqual(result, items)
+        params = session.get.call_args.kwargs.get("params", {})
+        self.assertEqual(params["itemKey"], "AAAA,BBBB")
+
+    async def test_get_items_by_keys_empty_list_returns_empty_without_request(self):
+        api = ZoteroWebAPI(api_key="testkey")
+        session = _make_session(_make_response(200, []))
+        api.session = session
+
+        result = await api.get_items_by_keys("u12345", [], "user")
+        self.assertEqual(result, [])
+        session.get.assert_not_called()
+
+    async def test_get_items_by_keys_batches_beyond_fifty_keys(self):
+        """Zotero's itemKey filter accepts at most 50 keys per request."""
+        keys = [f"KEY{i:03d}" for i in range(75)]
+        page1 = [{"key": k, "version": 1, "data": {}} for k in keys[:50]]
+        page2 = [{"key": k, "version": 1, "data": {}} for k in keys[50:]]
+        api = ZoteroWebAPI(api_key="testkey")
+        session = _make_session(_make_response(200, page1), _make_response(200, page2))
+        api.session = session
+
+        result = await api.get_items_by_keys("u12345", keys, "user")
+        self.assertEqual(len(result), 75)
+        self.assertEqual(session.get.call_count, 2)
+
+    async def test_get_items_by_keys_error_status_skips_batch(self):
+        api = ZoteroWebAPI(api_key="testkey")
+        session = _make_session(_make_response(403, {}))
+        api.session = session
+
+        result = await api.get_items_by_keys("u12345", ["AAAA"], "user")
+        self.assertEqual(result, [])
+
+
 class TestZoteroWebAPIGetAttachmentFile(unittest.IsolatedAsyncioTestCase):
     async def test_get_attachment_file_success(self):
         content = b"%PDF-1.4 fake pdf content"

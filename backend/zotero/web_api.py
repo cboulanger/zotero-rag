@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 ZOTERO_API_BASE = "https://api.zotero.org"
 _PAGE_SIZE = 100
+_ITEM_KEY_BATCH_SIZE = 50  # Zotero API's documented max for the itemKey filter
 
 
 class ZoteroWebAPI:
@@ -145,6 +146,33 @@ class ZoteroWebAPI:
                 current_start += len(items)
 
         logger.info("Retrieved %d items from library %s", len(all_items), library_id)
+        return all_items
+
+    async def get_items_by_keys(
+        self,
+        library_id: str,
+        item_keys: list[str],
+        library_type: str = "user",
+    ) -> list[dict[str, Any]]:
+        """Fetch specific items by key, batched per Zotero's itemKey filter limit (50 keys/request)."""
+        if not item_keys:
+            return []
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/items"
+
+        all_items: list[dict] = []
+        for i in range(0, len(item_keys), _ITEM_KEY_BATCH_SIZE):
+            batch = item_keys[i : i + _ITEM_KEY_BATCH_SIZE]
+            params = {"format": "json", "itemKey": ",".join(batch), "limit": _PAGE_SIZE}
+            async with self.session.get(url, params=params) as resp:
+                await self._handle_rate_limit(resp)
+                if resp.status != 200:
+                    logger.error("get_items_by_keys failed: HTTP %s", resp.status)
+                    continue
+                items = await resp.json()
+                if isinstance(items, list):
+                    all_items.extend(items)
+
         return all_items
 
     async def get_item_children(
