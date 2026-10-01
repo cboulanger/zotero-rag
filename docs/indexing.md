@@ -19,6 +19,8 @@ Orchestrates the indexing pipeline:
 - Handles progress tracking and cancellation
 - Implements version-aware incremental updates
 - Delegates extraction/chunking to a `DocumentExtractor` implementation (Kreuzberg by default)
+- Merges small consecutive extractor chunks via `coalesce_chunks()` (see
+  [Chunk Coalescing](#chunk-coalescing) below) before storage
 
 #### DocumentExtractor (Adapter)
 
@@ -35,13 +37,33 @@ Pluggable extraction layer supporting multiple backends and MIME types.
 
 Select backend via `extractor_backend` setting (`kreuzberg` or `legacy`).
 
+#### Chunk Coalescing
+
+`backend/services/chunking.py`'s `coalesce_chunks(chunks, target_size=1500)`
+
+Some extraction backends treat each page as a hard chunk boundary, so a
+page's text becomes its own chunk even when far below the configured
+chunk-size budget — for a long book, this produces one tiny Qdrant point per
+page. `DocumentProcessor` runs every extractor's output through
+`coalesce_chunks()` before storage: it merges consecutive chunks (joined
+with `\n\n`) up to `target_size` characters, keeping the `page_number` of the
+first sub-chunk in each merged group. A chunk already at or above
+`target_size` is kept as-is and never split. This keeps the chunk (and
+Qdrant point) count proportional to document content rather than page count,
+regardless of which extraction backend produced the chunks.
+
+Configurable via `DocumentProcessor(chunk_merge_target_size=...)` (default
+`1500`).
+
 #### VectorStore
 
 `backend/db/vector_store.py`
 
 Qdrant-based storage with three collections:
 
-- **document_chunks**: Vector embeddings with metadata payloads
+- **document_chunks**: Vector embeddings with metadata payloads. Created
+  with int8 scalar quantization and on-disk full-precision vectors — see
+  [Architecture: Vector Database Choice](architecture.md#1-vector-database-choice)
 - **deduplication**: Content hash → (library_id, item_key) mapping
 - **library_metadata**: Per-library indexing state
 
@@ -148,6 +170,7 @@ For each POST /api/index/document:
    → status: "copied_cross_library" — skips steps 6-7
 6. Delete existing chunks for this attachment (if updating)
 7. Extract text + chunks (DocumentExtractor: max_chunk_size=512, overlap=50)
+7a. Coalesce small consecutive chunks up to `chunk_merge_target_size` (default 1500 chars)
 8. Generate embeddings (EmbeddingService: batch processing)
 9. Create ChunkMetadata with version info
 10. Store chunks in vector database

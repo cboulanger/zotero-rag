@@ -19,9 +19,9 @@ QueryOrchestrator  (holds agent registry)
      │               ├── agents_to_use: list[str]
      │               └── filters: MetadataFilters
      │
-     ├─── selected agents — run in parallel via asyncio.gather
-     │         ├── RAGAgent.execute(...)       → AgentResult
-     │         └── MetadataAgent.execute(...)  → AgentResult
+     ├─── selected agents — run in parallel via asyncio.gather(return_exceptions=True)
+     │         ├── RAGAgent.execute(...)       → AgentResult (or isolated failure)
+     │         └── MetadataAgent.execute(...)  → AgentResult (or isolated failure)
      │
      └─── Synthesis LLM call → Final Answer
           (skipped when only the RAG agent ran — direct pass-through)
@@ -53,6 +53,13 @@ result = await orchestrator.query(
 `register(agent)` stores the agent under `agent.name`.  Registering a second agent
 with the same name replaces the first.  Two agents are registered by default:
 `"rag"` and `"metadata"`.
+
+**Fault isolation:** selected agents run via `asyncio.gather(..., return_exceptions=True)`.
+An agent that raises (e.g. `VectorStoreTimeoutError` from a slow Qdrant query) is logged
+and excluded from the result set; sibling agents' results are still used for synthesis.
+If every selected agent fails, the orchestrator re-raises the first failure, which
+`POST /api/query` maps to a `504` for `VectorStoreTimeoutError` (see [API](#api) below)
+or a generic `500` otherwise.
 
 ### `QueryRouter` (`backend/services/query_router.py`)
 
@@ -345,6 +352,13 @@ Also accepts five optional retrieval/answer-diversity tuning fields —
 `max_chunks_per_document`, `low_diversity_available_floor` — each falling back to
 `rag_engine.py`'s module-level defaults when omitted. See
 [Answer Quality Guards](#answer-quality-guards) above.
+
+**Error responses:**
+
+| Status | Cause |
+| --- | --- |
+| `504` | The Qdrant search backend did not respond within its configured timeout (`VectorStoreTimeoutError`) |
+| `500` | Any other unhandled error |
 
 ### `POST /api/index/items/metadata`
 

@@ -479,6 +479,24 @@ The `backendURL` preference is the single configuration point for server locatio
 - **Local file mode** (default, `QDRANT_URL` unset): `QdrantClient(path=...)` — no external service required, but limited to a single uvicorn worker due to file-lock contention
 - **Server mode** (`QDRANT_URL` set): `QdrantClient(url=...)` — Qdrant runs as a sidecar container; supports multiple uvicorn workers (`--workers 4`) for full CPU utilization
 
+**Capacity at scale:**
+
+- `document_chunks` is created with int8 scalar quantization (`quantile=0.99`,
+  `always_ram=True`) and the original full-precision vectors marked
+  `on_disk=True` (`backend/db/vector_store.py`'s `CHUNKS_QUANTIZATION_CONFIG`).
+  Qdrant keeps only the quantized (1 byte/dim) vectors resident for HNSW
+  search and reads the on-disk float32 vectors back only to rescore the
+  top candidates of each query, instead of forcing the full vector set into
+  RAM.
+- `scripts/enable_chunk_quantization.py` applies this to an already-indexed
+  collection in place (Qdrant rebuilds segments in the background; the
+  collection stays queryable throughout).
+- A Qdrant search that exceeds the configured client timeout raises
+  `VectorStoreTimeoutError` instead of propagating a raw `httpx`/`qdrant_client`
+  exception — see [Query Performance](#query-performance) and
+  [Query Routing & Agent Architecture](query-routing.md) for how this
+  surfaces to the API and to sibling agents.
+
 ### 3. Embedding Strategy
 
 **Decision:** Content-hash based caching
@@ -638,6 +656,7 @@ The `backendURL` preference is the single configuration point for server locatio
 - Vector search speed (top_k parameter)
 - LLM inference time (model size, quantization)
 - Context assembly (retrieved chunk count)
+- `document_chunks` collection size (point count × vector dimension)
 
 **Optimization:**
 
@@ -645,6 +664,18 @@ The `backendURL` preference is the single configuration point for server locatio
 - Quantized models reduce memory and latency
 - Configurable top_k and min_score thresholds
 - Embedding cache for repeated queries
+- Int8 scalar quantization on `document_chunks` keeps the RAM-resident vector
+  set at roughly a quarter of its unquantized size as the collection grows
+  (see [Vector Database Choice](#1-vector-database-choice))
+- `coalesce_chunks()` (`backend/services/chunking.py`) merges small
+  consecutive extractor chunks (e.g. one tiny chunk per PDF page) up to a
+  configurable target size before storage, keeping the point count
+  proportional to document content rather than page count — see
+  [Indexing System Documentation](indexing.md)
+- A Qdrant query that exceeds the client timeout raises
+  `VectorStoreTimeoutError`; `QueryOrchestrator` isolates the failure to the
+  agent that hit it (sibling agents still complete) and `POST /api/query`
+  returns `504` instead of a generic `500`
 
 ### Memory Footprint
 
@@ -660,7 +691,8 @@ The `backendURL` preference is the single configuration point for server locatio
 - Lazy model loading (load on first use)
 - Quantization (4-bit, 8-bit) reduces model size
 - Configurable model cache directory
-- Vector DB persistent storage (not in RAM)
+- Vector DB persistent storage, not fully RAM-resident: `document_chunks`
+  stores quantized vectors in RAM and full-precision vectors on disk (mmap)
 
 ---
 
