@@ -868,6 +868,45 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
 
+    async def test_index_item_isolates_attachment_processing_failure(self):
+        """A multi-attachment item where one attachment's extraction/embedding
+        raises must not lose chunks already written for the other attachments —
+        the failure is isolated to that attachment, recorded, and the loop
+        continues. Regression test for a production incident where a single
+        attachment's flaky embedding call crashed the whole item, discarding
+        chunks already stored for its earlier attachments."""
+        mock_item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "book", "title": "Test Book"},
+        }
+        good_attachment = _attachment("GOOD123", "ITEM123")
+        bad_attachment = _attachment("BAD123", "ITEM123")
+        self.mock_zotero_client.get_item_children.return_value = [bad_attachment, good_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"%PDF-1.4 fake bytes"
+
+        self.mock_vector_store.check_duplicate.return_value = None
+
+        async def extract_side_effect(*args, **kwargs):
+            if extract_side_effect.calls == 0:
+                extract_side_effect.calls += 1
+                raise RuntimeError("Internal Server Error")
+            return _make_extraction_chunks(("Hello", None))
+
+        extract_side_effect.calls = 0
+        self.mock_extractor.extract_and_chunk.side_effect = extract_side_effect
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+
+        chunk_count = await self.processor._index_item(mock_item, "test_lib", "user")
+
+        self.assertEqual(chunk_count, 1)
+        self.assertEqual(self.processor._attachment_failures, [
+            {
+                "item_key": "ITEM123",
+                "attachment_key": "BAD123",
+                "error": "Document extraction failed for BAD123: Internal Server Error",
+            },
+        ])
+
     async def test_full_sync_persists_download_failures_on_metadata(self):
         """Full sync must persist up to 100 download-failure records onto
         LibraryIndexMetadata.last_full_scan_failed_downloads, capped, and reset
@@ -1336,6 +1375,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
         self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_vector_store.get_item_version.return_value = None
         # First item extracts fine; second fails extraction (non-fatal, swallowed per-item).
         self.mock_extractor.extract_and_chunk.side_effect = [
             _make_extraction_chunks(("content", 1)),
@@ -1496,6 +1536,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_zotero_client.get_attachment_file.return_value = b"pdf bytes"
         self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_vector_store.get_item_version.return_value = None
         self.mock_extractor.extract_and_chunk.side_effect = [
             _make_extraction_chunks(("content", 1)),
             ValueError("boom"),

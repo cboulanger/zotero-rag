@@ -278,6 +278,11 @@ class DocumentProcessor:
         # attempt to recover them (unlike parse errors, these may be fixable client-side).
         self._download_failures: list[dict] = []
 
+        # Attachments that raised during processing (extraction/embedding errors),
+        # as opposed to _download_failures (couldn't even fetch the bytes). See
+        # _index_item's per-attachment try/except.
+        self._attachment_failures: list[dict] = []
+
         logger.debug("Initialized DocumentProcessor")
 
     async def index_library(
@@ -968,15 +973,35 @@ class DocumentProcessor:
                     self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
                     continue
 
-                result = await self._process_attachment_bytes(
-                    file_bytes=file_bytes,
-                    mime_type=mime_type,
-                    doc_metadata=doc_metadata,
-                    item_version=item_version,
-                    attachment_version=attachment_version,
-                    item_modified=item_modified,
-                    force_extraction=force_extraction,
-                )
+                try:
+                    result = await self._process_attachment_bytes(
+                        file_bytes=file_bytes,
+                        mime_type=mime_type,
+                        doc_metadata=doc_metadata,
+                        item_version=item_version,
+                        attachment_version=attachment_version,
+                        item_modified=item_modified,
+                        force_extraction=force_extraction,
+                    )
+                except _FATAL_EMBEDDING_ERRORS:
+                    # Affects every attachment equally — propagate rather than
+                    # burning through the rest of the item's attachments.
+                    raise
+                except Exception as e:
+                    # One bad attachment (e.g. a transient extraction/embedding
+                    # failure) must not discard chunks already written for this
+                    # item's other attachments — isolate it and move on. A failed
+                    # attachment with no chunks stored is picked up again on the
+                    # next run (get_item_version only reflects attachments that
+                    # actually wrote chunks).
+                    logger.error(
+                        "Error processing attachment %s of item %s: %s",
+                        attachment_key, item_key, e, exc_info=True,
+                    )
+                    self._attachment_failures.append(
+                        {"item_key": item_key, "attachment_key": attachment_key, "error": str(e)}
+                    )
+                    continue
                 total_chunks += result.chunks_written
 
         # Fall back to abstractNote when no attachment is available or all downloads failed
