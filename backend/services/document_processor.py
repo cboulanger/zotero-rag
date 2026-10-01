@@ -897,10 +897,18 @@ class DocumentProcessor:
         self,
         item: dict,
         library_id: str,
-        library_type: str
+        library_type: str,
+        force_extraction: bool = False,
     ) -> int:
         """
         Index a single item with all its indexable attachments.
+
+        Args:
+            force_extraction: Skip same-library/cross-library dedup lookups and
+                always re-extract. Used by maintenance reprocessing (e.g.
+                bin/reindex_oversized_items.py): without this, reprocessing one
+                copy of duplicated content just cross-copies another library's
+                still-unprocessed chunks instead of actually re-chunking.
 
         Returns:
             Number of chunks created.
@@ -967,6 +975,7 @@ class DocumentProcessor:
                     item_version=item_version,
                     attachment_version=attachment_version,
                     item_modified=item_modified,
+                    force_extraction=force_extraction,
                 )
                 total_chunks += result.chunks_written
 
@@ -1060,6 +1069,7 @@ class DocumentProcessor:
         attachment_version: int,
         item_modified: str,
         on_progress: Optional[Callable[[str], None]] = None,
+        force_extraction: bool = False,
     ) -> AttachmentProcessingResult:
         """
         Extract, embed, and store chunks for a single attachment.
@@ -1074,6 +1084,8 @@ class DocumentProcessor:
             item_version: Zotero item version number.
             attachment_version: Zotero attachment version number.
             item_modified: ISO 8601 modification timestamp from Zotero.
+            force_extraction: Skip same-library/cross-library dedup lookups
+                (Steps 1-2 below) and always re-extract — see _index_item.
 
         Returns:
             AttachmentProcessingResult with chunk count and processing status.
@@ -1085,7 +1097,9 @@ class DocumentProcessor:
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
         # Step 1: same-library dedup
-        same_lib_dup = await asyncio.to_thread(self.vector_store.check_duplicate, content_hash, library_id)
+        same_lib_dup = None if force_extraction else await asyncio.to_thread(
+            self.vector_store.check_duplicate, content_hash, library_id
+        )
         if same_lib_dup is not None:
             dup_result = await self._handle_same_library_duplicate(
                 dup=same_lib_dup,
@@ -1103,7 +1117,7 @@ class DocumentProcessor:
             # fall through to Step 2 / fresh extraction.
 
         # Step 2: cross-library content-hash copy — reuse chunks from another library
-        cross_record = await asyncio.to_thread(
+        cross_record = None if force_extraction else await asyncio.to_thread(
             self.vector_store.find_cross_library_duplicate, content_hash, library_id
         )
         if cross_record:

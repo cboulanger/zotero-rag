@@ -22,6 +22,18 @@ lookup returns None and the duplicate check falls through to fresh
 extraction instead of skipping (see DocumentProcessor._handle_same_library_
 duplicate's docstring).
 
+It calls `_index_item(..., force_extraction=True)`, which also skips the
+*cross-library* dedup lookup. Without this, reprocessing a copy of content
+that's duplicated across libraries (same book attached to a personal library
+and a shared group library, for example) doesn't re-extract at all — it just
+cross-copies whatever chunks another library's still-unprocessed copy
+currently has, which can make the chunk count *worse* if that other copy
+hasn't been reprocessed yet. (This happened in production: reprocessing one
+copy of a shared book went from 70,020 to 90,402 chunks because it silently
+copied a sibling library's stale, un-coalesced chunks.) force_extraction
+guarantees a real extraction + coalesce_chunks pass regardless of what any
+other library currently has stored for the same content.
+
 Usage
 -----
     # Discover candidates (read-only): items with >= 1000 chunks, top 25
@@ -159,7 +171,9 @@ async def _reprocess_items(
 
                 t0 = time.monotonic()
                 vector_store.delete_item_chunks(library_id, item_key)
-                new_count = await processor._index_item(item, library_id, library_type)
+                new_count = await processor._index_item(
+                    item, library_id, library_type, force_extraction=True
+                )
                 elapsed = time.monotonic() - t0
                 print(
                     f"[DONE] {library_id}:{item_key} ({title!r}): "

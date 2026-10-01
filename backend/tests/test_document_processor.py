@@ -263,6 +263,45 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added_record.item_key, "ITEM123")
         self.assertEqual(added_record.content_hash, "existing_hash")
 
+    async def test_index_item_force_extraction_bypasses_cross_library_duplicate(self):
+        """force_extraction=True must skip the dedup/cross-library-copy lookups
+        entirely, forcing a real extraction even when a matching content hash
+        exists elsewhere.
+
+        Used by maintenance reprocessing (bin/reindex_oversized_items.py):
+        reprocessing one copy of duplicated content without this flag just
+        cross-copies another library's still-unprocessed, un-coalesced chunks
+        instead of re-extracting — a real production incident where a
+        70,020-chunk item grew to 90,402 chunks after "reprocessing" because
+        it silently copied a sibling library's stale copy.
+        """
+        item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "book", "title": "Big Book"},
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
+
+        # A duplicate WOULD be found and copied if dedup checks ran.
+        duplicate_record = DeduplicationRecord(
+            content_hash="existing_hash", library_id="other_lib", item_key="OTHER", relation_uri=None,
+        )
+        self.mock_vector_store.check_duplicate.return_value = duplicate_record
+        self.mock_vector_store.find_cross_library_duplicate.return_value = duplicate_record
+
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("Some content.", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2, 0.3]]
+        self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
+
+        chunk_count = await self.processor._index_item(item, "test_lib", "user", force_extraction=True)
+
+        self.assertEqual(chunk_count, 1)
+        self.mock_extractor.extract_and_chunk.assert_called_once()
+        self.mock_vector_store.copy_chunks_cross_library.assert_not_called()
+        self.mock_vector_store.check_duplicate.assert_not_called()
+        self.mock_vector_store.find_cross_library_duplicate.assert_not_called()
+
     async def test_index_library_reindexes_when_duplicate_source_has_no_chunks(self):
         """If the matching item's chunks are gone (orphaned dedup record across
         items), fall through to fresh extraction instead of leaving this item
