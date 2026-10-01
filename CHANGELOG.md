@@ -1,3 +1,10 @@
+## [1.45.1](https://github.com/cboulanger/zotero-rag/compare/v1.45.0...v1.45.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **embeddings:** retry all InternalServerError responses, not just "try again" ([bc931b5](https://github.com/cboulanger/zotero-rag/commit/bc931b507cd3d389e62ad1ce32ad216f4f52aae2))
+
 # [1.45.0](https://github.com/cboulanger/zotero-rag/compare/v1.44.3...v1.45.0) (2026-10-01)
 
 
