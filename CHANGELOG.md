@@ -1,3 +1,10 @@
+## [1.44.3](https://github.com/cboulanger/zotero-rag/compare/v1.44.2...v1.44.3) (2026-10-01)
+
+
+### Bug Fixes
+
+* **document-processor:** isolate per-attachment failures within an item ([913b9a1](https://github.com/cboulanger/zotero-rag/commit/913b9a16bb23c08cec32e4e92c6ca7bcf69bd8ab))
+
 ## [1.44.2](https://github.com/cboulanger/zotero-rag/compare/v1.44.1...v1.44.2) (2026-10-01)
 
 
