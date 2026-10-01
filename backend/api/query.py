@@ -25,7 +25,7 @@ from backend.services.rag_engine import (
 )
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.db.vector_store import VectorStore
+from backend.db.vector_store import VectorStore, VectorStoreTimeoutError
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
 
@@ -302,6 +302,15 @@ async def query_libraries(
         if isinstance(exc, NeedsClarificationError):
             return _needs_clarification_response(query, exc)
         raise
+
+    except VectorStoreTimeoutError as e:
+        # Known, recoverable failure mode (the search backend is overloaded) —
+        # a short warning is enough; a full traceback would just be log noise.
+        logger.warning(f"Query failed: {e}")
+        raise HTTPException(
+            status_code=504,
+            detail="The search backend is taking longer than usual to respond. Please try again in a moment.",
+        )
 
     except Exception as e:
         logger.exception("Query failed")

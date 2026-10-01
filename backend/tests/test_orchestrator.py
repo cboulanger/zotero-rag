@@ -205,6 +205,46 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RAG context", synthesis_prompt)
         self.assertIn("META context", synthesis_prompt)
 
+    async def test_one_agent_failure_does_not_take_down_siblings(self):
+        """A sibling agent's exception (e.g. a Qdrant search timeout) must not
+        cancel/propagate through the whole gather — the surviving agent's result
+        is used instead."""
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="unused", sources=[]))
+        meta_agent.execute = AsyncMock(side_effect=RuntimeError("Qdrant search timed out after 30s"))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            result = await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        self.assertEqual(result.answer, "RAG context")
+        meta_agent.execute.assert_called_once()
+
+    async def test_all_agents_failing_raises_the_underlying_error(self):
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="unused", sources=[]))
+        rag_agent.execute = AsyncMock(side_effect=RuntimeError("Qdrant search timed out after 30s"))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="unused", sources=[]))
+        meta_agent.execute = AsyncMock(side_effect=RuntimeError("Qdrant search timed out after 30s"))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            with self.assertRaises(RuntimeError):
+                await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
     async def test_synthesis_prompt_forbids_process_narration_and_ungrounded_speculation(self):
         orch = _make_orchestrator()
         rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))

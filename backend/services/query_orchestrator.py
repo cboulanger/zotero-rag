@@ -249,8 +249,10 @@ class QueryOrchestrator:
             if fallback:
                 selected = [fallback]
 
-        # 3. Execute in parallel
-        agent_results: list[AgentResult] = await asyncio.gather(*[
+        # 3. Execute in parallel. A single agent's failure (e.g. a Qdrant search
+        # timeout) must not take down its siblings — collect exceptions instead of
+        # letting gather propagate the first one and cancel the rest.
+        raw_results = await asyncio.gather(*[
             agent.execute(
                 question=question,
                 library_ids=library_ids,
@@ -268,7 +270,20 @@ class QueryOrchestrator:
                 low_diversity_available_floor=low_diversity_available_floor,
             )
             for agent in selected
-        ])
+        ], return_exceptions=True)
+
+        agent_results: list[AgentResult] = []
+        failures: list[Exception] = []
+        for agent, raw in zip(selected, raw_results):
+            if isinstance(raw, Exception):
+                logger.warning(f"Agent '{agent.name}' failed: {raw}")
+                failures.append(raw)
+                continue
+            agent_results.append(raw)
+
+        if not agent_results:
+            # Every agent failed — surface the failure rather than returning silently empty.
+            raise failures[0]
 
         # 3a. Clarification partition — an agent that judges the query too broad
         # contributes no usable content; short-circuit only if NONE of the

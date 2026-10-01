@@ -39,6 +39,10 @@ from backend.models.library import LibraryIndexMetadata
 logger = logging.getLogger(__name__)
 
 
+class VectorStoreTimeoutError(RuntimeError):
+    """Raised when a Qdrant search request exceeds the configured client timeout."""
+
+
 def _extract_lastnames(authors: list[str]) -> list[str]:
     """Return lowercase last names from a list of author strings.
 
@@ -441,14 +445,27 @@ class VectorStore:
         )
 
         # Search using query_points (replaces deprecated search method)
-        results = self.client.query_points(
-            collection_name=self.CHUNKS_COLLECTION,
-            query=query_vector,
-            limit=limit,
-            score_threshold=score_threshold,
-            query_filter=query_filter,
-            with_payload=True,
-        ).points
+        try:
+            results = self.client.query_points(
+                collection_name=self.CHUNKS_COLLECTION,
+                query=query_vector,
+                limit=limit,
+                score_threshold=score_threshold,
+                query_filter=query_filter,
+                with_payload=True,
+            ).points
+        except (TimeoutException, ReadTimeout, WriteTimeout) as exc:
+            logger.warning(f"Qdrant search timed out after {self.qdrant_timeout}s")
+            raise VectorStoreTimeoutError(
+                f"Qdrant search timed out after {self.qdrant_timeout}s"
+            ) from exc
+        except ResponseHandlingException as exc:
+            if "timed out" not in str(exc).lower():
+                raise
+            logger.warning(f"Qdrant search timed out after {self.qdrant_timeout}s")
+            raise VectorStoreTimeoutError(
+                f"Qdrant search timed out after {self.qdrant_timeout}s"
+            ) from exc
 
         # Convert to SearchResult objects
         search_results = []

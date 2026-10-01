@@ -6,10 +6,13 @@ import unittest
 import tempfile
 import shutil
 from pathlib import Path
+from unittest.mock import patch
 
+from httpx import ReadTimeout
+from qdrant_client.http.exceptions import ResponseHandlingException
 from qdrant_client.models import Distance
 
-from backend.db.vector_store import VectorStore
+from backend.db.vector_store import VectorStore, VectorStoreTimeoutError
 from backend.models.document import (
     DocumentChunk,
     ChunkMetadata,
@@ -208,6 +211,34 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].chunk.metadata.chunk_id, "chunk-001")
         self.assertGreater(results[0].score, results[1].score)
+
+    def test_search_raises_vector_store_timeout_error_on_read_timeout(self):
+        """A raw httpx ReadTimeout from the client is converted to VectorStoreTimeoutError."""
+        with patch.object(
+            self.vector_store.client, "query_points", side_effect=ReadTimeout("timed out")
+        ):
+            with self.assertRaises(VectorStoreTimeoutError):
+                self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+
+    def test_search_raises_vector_store_timeout_error_on_response_handling_timeout(self):
+        """A qdrant_client ResponseHandlingException wrapping a timeout is converted too."""
+        with patch.object(
+            self.vector_store.client,
+            "query_points",
+            side_effect=ResponseHandlingException("timed out"),
+        ):
+            with self.assertRaises(VectorStoreTimeoutError):
+                self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+
+    def test_search_reraises_non_timeout_response_handling_exception(self):
+        """A ResponseHandlingException NOT about a timeout must propagate unchanged."""
+        with patch.object(
+            self.vector_store.client,
+            "query_points",
+            side_effect=ResponseHandlingException("connection refused"),
+        ):
+            with self.assertRaises(ResponseHandlingException):
+                self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
 
     def test_search_with_library_filter(self):
         """Test search with library ID filter."""
