@@ -2421,6 +2421,62 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Retry indexing a single attachment that previously hit skipped_empty (no
+	 * extractable text), with a plain re-upload. Used by the Fix Unavailable
+	 * dialog's "Search & Fix" button — the attachment's underlying file may
+	 * have been replaced in place since the skip was recorded (e.g. a scanned
+	 * PDF that was OCR'd outside Zotero), which doesn't bump Zotero's
+	 * item.version and so would never trigger a normal indexing run's
+	 * re-upload. Like retryTimeoutSkippedAttachment, this always re-uploads
+	 * regardless of cache state.
+	 * @param {any} attachmentItem - Zotero attachment item
+	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<{fixed: boolean, stillEmpty: boolean, error?: string}>}
+	 */
+	async retryEmptyTextSkippedAttachment(attachmentItem, parentItem, libraryID) {
+		try {
+			const library = Zotero.Libraries.get(libraryID);
+			const libraryType = library ? library.libraryType : 'user';
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+
+			const att = {
+				item_key: parentItem ? parentItem.key : attachmentItem.key,
+				attachment_key: attachmentItem.key,
+				mime_type: attachmentItem.attachmentContentType || 'application/pdf',
+				item_version: parentItem ? (parentItem.version || 0) : (attachmentItem.version || 0),
+				attachment_version: attachmentItem.version || 0,
+				zoteroItem: attachmentItem,
+				parentItem,
+				filePath: null,
+			};
+
+			const result = await RemoteIndexer._uploadAttachment({
+				att,
+				libraryId: backendLibraryId,
+				libraryType,
+				backendURL: this.backendURL,
+				userId: this.getCurrentZoteroUserId ? this.getCurrentZoteroUserId() : null,
+				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
+				log: (msg) => this.log(msg),
+			});
+
+			if (result.skippedEmpty) {
+				return { fixed: false, stillEmpty: true };
+			}
+			if (result.parseError || result.skippedTimeout) {
+				// Re-extraction surfaced a different, non-empty failure — treat as
+				// "not fixed, not empty anymore" rather than retry-forever.
+				return { fixed: false, stillEmpty: false, error: result.errorDetail || 'Extraction failed' };
+			}
+			return { fixed: true, stillEmpty: false };
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return { fixed: false, stillEmpty: false, error: msg };
+		}
+	}
+
+	/**
 	 * Load server-skipped attachment entries and resolve them to UnavailableAttachmentInfo objects.
 	 * Silently drops entries where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID

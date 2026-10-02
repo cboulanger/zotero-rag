@@ -454,19 +454,18 @@ var ZoteroFixUnavailableDialog = {
 		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked);
 
 		for (const i of parseErrorIndices)  this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
-		for (const i of emptyTextIndices)   this.setRowStatus(i, 'not-found', 'Not indexable — delete or reindex after upgrade');
 		for (const i of linkedIndices)      this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');
+		for (const i of emptyTextIndices)   this.setRowStatus(i, 'searching', 'Re-checking (file may have changed)...');
 
 		// Phase 0: retry skipReason='timeout' rows server-side with a doubled
-		// extraction timeout. Unlike skipReason='no text' (genuinely empty —
-		// no timeout can produce text that isn't there), a 'timeout' row's file
-		// downloaded fine; only Kreuzberg's parsing pass ran out of time, so a
-		// longer timeout can plausibly succeed. Sequential (not batched like
-		// Phase 1) since these are exactly the largest/slowest files — running
-		// several OCR-heavy extractions concurrently risks the Kreuzberg
-		// sidecar's own memory limits.
+		// extraction timeout. A 'timeout' row's file downloaded fine; only
+		// Kreuzberg's parsing pass ran out of time, so a longer timeout can
+		// plausibly succeed. Sequential (not batched like Phase 1) since these
+		// are exactly the largest/slowest files — running several OCR-heavy
+		// extractions concurrently risks the Kreuzberg sidecar's own memory
+		// limits.
 		/** @type {Array<number>} */
 		const timeoutFixedIndices = [];
 		let timeoutStillFailed = 0;
@@ -500,6 +499,54 @@ var ZoteroFixUnavailableDialog = {
 			try {
 				await this.plugin.removeSkippedServerItems(
 					this.backendLibraryId, timeoutFixedIndices.map(i => this.items[i].attachmentItem.key)
+				);
+			} catch (e) {
+				console.error(`fix-unavailable: failed to prune fixed skipped-server entries: ${e}`);
+			}
+		}
+
+		// Phase 0b: retry skipReason='no text' rows with a plain re-upload. A
+		// "no text" skip reflects the attachment's content *at the time it was
+		// last indexed* (e.g. a scanned PDF with no text layer) — if the user
+		// has since OCR'd the same file in place (outside Zotero, e.g. via
+		// ScanTailor), Zotero's own item.version often doesn't change, since a
+		// manual file replace isn't a Zotero-tracked edit. The normal indexing
+		// run's version cache would therefore never notice and keep skipping
+		// it forever. Bypass that cache here by re-uploading directly, same as
+		// the timeout retry above.
+		/** @type {Array<number>} */
+		const emptyTextFixedIndices = [];
+		let emptyTextStillFailed = 0;
+		if (emptyTextIndices.length > 0) {
+			this.setStatus(`Re-checking ${emptyTextIndices.length} previously empty file(s)...`);
+			for (const i of emptyTextIndices) {
+				const info = this.items[i];
+				try {
+					const result = await this.plugin.retryEmptyTextSkippedAttachment(
+						info.attachmentItem, info.parentItem, this.libraryID
+					);
+					if (result.fixed) {
+						this.setRowStatus(i, 'fixed', 'Fixed (re-extracted)');
+						emptyTextFixedIndices.push(i);
+					} else if (result.stillEmpty) {
+						this.setRowStatus(i, 'not-found', 'Not indexable — delete or replace file');
+						emptyTextStillFailed++;
+					} else {
+						this.setRowStatus(i, 'error', `Retry failed: ${result.error}`, result.error);
+						emptyTextStillFailed++;
+					}
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					emptyTextStillFailed++;
+					console.error(`fix-unavailable: empty-text retry error for item ${info.zoteroID}: ${msg}`);
+				}
+			}
+		}
+		if (emptyTextFixedIndices.length > 0 && this.plugin?.removeSkippedServerItems) {
+			try {
+				await this.plugin.removeSkippedServerItems(
+					this.backendLibraryId, emptyTextFixedIndices.map(i => this.items[i].attachmentItem.key)
 				);
 			} catch (e) {
 				console.error(`fix-unavailable: failed to prune fixed skipped-server entries: ${e}`);
@@ -550,8 +597,8 @@ var ZoteroFixUnavailableDialog = {
 			.map(r => r.index);
 
 		// Phase 2: copy from another library for imported items still missing
-		let fixed    = downloadResults.filter(r => r.downloaded).length + timeoutFixedIndices.length;
-		let notFound = linkedIndices.length + parseErrorIndices.length + emptyTextIndices.length + timeoutStillFailed;
+		let fixed    = downloadResults.filter(r => r.downloaded).length + timeoutFixedIndices.length + emptyTextFixedIndices.length;
+		let notFound = linkedIndices.length + parseErrorIndices.length + timeoutStillFailed + emptyTextStillFailed;
 		let errors   = 0;
 
 		/** @type {Array<number>} */
@@ -607,6 +654,7 @@ var ZoteroFixUnavailableDialog = {
 			...downloadResults.filter(r => r.downloaded).map(r => r.index),
 			...phase2FixedIndices,
 			...timeoutFixedIndices,
+			...emptyTextFixedIndices,
 		];
 		const fixedDownloadFailedKeys = allFixedIndices
 			.filter(i => this.items[i].serverDownloadFailed)

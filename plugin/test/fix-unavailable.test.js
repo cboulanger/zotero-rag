@@ -199,7 +199,7 @@ test('searchAndFix keeps a still-timed-out row visible with an updated status, w
 	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
 });
 
-test('searchAndFix does not retry skipReason "no text" rows — a timeout retry cannot fix genuinely empty extraction', async () => {
+test('searchAndFix retries skipReason "no text" rows via retryEmptyTextSkippedAttachment instead of marking them not-found immediately', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
 	dialog.libraryID = 1;
@@ -209,16 +209,93 @@ test('searchAndFix does not retry skipReason "no text" rows — a timeout retry 
 	dialog.items = [
 		{ attachmentItem: { key: 'EMPTY1' }, parentItem: { key: 'PARENT1' }, skipReason: 'no text', isLinked: false },
 	];
-	let retryCalled = false;
+	const retryCalls = [];
+	const removedCalls = [];
 	dialog.plugin = {
-		retryTimeoutSkippedAttachment: async () => { retryCalled = true; return { fixed: true, stillTimedOut: false }; },
-		removeSkippedServerItems: async () => {},
+		retryEmptyTextSkippedAttachment: async (att, parent, libId) => {
+			retryCalls.push({ key: att.key, libId });
+			return { fixed: true, stillEmpty: false };
+		},
+		removeSkippedServerItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
 	};
 
 	await dialog.searchAndFix();
 
-	assert.strictEqual(retryCalled, false);
+	assert.strictEqual(retryCalls.length, 1);
+	assert.strictEqual(retryCalls[0].key, 'EMPTY1');
+	assert.strictEqual(removedCalls.length, 1);
+	assert.deepStrictEqual([...removedCalls[0].keys], ['EMPTY1']);
+	// Fixed row is removed from the table immediately, same as other fix paths.
+	assert.strictEqual(dialog.items.length, 0);
+});
+
+test('searchAndFix keeps a still-empty row visible with an updated status, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'STILLEMPTY' }, parentItem: { key: 'PARENT1' }, skipReason: 'no text', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryEmptyTextSkippedAttachment: async () => ({ fixed: false, stillEmpty: true }),
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
 	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
+});
+
+test('searchAndFix marks a row with error status when retryEmptyTextSkippedAttachment returns a non-empty failure, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'EMPTYPARSEFAIL' }, parentItem: { key: 'PARENT1' }, skipReason: 'no text', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryEmptyTextSkippedAttachment: async () => ({ fixed: false, stillEmpty: false, error: 'Binary data — unsupported format' }),
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'error');
+});
+
+test('searchAndFix marks a row with error status when retryEmptyTextSkippedAttachment throws, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'EMPTYNETERR' }, parentItem: { key: 'PARENT1' }, skipReason: 'no text', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryEmptyTextSkippedAttachment: async () => { throw new Error('network error'); },
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'error');
 });
 
 test('searchAndFix marks a row with error status when retryTimeoutSkippedAttachment returns a non-timeout failure, without pruning the store', async () => {
