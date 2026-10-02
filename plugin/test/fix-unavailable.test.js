@@ -220,3 +220,49 @@ test('searchAndFix does not retry skipReason "no text" rows — a timeout retry 
 	assert.strictEqual(retryCalled, false);
 	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
 });
+
+test('searchAndFix marks a row with error status when retryTimeoutSkippedAttachment returns a non-timeout failure, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'PARSEFAIL' }, parentItem: { key: 'PARENT1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => ({ fixed: false, stillTimedOut: false, error: 'Binary data — unsupported format' }),
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'error');
+});
+
+test('searchAndFix marks a row with error status when retryTimeoutSkippedAttachment throws, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'NETERR' }, parentItem: { key: 'PARENT1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => { throw new Error('network error'); },
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'error');
+});
