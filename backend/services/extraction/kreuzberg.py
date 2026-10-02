@@ -24,15 +24,28 @@ from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 logger = logging.getLogger(__name__)
 
 _TIMEOUT_FLOOR = 60       # seconds
-_TIMEOUT_CAP = 1800       # seconds (30 min)
+_TIMEOUT_CAP_DEFAULT = 1800    # seconds (30 min) — overridable via Settings.kreuzberg_timeout_seconds
 _BYTES_PER_SECOND_PDF = 3_000    # OCR-heavy; slow per byte
 _BYTES_PER_SECOND_OTHER = 10_000
 
 
-def _compute_timeout(content_size: int, mime_type: str) -> int:
-    """Return a per-request timeout scaled to document size and type."""
+def _compute_timeout(
+    content_size: int,
+    mime_type: str,
+    cap: int = _TIMEOUT_CAP_DEFAULT,
+    multiplier: float = 1.0,
+) -> int:
+    """Return a per-request timeout scaled to document size and type.
+
+    `multiplier` scales both the size-based computed value and the cap by the
+    same factor — scaling only the raw value would be a no-op for any file
+    already large enough to saturate the cap, which is exactly the case a
+    repair retry with a longer timeout needs to help.
+    """
     rate = _BYTES_PER_SECOND_PDF if mime_type == "application/pdf" else _BYTES_PER_SECOND_OTHER
-    return max(_TIMEOUT_FLOOR, min(_TIMEOUT_CAP, content_size // rate))
+    scaled_cap = int(cap * multiplier)
+    scaled_value = int((content_size // rate) * multiplier)
+    return max(_TIMEOUT_FLOOR, min(scaled_cap, scaled_value))
 
 
 class KreuzbergTimeoutError(RuntimeError):
@@ -57,6 +70,7 @@ class KreuzbergExtractor(DocumentExtractor):
         max_chunk_size: int = 512,
         chunk_overlap: int = 50,
         ocr_enabled: bool = True,
+        timeout_cap: int = _TIMEOUT_CAP_DEFAULT,
     ):
         """
         Args:
@@ -64,9 +78,13 @@ class KreuzbergExtractor(DocumentExtractor):
             max_chunk_size: Maximum characters per chunk.
             chunk_overlap: Overlap characters between consecutive chunks.
             ocr_enabled: Whether to attempt OCR on image-only pages.
+            timeout_cap: Upper bound (seconds) for the per-request timeout computed
+                from document size — see _compute_timeout(). Normally comes from
+                Settings.kreuzberg_timeout_seconds.
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
         self._ocr_enabled = ocr_enabled
+        self._timeout_cap = timeout_cap
         self._config: dict[str, Any] = {
             "chunking": {
                 "max_characters": max_chunk_size,
@@ -76,13 +94,15 @@ class KreuzbergExtractor(DocumentExtractor):
         }
         logger.debug(
             f"Initialized KreuzbergExtractor (url={kreuzberg_url}, "
-            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled})"
+            f"max_chars={max_chunk_size}, overlap={chunk_overlap}, ocr={ocr_enabled}, "
+            f"timeout_cap={timeout_cap})"
         )
 
     async def extract_and_chunk(
         self,
         content: bytes,
         mime_type: str,
+        timeout_multiplier: float = 1.0,
     ) -> list[ExtractionChunk]:
         """
         Send document bytes to the kreuzberg sidecar and return extraction chunks.
@@ -90,14 +110,19 @@ class KreuzbergExtractor(DocumentExtractor):
         Args:
             content: Raw document bytes.
             mime_type: MIME type of the document (e.g. "application/pdf").
+            timeout_multiplier: Scales both the computed per-request timeout and
+                this instance's configured cap by this factor. Used only by the
+                Fix Unavailable repair action for attachments that previously hit
+                `skipped_timeout` — normal indexing always uses the default 1.0.
 
         Returns:
             List of ExtractionChunk objects, empty if extraction fails.
         """
         url = f"{self._kreuzberg_url}/extract"
-        timeout = _compute_timeout(len(content), mime_type)
+        timeout = _compute_timeout(len(content), mime_type, cap=self._timeout_cap, multiplier=timeout_multiplier)
         logger.debug(
-            f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s"
+            f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s "
+            f"(cap={self._timeout_cap}, multiplier={timeout_multiplier})"
         )
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

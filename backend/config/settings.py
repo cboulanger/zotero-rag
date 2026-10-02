@@ -99,6 +99,12 @@ class Settings(BaseSettings):
         description="URL of the kreuzberg sidecar HTTP API. "
                     "Used when extractor_backend='kreuzberg' and the kreuzberg container is running."
     )
+    kreuzberg_timeout_seconds: int = Field(
+        default=1800,
+        description="Upper bound (seconds) for the kreuzberg sidecar's per-request timeout, "
+                    "which is otherwise scaled down automatically for smaller documents. "
+                    "Raise this if large OCR-heavy PDFs or HTML snapshots hit skipped_timeout."
+    )
     pdf_split_threshold: int = Field(
         default=50 * 1024 ** 2,
         description="PDFs larger than this are split into parts before sending to kreuzberg. "
