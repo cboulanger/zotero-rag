@@ -116,6 +116,23 @@ class DocumentUploadAuthorizationTest(unittest.TestCase):
         )
         self.assertNotEqual(r.status_code, 403)
 
+    def test_upload_document_accepts_timeout_multiplier_field(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        metadata = json.dumps({
+            "library_id": "u1",
+            "item_key": "ITEM1",
+            "attachment_key": "ATT1",
+        })
+        r = self.client.post(
+            "/api/index/document",
+            files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
+            data={"metadata": metadata, "timeout_multiplier": "2.0"},
+        )
+        # Not 422/400 — the field is accepted and parsed without error. (Testing
+        # mode's extractor stub makes this a cheap smoke test, not a full
+        # end-to-end timeout check — that's covered by Task 2's unit tests.)
+        self.assertEqual(r.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

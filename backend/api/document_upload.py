@@ -264,6 +264,7 @@ async def _execute_upload(
     vector_store: VectorStore,
     embedding_service,
     on_progress: Optional[Callable[[str], None]] = None,
+    timeout_multiplier: float = 1.0,
 ) -> DocumentUploadResult:
     """Core upload processing: duplicate-check → extract → embed → store → update lib meta.
 
@@ -331,6 +332,7 @@ async def _execute_upload(
             attachment_version=attachment_version,
             item_modified=item_modified,
             on_progress=on_progress,
+            timeout_multiplier=timeout_multiplier,
         )
         chunks_added = proc_result.chunks_written
         logger.info(
@@ -598,6 +600,12 @@ async def upload_and_index_document(
             "zotero_modified (ISO 8601 string)"
         ),
     ),
+    timeout_multiplier: float = Form(
+        1.0,
+        description="Scales the extraction timeout for this upload only. Used by the "
+                    "Fix Unavailable repair action to retry a previously skipped_timeout "
+                    "attachment with more time.",
+    ),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
@@ -628,7 +636,9 @@ async def upload_and_index_document(
     """
     meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
         library_type, mime_type, item_version, attachment_version, item_modified, \
-        file_bytes = await _parse_upload_request(file, metadata, identity)
+        file_bytes, timeout_multiplier = await _parse_upload_request(
+            file, metadata, identity, timeout_multiplier
+        )
 
     logger.info(
         f"Upload request: library={library_id} user={user_id} "
@@ -658,6 +668,7 @@ async def upload_and_index_document(
         library_name=meta_dict.get("library_name", ""),
         vector_store=vector_store,
         embedding_service=embedding_service,
+        timeout_multiplier=timeout_multiplier,
     )
 
 
@@ -670,6 +681,12 @@ async def upload_and_index_document_async(
     http_request: Request,
     file: UploadFile = File(..., description="Raw attachment bytes"),
     metadata: str = Form(...),
+    timeout_multiplier: float = Form(
+        1.0,
+        description="Scales the extraction timeout for this upload only. Used by the "
+                    "Fix Unavailable repair action to retry a previously skipped_timeout "
+                    "attachment with more time.",
+    ),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
@@ -685,7 +702,9 @@ async def upload_and_index_document_async(
     """
     meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id, \
         library_type, mime_type, item_version, attachment_version, item_modified, \
-        file_bytes = await _parse_upload_request(file, metadata, identity)
+        file_bytes, timeout_multiplier = await _parse_upload_request(
+            file, metadata, identity, timeout_multiplier
+        )
 
     logger.info(
         f"Async upload request: library={library_id} user={user_id} "
@@ -742,6 +761,7 @@ async def upload_and_index_document_async(
         library_name=meta_dict.get("library_name", ""),
         vector_store=vector_store,
         embedding_service=embedding_service,
+        timeout_multiplier=timeout_multiplier,
     ))
     logger.info(f"Async upload task {task_id} created for {attachment_key}")
     return AsyncUploadResponse(task_id=task_id, status="processing")
@@ -965,7 +985,9 @@ def batch_update_metadata(
 # ---------------------------------------------------------------------------
 
 
-async def _parse_upload_request(file: UploadFile, metadata: str, identity: Optional[ZoteroIdentity]):
+async def _parse_upload_request(
+    file: UploadFile, metadata: str, identity: Optional[ZoteroIdentity], timeout_multiplier: float = 1.0
+):
     """Parse and validate the common multipart upload fields.
 
     Returns a tuple of all parsed fields needed by both sync and async endpoints.
@@ -1015,5 +1037,5 @@ async def _parse_upload_request(file: UploadFile, metadata: str, identity: Optio
     return (
         meta_dict, doc_metadata, library_id, item_key, attachment_key, user_id,
         library_type, mime_type, item_version, attachment_version, item_modified,
-        file_bytes,
+        file_bytes, timeout_multiplier,
     )
