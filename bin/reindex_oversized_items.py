@@ -221,6 +221,10 @@ async def _reprocess_items(
                 # Zotero's own API deleted their chunks upfront with no way to
                 # restore them.
                 old_ids = [c["id"] for c in old_chunks]
+                old_attachment_keys = {c["payload"].get("attachment_key") for c in old_chunks}
+                old_was_abstract_only = old_count > 0 and all(
+                    (k or "").endswith(":abstract") for k in old_attachment_keys
+                )
                 t0 = time.monotonic()
                 new_count = await processor._index_item(
                     item, library_id, library_type, force_extraction=True
@@ -234,6 +238,40 @@ async def _reprocess_items(
                     )
                     results[(library_id, item_key)] = "failed"
                     continue
+
+                # Guard against a second, more insidious zero-content case than
+                # new_count == 0: DocumentProcessor._index_item falls back to
+                # indexing an item's abstractNote (a handful of words, 1 chunk)
+                # whenever every real attachment failed to download — which is
+                # indistinguishable, from new_count alone, from a genuine small
+                # improvement. If this item previously had real attachment-derived
+                # content (old chunks not already abstract-only) and everything
+                # just written this round IS abstract-only, the actual PDF simply
+                # failed to download this run — accepting the swap would delete
+                # thousands of real chunks in exchange for a one-chunk blurb. Hit
+                # in production: three ~3,500-chunk items collapsed to 1 chunk each
+                # after a transient "Could not download attachment" during
+                # reprocessing. Detect it before old_ids is deleted, so the
+                # last-known-good chunks can still be kept.
+                if not old_was_abstract_only:
+                    old_id_set = set(old_ids)
+                    current_chunks = vector_store.get_item_chunks(library_id, item_key)
+                    new_chunks = [c for c in current_chunks if c["id"] not in old_id_set]
+                    new_is_abstract_only = bool(new_chunks) and all(
+                        (c["payload"].get("attachment_key") or "").endswith(":abstract")
+                        for c in new_chunks
+                    )
+                    if new_is_abstract_only:
+                        vector_store.delete_chunks_by_ids([c["id"] for c in new_chunks])
+                        print(
+                            f"[FAILED] {library_id}:{item_key} ({title!r}): "
+                            f"reprocessing fell back to abstract-only content "
+                            f"({new_count} chunk(s)) after a download failure — "
+                            f"existing {old_count} chunks left untouched"
+                        )
+                        results[(library_id, item_key)] = "failed"
+                        continue
+
                 vector_store.delete_chunks_by_ids(old_ids)
                 if new_count >= old_count:
                     # Reprocessing succeeded but didn't shrink the item — it was
