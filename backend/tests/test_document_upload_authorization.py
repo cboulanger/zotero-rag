@@ -133,6 +133,20 @@ class DocumentUploadAuthorizationTest(unittest.TestCase):
         # end-to-end timeout check — that's covered by Task 2's unit tests.)
         self.assertEqual(r.status_code, 200)
 
+    def test_upload_document_rejects_out_of_range_timeout_multiplier(self):
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        metadata = json.dumps({
+            "library_id": "u1",
+            "item_key": "ITEM1",
+            "attachment_key": "ATT1",
+        })
+        r = self.client.post(
+            "/api/index/document",
+            files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
+            data={"metadata": metadata, "timeout_multiplier": "999999"},
+        )
+        self.assertEqual(r.status_code, 422)
+
 
 if __name__ == "__main__":
     unittest.main()

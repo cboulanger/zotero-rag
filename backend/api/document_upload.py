@@ -602,9 +602,11 @@ async def upload_and_index_document(
     ),
     timeout_multiplier: float = Form(
         1.0,
+        ge=1.0,
+        le=10.0,
         description="Scales the extraction timeout for this upload only. Used by the "
                     "Fix Unavailable repair action to retry a previously skipped_timeout "
-                    "attachment with more time.",
+                    "attachment with more time. Must be between 1.0 and 10.0.",
     ),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
@@ -683,9 +685,11 @@ async def upload_and_index_document_async(
     metadata: str = Form(...),
     timeout_multiplier: float = Form(
         1.0,
+        ge=1.0,
+        le=10.0,
         description="Scales the extraction timeout for this upload only. Used by the "
                     "Fix Unavailable repair action to retry a previously skipped_timeout "
-                    "attachment with more time.",
+                    "attachment with more time. Must be between 1.0 and 10.0.",
     ),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
