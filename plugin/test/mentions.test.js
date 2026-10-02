@@ -63,6 +63,25 @@ test('findMentionEvidence falls back to fulltextWord when Zotero.SearchCondition
 	assert.ok(addedConditions.some(c => c[0] === 'fulltextWord'));
 });
 
+test('findMentionEvidence falls back to fulltextWord when Zotero.SearchConditions.get() throws', async () => {
+	/** @type {Array<any>} */
+	const addedConditions = [];
+	const zotero = {
+		SearchConditions: { get: () => { throw new Error('not ready'); } },
+		Search: function () {
+			return {
+				libraryID: null,
+				addCondition(...args) { addedConditions.push(args); },
+				async search() { return []; },
+			};
+		},
+	};
+	const M = loadMentionSearch(zotero);
+	await M.findMentionEvidence([{ author: 'Smith' }], [1]);
+	assert.ok(addedConditions.some(c => c[0] === 'fulltextWord'));
+	assert.ok(!addedConditions.some(c => c[0] === 'fulltextContent'));
+});
+
 test('expandVariants includes original, diacritic-folded, and transliterated forms', () => {
 	const M = loadMentionSearch();
 	const variants = M.expandVariants('Wiethölter');
