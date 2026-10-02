@@ -130,14 +130,13 @@ class TestExtractPdfInParts(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].text, "good")
 
-    async def test_all_parts_timeout_returns_empty(self):
+    async def test_all_parts_timeout_raises_to_signal_skipped_timeout(self):
         self.extractor.extract_and_chunk.side_effect = KreuzbergTimeoutError("out")
 
         with patch("backend.utils.pdf_splitter.split_pdf_bytes",
                    return_value=[(b"p1", 0), (b"p2", 5)]):
-            result = await self.proc._extract_pdf_in_parts(b"pdf", "ATT1", 30 * 1024 ** 2)
-
-        self.assertEqual(result, [])
+            with self.assertRaises(KreuzbergTimeoutError):
+                await self.proc._extract_pdf_in_parts(b"pdf", "ATT1", 30 * 1024 ** 2)
 
     async def test_split_failure_falls_back_to_whole_file(self):
         self.extractor.extract_and_chunk.return_value = _make_chunks(("fallback", 1))
@@ -205,6 +204,28 @@ class TestProcessAttachmentBytesRouting(unittest.IsolatedAsyncioTestCase):
         # extractor called once per page → split path was used
         self.assertEqual(self.extractor.extract_and_chunk.call_count, 5)
         self.assertIn(result.status, ("indexed_fresh", "skipped_empty"))
+
+    async def test_large_pdf_all_parts_timeout_yields_skipped_timeout_not_empty(self):
+        pdf = _make_pdf(3)
+        mock_settings = self._mock_settings(threshold_bytes=len(pdf) // 2)
+        mock_settings.pdf_split_target_part_size = 1  # forces one part per page
+
+        self.extractor.extract_and_chunk.side_effect = KreuzbergTimeoutError("too slow")
+
+        with patch("backend.services.document_processor.get_settings",
+                   return_value=mock_settings):
+            result = await self.proc._process_attachment_bytes(
+                file_bytes=pdf,
+                mime_type="application/pdf",
+                doc_metadata=self.doc_meta,
+                item_version=1,
+                attachment_version=1,
+                item_modified="2026-01-01T00:00:00Z",
+            )
+
+        # extractor called once per page → split path was taken, every part timed out
+        self.assertEqual(self.extractor.extract_and_chunk.call_count, 3)
+        self.assertEqual(result.status, "skipped_timeout")
 
     async def test_small_pdf_uses_direct_path(self):
         pdf = _make_pdf(3)

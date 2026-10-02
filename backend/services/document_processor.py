@@ -1217,6 +1217,9 @@ class DocumentProcessor:
                     on_progress=on_progress,
                     timeout_multiplier=timeout_multiplier,
                 )
+            except KreuzbergTimeoutError as e:
+                logger.warning(f"Skipping attachment {attachment_key}: {e}")
+                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
             except KreuzbergParsingError as e:
                 logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
                 return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
@@ -1335,6 +1338,13 @@ class DocumentProcessor:
         Page numbers returned by kreuzberg are 1-based within each part; adding
         page_offset (0-based pages before the part) converts them back to the
         original document's page numbers.
+
+        Raises:
+            KreuzbergTimeoutError: If every part's extraction either timed out or
+                otherwise produced no chunks, and at least one part timed out —
+                this distinguishes "every part ran out of time" from a genuinely
+                empty document, so the caller can classify it as ``skipped_timeout``
+                (retryable with a longer timeout) rather than ``skipped_empty``.
         """
         from backend.utils.pdf_splitter import split_pdf_bytes
 
@@ -1367,6 +1377,7 @@ class DocumentProcessor:
 
         total_parts = len(parts)
         all_chunks: list[ExtractionChunk] = []
+        any_part_timed_out = False
         for part_num, (part_bytes, page_offset) in enumerate(parts, 1):
             if on_progress:
                 on_progress(f"Extracting text (part {part_num}/{total_parts})...")
@@ -1378,6 +1389,7 @@ class DocumentProcessor:
                 logger.warning(
                     f"Part (offset={page_offset}) of {attachment_key} timed out: {e}"
                 )
+                any_part_timed_out = True
                 continue
             except KreuzbergParsingError as e:
                 logger.warning(
@@ -1389,6 +1401,12 @@ class DocumentProcessor:
                 if chunk.page_number is not None:
                     chunk.page_number += page_offset
             all_chunks.extend(part_chunks)
+
+        if not all_chunks and any_part_timed_out:
+            raise KreuzbergTimeoutError(
+                f"All extracted content from {attachment_key} was lost to "
+                f"per-part timeouts ({len(parts)} part(s))"
+            )
 
         for i, chunk in enumerate(all_chunks):
             chunk.chunk_index = i

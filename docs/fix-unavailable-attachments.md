@@ -30,3 +30,21 @@ For each missing file the tool tries the following strategies in order:
 When a file is found it is copied into the correct Zotero storage directory.
 Items that cannot be recovered can be deleted permanently from the dialog
 using the **Delete Selected** button.
+
+## Attachments that failed server-side text extraction
+
+Some rows in this dialog aren't missing files at all — the attachment downloaded
+successfully, but the backend's text-extraction step (Kreuzberg) couldn't produce
+usable content from it. These show up with "timeout" or "empty" in the Type/Status
+columns:
+
+- **timeout** — extraction ran out of time, most often on very large or
+  OCR-heavy files. Clicking **Search & Fix Selected** automatically retries these
+  once with double the normal extraction timeout before giving up. If it still
+  times out, the row is left for manual handling (delete the item, or raise the
+  server's `KREUZBERG_TIMEOUT_SECONDS` setting and reindex).
+- **empty** — extraction completed but produced no text at all (e.g. an
+  image-only PDF with OCR disabled, or a genuinely blank document). A longer
+  timeout can't produce text that isn't there, so these are never auto-retried —
+  only deleting the item or reindexing after a configuration change (e.g.
+  enabling OCR) can resolve them.
