@@ -1,5 +1,14 @@
 ## Recent Updates
 
+**Zotero 10/11 compatibility:**
+
+- Plugin now declares compatibility with Zotero 10 (`strict_max_version` raised from `9.*` to
+  `10.*`); it was previously rejected at install time on Zotero 10
+- Fixed `ZoteroPane.getSelectedLibraryID()`/`getSelectedCollection()` calls that throw on
+  Zotero 10/11 beta/dev builds and on any multi-selection on stable builds
+- Fixed the citation/mention search feature, which used a `fulltextWord` search condition
+  removed in Zotero 10's full-text search rewrite
+
 **Version 1.1 - January 2025:**
 
 - Added incremental indexing with version-based change detection
