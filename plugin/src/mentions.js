@@ -19,10 +19,22 @@ const MENTION_MAX_EVIDENCE_ITEMS = 40;
 // "Invalid condition 'fulltextWord' in hasOperator()" unconditionally. `fulltextContent` is the
 // replacement and isn't registered on Zotero 7-9, so detect which one exists once at load time.
 // Remove the 'fulltextWord' fallback once strict_min_version is raised past 9.
-const FULLTEXT_SEARCH_CONDITION = (typeof Zotero !== 'undefined'
-	&& Zotero.SearchConditions && Zotero.SearchConditions.get('fulltextContent'))
-	? 'fulltextContent'
-	: 'fulltextWord';
+// The detection itself is wrapped in try/catch: this file is loaded via bootstrap.js's
+// loadSubScript() with no surrounding try/catch, so if Zotero.SearchConditions.get() ever threw
+// here (e.g. because SearchConditions hasn't finished initializing yet when startup() runs —
+// not currently possible per Zotero's own init order, but not a guarantee this file controls
+// either), an uncaught exception would abort this whole plugin's startup() rather than just
+// degrading mention-search.
+const FULLTEXT_SEARCH_CONDITION = (() => {
+	try {
+		if (typeof Zotero !== 'undefined' && Zotero.SearchConditions && Zotero.SearchConditions.get('fulltextContent')) {
+			return 'fulltextContent';
+		}
+	} catch (e) {
+		// Fall through to the pre-Zotero-10 condition name below.
+	}
+	return 'fulltextWord';
+})();
 
 /**
  * Strip diacritics for variant-tolerant matching (NFD decompose, drop combining marks).
