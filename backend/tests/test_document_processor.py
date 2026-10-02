@@ -959,9 +959,11 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         result = await self.processor.index_library("test_lib", mode="incremental")
 
         self.assertEqual(result["mode"], "incremental")
+        # New failures are placed first so a later cap/eviction drops the
+        # stalest entries, not the one just discovered this run.
         self.assertEqual(metadata.last_scan_failed_downloads, [
-            {"item_key": "OLD", "attachment_key": "OLDATT"},
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
+            {"item_key": "OLD", "attachment_key": "OLDATT"},
         ])
 
     async def test_index_library_html_attachment(self):

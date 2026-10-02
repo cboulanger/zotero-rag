@@ -92,7 +92,7 @@ from backend.services.embeddings import (  # noqa: E402
 )
 from backend.services.autoindex_key_store import AutoIndexKeyStore  # noqa: E402
 from backend.services.autoindex_resolver import resolve_targets  # noqa: E402
-from backend.services.document_processor import DocumentProcessor  # noqa: E402
+from backend.services.document_processor import DocumentProcessor, merge_download_failures  # noqa: E402
 from backend.zotero.web_api import ZoteroWebAPI  # noqa: E402
 
 
@@ -311,14 +311,9 @@ async def _reprocess_items(
             # outright could hide genuine failures a real full scan found. The
             # next full scan still fully supersedes this once it runs.
             if processor._download_failures:
-                seen = {(f["item_key"], f["attachment_key"]) for f in metadata.last_scan_failed_downloads}
-                merged = list(metadata.last_scan_failed_downloads)
-                for failure in processor._download_failures:
-                    key = (failure["item_key"], failure["attachment_key"])
-                    if key not in seen:
-                        seen.add(key)
-                        merged.append(failure)
-                metadata.last_scan_failed_downloads = merged[:100]
+                metadata.last_scan_failed_downloads = merge_download_failures(
+                    metadata.last_scan_failed_downloads, processor._download_failures
+                )
             vector_store.update_library_metadata(metadata)
 
     return results

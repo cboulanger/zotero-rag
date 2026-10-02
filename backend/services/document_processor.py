@@ -52,6 +52,35 @@ _FATAL_EMBEDDING_ERRORS = (
     EmbeddingRateLimitExhaustedError,
 )
 
+# Upper bound on tracked failed-download records — a safety net against
+# unbounded growth, not a realistic ceiling (a library with this many broken
+# attachments would be pathological; the Fix Unavailable tool is meant to
+# show ALL currently-known failures, so this must never be the thing that
+# silently hides one).
+MAX_TRACKED_DOWNLOAD_FAILURES = 1000
+
+
+def merge_download_failures(existing: list[dict], new_failures: list[dict]) -> list[dict]:
+    """
+    Merge newly-observed download failures into an existing list, deduplicated
+    by (item_key, attachment_key), capped at MAX_TRACKED_DOWNLOAD_FAILURES.
+
+    New failures are placed first so that, if the cap is ever actually hit,
+    the entries evicted are the stalest ones rather than the ones just
+    discovered — naively appending new entries and slicing from the front
+    silently drops every new failure once the list is already at the cap,
+    which previously let real, newly-broken attachments go unreported.
+    """
+    seen: set[tuple] = set()
+    merged: list[dict] = []
+    for failure in (*new_failures, *existing):
+        key = (failure["item_key"], failure["attachment_key"])
+        if key not in seen:
+            seen.add(key)
+            merged.append(failure)
+    return merged[:MAX_TRACKED_DOWNLOAD_FAILURES]
+
+
 # MIME types that will be downloaded and indexed
 INDEXABLE_MIME_TYPES = {
     "application/pdf",
@@ -170,7 +199,7 @@ def _subprocess_index_batch(
             "items_updated": items_updated,
             "items_skipped": items_skipped,
             "items_failed": items_failed,
-            "failed_downloads": processor._download_failures[:100],
+            "failed_downloads": processor._download_failures[:MAX_TRACKED_DOWNLOAD_FAILURES],
         }
 
     return _asyncio.run(_run())
@@ -546,14 +575,9 @@ class DocumentProcessor:
         # outside that set — replacing the list outright would hide those. The next
         # full scan still fully supersedes this with its complete view.
         if self._download_failures:
-            seen = {(f["item_key"], f["attachment_key"]) for f in metadata.last_scan_failed_downloads}
-            merged = list(metadata.last_scan_failed_downloads)
-            for failure in self._download_failures:
-                key = (failure["item_key"], failure["attachment_key"])
-                if key not in seen:
-                    seen.add(key)
-                    merged.append(failure)
-            metadata.last_scan_failed_downloads = merged[:100]
+            metadata.last_scan_failed_downloads = merge_download_failures(
+                metadata.last_scan_failed_downloads, self._download_failures
+            )
 
         if items_failed:
             logger.warning(
@@ -885,16 +909,20 @@ class DocumentProcessor:
         # never touches it (see _index_library_incremental, which only ever sees
         # items that changed, not previously-failed unchanged ones).
         metadata.last_full_scan_items_failed = items_failed
-        # Cap at 100 to keep the metadata payload small — these are surfaced to the
-        # plugin's Fix Unavailable tool as potentially fixable. self._download_failures
-        # is populated by the inline path (settings.testing=True); the subprocess
-        # dispatch path (production) can't see that instance's accumulator directly,
-        # since each batch runs in a fresh process, so its results are aggregated
-        # into subprocess_download_failures above instead. Exactly one of the two
+        # Capped at MAX_TRACKED_DOWNLOAD_FAILURES as a safety net against unbounded
+        # growth (see its definition) — these are surfaced to the plugin's Fix
+        # Unavailable tool as potentially fixable, and the tool is meant to show
+        # ALL currently-known failures. self._download_failures is populated by
+        # the inline path (settings.testing=True); the subprocess dispatch path
+        # (production) can't see that instance's accumulator directly, since each
+        # batch runs in a fresh process, so its results are aggregated into
+        # subprocess_download_failures above instead. Exactly one of the two
         # lists is ever non-empty for a given run — use_subprocess is a single
         # boolean deciding which branch processes every item — so concatenating
         # both unconditionally is safe and needs no extra branching.
-        metadata.last_scan_failed_downloads = (self._download_failures + subprocess_download_failures)[:100]
+        metadata.last_scan_failed_downloads = (
+            self._download_failures + subprocess_download_failures
+        )[:MAX_TRACKED_DOWNLOAD_FAILURES]
 
         if items_failed:
             logger.warning(

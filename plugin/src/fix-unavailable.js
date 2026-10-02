@@ -571,7 +571,19 @@ var ZoteroFixUnavailableDialog = {
 						this.setRowStatus(i, 'error', `Copy failed: ${result.error}`, result.error);
 						errors++;
 					} else {
-						this.setRowStatus(i, 'not-found', 'Not found');
+						// This is the terminal state for a server-reported download
+						// failure once both Zotero sync and the other-library search
+						// strategies have been tried — nothing left for the plugin to
+						// attempt automatically. Most commonly the file has been
+						// permanently removed from Zotero's cloud storage (e.g. a
+						// storage-quota 404), which only the user can resolve.
+						this.setRowStatus(
+							i, 'not-found', 'Not found — re-upload required',
+							'Could not be downloaded or located elsewhere. The file may no '
+							+ 'longer be on Zotero’s servers (e.g. a storage-quota issue) '
+							+ '— re-upload it to this item in Zotero, or check your storage '
+							+ 'quota, then try again.'
+						);
 						notFound++;
 					}
 				} catch (e) {

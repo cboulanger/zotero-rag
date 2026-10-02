@@ -75,17 +75,22 @@ class LibraryIndexMetadata(BaseModel):
     last_scan_failed_downloads: list[dict] = Field(
         default_factory=list,
         description=(
-            "Up to 100 {item_key, attachment_key} pairs whose attachment could not "
-            "be downloaded from Zotero the last time this library was indexed, by "
+            "Up to MAX_TRACKED_DOWNLOAD_FAILURES (see document_processor.py) "
+            "{item_key, attachment_key} pairs whose attachment could not be "
+            "downloaded from Zotero the last time this library was indexed, by "
             "any path — a full scan, an incremental sync, or the oversized-item "
             "reindex script. Unlike a generic parse error (which recurs regardless "
             "of how the bytes are obtained), these may be fixable client-side — "
             "e.g. the file exists on the user's Zotero desktop even though the "
             "server's cloud-storage fetch failed. Surfaced to the plugin's Fix "
-            "Unavailable tool. A full scan replaces this list outright (it's the "
+            "Unavailable tool, which is meant to show ALL currently-known "
+            "failures — the cap is a safety net against unbounded growth, not a "
+            "realistic ceiling. A full scan replaces this list outright (it's the "
             "authoritative, complete view); an incremental sync or the oversized-"
             "item reindex script only sees a subset of the library, so each of "
-            "those merges its own failures into whatever's already here instead."
+            "those merges its own failures into whatever's already here instead, "
+            "preferring to keep the newest-discovered entries if the cap is ever "
+            "actually hit."
         )
     )
 
