@@ -47,6 +47,13 @@ async function startup({ id, version, rootURI }) {
 	// "needs_client_evidence" protocol.
 	Services.scriptloader.loadSubScript(rootURI + 'mentions.js');
 
+	// Also eager, plugin-lifetime — ZoteroRAGPlugin's own methods (e.g.
+	// retryTimeoutSkippedAttachment(), called from the Fix Unavailable dialog)
+	// reference RemoteIndexer directly and must work even if the main search
+	// dialog (which separately loads its own window-scoped copy into
+	// dialog.xhtml for ZoteroRAGDialog's use) has never been opened.
+	Services.scriptloader.loadSubScript(rootURI + 'remote_indexer.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
