@@ -75,6 +75,7 @@ import argparse
 import asyncio
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from qdrant_client.models import FieldCondition, Filter, MatchValue
@@ -84,7 +85,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.config.settings import get_settings  # noqa: E402
 from backend.dependencies import make_vector_store  # noqa: E402
 from backend.db.vector_store import VectorStore  # noqa: E402
-from backend.services.embeddings import create_embedding_service  # noqa: E402
+from backend.services.embeddings import (  # noqa: E402
+    EmbeddingAuthenticationError,
+    EmbeddingRateLimitExhaustedError,
+    create_embedding_service,
+)
 from backend.services.autoindex_key_store import AutoIndexKeyStore  # noqa: E402
 from backend.services.autoindex_resolver import resolve_targets  # noqa: E402
 from backend.services.document_processor import DocumentProcessor  # noqa: E402
@@ -299,6 +304,18 @@ async def _loop(
     run, so neither a permanently-undownloadable attachment nor an
     already-optimally-chunked item can spin the loop forever; both are
     retried the next time this script is run.
+
+    The embedding API's rate limit/quota is a different kind of failure —
+    unlike a 404'd attachment, it isn't specific to any one item, and it
+    resolves itself once the provider's window resets. _index_item raises
+    EmbeddingRateLimitExhaustedError for this (see
+    DocumentProcessor._FATAL_EMBEDDING_ERRORS) with an ``available_at``
+    timestamp; this loop catches it here, sleeps until then, and retries the
+    exact same round from scratch rather than excluding anything or crashing
+    the whole unattended run (matching how CronIndexer already handles the
+    same exception for regular sync runs). EmbeddingAuthenticationError (a
+    bad/revoked key) is not retried — no amount of waiting fixes that — so
+    the loop stops and reports it for a human to fix.
     """
     permanently_excluded: set[tuple[str, str]] = set()
     round_num = 0
@@ -338,7 +355,25 @@ async def _loop(
         for c in batch:
             targets_by_library.setdefault(c["library_id"], []).append(c["item_key"])
 
-        results = await _reprocess_items(targets_by_library, vector_store, apply=True)
+        try:
+            results = await _reprocess_items(targets_by_library, vector_store, apply=True)
+        except EmbeddingRateLimitExhaustedError as exc:
+            wait_s = max(0.0, (exc.available_at - datetime.now(timezone.utc)).total_seconds()) + 5
+            print(
+                f"[LOOP] Embedding quota exhausted ({exc}); nothing in this round was "
+                f"excluded. Waiting {wait_s:.0f}s until {exc.available_at.isoformat()} "
+                f"before retrying this round from scratch."
+            )
+            await asyncio.sleep(wait_s)
+            round_num -= 1  # this attempt didn't count as a real round
+            continue
+        except EmbeddingAuthenticationError as exc:
+            print(
+                f"[LOOP] Embedding API rejected credentials ({exc}) — stopping; "
+                f"this needs a human to fix the key, waiting won't help."
+            )
+            return
+
         for key, status in results.items():
             if status in ("failed", "not_found", "skipped_no_key", "no_improvement"):
                 permanently_excluded.add(key)
