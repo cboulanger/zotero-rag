@@ -35,6 +35,7 @@ class DocumentExtractor(ABC):
         self,
         content: bytes,
         mime_type: str,
+        timeout_multiplier: float = 1.0,
     ) -> list[ExtractionChunk]:
         """
         Extract text from document bytes and split into chunks.
@@ -42,6 +43,9 @@ class DocumentExtractor(ABC):
         Args:
             content: Raw document bytes.
             mime_type: MIME type hint (e.g. "application/pdf", "text/html").
+            timeout_multiplier: Scales the per-request extraction timeout for
+                backends that enforce one (Kreuzberg). Ignored by backends with
+                no timeout concept (e.g. Legacy).
 
         Returns:
             Ordered list of ExtractionChunk objects.  Empty list if no text

@@ -148,7 +148,9 @@ class TestExtractPdfInParts(unittest.IsolatedAsyncioTestCase):
             result = await self.proc._extract_pdf_in_parts(whole_pdf, "ATT1", 30 * 1024 ** 2)
 
         # extractor must have been called with the original bytes
-        self.extractor.extract_and_chunk.assert_called_once_with(whole_pdf, "application/pdf")
+        self.extractor.extract_and_chunk.assert_called_once_with(
+            whole_pdf, "application/pdf", timeout_multiplier=1.0
+        )
         self.assertEqual(len(result), 1)
 
     async def test_page_offset_zero_on_first_part(self):
@@ -259,7 +261,7 @@ class TestProcessAttachmentBytesRouting(unittest.IsolatedAsyncioTestCase):
         # part2 (offset=3): kreuzberg says pages 1,2,3  → should become 4,5,6
         call_count = 0
 
-        async def fake_extract(content, mime):
+        async def fake_extract(content, mime, timeout_multiplier=1.0):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

@@ -41,6 +41,7 @@ class LegacyExtractor(DocumentExtractor):
         self,
         content: bytes,
         mime_type: str,
+        timeout_multiplier: float = 1.0,
     ) -> list[ExtractionChunk]:
         if mime_type not in _SUPPORTED_MIME_TYPES:
             logger.debug(f"LegacyExtractor: unsupported MIME type '{mime_type}', skipping")

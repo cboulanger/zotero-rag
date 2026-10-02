@@ -1113,6 +1113,7 @@ class DocumentProcessor:
         item_modified: str,
         on_progress: Optional[Callable[[str], None]] = None,
         force_extraction: bool = False,
+        timeout_multiplier: float = 1.0,
     ) -> AttachmentProcessingResult:
         """
         Extract, embed, and store chunks for a single attachment.
@@ -1129,6 +1130,10 @@ class DocumentProcessor:
             item_modified: ISO 8601 modification timestamp from Zotero.
             force_extraction: Skip same-library/cross-library dedup lookups
                 (Steps 1-2 below) and always re-extract — see _index_item.
+            timeout_multiplier: Scales the extraction timeout for this call only
+                (passed through to the extractor). Used by the Fix Unavailable
+                repair action to retry a previously skipped_timeout attachment
+                with more time; normal indexing always uses the default 1.0.
 
         Returns:
             AttachmentProcessingResult with chunk count and processing status.
@@ -1210,6 +1215,7 @@ class DocumentProcessor:
                 chunks = await self._extract_pdf_in_parts(
                     file_bytes, attachment_key, settings.pdf_split_target_part_size,
                     on_progress=on_progress,
+                    timeout_multiplier=timeout_multiplier,
                 )
             except KreuzbergParsingError as e:
                 logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
@@ -1218,7 +1224,9 @@ class DocumentProcessor:
             if on_progress:
                 on_progress("Extracting text...")
             try:
-                chunks = await self.document_extractor.extract_and_chunk(file_bytes, mime_type)
+                chunks = await self.document_extractor.extract_and_chunk(
+                    file_bytes, mime_type, timeout_multiplier=timeout_multiplier
+                )
             except KreuzbergTimeoutError as e:
                 logger.warning(f"Skipping attachment {attachment_key}: {e}")
                 return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
@@ -1320,6 +1328,7 @@ class DocumentProcessor:
         attachment_key: str,
         target_part_bytes: int,
         on_progress: Optional[Callable[[str], None]] = None,
+        timeout_multiplier: float = 1.0,
     ) -> list[ExtractionChunk]:
         """Split a large PDF by target byte size and extract each part via kreuzberg.
 
@@ -1363,7 +1372,7 @@ class DocumentProcessor:
                 on_progress(f"Extracting text (part {part_num}/{total_parts})...")
             try:
                 part_chunks = await self.document_extractor.extract_and_chunk(
-                    part_bytes, "application/pdf"
+                    part_bytes, "application/pdf", timeout_multiplier=timeout_multiplier
                 )
             except KreuzbergTimeoutError as e:
                 logger.warning(

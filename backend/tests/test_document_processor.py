@@ -168,7 +168,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         # Verify extractor was called with correct args
         self.mock_extractor.extract_and_chunk.assert_called_once_with(
-            b"fake pdf bytes", "application/pdf"
+            b"fake pdf bytes", "application/pdf", timeout_multiplier=1.0
         )
 
         # Verify embeddings were generated
@@ -994,7 +994,38 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         # Verify extractor was called with correct mime type
         self.mock_extractor.extract_and_chunk.assert_called_once_with(
-            b"<html><body>Hello</body></html>", "text/html"
+            b"<html><body>Hello</body></html>", "text/html", timeout_multiplier=1.0
+        )
+
+    async def test_process_attachment_bytes_passes_timeout_multiplier_to_extractor(self):
+        """A caller-supplied timeout_multiplier must reach the extractor unchanged —
+        this is how the Fix Unavailable repair action asks for a longer timeout on
+        a single retry without changing the server's default behavior."""
+        from backend.models.document import DocumentMetadata
+
+        self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("content", 1))
+        self.mock_embedding_service.embed_batch.return_value = [[0.1, 0.2]]
+        self.mock_vector_store.check_duplicate.return_value = None
+        self.mock_vector_store.find_cross_library_duplicate.return_value = None
+        self.mock_vector_store.add_chunks_batch.return_value = ["id1"]
+
+        doc_metadata = DocumentMetadata(
+            library_id="test_lib", item_key="ITEM1", attachment_key="ATT1",
+            title="T", authors=[], year=None, item_type=None,
+        )
+
+        await self.processor._process_attachment_bytes(
+            file_bytes=b"fake pdf bytes",
+            mime_type="application/pdf",
+            doc_metadata=doc_metadata,
+            item_version=1,
+            attachment_version=1,
+            item_modified="2026-01-01T00:00:00Z",
+            timeout_multiplier=2.0,
+        )
+
+        self.mock_extractor.extract_and_chunk.assert_called_once_with(
+            b"fake pdf bytes", "application/pdf", timeout_multiplier=2.0
         )
 
 
