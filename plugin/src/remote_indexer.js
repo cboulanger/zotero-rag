@@ -1002,6 +1002,38 @@ var RemoteIndexer = {
 	},
 
 	/**
+	 * Portable replacement for `AbortSignal.timeout(ms)` — the native static
+	 * method requires a DOM window to schedule its timer and throws
+	 * "AbortSignal.timeout: Could not find window." when called from this
+	 * plugin's bootstrap-global scope (remote_indexer.js is now loaded there
+	 * too, not just into dialog.xhtml's own window — see bootstrap.js).
+	 * AbortController + setTimeout works identically in both contexts.
+	 * @param {number} ms
+	 * @returns {AbortSignal}
+	 */
+	_timeoutSignal(ms) {
+		const controller = new AbortController();
+		setTimeout(() => controller.abort(new Error(`Timed out after ${ms}ms`)), ms);
+		return controller.signal;
+	},
+
+	/**
+	 * Portable replacement for `AbortSignal.any([...])` — combines multiple
+	 * signals into one that aborts as soon as any input signal aborts. Same
+	 * window-dependency rationale as _timeoutSignal.
+	 * @param {Array<AbortSignal>} signals
+	 * @returns {AbortSignal}
+	 */
+	_combineSignals(signals) {
+		const controller = new AbortController();
+		for (const s of signals) {
+			if (s.aborted) { controller.abort(s.reason); break; }
+			s.addEventListener('abort', () => controller.abort(s.reason), { once: true });
+		}
+		return controller.signal;
+	},
+
+	/**
 	 * @param {string} method
 	 * @param {string} url
 	 * @param {RequestInit & {timeout?: number}} [init]
@@ -1011,8 +1043,8 @@ var RemoteIndexer = {
 		const { signal, timeout: timeoutMs, ...rest } = init;
 		let effectiveSignal = signal;
 		if (timeoutMs != null) {
-			const timeoutSignal = AbortSignal.timeout(timeoutMs);
-			effectiveSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+			const timeoutSignal = this._timeoutSignal(timeoutMs);
+			effectiveSignal = signal ? this._combineSignals([signal, timeoutSignal]) : timeoutSignal;
 		}
 		const response = await fetch(url, { method, ...rest, signal: effectiveSignal });
 		if (!response.ok) {
