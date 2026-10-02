@@ -863,3 +863,45 @@ test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 
 	assert.deepStrictEqual(calls, ['start', 'stop']);
 });
+
+test('_getSelectedLibraryIDCompat prefers the Zotero 10+ plural getter when present', () => {
+	const plugin = loadPlugin({}, {}, {});
+	const pane = {
+		getSelectedLibraryIDs: () => [7],
+		getSelectedLibraryID: () => { throw new Error('should not be called'); },
+	};
+	assert.strictEqual(plugin._getSelectedLibraryIDCompat(pane), 7);
+});
+
+test('_getSelectedLibraryIDCompat falls back to the singular getter on pre-Zotero-10 panes', () => {
+	const plugin = loadPlugin({}, {}, {});
+	const pane = { getSelectedLibraryID: () => 3 };
+	assert.strictEqual(plugin._getSelectedLibraryIDCompat(pane), 3);
+});
+
+test('_getSelectedLibraryIDCompat returns null when nothing is selected, on both pane shapes', () => {
+	const plugin = loadPlugin({}, {}, {});
+	assert.strictEqual(plugin._getSelectedLibraryIDCompat({ getSelectedLibraryIDs: () => [] }), null);
+	assert.strictEqual(plugin._getSelectedLibraryIDCompat({ getSelectedLibraryID: () => false }), null);
+});
+
+test('_getSelectedCollectionIDCompat prefers the Zotero 10+ plural getter when present', () => {
+	const plugin = loadPlugin({}, {}, {});
+	const pane = {
+		getSelectedCollections: () => [{ id: 42 }],
+		getSelectedCollection: () => { throw new Error('should not be called'); },
+	};
+	assert.strictEqual(plugin._getSelectedCollectionIDCompat(pane), 42);
+});
+
+test('_getSelectedCollectionIDCompat falls back to the singular getter on pre-Zotero-10 panes', () => {
+	const plugin = loadPlugin({}, {}, {});
+	const pane = { getSelectedCollection: () => ({ id: 9 }) };
+	assert.strictEqual(plugin._getSelectedCollectionIDCompat(pane), 9);
+});
+
+test('_getSelectedCollectionIDCompat returns null when no collection is selected, on both pane shapes', () => {
+	const plugin = loadPlugin({}, {}, {});
+	assert.strictEqual(plugin._getSelectedCollectionIDCompat({ getSelectedCollections: () => [] }), null);
+	assert.strictEqual(plugin._getSelectedCollectionIDCompat({ getSelectedCollection: () => undefined }), null);
+});

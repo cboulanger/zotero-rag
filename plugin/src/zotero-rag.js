@@ -1132,6 +1132,44 @@ class ZoteroRAGPlugin {
 		return libraries;
 	}
 
+	// ── Zotero 10/11 compatibility shims ──────────────────────────────────────
+
+	/**
+	 * BC(<10): `ZoteroPane.getSelectedLibraryID()` still works on a stable Zotero 10/11
+	 * release with a single selection, but throws on any multi-selection and
+	 * unconditionally on beta/dev/source builds (`collectionTree.jsx`'s
+	 * `_requireSingleSelection()`). `getSelectedLibraryIDs()` is the Zotero 10+
+	 * replacement and doesn't exist on Zotero 7-9, so prefer it when present and only
+	 * fall back to the singular getter when it isn't. Remove the fallback branch once
+	 * strict_min_version is raised past 9.
+	 * @param {any} zoteroPane
+	 * @returns {number|null}
+	 */
+	_getSelectedLibraryIDCompat(zoteroPane) {
+		if (typeof zoteroPane.getSelectedLibraryIDs === 'function') {
+			const ids = zoteroPane.getSelectedLibraryIDs();
+			return ids.length ? ids[0] : null;
+		}
+		// BC(<10): pre-Zotero-10 pane; getSelectedLibraryIDs() doesn't exist yet.
+		const id = zoteroPane.getSelectedLibraryID();
+		return id || null;
+	}
+
+	/**
+	 * BC(<10): same situation as _getSelectedLibraryIDCompat, for
+	 * `getSelectedCollection()` / `getSelectedCollections()`.
+	 * @param {any} zoteroPane
+	 * @returns {number|null}
+	 */
+	_getSelectedCollectionIDCompat(zoteroPane) {
+		if (typeof zoteroPane.getSelectedCollections === 'function') {
+			const collections = zoteroPane.getSelectedCollections();
+			return collections.length ? collections[0].id : null;
+		}
+		// BC(<10): pre-Zotero-10 pane; getSelectedCollections() doesn't exist yet.
+		return zoteroPane.getSelectedCollection()?.id ?? null;
+	}
+
 	/**
 	 * Get currently selected library/collection.
 	 * @returns {string|null} Library ID or null if none selected
@@ -1140,7 +1178,7 @@ class ZoteroRAGPlugin {
 		const zoteroPane = Zotero.getActiveZoteroPane();
 		if (!zoteroPane) return null;
 
-		const libraryID = zoteroPane.getSelectedLibraryID();
+		const libraryID = this._getSelectedLibraryIDCompat(zoteroPane);
 		if (!libraryID) return null;
 
 		return this.getBackendLibraryId(libraryID);
@@ -1256,8 +1294,8 @@ class ZoteroRAGPlugin {
 		}
 
 		// Get current library/collection
-		const libraryID = zoteroPane.getSelectedLibraryID();
-		const collectionID = zoteroPane.getSelectedCollection()?.id;
+		const libraryID = this._getSelectedLibraryIDCompat(zoteroPane);
+		const collectionID = this._getSelectedCollectionIDCompat(zoteroPane);
 
 		// Create standalone note
 		const note = new Zotero.Item('note');
@@ -1979,7 +2017,7 @@ class ZoteroRAGPlugin {
 		let zoteroLibraryID;
 		if (!backendLibraryId) {
 			const pane = Zotero.getActiveZoteroPane();
-			zoteroLibraryID = (pane ? pane.getSelectedLibraryID() : null) ?? Zotero.Libraries.userLibraryID;
+			zoteroLibraryID = (pane ? this._getSelectedLibraryIDCompat(pane) : null) ?? Zotero.Libraries.userLibraryID;
 			// Derive backendLibraryId from the Zotero internal ID
 			const libs = this.getLibraries();
 			const matched = libs.find(l => this._resolveZoteroLibraryID(l.id) === zoteroLibraryID);
@@ -2072,7 +2110,7 @@ class ZoteroRAGPlugin {
 		if (!btn || !badge) return;
 		const pane = Zotero.getActiveZoteroPane();
 		if (!pane) return;
-		const libraryID = pane.getSelectedLibraryID();
+		const libraryID = this._getSelectedLibraryIDCompat(pane);
 		if (!libraryID) {
 			btn.setAttribute('hidden', 'true');
 			return;
