@@ -26,6 +26,43 @@ function loadMentionSearch(zoteroStub = {}, ioUtilsStub = {}) {
 	return context.MentionSearch;
 }
 
+test('findMentionEvidence uses fulltextContent when Zotero.SearchConditions registers it (Zotero 10+)', async () => {
+	/** @type {Array<any>} */
+	const addedConditions = [];
+	const zotero = {
+		SearchConditions: { get: (name) => (name === 'fulltextContent' ? { name } : undefined) },
+		Search: function () {
+			return {
+				libraryID: null,
+				addCondition(...args) { addedConditions.push(args); },
+				async search() { return []; },
+			};
+		},
+	};
+	const M = loadMentionSearch(zotero);
+	await M.findMentionEvidence([{ author: 'Smith' }], [1]);
+	assert.ok(addedConditions.some(c => c[0] === 'fulltextContent'));
+	assert.ok(!addedConditions.some(c => c[0] === 'fulltextWord'));
+});
+
+test('findMentionEvidence falls back to fulltextWord when Zotero.SearchConditions is absent (pre-Zotero-10)', async () => {
+	/** @type {Array<any>} */
+	const addedConditions = [];
+	const zotero = {
+		// BC(<10): no Zotero.SearchConditions.get('fulltextContent') result on these builds.
+		Search: function () {
+			return {
+				libraryID: null,
+				addCondition(...args) { addedConditions.push(args); },
+				async search() { return []; },
+			};
+		},
+	};
+	const M = loadMentionSearch(zotero);
+	await M.findMentionEvidence([{ author: 'Smith' }], [1]);
+	assert.ok(addedConditions.some(c => c[0] === 'fulltextWord'));
+});
+
 test('expandVariants includes original, diacritic-folded, and transliterated forms', () => {
 	const M = loadMentionSearch();
 	const variants = M.expandVariants('Wiethölter');
@@ -163,7 +200,8 @@ function makeEvidenceStubs(docs) {
 				libraryID: null,
 				addCondition(...args) { conditions.push(args); },
 				async search() {
-					const term = conditions.find(c => c[0] === 'fulltextWord')[2].toLowerCase();
+					const condition = conditions.find(c => c[0] === 'fulltextContent' || c[0] === 'fulltextWord');
+					const term = condition[2].toLowerCase();
 					return docs.filter(d => d.text.toLowerCase().includes(term)).map(d => d.id);
 				},
 			};

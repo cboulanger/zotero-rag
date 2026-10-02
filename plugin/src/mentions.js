@@ -14,6 +14,16 @@ const MENTION_SNIPPET_CHARS = 240;
 const MENTION_MAX_SNIPPETS_PER_TARGET = 3;
 const MENTION_MAX_EVIDENCE_ITEMS = 40;
 
+// BC(<10): `fulltextWord` was removed from Zotero's search-condition registry when full-text
+// search was rewritten on FTS5 (Zotero 10) — addCondition('fulltextWord', ...) now throws
+// "Invalid condition 'fulltextWord' in hasOperator()" unconditionally. `fulltextContent` is the
+// replacement and isn't registered on Zotero 7-9, so detect which one exists once at load time.
+// Remove the 'fulltextWord' fallback once strict_min_version is raised past 9.
+const FULLTEXT_SEARCH_CONDITION = (typeof Zotero !== 'undefined'
+	&& Zotero.SearchConditions && Zotero.SearchConditions.get('fulltextContent'))
+	? 'fulltextContent'
+	: 'fulltextWord';
+
 /**
  * Strip diacritics for variant-tolerant matching (NFD decompose, drop combining marks).
  * @param {string} s
@@ -39,8 +49,10 @@ function transliterateGerman(s) {
 
 /**
  * Distinct lowercase spelling variants of a name/word worth searching for.
- * `fulltextWord` matching in Zotero is a left-bound (prefix) match, so suffix
- * variants (plurals, possessives) don't need to be listed separately.
+ * On Zotero 7-9, `fulltextWord` matching is a left-bound (prefix) match, so suffix variants
+ * (plurals, possessives) don't need to be listed separately. On Zotero 10+ this goes through
+ * `fulltextContent` (FTS5) instead — see FULLTEXT_SEARCH_CONDITION — whose match semantics
+ * weren't verified to be identical; keep listing variants defensively either way.
  * @param {string} word
  * @returns {Array<string>}
  */
@@ -186,7 +198,7 @@ async function findMentionEvidence(citationTargets, zoteroLibraryIDs) {
 				const search = new Zotero.Search();
 				(/** @type {any} */ (search)).libraryID = libraryID;
 				search.addCondition('deleted', 'false');
-				search.addCondition('fulltextWord', 'contains', term);
+				search.addCondition(FULLTEXT_SEARCH_CONDITION, 'contains', term);
 				for (const id of await search.search()) ids.add(id);
 			}
 		}
