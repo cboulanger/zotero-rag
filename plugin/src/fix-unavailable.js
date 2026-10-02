@@ -448,14 +448,63 @@ var ZoteroFixUnavailableDialog = {
 
 		const indices = this.getSelectedIndices();
 		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
-		const skippedServerIndices = indices.filter(i => !!this.items[i].skipReason);
+		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
+		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
 		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
 		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked);
 
-		for (const i of parseErrorIndices)    this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
-		for (const i of skippedServerIndices) this.setRowStatus(i, 'not-found', 'Not indexable — delete or reindex after upgrade');
-		for (const i of linkedIndices)        this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
-		for (const i of importedIndices)   this.setRowStatus(i, 'searching', 'Queued...');
+		for (const i of parseErrorIndices)  this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
+		for (const i of emptyTextIndices)   this.setRowStatus(i, 'not-found', 'Not indexable — delete or reindex after upgrade');
+		for (const i of linkedIndices)      this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
+		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
+		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');
+
+		// Phase 0: retry skipReason='timeout' rows server-side with a doubled
+		// extraction timeout. Unlike skipReason='no text' (genuinely empty —
+		// no timeout can produce text that isn't there), a 'timeout' row's file
+		// downloaded fine; only Kreuzberg's parsing pass ran out of time, so a
+		// longer timeout can plausibly succeed. Sequential (not batched like
+		// Phase 1) since these are exactly the largest/slowest files — running
+		// several OCR-heavy extractions concurrently risks the Kreuzberg
+		// sidecar's own memory limits.
+		/** @type {Array<number>} */
+		const timeoutFixedIndices = [];
+		let timeoutStillFailed = 0;
+		if (timeoutIndices.length > 0) {
+			this.setStatus(`Retrying ${timeoutIndices.length} timed-out file(s) with a longer timeout...`);
+			for (const i of timeoutIndices) {
+				const info = this.items[i];
+				try {
+					const result = await this.plugin.retryTimeoutSkippedAttachment(
+						info.attachmentItem, info.parentItem, this.libraryID
+					);
+					if (result.fixed) {
+						this.setRowStatus(i, 'fixed', 'Fixed (longer timeout)');
+						timeoutFixedIndices.push(i);
+					} else if (result.stillTimedOut) {
+						this.setRowStatus(i, 'not-found', 'Still times out — delete or raise the limit further');
+						timeoutStillFailed++;
+					} else {
+						this.setRowStatus(i, 'error', `Retry failed: ${result.error}`, result.error);
+						timeoutStillFailed++;
+					}
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					timeoutStillFailed++;
+					console.error(`fix-unavailable: timeout retry error for item ${info.zoteroID}: ${msg}`);
+				}
+			}
+		}
+		if (timeoutFixedIndices.length > 0 && this.plugin?.removeSkippedServerItems) {
+			try {
+				await this.plugin.removeSkippedServerItems(
+					this.backendLibraryId, timeoutFixedIndices.map(i => this.items[i].attachmentItem.key)
+				);
+			} catch (e) {
+				console.error(`fix-unavailable: failed to prune fixed skipped-server entries: ${e}`);
+			}
+		}
 
 		// Phase 1: batched sync downloads for imported files only (10 at a time)
 		const BATCH_SIZE = 10;
@@ -501,8 +550,8 @@ var ZoteroFixUnavailableDialog = {
 			.map(r => r.index);
 
 		// Phase 2: copy from another library for imported items still missing
-		let fixed    = downloadResults.filter(r => r.downloaded).length;
-		let notFound = linkedIndices.length + parseErrorIndices.length + skippedServerIndices.length;
+		let fixed    = downloadResults.filter(r => r.downloaded).length + timeoutFixedIndices.length;
+		let notFound = linkedIndices.length + parseErrorIndices.length + emptyTextIndices.length + timeoutStillFailed;
 		let errors   = 0;
 
 		/** @type {Array<number>} */
@@ -545,6 +594,7 @@ var ZoteroFixUnavailableDialog = {
 		const allFixedIndices = [
 			...downloadResults.filter(r => r.downloaded).map(r => r.index),
 			...phase2FixedIndices,
+			...timeoutFixedIndices,
 		];
 		const fixedDownloadFailedKeys = allFixedIndices
 			.filter(i => this.items[i].serverDownloadFailed)

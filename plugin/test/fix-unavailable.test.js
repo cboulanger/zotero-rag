@@ -141,3 +141,82 @@ test('searchAndFix does not call removeDownloadFailedItems when nothing was fixe
 
 	assert.strictEqual(called, false);
 });
+
+test('searchAndFix retries skipReason timeout rows via retryTimeoutSkippedAttachment instead of marking them not-found immediately', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'TIMEOUT1' }, parentItem: { key: 'PARENT1' }, skipReason: 'timeout', isLinked: false },
+	];
+	const retryCalls = [];
+	const removedCalls = [];
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async (att, parent, libId) => {
+			retryCalls.push({ key: att.key, libId });
+			return { fixed: true, stillTimedOut: false };
+		},
+		removeSkippedServerItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(retryCalls.length, 1);
+	assert.strictEqual(retryCalls[0].key, 'TIMEOUT1');
+	assert.strictEqual(removedCalls.length, 1);
+	// Spread into a host-realm array before comparing — removedCalls[0].keys was
+	// built by .map() inside the vm-executed searchAndFix(), so it's a vm-realm
+	// Array; deepStrictEqual treats same-content arrays from different vm
+	// realms as unequal otherwise (see the established pattern a few tests up).
+	assert.deepStrictEqual([...removedCalls[0].keys], ['TIMEOUT1']);
+	// Fixed row is removed from the table immediately, same as other fix paths.
+	assert.strictEqual(dialog.items.length, 0);
+});
+
+test('searchAndFix keeps a still-timed-out row visible with an updated status, without pruning the store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'STILLSLOW' }, parentItem: { key: 'PARENT1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let removeCalled = false;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => ({ fixed: false, stillTimedOut: true }),
+		removeSkippedServerItems: async () => { removeCalled = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removeCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
+});
+
+test('searchAndFix does not retry skipReason "no text" rows — a timeout retry cannot fix genuinely empty extraction', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'EMPTY1' }, parentItem: { key: 'PARENT1' }, skipReason: 'no text', isLinked: false },
+	];
+	let retryCalled = false;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => { retryCalled = true; return { fixed: true, stillTimedOut: false }; },
+		removeSkippedServerItems: async () => {},
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(retryCalled, false);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
+});
