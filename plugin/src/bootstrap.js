@@ -12,6 +12,18 @@ function install() {
 async function startup({ id, version, rootURI }) {
 	log(`Starting version ${version}`);
 
+	// This bootstrap scope is a privileged JS component global, not a DOM
+	// window — unlike dialog.xhtml's own window-scoped load of
+	// remote_indexer.js, several Web APIs it relies on aren't present here by
+	// default even though fetch/setTimeout already are. RemoteIndexer's
+	// _uploadAttachment() (now loaded eagerly below, not just per-dialog)
+	// needs FormData/Blob to build its multipart upload body and
+	// AbortController for its per-request timeout handling (AbortSignal
+	// itself isn't an importable name here — see remote_indexer.js's
+	// _timeoutSignal()/_combineSignals(), which avoid AbortSignal.timeout()/
+	// .any() entirely since those also require a DOM window at call time,
+	// not just at import time).
+	Components.utils.importGlobalProperties(["FormData", "Blob", "AbortController"]);
 
 	// Register chrome:// protocol
 	var aomStartup = Components.classes[
