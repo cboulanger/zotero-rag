@@ -486,6 +486,9 @@ var ZoteroFixUnavailableDialog = {
 		let notFound = linkedIndices.length + parseErrorIndices.length + skippedServerIndices.length;
 		let errors   = 0;
 
+		/** @type {Array<number>} */
+		const phase2FixedIndices = [];
+
 		if (stillMissing.length > 0) {
 			this.setStatus(`Phase 2/2: searching other libraries for ${stillMissing.length} remaining file(s)...`);
 			for (const i of stillMissing) {
@@ -495,6 +498,7 @@ var ZoteroFixUnavailableDialog = {
 					if (result.found && !result.error) {
 						this.setRowStatus(i, 'fixed', `Fixed (${result.via})`);
 						fixed++;
+						phase2FixedIndices.push(i);
 					} else if (result.found && result.error) {
 						this.setRowStatus(i, 'error', `Copy failed: ${result.error}`, result.error);
 						errors++;
@@ -508,6 +512,29 @@ var ZoteroFixUnavailableDialog = {
 					errors++;
 					console.error(`fix-unavailable: error for item ${info.zoteroID}: ${msg}`);
 				}
+			}
+		}
+
+		// Rows sourced from the server's download-failed report (see
+		// UnavailableAttachmentInfo.serverDownloadFailed) are loaded from a
+		// persistent per-library store, not derived live like the local
+		// fileExists() check — a successful fix here doesn't make them
+		// disappear from that store on its own, so without this they'd keep
+		// reappearing (with their status reset) on every Refresh/reopen even
+		// though the attachment is now available. Prune just the ones that
+		// were actually fixed this run.
+		const allFixedIndices = [
+			...downloadResults.filter(r => r.downloaded).map(r => r.index),
+			...phase2FixedIndices,
+		];
+		const fixedDownloadFailedKeys = allFixedIndices
+			.filter(i => this.items[i].serverDownloadFailed)
+			.map(i => this.items[i].attachmentItem.key);
+		if (fixedDownloadFailedKeys.length > 0 && this.plugin?.removeDownloadFailedItems) {
+			try {
+				await this.plugin.removeDownloadFailedItems(this.backendLibraryId, fixedDownloadFailedKeys);
+			} catch (e) {
+				console.error(`fix-unavailable: failed to prune fixed download-failed entries: ${e}`);
 			}
 		}
 

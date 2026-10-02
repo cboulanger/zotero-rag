@@ -80,6 +80,37 @@ test('storeDownloadFailedItems merges keys and returns the count of new ones', a
 	assert.strictEqual(secondAdded, 1); // ATT2 already stored, only ATT3 is new
 });
 
+test('removeDownloadFailedItems prunes fixed keys so they stop reappearing', async () => {
+	const fakeAttachment = (key) => ({
+		deleted: false,
+		parentItemID: null,
+		key,
+		getCreators: () => [],
+		getField: () => '',
+	});
+	const { zotero, ioUtils, pathUtils } = makeStubs({
+		ATT1: fakeAttachment('ATT1'),
+		ATT2: fakeAttachment('ATT2'),
+		ATT3: fakeAttachment('ATT3'),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2', 'ATT3']);
+	await plugin.removeDownloadFailedItems('u1', ['ATT1', 'ATT3']);
+
+	const results = await plugin._getDownloadFailedAttachments(1);
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].attachmentItem.key, 'ATT2');
+});
+
+test('removeDownloadFailedItems is a no-op when the store does not exist yet', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	// Must not throw even though no file has ever been written
+	await plugin.removeDownloadFailedItems('u1', ['ATT1']);
+});
+
 test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFailed set, no skipReason/isParseError', async () => {
 	const fakeAttachment = {
 		deleted: false,

@@ -63,3 +63,50 @@ test('_typeLabelFor falls back to the file type label', () => {
 	dialog.getFileTypeLabel = () => 'PDF';
 	assert.strictEqual(dialog._typeLabelFor({ attachmentItem: {} }), 'PDF');
 });
+
+test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from the persistent store', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.items = [
+		{ attachmentItem: { key: 'ATT1' }, serverDownloadFailed: true, isLinked: false },
+		{ attachmentItem: { key: 'ATT2' }, serverDownloadFailed: true, isLinked: false },
+		// Not a server-download-failure row (e.g. found locally missing) — must
+		// never be passed to removeDownloadFailedItems even though it's fixed.
+		{ attachmentItem: { key: 'ATT3' }, isLinked: false },
+	];
+	const removedCalls = [];
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: true }),
+		removeDownloadFailedItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(removedCalls.length, 1);
+	assert.strictEqual(removedCalls[0].libId, 'u1');
+	assert.deepStrictEqual([...removedCalls[0].keys].sort(), ['ATT1', 'ATT2']);
+});
+
+test('searchAndFix does not call removeDownloadFailedItems when nothing was fixed', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'ATT1' }, serverDownloadFailed: true, isLinked: false },
+	];
+	let called = false;
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: false, reason: 'still-missing' }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+		removeDownloadFailedItems: async () => { called = true; },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(called, false);
+});

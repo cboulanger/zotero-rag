@@ -2459,6 +2459,42 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Remove attachment keys from the persistent download-failure store once
+	 * they've been successfully fixed (downloaded via sync, or copied from
+	 * another library) — without this, storeDownloadFailedItems's merge is
+	 * one-directional and a fixed entry would keep reappearing (with its
+	 * status reset) on every subsequent Fix Unavailable refresh/reopen, since
+	 * unlike the local fileExists() tier, this store isn't derived live.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {string[]} keysToRemove - Attachment keys that are now available
+	 * @returns {Promise<void>}
+	 */
+	async removeDownloadFailedItems(backendLibraryId, keysToRemove) {
+		if (!keysToRemove || keysToRemove.length === 0) return;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return;
+		const filePath = this._downloadFailedFilePath(zoteroLibraryID);
+		/** @type {string[]} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {
+			return;
+		}
+		const toRemove = new Set(keysToRemove);
+		const remaining = existing.filter(k => !toRemove.has(k));
+		if (remaining.length === existing.length) return;
+		try {
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(remaining));
+		} catch (e) {
+			this.log(`[removeDownloadFailedItems] Failed to write download-failed file: ${e}`);
+		}
+	}
+
+	/**
 	 * Load server-reported download-failure attachment keys and resolve them to
 	 * UnavailableAttachmentInfo objects. Deliberately does NOT set isParseError
 	 * or skipReason (see the typedef) — these items must fall into the Fix
