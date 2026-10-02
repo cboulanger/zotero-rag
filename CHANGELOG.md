@@ -1,3 +1,10 @@
+## [1.49.2](https://github.com/cboulanger/zotero-rag/compare/v1.49.1...v1.49.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **fix-unavailable:** retry "no text" attachments instead of giving up immediately ([e43ae30](https://github.com/cboulanger/zotero-rag/commit/e43ae301cbcb5c7a16527eea4030580be7d1f7cb))
+
 ## [1.49.1](https://github.com/cboulanger/zotero-rag/compare/v1.49.0...v1.49.1) (2026-10-02)
 
 
