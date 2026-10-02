@@ -90,6 +90,37 @@ test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from t
 	assert.deepStrictEqual([...removedCalls[0].keys].sort(), ['ATT1', 'ATT2']);
 });
 
+test('searchAndFix removes fixed rows immediately and keeps unresolved rows with their status intact', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.items = [
+		{ attachmentItem: { key: 'FIXED' }, serverDownloadFailed: true, isLinked: false },
+		{ attachmentItem: { key: 'NOTFOUND' }, serverDownloadFailed: true, isLinked: false },
+		{ attachmentItem: { key: 'ERRORED' }, serverDownloadFailed: true, isLinked: false },
+	];
+	dialog.plugin = {
+		_tryDownloadAttachment: async (att) => ({ downloaded: att.key === 'FIXED' }),
+		_searchAndFixUnavailableAttachment: async (att) => {
+			if (att.key === 'ERRORED') throw new Error('boom');
+			return { found: false };
+		},
+		removeDownloadFailedItems: async () => {},
+	};
+
+	await dialog.searchAndFix();
+
+	// The fixed row is gone immediately — no manual Refresh needed.
+	assert.strictEqual(dialog.items.length, 2);
+	assert.deepStrictEqual([...dialog.items.map(i => i.attachmentItem.key)], ['NOTFOUND', 'ERRORED']);
+	// Unresolved rows survive with their just-set status intact — nothing wipes
+	// rowStatus wholesale the way a full populateTable() re-fetch would.
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'not-found');
+	assert.strictEqual(dialog.rowStatus.get(1)?.cssClass, 'error');
+});
+
 test('searchAndFix does not call removeDownloadFailedItems when nothing was fixed', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
