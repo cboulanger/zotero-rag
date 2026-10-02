@@ -384,6 +384,7 @@ class DocumentProcessor:
     ) -> dict:
         """Incremental indexing: only process new/modified items."""
         logger.debug(f"Incremental index from version {metadata.last_indexed_version}")
+        self._download_failures = []
 
         # Fetch items modified since last index
         since_version = metadata.last_indexed_version
@@ -536,6 +537,22 @@ class DocumentProcessor:
         # Update metadata with new version
         metadata.last_indexed_version = max_version_seen
         metadata.total_items_indexed = metadata.total_items_indexed + items_added
+
+        # Surface this run's download failures (e.g. an attachment's Zotero-hosted
+        # file 404'd) to the plugin's Fix Unavailable tool. Merge rather than
+        # overwrite: unlike a full scan, incremental sync only ever sees items that
+        # changed since the last run, so it has no view on previously-failed items
+        # outside that set — replacing the list outright would hide those. The next
+        # full scan still fully supersedes this with its complete view.
+        if self._download_failures:
+            seen = {(f["item_key"], f["attachment_key"]) for f in metadata.last_scan_failed_downloads}
+            merged = list(metadata.last_scan_failed_downloads)
+            for failure in self._download_failures:
+                key = (failure["item_key"], failure["attachment_key"])
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(failure)
+            metadata.last_scan_failed_downloads = merged[:100]
 
         if items_failed:
             logger.warning(
@@ -876,7 +893,7 @@ class DocumentProcessor:
         # lists is ever non-empty for a given run — use_subprocess is a single
         # boolean deciding which branch processes every item — so concatenating
         # both unconditionally is safe and needs no extra branching.
-        metadata.last_full_scan_failed_downloads = (self._download_failures + subprocess_download_failures)[:100]
+        metadata.last_scan_failed_downloads = (self._download_failures + subprocess_download_failures)[:100]
 
         if items_failed:
             logger.warning(

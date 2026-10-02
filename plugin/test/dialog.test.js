@@ -63,7 +63,7 @@ test('mergeDownloadFailures does nothing when metadata has no failed downloads',
 	const ZoteroRAGDialog = loadDialogMethods();
 	const { fakeThis, storeCalls, countUpdates } = makeFakeThis(0, 5);
 
-	await ZoteroRAGDialog.mergeDownloadFailures.call(fakeThis, 'lib1', { last_full_scan_failed_downloads: [] });
+	await ZoteroRAGDialog.mergeDownloadFailures.call(fakeThis, 'lib1', { last_scan_failed_downloads: [] });
 	await ZoteroRAGDialog.mergeDownloadFailures.call(fakeThis, 'lib1', null);
 
 	assert.deepStrictEqual(storeCalls, []);
@@ -75,7 +75,7 @@ test('mergeDownloadFailures stores keys and bumps the count when new ones were a
 	const { fakeThis, storeCalls, countUpdates } = makeFakeThis(2, 5);
 
 	await ZoteroRAGDialog.mergeDownloadFailures.call(fakeThis, 'lib1', {
-		last_full_scan_failed_downloads: [
+		last_scan_failed_downloads: [
 			{ item_key: 'A', attachment_key: 'ATT1' },
 			{ item_key: 'B', attachment_key: 'ATT2' },
 		],
@@ -90,7 +90,7 @@ test('mergeDownloadFailures does not bump the count when nothing new was added',
 	const { fakeThis, storeCalls, countUpdates } = makeFakeThis(0, 5);
 
 	await ZoteroRAGDialog.mergeDownloadFailures.call(fakeThis, 'lib1', {
-		last_full_scan_failed_downloads: [{ item_key: 'A', attachment_key: 'ATT1' }],
+		last_scan_failed_downloads: [{ item_key: 'A', attachment_key: 'ATT1' }],
 	});
 
 	assert.deepStrictEqual(storeCalls, [{ libraryId: 'lib1', keys: ['ATT1'] }]);

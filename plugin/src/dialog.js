@@ -34,10 +34,11 @@
  *   processing (dead download link, extraction error) in the last completed
  *   full scan — the server's authoritative floor of currently un-indexable
  *   items; incremental syncs never update it.
- * @property {Array<{item_key: string, attachment_key: string}>} [last_full_scan_failed_downloads] -
- *   Up to 100 attachments that failed to download from Zotero in the last full
- *   scan. Unlike a parse error, these may be fixable client-side (see
- *   mergeDownloadFailures).
+ * @property {Array<{item_key: string, attachment_key: string}>} [last_scan_failed_downloads] -
+ *   Up to 100 attachments that failed to download from Zotero the last time this
+ *   library was indexed, by any path (full scan, incremental sync, or the
+ *   oversized-item reindex script). Unlike a parse error, these may be fixable
+ *   client-side (see mergeDownloadFailures).
  */
 
 /**
@@ -641,10 +642,10 @@ var ZoteroRAGDialog = {
 	 * @returns {Promise<void>}
 	 */
 	async mergeDownloadFailures(libraryId, metadata) {
-		if (!metadata || !metadata.last_full_scan_failed_downloads || metadata.last_full_scan_failed_downloads.length === 0) {
+		if (!metadata || !metadata.last_scan_failed_downloads || metadata.last_scan_failed_downloads.length === 0) {
 			return;
 		}
-		const keys = metadata.last_full_scan_failed_downloads.map(f => f.attachment_key);
+		const keys = metadata.last_scan_failed_downloads.map(f => f.attachment_key);
 		const added = await this.plugin.storeDownloadFailedItems(libraryId, keys);
 		// Additive heuristic: a download-failed attachment may already be counted by the tier-1 local-scan
 		// baseline if also missing locally, so this can transiently over-count; cosmetic and self-corrects on next full scan.

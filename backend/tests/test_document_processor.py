@@ -909,7 +909,7 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
     async def test_full_sync_persists_download_failures_on_metadata(self):
         """Full sync must persist up to 100 download-failure records onto
-        LibraryIndexMetadata.last_full_scan_failed_downloads, capped, and reset
+        LibraryIndexMetadata.last_scan_failed_downloads, capped, and reset
         cleanly between runs."""
         mock_item = {
             "version": 1,
@@ -925,7 +925,42 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("mode", result)
         saved_metadata = self.mock_vector_store.update_library_metadata.call_args.args[0]
-        self.assertEqual(saved_metadata.last_full_scan_failed_downloads, [
+        self.assertEqual(saved_metadata.last_scan_failed_downloads, [
+            {"item_key": "ITEM123", "attachment_key": "PDF123"},
+        ])
+
+    async def test_incremental_sync_merges_download_failures_into_metadata(self):
+        """Incremental sync must merge its own download failures into
+        LibraryIndexMetadata.last_scan_failed_downloads rather than discarding
+        them or overwriting pre-existing entries — unlike a full scan, it only
+        ever sees items that changed since the last run, so it has no view on
+        previously-failed items outside that set."""
+        from backend.models.library import LibraryIndexMetadata
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib",
+            library_type="user",
+            library_name="Test Library",
+            last_indexed_version=5,
+            last_scan_failed_downloads=[{"item_key": "OLD", "attachment_key": "OLDATT"}],
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        mock_item = {
+            "version": 6,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = None  # Download failed
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.assertEqual(result["mode"], "incremental")
+        self.assertEqual(metadata.last_scan_failed_downloads, [
+            {"item_key": "OLD", "attachment_key": "OLDATT"},
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
 
@@ -1777,7 +1812,7 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
     @patch("backend.services.document_processor.MPQueue")
     async def test_subprocess_batch_aggregates_failed_downloads(self, mock_queue_cls, mock_process_cls):
         """failed_downloads reported by a subprocess batch must be aggregated onto
-        metadata.last_full_scan_failed_downloads via _index_library_full's dispatch loop,
+        metadata.last_scan_failed_downloads via _index_library_full's dispatch loop,
         not just handled in _subprocess_index_batch in isolation."""
         item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
         pdf = _attachment("PDF", "AAA")
@@ -1811,7 +1846,7 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(
-            metadata.last_full_scan_failed_downloads,
+            metadata.last_scan_failed_downloads,
             [{"item_key": "AAA", "attachment_key": "PDF"}],
         )
 

@@ -263,20 +263,19 @@ async def _reprocess_items(
             # Zotero-hosted file has 404'd) to the plugin's Fix Unavailable tool
             # the same way a full scan would — otherwise they're only visible in
             # this script's own log, invisible to the UI. Merge rather than
-            # overwrite: last_full_scan_failed_downloads is a full scan's
-            # snapshot of every candidate, which this script never re-examines
-            # in full, so replacing it outright could hide genuine failures a
-            # real full scan found. The next full scan still fully supersedes
-            # this once it runs.
+            # overwrite: this script only ever sees the items it was asked to
+            # reprocess, not a full scan's complete view, so replacing the list
+            # outright could hide genuine failures a real full scan found. The
+            # next full scan still fully supersedes this once it runs.
             if processor._download_failures:
-                seen = {(f["item_key"], f["attachment_key"]) for f in metadata.last_full_scan_failed_downloads}
-                merged = list(metadata.last_full_scan_failed_downloads)
+                seen = {(f["item_key"], f["attachment_key"]) for f in metadata.last_scan_failed_downloads}
+                merged = list(metadata.last_scan_failed_downloads)
                 for failure in processor._download_failures:
                     key = (failure["item_key"], failure["attachment_key"])
                     if key not in seen:
                         seen.add(key)
                         merged.append(failure)
-                metadata.last_full_scan_failed_downloads = merged[:100]
+                metadata.last_scan_failed_downloads = merged[:100]
             vector_store.update_library_metadata(metadata)
 
     return results
