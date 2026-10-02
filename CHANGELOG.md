@@ -1,3 +1,16 @@
+# [1.48.0](https://github.com/cboulanger/zotero-rag/compare/v1.47.0...v1.48.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **fix-unavailable:** prune fixed entries from the download-failed store ([7c1fa2f](https://github.com/cboulanger/zotero-rag/commit/7c1fa2f1e92c3229ca986a1239edf54a10ba8917))
+* **reindex:** handle embedding quota exhaustion in --loop instead of crashing ([3ed9541](https://github.com/cboulanger/zotero-rag/commit/3ed954103aaac855670195a076722f702843cebd))
+
+
+### Features
+
+* **sync:** surface incremental sync's download failures to Fix Unavailable ([3c6aeec](https://github.com/cboulanger/zotero-rag/commit/3c6aeecc263c351d36d3af41629e33204eca5abd))
+
 # [1.47.0](https://github.com/cboulanger/zotero-rag/compare/v1.46.0...v1.47.0) (2026-10-02)
 
 
