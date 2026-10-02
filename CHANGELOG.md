@@ -1,3 +1,10 @@
+## [1.49.1](https://github.com/cboulanger/zotero-rag/compare/v1.49.0...v1.49.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **fix-unavailable:** stop the failed-download cap from silently hiding new failures ([7190821](https://github.com/cboulanger/zotero-rag/commit/71908212aeee03e8f691263e7f86029c524977d0))
+
 # [1.49.0](https://github.com/cboulanger/zotero-rag/compare/v1.48.1...v1.49.0) (2026-10-02)
 
 
