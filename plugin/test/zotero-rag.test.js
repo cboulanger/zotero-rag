@@ -905,3 +905,36 @@ test('_getSelectedCollectionIDCompat returns null when no collection is selected
 	assert.strictEqual(plugin._getSelectedCollectionIDCompat({ getSelectedCollections: () => [] }), null);
 	assert.strictEqual(plugin._getSelectedCollectionIDCompat({ getSelectedCollection: () => undefined }), null);
 });
+
+test('removeSkippedServerItems prunes only the given keys, preserving the rest', async () => {
+	const fakeAttachment = (key) => ({
+		deleted: false,
+		parentItemID: null,
+		key,
+		getCreators: () => [],
+		getField: () => '',
+	});
+	const { zotero, ioUtils, pathUtils } = makeStubs({
+		KEEP: fakeAttachment('KEEP'),
+		REMOVE: fakeAttachment('REMOVE'),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeSkippedServerItems('u1', [
+		{ key: 'KEEP', reason: 'skipped_timeout' },
+		{ key: 'REMOVE', reason: 'skipped_timeout' },
+	]);
+	await plugin.removeSkippedServerItems('u1', ['REMOVE']);
+
+	const results = await plugin._getSkippedServerAttachments(1);
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].attachmentItem.key, 'KEEP');
+});
+
+test('removeSkippedServerItems is a no-op when the store does not exist yet', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	// Must not throw even though no file has ever been written
+	await plugin.removeSkippedServerItems('u1', ['ANY']);
+});

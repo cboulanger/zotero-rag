@@ -2331,6 +2331,96 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Remove attachment keys from the persistent skipped-server store once
+	 * they've been successfully reindexed (e.g. a Fix Unavailable repair retry
+	 * with a longer timeout succeeded) — without this, storeSkippedServerItems's
+	 * merge is one-directional and a fixed entry would keep reappearing on every
+	 * subsequent Fix Unavailable refresh/reopen, same rationale as
+	 * removeDownloadFailedItems.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {string[]} keysToRemove - Attachment keys that are now successfully indexed
+	 * @returns {Promise<void>}
+	 */
+	async removeSkippedServerItems(backendLibraryId, keysToRemove) {
+		if (!keysToRemove || keysToRemove.length === 0) return;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return;
+		const filePath = this._skippedServerFilePath(zoteroLibraryID);
+		/** @type {Array<{key: string, reason: string}>} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {
+			return;
+		}
+		const toRemove = new Set(keysToRemove);
+		const remaining = existing.filter(e => !toRemove.has(e.key));
+		if (remaining.length === existing.length) return;
+		try {
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(remaining));
+		} catch (e) {
+			this.log(`[removeSkippedServerItems] Failed to write skipped-server file: ${e}`);
+		}
+	}
+
+	/**
+	 * Retry indexing a single attachment that previously hit skipped_timeout,
+	 * with a doubled server-side extraction timeout. Used by the Fix Unavailable
+	 * dialog's "Search & Fix" button — unlike a normal indexing run (which skips
+	 * anything already in its version cache, including prior timeouts), this
+	 * always re-uploads regardless of cache state.
+	 * @param {any} attachmentItem - Zotero attachment item
+	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<{fixed: boolean, stillTimedOut: boolean, error?: string}>}
+	 */
+	async retryTimeoutSkippedAttachment(attachmentItem, parentItem, libraryID) {
+		try {
+			const library = Zotero.Libraries.get(libraryID);
+			const libraryType = library ? library.libraryType : 'user';
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+
+			const att = {
+				item_key: parentItem ? parentItem.key : attachmentItem.key,
+				attachment_key: attachmentItem.key,
+				mime_type: attachmentItem.attachmentContentType || 'application/pdf',
+				item_version: parentItem ? (parentItem.version || 0) : (attachmentItem.version || 0),
+				attachment_version: attachmentItem.version || 0,
+				zoteroItem: attachmentItem,
+				parentItem,
+				filePath: null,
+			};
+
+			const result = await RemoteIndexer._uploadAttachment({
+				att,
+				libraryId: backendLibraryId,
+				libraryType,
+				backendURL: this.backendURL,
+				userId: this.getCurrentZoteroUserId ? this.getCurrentZoteroUserId() : null,
+				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
+				log: (msg) => this.log(msg),
+				timeoutMultiplier: 2.0,
+			});
+
+			if (result.skippedTimeout) {
+				return { fixed: false, stillTimedOut: true };
+			}
+			if (result.parseError || result.skippedEmpty) {
+				// A doubled timeout surfaced a different, non-timeout failure —
+				// treat as "not fixed, not a timeout anymore" rather than retry-forever.
+				return { fixed: false, stillTimedOut: false, error: result.errorDetail || 'Extraction failed' };
+			}
+			return { fixed: true, stillTimedOut: false };
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return { fixed: false, stillTimedOut: false, error: msg };
+		}
+	}
+
+	/**
 	 * Load server-skipped attachment entries and resolve them to UnavailableAttachmentInfo objects.
 	 * Silently drops entries where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
