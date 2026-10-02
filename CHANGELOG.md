@@ -1,3 +1,10 @@
+## [1.48.1](https://github.com/cboulanger/zotero-rag/compare/v1.48.0...v1.48.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **fix-unavailable:** restore checkbox/status/select cells on newer Zotero ([6d8c54d](https://github.com/cboulanger/zotero-rag/commit/6d8c54d9f3eeb0f5c1ff7277a2fcd4fc77b99f8b))
+
 # [1.48.0](https://github.com/cboulanger/zotero-rag/compare/v1.47.0...v1.48.0) (2026-10-02)
 
 
