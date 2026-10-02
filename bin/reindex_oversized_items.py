@@ -144,10 +144,12 @@ async def _reprocess_items(
     apply: bool,
 ) -> dict[tuple[str, str], str]:
     """Reprocess the given items. Returns {(library_id, item_key): status},
-    status one of "done", "failed", "not_found", "skipped_no_key" — used by
-    _loop() to permanently exclude items that fail for reasons a retry can't
-    fix (e.g. a 404'd attachment), instead of retrying them every round
-    forever.
+    status one of "done", "no_improvement", "failed", "not_found",
+    "skipped_no_key" — used by _loop() to permanently exclude items that
+    fail for reasons a retry can't fix (e.g. a 404'd attachment), or that
+    reprocessed successfully but produced no reduction (already optimally
+    chunked — a repeat run would just reproduce the same count), instead of
+    retrying them every round forever.
     """
     results: dict[tuple[str, str], str] = {}
     settings = get_settings()
@@ -228,11 +230,30 @@ async def _reprocess_items(
                     results[(library_id, item_key)] = "failed"
                     continue
                 vector_store.delete_chunks_by_ids(old_ids)
-                print(
-                    f"[DONE] {library_id}:{item_key} ({title!r}): "
-                    f"{old_count} -> {new_count} chunks ({elapsed:.1f}s)"
-                )
-                results[(library_id, item_key)] = "done"
+                if new_count >= old_count:
+                    # Reprocessing succeeded but didn't shrink the item — it was
+                    # already optimally chunked (e.g. a long but densely-packed
+                    # book) rather than an old per-page-chunk outlier. A repeat
+                    # run would deterministically reproduce the same count, so
+                    # treat this like a terminal failure for _loop()'s exclusion
+                    # purposes: without this, an item whose "optimal" size is
+                    # still >= --min-chunks gets rediscovered and reprocessed
+                    # every single round forever, burning the full extraction
+                    # time for zero benefit. (Hit in production: a single
+                    # ~4,500-chunk item was reprocessed 9 times in a row, ~40
+                    # minutes each, before this was caught.)
+                    print(
+                        f"[DONE] {library_id}:{item_key} ({title!r}): "
+                        f"{old_count} -> {new_count} chunks ({elapsed:.1f}s) — "
+                        f"no reduction, excluding from future rounds"
+                    )
+                    results[(library_id, item_key)] = "no_improvement"
+                else:
+                    print(
+                        f"[DONE] {library_id}:{item_key} ({title!r}): "
+                        f"{old_count} -> {new_count} chunks ({elapsed:.1f}s)"
+                    )
+                    results[(library_id, item_key)] = "done"
 
         # Refresh library-level chunk total so the plugin's index-status view stays accurate.
         metadata = vector_store.get_library_metadata(library_id)
@@ -274,9 +295,11 @@ async def _loop(
     `max_batch_size` items — a single huge item fills a round alone, several
     smaller ones get grouped together up to `batch_chunk_budget` combined old
     chunks — reprocess that batch, then loop. Items that fail for a reason a
-    retry can't fix (see _reprocess_items's return) are excluded from every
-    later round in this run, so a permanently-undownloadable attachment can't
-    spin the loop forever; it'll be retried the next time this script is run.
+    retry can't fix, or that reprocess successfully but don't shrink (see
+    _reprocess_items's return) are excluded from every later round in this
+    run, so neither a permanently-undownloadable attachment nor an
+    already-optimally-chunked item can spin the loop forever; both are
+    retried the next time this script is run.
     """
     permanently_excluded: set[tuple[str, str]] = set()
     round_num = 0
@@ -318,7 +341,7 @@ async def _loop(
 
         results = await _reprocess_items(targets_by_library, vector_store, apply=True)
         for key, status in results.items():
-            if status in ("failed", "not_found", "skipped_no_key"):
+            if status in ("failed", "not_found", "skipped_no_key", "no_improvement"):
                 permanently_excluded.add(key)
 
 
