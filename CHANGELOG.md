@@ -1,3 +1,15 @@
+# [1.47.0](https://github.com/cboulanger/zotero-rag/compare/v1.46.0...v1.47.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **reindex:** exclude items whose reprocessing produced no reduction ([281a95d](https://github.com/cboulanger/zotero-rag/commit/281a95d950522552daa911480197474d2126aaf6))
+
+
+### Features
+
+* **reindex:** surface download failures to the Fix Unavailable UI ([2644f44](https://github.com/cboulanger/zotero-rag/commit/2644f4464e03ffeaff87477d05b69e29d84c051c))
+
 # [1.46.0](https://github.com/cboulanger/zotero-rag/compare/v1.45.2...v1.46.0) (2026-10-01)
 
 
