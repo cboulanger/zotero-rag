@@ -155,6 +155,50 @@ var ZoteroFixUnavailableDialog = {
 			return span;
 		};
 
+		const checkboxCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const span = document.createElement('span');
+			span.className = `cell ${column.className}`;
+			span.style.cssText = 'display:flex;align-items:center;justify-content:center;';
+			const cb = document.createElement('input');
+			cb.type = 'checkbox';
+			cb.checked = this.selected.has(index);
+			cb.style.margin = '0';
+			cb.addEventListener('change', () => {
+				if (cb.checked) {
+					this.selected.add(index);
+				} else {
+					this.selected.delete(index);
+				}
+				this.updateActionButtons();
+			});
+			span.appendChild(cb);
+			return span;
+		};
+		const statusCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const span = document.createElement('span');
+			const status = this.rowStatus.get(index);
+			span.className = `cell ${column.className}${status ? ' status-' + status.cssClass : ''}`;
+			span.textContent = status ? status.text : '';
+			if (status?.tooltip) span.title = status.tooltip;
+			return span;
+		};
+		const selectCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const span = document.createElement('span');
+			span.className = `cell ${column.className}`;
+			const btn = document.createElement('button');
+			btn.className = 'select-btn';
+			btn.textContent = '🔍';
+			btn.title = 'Select in Zotero';
+			btn.addEventListener('mousedown', e => e.stopPropagation());
+			btn.addEventListener('click', e => {
+				e.stopPropagation();
+				const info = this.items[index];
+				if (info) this.selectItemInZotero(info);
+			});
+			span.appendChild(btn);
+			return span;
+		};
+
 		/** @type {Array<any>} */
 		const columns = [
 			{
@@ -163,44 +207,28 @@ var ZoteroFixUnavailableDialog = {
 				fixedWidth: true,
 				width: 28,
 				ignoreInColumnPicker: true,
-				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
-					const span = document.createElement('span');
-					span.className = `cell ${column.className}`;
-					span.style.cssText = 'display:flex;align-items:center;justify-content:center;';
-					const cb = document.createElement('input');
-					cb.type = 'checkbox';
-					cb.checked = this.selected.has(index);
-					cb.style.margin = '0';
-					cb.addEventListener('change', () => {
-						if (cb.checked) {
-							this.selected.add(index);
-						} else {
-							this.selected.delete(index);
-						}
-						this.updateActionButtons();
-					});
-					span.appendChild(cb);
-					return span;
-				},
+				// Both names are set for cross-version compatibility: older Zotero
+				// builds' virtualized-table dispatch on `column.renderer`, newer ones
+				// (confirmed against a current Zotero checkout) renamed the hook to
+				// `column.renderCell` — a column missing whichever name that build's
+				// renderCell() looks for silently falls back to plain textContent,
+				// which is empty for these three columns (their getRowData value is
+				// '' on purpose), so the whole cell renders blank with no error.
+				renderer: checkboxCellRenderer,
+				renderCell: checkboxCellRenderer,
 			},
-			{ dataKey: 'author',   label: 'Author(s)', flex: 2,   renderer: textCellRenderer },
-			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48, renderer: textCellRenderer },
-			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer },
-			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer },
-			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer },
-			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 70, renderer: textCellRenderer },
+			{ dataKey: 'author',   label: 'Author(s)', flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
+			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48, renderer: textCellRenderer, renderCell: textCellRenderer },
+			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer, renderCell: textCellRenderer },
+			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer, renderCell: textCellRenderer },
+			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
+			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 70, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{
 				dataKey: 'status',
 				label: 'Status',
 				flex: 2,
-				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
-					const span = document.createElement('span');
-					const status = this.rowStatus.get(index);
-					span.className = `cell ${column.className}${status ? ' status-' + status.cssClass : ''}`;
-					span.textContent = status ? status.text : '';
-					if (status?.tooltip) span.title = status.tooltip;
-					return span;
-				},
+				renderer: statusCellRenderer,
+				renderCell: statusCellRenderer,
 			},
 			{
 				dataKey: 'select',
@@ -208,22 +236,8 @@ var ZoteroFixUnavailableDialog = {
 				fixedWidth: true,
 				width: 28,
 				ignoreInColumnPicker: true,
-				renderer: (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
-					const span = document.createElement('span');
-					span.className = `cell ${column.className}`;
-					const btn = document.createElement('button');
-					btn.className = 'select-btn';
-					btn.textContent = '🔍';
-					btn.title = 'Select in Zotero';
-					btn.addEventListener('mousedown', e => e.stopPropagation());
-					btn.addEventListener('click', e => {
-						e.stopPropagation();
-						const info = this.items[index];
-						if (info) this.selectItemInZotero(info);
-					});
-					span.appendChild(btn);
-					return span;
-				},
+				renderer: selectCellRenderer,
+				renderCell: selectCellRenderer,
 			},
 		];
 
@@ -254,6 +268,11 @@ var ZoteroFixUnavailableDialog = {
 					};
 				},
 				onSelectionChange: () => {},
+				// This table has no context menu, but some Zotero builds' virtualized-table
+				// calls this.props.onItemContextMenu(...) unconditionally on right-click
+				// rather than falling back to a default no-op — without this, right-clicking
+				// any row throws "onItemContextMenu is not a function" in the Browser Console.
+				onItemContextMenu: () => {},
 			});
 
 		this.tableHelper.render(undefined, () => {
@@ -536,6 +555,36 @@ var ZoteroFixUnavailableDialog = {
 			} catch (e) {
 				console.error(`fix-unavailable: failed to prune fixed download-failed entries: ${e}`);
 			}
+		}
+
+		// Drop fixed rows from the table immediately rather than waiting for a
+		// manual Refresh — and do it by filtering this.items in place instead
+		// of re-running populateTable(), which would also wipe rowStatus for
+		// every row (including the 'error'/'not-found' status we just set on
+		// rows that are NOT fixed) since that status only ever lives in memory
+		// for the current session, never persisted.
+		if (allFixedIndices.length > 0) {
+			const fixedSet = new Set(allFixedIndices);
+			/** @type {Array<AttachmentInfo>} */
+			const survivingItems = [];
+			/** @type {Map<number, RowStatus>} */
+			const survivingRowStatus = new Map();
+			/** @type {Set<number>} */
+			const survivingSelected = new Set();
+			for (let i = 0; i < this.items.length; i++) {
+				if (fixedSet.has(i)) continue;
+				const newIndex = survivingItems.length;
+				survivingItems.push(this.items[i]);
+				if (this.rowStatus.has(i)) survivingRowStatus.set(newIndex, this.rowStatus.get(i));
+				if (this.selected.has(i)) survivingSelected.add(newIndex);
+			}
+			this.items = survivingItems;
+			this.rowStatus = survivingRowStatus;
+			this.selected = survivingSelected;
+			if (this.plugin && typeof this.plugin.updateMissingFilesCount === 'function') {
+				this.plugin.updateMissingFilesCount(this.backendLibraryId, this.items.length);
+			}
+			this.tableHelper?.render(undefined, () => this.updateActionButtons());
 		}
 
 		const parts = [];
