@@ -1,3 +1,30 @@
+# [1.49.0](https://github.com/cboulanger/zotero-rag/compare/v1.48.1...v1.49.0) (2026-10-02)
+
+
+### Bug Fixes
+
+* **api:** clamp timeout_multiplier to [1.0, 10.0] ([3c9d5c9](https://github.com/cboulanger/zotero-rag/commit/3c9d5c9a93e69ff6a2ffac735e227646682a4dab))
+* **extraction:** classify fully-timed-out split PDFs as skipped_timeout, not skipped_empty ([7b8d406](https://github.com/cboulanger/zotero-rag/commit/7b8d4069bc854223c742c1cdf4c8ed1eabf1f642))
+* **fix-unavailable:** update dialog header to describe both unavailability causes ([03fc8bd](https://github.com/cboulanger/zotero-rag/commit/03fc8bd7e81835f89cc3452cd8721afb13667758))
+* **plugin:** add Zotero 10/11 compat shim for collection-pane selection getters ([3044d16](https://github.com/cboulanger/zotero-rag/commit/3044d16d638d4df542311ae9fe219610c0555f25))
+* **plugin:** add Zotero 10/11 compat shim for fulltextWord search condition ([278ee4a](https://github.com/cboulanger/zotero-rag/commit/278ee4a9a38538276af7b0cc3c85098e6751b33c))
+* **plugin:** harden fulltextContent detection against SearchConditions.get() throwing ([55526f8](https://github.com/cboulanger/zotero-rag/commit/55526f8f35519c7da68857973bf4dfe237d73e20))
+* **plugin:** import FormData/Blob/AbortController into the bootstrap global ([4cf2fff](https://github.com/cboulanger/zotero-rag/commit/4cf2fffe87d65b1cdf497adbf9ba2d04d4191469))
+* **plugin:** load remote_indexer.js at plugin startup, not just per-dialog ([6b5f2c5](https://github.com/cboulanger/zotero-rag/commit/6b5f2c58cc3a6407ce8a02d0029c3855809d7df8))
+* **plugin:** make _apiFetch's timeout signal portable to non-window globals ([0af770b](https://github.com/cboulanger/zotero-rag/commit/0af770b11506b7951e880b30591be27b0344a16c))
+* **plugin:** raise strict_max_version to 10.* for Zotero 10 compatibility ([639faf4](https://github.com/cboulanger/zotero-rag/commit/639faf4b629741650bfe96580b738a71734f13c2))
+* **reindex:** reject abstract-only fallback as a false improvement ([08e0fe8](https://github.com/cboulanger/zotero-rag/commit/08e0fe8d931a16503d977336054b24b775f57d26))
+
+
+### Features
+
+* **api:** accept an optional timeout_multiplier on the document upload endpoints ([3d4f26b](https://github.com/cboulanger/zotero-rag/commit/3d4f26baf5e2fb26540df905cdcf5a54179ee9b9))
+* **extraction:** make Kreuzberg timeout cap configurable via KREUZBERG_TIMEOUT_SECONDS ([35adcee](https://github.com/cboulanger/zotero-rag/commit/35adcee708bd0768578b2f48931bca726d913eb7))
+* **extraction:** thread a per-call timeout_multiplier through DocumentProcessor ([0985c5c](https://github.com/cboulanger/zotero-rag/commit/0985c5c256a8a25f131875583b2a13733b7434a7))
+* **fix-unavailable:** retry timeout rows with a longer timeout by default on Search & Fix ([1cfa1c8](https://github.com/cboulanger/zotero-rag/commit/1cfa1c89dc2f2be76145c803365b4410aa213e9d))
+* **plugin:** add removeSkippedServerItems and retryTimeoutSkippedAttachment ([9946de9](https://github.com/cboulanger/zotero-rag/commit/9946de9afc59c5867b3bd8e718b92d9244705b28))
+* **plugin:** let _uploadAttachment request a scaled-up extraction timeout ([6e64fe9](https://github.com/cboulanger/zotero-rag/commit/6e64fe93af91a5c2c98642ba3bb4ea128fc10b1b))
+
 ## [1.48.1](https://github.com/cboulanger/zotero-rag/compare/v1.48.0...v1.48.1) (2026-10-02)
 
 
