@@ -796,9 +796,11 @@ var RemoteIndexer = {
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
 	 * @param {function(string): void} [opts.onStatusUpdate]
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean}>}
+	 * @param {number} [opts.timeoutMultiplier] - Scales the backend's extraction timeout for
+	 *   this upload only (used by the Fix Unavailable repair action). Defaults to 1.0 (no change).
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0 }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -834,6 +836,9 @@ var RemoteIndexer = {
 		const formData = new FormData();
 		formData.append('file', new Blob([/** @type {any} */ (bytes)], { type: att.mime_type }), att.attachment_key);
 		formData.append('metadata', JSON.stringify(metadata));
+		if (timeoutMultiplier !== 1.0) {
+			formData.append('timeout_multiplier', String(timeoutMultiplier));
+		}
 
 		// Overall deadline covers the upload + async processing + polling
 		const uploadTimeoutMs = 10 * 60 * 1000;
