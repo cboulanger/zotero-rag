@@ -77,3 +77,74 @@ test('_collectAbstractItems excludes trashed items from the search', async () =>
 
 	assert.deepStrictEqual(addedConditions, [['deleted', 'false']]);
 });
+
+// ---------------------------------------------------------------------------
+// _uploadAttachment: includeDiagnostics
+// ---------------------------------------------------------------------------
+
+/** Build a RemoteIndexer whose network layer is stubbed. */
+function makeUploader(result, { asyncStatus = 'done' } = {}) {
+	const bodies = [];
+	const zotero = { ZoteroRAG: { _extractAuthors: () => [], _extractYear: () => null } };
+	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
+	const context = {
+		Zotero: zotero,
+		IOUtils: { read: async () => new Uint8Array([1, 2, 3]) },
+		FormData: class { constructor() { this.f = {}; } append(k, v) { this.f[k] = v; } },
+		Blob: class {},
+	};
+	vm.createContext(context);
+	vm.runInContext(src, context, { filename: 'remote_indexer.js' });
+	const ri = context.RemoteIndexer;
+	ri._apiFetch = async (_m, _u, opts) => {
+		bodies.push(opts.body.f);
+		return { status: 200, json: async () => ({ status: asyncStatus, result }) };
+	};
+	const att = {
+		attachment_key: 'A', item_key: 'I', mime_type: 'application/pdf', item_version: 1, attachment_version: 1,
+		filePath: '/x.pdf', zoteroItem: {}, parentItem: { getField: () => 't', itemType: 'book', dateModified: 'd' },
+	};
+	const call = (extra = {}) => ri._uploadAttachment({
+		att, libraryId: 'u1', libraryType: 'user', backendURL: 'http://x', userId: 1,
+		getAuthHeaders: () => ({}), log: () => {}, ...extra,
+	});
+	return { call, bodies };
+}
+
+test('_uploadAttachment sends include_diagnostics only when requested', async () => {
+	const { call, bodies } = makeUploader({ status: 'indexed', chunks_added: 1, library_id: 'u1' });
+	await call();
+	await call({ includeDiagnostics: true });
+	assert.strictEqual(bodies[0].include_diagnostics, undefined);
+	assert.strictEqual(bodies[1].include_diagnostics, 'true');
+});
+
+test('_uploadAttachment returns diagnostics + pluginDiag on skipped_timeout', async () => {
+	const diag = { request_id: 'r1' };
+	const { call } = makeUploader({ status: 'skipped_timeout', chunks_added: 0, diagnostics: diag, error_detail: 'slow' });
+	const r = await call({ includeDiagnostics: true, timeoutMultiplier: 2 });
+	assert.strictEqual(r.skippedTimeout, true);
+	assert.deepStrictEqual(r.diagnostics, diag);
+	assert.strictEqual(r.pluginDiag.timeout_multiplier, 2);
+	assert.strictEqual(r.pluginDiag.result_status, 'skipped_timeout');
+	assert.strictEqual(r.pluginDiag.http_status, 200);
+});
+
+test('_uploadAttachment attaches diagnostics to the thrown error for status "error"', async () => {
+	const diag = { request_id: 'r2', error: { type: 'RuntimeError' } };
+	const { call } = makeUploader({ status: 'error', message: 'boom', chunks_added: 0, diagnostics: diag });
+	await assert.rejects(call({ includeDiagnostics: true }), (err) => {
+		assert.strictEqual(err.message, 'boom');
+		assert.deepStrictEqual(err.diagnostics, diag);
+		assert.strictEqual(err.pluginDiag.upload_attempts, 1);
+		return true;
+	});
+});
+
+test('_uploadAttachment without includeDiagnostics adds no diagnostics fields', async () => {
+	const { call } = makeUploader({ status: 'skipped_empty', chunks_added: 0 });
+	const r = await call();
+	assert.strictEqual(r.skippedEmpty, true);
+	assert.ok(!('diagnostics' in r));
+	assert.ok(!('pluginDiag' in r));
+});

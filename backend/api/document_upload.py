@@ -35,8 +35,16 @@ from backend.models.document import (
     CURRENT_SCHEMA_VERSION,
     DocumentMetadata,
 )
+from backend.models.diagnostics import DiagnosticsPayload
 from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
+from backend.services.diagnostics_collector import (
+    DiagnosticsCollector,
+    activate as activate_diagnostics,
+    build_server_info,
+    current as current_diagnostics,
+    stage as diag_stage,
+)
 from backend.services.document_processor import DocumentProcessor
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.config.settings import get_settings
@@ -215,6 +223,7 @@ class DocumentUploadResult(BaseModel):
     rate_limit_retries: int = 0
     rate_limit_headers: dict[str, str] | None = None
     error_detail: Optional[str] = None
+    diagnostics: Optional[DiagnosticsPayload] = None  # only when include_diagnostics was requested
 
 
 class AsyncUploadResponse(BaseModel):
@@ -247,7 +256,29 @@ class AbstractIndexRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _execute_upload(
+_DIAGNOSTICS_FORM_DESCRIPTION = (
+    "When true, the result includes a `diagnostics` payload (processing stages, "
+    "request-scoped log records, error details). Used by the Fix Unavailable "
+    "'Download debugging information' option; off by default."
+)
+
+
+async def _execute_upload(*, include_diagnostics: bool = False, **kwargs) -> DocumentUploadResult:
+    """Run :func:`_execute_upload_impl`, optionally capturing per-request diagnostics.
+
+    Called by both the synchronous and async upload endpoints.
+    """
+    if not include_diagnostics:
+        return await _execute_upload_impl(**kwargs)
+    collector = DiagnosticsCollector(server=build_server_info(kwargs.get("embedding_service")))
+    with activate_diagnostics(collector):
+        result = await _execute_upload_impl(**kwargs)
+        collector.set_final_status(result.status)
+        result.diagnostics = collector.finalize()
+    return result
+
+
+async def _execute_upload_impl(
     *,
     file_bytes: bytes,
     content_hash: str,
@@ -283,11 +314,20 @@ async def _execute_upload(
     # get its own chunks and would stay permanently "not indexed". That case is left
     # to fall through to _process_attachment_bytes, which copies the shared content
     # under this item's own key (see _handle_same_library_duplicate).
-    dup = await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id)
+    with diag_stage("dedup_check") as dedup_stage:
+        dup = await asyncio.to_thread(vector_store.check_duplicate, content_hash, library_id)
+        dup_has_chunks = False
+        if dup is not None and dup.item_key == item_key:
+            dup_has_chunks = await asyncio.to_thread(
+                vector_store.get_item_version, library_id, dup.item_key
+            ) is not None
+        dedup_stage.set(
+            content_hash_prefix=content_hash[:8],
+            record_found=dup is not None,
+            same_item=dup is not None and dup.item_key == item_key,
+            has_chunks=dup_has_chunks,
+        )
     if dup is not None and dup.item_key == item_key:
-        dup_has_chunks = await asyncio.to_thread(
-            vector_store.get_item_version, library_id, dup.item_key
-        ) is not None
         if dup_has_chunks:
             logger.info(f"Document {attachment_key} already indexed (hash {content_hash[:8]})")
             return DocumentUploadResult(
@@ -309,13 +349,18 @@ async def _execute_upload(
 
     # Delete stale chunks for this item before re-indexing
     if item_version > 0:
-        stale = await asyncio.to_thread(vector_store.get_item_version, library_id, item_key)
-        if stale is not None and stale < item_version:
-            deleted = await asyncio.to_thread(vector_store.delete_item_chunks, library_id, item_key)
-            logger.info(
-                f"Deleted {deleted} stale chunks for {item_key} "
-                f"(v{stale} → v{item_version})"
-            )
+        with diag_stage("stale_chunk_purge") as purge_stage:
+            stale = await asyncio.to_thread(vector_store.get_item_version, library_id, item_key)
+            purge_stage.set(stale_version=stale, new_version=item_version, chunks_deleted=0)
+            if stale is not None and stale < item_version:
+                deleted = await asyncio.to_thread(vector_store.delete_item_chunks, library_id, item_key)
+                purge_stage.set(chunks_deleted=deleted)
+                logger.info(
+                    f"Deleted {deleted} stale chunks for {item_key} "
+                    f"(v{stale} → v{item_version})"
+                )
+            else:
+                purge_stage.skip()
 
     # Process: extract → embed → store
     processor = DocumentProcessor(
@@ -342,21 +387,26 @@ async def _execute_upload(
         )
 
         # Update library metadata so index-status reflects this upload
-        lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
-        if lib_meta is None:
-            lib_meta = LibraryIndexMetadata(
-                library_id=library_id,
-                library_type=library_type,
-                library_name=library_name,
-                indexing_mode="incremental",
-            )
-        lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, item_version)
-        lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
-        lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
-        if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
-            lib_meta.total_items_indexed += 1
-        await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
+        with diag_stage("library_metadata") as meta_stage:
+            lib_meta = await asyncio.to_thread(vector_store.get_library_metadata, library_id)
+            if lib_meta is None:
+                lib_meta = LibraryIndexMetadata(
+                    library_id=library_id,
+                    library_type=library_type,
+                    library_name=library_name,
+                    indexing_mode="incremental",
+                )
+            lib_meta.last_indexed_version = max(lib_meta.last_indexed_version, item_version)
+            lib_meta.last_indexed_at = datetime.now(timezone.utc).isoformat()
+            lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
+            if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
+                lib_meta.total_items_indexed += 1
+            await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
+            meta_stage.set(total_chunks=lib_meta.total_chunks)
     except Exception as e:
+        active_collector = current_diagnostics()
+        if active_collector is not None:
+            active_collector.set_error(e)
         import openai
         from qdrant_client.http.exceptions import ResponseHandlingException
         from httpx import ConnectError, WriteTimeout, ReadTimeout, TimeoutException
@@ -608,6 +658,7 @@ async def upload_and_index_document(
                     "Fix Unavailable repair action to retry a previously skipped_timeout "
                     "attachment with more time. Must be between 1.0 and 10.0.",
     ),
+    include_diagnostics: bool = Form(False, description=_DIAGNOSTICS_FORM_DESCRIPTION),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
@@ -671,6 +722,7 @@ async def upload_and_index_document(
         vector_store=vector_store,
         embedding_service=embedding_service,
         timeout_multiplier=timeout_multiplier,
+        include_diagnostics=include_diagnostics,
     )
 
 
@@ -691,6 +743,7 @@ async def upload_and_index_document_async(
                     "Fix Unavailable repair action to retry a previously skipped_timeout "
                     "attachment with more time. Must be between 1.0 and 10.0.",
     ),
+    include_diagnostics: bool = Form(False, description=_DIAGNOSTICS_FORM_DESCRIPTION),
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
@@ -736,6 +789,16 @@ async def upload_and_index_document_async(
             status="skipped_duplicate",
             message="Document already indexed (content hash match)",
         )
+        if include_diagnostics:
+            collector = DiagnosticsCollector(server=build_server_info())
+            with collector.stage("dedup_check") as fast_stage:
+                fast_stage.skip(
+                    content_hash_prefix=content_hash[:8],
+                    record_found=True, same_item=True, has_chunks=True,
+                    note="same-item content-hash duplicate; short-circuited before background task",
+                )
+            collector.set_final_status(result.status)
+            result.diagnostics = collector.finalize()
         return AsyncUploadResponse(task_id=None, status="skipped_duplicate", result=result)
 
     # Extract API keys from request NOW (before returning — request object won't be
@@ -766,6 +829,7 @@ async def upload_and_index_document_async(
         vector_store=vector_store,
         embedding_service=embedding_service,
         timeout_multiplier=timeout_multiplier,
+        include_diagnostics=include_diagnostics,
     ))
     logger.info(f"Async upload task {task_id} created for {attachment_key}")
     return AsyncUploadResponse(task_id=task_id, status="processing")
