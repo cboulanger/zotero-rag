@@ -1,3 +1,10 @@
+# [1.50.0](https://github.com/cboulanger/zotero-rag/compare/v1.49.2...v1.50.0) (2026-10-03)
+
+
+### Features
+
+* **fix-unavailable:** add optional debugging-information download ([#45](https://github.com/cboulanger/zotero-rag/issues/45)) ([83c2526](https://github.com/cboulanger/zotero-rag/commit/83c2526aba061d7df5c95860266b3c650cb97c1e))
+
 ## [1.49.2](https://github.com/cboulanger/zotero-rag/compare/v1.49.1...v1.49.2) (2026-10-02)
 
 
