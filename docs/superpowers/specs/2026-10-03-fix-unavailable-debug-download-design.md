@@ -519,27 +519,23 @@ confirm the checkbox disappears.
 - Changing any repair strategy, ordering, or timeout behavior.
 - Persisting the checkbox state as a preference.
 - Collecting diagnostics for **Delete Selected**, or for more than 10 items.
-- Re-uploading a Phase 1/2-fixed item to the backend to gather extraction
-  diagnostics (possible follow-up: an explicit "index and diagnose" step).
+- Touching rows fixed by Phase 1/2: they are never re-uploaded to gather
+  extraction diagnostics.
 - A server-side diagnostics store / retrieval-by-request-id endpoint; the
   `request_id` is included only so a maintainer can grep the server log.
 - Streaming or uploading the file anywhere. It is written locally; the user
   decides whether to share it.
 - Re-offering the save dialog after a cancelled/failed save (follow-up).
 
-## 12. Open questions
+## 12. Decisions on earlier open questions
 
-1. **Level override mechanics** (§7.2): refcounted `setLevel` on three named
-   loggers vs. installing a dedicated `DEBUG`-level logger hierarchy for
-   request-scoped capture. Preference here is the former (smaller change);
-   confirm during planning that no existing handler downstream would be
-   flooded by the lowered level (console/file handlers have their own levels,
-   so expected safe).
-2. **Kreuzberg sidecar logs**: the sidecar is a separate container; this spec
-   captures only what the backend sees (HTTP status + body). Pulling sidecar
-   container logs would need container access the backend doesn't have — left
-   out unless the response-body excerpt proves insufficient in practice.
-3. **Server-reported rows with no backend step** (e.g. a pure download-failed
-   row fixed by Phase 1): the file contains the stored `server_recorded_detail`
-   but no live backend data. Acceptable for v1, or should such rows trigger an
-   immediate diagnostic re-index (see Non-goals)?
+1. **Fixed rows are left alone.** A row repaired by Phase 1/2 (download or
+   other-library search) is never re-uploaded to gather backend diagnostics;
+   its report entry has plugin-side data only (plus any stored
+   `server_recorded_detail`). See Non-goals.
+2. **Log level:** capture uses a refcounted temporary `setLevel(DEBUG)` on the
+   named loggers (§7.2), not a separate logger hierarchy. Console/file handlers
+   keep their own levels, so server log volume is unchanged. Confirm during
+   planning that no downstream handler is flooded.
+3. **Kreuzberg sidecar logs** remain out of scope; the response-body excerpt is
+   the only sidecar signal unless it proves insufficient.
