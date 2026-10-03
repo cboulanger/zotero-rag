@@ -48,3 +48,29 @@ columns:
   timeout can't produce text that isn't there, so these are never auto-retried —
   only deleting the item or reindexing after a configuration change (e.g.
   enabling OCR) can resolve them.
+
+## Downloading debugging information
+
+When a repair does not work and the status text isn't enough to tell why, tick
+**Download debugging information** at the left of the dialog's footer before
+clicking **Search & Fix Selected**. The checkbox is only shown while 1–10 rows
+are selected, starts unticked every time the dialog opens, and has no effect on
+what the repair does.
+
+During the run the plugin records, for every selected row, each step that was
+tried and its outcome (Zotero sync download, each other-library search strategy,
+the longer-timeout and empty-text re-uploads). For re-uploads, the backend also
+returns its own diagnostics for that request: processing stages with timings
+(duplicate check, extraction, embedding, storage), the extraction timeout that
+was applied, the Kreuzberg response status and body excerpt, per-part results
+for split PDFs, any error with its traceback, and the server log lines
+(including DEBUG level) emitted while that request was processed. When the run
+finishes, a save dialog offers the result as one `zotero-rag-fix-debug-*.json`
+file, suitable for attaching to a bug report. Cancelling the save dialog just
+skips writing the file.
+
+The file contains item titles and keys, MIME types, file sizes and timings. It
+does not contain API keys, request headers, file contents, absolute local paths
+(only file names) or the full backend URL (only its host). Rows that were
+repaired by the download or other-library search are not re-uploaded, so they
+have plugin-side details only.

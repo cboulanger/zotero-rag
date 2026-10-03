@@ -343,3 +343,150 @@ test('searchAndFix marks a row with error status when retryTimeoutSkippedAttachm
 	assert.strictEqual(dialog.items.length, 1);
 	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'error');
 });
+
+// ---------------------------------------------------------------------------
+// "Download debugging information" option
+// ---------------------------------------------------------------------------
+
+const DEBUG_SOURCE_PATH = path.join(__dirname, '..', 'src', 'fix-unavailable-debug.js');
+
+/**
+ * Load the dialog + debug helper with a DOM stub exposing the footer checkbox.
+ * @param {{checked?: boolean, saveImpl?: Function}} [opts]
+ */
+function loadDialogWithDebug({ checked = false, saveImpl } = {}) {
+	const elements = {
+		'debug-download-label': { style: { display: 'none' } },
+		'debug-download-cb': { checked, disabled: false },
+	};
+	const context = {
+		window: {},
+		document: { getElementById: (id) => elements[id] || { addEventListener: () => {}, style: {}, disabled: false } },
+		console,
+		Services: { console: { logStringMessage: () => {}, logMessage: () => {} } },
+		Cc: { '@mozilla.org/scripterror;1': { createInstance: () => ({ init: () => {} }) } },
+		Ci: { nsIScriptError: {} },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(DEBUG_SOURCE_PATH, 'utf8'), context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'fix-unavailable.js' });
+	const saves = [];
+	context.ZoteroFixDebug.save = saveImpl || (async (_w, data, name) => { saves.push({ data, name }); return name; });
+	const dialog = context.ZoteroFixUnavailableDialog;
+	dialog._describeFile = async () => ({ exists_locally: false, size_bytes: null, basename: null, is_linked: false });
+	dialog._debugEnvironment = () => ({ plugin: {}, backend: {}, library: {}, pathPrefixes: [] });
+	return { dialog, elements, saves, context };
+}
+
+test('debug checkbox is visible only while 1-10 rows are selected', () => {
+	const { dialog, elements } = loadDialogWithDebug();
+	const label = elements['debug-download-label'];
+	for (const [n, visible] of [[0, false], [1, true], [10, true], [11, false]]) {
+		dialog.selected = new Set(Array.from({ length: n }, (_, i) => i));
+		dialog._updateDebugCheckboxVisibility();
+		assert.strictEqual(label.style.display === '', visible, `n=${n}`);
+	}
+});
+
+test('debug checkbox is disabled (not hidden) while a run is in progress', () => {
+	const { dialog, elements } = loadDialogWithDebug();
+	dialog.selected = new Set([0]);
+	dialog.isRunning = true;
+	dialog._updateDebugCheckboxVisibility();
+	assert.strictEqual(elements['debug-download-cb'].disabled, true);
+	assert.strictEqual(elements['debug-download-label'].style.display, '');
+});
+
+test('_shouldCollectDebug ignores a checked box when the selection is out of range', () => {
+	const { dialog } = loadDialogWithDebug({ checked: true });
+	assert.strictEqual(dialog._shouldCollectDebug([0]), true);
+	assert.strictEqual(dialog._shouldCollectDebug([]), false);
+	assert.strictEqual(dialog._shouldCollectDebug(Array.from({ length: 11 }, (_, i) => i)), false);
+});
+
+/** Run searchAndFix on a mixed selection and return the call log + statuses. */
+async function runMixed(checked) {
+	const { dialog, saves } = loadDialogWithDebug({ checked });
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1, 2, 3]);
+	dialog.items = [
+		{ attachmentItem: { key: 'T' }, skipReason: 'timeout' },
+		{ attachmentItem: { key: 'E' }, skipReason: 'no text' },
+		{ attachmentItem: { key: 'D' }, isLinked: false },
+		{ attachmentItem: { key: 'N' }, isLinked: false },
+	];
+	const calls = [];
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async (...a) => { calls.push(['timeout', a[0].key]); return { fixed: false, stillTimedOut: true, backendDiag: { request_id: 'r1' }, pluginDiag: { upload_attempts: 1 } }; },
+		retryEmptyTextSkippedAttachment: async (...a) => { calls.push(['empty', a[0].key]); return { fixed: true, stillEmpty: false }; },
+		_tryDownloadAttachment: async (att) => { calls.push(['dl', att.key]); return { downloaded: att.key === 'D', reason: 'x' }; },
+		_searchAndFixUnavailableAttachment: async (att, trace) => { calls.push(['search', att.key]); if (trace) trace('md5', { attempted: false }); return { found: false }; },
+		removeSkippedServerItems: async () => {},
+		removeDownloadFailedItems: async () => {},
+	};
+	await dialog.searchAndFix();
+	return { calls, statuses: [...dialog.rowStatus.entries()], remaining: dialog.items.map(i => i.attachmentItem.key), saves, dialog };
+}
+
+test('debug collection is behaviour-neutral: same calls, statuses and surviving rows as without it', async () => {
+	const off = await runMixed(false);
+	const on = await runMixed(true);
+	const plain = (v) => JSON.parse(JSON.stringify(v));
+	assert.deepStrictEqual(plain(on.calls), plain(off.calls));
+	assert.deepStrictEqual(plain(on.statuses), plain(off.statuses));
+	assert.deepStrictEqual(plain(on.remaining), plain(off.remaining));
+	assert.strictEqual(off.saves.length, 0);
+});
+
+test('with the box checked, one report is saved containing every selected row and backend payloads', async () => {
+	const { saves } = await runMixed(true);
+	assert.strictEqual(saves.length, 1);
+	assert.ok(/^zotero-rag-fix-debug-u1-\d{8}-\d{6}\.json$/.test(saves[0].name));
+	const data = saves[0].data;
+	assert.strictEqual(data.items.length, 4);
+	const byKey = Object.fromEntries(data.items.map(i => [i.attachment_key, i]));
+	assert.strictEqual(byKey.T.steps[0].phase, 'timeout_retry');
+	assert.strictEqual(byKey.T.steps[0].backend.request_id, 'r1');
+	assert.strictEqual(byKey.T.steps[0].outcome, 'still_timed_out');
+	assert.strictEqual(byKey.E.steps[0].outcome, 'fixed');
+	assert.strictEqual(byKey.E.steps[0].backend, null);
+	assert.ok(byKey.E.steps[0].backend_note.includes('did not return diagnostics'));
+	assert.strictEqual(byKey.D.steps[0].phase, 'sync_download');
+	assert.strictEqual(byKey.D.final_row_status.css_class, 'fixed');
+	assert.strictEqual(byKey.N.steps[1].phase, 'other_library_search');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(byKey.N.steps[1].plugin.trail)), [{ name: 'md5', data: { attempted: false } }]);
+});
+
+test('a cancelled save dialog does not throw or change row statuses', async () => {
+	const off = await runMixed(false);
+	const { dialog } = loadDialogWithDebug({ checked: true, saveImpl: async () => null });
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [{ attachmentItem: { key: 'N' }, isLinked: false }];
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: false }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+	};
+	await dialog.searchAndFix();
+	assert.strictEqual(dialog.rowStatus.get(0).cssClass, 'not-found');
+	assert.strictEqual(dialog.isRunning, false);
+	assert.ok(off.statuses.length > 0);
+});
+
+test('a failing save is reported in the status bar and still restores the dialog state', async () => {
+	const { dialog } = loadDialogWithDebug({ checked: true, saveImpl: async () => { throw new Error('disk full'); } });
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [{ attachmentItem: { key: 'N' }, isLinked: false }];
+	let status = '';
+	dialog.setStatus = (t) => { status = t; };
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: false }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+	};
+	await dialog.searchAndFix();
+	assert.ok(status.includes('Failed to save debug info: disk full'), status);
+	assert.strictEqual(dialog.isRunning, false);
+});

@@ -30,6 +30,14 @@
       }
       try {
         Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/fix-unavailable-debug.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load fix-unavailable-debug.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript(
           "chrome://zotero-rag/content/fix-unavailable.js",
           window
         );
@@ -63,6 +71,7 @@
     .toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     /* Button bar — status text left, action buttons right */
     .dialog-buttons { display: flex; align-items: center; gap: 8px; padding: 10px 0 12px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    #debug-download-label { display: flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 12px; color: #555; cursor: pointer; user-select: none; }
     #status-bar { flex: 1; font-size: 11px; color: #666; min-height: 15px; }
     .dialog-button { padding: 6px 16px; min-height: 32px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; }
     .dialog-button:hover { background: #e5e5e5; }
@@ -100,6 +109,11 @@
     <div id="table-container"></div>
 
     <div class="dialog-buttons">
+      <!-- Shown only while 1-10 rows are selected; see _updateDebugCheckboxVisibility() -->
+      <label id="debug-download-label" style="display:none"
+             title="Collect detailed diagnostics for the selected items during repair and save them as a JSON file">
+        <input type="checkbox" id="debug-download-cb"/> Download debugging information
+      </label>
       <div id="status-bar"></div>
       <button id="close-btn" type="button" class="dialog-button">Close</button>
       <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete Selected</button>

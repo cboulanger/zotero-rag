@@ -137,6 +137,19 @@ const DIVERSITY_TUNING_FIELDS = [
 /**
  * Main plugin class for Zotero RAG integration.
  */
+/**
+ * Diagnostics fields to merge into a retry helper's failure result when the upload
+ * threw: the thrown Error carries `diagnostics` / `pluginDiag` (see
+ * RemoteIndexer._uploadAttachment's includeDiagnostics option).
+ * @param {any} err
+ * @param {boolean} includeDiagnostics
+ * @returns {{backendDiag?: any, pluginDiag?: any}}
+ */
+function errorDiag(err, includeDiagnostics) {
+	if (!includeDiagnostics) return {};
+	return { backendDiag: (err && err.diagnostics) ?? null, pluginDiag: (err && err.pluginDiag) ?? null };
+}
+
 class ZoteroRAGPlugin {
 	constructor() {
 		/** @type {string|null} */
@@ -2040,7 +2053,7 @@ class ZoteroRAGPlugin {
 		this._fixUnavailableWindow = win.openDialog(
 			'chrome://zotero-rag/content/fix-unavailable.xhtml',
 			'zotero-rag-fix-unavailable',
-			'chrome,centerscreen,resizable=yes,width=720,height=560',
+			'chrome,centerscreen,resizable=yes,width=840,height=560',
 			{ plugin: this, libraryID: zoteroLibraryID, backendLibraryId }
 		);
 	}
@@ -2375,9 +2388,11 @@ class ZoteroRAGPlugin {
 	 * @param {any} attachmentItem - Zotero attachment item
 	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @returns {Promise<{fixed: boolean, stillTimedOut: boolean, error?: string}>}
+	 * @param {{includeDiagnostics?: boolean}} [opts] - includeDiagnostics: also request/return
+	 *   server + plugin diagnostics (`backendDiag`, `pluginDiag`) for the debug download option
+	 * @returns {Promise<{fixed: boolean, stillTimedOut: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
-	async retryTimeoutSkippedAttachment(attachmentItem, parentItem, libraryID) {
+	async retryTimeoutSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
 		try {
 			const library = Zotero.Libraries.get(libraryID);
 			const libraryType = library ? library.libraryType : 'user';
@@ -2403,20 +2418,22 @@ class ZoteroRAGPlugin {
 				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
 				log: (msg) => this.log(msg),
 				timeoutMultiplier: 2.0,
+				includeDiagnostics,
 			});
+			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
 			if (result.skippedTimeout) {
-				return { fixed: false, stillTimedOut: true };
+				return { fixed: false, stillTimedOut: true, ...diag };
 			}
 			if (result.parseError || result.skippedEmpty) {
 				// A doubled timeout surfaced a different, non-timeout failure —
 				// treat as "not fixed, not a timeout anymore" rather than retry-forever.
-				return { fixed: false, stillTimedOut: false, error: result.errorDetail || 'Extraction failed' };
+				return { fixed: false, stillTimedOut: false, error: result.errorDetail || 'Extraction failed', ...diag };
 			}
-			return { fixed: true, stillTimedOut: false };
+			return { fixed: true, stillTimedOut: false, ...diag };
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
-			return { fixed: false, stillTimedOut: false, error: msg };
+			return { fixed: false, stillTimedOut: false, error: msg, ...errorDiag(e, includeDiagnostics) };
 		}
 	}
 
@@ -2432,9 +2449,10 @@ class ZoteroRAGPlugin {
 	 * @param {any} attachmentItem - Zotero attachment item
 	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @returns {Promise<{fixed: boolean, stillEmpty: boolean, error?: string}>}
+	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, stillEmpty: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
-	async retryEmptyTextSkippedAttachment(attachmentItem, parentItem, libraryID) {
+	async retryEmptyTextSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
 		try {
 			const library = Zotero.Libraries.get(libraryID);
 			const libraryType = library ? library.libraryType : 'user';
@@ -2459,20 +2477,22 @@ class ZoteroRAGPlugin {
 				userId: this.getCurrentZoteroUserId ? this.getCurrentZoteroUserId() : null,
 				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
 				log: (msg) => this.log(msg),
+				includeDiagnostics,
 			});
+			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
 			if (result.skippedEmpty) {
-				return { fixed: false, stillEmpty: true };
+				return { fixed: false, stillEmpty: true, ...diag };
 			}
 			if (result.parseError || result.skippedTimeout) {
 				// Re-extraction surfaced a different, non-empty failure — treat as
 				// "not fixed, not empty anymore" rather than retry-forever.
-				return { fixed: false, stillEmpty: false, error: result.errorDetail || 'Extraction failed' };
+				return { fixed: false, stillEmpty: false, error: result.errorDetail || 'Extraction failed', ...diag };
 			}
-			return { fixed: true, stillEmpty: false };
+			return { fixed: true, stillEmpty: false, ...diag };
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e);
-			return { fixed: false, stillEmpty: false, error: msg };
+			return { fixed: false, stillEmpty: false, error: msg, ...errorDiag(e, includeDiagnostics) };
 		}
 	}
 
@@ -2850,9 +2870,15 @@ class ZoteroRAGPlugin {
 	 *   4. Direct URL download — re-fetch the attachment's stored URL
 	 *   5. Zotero resolver — DOI / OA lookup via Find-Available-File pipeline
 	 * @param {*} attachmentItem
+	 * @param {((name: string, data?: any) => void)|null} [trace] - Optional observer that receives
+	 *   one call per strategy with what was tried and what came back (used by the Fix Unavailable
+	 *   debug download). Purely observational: errors thrown by it are swallowed and it never
+	 *   changes control flow.
 	 * @returns {Promise<{found: boolean, via: string, error?: string}>}
 	 */
-	async _searchAndFixUnavailableAttachment(attachmentItem) {
+	async _searchAndFixUnavailableAttachment(attachmentItem, trace = null) {
+		/** @type {(name: string, data?: any) => void} */
+		const note = (name, data) => { if (!trace) return; try { trace(name, data); } catch (_) {} };
 		const key = attachmentItem.key;
 		const parentItem = attachmentItem.parentItemID
 			? /** @type {any} */ (await Zotero.Items.getAsync(attachmentItem.parentItemID))
@@ -2868,9 +2894,11 @@ class ZoteroRAGPlugin {
 			);
 			this.log(`[fix] ${key}: MD5 candidates: ${ids ? ids.length : 0}`);
 			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'md5');
+			note('md5', { attempted: true, hash, candidates: ids ? ids.length : 0, result });
 			if (result) { this.log(`[fix] ${key}: fixed via md5`); return result; }
 		} else {
 			this.log(`[fix] ${key}: no storageHash, skipping MD5`);
+			note('md5', { attempted: false, reason: 'no storageHash' });
 		}
 
 		// Strategy 2: filename match across all libraries
@@ -2883,20 +2911,30 @@ class ZoteroRAGPlugin {
 			);
 			this.log(`[fix] ${key}: filename candidates: ${ids ? ids.length : 0}`);
 			const result = await this._tryCopyFromCandidates(ids, attachmentItem, 'filename');
+			note('filename', { attempted: true, filename, candidates: ids ? ids.length : 0, result });
 			if (result) { this.log(`[fix] ${key}: fixed via filename`); return result; }
+		} else {
+			note('filename', { attempted: false, reason: 'no attachmentFilename' });
 		}
 
 		// Strategy 3: owl:sameAs relation
 		if (parentItem) {
 			this.log(`[fix] ${key}: trying owl:sameAs relations`);
 			const result = await this._tryFixViaRelations(attachmentItem, parentItem);
+			note('owl_sameAs', { attempted: true, result });
 			if (result) { this.log(`[fix] ${key}: fixed via owl:sameAs`); return result; }
+		} else {
+			note('owl_sameAs', { attempted: false, reason: 'no parent item' });
 		}
 
 		// Strategy 4: Direct URL re-download
 		const url = attachmentItem.getField('url');
 		this.log(`[fix] ${key}: trying direct URL download (url=${url || 'none'})`);
 		const result4 = await this._tryFixViaDirectURL(attachmentItem);
+		/** @type {string|null} */
+		let urlHost = null;
+		try { urlHost = url ? new URL(url).host : null; } catch (_) {}
+		note('direct_url', { attempted: !!url, url_host: urlHost, result: result4 });
 		if (result4) { this.log(`[fix] ${key}: fixed via direct URL`); return result4; }
 
 		// Strategy 5: Zotero resolver (DOI / OA lookup)
@@ -2904,7 +2942,10 @@ class ZoteroRAGPlugin {
 			const doi = parentItem.getField('DOI') || parentItem.getExtraField('DOI');
 			this.log(`[fix] ${key}: trying Zotero resolver (DOI=${doi || 'none'})`);
 			const result = await this._tryFixViaResolver(attachmentItem, parentItem);
+			note('resolver', { attempted: true, doi: doi || null, result });
 			if (result) { this.log(`[fix] ${key}: fixed via resolver`); return result; }
+		} else {
+			note('resolver', { attempted: false, reason: 'no parent item' });
 		}
 
 		this.log(`[fix] ${key}: all strategies exhausted — not found`);

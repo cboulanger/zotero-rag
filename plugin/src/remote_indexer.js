@@ -798,9 +798,47 @@ var RemoteIndexer = {
 	 * @param {function(string): void} [opts.onStatusUpdate]
 	 * @param {number} [opts.timeoutMultiplier] - Scales the backend's extraction timeout for
 	 *   this upload only (used by the Fix Unavailable repair action). Defaults to 1.0 (no change).
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null}>}
+	 * @param {boolean} [opts.includeDiagnostics] - Ask the backend for a per-request diagnostics
+	 *   payload (form field `include_diagnostics`) and attach it, plus plugin-side details, to
+	 *   the returned object (`diagnostics`, `pluginDiag`) — or, when the upload throws, to the
+	 *   thrown Error (`err.diagnostics`, `err.pluginDiag`). Used by the Fix Unavailable
+	 *   "Download debugging information" option. Defaults to false (no extra data requested).
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0 }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false }) {
+		/** @type {Record<string, any>|null} */
+		const pluginDiag = includeDiagnostics ? {
+			timeout_multiplier: timeoutMultiplier,
+			upload_attempts: 0,
+			attempt_errors: [],
+		} : null;
+		/**
+		 * Attach diagnostics gathered so far to an error before it propagates.
+		 * @param {any} err
+		 * @param {any} [diagnostics]
+		 * @returns {any}
+		 */
+		const withDiag = (err, diagnostics) => {
+			if (pluginDiag && err && typeof err === 'object') {
+				err.pluginDiag = pluginDiag;
+				err.diagnostics = diagnostics ?? null;
+			}
+			return err;
+		};
+		try {
+			return await this._uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag });
+		} catch (err) {
+			throw withDiag(err, err && err.diagnostics);
+		}
+	},
+
+	/**
+	 * Implementation of {@link RemoteIndexer._uploadAttachment}; `pluginDiag` (when non-null)
+	 * is filled in as the upload progresses.
+	 * @param {any} opts
+	 * @returns {Promise<any>}
+	 */
+	async _uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -839,6 +877,10 @@ var RemoteIndexer = {
 		if (timeoutMultiplier !== 1.0) {
 			formData.append('timeout_multiplier', String(timeoutMultiplier));
 		}
+		if (includeDiagnostics) {
+			formData.append('include_diagnostics', 'true');
+		}
+		if (pluginDiag) pluginDiag.file_size_bytes = bytes.length;
 
 		// Overall deadline covers the upload + async processing + polling
 		const uploadTimeoutMs = 10 * 60 * 1000;
@@ -848,6 +890,7 @@ var RemoteIndexer = {
 		debug(log, `${att.attachment_key}: upload start — size=${formatFileSize(bytes.length)}, timeout=${uploadTimeoutMs}ms`);
 		let response;
 		for (let attempt = 1; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
+			if (pluginDiag) pluginDiag.upload_attempts = attempt;
 			try {
 				response = await this._apiFetch('POST', `${backendURL}/api/index/document/async`, {
 					headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
@@ -857,6 +900,7 @@ var RemoteIndexer = {
 				});
 				break; // success
 			} catch (err) {
+				if (pluginDiag) pluginDiag.attempt_errors.push(err instanceof Error ? err.message : String(err));
 				debug(log, `${att.attachment_key}: upload failed after ${Date.now() - t0}ms`);
 				// Never retry on cancellation or payload-too-large
 				const isCancelled = signal?.aborted || err?.name === 'AbortError' || (err instanceof Error && err.message.includes('aborted'));
@@ -874,6 +918,7 @@ var RemoteIndexer = {
 			}
 		}
 		debug(log, `${att.attachment_key}: async response received in ${Date.now() - t0}ms`);
+		if (pluginDiag) pluginDiag.http_status = response.status ?? null;
 
 		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult}} */ (/** @type {unknown} */ (await response.json()));
 		/** @type {DocumentUploadResult} */
@@ -887,27 +932,41 @@ var RemoteIndexer = {
 			result = asyncData.result;
 		}
 
+		if (pluginDiag) {
+			pluginDiag.async_status = asyncData.status;
+			pluginDiag.task_id = asyncData.task_id ?? null;
+			pluginDiag.total_ms = Date.now() - t0;
+			pluginDiag.result_status = result.status;
+			pluginDiag.result_message = result.message ?? null;
+			pluginDiag.result_error_detail = result.error_detail ?? null;
+			pluginDiag.rate_limit_retries = result.rate_limit_retries ?? 0;
+		}
+		/** Diagnostics fields merged into every terminal return when requested. */
+		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
+
 		const rateLimitNote = result.rate_limit_retries > 0
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
 
 		if (result.status === 'error') {
-			throw new Error(result.message || `Indexing failed for ${att.attachment_key}`);
+			const err = /** @type {any} */ (new Error(result.message || `Indexing failed for ${att.attachment_key}`));
+			err.diagnostics = result.diagnostics ?? null;
+			throw err;
 		}
 		if (result.status === 'skipped_parse_error') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true, errorDetail: result.error_detail || null };
+			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_empty') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (no text extracted)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true, errorDetail: result.error_detail || null };
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_timeout') {
 			log(`[RemoteIndexer] ${att.attachment_key}: skipped (Kreuzberg timeout)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true, errorDetail: result.error_detail || null };
+			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
-		return { rateLimitHeaders: result.rate_limit_headers || null };
+		return { rateLimitHeaders: result.rate_limit_headers || null, ...diagFields };
 	},
 
 	/**
