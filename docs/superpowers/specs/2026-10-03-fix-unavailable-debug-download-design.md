@@ -539,3 +539,23 @@ confirm the checkbox disappears.
    planning that no downstream handler is flooded.
 3. **Kreuzberg sidecar logs** remain out of scope; the response-body excerpt is
    the only sidecar signal unless it proves insufficient.
+
+## 13. Implementation notes (deviations from the design above)
+
+- **Log capture handler** is attached lazily to the capture loggers while a
+  diagnostics request is active (refcounted), not once at startup in
+  `backend/main.py`; `main.py` is unchanged.
+- **Save helper**: the picker + `IOUtils.writeUTF8` code lives in
+  `ZoteroFixDebug.save()` (`fix-unavailable-debug.js`) rather than a module
+  shared with `dialog.js`, to avoid changing `dialog.js`'s load contract and its
+  existing tests.
+- **`server_recorded_detail`** is not recorded: the plugin's skipped/download-failed
+  stores keep only the reason, which is already captured as `skip_reason` /
+  `server_download_failed` in `initial_state`.
+- **Strategy trail** for the other-library search records, per strategy, whether
+  it was attempted, the lookup key (hash / filename / URL host / DOI), the
+  candidate count and the returned result; per-candidate outcomes are not
+  recorded.
+- Extra backend stages beyond the listed set: `kreuzberg_request` (one per
+  sidecar call), `extraction_parts` (split PDFs) and `extraction_result`
+  (empty extraction).

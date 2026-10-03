@@ -31,6 +31,7 @@ from backend.services.extraction.base import ExtractionChunk
 from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
+from backend.services import diagnostics_collector as diag
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
     DocumentMetadata,
@@ -1238,35 +1239,44 @@ class DocumentProcessor:
         # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
         settings = get_settings()
         t_extract_start = time.monotonic()
-        if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
-            try:
-                chunks = await self._extract_pdf_in_parts(
-                    file_bytes, attachment_key, settings.pdf_split_target_part_size,
-                    on_progress=on_progress,
-                    timeout_multiplier=timeout_multiplier,
-                )
-            except KreuzbergTimeoutError as e:
-                logger.warning(f"Skipping attachment {attachment_key}: {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
-            except KreuzbergParsingError as e:
-                logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
-        else:
-            if on_progress:
-                on_progress("Extracting text...")
-            try:
-                chunks = await self.document_extractor.extract_and_chunk(
-                    file_bytes, mime_type, timeout_multiplier=timeout_multiplier
-                )
-            except KreuzbergTimeoutError as e:
-                logger.warning(f"Skipping attachment {attachment_key}: {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
-            except KreuzbergParsingError as e:
-                logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
-                return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
-            except Exception as e:
-                logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
-                raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
+        with diag.stage("extraction") as ex_stage:
+            ex_stage.set(mime_type=mime_type, size_bytes=len(file_bytes), timeout_multiplier=timeout_multiplier,
+                         split_pdf=mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold)
+            if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
+                try:
+                    chunks = await self._extract_pdf_in_parts(
+                        file_bytes, attachment_key, settings.pdf_split_target_part_size,
+                        on_progress=on_progress,
+                        timeout_multiplier=timeout_multiplier,
+                    )
+                except KreuzbergTimeoutError as e:
+                    logger.warning(f"Skipping attachment {attachment_key}: {e}")
+                    ex_stage.set(result="skipped_timeout", error=f"{type(e).__name__}: {e}")
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
+                except KreuzbergParsingError as e:
+                    logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
+                    ex_stage.set(result="skipped_parse_error", error=f"{type(e).__name__}: {e}")
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
+            else:
+                if on_progress:
+                    on_progress("Extracting text...")
+                try:
+                    chunks = await self.document_extractor.extract_and_chunk(
+                        file_bytes, mime_type, timeout_multiplier=timeout_multiplier
+                    )
+                except KreuzbergTimeoutError as e:
+                    logger.warning(f"Skipping attachment {attachment_key}: {e}")
+                    ex_stage.set(result="skipped_timeout", error=f"{type(e).__name__}: {e}")
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_timeout", error_detail=str(e))
+                except KreuzbergParsingError as e:
+                    logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
+                    ex_stage.set(result="skipped_parse_error", error=f"{type(e).__name__}: {e}")
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
+                except Exception as e:
+                    logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
+                    raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
+
+            ex_stage.set(chunks_returned=len(chunks))
 
         t_extract_done = time.monotonic()
         logger.info(
@@ -1276,6 +1286,8 @@ class DocumentProcessor:
 
         if not chunks:
             logger.warning(f"No text extracted from attachment {attachment_key}")
+            with diag.stage("extraction_result") as empty_stage:
+                empty_stage.skip(result="skipped_empty", note="extractor returned no chunks with text")
             return AttachmentProcessingResult(chunks_written=0, status="skipped_empty")
 
         chunks_before_merge = len(chunks)
@@ -1296,7 +1308,10 @@ class DocumentProcessor:
             def _on_embed_batch(done: int, total: int) -> None:
                 if on_progress:
                     on_progress(f"Generating embeddings ({done}/{total})")
-        embeddings = await self.embedding_service.embed_batch(chunk_texts, on_batch=_on_embed_batch)
+        with diag.stage("embedding") as emb_stage:
+            emb_stage.set(chunk_count=total_chunks)
+            embeddings = await self.embedding_service.embed_batch(chunk_texts, on_batch=_on_embed_batch)
+            emb_stage.set(rate_limit_retries=getattr(self.embedding_service, "rate_limit_retries", None))
 
         t_embed_done = time.monotonic()
         logger.info(
@@ -1333,7 +1348,9 @@ class DocumentProcessor:
         # Store in vector database — run in thread pool to avoid blocking the event loop
         if on_progress:
             on_progress(f"Storing chunks (0/{len(doc_chunks)})")
-        await asyncio.to_thread(self.vector_store.add_chunks_batch, doc_chunks)
+        with diag.stage("store") as store_stage:
+            await asyncio.to_thread(self.vector_store.add_chunks_batch, doc_chunks)
+            store_stage.set(chunks_written=len(doc_chunks))
 
         # Record in deduplication table
         dedup_record = DeduplicationRecord(
@@ -1406,7 +1423,9 @@ class DocumentProcessor:
         total_parts = len(parts)
         all_chunks: list[ExtractionChunk] = []
         any_part_timed_out = False
+        part_results: list[dict] = []
         for part_num, (part_bytes, page_offset) in enumerate(parts, 1):
+            t_part = time.monotonic()
             if on_progress:
                 on_progress(f"Extracting text (part {part_num}/{total_parts})...")
             try:
@@ -1418,18 +1437,29 @@ class DocumentProcessor:
                     f"Part (offset={page_offset}) of {attachment_key} timed out: {e}"
                 )
                 any_part_timed_out = True
+                part_results.append({"part": part_num, "page_offset": page_offset, "bytes": len(part_bytes),
+                                     "result": "timeout", "elapsed_s": round(time.monotonic() - t_part, 1)})
                 continue
             except KreuzbergParsingError as e:
                 logger.warning(
                     f"Part (offset={page_offset}) of {attachment_key} parse error: {e}"
                 )
+                part_results.append({"part": part_num, "page_offset": page_offset, "bytes": len(part_bytes),
+                                     "result": "parse_error", "elapsed_s": round(time.monotonic() - t_part, 1)})
                 continue
+            part_results.append({"part": part_num, "page_offset": page_offset, "bytes": len(part_bytes),
+                                 "result": "ok" if part_chunks else "empty", "chunks": len(part_chunks),
+                                 "elapsed_s": round(time.monotonic() - t_part, 1)})
 
             for chunk in part_chunks:
                 if chunk.page_number is not None:
                     chunk.page_number += page_offset
             all_chunks.extend(part_chunks)
 
+        collector = diag.current()
+        if collector is not None:
+            with collector.stage("extraction_parts") as parts_stage:
+                parts_stage.set(parts=part_results)
         if not all_chunks and any_part_timed_out:
             raise KreuzbergTimeoutError(
                 f"All extracted content from {attachment_key} was lost to "

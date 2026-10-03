@@ -19,6 +19,7 @@ from typing import Any
 
 import httpx
 
+from backend.services import diagnostics_collector as diag
 from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,18 @@ class KreuzbergExtractor(DocumentExtractor):
             f"kreuzberg request: mime={mime_type} size={len(content)} timeout={timeout}s "
             f"(cap={self._timeout_cap}, multiplier={timeout_multiplier})"
         )
+        with diag.stage("kreuzberg_request") as kb_stage:
+            kb_stage.set(
+                path="/extract", mime_type=mime_type, size_bytes=len(content),
+                computed_timeout_seconds=timeout, timeout_cap_seconds=self._timeout_cap,
+                timeout_multiplier=timeout_multiplier,
+            )
+            return await self._post_extract(url, content, mime_type, timeout, kb_stage)
+
+    async def _post_extract(
+        self, url: str, content: bytes, mime_type: str, timeout: int, kb_stage: Any
+    ) -> list[ExtractionChunk]:
+        """POST to the sidecar and parse chunks; records HTTP status/body on ``kb_stage``."""
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
@@ -131,6 +144,7 @@ class KreuzbergExtractor(DocumentExtractor):
                     files={"files": ("document", content, mime_type)},
                     data={"config": json.dumps(self._config)},
                 )
+                kb_stage.set(http_status=response.status_code)
                 response.raise_for_status()
         except httpx.ConnectError as exc:
             raise RuntimeError(
@@ -138,6 +152,7 @@ class KreuzbergExtractor(DocumentExtractor):
                 f"Ensure the kreuzberg container is running."
             ) from exc
         except httpx.HTTPStatusError as exc:
+            kb_stage.set(http_status=exc.response.status_code, response_body=diag.body_excerpt(exc.response.text))
             if exc.response.status_code == 422:
                 try:
                     body = exc.response.json()
@@ -152,11 +167,13 @@ class KreuzbergExtractor(DocumentExtractor):
                 f"for mime={mime_type}: {exc.response.text}"
             ) from exc
         except httpx.TimeoutException as exc:
+            kb_stage.set(failure="timeout", exception=type(exc).__name__)
             raise KreuzbergTimeoutError(
                 f"kreuzberg sidecar timed out for mime={mime_type} "
                 f"(size={len(content)}, timeout={timeout}s)"
             ) from exc
         except httpx.ReadError as exc:
+            kb_stage.set(failure="connection_dropped", exception=type(exc).__name__)
             raise KreuzbergTimeoutError(
                 f"kreuzberg sidecar connection dropped for mime={mime_type} "
                 f"(size={len(content)}, timeout={timeout}s)"
@@ -172,6 +189,7 @@ class KreuzbergExtractor(DocumentExtractor):
             logger.debug(f"kreuzberg returned empty result list for mime={mime_type}")
             return []
 
+        kb_stage.set(result_count=len(results))
         # We send one file, so take the first result
         first_result = results[0]
         raw_chunks = first_result.get("chunks") or []

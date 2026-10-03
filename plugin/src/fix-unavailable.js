@@ -344,12 +344,98 @@ var ZoteroFixUnavailableDialog = {
 	 * @returns {void}
 	 */
 	updateActionButtons() {
+		this._updateDebugCheckboxVisibility();
 		if (this.isRunning) return;
 		const count = this.selected.size;
 		const hasItems = this.items.length > 0;
 		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = count === 0 || !hasItems;
 		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = count === 0 || !hasItems;
 		this._updateSelectAllCheckbox();
+	},
+
+	/**
+	 * Show the "Download debugging information" checkbox only while 1-10 rows are
+	 * selected; disable (not hide) it while a repair run is in progress so the
+	 * mode of the current run stays visible but cannot be flipped mid-run.
+	 * @returns {void}
+	 */
+	_updateDebugCheckboxVisibility() {
+		const label = document.getElementById('debug-download-label');
+		const cb = /** @type {HTMLInputElement|null} */ (document.getElementById('debug-download-cb'));
+		if (!label || !label.style) return;
+		const n = this.selected.size;
+		const max = typeof ZoteroFixDebug !== 'undefined' ? ZoteroFixDebug.MAX_ITEMS : 10;
+		label.style.display = (n >= 1 && n <= max) ? '' : 'none';
+		if (cb) cb.disabled = this.isRunning;
+	},
+
+	/**
+	 * Whether debug collection applies to a run over `indices`: the box must be
+	 * checked and the selection within range, regardless of display state.
+	 * @param {number[]} indices
+	 * @returns {boolean}
+	 */
+	_shouldCollectDebug(indices) {
+		if (typeof ZoteroFixDebug === 'undefined') return false;
+		const cb = /** @type {HTMLInputElement|null} */ (document.getElementById('debug-download-cb'));
+		return !!cb?.checked && indices.length >= 1 && indices.length <= ZoteroFixDebug.MAX_ITEMS;
+	},
+
+	/**
+	 * Describe the attachment file for the debug report: existence, size,
+	 * basename only (never the absolute path). Never throws.
+	 * @param {AttachmentInfo} info
+	 * @returns {Promise<{exists_locally: boolean|null, size_bytes: number|null, basename: string|null, is_linked: boolean}>}
+	 */
+	async _describeFile(info) {
+		/** @type {{exists_locally: boolean|null, size_bytes: number|null, basename: string|null, is_linked: boolean}} */
+		const out = { exists_locally: null, size_bytes: null, basename: null, is_linked: !!info.isLinked };
+		try {
+			const att = info.attachmentItem;
+			out.basename = att.attachmentFilename || null;
+			out.exists_locally = await att.fileExists();
+			if (out.exists_locally) {
+				const filePath = await att.getFilePathAsync();
+				// @ts-ignore - IOUtils is a global in Firefox/Zotero
+				if (filePath) out.size_bytes = (await IOUtils.stat(filePath)).size ?? null;
+			}
+		} catch (_) {}
+		return out;
+	},
+
+	/**
+	 * Environment facts for the report's header and path redaction.
+	 * @returns {{plugin: any, backend: any, library: any, pathPrefixes: Array<{path: string, label: string}>}}
+	 */
+	_debugEnvironment() {
+		const plugin = this.plugin || {};
+		/** @type {Array<{path: string, label: string}>} */
+		const pathPrefixes = [];
+		/** @type {string|null} */
+		let urlHost = null;
+		try { urlHost = new URL(plugin.backendURL || '').host; } catch (_) {}
+		/** @type {any} */
+		let library = { backend_library_id: this.backendLibraryId, zotero_library_id: this.libraryID };
+		try {
+			// @ts-ignore
+			library.library_type = Zotero.Libraries.get(this.libraryID)?.libraryType || null;
+			// @ts-ignore
+			pathPrefixes.push({ path: Zotero.DataDirectory.dir, label: '<zotero-data>' });
+			// @ts-ignore
+			pathPrefixes.push({ path: Services.dirsvc.get('Home', Ci.nsIFile).path, label: '~' });
+		} catch (_) {}
+		return {
+			plugin: {
+				version: plugin.version || null,
+				// @ts-ignore
+				zoteroVersion: typeof Zotero !== 'undefined' ? Zotero.version : null,
+				// @ts-ignore
+				platform: typeof Zotero !== 'undefined' ? Zotero.platform : null,
+			},
+			backend: { urlHost, isLocal: typeof plugin.isLocalBackend === 'function' ? plugin.isLocalBackend() : false },
+			library,
+			pathPrefixes,
+		};
 	},
 
 	/**
@@ -453,6 +539,28 @@ var ZoteroFixUnavailableDialog = {
 		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
 		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked);
 
+		// Optional debug collection (observational only: never alters repair behaviour).
+		const collectDebug = this._shouldCollectDebug(indices);
+		/** @type {any} */
+		let report = null;
+		/** @type {Map<number, any>} */
+		const itemHandles = new Map();
+		const NO_DIAG_NOTE = 'server did not return diagnostics (backend may predate this feature)';
+		if (collectDebug) {
+			const env = this._debugEnvironment();
+			report = ZoteroFixDebug.createReport({
+				plugin: env.plugin, backend: env.backend, library: env.library, pathPrefixes: env.pathPrefixes,
+				selectionCount: indices.length, totalRows: this.items.length,
+			});
+			for (const i of indices) {
+				const info = this.items[i];
+				const handle = report.startItem(info, { typeLabel: this._typeLabelFor(info), file: await this._describeFile(info) });
+				itemHandles.set(i, handle);
+			}
+			for (const i of parseErrorIndices) itemHandles.get(i).skip('skipped_parse_error', 'file present but cannot be parsed (binary data)');
+			for (const i of linkedIndices)     itemHandles.get(i).skip('skipped_linked_file', 'linked file — cannot be auto-downloaded');
+		}
+
 		for (const i of parseErrorIndices)  this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
 		for (const i of linkedIndices)      this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
@@ -473,9 +581,15 @@ var ZoteroFixUnavailableDialog = {
 			this.setStatus(`Retrying ${timeoutIndices.length} timed-out file(s) with a longer timeout...`);
 			for (const i of timeoutIndices) {
 				const info = this.items[i];
+				const step = itemHandles.get(i)?.addStep('timeout_retry');
 				try {
-					const result = await this.plugin.retryTimeoutSkippedAttachment(
-						info.attachmentItem, info.parentItem, this.libraryID
+					const result = await (collectDebug
+						? this.plugin.retryTimeoutSkippedAttachment(info.attachmentItem, info.parentItem, this.libraryID, { includeDiagnostics: true })
+						: this.plugin.retryTimeoutSkippedAttachment(info.attachmentItem, info.parentItem, this.libraryID));
+					step?.finish(
+						result.fixed ? 'fixed' : result.stillTimedOut ? 'still_timed_out' : 'error',
+						{ ...(result.pluginDiag || {}), ...(result.error ? { error: result.error } : {}) },
+						result.backendDiag ?? null, result.backendDiag ? null : NO_DIAG_NOTE
 					);
 					if (result.fixed) {
 						this.setRowStatus(i, 'fixed', 'Fixed (longer timeout)');
@@ -490,6 +604,8 @@ var ZoteroFixUnavailableDialog = {
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
 					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					step?.finish('error', { error: msg });
+					itemHandles.get(i)?.addError('plugin', e);
 					timeoutStillFailed++;
 					console.error(`fix-unavailable: timeout retry error for item ${info.zoteroID}: ${msg}`);
 				}
@@ -521,9 +637,15 @@ var ZoteroFixUnavailableDialog = {
 			this.setStatus(`Re-checking ${emptyTextIndices.length} previously empty file(s)...`);
 			for (const i of emptyTextIndices) {
 				const info = this.items[i];
+				const step = itemHandles.get(i)?.addStep('empty_text_retry');
 				try {
-					const result = await this.plugin.retryEmptyTextSkippedAttachment(
-						info.attachmentItem, info.parentItem, this.libraryID
+					const result = await (collectDebug
+						? this.plugin.retryEmptyTextSkippedAttachment(info.attachmentItem, info.parentItem, this.libraryID, { includeDiagnostics: true })
+						: this.plugin.retryEmptyTextSkippedAttachment(info.attachmentItem, info.parentItem, this.libraryID));
+					step?.finish(
+						result.fixed ? 'fixed' : result.stillEmpty ? 'still_empty' : 'error',
+						{ ...(result.pluginDiag || {}), ...(result.error ? { error: result.error } : {}) },
+						result.backendDiag ?? null, result.backendDiag ? null : NO_DIAG_NOTE
 					);
 					if (result.fixed) {
 						this.setRowStatus(i, 'fixed', 'Fixed (re-extracted)');
@@ -538,6 +660,8 @@ var ZoteroFixUnavailableDialog = {
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
 					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					step?.finish('error', { error: msg });
+					itemHandles.get(i)?.addError('plugin', e);
 					emptyTextStillFailed++;
 					console.error(`fix-unavailable: empty-text retry error for item ${info.zoteroID}: ${msg}`);
 				}
@@ -577,9 +701,16 @@ var ZoteroFixUnavailableDialog = {
 					const index = /** @type {any} */ (outcome).index;
 					this.setRowStatus(index, 'error', 'Download error');
 					downloadResults.push({ index, downloaded: false, reason: 'rejected' });
+					const rejection = /** @type {any} */ (outcome).reason;
+					itemHandles.get(index)?.addStep('sync_download').finish('error', { reason: 'rejected', error: String(rejection) });
+					if (rejection) itemHandles.get(index)?.addError('plugin', rejection);
 				} else {
 					const { index, downloaded, reason } = outcome.value;
 					downloadResults.push({ index, downloaded, reason });
+					itemHandles.get(index)?.addStep('sync_download').finish(
+						downloaded ? 'fixed' : 'not_found',
+						{ reason: reason ?? null, sync_enabled: reason !== 'sync-disabled' }
+					);
 					if (downloaded) {
 						this.setRowStatus(index, 'fixed', 'Downloaded');
 					} else {
@@ -608,8 +739,15 @@ var ZoteroFixUnavailableDialog = {
 			this.setStatus(`Phase 2/2: searching other libraries for ${stillMissing.length} remaining file(s)...`);
 			for (const i of stillMissing) {
 				const info = this.items[i];
+				const step = itemHandles.get(i)?.addStep('other_library_search');
 				try {
-					const result = await this.plugin._searchAndFixUnavailableAttachment(info.attachmentItem);
+					const result = await (collectDebug
+						? this.plugin._searchAndFixUnavailableAttachment(info.attachmentItem, (/** @type {string} */ n, /** @type {any} */ d) => step?.note(n, d))
+						: this.plugin._searchAndFixUnavailableAttachment(info.attachmentItem));
+					step?.finish(
+						result.found && !result.error ? 'fixed' : result.found ? 'copy_failed' : 'not_found',
+						{ via: result.via ?? null, ...(result.error ? { error: result.error } : {}) }
+					);
 					if (result.found && !result.error) {
 						this.setRowStatus(i, 'fixed', `Fixed (${result.via})`);
 						fixed++;
@@ -636,6 +774,8 @@ var ZoteroFixUnavailableDialog = {
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
 					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					step?.finish('error', { error: msg });
+					itemHandles.get(i)?.addError('plugin', e);
 					errors++;
 					console.error(`fix-unavailable: error for item ${info.zoteroID}: ${msg}`);
 				}
@@ -665,6 +805,13 @@ var ZoteroFixUnavailableDialog = {
 			} catch (e) {
 				console.error(`fix-unavailable: failed to prune fixed download-failed entries: ${e}`);
 			}
+		}
+
+		// Record each selected row's final status for the debug report (before the
+		// fixed rows are filtered out and indices shift).
+		for (const [i, handle] of itemHandles) {
+			const st = this.rowStatus.get(i);
+			if (st) handle.setFinalStatus(st.cssClass, st.text);
 		}
 
 		// Drop fixed rows from the table immediately rather than waiting for a
@@ -701,7 +848,13 @@ var ZoteroFixUnavailableDialog = {
 		if (fixed    > 0) parts.push(`${fixed} fixed`);
 		if (notFound > 0) parts.push(`${notFound} not found`);
 		if (errors   > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-		this.setStatus(`Done. ${parts.join(', ')}.`);
+		const doneText = `Done. ${parts.join(', ')}.`;
+		this.setStatus(doneText);
+
+		if (report) {
+			const result = await this._saveDebugReport(report, { fixed, not_found: notFound, errors });
+			this.setStatus(`${doneText} ${result}`);
+		}
 
 		this.isRunning = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
@@ -712,6 +865,24 @@ var ZoteroFixUnavailableDialog = {
 		try {
 			if (window.opener && this.plugin) this.plugin._scanUnavailableCount(window.opener);
 		} catch (_) {}
+	},
+
+	/**
+	 * Finalize the debug report and save it via the native save dialog. Never
+	 * throws; returns a short status sentence for the status bar.
+	 * @param {any} report
+	 * @param {{fixed: number, not_found: number, errors: number}} summary
+	 * @returns {Promise<string>}
+	 */
+	async _saveDebugReport(report, summary) {
+		try {
+			const data = report.finalize(summary);
+			this.setStatus('Choose where to save the debug file...');
+			const saved = await ZoteroFixDebug.save(window, data, ZoteroFixDebug.fileName(this.backendLibraryId));
+			return saved ? `Debug info saved to ${saved}.` : 'Debug info not saved.';
+		} catch (e) {
+			return `Failed to save debug info: ${(/** @type {any} */ (e))?.message ?? String(e)}`;
+		}
 	},
 
 	/**
@@ -754,6 +925,8 @@ var ZoteroFixUnavailableDialog = {
 		for (const id of ['search-btn', 'delete-btn', 'close-btn', 'refresh-btn']) {
 			/** @type {HTMLButtonElement} */ (document.getElementById(id)).disabled = disabled;
 		}
+		const debugCb = /** @type {HTMLInputElement|null} */ (document.getElementById('debug-download-cb'));
+		if (debugCb) debugCb.disabled = disabled;
 	},
 
 	/**
