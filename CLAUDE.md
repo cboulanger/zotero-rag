@@ -602,6 +602,13 @@ For creating dialog windows in Zotero plugins:
 - Make atomic commits that represent single logical changes
 - Reference issues/tasks in commit messages when applicable
 
+### Branching Strategy
+
+- **`devel` is the default branch for day-to-day work.** Commit directly to it, or use a short-lived feature branch off it for larger/riskier changes. CI runs on `devel`, but nothing is ever released from it.
+- **`main` is protected and release-only.** Changes land there only via a pull request from `devel` (the repo owner can override this for an emergency hotfix). Merging into `main` runs CI and, on success, triggers an automatic semantic-release (version bump, changelog, GitHub release, Docker image, XPI).
+- Unless told otherwise, do new work on `devel` (or a feature branch off it), not `main`. Only open a `devel` → `main` PR when the user explicitly asks to release.
+- See [docs/ci-cd.md](docs/ci-cd.md) for the full CI/CD and release workflow.
+
 ### Working with git worktrees and subagents
 
 - When implementation work is happening in a git worktree (e.g. via subagent-driven-development or executing-plans), every subagent prompt dispatched for that work MUST explicitly state the worktree's absolute path and instruct the subagent to `cd` there and verify (`pwd`, `git branch --show-current`) as its first action, and to make **all** file edits, test runs, and commits from that directory — never from the original repo checkout.

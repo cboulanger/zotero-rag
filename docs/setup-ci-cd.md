@@ -31,10 +31,18 @@ git commit -m "docs: update documentation"
 ### Pushing Changes
 
 ```bash
-git push origin main
+# Day-to-day work goes to devel, not main
+git push origin devel
 ```
 
-That's it! If your commit includes `feat:` or `fix:`, a release is created automatically.
+`main` is protected — changes only land there via a pull request from `devel`
+(the repo owner can override this for an emergency hotfix):
+
+```bash
+gh pr create --base main --head devel --title "Release: <summary>"
+```
+
+Once that PR is merged, if the commits include `feat:` or `fix:`, a release is created automatically.
 
 ## Commit Format
 
@@ -87,7 +95,8 @@ Examples:
 | Command | Description |
 |---------|-------------|
 | `npm run commit` | Interactive commit helper |
-| `git push origin main` | Push and trigger release |
+| `git push origin devel` | Push day-to-day work (no release) |
+| `gh pr create --base main --head devel` | Open the release PR |
 | `npm run test:backend` | Run tests locally |
 
 **[Full command reference →](./ci-cd.md#npm-scripts-reference)**
@@ -102,8 +111,8 @@ A: Check the error message. Most common issues:
 
 **[More troubleshooting →](./ci-cd.md#troubleshooting)**
 
-**Q: I pushed to main but no release was created. Why?**
-A: Only `feat:`, `fix:`, and `perf:` commits trigger releases. If you only have `docs:` or `chore:` commits, no release is created (this is correct).
+**Q: I pushed to devel but no release was created. Why?**
+A: Releases only happen when a PR is merged into `main` — pushes to `devel` run CI but never release. Once merged to `main`, only `feat:`, `fix:`, and `perf:` commits trigger releases. If you only have `docs:` or `chore:` commits, no release is created (this is correct).
 
 **[Understanding release triggers →](./ci-cd.md#what-triggers-a-release)**
 
