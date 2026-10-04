@@ -1475,6 +1475,17 @@ async function handleDeploy(options) {
 
   // Pull or rebuild main image
   if (options.pull) {
+    // Re-tagging ${APP_NAME}:${tag} on every deploy leaves the previous image
+    // dangling (untagged) — left unchecked these accumulate indefinitely and
+    // can fill the disk (seen in production: 28GB+ across dozens of dangling
+    // layers). Prune before pulling so each deploy starts from a clean slate.
+    console.log('[INFO] Pruning dangling images before pull...');
+    try {
+      execSync(`${containerCmd} image prune -f`, { stdio: 'inherit' });
+    } catch (e) {
+      console.log(`[WARNING] Could not prune dangling images: ${e.message}`);
+    }
+
     const remoteImage = `${REGISTRY}:${tag}`;
     console.log(`[INFO] Pulling ${remoteImage}...`);
     try {

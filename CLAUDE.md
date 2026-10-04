@@ -120,6 +120,20 @@ After hotfixing, remove non-root (user-space) images to free space:
 podman rmi --all
 ```
 
+**Also prune the root store** (the one the hotfix `sudo podman build` command above actually
+writes to): every `sudo podman build -t zotero-rag:latest ...` leaves the *previous*
+`zotero-rag:latest` image dangling (untagged) once the new one takes the tag. Left unchecked
+these accumulate indefinitely — seen in production: 47 dangling images, 28GB+, which filled the
+disk and caused Qdrant to fail with `No space left on device` and queries to time out with 504s.
+
+```bash
+sudo podman image prune -f
+```
+
+`bin/container.mjs deploy --pull` already runs this automatically before pulling; the manual
+`sudo podman build` hotfix path does not, so run it yourself after confirming the patched image
+works and before moving on.
+
 ### Debugging the cron indexer
 
 The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `index_libraries.py` inside the main container via `podman exec` and appends **stderr** to the log file.
