@@ -7,6 +7,7 @@ once when a problem starts and once when it clears; it does not resend on
 every tick in between, so a sustained incident doesn't spam the topic.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from backend.utils import disk_space
 logger = logging.getLogger(__name__)
 
 _NTFY_TIMEOUT_SECONDS = 10
+_STARTUP_DELAY_SECONDS = 60
 
 
 def check_qdrant_collections(vector_store: VectorStore) -> list[str]:
@@ -116,3 +118,33 @@ def run_health_check(settings, vector_store: VectorStore, state_path: Optional[P
 
     _atomic_write_json(state_path, {"unhealthy": is_unhealthy, "problems": problems})
     return problems
+
+
+async def run_health_check_loop(settings, vector_store: VectorStore) -> None:
+    """Runs forever until cancelled. Ticks every health_check_interval_minutes,
+    running run_health_check() against the shared VectorStore. Mirrors
+    autoindex_scheduler.run_scheduler_loop: this way the check survives every
+    redeploy automatically (nothing lives only on the host), instead of
+    depending on a manually-created /etc/cron.d entry.
+
+    The tick body is wrapped in try/except Exception (re-raising
+    CancelledError) deliberately: a single tick's failure must not kill the
+    loop permanently — it must keep ticking on the configured interval
+    indefinitely.
+    """
+    if not settings.health_check_interval_minutes:
+        logger.error("run_health_check_loop called without health_check_interval_minutes set; exiting immediately.")
+        return
+    await asyncio.sleep(_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            problems = run_health_check(settings, vector_store)
+            if problems:
+                logger.warning("Health check found %d problem(s): %s", len(problems), "; ".join(problems))
+            else:
+                logger.debug("Health check: all clear.")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Health check tick failed unexpectedly; will retry next interval.")
+        await asyncio.sleep(settings.health_check_interval_minutes * 60)

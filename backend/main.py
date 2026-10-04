@@ -124,12 +124,24 @@ async def lifespan(app: FastAPI):
         app.state.autoindex_scheduler_task = scheduler_task
         logger.info(f"Auto-index scheduler started (every {settings.autoindex_interval_minutes} min)")
 
+    health_check_task: Optional[asyncio.Task] = None
+    if settings.health_check_interval_minutes and app.state.vector_store is not None:
+        from backend.services.health_check import run_health_check_loop
+        health_check_task = asyncio.create_task(run_health_check_loop(settings, app.state.vector_store))
+        app.state.health_check_task = health_check_task
+        logger.info(f"Health check scheduler started (every {settings.health_check_interval_minutes} min)")
+
     yield
 
     if scheduler_task is not None:
         scheduler_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await scheduler_task
+
+    if health_check_task is not None:
+        health_check_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await health_check_task
 
     logger.info("Shutting down Zotero RAG backend")
     save_item_cache(_cache_path)

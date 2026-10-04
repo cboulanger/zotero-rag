@@ -7,11 +7,12 @@ the original incident: the "red" optimizer_status sat unnoticed until a user
 reported a 504).
 """
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services import health_check
 
@@ -154,6 +155,63 @@ class RunHealthCheckTest(unittest.TestCase):
              patch.object(health_check.disk_space.shutil, "disk_usage", return_value=self._fake_disk_usage(2)):
             problems = health_check.run_health_check(self.settings, self.healthy_vs, state_path=self.state_path)
         self.assertTrue(any("disk" in p.lower() for p in problems))
+
+
+class RunHealthCheckLoopTest(unittest.IsolatedAsyncioTestCase):
+    """Mirrors test_autoindex_scheduler.py's RunSchedulerLoopTest: proves the
+    loop ticks on schedule, survives a failing tick, and is cancellable."""
+
+    def _settings(self, interval=60):
+        return SimpleNamespace(
+            data_path=Path(tempfile.mkdtemp()),
+            health_check_interval_minutes=interval,
+            health_check_min_free_disk_percent=15.0,
+            ntfy_topic_url=None,
+        )
+
+    async def test_tick_then_cancel(self):
+        settings = self._settings(interval=60)
+        vs = MagicMock()
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.health_check.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.health_check.run_health_check", return_value=[]) as mock_run:
+            with self.assertRaises(asyncio.CancelledError):
+                await health_check.run_health_check_loop(settings, vs)
+
+        mock_run.assert_called_once_with(settings, vs)
+        self.assertEqual(calls, [health_check._STARTUP_DELAY_SECONDS, settings.health_check_interval_minutes * 60])
+
+    async def test_tick_exception_does_not_stop_loop(self):
+        settings = self._settings(interval=60)
+        vs = MagicMock()
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.health_check.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.health_check.run_health_check", side_effect=RuntimeError("boom")):
+            with self.assertRaises(asyncio.CancelledError):
+                await health_check.run_health_check_loop(settings, vs)
+
+        self.assertEqual(len(calls), 2)
+
+    async def test_returns_immediately_when_interval_unset(self):
+        settings = self._settings(interval=None)
+        vs = MagicMock()
+        with patch("backend.services.health_check.asyncio.sleep", new=AsyncMock()) as mock_sleep, \
+             patch("backend.services.health_check.run_health_check") as mock_run:
+            await health_check.run_health_check_loop(settings, vs)  # must return, not raise or hang
+        mock_sleep.assert_not_called()
+        mock_run.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -358,32 +358,21 @@ Prefer `skip-slug` unless the process itself is unresponsive.
 
 ## Production Health Monitoring
 
-Two independent scripts watch for the conditions that caused the disk-full /
+Two independent checks watch for the conditions that caused the disk-full /
 Qdrant-optimizer-stuck incident, and push an alert via [ntfy.sh](https://ntfy.sh)
 (a free push-notification service; no account needed — just a topic name) when
 something degrades, instead of relying on a user reporting a 504.
 
-### `bin/check_production_health.py` — disk space + Qdrant collection health
+### Disk space + Qdrant collection health (built-in scheduler)
 
 Checks free disk space on the `data_path` volume and the `status`/
-`optimizer_status` of every Qdrant collection. Must run **inside the app
-container** (`podman exec`), since Qdrant is only reachable over the
-container-internal network — see "Running Inside a Container" above:
+`optimizer_status` of every Qdrant collection. Like `AUTOINDEX_INTERVAL_MINUTES`,
+this runs as an in-process scheduler inside the app itself — nothing lives only
+on the host, so it survives every redeploy automatically with no cron entry to
+recreate. Set in the deploy env file (passed into the container):
 
 ```bash
-podman exec zotero-rag python bin/check_production_health.py
-```
-
-Add as a host cron entry (runs every 15 minutes; adjust the data path):
-
-```text
-# /etc/cron.d/zotero-rag-health
-*/15 * * * * root podman exec zotero-rag python bin/check_production_health.py >> /path/to/data/logs/health_check.log 2>&1
-```
-
-Configure in the deploy env file (passed into the container):
-
-```bash
+HEALTH_CHECK_INTERVAL_MINUTES=15        # enables the periodic check
 NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name
 HEALTH_CHECK_MIN_FREE_DISK_PERCENT=15   # optional, default shown
 ```
@@ -391,6 +380,15 @@ HEALTH_CHECK_MIN_FREE_DISK_PERCENT=15   # optional, default shown
 Use a private, hard-to-guess topic name (anyone who knows it can read your
 alerts or publish fake ones to it); subscribe to it in the ntfy app or web UI
 to receive the push notifications.
+
+`bin/check_production_health.py` is the same check as a standalone CLI, for
+manual/on-demand runs when debugging (it must run **inside the app
+container**, since Qdrant is only reachable over the container-internal
+network — see "Running Inside a Container" above):
+
+```bash
+podman exec zotero-rag python bin/check_production_health.py
+```
 
 ### `bin/check_image_bloat.sh` — podman image bloat
 
@@ -413,8 +411,8 @@ Add as a host cron entry:
 */30 * * * * root NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name IMAGE_BLOAT_THRESHOLD_GB=10 /home/cloud/zotero-rag/bin/check_image_bloat.sh >> /path/to/data/logs/health_check.log 2>&1
 ```
 
-Both scripts alert once when a problem starts and once when it clears — they
-stay silent on every tick while already-reported problem persists, so a
+Both checks alert once when a problem starts and once when it clears — they
+stay silent on every tick while an already-reported problem persists, so a
 sustained incident doesn't spam the topic. State is tracked in a small JSON/
 text file (`data/system/health_check_state.json` and, for the bash script,
 `/var/lib/zotero-rag-image-bloat-state`).
