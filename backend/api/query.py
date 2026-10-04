@@ -25,7 +25,7 @@ from backend.services.rag_engine import (
 )
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.db.vector_store import VectorStore, VectorStoreTimeoutError
+from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
 
@@ -306,10 +306,23 @@ async def query_libraries(
     except VectorStoreTimeoutError as e:
         # Known, recoverable failure mode (the search backend is overloaded) —
         # a short warning is enough; a full traceback would just be log noise.
+        # Include the real detail: a bare "try again" message hides whether
+        # this is ordinary load or something that won't resolve by retrying
+        # (e.g. the search backend itself failing for a specific reason).
         logger.warning(f"Query failed: {e}")
         raise HTTPException(
             status_code=504,
-            detail="The search backend is taking longer than usual to respond. Please try again in a moment.",
+            detail=f"The search backend is taking longer than usual to respond ({e}). Please try again in a moment.",
+        )
+
+    except VectorStoreError as e:
+        # Distinct from a timeout: Qdrant returned an explicit error (e.g. the
+        # disk-full "No space left on device" case) — not transient load, so
+        # don't frame it as "try again in a moment" the way the timeout above does.
+        logger.warning(f"Query failed: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"The search backend returned an error: {e}",
         )
 
     except Exception as e:

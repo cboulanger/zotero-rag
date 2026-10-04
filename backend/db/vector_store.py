@@ -13,7 +13,7 @@ from pathlib import Path
 import uuid
 
 from httpx import TimeoutException, ReadTimeout, WriteTimeout
-from qdrant_client.http.exceptions import ResponseHandlingException
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -44,6 +44,38 @@ logger = logging.getLogger(__name__)
 
 class VectorStoreTimeoutError(RuntimeError):
     """Raised when a Qdrant search request exceeds the configured client timeout."""
+
+
+class VectorStoreError(RuntimeError):
+    """Raised when Qdrant returns an explicit error response (not a timeout),
+    e.g. the disk-full "No space left on device" case. Distinct from
+    VectorStoreTimeoutError so callers can tell "try again, it's slow" apart
+    from "this failed for a specific, non-transient reason"."""
+
+
+_MAX_QDRANT_ERROR_DETAIL_LEN = 300
+
+
+def _describe_qdrant_error(exc: Exception) -> str:
+    """Extract a short, user-safe description of a Qdrant client exception.
+
+    For UnexpectedResponse, pulls just the server's own `status.error` message
+    out of the raw response body — not the full exception repr, which includes
+    byte-string framing and would double any path/detail already in the error.
+    Falls back to str(exc) for anything else. Always truncated: Qdrant error
+    bodies can contain internal server details (file paths, host names) and
+    this value is shown directly to end users via the API's error `detail`.
+    """
+    if isinstance(exc, UnexpectedResponse):
+        try:
+            body = json.loads(exc.content)
+            message = body.get("status", {}).get("error")
+            if message:
+                return message[:_MAX_QDRANT_ERROR_DETAIL_LEN]
+        except (ValueError, AttributeError):
+            pass
+        return f"{exc.reason_phrase} ({exc.status_code})"
+    return str(exc)[:_MAX_QDRANT_ERROR_DETAIL_LEN]
 
 
 # int8 scalar quantization cuts the RAM-resident vector set to ~1/4 its
@@ -486,6 +518,10 @@ class VectorStore:
             raise VectorStoreTimeoutError(
                 f"Qdrant search timed out after {self.qdrant_timeout}s"
             ) from exc
+        except UnexpectedResponse as exc:
+            detail = _describe_qdrant_error(exc)
+            logger.warning(f"Qdrant search failed: {detail}")
+            raise VectorStoreError(detail) from exc
 
         # Convert to SearchResult objects
         search_results = []
@@ -672,11 +708,16 @@ class VectorStore:
                 break
         if not point_ids:
             return 0
-        self.client.set_payload(
-            collection_name=self.CHUNKS_COLLECTION,
-            payload=fields,
-            points=point_ids,
-        )
+        try:
+            self.client.set_payload(
+                collection_name=self.CHUNKS_COLLECTION,
+                payload=fields,
+                points=point_ids,
+            )
+        except UnexpectedResponse as exc:
+            detail = _describe_qdrant_error(exc)
+            logger.warning(f"Qdrant metadata update failed for {library_id}/{item_key}: {detail}")
+            raise VectorStoreError(detail) from exc
         logger.debug(f"Updated {len(point_ids)} chunks for {library_id}/{item_key}")
         return len(point_ids)
 

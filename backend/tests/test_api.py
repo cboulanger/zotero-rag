@@ -3,7 +3,7 @@ Integration tests for API endpoints.
 """
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi.testclient import TestClient
 import sys
 import os
@@ -11,6 +11,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from backend.main import app
+from backend.db.vector_store import VectorStoreError, VectorStoreTimeoutError
 from backend.dependencies import get_vector_store
 
 
@@ -134,6 +135,52 @@ class TestQueryAPI(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("At least one library", response.json()["detail"])
+
+    def _mock_vector_store_for_query(self):
+        """A MagicMock configured just enough to pass query.py's pre-flight
+        per-library indexed-count check (real int, not a MagicMock) and reach
+        the orchestrator.query() call this class's tests patch."""
+        mock_vs = MagicMock()
+        mock_vs.client.count.return_value.count = 1
+        mock_vs.get_library_metadata.return_value = None
+        app.dependency_overrides[get_vector_store] = lambda: mock_vs
+
+    def test_query_timeout_detail_includes_real_cause(self):
+        """Observed live: a VectorStoreTimeoutError surfaced to the user as a
+        fully static "taking longer than usual" message with no indication of
+        why — even once the search layer carries real detail, the API must
+        not throw it away again."""
+        self._mock_vector_store_for_query()
+        with patch(
+            "backend.services.query_orchestrator.QueryOrchestrator.query",
+            new_callable=AsyncMock,
+            side_effect=VectorStoreTimeoutError("Qdrant search timed out after 30s"),
+        ):
+            response = self.client.post(
+                "/api/query",
+                json={"question": "What is RAG?", "library_ids": ["1"]},
+            )
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("timed out after 30s", response.json()["detail"])
+
+    def test_query_vector_store_error_surfaces_real_detail_not_a_timeout(self):
+        """A VectorStoreError (e.g. Qdrant's disk-full response) is a distinct,
+        non-transient failure — it must not be reported as a 504 timeout, and
+        its real message must reach the client."""
+        self._mock_vector_store_for_query()
+        with patch(
+            "backend.services.query_orchestrator.QueryOrchestrator.query",
+            new_callable=AsyncMock,
+            side_effect=VectorStoreError(
+                "Qdrant search failed: No space left on device: WAL buffer size exceeds available disk space"
+            ),
+        ):
+            response = self.client.post(
+                "/api/query",
+                json={"question": "What is RAG?", "library_ids": ["1"]},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("No space left on device", response.json()["detail"])
 
 
 class TestRootEndpoints(unittest.TestCase):

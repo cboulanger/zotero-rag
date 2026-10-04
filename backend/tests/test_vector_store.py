@@ -9,10 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from httpx import ReadTimeout
-from qdrant_client.http.exceptions import ResponseHandlingException
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Distance
 
-from backend.db.vector_store import VectorStore, VectorStoreTimeoutError
+from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.models.document import (
     DocumentChunk,
     ChunkMetadata,
@@ -272,6 +272,23 @@ class TestVectorStore(unittest.TestCase):
         ):
             with self.assertRaises(ResponseHandlingException):
                 self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+
+    def test_search_raises_vector_store_error_with_real_detail_on_unexpected_response(self):
+        """Observed live: a full disk makes Qdrant return a 500 with a specific
+        body ("No space left on device: ..."), not a timeout. This must surface
+        as a distinct VectorStoreError whose message includes that real detail —
+        not get lost or miscategorized as a generic timeout."""
+        body = b'{"status":{"error":"No space left on device: WAL buffer size exceeds available disk space"},"time":0.0}'
+        with patch.object(
+            self.vector_store.client,
+            "query_points",
+            side_effect=UnexpectedResponse(
+                status_code=500, reason_phrase="Internal Server Error", content=body, headers={},
+            ),
+        ):
+            with self.assertRaises(VectorStoreError) as ctx:
+                self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+            self.assertIn("No space left on device", str(ctx.exception))
 
     def test_search_with_library_filter(self):
         """Test search with library ID filter."""
@@ -552,6 +569,36 @@ class TestVectorStore(unittest.TestCase):
         results = self.vector_store.get_item_chunks("1", "BIGITEM")
         self.assertEqual(len(results), chunk_count)
         self.assertTrue(all(r["payload"]["title"] == "New Title" for r in results))
+
+    def test_update_item_metadata_raises_vector_store_error_with_real_detail(self):
+        """set_payload() had no error handling at all in production — a disk-full
+        UnexpectedResponse from it propagated raw. It must now be converted to a
+        VectorStoreError carrying the real Qdrant error message, like search()."""
+        chunk = DocumentChunk(
+            text="Chunk",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-1",
+                document_metadata=DocumentMetadata(library_id="1", item_key="ITEM1", title="Old"),
+                page_number=1,
+                text_preview="Chunk",
+                chunk_index=0,
+                content_hash="hash1",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunks_batch([chunk])
+
+        body = b'{"status":{"error":"No space left on device: WAL buffer size exceeds available disk space"},"time":0.0}'
+        with patch.object(
+            self.vector_store.client,
+            "set_payload",
+            side_effect=UnexpectedResponse(
+                status_code=500, reason_phrase="Internal Server Error", content=body, headers={},
+            ),
+        ):
+            with self.assertRaises(VectorStoreError) as ctx:
+                self.vector_store.update_item_metadata("1", "ITEM1", {"title": "New"})
+            self.assertIn("No space left on device", str(ctx.exception))
 
     def test_delete_library_chunks(self):
         """Test deleting all chunks for a library."""
