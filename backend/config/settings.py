@@ -163,6 +163,16 @@ class Settings(BaseSettings):
                     "relying on an external OS cron job. Unset (default) leaves "
                     "scheduling entirely to the operator (see docs/cron-indexing.md)."
     )
+    autoindex_min_free_disk_percent: float = Field(
+        default=15.0,
+        description="Minimum free disk space (as a percentage of total size on the "
+                    "data_path volume) required before an auto-index run starts. "
+                    "Below this, bin/index_libraries.py skips the run and logs why "
+                    "instead of writing more data — Qdrant's segment optimizer needs "
+                    "multi-GB of free space to merge segments, and running it down to "
+                    "near-zero free space leaves the optimizer stuck (segments pile up "
+                    "unmerged, which keeps the disk full)."
+    )
 
     qdrant_url: Optional[str] = Field(
         default=None,

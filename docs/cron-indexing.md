@@ -387,6 +387,17 @@ with:
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
+### "Skipping indexing run: Only N% disk free"
+
+The volume holding `data_path` is low on free space, below
+`AUTOINDEX_MIN_FREE_DISK_PERCENT` (default 15%). The run is skipped rather than
+writing more data — Qdrant's segment optimizer needs multi-GB of free space to
+merge segments, and letting the disk run down to near-zero free space leaves
+the optimizer stuck (unmerged segments then keep piling up, keeping the disk
+full). Free up space (old container images are a common culprit — see
+`CLAUDE.md`'s "Cleanup" section) or raise the threshold in your deploy env file
+if you've confirmed there's enough real headroom.
+
 ### "Nothing to index" (no targets resolved)
 
 The store has no usable keys. Add at least one read-only Zotero key via the
