@@ -15,7 +15,6 @@ All log output goes to data/logs/cron_indexer.log (overridable with --log-file).
 import argparse
 import asyncio
 import logging
-import shutil
 import sys
 from pathlib import Path
 
@@ -24,6 +23,8 @@ from pathlib import Path
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
+
+from backend.utils.disk_space import check_disk_space  # noqa: E402
 
 
 def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
@@ -84,26 +85,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _check_disk_space(path: Path, min_free_percent: float) -> str | None:
-    """None if path's volume has enough free space to safely index, otherwise
-    a human-readable reason describing the shortfall.
-
-    Qdrant's segment optimizer needs multi-GB of free space to merge segments;
-    running the disk down to near-zero free space leaves it unable to merge,
-    so unmerged segments pile up and keep the disk full (seen in production:
-    optimizer error "Not enough space available for optimization" at ~98% used).
-    """
-    usage = shutil.disk_usage(path)
-    free_percent = (usage.free / usage.total) * 100
-    if free_percent < min_free_percent:
-        free_gb = usage.free / (1024 ** 3)
-        return (
-            f"Only {free_percent:.1f}% disk free ({free_gb:.1f} GB) at {path}, "
-            f"below the required {min_free_percent:.0f}% minimum."
-        )
-    return None
-
-
 def _filter_targets(targets: dict, fp: str | None) -> dict:
     """Restrict targets to those owned by fp, if given; otherwise return them unchanged."""
     if not fp:
@@ -139,7 +120,7 @@ async def _main(argv: list[str] | None = None) -> int:
     log_file = Path(args.log_file) if args.log_file else settings.data_path / "logs" / "cron_indexer.log"
     log = _setup_logging(log_file, args.log_level)
 
-    disk_issue = _check_disk_space(settings.data_path, settings.autoindex_min_free_disk_percent)
+    disk_issue = check_disk_space(settings.data_path, settings.autoindex_min_free_disk_percent)
     if disk_issue:
         log.error("Skipping indexing run: %s", disk_issue)
         return 1

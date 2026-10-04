@@ -174,6 +174,22 @@ class Settings(BaseSettings):
                     "unmerged, which keeps the disk full)."
     )
 
+    ntfy_topic_url: Optional[str] = Field(
+        default=None,
+        description="Full ntfy.sh (or self-hosted ntfy) topic URL, e.g. "
+                    "'https://ntfy.sh/your-private-topic'. If set, "
+                    "bin/check_production_health.py posts an alert here when a "
+                    "health check starts/stops failing. Unset disables alerting "
+                    "(the health check still logs locally either way)."
+    )
+    health_check_min_free_disk_percent: float = Field(
+        default=15.0,
+        description="Minimum free disk space (as a percentage of total size on the "
+                    "data_path volume) before bin/check_production_health.py reports "
+                    "a problem. Separate from autoindex_min_free_disk_percent so the "
+                    "health check can warn earlier than the hard indexing-skip floor."
+    )
+
     qdrant_url: Optional[str] = Field(
         default=None,
         description="Qdrant server URL (e.g. http://qdrant:6333). If set, uses server mode instead of local file mode."

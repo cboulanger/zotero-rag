@@ -356,6 +356,69 @@ full re-index of whatever was mid-flight). `skip-slug` only ever affects the
 one named job — every other library in the run keeps indexing uninterrupted.
 Prefer `skip-slug` unless the process itself is unresponsive.
 
+## Production Health Monitoring
+
+Two independent scripts watch for the conditions that caused the disk-full /
+Qdrant-optimizer-stuck incident, and push an alert via [ntfy.sh](https://ntfy.sh)
+(a free push-notification service; no account needed — just a topic name) when
+something degrades, instead of relying on a user reporting a 504.
+
+### `bin/check_production_health.py` — disk space + Qdrant collection health
+
+Checks free disk space on the `data_path` volume and the `status`/
+`optimizer_status` of every Qdrant collection. Must run **inside the app
+container** (`podman exec`), since Qdrant is only reachable over the
+container-internal network — see "Running Inside a Container" above:
+
+```bash
+podman exec zotero-rag python bin/check_production_health.py
+```
+
+Add as a host cron entry (runs every 15 minutes; adjust the data path):
+
+```text
+# /etc/cron.d/zotero-rag-health
+*/15 * * * * root podman exec zotero-rag python bin/check_production_health.py >> /path/to/data/logs/health_check.log 2>&1
+```
+
+Configure in the deploy env file (passed into the container):
+
+```bash
+NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name
+HEALTH_CHECK_MIN_FREE_DISK_PERCENT=15   # optional, default shown
+```
+
+Use a private, hard-to-guess topic name (anyone who knows it can read your
+alerts or publish fake ones to it); subscribe to it in the ntfy app or web UI
+to receive the push notifications.
+
+### `bin/check_image_bloat.sh` — podman image bloat
+
+Checks `podman system df`'s reclaimable (dangling) image storage — the root
+cause of the *other* recent incident (47 dangling images, 28GB+). Must run
+directly on the **host as root**, not via `podman exec`: the root image store
+(`/var/lib/containers/storage`, used by systemd and manual `sudo podman
+build` hotfixes) isn't visible from inside the app container.
+
+```bash
+NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name \
+IMAGE_BLOAT_THRESHOLD_GB=10 \
+/home/cloud/zotero-rag/bin/check_image_bloat.sh
+```
+
+Add as a host cron entry:
+
+```text
+# /etc/cron.d/zotero-rag-image-bloat
+*/30 * * * * root NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name IMAGE_BLOAT_THRESHOLD_GB=10 /home/cloud/zotero-rag/bin/check_image_bloat.sh >> /path/to/data/logs/health_check.log 2>&1
+```
+
+Both scripts alert once when a problem starts and once when it clears — they
+stay silent on every tick while already-reported problem persists, so a
+sustained incident doesn't spam the topic. State is tracked in a small JSON/
+text file (`data/system/health_check_state.json` and, for the bash script,
+`/var/lib/zotero-rag-image-bloat-state`).
+
 ## Troubleshooting
 
 ### Log file location
