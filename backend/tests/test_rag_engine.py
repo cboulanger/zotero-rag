@@ -522,6 +522,37 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(second_call_kwargs["limit"], 5)
         self.assertEqual(len(result.sources), 3)
 
+    async def test_query_escalates_when_one_item_has_multiple_attachments(self):
+        """Observed live: a single Zotero item with several indexed attachments
+        (e.g. multiple PDF versions of the same paper) must count as ONE document
+        for diversity purposes, not one per attachment_key. Otherwise a single
+        paper whose attachments happen to split across >= diversity_floor
+        attachment_keys can saturate top_k and suppress escalation even though
+        the library has only one genuinely relevant item represented."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = (
+            [self._make_chunk("DOC1", "ATT1", "Same Paper", 0.9, i) for i in range(4)]
+            + [self._make_chunk("DOC1", "ATT2", "Same Paper", 0.88, i) for i in range(3)]
+            + [self._make_chunk("DOC1", "ATT3", "Same Paper", 0.86, i) for i in range(3)]
+        )
+        diverse_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT4", "Second Doc", 0.7),
+            self._make_chunk("DOC3", "ATT5", "Third Doc", 0.65),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=10)
+
+        self.assertEqual(
+            self.mock_vector_store.search.call_count, 2,
+            "same item_key across 3 attachment_keys must still count as 1 "
+            "document and trigger escalation (1 < diversity_floor=3)",
+        )
+        self.assertEqual(len(result.sources), 3)
+
     async def test_query_does_not_escalate_when_diversity_already_sufficient(self):
         """No wasted second search when the first pass already spans enough documents."""
         question, library_ids = "Question", ["12345"]

@@ -275,8 +275,7 @@ class RAGEngine:
         escalated = False
         if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
             unique_doc_count = len({
-                r.chunk.metadata.document_metadata.attachment_key
-                or r.chunk.metadata.document_metadata.item_key
+                r.chunk.metadata.document_metadata.item_key
                 for r in search_results
             })
             if unique_doc_count < diversity_floor:
@@ -298,18 +297,17 @@ class RAGEngine:
                     escalated = True
                     logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
 
-        # Group chunks by document (attachment_key), preserving all relevant passages.
-        # This gives the LLM real content (not just the highest-scoring chunk, which is
-        # often a bibliography/reference section) while still assigning one source number
-        # per document so citations are not repetitively labelled [1], [2], [3] for the
+        # Group chunks by document (item_key — a Zotero item can have several indexed
+        # attachments, e.g. multiple PDF versions of the same paper, which must still
+        # count as one document), preserving all relevant passages. This gives the LLM
+        # real content (not just the highest-scoring chunk, which is often a
+        # bibliography/reference section) while still assigning one source number per
+        # document so citations are not repetitively labelled [1], [2], [3] for the
         # same paper.
         doc_chunks: dict[str, list] = {}
         doc_best_score: dict[str, float] = {}
         for result in search_results:
-            key = (
-                result.chunk.metadata.document_metadata.attachment_key
-                or result.chunk.metadata.document_metadata.item_key
-            )
+            key = result.chunk.metadata.document_metadata.item_key
             if key not in doc_chunks:
                 doc_chunks[key] = []
                 doc_best_score[key] = result.score
