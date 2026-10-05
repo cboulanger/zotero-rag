@@ -25,6 +25,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # Without an explicit ref, actions/checkout defaults to the repo's
+          # default branch (devel) for a workflow_run event — NOT the branch
+          # of the CI run that triggered this workflow. Since this workflow's
+          # own `on.workflow_run.branches: [main]` filter already guarantees
+          # the triggering CI run was on main, pin the checkout to match, or
+          # semantic-release sees "devel" and refuses to publish a version.
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -63,6 +70,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          # Same workflow_run default-branch gotcha as the release job above:
+          # pin to main or this checks out devel instead.
+          ref: main
           fetch-depth: 0
 
       - name: Update latest and stable tags
