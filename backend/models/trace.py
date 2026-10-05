@@ -46,6 +46,9 @@ class AgentExecutionTrace(Trace):
     context_text: str                             # context assembled and passed to LLM
     sources_count: int
     duration_ms: int
+    quality_review: Optional[dict] = None
+    # Populated only when enable_quality_self_review triggered the
+    # thin-context retry: {"triggered": bool, "reason": str, "retry_improved": bool}.
 
 
 class RoutingTrace(Trace):

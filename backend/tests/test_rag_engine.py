@@ -866,6 +866,156 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         self.mock_llm_service.generate.assert_called_once()
 
+    async def test_quality_review_escalates_and_adopts_better_retry(self):
+        """When enable_quality_self_review=True and the first answer's
+        citation coverage looks thin (signaled by the model emitting
+        CONTEXT_INSUFFICIENT_MARKER), retry once with escalated retrieval
+        and adopt the retry if it has fewer quality issues."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        better_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, better_answer])
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=1, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, better_answer)
+        self.assertEqual(len(result.sources), 3)
+
+    async def test_quality_review_keeps_original_when_retry_is_not_better(self):
+        """If the escalated retry's answer has the same or more quality
+        issues, keep the original answer (minus the marker, which is
+        always stripped) rather than discarding a decent first attempt for
+        a worse one."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        still_thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, still_thin_answer])
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=1, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, "I can only find a partial answer here [S1].")
+        self.assertEqual(len(result.sources), 1)
+
+    async def test_quality_review_does_not_fire_when_disabled(self):
+        """Default False — a thin-looking answer must not trigger a retry
+        unless the caller explicitly opts in. The marker is still stripped
+        from the final answer regardless (the prompt instruction to emit it
+        is unconditional; only the escalation RETRY is gated by the flag)."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=thin_answer)
+
+        result = await self.rag_engine.query(question, library_ids, top_k=1)
+
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertEqual(result.answer, "I can only find a partial answer here [S1].")
+
+    async def test_quality_review_does_not_fire_when_answer_already_good(self):
+        """No wasted retry when the first answer already looks fine."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        good_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(return_value=good_answer)
+
+        await self.rag_engine.query(
+            question, library_ids, top_k=2, enable_quality_self_review=True,
+        )
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_quality_review_records_trace_block(self):
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_llm_service.model_name = "test-model"
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        better_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, better_answer])
+
+        collector = TraceCollector(question, library_ids, {})
+        await self.rag_engine.query(
+            question, library_ids, top_k=1, enable_quality_self_review=True, trace=collector,
+        )
+        trace = collector.finalize()
+
+        review = trace.agent_executions[0].quality_review
+        self.assertIsNotNone(review)
+        self.assertTrue(review["triggered"])
+        self.assertTrue(review["retry_improved"])
+
+    async def test_quality_review_strips_marker_from_answer_but_not_from_trace(self):
+        """CONTEXT_INSUFFICIENT_MARKER is a detection signal for the model to
+        emit, not something the user should see — it must be stripped from
+        QueryResult.answer, but the trace should still show the raw model
+        output (including the marker) for debuggability."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_llm_service.model_name = "test-model"
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        raw_answer = f"The first source states X [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=raw_answer)
+
+        collector = TraceCollector(question, library_ids, {})
+        result = await self.rag_engine.query(question, library_ids, top_k=2, trace=collector)
+        trace = collector.finalize()
+
+        self.assertNotIn(CONTEXT_INSUFFICIENT_MARKER, result.answer)
+        self.assertEqual(result.answer, "The first source states X [S1].")
+        self.assertIn(CONTEXT_INSUFFICIENT_MARKER, trace.llm_calls[-1].response)
+
 
 class TestThinContextCoverage(unittest.TestCase):
     """_thin_context_coverage detects a different failure mode than the

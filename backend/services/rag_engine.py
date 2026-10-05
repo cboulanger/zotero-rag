@@ -164,6 +164,32 @@ def _quality_issue_reinforcement(
     return None
 
 
+def _count_quality_issues(
+    answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
+) -> int:
+    """Count detectable quality issues in `answer`, used to compare an
+    original answer against an escalated-retrieval retry."""
+    issues = 0
+    if _looks_like_tool_call_leak(answer):
+        issues += 1
+    if _missing_citations(answer):
+        issues += 1
+    if _low_citation_diversity(answer, documents_grouped, low_diversity_floor):
+        issues += 1
+    if _thin_context_coverage(answer, documents_grouped, low_diversity_floor):
+        issues += 1
+    return issues
+
+
+def _strip_insufficient_context_marker(answer: str) -> str:
+    """Remove the CONTEXT_INSUFFICIENT_MARKER sentinel (and any trailing
+    whitespace left behind) from the user-facing answer — it's a detection
+    signal for _thin_context_coverage, not something the user should see.
+    The raw answer (marker included) is still what gets traced, so a future
+    trace inspection can see whether the model actually emitted it."""
+    return answer.replace(CONTEXT_INSUFFICIENT_MARKER, "").rstrip()
+
+
 # Observed live: a fixed top_k can be entirely saturated by chunks from a single
 # dominant document (e.g. one paper with 100+ indexed chunks vs. a handful for
 # everything else), starving the answer of other genuinely relevant sources even
@@ -274,6 +300,40 @@ def _assemble_context(
     return context, doc_representatives
 
 
+def _build_generation_prompt(context: str, question: str) -> str:
+    return f"""
+Based on the following context from academic documents, please answer the question.
+
+Context:
+{context}
+
+Question: {question}
+
+Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, state clearly what is missing and stop there — do not supplement your answer with general knowledge, guesses, or suggestions that are not grounded in and cited from the context above. In that case, after stating what is missing, add this exact line by itself as the very last line of your response, with nothing else on that line: {CONTEXT_INSUFFICIENT_MARKER}
+
+Answer directly. Do not narrate your process or describe what you are about to do (e.g. do not write "I will look through the context" or "Here are some relevant sources:") — begin with the substantive answer itself.
+
+You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
+
+CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:
+  - [SN]        — reference to source N (e.g. [S1], [S3])
+  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7].
+                  Replace P with the real page number; never write the literal
+                  letter "P". If you don't know the specific page, write [SN]
+                  with no colon instead.
+  - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
+  - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
+
+IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3].
+NEVER cite a page range like [S1:305-306] — pick the single page where the cited claim
+actually appears.
+NEVER use plain numbers like [1] or [4] — those are bibliography references inside the documents, not source labels.
+NEVER write "Source 1", "S1", or any form other than the bracket notation above.
+
+PAGE SELECTION RULE: When citing a specific page, only cite pages that contain substantive content (arguments, analysis, findings). Do NOT cite pages that consist primarily of bibliographies, reference lists, or footnote-only content — use a different page from the same source instead, or omit the page number.
+"""
+
+
 class SourceInfo(BaseModel):
     """Source citation information."""
     item_id: str
@@ -362,11 +422,9 @@ class RAGEngine:
                 _LOW_DIVERSITY_AVAILABLE_FLOOR above).
             enable_quality_self_review: When True, if the generated answer's
                 citation coverage looks thin (see _thin_context_coverage),
-                retry once with escalated retrieval before returning.
+                retry once with escalated retrieval before returning, and
+                keep whichever answer has fewer detectable quality issues.
                 Default False — doubles latency on queries that trigger it.
-                NOT YET IMPLEMENTED: this parameter is currently accepted
-                but has no effect — detection/retry logic lands in a later
-                task. Until then, setting this to True is a no-op.
 
         Returns:
             Query result with answer and source citations.
@@ -402,9 +460,18 @@ class RAGEngine:
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
         # Escalate once if the search hit the top_k cap (not the corpus limit) and
-        # came back dominated by too few distinct documents.
+        # came back dominated by too few distinct documents. Skipped when
+        # enable_quality_self_review is on: that flag's post-generation
+        # thin-context check (see below) is a strictly more informed signal
+        # (it sees the model's actual answer, not just raw document counts)
+        # and shares the same one-retry escalation budget — firing both
+        # would spend two escalated searches on one query instead of one.
         escalated = False
-        if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
+        if (
+            not enable_quality_self_review
+            and len(search_results) == top_k
+            and top_k < diversity_escalation_max_top_k
+        ):
             unique_doc_count = len({
                 r.chunk.metadata.document_metadata.item_key
                 for r in search_results
@@ -442,74 +509,8 @@ class RAGEngine:
         # listed (deduped by text, then capped per document — see _assemble_context).
         context, doc_representatives = _assemble_context(doc_chunks, sorted_doc_keys, max_chunks_per_document)
 
-        # Record retrieval trace before calling the LLM
-        if trace is not None:
-            scores = [r.score for r in search_results]
-            chunk_traces = [
-                ChunkTrace(
-                    item_key=r.chunk.metadata.document_metadata.item_key or "",
-                    attachment_key=r.chunk.metadata.document_metadata.attachment_key,
-                    title=r.chunk.metadata.document_metadata.title or "",
-                    authors=r.chunk.metadata.document_metadata.authors or [],
-                    year=r.chunk.metadata.document_metadata.year,
-                    page_number=r.chunk.metadata.page_number,
-                    score=r.score,
-                    text_preview=r.chunk.metadata.text_preview,
-                )
-                for r in search_results
-            ]
-            retrieval_trace = RetrievalTrace(
-                embedding_model=embedding_model,
-                embedding_dims=len(query_embedding),
-                search_params={
-                    "top_k": top_k,
-                    "min_score": min_score,
-                    "library_ids": library_ids,
-                    "filters": active_filters.model_dump() if active_filters else None,
-                },
-                escalated=escalated,
-                raw_results_count=len(search_results),
-                score_stats={
-                    "min": min(scores),
-                    "max": max(scores),
-                    "avg": sum(scores) / len(scores),
-                },
-                documents_grouped=len(sorted_doc_keys),
-                chunks=chunk_traces,
-            )
-
         # Step 4: Generate prompt with context
-        prompt = f"""
-Based on the following context from academic documents, please answer the question.
-
-Context:
-{context}
-
-Question: {question}
-
-Provide a comprehensive answer based on the context above. Only use information from the context. If the context doesn't contain enough information to fully answer the question, state clearly what is missing and stop there — do not supplement your answer with general knowledge, guesses, or suggestions that are not grounded in and cited from the context above.
-
-Answer directly. Do not narrate your process or describe what you are about to do (e.g. do not write "I will look through the context" or "Here are some relevant sources:") — begin with the substantive answer itself.
-
-You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
-
-CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:
-  - [SN]        — reference to source N (e.g. [S1], [S3])
-  - [SN:P]      — source N, page P — P is a plain integer, e.g. [S2:7] NOT [S2:p.7].
-                  Replace P with the real page number; never write the literal
-                  letter "P". If you don't know the specific page, write [SN]
-                  with no colon instead.
-  - [SN,SM]     — multiple sources (e.g. [S1,S2,S3])
-  - [SN:P,SM:Q] — multiple sources with pages (e.g. [S1:10,S2:20])
-
-IMPORTANT: Page numbers are integers only. Write [S1:3] not [S1:p.3].
-NEVER cite a page range like [S1:305-306] — pick the single page where the cited claim
-actually appears.
-NEVER use plain numbers like [1] or [4] — those are bibliography references inside the documents, not source labels.
-NEVER write "Source 1", "S1", or any form other than the bracket notation above.
-
-PAGE SELECTION RULE: When citing a specific page, only cite pages that contain substantive content (arguments, analysis, findings). Do NOT cite pages that consist primarily of bibliographies, reference lists, or footnote-only content — use a different page from the same source instead, or omit the page number.
-"""
+        prompt = _build_generation_prompt(context, question)
 
         logger.debug(f"Generated prompt with {len(context)} characters of context")
 
@@ -545,6 +546,54 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                     f"Retry still had a quality issue; using it anyway: {answer[:200]!r}"
                 )
 
+        quality_review: Optional[dict] = None
+        if (
+            enable_quality_self_review
+            and top_k < diversity_escalation_max_top_k
+            and _thin_context_coverage(answer, available_sources, low_diversity_available_floor)
+        ):
+            escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
+            logger.info(
+                f"Thin context coverage detected; escalating retrieval to "
+                f"top_k={escalated_top_k} and regenerating once"
+            )
+            retry_search_results = await asyncio.to_thread(
+                self.vector_store.search,
+                query_vector=query_embedding,
+                limit=escalated_top_k,
+                score_threshold=min_score,
+                library_ids=library_ids if library_ids else None,
+                filters=active_filters,
+            )
+            if len(retry_search_results) > len(search_results):
+                retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
+                retry_context, retry_doc_representatives = _assemble_context(
+                    retry_doc_chunks, retry_sorted_doc_keys, max_chunks_per_document
+                )
+                retry_prompt = _build_generation_prompt(retry_context, question)
+                retry_answer = await self.llm_service.generate(
+                    prompt=retry_prompt, max_tokens=max_tokens, temperature=0.7
+                )
+                original_issues = _count_quality_issues(answer, available_sources, low_diversity_available_floor)
+                retry_issues = _count_quality_issues(
+                    retry_answer, len(retry_sorted_doc_keys), low_diversity_available_floor
+                )
+                retry_improved = retry_issues < original_issues
+                if retry_improved:
+                    answer = retry_answer
+                    final_prompt = retry_prompt
+                    context = retry_context
+                    search_results = retry_search_results
+                    sorted_doc_keys = retry_sorted_doc_keys
+                    doc_representatives = retry_doc_representatives
+                    available_sources = len(sorted_doc_keys)
+                    escalated = True
+                quality_review = {
+                    "triggered": True,
+                    "reason": "thin_context_coverage",
+                    "retry_improved": retry_improved,
+                }
+
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 
         logger.info("Answer generated successfully")
@@ -575,6 +624,39 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
             sources.append(source)
 
         if trace is not None:
+            scores = [r.score for r in search_results]
+            chunk_traces = [
+                ChunkTrace(
+                    item_key=r.chunk.metadata.document_metadata.item_key or "",
+                    attachment_key=r.chunk.metadata.document_metadata.attachment_key,
+                    title=r.chunk.metadata.document_metadata.title or "",
+                    authors=r.chunk.metadata.document_metadata.authors or [],
+                    year=r.chunk.metadata.document_metadata.year,
+                    page_number=r.chunk.metadata.page_number,
+                    score=r.score,
+                    text_preview=r.chunk.metadata.text_preview,
+                )
+                for r in search_results
+            ]
+            retrieval_trace = RetrievalTrace(
+                embedding_model=embedding_model,
+                embedding_dims=len(query_embedding),
+                search_params={
+                    "top_k": top_k,
+                    "min_score": min_score,
+                    "library_ids": library_ids,
+                    "filters": active_filters.model_dump() if active_filters else None,
+                },
+                escalated=escalated,
+                raw_results_count=len(search_results),
+                score_stats={
+                    "min": min(scores),
+                    "max": max(scores),
+                    "avg": sum(scores) / len(scores),
+                },
+                documents_grouped=len(sorted_doc_keys),
+                chunks=chunk_traces,
+            )
             trace.record(AgentExecutionTrace(
                 agent_name="rag",
                 retrieval=retrieval_trace,
@@ -582,6 +664,7 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
                 context_text=context,
                 sources_count=len(sources),
                 duration_ms=int((time.monotonic() - t_start) * 1000),
+                quality_review=quality_review,
             ))
             trace.record(LLMCallTrace(
                 call_type="rag_generation",
@@ -596,6 +679,6 @@ PAGE SELECTION RULE: When citing a specific page, only cite pages that contain s
 
         return QueryResult(
             question=question,
-            answer=answer,
+            answer=_strip_insufficient_context_marker(answer),
             sources=sources
         )
