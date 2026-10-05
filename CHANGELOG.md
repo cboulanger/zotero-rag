@@ -1,3 +1,40 @@
+# [1.51.0](https://github.com/cboulanger/zotero-rag/compare/v1.50.0...v1.51.0) (2026-10-05)
+
+
+### Bug Fixes
+
+* **autoindex:** skip indexing runs when disk space is critically low ([f9569f8](https://github.com/cboulanger/zotero-rag/commit/f9569f83cb6babf01a9840bea29c5ba59d9579c7))
+* **ci:** call release.yml as a reusable workflow instead of via workflow_run ([7032a45](https://github.com/cboulanger/zotero-rag/commit/7032a45438ee32ad8e8a4459c4ded8fa4e19e8d3))
+* **ci:** override GITHUB_REF/GITHUB_REF_NAME for semantic-release's branch detection ([d067930](https://github.com/cboulanger/zotero-rag/commit/d067930ffdc026fc0485efa54986edf1388e5b39))
+* **ci:** pin release workflow checkouts to main, not the default branch ([5dcc37e](https://github.com/cboulanger/zotero-rag/commit/5dcc37e3f7d7eeb4877f7afb1f534de1a83ed072)), closes [#46](https://github.com/cboulanger/zotero-rag/issues/46)
+* **ci:** use a scoped admin PAT for semantic-release's push to protected main ([1f1c03a](https://github.com/cboulanger/zotero-rag/commit/1f1c03afd6030fc712905efa8ca00511855eec64))
+* **deploy:** prune dangling images before pulling new ones ([5b8183b](https://github.com/cboulanger/zotero-rag/commit/5b8183b697cae3e1c89d1ee1a4c6520408f4ae02))
+* **migration:** clean up migrate_library.py help text and error handling ([25b5db6](https://github.com/cboulanger/zotero-rag/commit/25b5db6bda82d5e91ea851f43f35a306f18c836e))
+* **migration:** reject malformed import payloads with 400 instead of 500 ([833c0be](https://github.com/cboulanger/zotero-rag/commit/833c0be77b469428b4719f45121aa3fc1fa91446))
+* **migration:** retry on transient 5xx responses and add transfer progress reporting ([a789650](https://github.com/cboulanger/zotero-rag/commit/a789650950206666c126a134015ad8a5f2ce9ed5))
+* **quality-review:** don't suppress pre-generation escalation for the flag ([fe86819](https://github.com/cboulanger/zotero-rag/commit/fe86819d895cbc63bd1d5106d8b0119e44ea0b5f))
+* **quality-review:** remove stale no-op caveat, pin the escalation-budget regression ([3ea3db4](https://github.com/cboulanger/zotero-rag/commit/3ea3db4d25fffc761e7821ca29241210c9f0f23b))
+* **quality-review:** replace hedge-phrase regex with explicit sentinel ([a5c213f](https://github.com/cboulanger/zotero-rag/commit/a5c213f6bcceb4030b39fbafd940568fb53afe5b))
+* **query:** surface the real Qdrant error instead of a generic message ([3306f31](https://github.com/cboulanger/zotero-rag/commit/3306f315ce2147d29501b49fd30d744cec49919b))
+* **rag-engine:** dedup identical-text chunks before per-document truncation ([a6ec447](https://github.com/cboulanger/zotero-rag/commit/a6ec44797fe88bb0226cc203e76626b608f37840))
+* **retrieval:** group diversity by item_key, not attachment_key ([81c10c4](https://github.com/cboulanger/zotero-rag/commit/81c10c4f06a38efe961a1af21f768c02557b7368))
+* **router:** drop author/title/citation filters not mentioned in the question ([80e6427](https://github.com/cboulanger/zotero-rag/commit/80e64271bef63d84d75b74429785845829835dde))
+* **router:** instruct the routing LLM not to infer authors from topic ([17b8929](https://github.com/cboulanger/zotero-rag/commit/17b8929d2d6f02af4169b0f8a1119da87cb6c35f))
+
+
+### Features
+
+* **autoindex:** reserve CPUs for RAG queries during indexing runs ([d8277b9](https://github.com/cboulanger/zotero-rag/commit/d8277b9832328fd254205ff2f3d6376e7c293c5d))
+* **migration:** add admin-gated /api/migration/* endpoints ([b3e7152](https://github.com/cboulanger/zotero-rag/commit/b3e715240382e721f4400a911064d600e4aad7ac))
+* **migration:** add bin/migrate_library.py CLI ([8c28ae2](https://github.com/cboulanger/zotero-rag/commit/8c28ae29cae3d479180cf6162bc228e47d851e14))
+* **ops:** add production health monitoring with ntfy.sh alerts ([0f6ead1](https://github.com/cboulanger/zotero-rag/commit/0f6ead11ab8bd6805858cdc66392a84d6767d574))
+* **quality-review:** add _thin_context_coverage detector ([29f9d2d](https://github.com/cboulanger/zotero-rag/commit/29f9d2dac01fb2bdb995ad810fd3b9a3a2f301ac))
+* **quality-review:** escalate retrieval once on thin-context answers ([0ec7a4c](https://github.com/cboulanger/zotero-rag/commit/0ec7a4ccf80ded3ed58bf7e0937f828033552499))
+* **quality-review:** thread enable_quality_self_review flag end-to-end ([8e4dbb5](https://github.com/cboulanger/zotero-rag/commit/8e4dbb5f92d9ed1dcee95a0b020f0e87f6e918ee))
+* **rag-engine:** instruct the model to answer in the question's language ([85eb4ad](https://github.com/cboulanger/zotero-rag/commit/85eb4ad9dc956d3dacef92402f8bd5a89d0204c0))
+* **router:** add dropped_filters field to QueryPlan ([2b84fbb](https://github.com/cboulanger/zotero-rag/commit/2b84fbb23976c2f3a925d0d817fce10ba810e6ec))
+* **vector-store:** add export/import/count methods for cross-instance library migration ([ff20b2a](https://github.com/cboulanger/zotero-rag/commit/ff20b2a3ade90cee8de805b01043137e9913a8d0))
+
 # [1.50.0](https://github.com/cboulanger/zotero-rag/compare/v1.49.2...v1.50.0) (2026-10-03)
 
 
