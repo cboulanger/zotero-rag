@@ -51,6 +51,18 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: DEBUG dump env
+        env:
+          GITHUB_REF: refs/heads/main
+          GITHUB_REF_NAME: main
+        run: |
+          echo "--- raw env (this step's own override) ---"
+          env | grep -E '^GITHUB_(REF|SHA|EVENT_NAME|RUN_ID|REPOSITORY|WORKSPACE|ACTIONS)' | sort
+          echo "--- node sees ---"
+          node -e "console.log('GITHUB_REF=' + process.env.GITHUB_REF); console.log('GITHUB_REF_NAME=' + process.env.GITHUB_REF_NAME)"
+          echo "--- env-ci sees ---"
+          node -e "import('env-ci').then(m => console.log(JSON.stringify(m.default({env: process.env, cwd: process.cwd()}), null, 2)))"
+
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
