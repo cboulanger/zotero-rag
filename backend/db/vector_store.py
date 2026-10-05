@@ -1139,6 +1139,82 @@ class VectorStore:
             "distance": self.distance.value if hasattr(self.distance, 'value') else str(self.distance),
         }
 
+    # ---------------------------------------------------------------------
+    # Cross-instance migration support (backend/api/migration.py,
+    # bin/migrate_library.py). See
+    # docs/superpowers/specs/2026-10-05-library-rag-migration-design.md.
+    # ---------------------------------------------------------------------
+
+    def _resolve_migration_collection(self, collection: str) -> str:
+        """Map the migration API's short collection name to the actual Qdrant collection.
+
+        Only document_chunks and deduplication are ever paginated/transferred
+        this way — library_metadata is a single point per library, handled
+        separately via get_library_metadata/update_library_metadata.
+        """
+        if collection == "chunks":
+            return self.CHUNKS_COLLECTION
+        if collection == "dedup":
+            return self.DEDUP_COLLECTION
+        raise ValueError(f"Unknown migration collection: {collection!r} (expected 'chunks' or 'dedup')")
+
+    def count_library_points(self, collection: str, library_id: str) -> int:
+        """Count points for a library in document_chunks or deduplication.
+
+        Used by the migration script to show progress against a total while
+        paginating export_points.
+        """
+        collection_name = self._resolve_migration_collection(collection)
+        return self.client.count(
+            collection_name=collection_name,
+            count_filter=Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))]),
+        ).count
+
+    def export_points(
+        self,
+        collection: str,
+        library_id: str,
+        offset: Optional[str],
+        limit: int,
+    ) -> tuple[list[dict], Optional[str]]:
+        """Return one page of raw points (id, vector, payload) for a library.
+
+        Used by GET /api/migration/export to export a library's
+        document_chunks or deduplication records to another instance
+        without either side touching Qdrant directly. `offset` is Qdrant's
+        own opaque scroll cursor from a previous call's returned
+        next_offset, passed through unmodified.
+        """
+        collection_name = self._resolve_migration_collection(collection)
+        points, next_offset = self.client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(must=[FieldCondition(key="library_id", match=MatchValue(value=library_id))]),
+            limit=limit,
+            offset=offset,
+            with_payload=True,
+            with_vectors=True,
+        )
+        return (
+            [{"id": p.id, "vector": p.vector, "payload": p.payload} for p in points],
+            next_offset,
+        )
+
+    def import_points(self, collection: str, points: list[dict]) -> int:
+        """Upsert a batch of raw points (as returned by export_points) into a collection.
+
+        Used by POST /api/migration/import — writes the source instance's
+        exact id/vector/payload with no transformation.
+        """
+        if not points:
+            return 0
+        collection_name = self._resolve_migration_collection(collection)
+        point_structs = [
+            PointStruct(id=p["id"], vector=p["vector"], payload=p["payload"])
+            for p in points
+        ]
+        self.client.upsert(collection_name=collection_name, points=point_structs)
+        return len(point_structs)
+
     # Library Metadata Methods
 
     def _library_id_to_uuid(self, library_id: str) -> str:

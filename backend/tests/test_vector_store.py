@@ -669,5 +669,92 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(remaining[0]["id"], point_ids[2])
 
 
+class MigrationExportImportTest(unittest.TestCase):
+    """Tests for export_points/import_points/count_library_points, which back
+    the cross-instance library migration endpoints in backend/api/migration.py.
+    See docs/superpowers/specs/2026-10-05-library-rag-migration-design.md."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.vector_store = VectorStore(
+            storage_path=Path(self.temp_dir) / "qdrant",
+            embedding_dim=4,
+            embedding_model_name="test-model",
+            distance=Distance.COSINE,
+        )
+        self._add_chunk("u1", "item-a", [0.1, 0.2, 0.3, 0.4])
+        self._add_chunk("u1", "item-b", [0.5, 0.6, 0.7, 0.8])
+        self._add_chunk("u2", "item-c", [0.9, 0.9, 0.9, 0.9])
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="hash-1", library_id="u1", item_key="item-a")
+        )
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="hash-2", library_id="u2", item_key="item-c")
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _add_chunk(self, library_id, item_key, embedding):
+        chunk = DocumentChunk(
+            text="some text",
+            embedding=embedding,
+            metadata=ChunkMetadata(
+                chunk_id=f"{item_key}-chunk-0",
+                document_metadata=DocumentMetadata(library_id=library_id, item_key=item_key),
+                text_preview="some text",
+                chunk_index=0,
+                content_hash=f"hash-of-{item_key}",
+            ),
+        )
+        self.vector_store.add_chunk(chunk)
+
+    def test_count_library_points_scopes_to_library(self):
+        self.assertEqual(self.vector_store.count_library_points("chunks", "u1"), 2)
+        self.assertEqual(self.vector_store.count_library_points("chunks", "u2"), 1)
+        self.assertEqual(self.vector_store.count_library_points("dedup", "u1"), 1)
+
+    def test_export_points_paginates_and_filters_by_library(self):
+        page1, offset1 = self.vector_store.export_points("chunks", "u1", offset=None, limit=1)
+        self.assertEqual(len(page1), 1)
+        self.assertIsNotNone(offset1)
+
+        page2, offset2 = self.vector_store.export_points("chunks", "u1", offset=offset1, limit=1)
+        self.assertEqual(len(page2), 1)
+        self.assertIsNone(offset2)
+
+        all_item_keys = {p["payload"]["item_key"] for p in (page1 + page2)}
+        self.assertEqual(all_item_keys, {"item-a", "item-b"})
+        self.assertEqual(len(page1[0]["vector"]), 4)
+
+    def test_export_points_unknown_collection_raises(self):
+        with self.assertRaises(ValueError):
+            self.vector_store.export_points("not-a-collection", "u1", offset=None, limit=10)
+
+    def test_import_points_round_trips_into_a_fresh_store(self):
+        points, _ = self.vector_store.export_points("chunks", "u1", offset=None, limit=10)
+        dest_dir = tempfile.mkdtemp()
+        try:
+            dest_store = VectorStore(
+                storage_path=Path(dest_dir) / "qdrant",
+                embedding_dim=4,
+                embedding_model_name="test-model",
+                distance=Distance.COSINE,
+            )
+            imported = dest_store.import_points("chunks", points)
+            self.assertEqual(imported, 2)
+            self.assertEqual(dest_store.count_library_points("chunks", "u1"), 2)
+            dest_points, _ = dest_store.export_points("chunks", "u1", offset=None, limit=10)
+            dest_by_id = {p["id"]: p for p in dest_points}
+            for original in points:
+                self.assertEqual(dest_by_id[original["id"]]["payload"], original["payload"])
+                self.assertEqual(dest_by_id[original["id"]]["vector"], original["vector"])
+        finally:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+
+    def test_import_points_empty_list_is_noop(self):
+        self.assertEqual(self.vector_store.import_points("chunks", []), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
