@@ -48,7 +48,13 @@ jobs:
 
       - name: Run semantic-release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # main is protected ("changes via PR only"); enforce_admins is off,
+          # so an admin-owned token bypasses that rule, but the default
+          # GITHUB_TOKEN authenticates as github-actions[bot], which is not
+          # an admin and gets GH006-rejected pushing the version-bump commit.
+          # RELEASE_TOKEN is a fine-grained PAT (Contents: read/write only,
+          # scoped to this repo) belonging to the repo owner, used here only.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           GIT_AUTHOR_NAME: ${{ github.actor }}
           GIT_AUTHOR_EMAIL: ${{ github.actor }}@users.noreply.github.com
           GIT_COMMITTER_NAME: ${{ github.actor }}
