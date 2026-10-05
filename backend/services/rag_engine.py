@@ -87,6 +87,40 @@ def _low_citation_diversity(
     return len(_extract_cited_source_numbers(answer)) <= 1
 
 
+# Detects a different failure mode than _low_citation_diversity above: the
+# answer DOES cite sources (so missing/low-diversity checks don't fire), but
+# either the model itself says the context was insufficient, or it used very
+# little of a small retrieved pool — both suggest the retrieved content
+# itself didn't address the question, not just that the model under-cited
+# material that genuinely was relevant. Observed live: a question about the
+# relationship between two legal-theory concepts retrieved 6 documents, only
+# one of which actually discussed the connection — the model correctly used
+# mostly that one source, but the answer was thin because there was little
+# else to say, not because the model was lazy.
+_THIN_CONTEXT_HEDGE_PATTERN = re.compile(
+    r"nicht genügend informationen|der kontext enthält keine|"
+    r"aus dem kontext nicht ersichtlich|context does not contain|"
+    r"does not provide enough information",
+    re.IGNORECASE,
+)
+
+
+def _thin_context_coverage(
+    answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
+) -> bool:
+    """True if the answer suggests the retrieved context itself was too thin
+    or off-topic, rather than the model merely under-citing relevant
+    material. Only applies to a small retrieved pool (<= 2x the low-diversity
+    floor) — a large pool with few citations is a citation-behavior issue,
+    not evidence the pool itself was thin."""
+    if _THIN_CONTEXT_HEDGE_PATTERN.search(answer):
+        return True
+    if documents_grouped == 0 or documents_grouped > low_diversity_floor * 2:
+        return False
+    cited = len(_extract_cited_source_numbers(answer))
+    return cited < documents_grouped / 2
+
+
 def _quality_issue_reinforcement(
     answer: str,
     available_sources: int = 0,

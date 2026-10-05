@@ -867,6 +867,47 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.generate.assert_called_once()
 
 
+class TestThinContextCoverage(unittest.TestCase):
+    """_thin_context_coverage detects a different failure mode than the
+    existing _low_citation_diversity: the answer DOES cite sources, and
+    doesn't necessarily cite only one, but the retrieved pool itself looks
+    like it didn't actually address the question (either the model says so,
+    or it uses little of a small retrieved pool)."""
+
+    def test_true_when_answer_hedges_in_german(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "Der Kontext enthält keine ausreichenden Informationen dazu [S1]."
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_true_when_answer_hedges_in_english(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The context does not contain enough information to answer this [S1]."
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_true_when_citation_utilization_is_low_on_a_small_pool(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "Only one source is relevant here [S1]."
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_false_when_citation_utilization_is_adequate(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The first [S1], second [S2], and third [S3] sources all matter."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_false_when_pool_is_large_even_if_few_cited(self):
+        """A large retrieved pool with few citations is a citation-behavior
+        issue (see _low_citation_diversity), not evidence the pool itself
+        was thin — don't double-trigger on it here."""
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "Only the first source matters here [S1]."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=20))
+
+    def test_false_on_a_normal_well_cited_short_answer(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The only relevant source states X [S1]."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=1))
+
+
 class TestSourceInfo(unittest.TestCase):
     """Test SourceInfo model."""
 
