@@ -2,6 +2,7 @@
 
 import importlib.util
 import unittest
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -526,6 +527,163 @@ class MainErrorHandlingTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 migrate_library.main()
         self.assertEqual(ctx.exception.code, 1)
+
+
+class ParseArgsModeTest(unittest.TestCase):
+    def test_mode_defaults_to_none(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        self.assertIsNone(args.mode)
+
+    def test_mode_accepts_clean_and_resume(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest", "--mode", "resume"])
+        self.assertEqual(args.mode, "resume")
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest", "--mode", "clean"])
+        self.assertEqual(args.mode, "clean")
+
+    def test_mode_rejects_invalid_value(self):
+        with self.assertRaises(SystemExit):
+            migrate_library._parse_args(["users/39226", "http://source", "http://dest", "--mode", "bogus"])
+
+
+class ResolveModeTest(unittest.TestCase):
+    def _make_state_file(self, data_path):
+        path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+        migrate_library.save_state(path, migrate_library.new_state(
+            "users/39226", "http://source", "http://dest", "u39226", "m", 8, "2026-01-01T00:00:00Z",
+        ))
+        return path
+
+    def test_explicit_mode_short_circuits_without_prompting(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest", "--mode", "clean"])
+        with TemporaryDirectory() as tmp:
+            with patch("builtins.input") as mock_input:
+                mode = migrate_library._resolve_mode(args, Path(tmp))
+        self.assertEqual(mode, "clean")
+        mock_input.assert_not_called()
+
+    def test_no_state_file_resolves_to_clean_without_prompting(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            with patch("builtins.input") as mock_input:
+                mode = migrate_library._resolve_mode(args, Path(tmp))
+        self.assertEqual(mode, "clean")
+        mock_input.assert_not_called()
+
+    def test_prompts_and_returns_resume_on_r(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            self._make_state_file(data_path)
+            with patch("builtins.input", return_value="r"):
+                mode = migrate_library._resolve_mode(args, data_path)
+        self.assertEqual(mode, "resume")
+
+    def test_prompts_and_returns_clean_on_c(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            self._make_state_file(data_path)
+            with patch("builtins.input", return_value="c"):
+                mode = migrate_library._resolve_mode(args, data_path)
+        self.assertEqual(mode, "clean")
+
+    def test_prompt_summary_includes_timestamps_and_transferred_counts(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            path = self._make_state_file(data_path)
+            state = migrate_library.load_state(path)
+            state["collections"]["chunks"] = {"cursor": "c1", "transferred": 155000, "done": False}
+            state["collections"]["dedup"] = {"cursor": None, "transferred": 0, "done": True}
+            state["updated_at"] = "2026-01-01T00:30:00Z"
+            migrate_library.save_state(path, state)
+            with patch("builtins.input", return_value="r"), \
+                 patch("sys.stderr", new_callable=StringIO) as mock_stderr:
+                migrate_library._resolve_mode(args, data_path)
+        summary = mock_stderr.getvalue()
+        self.assertIn("2026-01-01T00:00:00Z", summary)
+        self.assertIn("2026-01-01T00:30:00Z", summary)
+        self.assertIn("155000", summary)
+        self.assertIn("done", summary)
+
+    def test_reprompts_on_invalid_answer_then_accepts_valid_one(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            self._make_state_file(data_path)
+            with patch("builtins.input", side_effect=["bogus", "resume"]):
+                mode = migrate_library._resolve_mode(args, data_path)
+        self.assertEqual(mode, "resume")
+
+    def test_abort_answer_exits_with_code_1(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            self._make_state_file(data_path)
+            with patch("builtins.input", return_value="a"):
+                with self.assertRaises(SystemExit) as ctx:
+                    migrate_library._resolve_mode(args, data_path)
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_eof_on_prompt_exits_with_code_1(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            self._make_state_file(data_path)
+            with patch("builtins.input", side_effect=EOFError):
+                with self.assertRaises(SystemExit) as ctx:
+                    migrate_library._resolve_mode(args, data_path)
+        self.assertEqual(ctx.exception.code, 1)
+
+
+class MainModeIntegrationTest(unittest.TestCase):
+    def test_main_passes_resolved_mode_and_data_path_to_run_migration(self):
+        argv = ["migrate_library.py", "users/39226", "http://source", "http://dest", "--mode", "clean"]
+        fake_result = {
+            "library_id": "u39226", "dry_run": False,
+            "begin_result": {"chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False},
+            "transferred": {"chunks": 0, "dedup": 0},
+            "metadata": {"total_chunks": 0, "total_items_indexed": 0},
+        }
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(migrate_library, "run_migration", return_value=fake_result) as mock_run, \
+             patch("backend.config.settings.get_settings") as mock_get_settings:
+            mock_get_settings.return_value.data_path = Path("/fake/data")
+            migrate_library.main()
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs["mode"], "clean")
+        self.assertEqual(kwargs["data_path"], Path("/fake/data"))
+
+    def test_main_prints_resumed_message_when_begin_result_is_none(self):
+        argv = ["migrate_library.py", "users/39226", "http://source", "http://dest", "--mode", "resume"]
+        fake_result = {
+            "library_id": "u39226", "dry_run": False,
+            "begin_result": None,
+            "transferred": {"chunks": 1, "dedup": 0},
+            "metadata": {"total_chunks": 1, "total_items_indexed": 1},
+        }
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(migrate_library, "run_migration", return_value=fake_result), \
+             patch("backend.config.settings.get_settings") as mock_get_settings, \
+             patch("sys.stdout", new_callable=StringIO) as mock_stdout:
+            mock_get_settings.return_value.data_path = Path("/fake/data")
+            migrate_library.main()
+        self.assertIn("Resumed previous run", mock_stdout.getvalue())
+
+    def test_main_dry_run_never_touches_settings_or_state(self):
+        argv = ["migrate_library.py", "users/39226", "http://source", "http://dest", "--dry-run"]
+        fake_result = {
+            "library_id": "u39226", "dry_run": True,
+            "metadata": {"total_chunks": 5, "total_items_indexed": 2},
+        }
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(migrate_library, "run_migration", return_value=fake_result) as mock_run, \
+             patch("backend.config.settings.get_settings") as mock_get_settings:
+            migrate_library.main()
+        mock_get_settings.assert_not_called()
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs["mode"], "clean")
+        self.assertIsNone(kwargs["data_path"])
 
 
 if __name__ == "__main__":
