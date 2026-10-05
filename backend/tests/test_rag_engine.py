@@ -961,6 +961,62 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         self.mock_llm_service.generate.assert_called_once()
 
+    async def test_quality_review_skips_post_generation_escalation_when_pre_generation_already_escalated(self):
+        """Regression test: an earlier version of this feature suppressed
+        the pre-existing pre-generation diversity escalation whenever
+        enable_quality_self_review was True, which was wrong (the two
+        escalation mechanisms detect different failure modes — structural
+        retrieval narrowness vs. answer-quality degradation — and aren't a
+        strict superset of each other). The fix keeps pre-generation
+        escalation unconditional and instead skips the NEW post-generation
+        thin-context escalation if pre-generation escalation already fired
+        for this query (via the `not escalated` guard), so only one
+        escalation retry is ever spent per query. This test sets up a
+        first search that saturates top_k with chunks from a single
+        dominant document (triggering pre-generation escalation
+        unconditionally) and confirms: (1) pre-generation escalation fires
+        and consumes the one available extra search result, (2) the
+        post-generation thin-context check does NOT also fire even though
+        the answer contains CONTEXT_INSUFFICIENT_MARKER, because
+        `escalated` is already True — i.e. vector_store.search is called
+        exactly twice (the pre-generation escalation's two searches), not
+        three, and llm_service.generate is called exactly once, not
+        twice."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        # top_k=3, first search saturates it with 3 chunks all from DOC1 —
+        # triggers pre-generation escalation (len(search_results)==top_k
+        # and unique_doc_count=1 < diversity_floor=3) unconditionally,
+        # regardless of enable_quality_self_review.
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(3)]
+        escalated_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        # Even though this answer contains the thin-context marker, the
+        # post-generation escalation must NOT fire a second time, because
+        # pre-generation escalation already spent this query's one
+        # escalation budget.
+        answer_with_marker = f"Answer from the escalated context [S1,S2,S3].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=answer_with_marker)
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=3, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(
+            self.mock_vector_store.search.call_count, 2,
+            "pre-generation escalation should have searched twice; "
+            "post-generation escalation must not add a third search",
+        )
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertNotIn(CONTEXT_INSUFFICIENT_MARKER, result.answer)
+
     async def test_quality_review_records_trace_block(self):
         from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
         from backend.services.trace_collector import TraceCollector
