@@ -163,6 +163,40 @@ class MigrationApiTest(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 400)
 
+    def test_import_metadata_rejects_malformed_payload(self):
+        r = self.client.post(
+            "/api/migration/import/metadata",
+            json={"library_id": "u1", "payload": {"library_id": "u1"}},
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_import_points_rejects_library_id_mismatch(self):
+        export = self.client.get(
+            "/api/migration/export", params={"library_id": "u1", "collection": "chunks", "limit": 10}
+        ).json()
+        points = export["points"]
+        points[0]["payload"]["library_id"] = "u2"
+
+        dest_dir = tempfile.mkdtemp()
+        try:
+            dest_store = VectorStore(
+                storage_path=Path(dest_dir) / "qdrant",
+                embedding_dim=4,
+                embedding_model_name="test-model",
+                distance=Distance.COSINE,
+            )
+            app.state.vector_store = dest_store
+            r = self.client.post(
+                "/api/migration/import",
+                params={"collection": "chunks"},
+                json={"library_id": "u1", "points": points},
+            )
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(dest_store.count_library_points("chunks", "u1"), 0)
+        finally:
+            app.state.vector_store = self.vector_store
+            shutil.rmtree(dest_dir, ignore_errors=True)
+
     def test_endpoints_require_admin_when_not_loopback(self):
         app.dependency_overrides.clear()
         get_settings().api_host = "rag.example.com"

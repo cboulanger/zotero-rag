@@ -19,7 +19,7 @@ import logging
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from backend.db.vector_store import VectorStore
 from backend.dependencies import get_vector_store, require_authorized_group_admin
@@ -146,6 +146,16 @@ def import_points_batch(
     vector_store: VectorStore = Depends(get_vector_store),
 ) -> dict:
     """Import one batch of exported points into document_chunks or deduplication (admin only)."""
+    for point in body.points:
+        point_library_id = point.payload.get("library_id")
+        if point_library_id != body.library_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Point {point.id!r} has payload.library_id={point_library_id!r}, "
+                    f"which does not match the request's library_id={body.library_id!r}."
+                ),
+            )
     imported = vector_store.import_points(
         collection,
         [p.model_dump() for p in body.points],
@@ -162,6 +172,9 @@ def import_library_metadata(
     """Import a library's index metadata point, exactly as returned by export/metadata (admin only)."""
     if body.payload.get("library_id") != body.library_id:
         raise HTTPException(status_code=400, detail="payload.library_id does not match library_id.")
-    metadata = LibraryIndexMetadata(**body.payload)
+    try:
+        metadata = LibraryIndexMetadata(**body.payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     vector_store.update_library_metadata(metadata)
     return {"library_id": body.library_id}
