@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import unicodedata
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
@@ -56,6 +57,49 @@ General guidance:
   discussion of a specific named work, not a general topic search (that's "rag").
 - Default when uncertain: {"agents": ["rag"], ...rest null/empty}
 """
+
+
+_GERMAN_DIACRITIC_EXPANSIONS = {"ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss"}
+
+
+def _normalize_forms(text: str) -> set[str]:
+    """Return both a diacritic-stripped and a German-transliterated,
+    casefolded form of `text`, so an entity written either way (e.g.
+    "Wiethölter", "Wietholter", or "Wiethoelter") matches consistently
+    whichever form appears on the candidate side vs. the question side."""
+    folded = text.casefold()
+    stripped = "".join(
+        c for c in unicodedata.normalize("NFKD", folded) if not unicodedata.combining(c)
+    )
+    translit = folded
+    for umlaut, expansion in _GERMAN_DIACRITIC_EXPANSIONS.items():
+        translit = translit.replace(umlaut, expansion)
+    return {stripped, translit}
+
+
+def _mentioned_in_question(candidate: str, question_forms: set[str]) -> bool:
+    """True if `candidate` (in any normalized form) is a substring of the
+    question (in any normalized form). Substring containment — not exact
+    token equality — so German inflection (e.g. genitive "Wiethölters")
+    matches for free without needing a stemmer."""
+    if not candidate:
+        return False
+    return any(
+        cand_form in q_form
+        for cand_form in _normalize_forms(candidate)
+        for q_form in question_forms
+    )
+
+
+def _filter_mentioned(candidates: list[str], question_forms: set[str]) -> tuple[list[str], list[str]]:
+    """Split `candidates` into (kept, dropped) by whether each is mentioned
+    in the question."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for candidate in candidates:
+        (kept if _mentioned_in_question(candidate, question_forms) else dropped).append(candidate)
+    return kept, dropped
+
 
 _PROMPT_TEMPLATE = """\
 You are a query router for an academic library system.
@@ -159,28 +203,54 @@ class QueryRouter:
             if not selected:
                 selected = ["rag"]
 
+            question_forms = _normalize_forms(question)
+
+            authors, dropped_authors = _filter_mentioned(data.get("authors") or [], question_forms)
+            title_keywords, dropped_title_keywords = _filter_mentioned(
+                data.get("title_keywords") or [], question_forms
+            )
+
             citation_targets = []
+            dropped_citation_authors = []
             for ct in data.get("citation_targets") or []:
                 if isinstance(ct, dict) and ct.get("author"):
-                    citation_targets.append(CitationTarget(
-                        author=str(ct["author"]),
-                        year=ct.get("year"),
-                        title_keywords=ct.get("title_keywords") or [],
-                    ))
+                    author = str(ct["author"])
+                    if _mentioned_in_question(author, question_forms):
+                        citation_targets.append(CitationTarget(
+                            author=author,
+                            year=ct.get("year"),
+                            title_keywords=ct.get("title_keywords") or [],
+                        ))
+                    else:
+                        dropped_citation_authors.append(author)
+
+            dropped_filters: dict[str, list[str]] = {}
+            if dropped_authors:
+                dropped_filters["authors"] = dropped_authors
+            if dropped_title_keywords:
+                dropped_filters["title_keywords"] = dropped_title_keywords
+            if dropped_citation_authors:
+                dropped_filters["citation_targets.author"] = dropped_citation_authors
+            if dropped_filters:
+                logger.warning(
+                    "QueryRouter: dropped filter entries not found in question text: %s",
+                    dropped_filters,
+                )
 
             plan = QueryPlan(
                 agents_to_use=selected,
                 filters=MetadataFilters(
                     year_min=data.get("year_min"),
                     year_max=data.get("year_max"),
-                    authors=data.get("authors") or [],
+                    authors=authors,
                     item_types=data.get("item_types") or [],
-                    title_keywords=data.get("title_keywords") or [],
+                    title_keywords=title_keywords,
                     citation_targets=citation_targets,
                 ),
                 routing_description=data.get("routing_description"),
                 clarification_needed=bool(data.get("clarification_needed", False)),
                 clarification_question=data.get("clarification_question"),
+                dropped_filters=dropped_filters or None,
             )
 
             if trace is not None:
