@@ -3,6 +3,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import httpx
@@ -136,6 +137,18 @@ class RunMigrationTest(unittest.TestCase):
             "last_indexed_version": 1, "total_items_indexed": 2, "total_chunks": 3,
         }
 
+    def test_invalid_mode_raises_before_any_network_call(self):
+        with patch.object(migrate_library, "_get") as mock_get, \
+             patch.object(migrate_library, "_post") as mock_post:
+            with self.assertRaises(migrate_library.MigrationError):
+                migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", mode="bogus",
+                )
+        mock_get.assert_not_called()
+        mock_post.assert_not_called()
+
     def test_embedding_mismatch_raises_before_any_write(self):
         def fake_get(client, base_url, path, api_key, **params):
             if base_url == "http://source":
@@ -201,13 +214,15 @@ class RunMigrationTest(unittest.TestCase):
                 return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
             return {}
 
-        with patch.object(migrate_library, "_get", side_effect=fake_get), \
-             patch.object(migrate_library, "_post", side_effect=fake_post):
-            result = migrate_library.run_migration(
-                client=object(), slug="users/39226",
-                source_url="http://source", dest_url="http://dest",
-                source_key="SK", dest_key="DK", batch_size=1,
-            )
+        with TemporaryDirectory() as tmp:
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                result = migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", batch_size=1,
+                    data_path=Path(tmp),
+                )
 
         self.assertEqual(result["transferred"], {"chunks": 2, "dedup": 0})
 
@@ -257,13 +272,15 @@ class RunMigrationTest(unittest.TestCase):
                 return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
             return {}
 
-        with patch.object(migrate_library, "_get", side_effect=fake_get), \
-             patch.object(migrate_library, "_post", side_effect=fake_post):
-            migrate_library.run_migration(
-                client=object(), slug="users/39226",
-                source_url="http://source", dest_url="http://dest",
-                source_key="SK", dest_key="DK", batch_size=1,
-            )
+        with TemporaryDirectory() as tmp:
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", batch_size=1,
+                    data_path=Path(tmp),
+                )
 
         count_call_indices = [
             i for i, (path, _) in enumerate(get_calls) if path == "/api/migration/export/count"
@@ -274,6 +291,225 @@ class RunMigrationTest(unittest.TestCase):
         self.assertEqual(len(count_call_indices), 2)
         # Each collection's count call happens before its own export call.
         self.assertLess(count_call_indices[0], export_call_indices[0])
+
+    def test_clean_mode_ignores_existing_state_and_clears_destination(self):
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+            stale_state = migrate_library.new_state(
+                "users/39226", "http://source", "http://dest", "u39226", "m", 8, "2026-01-01T00:00:00Z",
+            )
+            stale_state["begin_done"] = True
+            stale_state["collections"]["chunks"] = {"cursor": "stale-cursor", "transferred": 999, "done": False}
+            migrate_library.save_state(path, stale_state)
+
+            chunk_pages = [{"points": [], "next_offset": None}]
+            dedup_pages = [{"points": [], "next_offset": None}]
+
+            def fake_get(client, base_url, path_, api_key, **params):
+                if path_ == "/api/migration/embedding-info":
+                    return self.embedding_info
+                if path_ == "/api/migration/export/metadata":
+                    return self.metadata
+                if path_ == "/api/migration/export/count":
+                    return {"count": 0}
+                if path_ == "/api/migration/export" and params["collection"] == "chunks":
+                    self.assertIsNone(params["offset"])
+                    return chunk_pages.pop(0)
+                if path_ == "/api/migration/export" and params["collection"] == "dedup":
+                    return dedup_pages.pop(0)
+                raise AssertionError(f"unexpected GET {path_} {params}")
+
+            post_calls = []
+
+            def fake_post(client, base_url, path_, api_key, body, **params):
+                post_calls.append(path_)
+                if path_ == "/api/migration/import/begin":
+                    return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
+                return {}
+
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                result = migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", batch_size=1,
+                    mode="clean", data_path=data_path,
+                )
+
+        self.assertIn("/api/migration/import/begin", post_calls)
+        self.assertIsNotNone(result["begin_result"])
+
+    def test_resume_mode_skips_import_begin_and_continues_from_cursor(self):
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+            state = migrate_library.new_state(
+                "users/39226", "http://source", "http://dest", "u39226", "m", 8, "2026-01-01T00:00:00Z",
+            )
+            state["begin_done"] = True
+            state["collections"]["chunks"] = {"cursor": "cursor-1", "transferred": 1, "done": False}
+            state["collections"]["dedup"] = {"cursor": None, "transferred": 0, "done": True}
+            migrate_library.save_state(path, state)
+
+            def fake_get(client, base_url, path_, api_key, **params):
+                if path_ == "/api/migration/embedding-info":
+                    return self.embedding_info
+                if path_ == "/api/migration/export/metadata":
+                    return self.metadata
+                if path_ == "/api/migration/export/count":
+                    return {"count": 2}
+                if path_ == "/api/migration/export" and params["collection"] == "chunks":
+                    self.assertEqual(params["offset"], "cursor-1")
+                    return {"points": [{"id": "2", "vector": [0.2] * 8, "payload": {}}], "next_offset": None}
+                raise AssertionError(f"unexpected GET {path_} {params}")
+
+            post_calls = []
+
+            def fake_post(client, base_url, path_, api_key, body, **params):
+                post_calls.append(path_)
+                return {}
+
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                result = migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", batch_size=1,
+                    mode="resume", data_path=data_path,
+                )
+
+        self.assertNotIn("/api/migration/import/begin", post_calls)
+        self.assertEqual(result["transferred"], {"chunks": 2, "dedup": 0})
+        self.assertIsNone(result["begin_result"])
+
+    def test_resume_mode_without_existing_state_raises(self):
+        def fake_get(client, base_url, path, api_key, **params):
+            if path == "/api/migration/embedding-info":
+                return self.embedding_info
+            return self.metadata
+
+        with TemporaryDirectory() as tmp:
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post") as mock_post:
+                with self.assertRaises(migrate_library.MigrationError):
+                    migrate_library.run_migration(
+                        client=object(), slug="users/39226",
+                        source_url="http://source", dest_url="http://dest",
+                        source_key="SK", dest_key="DK",
+                        mode="resume", data_path=Path(tmp),
+                    )
+        mock_post.assert_not_called()
+
+    def test_resume_mode_with_embedding_mismatch_against_state_raises(self):
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+            stale_state = migrate_library.new_state(
+                "users/39226", "http://source", "http://dest", "u39226", "old-model", 16, "2026-01-01T00:00:00Z",
+            )
+            migrate_library.save_state(path, stale_state)
+
+            def fake_get(client, base_url, path_, api_key, **params):
+                if path_ == "/api/migration/embedding-info":
+                    return self.embedding_info
+                return self.metadata
+
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post") as mock_post:
+                with self.assertRaises(migrate_library.MigrationError):
+                    migrate_library.run_migration(
+                        client=object(), slug="users/39226",
+                        source_url="http://source", dest_url="http://dest",
+                        source_key="SK", dest_key="DK",
+                        mode="resume", data_path=data_path,
+                    )
+        mock_post.assert_not_called()
+
+    def test_successful_run_deletes_state_file(self):
+        chunk_pages = [{"points": [], "next_offset": None}]
+        dedup_pages = [{"points": [], "next_offset": None}]
+
+        def fake_get(client, base_url, path, api_key, **params):
+            if path == "/api/migration/embedding-info":
+                return self.embedding_info
+            if path == "/api/migration/export/metadata":
+                return self.metadata
+            if path == "/api/migration/export/count":
+                return {"count": 0}
+            if path == "/api/migration/export" and params["collection"] == "chunks":
+                return chunk_pages.pop(0)
+            if path == "/api/migration/export" and params["collection"] == "dedup":
+                return dedup_pages.pop(0)
+            raise AssertionError(f"unexpected GET {path} {params}")
+
+        def fake_post(client, base_url, path, api_key, body, **params):
+            if path == "/api/migration/import/begin":
+                return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
+            return {}
+
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                migrate_library.run_migration(
+                    client=object(), slug="users/39226",
+                    source_url="http://source", dest_url="http://dest",
+                    source_key="SK", dest_key="DK", batch_size=1,
+                    data_path=data_path,
+                )
+            path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+            self.assertFalse(path.exists())
+
+    def test_batch_failure_persists_state_up_to_last_successful_batch(self):
+        chunk_pages = [
+            {"points": [{"id": "1", "vector": [0.1] * 8, "payload": {}}], "next_offset": "cursor-1"},
+            {"points": [{"id": "2", "vector": [0.2] * 8, "payload": {}}], "next_offset": None},
+        ]
+
+        def fake_get(client, base_url, path, api_key, **params):
+            if path == "/api/migration/embedding-info":
+                return self.embedding_info
+            if path == "/api/migration/export/metadata":
+                return self.metadata
+            if path == "/api/migration/export/count":
+                return {"count": 2}
+            if path == "/api/migration/export" and params["collection"] == "chunks":
+                return chunk_pages.pop(0)
+            raise AssertionError(f"unexpected GET {path} {params}")
+
+        call_count = {"n": 0}
+
+        def fake_post(client, base_url, path, api_key, body, **params):
+            if path == "/api/migration/import/begin":
+                return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
+            if path == "/api/migration/import":
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    raise migrate_library.MigrationError("simulated network failure")
+                return {}
+            return {}
+
+        with TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            with patch.object(migrate_library, "_get", side_effect=fake_get), \
+                 patch.object(migrate_library, "_post", side_effect=fake_post):
+                with self.assertRaises(migrate_library.MigrationError):
+                    migrate_library.run_migration(
+                        client=object(), slug="users/39226",
+                        source_url="http://source", dest_url="http://dest",
+                        source_key="SK", dest_key="DK", batch_size=1,
+                        data_path=data_path,
+                    )
+
+            path = migrate_library.state_path("users/39226", "http://source", "http://dest", data_path)
+            state = migrate_library.load_state(path)
+
+        self.assertIsNotNone(state)
+        self.assertTrue(state["begin_done"])
+        self.assertEqual(state["collections"]["chunks"]["transferred"], 1)
+        self.assertEqual(state["collections"]["chunks"]["cursor"], "cursor-1")
+        self.assertFalse(state["collections"]["chunks"]["done"])
 
 
 class MainErrorHandlingTest(unittest.TestCase):

@@ -24,6 +24,7 @@ See docs/superpowers/specs/2026-10-05-library-rag-migration-design.md.
 import argparse
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -34,8 +35,15 @@ if str(_PROJECT_ROOT) not in sys.path:
 import httpx  # noqa: E402
 
 from backend.api.public_query import slug_to_backend_id  # noqa: E402
+from backend.utils.migration_state import (  # noqa: E402
+    MIGRATION_COLLECTIONS,
+    delete_state,
+    load_state,
+    new_state,
+    save_state,
+    state_path,
+)
 
-MIGRATION_COLLECTIONS = ("chunks", "dedup")
 _MAX_ATTEMPTS = 4
 
 
@@ -96,12 +104,29 @@ def run_migration(
     dest_key: Optional[str],
     batch_size: int = 200,
     dry_run: bool = False,
+    mode: str = "clean",
+    data_path: Optional[Path] = None,
 ) -> dict:
     """Run the full migration (or, if dry_run, just the compatibility/size check).
+
+    `mode` is "clean" (ignore/clear any prior state and start fresh, the
+    default) or "resume" (continue a previously interrupted run for this
+    exact slug/source/dest combination; raises MigrationError if no
+    matching state file exists). The clean-vs-resume *prompt* shown when
+    the caller hasn't decided yet lives in main(), not here — this
+    function always receives an already-resolved mode so it stays
+    non-interactive and testable.
+
+    `data_path` is the base directory under which the state checkpoint
+    file is kept (at `<data_path>/system/migration_state/`). If omitted,
+    it's resolved from `get_settings().data_path`.
 
     Returns a summary dict used by main() for its console output and by
     tests for assertions.
     """
+    if mode not in ("clean", "resume"):
+        raise MigrationError(f"Invalid mode: {mode!r} (must be 'clean' or 'resume')")
+
     library_id = slug_to_backend_id(slug)
 
     source_info = _get(client, source_url, "/api/migration/embedding-info", source_key)
@@ -120,16 +145,54 @@ def run_migration(
     if dry_run:
         return {"library_id": library_id, "dry_run": True, "metadata": metadata}
 
-    begin_result = _post(client, dest_url, "/api/migration/import/begin", dest_key, {"library_id": library_id})
+    if data_path is None:
+        from backend.config.settings import get_settings
+        data_path = get_settings().data_path
+    path = state_path(slug, source_url, dest_url, data_path)
+
+    if mode == "resume":
+        state = load_state(path)
+        if state is None:
+            raise MigrationError(
+                f"No incomplete migration found for {slug} ({source_url} -> {dest_url}); "
+                "use --mode=clean or omit --mode to start fresh."
+            )
+        if (state["embedding_model_name"], state["embedding_dim"]) != source_model:
+            raise MigrationError(
+                "Embedding config changed since the interrupted run: recorded "
+                f"{state['embedding_model_name']} ({state['embedding_dim']}-dim), "
+                f"now {source_model[0]} ({source_model[1]}-dim). Use --mode=clean to start fresh."
+            )
+    else:
+        delete_state(path)
+        state = new_state(
+            slug, source_url, dest_url, library_id,
+            source_model[0], source_model[1],
+            started_at=datetime.now(timezone.utc).isoformat(),
+        )
+        save_state(path, state)
+
+    if not state["begin_done"]:
+        begin_result = _post(client, dest_url, "/api/migration/import/begin", dest_key, {"library_id": library_id})
+        state["begin_done"] = True
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        save_state(path, state)
+    else:
+        begin_result = None
 
     transferred = {}
     for collection in MIGRATION_COLLECTIONS:
+        coll_state = state["collections"][collection]
         total = _get(
             client, source_url, "/api/migration/export/count", source_key,
             library_id=library_id, collection=collection,
         )["count"]
-        count = 0
-        offset = None
+        count = coll_state["transferred"]
+        offset = coll_state["cursor"]
+        if coll_state["done"]:
+            print(f"[OK] {collection}: {count}/{total} transferred (already complete)", file=sys.stderr)
+            transferred[collection] = count
+            continue
         while True:
             page = _get(
                 client, source_url, "/api/migration/export", source_key,
@@ -143,13 +206,23 @@ def run_migration(
                 )
                 count += len(points)
             offset = page["next_offset"]
+            coll_state["cursor"] = offset
+            coll_state["transferred"] = count
+            coll_state["done"] = offset is None
+            state["updated_at"] = datetime.now(timezone.utc).isoformat()
+            save_state(path, state)
             print(f"[..] {collection}: {count}/{total} transferred", end="\r", file=sys.stderr)
             if offset is None:
                 break
         print(f"[OK] {collection}: {count}/{total} transferred", file=sys.stderr)
         transferred[collection] = count
 
-    _post(client, dest_url, "/api/migration/import/metadata", dest_key, {"library_id": library_id, "payload": metadata})
+    if not state["metadata_done"]:
+        _post(client, dest_url, "/api/migration/import/metadata", dest_key, {"library_id": library_id, "payload": metadata})
+        state["metadata_done"] = True
+        save_state(path, state)
+
+    delete_state(path)
 
     return {
         "library_id": library_id,
