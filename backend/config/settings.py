@@ -173,6 +173,16 @@ class Settings(BaseSettings):
                     "near-zero free space leaves the optimizer stuck (segments pile up "
                     "unmerged, which keeps the disk full)."
     )
+    autoindex_reserved_cpus: int = Field(
+        default=1,
+        ge=0,
+        description="Number of CPUs to leave free for serving RAG queries while an "
+                    "indexing run is active. bin/index_libraries.py restricts its own "
+                    "CPU affinity to (available CPUs - this value), down to a minimum "
+                    "of 1 CPU for indexing itself. Set to 0 to disable (indexing may "
+                    "use all CPUs). No-op on platforms without sched_getaffinity/"
+                    "sched_setaffinity (e.g. macOS dev)."
+    )
 
     ntfy_topic_url: Optional[str] = Field(
         default=None,

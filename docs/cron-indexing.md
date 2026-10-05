@@ -459,6 +459,24 @@ full). Free up space (old container images are a common culprit — see
 `CLAUDE.md`'s "Cleanup" section) or raise the threshold in your deploy env file
 if you've confirmed there's enough real headroom.
 
+### CPU cap: reserving cores for RAG queries during indexing
+
+Root-caused in the 2026-10 Qdrant-timeout incident: a concurrent indexing run
+and a live `/api/query` search can both need CPU/IO time at the same moment,
+and an unbounded indexing process can starve query handling long enough to
+trip a client timeout. `bin/index_libraries.py` restricts its own CPU
+affinity on startup (`backend/utils/cpu_affinity.py`) to leave
+`AUTOINDEX_RESERVED_CPUS` (default 1) cores free for everything else —
+serving queries, Qdrant, etc. Indexing itself is never reduced below 1 CPU,
+even if `AUTOINDEX_RESERVED_CPUS` would otherwise consume all of them. Set to
+`0` to disable (indexing may use every CPU). No-op on platforms without
+`os.sched_getaffinity`/`sched_setaffinity` (e.g. macOS dev) — this only
+applies on Linux hosts, which is where production runs.
+
+This restricts the indexing process itself, however it's invoked (the
+built-in scheduler's subprocess, the external `/etc/cron.d/zotero-rag-indexer`
+job, or a manual run) — there's nothing to configure beyond the env var.
+
 ### "Nothing to index" (no targets resolved)
 
 The store has no usable keys. Add at least one read-only Zotero key via the

@@ -24,6 +24,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from backend.utils.cpu_affinity import restrict_current_process_cpus  # noqa: E402
 from backend.utils.disk_space import check_disk_space  # noqa: E402
 
 
@@ -124,6 +125,8 @@ async def _main(argv: list[str] | None = None) -> int:
     if disk_issue:
         log.error("Skipping indexing run: %s", disk_issue)
         return 1
+
+    restrict_current_process_cpus(settings.autoindex_reserved_cpus)
 
     from backend.services.autoindex_key_store import AutoIndexKeyStore
     from backend.services.autoindex_resolver import resolve_targets
