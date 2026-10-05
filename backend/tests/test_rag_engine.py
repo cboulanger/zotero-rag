@@ -632,6 +632,88 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertLessEqual(prompt.count("Content from Dominant Doc"), 2)
 
+    async def test_query_dedupes_identical_chunk_text_within_one_document(self):
+        """Observed live: the same passage can be indexed twice for one
+        Zotero item (e.g. extracted from two attachment_keys, or re-chunked
+        during a second indexing pass), producing two SearchResults with
+        identical text. These must not both consume a context slot — keep
+        the higher-scoring copy so a genuinely different chunk can fill the
+        slot that would otherwise be wasted on the duplicate."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "Identical passage repeated across two attachments."
+        chunk_a = self._make_chunk("DOC1", "ATT1", "Doc", 0.9, chunk_index=0, text=duplicate_text)
+        chunk_b = self._make_chunk("DOC1", "ATT2", "Doc", 0.85, chunk_index=1, text=duplicate_text)
+        unique_chunk = self._make_chunk("DOC1", "ATT3", "Doc", 0.8, chunk_index=2)
+
+        self.mock_vector_store.search = Mock(return_value=[chunk_a, chunk_b, unique_chunk])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3, max_chunks_per_document=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertEqual(prompt.count(duplicate_text), 1)
+        self.assertIn(unique_chunk.chunk.text, prompt)
+
+    async def test_query_dedup_keeps_higher_scoring_duplicate(self):
+        """When two chunks have identical text, the surviving copy's score
+        must be the higher of the two, so it isn't treated as a
+        lower-quality hit downstream (e.g. in SourceInfo.score)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "Identical passage."
+        low_score_first = self._make_chunk("DOC1", "ATT1", "Doc", 0.7, chunk_index=0, text=duplicate_text)
+        high_score_second = self._make_chunk("DOC1", "ATT2", "Doc", 0.95, chunk_index=1, text=duplicate_text)
+
+        self.mock_vector_store.search = Mock(return_value=[low_score_first, high_score_second])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=2)
+
+        self.assertEqual(result.sources[0].score, 0.95)
+
+    async def test_query_dedup_is_case_and_whitespace_insensitive(self):
+        """Observed live: the same passage extracted twice differed only by
+        a capitalization/whitespace artifact from re-extraction — this must
+        still be recognized as a duplicate."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        chunk_a = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.9, chunk_index=0,
+            text="RechtsVergleichung  und   Rechtsdogmatik",
+        )
+        chunk_b = self._make_chunk(
+            "DOC1", "ATT2", "Doc", 0.85, chunk_index=1,
+            text="Rechtsvergleichung und Rechtsdogmatik",
+        )
+
+        self.mock_vector_store.search = Mock(return_value=[chunk_a, chunk_b])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn(chunk_a.chunk.text, prompt)
+        self.assertNotIn(chunk_b.chunk.text, prompt)
+
+    async def test_query_dedup_does_not_collapse_distinct_chunks(self):
+        """No regression: chunks with genuinely different text must not be
+        affected by dedup, even within the same document."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(3)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3, max_chunks_per_document=10)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertEqual(prompt.count("Content from Dominant Doc"), 3)
+
     async def test_query_custom_diversity_floor_suppresses_escalation(self):
         """A caller-supplied diversity_floor of 1 means "1 document is already
         enough" — escalation must not fire even though the default floor (3)

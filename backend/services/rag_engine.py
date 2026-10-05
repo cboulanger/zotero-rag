@@ -151,6 +151,87 @@ def _format_authors(authors: list[str]) -> str:
     return f"{last_names[0]} et al."
 
 
+def _normalize_for_dedup(text: str) -> str:
+    """Normalize chunk text for duplicate detection: collapse whitespace and
+    casefold, so near-identical chunks differing only by whitespace/case
+    (e.g. the same passage re-extracted from two attachment_keys of one
+    item) are recognized as duplicates."""
+    return " ".join(text.split()).casefold()
+
+
+def _dedup_chunks_by_text(results: list) -> list:
+    """Within one document's chunks, drop exact-after-normalization text
+    duplicates, keeping the highest-scoring copy of each. Observed live: the
+    same page re-extracted from two attachment_keys of one Zotero item (or
+    chunked twice during indexing) produces two SearchResults with identical
+    text, wasting a context slot that could hold a genuinely different
+    passage."""
+    best_by_text: dict[str, object] = {}
+    for result in results:
+        key = _normalize_for_dedup(result.chunk.text)
+        existing = best_by_text.get(key)
+        if existing is None or result.score > existing.score:
+            best_by_text[key] = result
+    return list(best_by_text.values())
+
+
+def _group_chunks_by_document(search_results: list) -> tuple[dict[str, list], list[str]]:
+    """Group search results by item_key (a Zotero item can have several
+    indexed attachments, which must still count as one document), returning
+    the grouping plus document keys sorted by each document's best chunk
+    score (most relevant document first)."""
+    doc_chunks: dict[str, list] = {}
+    doc_best_score: dict[str, float] = {}
+    for result in search_results:
+        key = result.chunk.metadata.document_metadata.item_key
+        if key not in doc_chunks:
+            doc_chunks[key] = []
+            doc_best_score[key] = result.score
+        doc_chunks[key].append(result)
+        if result.score > doc_best_score[key]:
+            doc_best_score[key] = result.score
+    sorted_doc_keys = sorted(doc_chunks.keys(), key=lambda k: doc_best_score[k], reverse=True)
+    return doc_chunks, sorted_doc_keys
+
+
+def _assemble_context(
+    doc_chunks: dict[str, list], sorted_doc_keys: list[str], max_chunks_per_document: int
+) -> tuple[str, list]:
+    """Build the numbered [S1]/[S2]/... context string, one source per
+    document. Within each document: dedup identical-text chunks first (see
+    _dedup_chunks_by_text), then cap to max_chunks_per_document, keeping the
+    highest-scoring survivors. Returns (context, doc_representatives) —
+    doc_representatives is the best-scoring chunk per document, in [SN]
+    order, used for SourceInfo citations."""
+    context_parts = []
+    doc_representatives: list = []
+    for i, doc_key in enumerate(sorted_doc_keys, 1):
+        results_for_doc = _dedup_chunks_by_text(doc_chunks[doc_key])
+        if len(results_for_doc) > max_chunks_per_document:
+            results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:max_chunks_per_document]
+        results_for_doc.sort(key=lambda r: (
+            r.chunk.metadata.page_number or 0,
+            r.chunk.metadata.chunk_index or 0,
+        ))
+        best_result = max(results_for_doc, key=lambda r: r.score)
+        doc_representatives.append(best_result)
+
+        doc_meta = results_for_doc[0].chunk.metadata.document_metadata
+        authors_str = _format_authors(doc_meta.authors or [])
+        year_str = f" ({doc_meta.year})" if doc_meta.year else ""
+        attribution = f"{authors_str}{year_str} — " if authors_str or year_str else ""
+        header = f"[S{i}: {attribution}{doc_meta.title or 'Unknown'}]"
+        passages = []
+        for result in results_for_doc:
+            metadata = result.chunk.metadata
+            page_label = f"[p. {metadata.page_number}] " if metadata.page_number else ""
+            passages.append(f"{page_label}{result.chunk.text}")
+        context_parts.append(f"{header}\n" + "\n\n".join(passages))
+
+    context = "\n\n".join(context_parts)
+    return context, doc_representatives
+
+
 class SourceInfo(BaseModel):
     """Source citation information."""
     item_id: str
@@ -304,49 +385,12 @@ class RAGEngine:
         # bibliography/reference section) while still assigning one source number per
         # document so citations are not repetitively labelled [1], [2], [3] for the
         # same paper.
-        doc_chunks: dict[str, list] = {}
-        doc_best_score: dict[str, float] = {}
-        for result in search_results:
-            key = result.chunk.metadata.document_metadata.item_key
-            if key not in doc_chunks:
-                doc_chunks[key] = []
-                doc_best_score[key] = result.score
-            doc_chunks[key].append(result)
-            if result.score > doc_best_score[key]:
-                doc_best_score[key] = result.score
-
-        # Sort documents by their best chunk score (most relevant document first)
-        sorted_doc_keys = sorted(doc_chunks.keys(), key=lambda k: doc_best_score[k], reverse=True)
+        doc_chunks, sorted_doc_keys = _group_chunks_by_document(search_results)
         logger.info(f"Grouped into {len(sorted_doc_keys)} unique documents for context")
 
-        # Step 3: Assemble context — one numbered source per document, all its chunks listed
-        context_parts = []
-        doc_representatives: list = []  # best-scoring chunk per doc for SourceInfo
-        for i, doc_key in enumerate(sorted_doc_keys, 1):
-            results_for_doc = doc_chunks[doc_key]
-            if len(results_for_doc) > max_chunks_per_document:
-                results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:max_chunks_per_document]
-            # Sort chunks within document by page number, then chunk index
-            results_for_doc.sort(key=lambda r: (
-                r.chunk.metadata.page_number or 0,
-                r.chunk.metadata.chunk_index or 0,
-            ))
-            best_result = max(results_for_doc, key=lambda r: r.score)
-            doc_representatives.append(best_result)
-
-            doc_meta = results_for_doc[0].chunk.metadata.document_metadata
-            authors_str = _format_authors(doc_meta.authors or [])
-            year_str = f" ({doc_meta.year})" if doc_meta.year else ""
-            attribution = f"{authors_str}{year_str} — " if authors_str or year_str else ""
-            header = f"[S{i}: {attribution}{doc_meta.title or 'Unknown'}]"
-            passages = []
-            for result in results_for_doc:
-                metadata = result.chunk.metadata
-                page_label = f"[p. {metadata.page_number}] " if metadata.page_number else ""
-                passages.append(f"{page_label}{result.chunk.text}")
-            context_parts.append(f"{header}\n" + "\n\n".join(passages))
-
-        context = "\n\n".join(context_parts)
+        # Step 3: Assemble context — one numbered source per document, all its chunks
+        # listed (deduped by text, then capped per document — see _assemble_context).
+        context, doc_representatives = _assemble_context(doc_chunks, sorted_doc_keys, max_chunks_per_document)
 
         # Record retrieval trace before calling the LLM
         if trace is not None:
