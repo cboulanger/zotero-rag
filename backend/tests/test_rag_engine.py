@@ -481,9 +481,11 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not narrate", prompt)
         self.assertIn("stop there", prompt)
 
-    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0):
+    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0, text=None):
+        if text is None:
+            text = f"Content from {title}, chunk {chunk_index}."
         chunk = DocumentChunk(
-            text=f"Content from {title}.",
+            text=text,
             metadata=ChunkMetadata(
                 chunk_id=f"{item_key}-{chunk_index}",
                 document_metadata=DocumentMetadata(
