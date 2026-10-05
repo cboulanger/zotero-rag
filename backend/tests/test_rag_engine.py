@@ -481,9 +481,11 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not narrate", prompt)
         self.assertIn("stop there", prompt)
 
-    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0):
+    def _make_chunk(self, item_key, attachment_key, title, score, chunk_index=0, text=None):
+        if text is None:
+            text = f"Content from {title}, chunk {chunk_index}."
         chunk = DocumentChunk(
-            text=f"Content from {title}.",
+            text=text,
             metadata=ChunkMetadata(
                 chunk_id=f"{item_key}-{chunk_index}",
                 document_metadata=DocumentMetadata(
@@ -520,6 +522,37 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.mock_vector_store.search.call_count, 2)
         second_call_kwargs = self.mock_vector_store.search.call_args_list[1].kwargs
         self.assertGreater(second_call_kwargs["limit"], 5)
+        self.assertEqual(len(result.sources), 3)
+
+    async def test_query_escalates_when_one_item_has_multiple_attachments(self):
+        """Observed live: a single Zotero item with several indexed attachments
+        (e.g. multiple PDF versions of the same paper) must count as ONE document
+        for diversity purposes, not one per attachment_key. Otherwise a single
+        paper whose attachments happen to split across >= diversity_floor
+        attachment_keys can saturate top_k and suppress escalation even though
+        the library has only one genuinely relevant item represented."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = (
+            [self._make_chunk("DOC1", "ATT1", "Same Paper", 0.9, i) for i in range(4)]
+            + [self._make_chunk("DOC1", "ATT2", "Same Paper", 0.88, i) for i in range(3)]
+            + [self._make_chunk("DOC1", "ATT3", "Same Paper", 0.86, i) for i in range(3)]
+        )
+        diverse_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT4", "Second Doc", 0.7),
+            self._make_chunk("DOC3", "ATT5", "Third Doc", 0.65),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=10)
+
+        self.assertEqual(
+            self.mock_vector_store.search.call_count, 2,
+            "same item_key across 3 attachment_keys must still count as 1 "
+            "document and trigger escalation (1 < diversity_floor=3)",
+        )
         self.assertEqual(len(result.sources), 3)
 
     async def test_query_does_not_escalate_when_diversity_already_sufficient(self):
@@ -598,6 +631,88 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertLessEqual(prompt.count("Content from Dominant Doc"), 2)
+
+    async def test_query_dedupes_identical_chunk_text_within_one_document(self):
+        """Observed live: the same passage can be indexed twice for one
+        Zotero item (e.g. extracted from two attachment_keys, or re-chunked
+        during a second indexing pass), producing two SearchResults with
+        identical text. These must not both consume a context slot — keep
+        the higher-scoring copy so a genuinely different chunk can fill the
+        slot that would otherwise be wasted on the duplicate."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "Identical passage repeated across two attachments."
+        chunk_a = self._make_chunk("DOC1", "ATT1", "Doc", 0.9, chunk_index=0, text=duplicate_text)
+        chunk_b = self._make_chunk("DOC1", "ATT2", "Doc", 0.85, chunk_index=1, text=duplicate_text)
+        unique_chunk = self._make_chunk("DOC1", "ATT3", "Doc", 0.8, chunk_index=2)
+
+        self.mock_vector_store.search = Mock(return_value=[chunk_a, chunk_b, unique_chunk])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3, max_chunks_per_document=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertEqual(prompt.count(duplicate_text), 1)
+        self.assertIn(unique_chunk.chunk.text, prompt)
+
+    async def test_query_dedup_keeps_higher_scoring_duplicate(self):
+        """When two chunks have identical text, the surviving copy's score
+        must be the higher of the two, so it isn't treated as a
+        lower-quality hit downstream (e.g. in SourceInfo.score)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "Identical passage."
+        low_score_first = self._make_chunk("DOC1", "ATT1", "Doc", 0.7, chunk_index=0, text=duplicate_text)
+        high_score_second = self._make_chunk("DOC1", "ATT2", "Doc", 0.95, chunk_index=1, text=duplicate_text)
+
+        self.mock_vector_store.search = Mock(return_value=[low_score_first, high_score_second])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=2)
+
+        self.assertEqual(result.sources[0].score, 0.95)
+
+    async def test_query_dedup_is_case_and_whitespace_insensitive(self):
+        """Observed live: the same passage extracted twice differed only by
+        a capitalization/whitespace artifact from re-extraction — this must
+        still be recognized as a duplicate."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        chunk_a = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.9, chunk_index=0,
+            text="RechtsVergleichung  und   Rechtsdogmatik",
+        )
+        chunk_b = self._make_chunk(
+            "DOC1", "ATT2", "Doc", 0.85, chunk_index=1,
+            text="Rechtsvergleichung und Rechtsdogmatik",
+        )
+
+        self.mock_vector_store.search = Mock(return_value=[chunk_a, chunk_b])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn(chunk_a.chunk.text, prompt)
+        self.assertNotIn(chunk_b.chunk.text, prompt)
+
+    async def test_query_dedup_does_not_collapse_distinct_chunks(self):
+        """No regression: chunks with genuinely different text must not be
+        affected by dedup, even within the same document."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(3)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=3, max_chunks_per_document=10)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertEqual(prompt.count("Content from Dominant Doc"), 3)
 
     async def test_query_custom_diversity_floor_suppresses_escalation(self):
         """A caller-supplied diversity_floor of 1 means "1 document is already
@@ -734,6 +849,290 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
         self.assertIn("every sentence", prompt)
         self.assertIn("do not state it", prompt)
+
+    async def test_prompt_instructs_model_to_answer_in_the_questions_language(self):
+        """Observed live: a German question retrieved a mix of German and
+        English source passages and the model answered in English — the
+        prompt must explicitly instruct it to match the question's
+        language regardless of what language the context happens to be
+        in."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("same language as the question", prompt)
+
+    async def test_query_accepts_enable_quality_self_review_flag(self):
+        """Plumbing check: the flag must be accepted without error and must
+        not change behavior when nothing triggers the review (a later task
+        adds the detector and retry that actually use it)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        results = [self._make_chunk("DOC1", "ATT1", "Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(
+            question, library_ids, top_k=1, enable_quality_self_review=True
+        )
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_quality_review_escalates_and_adopts_better_retry(self):
+        """When enable_quality_self_review=True and the first answer's
+        citation coverage looks thin (signaled by the model emitting
+        CONTEXT_INSUFFICIENT_MARKER), retry once with escalated retrieval
+        and adopt the retry if it has fewer quality issues."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        better_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, better_answer])
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=5, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, better_answer)
+        self.assertEqual(len(result.sources), 3)
+
+    async def test_quality_review_keeps_original_when_retry_is_not_better(self):
+        """If the escalated retry's answer has the same or more quality
+        issues, keep the original answer (minus the marker, which is
+        always stripped) rather than discarding a decent first attempt for
+        a worse one."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        still_thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, still_thin_answer])
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=5, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, "I can only find a partial answer here [S1].")
+        self.assertEqual(len(result.sources), 1)
+
+    async def test_quality_review_does_not_fire_when_disabled(self):
+        """Default False — a thin-looking answer must not trigger a retry
+        unless the caller explicitly opts in. The marker is still stripped
+        from the final answer regardless (the prompt instruction to emit it
+        is unconditional; only the escalation RETRY is gated by the flag)."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=thin_answer)
+
+        result = await self.rag_engine.query(question, library_ids, top_k=1)
+
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertEqual(result.answer, "I can only find a partial answer here [S1].")
+
+    async def test_quality_review_does_not_fire_when_answer_already_good(self):
+        """No wasted retry when the first answer already looks fine."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        good_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(return_value=good_answer)
+
+        await self.rag_engine.query(
+            question, library_ids, top_k=2, enable_quality_self_review=True,
+        )
+
+        self.mock_llm_service.generate.assert_called_once()
+
+    async def test_quality_review_skips_post_generation_escalation_when_pre_generation_already_escalated(self):
+        """Regression test: an earlier version of this feature suppressed
+        the pre-existing pre-generation diversity escalation whenever
+        enable_quality_self_review was True, which was wrong (the two
+        escalation mechanisms detect different failure modes — structural
+        retrieval narrowness vs. answer-quality degradation — and aren't a
+        strict superset of each other). The fix keeps pre-generation
+        escalation unconditional and instead skips the NEW post-generation
+        thin-context escalation if pre-generation escalation already fired
+        for this query (via the `not escalated` guard), so only one
+        escalation retry is ever spent per query. This test sets up a
+        first search that saturates top_k with chunks from a single
+        dominant document (triggering pre-generation escalation
+        unconditionally) and confirms: (1) pre-generation escalation fires
+        and consumes the one available extra search result, (2) the
+        post-generation thin-context check does NOT also fire even though
+        the answer contains CONTEXT_INSUFFICIENT_MARKER, because
+        `escalated` is already True — i.e. vector_store.search is called
+        exactly twice (the pre-generation escalation's two searches), not
+        three, and llm_service.generate is called exactly once, not
+        twice."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        # top_k=3, first search saturates it with 3 chunks all from DOC1 —
+        # triggers pre-generation escalation (len(search_results)==top_k
+        # and unique_doc_count=1 < diversity_floor=3) unconditionally,
+        # regardless of enable_quality_self_review.
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(3)]
+        escalated_results = narrow_results + [
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+            self._make_chunk("DOC3", "ATT3", "Third Doc", 0.8),
+        ]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        # Even though this answer contains the thin-context marker, the
+        # post-generation escalation must NOT fire a second time, because
+        # pre-generation escalation already spent this query's one
+        # escalation budget.
+        answer_with_marker = f"Answer from the escalated context [S1,S2,S3].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=answer_with_marker)
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=3, enable_quality_self_review=True,
+        )
+
+        self.assertEqual(
+            self.mock_vector_store.search.call_count, 2,
+            "pre-generation escalation should have searched twice; "
+            "post-generation escalation must not add a third search",
+        )
+        self.mock_llm_service.generate.assert_called_once()
+        self.assertNotIn(CONTEXT_INSUFFICIENT_MARKER, result.answer)
+
+    async def test_quality_review_records_trace_block(self):
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_llm_service.model_name = "test-model"
+
+        narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
+        escalated_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
+        self.mock_vector_store.search = Mock(side_effect=[narrow_results, escalated_results])
+
+        thin_answer = f"I can only find a partial answer here [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        better_answer = "The first [S1] and second [S2] sources both address this."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, better_answer])
+
+        collector = TraceCollector(question, library_ids, {})
+        await self.rag_engine.query(
+            question, library_ids, top_k=5, enable_quality_self_review=True, trace=collector,
+        )
+        trace = collector.finalize()
+
+        review = trace.agent_executions[0].quality_review
+        self.assertIsNotNone(review)
+        self.assertTrue(review["triggered"])
+        self.assertTrue(review["retry_improved"])
+
+    async def test_quality_review_strips_marker_from_answer_but_not_from_trace(self):
+        """CONTEXT_INSUFFICIENT_MARKER is a detection signal for the model to
+        emit, not something the user should see — it must be stripped from
+        QueryResult.answer, but the trace should still show the raw model
+        output (including the marker) for debuggability."""
+        from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
+        from backend.services.trace_collector import TraceCollector
+
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_llm_service.model_name = "test-model"
+
+        results = [
+            self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
+            self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85),
+        ]
+        self.mock_vector_store.search = Mock(return_value=results)
+        raw_answer = f"The first source states X [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.mock_llm_service.generate = AsyncMock(return_value=raw_answer)
+
+        collector = TraceCollector(question, library_ids, {})
+        result = await self.rag_engine.query(question, library_ids, top_k=2, trace=collector)
+        trace = collector.finalize()
+
+        self.assertNotIn(CONTEXT_INSUFFICIENT_MARKER, result.answer)
+        self.assertEqual(result.answer, "The first source states X [S1].")
+        self.assertIn(CONTEXT_INSUFFICIENT_MARKER, trace.llm_calls[-1].response)
+
+
+class TestThinContextCoverage(unittest.TestCase):
+    """_thin_context_coverage detects a different failure mode than the
+    existing _low_citation_diversity: the answer DOES cite sources, and
+    doesn't necessarily cite only one, but the retrieved pool itself looks
+    like it didn't actually address the question (either the model says so,
+    or it uses little of a small retrieved pool)."""
+
+    def test_true_when_answer_contains_insufficient_context_marker(self):
+        """The hedge regex this replaced was language-dependent and missed
+        its own motivating phrasing (the system prompt's "doesn't contain"
+        contraction didn't match a "does not contain" regex alternative).
+        An explicit sentinel the model is instructed to emit is
+        language-independent and exact-match, not pattern-match."""
+        from backend.services.rag_engine import _thin_context_coverage, CONTEXT_INSUFFICIENT_MARKER
+        answer = f"I can only find a partial answer [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_false_when_marker_absent_and_utilization_is_adequate(self):
+        """No regression: without the marker, behavior falls through to the
+        citation-utilization check exactly as before."""
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The first [S1], second [S2], and third [S3] sources all matter."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_true_when_citation_utilization_is_low_on_a_small_pool(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "Only one source is relevant here [S1]."
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_false_when_citation_utilization_is_adequate(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The first [S1], second [S2], and third [S3] sources all matter."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=6))
+
+    def test_false_when_pool_is_large_even_if_few_cited(self):
+        """A large retrieved pool with few citations is a citation-behavior
+        issue (see _low_citation_diversity), not evidence the pool itself
+        was thin — don't double-trigger on it here."""
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "Only the first source matters here [S1]."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=20))
+
+    def test_false_on_a_normal_well_cited_short_answer(self):
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "The only relevant source states X [S1]."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=1))
 
 
 class TestSourceInfo(unittest.TestCase):

@@ -17,9 +17,9 @@ The project uses **GitHub Actions** with **semantic-release** for automated test
 
 ### Branches
 
-- **`main`** - Production branch, protected, releases triggered on push
-- **`develop`** - Optional development branch for integration (not required)
-- **Feature branches** - Short-lived branches, merge to main via PR
+- **`main`** - Production/release branch. **Protected**: direct pushes are rejected: all changes land via pull request (the repo owner can override the PR requirement when necessary, e.g. an emergency hotfix). Every push to `main` (via a merged PR) runs CI and, on success, triggers a release.
+- **`devel`** - Default integration branch for day-to-day work. Not protected — commit directly, or use short-lived feature branches off `devel` for larger changes. Pushes to `devel` run CI (tests must pass) but **never trigger a release** — `.releaserc.json` restricts semantic-release to the `main` branch only, and the release workflow's `workflow_run` trigger is filtered to `branches: [main]`.
+- **Feature branches** - Short-lived branches off `devel` for larger or riskier changes; merge back into `devel` (PR optional) before `devel` is eventually merged into `main` via PR to cut a release.
 
 ### Tags
 
@@ -34,8 +34,8 @@ The project uses **GitHub Actions** with **semantic-release** for automated test
 
 **Triggers:**
 
-- Push to `main` or `develop` branches
-- Pull requests to `main` or `develop`
+- Push to `main` or `devel` branches
+- Pull requests to `main` or `devel`
 
 **Jobs:**
 
@@ -140,7 +140,11 @@ BREAKING CHANGE: Config format changed to YAML
 ```
 Developer commits with conventional format
     ↓
-Push to main (or merge PR)
+Push to devel (day-to-day work)
+    ↓
+Open PR from devel → main when ready to release
+    ↓
+PR merged into main
     ↓
 GitHub Actions: Run tests
     ↓
@@ -168,8 +172,9 @@ Updates 'latest' and 'stable' tags
 #### 1. Make Your Changes
 
 ```bash
-# Create feature branch (optional but recommended)
-git checkout -b feat/add-caching
+# Switch to the integration branch (or a feature branch off it for larger changes)
+git checkout devel
+git checkout -b feat/add-caching  # optional, for larger/riskier changes
 
 # Make code changes
 # ... edit files ...
@@ -196,27 +201,36 @@ git commit -m "feat: add query result caching"
 
 The Git hook will validate your message automatically. If invalid, commit is rejected with helpful error message.
 
-#### 3. Push to Main
+#### 3. Push to devel
 
 ```bash
-# If on feature branch, push and create PR
-git push origin feat/add-caching
-# Then merge PR through GitHub UI
+# Day-to-day work: push straight to devel
+git push origin devel
 
-# If on main (for small changes)
-git push origin main
+# Larger/riskier changes: push the feature branch and PR it into devel
+git push origin feat/add-caching
+# Then merge PR into devel through GitHub UI
 ```
 
-#### 4. Automatic Release
+CI runs on `devel`, but **no release is created** — releases only happen from `main`.
 
-GitHub Actions will:
+#### 4. Release via PR to main
+
+When `devel` is ready to ship:
+
+```bash
+gh pr create --base main --head devel --title "Release: <summary>"
+```
+
+`main` is protected — this PR is the only way in (the repo owner can override
+the requirement for an emergency hotfix). Once merged, GitHub Actions will:
 
 1. Run tests
-2. Analyze your commits
-3. Determine if release is needed
+2. Analyze the commits that landed on `main`
+3. Determine if a release is needed
 4. If yes: bump version, create release, publish XPI
 
-**That's it!** No manual version bumps, no manual tags, no manual releases.
+**No manual version bumps, no manual tags, no manual releases.**
 
 ### What Triggers a Release?
 
@@ -538,8 +552,10 @@ npm run release:push   # ❌ Removed
 
 ```bash
 git commit -m "feat: add new feature"
-git push origin main
-# Release happens automatically!
+git push origin devel
+# When ready to release:
+gh pr create --base main --head devel
+# Merge the PR — release happens automatically!
 ```
 
 ## Security

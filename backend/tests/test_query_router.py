@@ -155,7 +155,7 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
             '"citation_targets": [{"year": 1975}, "not a dict", {"author": "teubner"}]}'
         )
         agents = [_make_agent("mentions", "citation search")]
-        plan = await router.route("q", agents)
+        plan = await router.route("Which publications discuss teubner?", agents)
         self.assertEqual(len(plan.filters.citation_targets), 1)
         self.assertEqual(plan.filters.citation_targets[0].author, "teubner")
 
@@ -243,6 +243,110 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
         prompt = llm.generate.call_args.kwargs["prompt"].lower()
         self.assertIn("not authors", prompt)
         self.assertIn("endnote", prompt)
+
+    async def test_prompt_warns_against_inferring_authors_from_topic(self):
+        """The prompt must explicitly warn against inferring a plausible
+        author from the topic rather than extracting one from the question
+        text — the exact failure mode behind dropped_filters (Task 2) is a
+        safety net; the prompt itself should discourage it first."""
+        llm = MagicMock()
+        llm.generate = AsyncMock(return_value='{"agents": ["rag"]}')
+        router = QueryRouter(llm)
+        agents = [_make_agent("rag", "semantic")]
+        await router.route(
+            "Welche Beziehung besteht zwischen der systemtheoretischen "
+            "Rechtssoziologie und der Rechtsdogmatik?", agents,
+        )
+        prompt = llm.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("never infer", prompt)
+        self.assertIn("luhmann", prompt)
+
+
+class TestEntityMentionValidation(unittest.IsolatedAsyncioTestCase):
+    """The router LLM can hallucinate authors/title_keywords/citation_targets
+    that sound plausible for the topic but were never written in the
+    question — observed live: a question with no named author ("Welche
+    Beziehung besteht zwischen der systemtheoretischen Rechtssoziologie und
+    der Rechtsdogmatik?") still got authors=["teubner", "wiethölter"]
+    because those scholars are commonly associated with the topic. Any
+    candidate not literally present in the question (allowing for
+    diacritics/case/German inflection) must be dropped before it becomes a
+    hard Qdrant filter."""
+
+    async def test_drops_author_not_mentioned_in_question(self):
+        router = _make_router('{"agents": ["rag"], "authors": ["teubner", "wiethölter"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route(
+            "Welche Beziehung besteht zwischen der systemtheoretischen "
+            "Rechtssoziologie und der Rechtsdogmatik?", agents,
+        )
+        self.assertEqual(plan.filters.authors, [])
+        self.assertEqual(
+            sorted(plan.dropped_filters["authors"]), ["teubner", "wiethölter"]
+        )
+
+    async def test_keeps_author_mentioned_in_question(self):
+        router = _make_router('{"agents": ["rag"], "authors": ["luhmann"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("What does Luhmann say about autopoiesis?", agents)
+        self.assertEqual(plan.filters.authors, ["luhmann"])
+        self.assertIsNone(plan.dropped_filters)
+
+    async def test_keeps_author_mentioned_with_diacritic_variant(self):
+        """The question may spell a name without its diacritic even though
+        the router returns the canonical spelling, or vice versa."""
+        router = _make_router('{"agents": ["rag"], "authors": ["wiethölter"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("What did Wietholter argue?", agents)
+        self.assertEqual(plan.filters.authors, ["wiethölter"])
+
+    async def test_keeps_author_mentioned_in_inflected_german_form(self):
+        """German genitive ("Wiethölters") must still count as a mention of
+        "wiethölter" — substring containment after normalization handles
+        this without a stemmer."""
+        router = _make_router('{"agents": ["rag"], "authors": ["wiethölter"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("Was ist Wiethölters Hauptargument?", agents)
+        self.assertEqual(plan.filters.authors, ["wiethölter"])
+
+    async def test_drops_title_keyword_not_mentioned_in_question(self):
+        router = _make_router('{"agents": ["rag"], "title_keywords": ["bukowina"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("What is systems theory?", agents)
+        self.assertEqual(plan.filters.title_keywords, [])
+        self.assertEqual(plan.dropped_filters["title_keywords"], ["bukowina"])
+
+    async def test_keeps_title_keyword_mentioned_in_question(self):
+        router = _make_router('{"agents": ["rag"], "title_keywords": ["bukowina"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("Find the paper called 'Globale Bukowina'", agents)
+        self.assertEqual(plan.filters.title_keywords, ["bukowina"])
+
+    async def test_drops_citation_target_author_not_mentioned(self):
+        router = _make_router(
+            '{"agents": ["mentions"], '
+            '"citation_targets": [{"author": "wiethölter", "year": 1975, "title_keywords": []}]}'
+        )
+        agents = [_make_agent("mentions", "citation search")]
+        plan = await router.route("Which publications discuss legal sociology?", agents)
+        self.assertEqual(plan.filters.citation_targets, [])
+        self.assertEqual(plan.dropped_filters["citation_targets.author"], ["wiethölter"])
+
+    async def test_keeps_citation_target_author_mentioned(self):
+        router = _make_router(
+            '{"agents": ["mentions"], '
+            '"citation_targets": [{"author": "wiethölter", "year": 1975, "title_keywords": []}]}'
+        )
+        agents = [_make_agent("mentions", "citation search")]
+        plan = await router.route("Which publications cite Wiethölter's 1975 article?", agents)
+        self.assertEqual(len(plan.filters.citation_targets), 1)
+        self.assertEqual(plan.filters.citation_targets[0].author, "wiethölter")
+
+    async def test_dropped_filters_is_none_when_nothing_dropped(self):
+        router = _make_router('{"agents": ["rag"], "authors": ["luhmann"]}')
+        agents = [_make_agent("rag", "semantic")]
+        plan = await router.route("What does Luhmann argue?", agents)
+        self.assertIsNone(plan.dropped_filters)
 
 
 class TestConversationHistoryInPrompt(unittest.IsolatedAsyncioTestCase):

@@ -42,6 +42,10 @@ class QueryPlan(BaseModel):
     routing_description: Optional[str] = None   # LLM's brief reasoning, used in synthesis
     clarification_needed: bool = False          # router judged the question too broad, pre-execution
     clarification_question: Optional[str] = None
+    dropped_filters: Optional[dict[str, list[str]]] = None
+    # Entries the router LLM returned that were dropped because they don't
+    # literally occur in the question text (see QueryRouter._filter_mentioned).
+    # Keys are "authors" | "title_keywords" | "citation_targets.author".
 
 
 class NeedsUserInputError(Exception):

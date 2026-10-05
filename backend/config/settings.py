@@ -163,6 +163,53 @@ class Settings(BaseSettings):
                     "relying on an external OS cron job. Unset (default) leaves "
                     "scheduling entirely to the operator (see docs/cron-indexing.md)."
     )
+    autoindex_min_free_disk_percent: float = Field(
+        default=15.0,
+        description="Minimum free disk space (as a percentage of total size on the "
+                    "data_path volume) required before an auto-index run starts. "
+                    "Below this, bin/index_libraries.py skips the run and logs why "
+                    "instead of writing more data — Qdrant's segment optimizer needs "
+                    "multi-GB of free space to merge segments, and running it down to "
+                    "near-zero free space leaves the optimizer stuck (segments pile up "
+                    "unmerged, which keeps the disk full)."
+    )
+    autoindex_reserved_cpus: int = Field(
+        default=1,
+        ge=0,
+        description="Number of CPUs to leave free for serving RAG queries while an "
+                    "indexing run is active. bin/index_libraries.py restricts its own "
+                    "CPU affinity to (available CPUs - this value), down to a minimum "
+                    "of 1 CPU for indexing itself. Set to 0 to disable (indexing may "
+                    "use all CPUs). No-op on platforms without sched_getaffinity/"
+                    "sched_setaffinity (e.g. macOS dev)."
+    )
+
+    ntfy_topic_url: Optional[str] = Field(
+        default=None,
+        description="Full ntfy.sh (or self-hosted ntfy) topic URL, e.g. "
+                    "'https://ntfy.sh/your-private-topic'. If set, the production "
+                    "health check posts an alert here when it starts/stops failing. "
+                    "Unset disables alerting (the health check still logs locally "
+                    "either way)."
+    )
+    health_check_interval_minutes: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="If set, the backend runs its own in-process scheduler that "
+                    "checks disk space and Qdrant collection health every N minutes "
+                    "(see backend/services/health_check.py), the same way "
+                    "autoindex_interval_minutes runs the auto-indexer — this way the "
+                    "check survives every redeploy automatically, with nothing living "
+                    "only on the host. Unset (default) disables the periodic check; "
+                    "bin/check_production_health.py can still be run manually/via cron."
+    )
+    health_check_min_free_disk_percent: float = Field(
+        default=15.0,
+        description="Minimum free disk space (as a percentage of total size on the "
+                    "data_path volume) before the health check reports a problem. "
+                    "Separate from autoindex_min_free_disk_percent so the health "
+                    "check can warn earlier than the hard indexing-skip floor."
+    )
 
     qdrant_url: Optional[str] = Field(
         default=None,

@@ -356,6 +356,67 @@ full re-index of whatever was mid-flight). `skip-slug` only ever affects the
 one named job — every other library in the run keeps indexing uninterrupted.
 Prefer `skip-slug` unless the process itself is unresponsive.
 
+## Production Health Monitoring
+
+Two independent checks watch for the conditions that caused the disk-full /
+Qdrant-optimizer-stuck incident, and push an alert via [ntfy.sh](https://ntfy.sh)
+(a free push-notification service; no account needed — just a topic name) when
+something degrades, instead of relying on a user reporting a 504.
+
+### Disk space + Qdrant collection health (built-in scheduler)
+
+Checks free disk space on the `data_path` volume and the `status`/
+`optimizer_status` of every Qdrant collection. Like `AUTOINDEX_INTERVAL_MINUTES`,
+this runs as an in-process scheduler inside the app itself — nothing lives only
+on the host, so it survives every redeploy automatically with no cron entry to
+recreate. Set in the deploy env file (passed into the container):
+
+```bash
+HEALTH_CHECK_INTERVAL_MINUTES=15        # enables the periodic check
+NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name
+HEALTH_CHECK_MIN_FREE_DISK_PERCENT=15   # optional, default shown
+```
+
+Use a private, hard-to-guess topic name (anyone who knows it can read your
+alerts or publish fake ones to it); subscribe to it in the ntfy app or web UI
+to receive the push notifications.
+
+`bin/check_production_health.py` is the same check as a standalone CLI, for
+manual/on-demand runs when debugging (it must run **inside the app
+container**, since Qdrant is only reachable over the container-internal
+network — see "Running Inside a Container" above):
+
+```bash
+podman exec zotero-rag python bin/check_production_health.py
+```
+
+### `bin/check_image_bloat.sh` — podman image bloat
+
+Checks `podman system df`'s reclaimable (dangling) image storage — the root
+cause of the *other* recent incident (47 dangling images, 28GB+). Must run
+directly on the **host as root**, not via `podman exec`: the root image store
+(`/var/lib/containers/storage`, used by systemd and manual `sudo podman
+build` hotfixes) isn't visible from inside the app container.
+
+```bash
+NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name \
+IMAGE_BLOAT_THRESHOLD_GB=10 \
+/home/cloud/zotero-rag/bin/check_image_bloat.sh
+```
+
+Add as a host cron entry:
+
+```text
+# /etc/cron.d/zotero-rag-image-bloat
+*/30 * * * * root NTFY_TOPIC_URL=https://ntfy.sh/your-private-topic-name IMAGE_BLOAT_THRESHOLD_GB=10 /home/cloud/zotero-rag/bin/check_image_bloat.sh >> /path/to/data/logs/health_check.log 2>&1
+```
+
+Both checks alert once when a problem starts and once when it clears — they
+stay silent on every tick while an already-reported problem persists, so a
+sustained incident doesn't spam the topic. State is tracked in a small JSON/
+text file (`data/system/health_check_state.json` and, for the bash script,
+`/var/lib/zotero-rag-image-bloat-state`).
+
 ## Troubleshooting
 
 ### Log file location
@@ -386,6 +447,35 @@ with:
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+### "Skipping indexing run: Only N% disk free"
+
+The volume holding `data_path` is low on free space, below
+`AUTOINDEX_MIN_FREE_DISK_PERCENT` (default 15%). The run is skipped rather than
+writing more data — Qdrant's segment optimizer needs multi-GB of free space to
+merge segments, and letting the disk run down to near-zero free space leaves
+the optimizer stuck (unmerged segments then keep piling up, keeping the disk
+full). Free up space (old container images are a common culprit — see
+`CLAUDE.md`'s "Cleanup" section) or raise the threshold in your deploy env file
+if you've confirmed there's enough real headroom.
+
+### CPU cap: reserving cores for RAG queries during indexing
+
+Root-caused in the 2026-10 Qdrant-timeout incident: a concurrent indexing run
+and a live `/api/query` search can both need CPU/IO time at the same moment,
+and an unbounded indexing process can starve query handling long enough to
+trip a client timeout. `bin/index_libraries.py` restricts its own CPU
+affinity on startup (`backend/utils/cpu_affinity.py`) to leave
+`AUTOINDEX_RESERVED_CPUS` (default 1) cores free for everything else —
+serving queries, Qdrant, etc. Indexing itself is never reduced below 1 CPU,
+even if `AUTOINDEX_RESERVED_CPUS` would otherwise consume all of them. Set to
+`0` to disable (indexing may use every CPU). No-op on platforms without
+`os.sched_getaffinity`/`sched_setaffinity` (e.g. macOS dev) — this only
+applies on Linux hosts, which is where production runs.
+
+This restricts the indexing process itself, however it's invoked (the
+built-in scheduler's subprocess, the external `/etc/cron.d/zotero-rag-indexer`
+job, or a manual run) — there's nothing to configure beyond the env var.
 
 ### "Nothing to index" (no targets resolved)
 

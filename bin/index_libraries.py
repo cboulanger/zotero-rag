@@ -24,6 +24,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from backend.utils.cpu_affinity import restrict_current_process_cpus  # noqa: E402
+from backend.utils.disk_space import check_disk_space  # noqa: E402
+
 
 def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -117,6 +120,13 @@ async def _main(argv: list[str] | None = None) -> int:
     # Resolve log file
     log_file = Path(args.log_file) if args.log_file else settings.data_path / "logs" / "cron_indexer.log"
     log = _setup_logging(log_file, args.log_level)
+
+    disk_issue = check_disk_space(settings.data_path, settings.autoindex_min_free_disk_percent)
+    if disk_issue:
+        log.error("Skipping indexing run: %s", disk_issue)
+        return 1
+
+    restrict_current_process_cpus(settings.autoindex_reserved_cpus)
 
     from backend.services.autoindex_key_store import AutoIndexKeyStore
     from backend.services.autoindex_resolver import resolve_targets

@@ -9,10 +9,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from httpx import ReadTimeout
-from qdrant_client.http.exceptions import ResponseHandlingException
+from qdrant_client.http.exceptions import ResponseHandlingException, UnexpectedResponse
 from qdrant_client.models import Distance
 
-from backend.db.vector_store import VectorStore, VectorStoreTimeoutError
+from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.models.document import (
     DocumentChunk,
     ChunkMetadata,
@@ -272,6 +272,23 @@ class TestVectorStore(unittest.TestCase):
         ):
             with self.assertRaises(ResponseHandlingException):
                 self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+
+    def test_search_raises_vector_store_error_with_real_detail_on_unexpected_response(self):
+        """Observed live: a full disk makes Qdrant return a 500 with a specific
+        body ("No space left on device: ..."), not a timeout. This must surface
+        as a distinct VectorStoreError whose message includes that real detail —
+        not get lost or miscategorized as a generic timeout."""
+        body = b'{"status":{"error":"No space left on device: WAL buffer size exceeds available disk space"},"time":0.0}'
+        with patch.object(
+            self.vector_store.client,
+            "query_points",
+            side_effect=UnexpectedResponse(
+                status_code=500, reason_phrase="Internal Server Error", content=body, headers={},
+            ),
+        ):
+            with self.assertRaises(VectorStoreError) as ctx:
+                self.vector_store.search([1.0, 0.0] + [0.0] * 382, limit=2)
+            self.assertIn("No space left on device", str(ctx.exception))
 
     def test_search_with_library_filter(self):
         """Test search with library ID filter."""
@@ -553,6 +570,36 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(len(results), chunk_count)
         self.assertTrue(all(r["payload"]["title"] == "New Title" for r in results))
 
+    def test_update_item_metadata_raises_vector_store_error_with_real_detail(self):
+        """set_payload() had no error handling at all in production — a disk-full
+        UnexpectedResponse from it propagated raw. It must now be converted to a
+        VectorStoreError carrying the real Qdrant error message, like search()."""
+        chunk = DocumentChunk(
+            text="Chunk",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-1",
+                document_metadata=DocumentMetadata(library_id="1", item_key="ITEM1", title="Old"),
+                page_number=1,
+                text_preview="Chunk",
+                chunk_index=0,
+                content_hash="hash1",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunks_batch([chunk])
+
+        body = b'{"status":{"error":"No space left on device: WAL buffer size exceeds available disk space"},"time":0.0}'
+        with patch.object(
+            self.vector_store.client,
+            "set_payload",
+            side_effect=UnexpectedResponse(
+                status_code=500, reason_phrase="Internal Server Error", content=body, headers={},
+            ),
+        ):
+            with self.assertRaises(VectorStoreError) as ctx:
+                self.vector_store.update_item_metadata("1", "ITEM1", {"title": "New"})
+            self.assertIn("No space left on device", str(ctx.exception))
+
     def test_delete_library_chunks(self):
         """Test deleting all chunks for a library."""
         # Add chunks from different libraries
@@ -620,6 +667,93 @@ class TestVectorStore(unittest.TestCase):
         remaining = self.vector_store.get_item_chunks("1", "ITEM1")
         self.assertEqual(len(remaining), 1)
         self.assertEqual(remaining[0]["id"], point_ids[2])
+
+
+class MigrationExportImportTest(unittest.TestCase):
+    """Tests for export_points/import_points/count_library_points, which back
+    the cross-instance library migration endpoints in backend/api/migration.py.
+    See docs/superpowers/specs/2026-10-05-library-rag-migration-design.md."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.vector_store = VectorStore(
+            storage_path=Path(self.temp_dir) / "qdrant",
+            embedding_dim=4,
+            embedding_model_name="test-model",
+            distance=Distance.COSINE,
+        )
+        self._add_chunk("u1", "item-a", [0.1, 0.2, 0.3, 0.4])
+        self._add_chunk("u1", "item-b", [0.5, 0.6, 0.7, 0.8])
+        self._add_chunk("u2", "item-c", [0.9, 0.9, 0.9, 0.9])
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="hash-1", library_id="u1", item_key="item-a")
+        )
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="hash-2", library_id="u2", item_key="item-c")
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _add_chunk(self, library_id, item_key, embedding):
+        chunk = DocumentChunk(
+            text="some text",
+            embedding=embedding,
+            metadata=ChunkMetadata(
+                chunk_id=f"{item_key}-chunk-0",
+                document_metadata=DocumentMetadata(library_id=library_id, item_key=item_key),
+                text_preview="some text",
+                chunk_index=0,
+                content_hash=f"hash-of-{item_key}",
+            ),
+        )
+        self.vector_store.add_chunk(chunk)
+
+    def test_count_library_points_scopes_to_library(self):
+        self.assertEqual(self.vector_store.count_library_points("chunks", "u1"), 2)
+        self.assertEqual(self.vector_store.count_library_points("chunks", "u2"), 1)
+        self.assertEqual(self.vector_store.count_library_points("dedup", "u1"), 1)
+
+    def test_export_points_paginates_and_filters_by_library(self):
+        page1, offset1 = self.vector_store.export_points("chunks", "u1", offset=None, limit=1)
+        self.assertEqual(len(page1), 1)
+        self.assertIsNotNone(offset1)
+
+        page2, offset2 = self.vector_store.export_points("chunks", "u1", offset=offset1, limit=1)
+        self.assertEqual(len(page2), 1)
+        self.assertIsNone(offset2)
+
+        all_item_keys = {p["payload"]["item_key"] for p in (page1 + page2)}
+        self.assertEqual(all_item_keys, {"item-a", "item-b"})
+        self.assertEqual(len(page1[0]["vector"]), 4)
+
+    def test_export_points_unknown_collection_raises(self):
+        with self.assertRaises(ValueError):
+            self.vector_store.export_points("not-a-collection", "u1", offset=None, limit=10)
+
+    def test_import_points_round_trips_into_a_fresh_store(self):
+        points, _ = self.vector_store.export_points("chunks", "u1", offset=None, limit=10)
+        dest_dir = tempfile.mkdtemp()
+        try:
+            dest_store = VectorStore(
+                storage_path=Path(dest_dir) / "qdrant",
+                embedding_dim=4,
+                embedding_model_name="test-model",
+                distance=Distance.COSINE,
+            )
+            imported = dest_store.import_points("chunks", points)
+            self.assertEqual(imported, 2)
+            self.assertEqual(dest_store.count_library_points("chunks", "u1"), 2)
+            dest_points, _ = dest_store.export_points("chunks", "u1", offset=None, limit=10)
+            dest_by_id = {p["id"]: p for p in dest_points}
+            for original in points:
+                self.assertEqual(dest_by_id[original["id"]]["payload"], original["payload"])
+                self.assertEqual(dest_by_id[original["id"]]["vector"], original["vector"])
+        finally:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+
+    def test_import_points_empty_list_is_noop(self):
+        self.assertEqual(self.vector_store.import_points("chunks", []), 0)
 
 
 if __name__ == "__main__":

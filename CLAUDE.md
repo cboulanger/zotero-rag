@@ -120,6 +120,20 @@ After hotfixing, remove non-root (user-space) images to free space:
 podman rmi --all
 ```
 
+**Also prune the root store** (the one the hotfix `sudo podman build` command above actually
+writes to): every `sudo podman build -t zotero-rag:latest ...` leaves the *previous*
+`zotero-rag:latest` image dangling (untagged) once the new one takes the tag. Left unchecked
+these accumulate indefinitely — seen in production: 47 dangling images, 28GB+, which filled the
+disk and caused Qdrant to fail with `No space left on device` and queries to time out with 504s.
+
+```bash
+sudo podman image prune -f
+```
+
+`bin/container.mjs deploy --pull` already runs this automatically before pulling; the manual
+`sudo podman build` hotfix path does not, so run it yourself after confirming the patched image
+works and before moving on.
+
 ### Debugging the cron indexer
 
 The hourly cron job is defined in `/etc/cron.d/zotero-rag-indexer`. It runs `index_libraries.py` inside the main container via `podman exec` and appends **stderr** to the log file.
@@ -245,6 +259,42 @@ sudo dmesg --since "1 hour ago" | grep -i "oom\|killed process"
 **Note on Qdrant RSS:** Qdrant shows a very large RSS (e.g. 13 GB) in `ps` because it uses memory-mapped files for its vector store. This is normal — those pages are file-backed and the kernel can evict them. Check `free -h`'s **available** column (not `free`) to assess actual memory pressure.
 
 **Host swap:** An 8 GB swapfile lives at `/swapfile` (persistent via `/etc/fstab`). It must be set up manually on each new server — it is intentionally not in the deploy scripts because disk capacity varies per host.
+
+## Migrating Library RAG Data Between Instances
+
+`bin/migrate_library.py` copies one Zotero library's indexed RAG data
+(vectors, dedup records, index metadata) from one zotero-rag backend
+instance to another — e.g. pulling a production library's real indexed
+data down to a local dev instance to test retrieval/routing changes
+against it, without re-indexing or copying the entire shared vector
+database. See `docs/superpowers/specs/2026-10-05-library-rag-migration-design.md`
+for the full design.
+
+The destination's existing data for that library is **fully overwritten**.
+Both instances are reached only through their HTTP APIs
+(`/api/migration/*`, `backend/api/migration.py`) — never direct Qdrant
+access — and every endpoint requires an admin of that instance's own
+`AUTHORIZED_GROUP_ID` (the same `require_authorized_group_admin`
+dependency gating the autoindex scheduler's admin controls). A
+loopback-mode instance (local dev with no `AUTHORIZED_GROUP_ID`
+configured) needs no admin key for that side.
+
+```bash
+uv run python bin/migrate_library.py <slug> <source-url> <dest-url> \
+  --source-key <source-admin-zotero-api-key> \
+  --dest-key <dest-admin-zotero-api-key> \
+  [--batch-size 200] [--dry-run]
+```
+
+`<slug>` is a Zotero.org library slug (`users/<id>` or `groups/<id>`), e.g.
+`groups/6297749` for the `test-rag-plugin` library. `--dry-run` reports the
+source library's indexed size and checks embedding-model compatibility
+without writing anything. The script aborts before any write if source
+and destination use different embedding models/dimensions — re-index on
+the destination in that case rather than migrating incompatible vectors.
+A failed run is recovered by simply re-running the script; the
+destination is re-cleared on every run, so there is no
+resume-from-cursor logic.
 
 ## Python Environment
 
@@ -601,6 +651,13 @@ For creating dialog windows in Zotero plugins:
 - Write clear, descriptive commit messages
 - Make atomic commits that represent single logical changes
 - Reference issues/tasks in commit messages when applicable
+
+### Branching Strategy
+
+- **`devel` is the default branch for day-to-day work.** Commit directly to it, or use a short-lived feature branch off it for larger/riskier changes. CI runs on `devel`, but nothing is ever released from it.
+- **`main` is protected and release-only.** Changes land there only via a pull request from `devel` (the repo owner can override this for an emergency hotfix). Merging into `main` runs CI and, on success, triggers an automatic semantic-release (version bump, changelog, GitHub release, Docker image, XPI).
+- Unless told otherwise, do new work on `devel` (or a feature branch off it), not `main`. Only open a `devel` → `main` PR when the user explicitly asks to release.
+- See [docs/ci-cd.md](docs/ci-cd.md) for the full CI/CD and release workflow.
 
 ### Working with git worktrees and subagents
 

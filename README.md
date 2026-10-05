@@ -177,6 +177,13 @@ The project uses [Semantic Release](https://github.com/semantic-release/semantic
 
 Exception: version 1.x.y is beta, anything can change anytime. v2.0.0 will be the first stable release.
 
+### Branching
+
+- **`devel`** — default branch for day-to-day work. Push directly, or use short-lived feature branches off it for larger changes. CI runs here, but nothing is ever released from it.
+- **`main`** — protected release branch. Changes land only via a pull request from `devel` (the repo owner can override this for an emergency hotfix); merging triggers CI and, on success, an automatic semantic-release.
+
+See [CI/CD documentation](docs/ci-cd.md) for the full workflow.
+
 ## User Documentation
 
 - **[Plugin settings reference](docs/plugin-settings.md)**
