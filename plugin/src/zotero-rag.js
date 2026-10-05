@@ -2249,7 +2249,11 @@ class ZoteroRAGPlugin {
 	 * @property {string} year - Publication year (4 digits) or empty string
 	 * @property {string} title - Item title
 	 * @property {string} zoteroID - Parent item key
-	 * @property {boolean} isLinked - True for linked files (linkMode=2); can't be auto-downloaded
+	 * @property {boolean} isLinked - True when the attachment isn't a stored/imported file
+	 *   (!isImportedAttachment() — LINK_MODE_LINKED_FILE or LINK_MODE_LINKED_URL); can't be
+	 *   auto-downloaded. Note LINK_MODE_LINKED_URL (bare web link, no local file) is the mode whose
+	 *   fileExists() throws ("cannot be called on link attachments") — do not narrow this to
+	 *   linkMode===2 (LINK_MODE_LINKED_FILE) only, as an earlier version of this code mistakenly did.
 	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
 	 * @property {'no text'|'timeout'} [skipReason] - Set for items skipped by the server (skipped_empty / skipped_timeout)
 	 * @property {boolean} [serverDownloadFailed] - True when the server couldn't download this attachment
@@ -2747,7 +2751,14 @@ class ZoteroRAGPlugin {
 				year: yearMatch ? yearMatch[1] : '',
 				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
 				zoteroID: (parentItem ?? attachment).key,
-				isLinked: false,
+				// Not isImportedAttachment() — covers both LINK_MODE_LINKED_FILE and
+				// LINK_MODE_LINKED_URL. The latter is what server-reported download
+				// failures are typically backed by (a bare web link with no local
+				// file), and Zotero's own fileExists() throws when called on one —
+				// this flag must be true for it so fix-unavailable.js never routes
+				// it into the copy-based repair strategies that end by calling
+				// fileExists() on it.
+				isLinked: !attachment.isImportedAttachment(),
 				serverDownloadFailed: true,
 			});
 		}

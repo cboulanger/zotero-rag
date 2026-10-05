@@ -85,6 +85,7 @@ test('removeDownloadFailedItems prunes fixed keys so they stop reappearing', asy
 		deleted: false,
 		parentItemID: null,
 		key,
+		isImportedAttachment: () => true,
 		getCreators: () => [],
 		getField: () => '',
 	});
@@ -116,6 +117,7 @@ test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFail
 		deleted: false,
 		parentItemID: null,
 		key: 'ATT1',
+		isImportedAttachment: () => true,
 		getCreators: () => [{ lastName: 'Doe' }],
 		getField: (f) => (f === 'title' ? 'A Paper' : f === 'date' ? '2020' : ''),
 	};
@@ -132,6 +134,49 @@ test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFail
 	assert.strictEqual(results[0].authors, 'Doe');
 	assert.strictEqual(results[0].year, '2020');
 	assert.strictEqual(results[0].title, 'A Paper');
+});
+
+test('_getDownloadFailedAttachments sets isLinked from the attachment\'s actual import status, not hardcoded false', async () => {
+	// Regression test: a server-reported download failure for a genuine link
+	// attachment (LINK_MODE_LINKED_URL — a bare web link with no stored file,
+	// the norm for these server-reported entries) was previously always marked
+	// isLinked=false, routing it into fix-unavailable's "imported" retry bucket.
+	// That bucket's copy-based repair strategies end by calling
+	// attachmentItem.fileExists(), which Zotero itself throws on for
+	// LINK_MODE_LINKED_URL items ("Zotero.Item.fileExists() cannot be called on
+	// link attachments"), surfacing as a "Copy failed" error for every such item
+	// instead of the correct "Linked file — fix path in Zotero" skip.
+	//
+	// An earlier version of this fix checked `attachmentLinkMode === 2`
+	// (LINK_MODE_LINKED_FILE) — the wrong constant: fileExists() only throws for
+	// LINK_MODE_LINKED_URL (3), not LINK_MODE_LINKED_FILE (2), so that check
+	// never matched the attachments actually hitting this bug. Using Zotero's
+	// own isImportedAttachment() avoids hardcoding either numeric constant.
+	const linkedAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		isImportedAttachment: () => false, // LINK_MODE_LINKED_URL in real Zotero
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const importedAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT2',
+		isImportedAttachment: () => true, // LINK_MODE_IMPORTED_FILE in real Zotero
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: linkedAttachment, ATT2: importedAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2']);
+	const results = await plugin._getDownloadFailedAttachments(1);
+
+	const byKey = Object.fromEntries(results.map(r => [r.attachmentItem.key, r]));
+	assert.strictEqual(byKey.ATT1.isLinked, true);
+	assert.strictEqual(byKey.ATT2.isLinked, false);
 });
 
 test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exists', async () => {
