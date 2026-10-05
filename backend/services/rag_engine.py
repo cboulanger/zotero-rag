@@ -97,12 +97,18 @@ def _low_citation_diversity(
 # one of which actually discussed the connection — the model correctly used
 # mostly that one source, but the answer was thin because there was little
 # else to say, not because the model was lazy.
-_THIN_CONTEXT_HEDGE_PATTERN = re.compile(
-    r"nicht genügend informationen|der kontext enthält keine|"
-    r"aus dem kontext nicht ersichtlich|context does not contain|"
-    r"does not provide enough information",
-    re.IGNORECASE,
-)
+# A language-dependent regex matching hedge phrases ("the context doesn't
+# contain enough information...") was tried first and rejected: it requires
+# ongoing manual maintenance per phrasing/language and missed its own
+# primary motivating example (the system prompt's exact wording uses the
+# contraction "doesn't", which the regex's "does not" alternative didn't
+# match). Instead, the generation prompt (see _build_generation_prompt,
+# added in a later task) instructs the model to emit this exact sentinel on
+# its own line when it judges the context insufficient — an explicit,
+# language-independent signal instead of free-text pattern matching. The
+# citation-utilization check below is kept as an independent second signal
+# that doesn't depend on the model following this instruction at all.
+CONTEXT_INSUFFICIENT_MARKER = "###CONTEXT_INSUFFICIENT###"
 
 
 def _thin_context_coverage(
@@ -110,10 +116,12 @@ def _thin_context_coverage(
 ) -> bool:
     """True if the answer suggests the retrieved context itself was too thin
     or off-topic, rather than the model merely under-citing relevant
-    material. Only applies to a small retrieved pool (<= 2x the low-diversity
-    floor) — a large pool with few citations is a citation-behavior issue,
-    not evidence the pool itself was thin."""
-    if _THIN_CONTEXT_HEDGE_PATTERN.search(answer):
+    material: either the model explicitly flagged this via
+    CONTEXT_INSUFFICIENT_MARKER, or citation utilization is low on a small
+    retrieved pool (<= 2x the low-diversity floor — a large pool with few
+    citations is a citation-behavior issue, not evidence the pool itself
+    was thin, so that case is left to _low_citation_diversity instead)."""
+    if CONTEXT_INSUFFICIENT_MARKER in answer:
         return True
     if documents_grouped == 0 or documents_grouped > low_diversity_floor * 2:
         return False

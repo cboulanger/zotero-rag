@@ -874,15 +874,22 @@ class TestThinContextCoverage(unittest.TestCase):
     like it didn't actually address the question (either the model says so,
     or it uses little of a small retrieved pool)."""
 
-    def test_true_when_answer_hedges_in_german(self):
-        from backend.services.rag_engine import _thin_context_coverage
-        answer = "Der Kontext enthält keine ausreichenden Informationen dazu [S1]."
+    def test_true_when_answer_contains_insufficient_context_marker(self):
+        """The hedge regex this replaced was language-dependent and missed
+        its own motivating phrasing (the system prompt's "doesn't contain"
+        contraction didn't match a "does not contain" regex alternative).
+        An explicit sentinel the model is instructed to emit is
+        language-independent and exact-match, not pattern-match."""
+        from backend.services.rag_engine import _thin_context_coverage, CONTEXT_INSUFFICIENT_MARKER
+        answer = f"I can only find a partial answer [S1].\n{CONTEXT_INSUFFICIENT_MARKER}"
         self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
 
-    def test_true_when_answer_hedges_in_english(self):
+    def test_false_when_marker_absent_and_utilization_is_adequate(self):
+        """No regression: without the marker, behavior falls through to the
+        citation-utilization check exactly as before."""
         from backend.services.rag_engine import _thin_context_coverage
-        answer = "The context does not contain enough information to answer this [S1]."
-        self.assertTrue(_thin_context_coverage(answer, documents_grouped=6))
+        answer = "The first [S1], second [S2], and third [S3] sources all matter."
+        self.assertFalse(_thin_context_coverage(answer, documents_grouped=6))
 
     def test_true_when_citation_utilization_is_low_on_a_small_pool(self):
         from backend.services.rag_engine import _thin_context_coverage
