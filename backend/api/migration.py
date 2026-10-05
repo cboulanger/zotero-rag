@@ -102,6 +102,21 @@ def export_library_metadata(
     return metadata
 
 
+@router.get("/migration/export/count")
+def export_library_point_count(
+    library_id: str,
+    collection: MigrationCollection,
+    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+    vector_store: VectorStore = Depends(get_vector_store),
+) -> dict:
+    """Report how many points a library has in document_chunks or deduplication (admin only).
+
+    Used by the migration script to show progress ("N/total transferred")
+    while paginating GET /migration/export.
+    """
+    return {"count": vector_store.count_library_points(collection, library_id)}
+
+
 @router.get("/migration/export", response_model=ExportPageResponse)
 def export_library_points(
     library_id: str,

@@ -81,6 +81,38 @@ class RequestRetryTest(unittest.TestCase):
         with self.assertRaises(migrate_library.MigrationError):
             migrate_library._get(client, "http://source", "/x", "KEY")
 
+    def test_retries_on_500_then_succeeds(self):
+        client = FakeClient([(500, {"detail": "transient qdrant error"}), (200, {"ok": True})])
+        with patch.object(migrate_library.time, "sleep"):
+            result = migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(client.calls), 2)
+
+    def test_raises_migration_error_after_max_attempts_on_500(self):
+        client = FakeClient([(500, {"detail": "boom"})] * migrate_library._MAX_ATTEMPTS)
+        with patch.object(migrate_library.time, "sleep"):
+            with self.assertRaises(migrate_library.MigrationError):
+                migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(len(client.calls), migrate_library._MAX_ATTEMPTS)
+
+    def test_does_not_retry_on_400(self):
+        client = FakeClient([(400, {"detail": "bad request"})])
+        with self.assertRaises(migrate_library.MigrationError):
+            migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(len(client.calls), 1)
+
+    def test_does_not_retry_on_403(self):
+        client = FakeClient([(403, {"detail": "forbidden"})])
+        with self.assertRaises(migrate_library.MigrationError):
+            migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(len(client.calls), 1)
+
+    def test_does_not_retry_on_404(self):
+        client = FakeClient([(404, {"detail": "not found"})])
+        with self.assertRaises(migrate_library.MigrationError):
+            migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(len(client.calls), 1)
+
     def test_get_omits_none_params(self):
         client = FakeClient([(200, {"ok": True})])
         migrate_library._get(client, "http://source", "/x", "KEY", offset=None, limit=5)
@@ -151,6 +183,10 @@ class RunMigrationTest(unittest.TestCase):
                 return self.embedding_info
             if path == "/api/migration/export/metadata":
                 return self.metadata
+            if path == "/api/migration/export/count" and params["collection"] == "chunks":
+                return {"count": 2}
+            if path == "/api/migration/export/count" and params["collection"] == "dedup":
+                return {"count": 0}
             if path == "/api/migration/export" and params["collection"] == "chunks":
                 return chunk_pages.pop(0)
             if path == "/api/migration/export" and params["collection"] == "dedup":
@@ -191,6 +227,53 @@ class RunMigrationTest(unittest.TestCase):
             if path == "/api/migration/export" and params["collection"] == "chunks"
         ]
         self.assertEqual(chunk_offsets, [None, "cursor-1"])
+
+        count_calls = [params["collection"] for path, params in get_calls if path == "/api/migration/export/count"]
+        self.assertEqual(count_calls, ["chunks", "dedup"])
+
+    def test_export_count_called_once_per_collection_before_pagination(self):
+        chunk_pages = [{"points": [], "next_offset": None}]
+        dedup_pages = [{"points": [], "next_offset": None}]
+        get_calls = []
+
+        def fake_get(client, base_url, path, api_key, **params):
+            get_calls.append((path, params))
+            if path == "/api/migration/embedding-info":
+                return self.embedding_info
+            if path == "/api/migration/export/metadata":
+                return self.metadata
+            if path == "/api/migration/export/count" and params["collection"] == "chunks":
+                return {"count": 0}
+            if path == "/api/migration/export/count" and params["collection"] == "dedup":
+                return {"count": 0}
+            if path == "/api/migration/export" and params["collection"] == "chunks":
+                return chunk_pages.pop(0)
+            if path == "/api/migration/export" and params["collection"] == "dedup":
+                return dedup_pages.pop(0)
+            raise AssertionError(f"unexpected GET {path} {params}")
+
+        def fake_post(client, base_url, path, api_key, body, **params):
+            if path == "/api/migration/import/begin":
+                return {"library_id": "u39226", "chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False}
+            return {}
+
+        with patch.object(migrate_library, "_get", side_effect=fake_get), \
+             patch.object(migrate_library, "_post", side_effect=fake_post):
+            migrate_library.run_migration(
+                client=object(), slug="users/39226",
+                source_url="http://source", dest_url="http://dest",
+                source_key="SK", dest_key="DK", batch_size=1,
+            )
+
+        count_call_indices = [
+            i for i, (path, _) in enumerate(get_calls) if path == "/api/migration/export/count"
+        ]
+        export_call_indices = [
+            i for i, (path, _) in enumerate(get_calls) if path == "/api/migration/export"
+        ]
+        self.assertEqual(len(count_call_indices), 2)
+        # Each collection's count call happens before its own export call.
+        self.assertLess(count_call_indices[0], export_call_indices[0])
 
 
 class MainErrorHandlingTest(unittest.TestCase):

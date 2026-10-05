@@ -66,6 +66,13 @@ def _request(
                 raise MigrationError(f"{method} {url} failed after {_MAX_ATTEMPTS} attempts: {exc}") from exc
             time.sleep(2 ** (attempt - 1))
             continue
+        if response.status_code >= 500:
+            if attempt >= _MAX_ATTEMPTS:
+                raise MigrationError(
+                    f"{method} {url} -> HTTP {response.status_code} after {_MAX_ATTEMPTS} attempts: {response.text}"
+                )
+            time.sleep(2 ** (attempt - 1))
+            continue
         break
     if response.status_code != 200:
         raise MigrationError(f"{method} {url} -> HTTP {response.status_code}: {response.text}")
@@ -117,6 +124,10 @@ def run_migration(
 
     transferred = {}
     for collection in MIGRATION_COLLECTIONS:
+        total = _get(
+            client, source_url, "/api/migration/export/count", source_key,
+            library_id=library_id, collection=collection,
+        )["count"]
         count = 0
         offset = None
         while True:
@@ -132,8 +143,10 @@ def run_migration(
                 )
                 count += len(points)
             offset = page["next_offset"]
+            print(f"[..] {collection}: {count}/{total} transferred", end="\r", file=sys.stderr)
             if offset is None:
                 break
+        print(f"[OK] {collection}: {count}/{total} transferred", file=sys.stderr)
         transferred[collection] = count
 
     _post(client, dest_url, "/api/migration/import/metadata", dest_key, {"library_id": library_id, "payload": metadata})
@@ -184,9 +197,11 @@ def main() -> None:
         f"[OK] Cleared destination: {result['begin_result']['chunks_deleted']} chunks, "
         f"{result['begin_result']['dedup_deleted']} dedup records."
     )
-    for collection, count in result["transferred"].items():
-        print(f"[OK] {collection}: {count} points transferred")
-    print(f"[OK] Metadata transferred. Done in {time.monotonic() - start:.1f}s")
+    # Per-collection "N/total transferred" progress/completion lines are already
+    # printed to stderr by run_migration as each collection finishes; avoid
+    # reprinting the same counts here and just give the overall wrap-up.
+    total_points = sum(result["transferred"].values())
+    print(f"[OK] {total_points} points and metadata transferred. Done in {time.monotonic() - start:.1f}s")
 
 
 if __name__ == "__main__":

@@ -86,6 +86,26 @@ class MigrationApiTest(unittest.TestCase):
         self.assertEqual(r.json()["library_id"], "u1")
         self.assertEqual(r.json()["total_chunks"], 2)
 
+    def test_export_count_reports_points_per_collection(self):
+        r_chunks = self.client.get(
+            "/api/migration/export/count", params={"library_id": "u1", "collection": "chunks"}
+        )
+        self.assertEqual(r_chunks.status_code, 200)
+        self.assertEqual(r_chunks.json(), {"count": 2})
+
+        r_dedup = self.client.get(
+            "/api/migration/export/count", params={"library_id": "u1", "collection": "dedup"}
+        )
+        self.assertEqual(r_dedup.status_code, 200)
+        self.assertEqual(r_dedup.json(), {"count": 1})
+
+    def test_export_count_is_zero_for_library_with_no_points(self):
+        r = self.client.get(
+            "/api/migration/export/count", params={"library_id": "u404", "collection": "chunks"}
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"count": 0})
+
     def test_export_points_paginates_chunks(self):
         r1 = self.client.get(
             "/api/migration/export", params={"library_id": "u1", "collection": "chunks", "limit": 1}
