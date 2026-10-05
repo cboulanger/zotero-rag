@@ -58,6 +58,15 @@ jobs:
           GIT_AUTHOR_EMAIL: ${{ github.actor }}@users.noreply.github.com
           GIT_COMMITTER_NAME: ${{ github.actor }}
           GIT_COMMITTER_EMAIL: ${{ github.actor }}@users.noreply.github.com
+          # For a workflow_run event, GitHub sets GITHUB_REF/GITHUB_REF_NAME
+          # for the *entire run* to the repo's default branch (devel) — this
+          # is fixed workflow-run context, NOT affected by the checkout
+          # step's `ref: main` above, which only changes the working
+          # directory's content. semantic-release's branch detection (via
+          # env-ci) reads these env vars directly, so without this override
+          # it always sees "devel" and refuses to publish from "main".
+          GITHUB_REF: refs/heads/main
+          GITHUB_REF_NAME: main
         run: npx semantic-release
 
   update-tags:
