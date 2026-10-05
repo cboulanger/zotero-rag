@@ -322,6 +322,9 @@ class RAGEngine:
                 citation coverage looks thin (see _thin_context_coverage),
                 retry once with escalated retrieval before returning.
                 Default False — doubles latency on queries that trigger it.
+                NOT YET IMPLEMENTED: this parameter is currently accepted
+                but has no effect — detection/retry logic lands in a later
+                task. Until then, setting this to True is a no-op.
 
         Returns:
             Query result with answer and source citations.

@@ -70,6 +70,8 @@ class QueryRequest(BaseModel):
     # When True, a thin/low-coverage answer triggers one escalated-retrieval
     # retry before returning (see rag_engine.py's _thin_context_coverage).
     # Off by default — see docs/superpowers/specs/2026-10-05-routing-retrieval-quality-design.md §6.
+    # NOT YET IMPLEMENTED: currently a no-op — detection/retry logic lands
+    # in a later task. Setting this to True today has no effect.
 
 
 class QueryResponse(BaseModel):
