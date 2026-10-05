@@ -460,18 +460,16 @@ class RAGEngine:
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
         # Escalate once if the search hit the top_k cap (not the corpus limit) and
-        # came back dominated by too few distinct documents. Skipped when
-        # enable_quality_self_review is on: that flag's post-generation
-        # thin-context check (see below) is a strictly more informed signal
-        # (it sees the model's actual answer, not just raw document counts)
-        # and shares the same one-retry escalation budget — firing both
-        # would spend two escalated searches on one query instead of one.
+        # came back dominated by too few distinct documents. Both this check and
+        # the post-generation thin-context check below (gated on
+        # enable_quality_self_review) can fire independently — they detect
+        # different failure modes (structural retrieval narrowness vs.
+        # answer-quality degradation) and are not a strict superset of each
+        # other. The post-generation block only runs if this one didn't already
+        # fire, so a query only ever spends one escalation retry regardless of
+        # which mechanism catches the problem first.
         escalated = False
-        if (
-            not enable_quality_self_review
-            and len(search_results) == top_k
-            and top_k < diversity_escalation_max_top_k
-        ):
+        if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
             unique_doc_count = len({
                 r.chunk.metadata.document_metadata.item_key
                 for r in search_results
@@ -549,6 +547,7 @@ class RAGEngine:
         quality_review: Optional[dict] = None
         if (
             enable_quality_self_review
+            and not escalated
             and top_k < diversity_escalation_max_top_k
             and _thin_context_coverage(answer, available_sources, low_diversity_available_floor)
         ):
@@ -565,6 +564,7 @@ class RAGEngine:
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
             )
+            retry_improved = False
             if len(retry_search_results) > len(search_results):
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
                 retry_context, retry_doc_representatives = _assemble_context(
@@ -588,11 +588,11 @@ class RAGEngine:
                     doc_representatives = retry_doc_representatives
                     available_sources = len(sorted_doc_keys)
                     escalated = True
-                quality_review = {
-                    "triggered": True,
-                    "reason": "thin_context_coverage",
-                    "retry_improved": retry_improved,
-                }
+            quality_review = {
+                "triggered": True,
+                "reason": "thin_context_coverage",
+                "retry_improved": retry_improved,
+            }
 
         llm_duration_ms = int((time.monotonic() - t_llm) * 1000)
 

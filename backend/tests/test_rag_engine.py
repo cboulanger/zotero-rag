@@ -888,7 +888,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, better_answer])
 
         result = await self.rag_engine.query(
-            question, library_ids, top_k=1, enable_quality_self_review=True,
+            question, library_ids, top_k=5, enable_quality_self_review=True,
         )
 
         self.assertEqual(self.mock_vector_store.search.call_count, 2)
@@ -915,7 +915,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.generate = AsyncMock(side_effect=[thin_answer, still_thin_answer])
 
         result = await self.rag_engine.query(
-            question, library_ids, top_k=1, enable_quality_self_review=True,
+            question, library_ids, top_k=5, enable_quality_self_review=True,
         )
 
         self.assertEqual(self.mock_llm_service.generate.call_count, 2)
@@ -979,7 +979,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         collector = TraceCollector(question, library_ids, {})
         await self.rag_engine.query(
-            question, library_ids, top_k=1, enable_quality_self_review=True, trace=collector,
+            question, library_ids, top_k=5, enable_quality_self_review=True, trace=collector,
         )
         trace = collector.finalize()
 
