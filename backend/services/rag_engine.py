@@ -299,6 +299,7 @@ class RAGEngine:
         diversity_escalation_max_top_k: int = _DIVERSITY_ESCALATION_MAX_TOP_K,
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         low_diversity_available_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+        enable_quality_self_review: bool = False,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -317,6 +318,10 @@ class RAGEngine:
             low_diversity_available_floor: Minimum distinct available sources before the
                 low-citation-diversity retry guard checks the answer (see
                 _LOW_DIVERSITY_AVAILABLE_FLOOR above).
+            enable_quality_self_review: When True, if the generated answer's
+                citation coverage looks thin (see _thin_context_coverage),
+                retry once with escalated retrieval before returning.
+                Default False — doubles latency on queries that trigger it.
 
         Returns:
             Query result with answer and source citations.

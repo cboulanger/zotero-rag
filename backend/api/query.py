@@ -66,6 +66,10 @@ class QueryRequest(BaseModel):
     diversity_escalation_max_top_k: Optional[int] = None
     max_chunks_per_document: Optional[int] = None
     low_diversity_available_floor: Optional[int] = None
+    enable_quality_self_review: bool = False
+    # When True, a thin/low-coverage answer triggers one escalated-retrieval
+    # retry before returning (see rag_engine.py's _thin_context_coverage).
+    # Off by default — see docs/superpowers/specs/2026-10-05-routing-retrieval-quality-design.md §6.
 
 
 class QueryResponse(BaseModel):
@@ -245,6 +249,7 @@ async def query_libraries(
                 "diversity_escalation_max_top_k": diversity_escalation_max_top_k,
                 "max_chunks_per_document": max_chunks_per_document,
                 "low_diversity_available_floor": low_diversity_available_floor,
+                "enable_quality_self_review": query.enable_quality_self_review,
             },
         ) if query.include_trace else None
 
@@ -262,6 +267,7 @@ async def query_libraries(
             diversity_escalation_max_top_k=diversity_escalation_max_top_k,
             max_chunks_per_document=max_chunks_per_document,
             low_diversity_available_floor=low_diversity_available_floor,
+            enable_quality_self_review=query.enable_quality_self_review,
             conversation_history=query.conversation_history,
             force_fresh_retrieval=query.force_fresh_retrieval,
         )

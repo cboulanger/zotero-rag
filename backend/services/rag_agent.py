@@ -70,7 +70,7 @@ class RAGAgent(BaseAgent):
         for key in (
             "diversity_floor", "diversity_escalation_factor",
             "diversity_escalation_max_top_k", "max_chunks_per_document",
-            "low_diversity_available_floor",
+            "low_diversity_available_floor", "enable_quality_self_review",
         ):
             if key in kwargs:
                 engine_kwargs[key] = kwargs[key]

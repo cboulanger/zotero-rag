@@ -850,6 +850,22 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("every sentence", prompt)
         self.assertIn("do not state it", prompt)
 
+    async def test_query_accepts_enable_quality_self_review_flag(self):
+        """Plumbing check: the flag must be accepted without error and must
+        not change behavior when nothing triggers the review (a later task
+        adds the detector and retry that actually use it)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        results = [self._make_chunk("DOC1", "ATT1", "Doc", 0.9)]
+        self.mock_vector_store.search = Mock(return_value=results)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(
+            question, library_ids, top_k=1, enable_quality_self_review=True
+        )
+
+        self.mock_llm_service.generate.assert_called_once()
+
 
 class TestSourceInfo(unittest.TestCase):
     """Test SourceInfo model."""

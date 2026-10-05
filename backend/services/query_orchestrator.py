@@ -163,6 +163,7 @@ class QueryOrchestrator:
         diversity_escalation_max_top_k: int = _DIVERSITY_ESCALATION_MAX_TOP_K,
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         low_diversity_available_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+        enable_quality_self_review: bool = False,
     ) -> QueryResult:
         """
         Route the question, run selected agents, and synthesize the final answer.
@@ -189,6 +190,8 @@ class QueryOrchestrator:
                 its docstring); ignored by agents that don't do vector retrieval.
             low_diversity_available_floor: Forwarded to RAGAgent and used directly by
                 _synthesize() below for the citation-diversity retry guard.
+            enable_quality_self_review: Forwarded to RAGAgent -> RAGEngine.query() (see
+                its docstring); ignored by agents that don't do vector retrieval.
 
         Raises:
             NeedsClientEvidenceError: the plan selects "mentions" with extracted
@@ -268,6 +271,7 @@ class QueryOrchestrator:
                 diversity_escalation_max_top_k=diversity_escalation_max_top_k,
                 max_chunks_per_document=max_chunks_per_document,
                 low_diversity_available_floor=low_diversity_available_floor,
+                enable_quality_self_review=enable_quality_self_review,
             )
             for agent in selected
         ], return_exceptions=True)
@@ -317,6 +321,7 @@ class QueryOrchestrator:
                     diversity_escalation_max_top_k=diversity_escalation_max_top_k,
                     max_chunks_per_document=max_chunks_per_document,
                     low_diversity_available_floor=low_diversity_available_floor,
+                    enable_quality_self_review=enable_quality_self_review,
                 )
                 return _rag_passthrough(
                     fallback_result, question,
