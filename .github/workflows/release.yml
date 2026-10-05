@@ -1,12 +1,15 @@
 name: Release
 
+# Called directly from ci.yml as a reusable workflow (job `release`), after
+# tests pass on a push to main — NOT via `workflow_run`. workflow_run runs in
+# a decoupled event context where GITHUB_REF/GITHUB_REF_NAME are fixed to the
+# repo's default branch (devel here) for the whole run, which made
+# semantic-release always see "devel" and refuse to publish from "main" —
+# and those are reserved variables the runner silently refuses to let any
+# step's own `env:` override. workflow_call instead runs in the SAME event
+# context as its caller, so github.ref is correctly refs/heads/main here.
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
-    branches:
-      - main
+  workflow_call:
 
 permissions:
   contents: write
@@ -18,19 +21,11 @@ jobs:
   release:
     name: Semantic Release
     runs-on: ubuntu-latest
-    # Only run if CI workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Without an explicit ref, actions/checkout defaults to the repo's
-          # default branch (devel) for a workflow_run event — NOT the branch
-          # of the CI run that triggered this workflow. Since this workflow's
-          # own `on.workflow_run.branches: [main]` filter already guarantees
-          # the triggering CI run was on main, pin the checkout to match, or
-          # semantic-release sees "devel" and refuses to publish a version.
           ref: main
           fetch-depth: 0
           persist-credentials: false
@@ -51,18 +46,6 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: DEBUG dump env
-        env:
-          GITHUB_REF: refs/heads/main
-          GITHUB_REF_NAME: main
-        run: |
-          echo "--- raw env (this step's own override) ---"
-          env | grep -E '^GITHUB_(REF|SHA|EVENT_NAME|RUN_ID|REPOSITORY|WORKSPACE|ACTIONS)' | sort
-          echo "--- node sees ---"
-          node -e "console.log('GITHUB_REF=' + process.env.GITHUB_REF); console.log('GITHUB_REF_NAME=' + process.env.GITHUB_REF_NAME)"
-          echo "--- env-ci sees ---"
-          node -e "import('env-ci').then(m => console.log(JSON.stringify(m.default({env: process.env, cwd: process.cwd()}), null, 2)))"
-
       - name: Run semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -70,15 +53,6 @@ jobs:
           GIT_AUTHOR_EMAIL: ${{ github.actor }}@users.noreply.github.com
           GIT_COMMITTER_NAME: ${{ github.actor }}
           GIT_COMMITTER_EMAIL: ${{ github.actor }}@users.noreply.github.com
-          # For a workflow_run event, GitHub sets GITHUB_REF/GITHUB_REF_NAME
-          # for the *entire run* to the repo's default branch (devel) — this
-          # is fixed workflow-run context, NOT affected by the checkout
-          # step's `ref: main` above, which only changes the working
-          # directory's content. semantic-release's branch detection (via
-          # env-ci) reads these env vars directly, so without this override
-          # it always sees "devel" and refuses to publish from "main".
-          GITHUB_REF: refs/heads/main
-          GITHUB_REF_NAME: main
         run: npx semantic-release
 
   update-tags:
@@ -91,8 +65,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Same workflow_run default-branch gotcha as the release job above:
-          # pin to main or this checks out devel instead.
           ref: main
           fetch-depth: 0
 
