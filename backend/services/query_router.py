@@ -52,6 +52,17 @@ General guidance:
     {"author": "wiethölter", "year": 1975, "title_keywords": []},
     {"author": "teubner", "year": null, "title_keywords": ["bukowina"]}
   ].
+- Only include a name in "authors", "title_keywords", or "citation_targets"
+  if that name (or an inflected form of it) is actually written in the
+  Question. Never infer a plausible author from the topic — a question about
+  a concept or school of thought (e.g. systems-theory jurisprudence) must NOT
+  populate authors with scholars commonly associated with that topic (e.g.
+  Luhmann, Teubner, Wiethölter) unless one of those names literally appears
+  in the Question text.
+  Example: "Welche Beziehung besteht zwischen der systemtheoretischen
+  Rechtssoziologie und der Rechtsdogmatik?" -> agents: ["rag"], authors: []
+  (NOT ["luhmann", "teubner", "wiethölter"] — none of those names appear in
+  the question; it names a concept, not a person).
 - "mentions" is expensive (a client-side full-text scan) and approximate (word co-occurrence,
   not a verified citation) — only select it when the question is clearly about citation or
   discussion of a specific named work, not a general topic search (that's "rag").

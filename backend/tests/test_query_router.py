@@ -244,6 +244,23 @@ class TestQueryRouterRoute(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not authors", prompt)
         self.assertIn("endnote", prompt)
 
+    async def test_prompt_warns_against_inferring_authors_from_topic(self):
+        """The prompt must explicitly warn against inferring a plausible
+        author from the topic rather than extracting one from the question
+        text — the exact failure mode behind dropped_filters (Task 2) is a
+        safety net; the prompt itself should discourage it first."""
+        llm = MagicMock()
+        llm.generate = AsyncMock(return_value='{"agents": ["rag"]}')
+        router = QueryRouter(llm)
+        agents = [_make_agent("rag", "semantic")]
+        await router.route(
+            "Welche Beziehung besteht zwischen der systemtheoretischen "
+            "Rechtssoziologie und der Rechtsdogmatik?", agents,
+        )
+        prompt = llm.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("never infer", prompt)
+        self.assertIn("luhmann", prompt)
+
 
 class TestEntityMentionValidation(unittest.IsolatedAsyncioTestCase):
     """The router LLM can hallucinate authors/title_keywords/citation_targets
