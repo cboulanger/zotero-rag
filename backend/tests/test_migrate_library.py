@@ -193,5 +193,21 @@ class RunMigrationTest(unittest.TestCase):
         self.assertEqual(chunk_offsets, [None, "cursor-1"])
 
 
+class MainErrorHandlingTest(unittest.TestCase):
+    def test_invalid_slug_value_error_is_caught_cleanly(self):
+        """A bare ValueError from slug_to_backend_id (e.g. an invalid <slug>)
+        must be caught by main()'s except clause and converted into a clean
+        exit(1), not left to propagate as an unhandled traceback."""
+        argv = ["migrate_library.py", "invalid-slug", "http://source", "http://dest"]
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(
+                 migrate_library, "slug_to_backend_id",
+                 side_effect=ValueError("Invalid library slug: 'invalid-slug'"),
+             ):
+            with self.assertRaises(SystemExit) as ctx:
+                migrate_library.main()
+        self.assertEqual(ctx.exception.code, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

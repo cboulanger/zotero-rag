@@ -4,9 +4,9 @@ deduplication records, and index metadata) from one zotero-rag backend
 instance to another.
 
 Usage:
-    uv run python bin/migrate_library.py <slug> <source-url> <dest-url> \
-        --source-key <source-admin-zotero-api-key> \
-        --dest-key <dest-admin-zotero-api-key> \
+    uv run python bin/migrate_library.py <slug> <source-url> <dest-url>
+        --source-key <source-admin-zotero-api-key>
+        --dest-key <dest-admin-zotero-api-key>
         [--batch-size 200] [--dry-run]
 
 <slug> is a Zotero.org library slug, e.g. users/39226 or groups/6297749.
@@ -168,7 +168,7 @@ def main() -> None:
                 client, args.slug, args.source_url, args.dest_url,
                 args.source_key, args.dest_key, args.batch_size, args.dry_run,
             )
-    except MigrationError as exc:
+    except (MigrationError, ValueError) as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
         sys.exit(1)
 
