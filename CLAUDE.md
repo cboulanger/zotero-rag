@@ -727,6 +727,7 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 - Validate and sanitize all user inputs
 - Use parameterized queries to prevent injection attacks
 - Keep dependencies updated to patch security vulnerabilities
+- **Never echo, print, or otherwise expose a credential's literal value in a session** — not in command output, not in a tool call's own command text, not in a file. This includes indirect leaks: a captured `$VAR` is still exposed if a later command prints it (directly, via `echo`/`printf`, or incidentally via something like `ps -o command`/`ps aux`, which prints full argv including any secret passed as a CLI argument), and a key fetched into a shell variable is still exposed if that fetch command itself embeds the plaintext value in its own invocation rather than reading it from a file/env var. Prefer sourcing `.env` (or whatever env file holds the credential) and referencing the resulting shell/environment variable via bash expansion (`"$API_KEY"`) in subsequent commands, rather than ever typing, printing, or re-displaying the literal value. When a command must pass a secret as a CLI argument to another program (unavoidable for some CLIs), avoid any follow-up command that would echo that process's argv back (e.g. check a background job with `ps -p <pid> -o pid,etime,%cpu` — omit the `command`/`args`/`cmd` column — rather than `ps aux | grep ...` or any `ps -o command`).
 
 ## Performance
 
