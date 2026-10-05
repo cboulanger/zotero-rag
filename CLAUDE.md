@@ -283,7 +283,7 @@ configured) needs no admin key for that side.
 uv run python bin/migrate_library.py <slug> <source-url> <dest-url> \
   --source-key <source-admin-zotero-api-key> \
   --dest-key <dest-admin-zotero-api-key> \
-  [--batch-size 200] [--dry-run]
+  [--batch-size 200] [--dry-run] [--mode clean|resume]
 ```
 
 `<slug>` is a Zotero.org library slug (`users/<id>` or `groups/<id>`), e.g.
@@ -292,9 +292,15 @@ source library's indexed size and checks embedding-model compatibility
 without writing anything. The script aborts before any write if source
 and destination use different embedding models/dimensions — re-index on
 the destination in that case rather than migrating incompatible vectors.
-A failed run is recovered by simply re-running the script; the
-destination is re-cleared on every run, so there is no
-resume-from-cursor logic.
+
+If a run is interrupted (crash, network outage, kill), it can resume
+instead of restarting: progress is checkpointed to
+`<data_path>/system/migration_state/` after every batch. Re-running the
+same command with no `--mode` flag finds the incomplete state and prompts
+`Resume, Clean, or Abort? [r/c/a]`; pass `--mode=resume` to continue
+non-interactively or `--mode=clean` to discard it and start over (the
+original "always re-clear the destination" behavior). See
+`docs/superpowers/specs/2026-10-05-library-rag-migration-resume-design.md`.
 
 ## Python Environment
 
