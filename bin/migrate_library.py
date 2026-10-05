@@ -73,7 +73,7 @@ def _request(
         attempt += 1
         try:
             response = client.request(method, url, headers=_headers(api_key), params=query, json=json_body, timeout=120.0)
-        except (httpx.ConnectError, httpx.ReadTimeout) as exc:
+        except httpx.TransportError as exc:
             if attempt >= _MAX_ATTEMPTS:
                 raise MigrationError(f"{method} {url} failed after {_MAX_ATTEMPTS} attempts: {exc}") from exc
             time.sleep(2 ** (attempt - 1))

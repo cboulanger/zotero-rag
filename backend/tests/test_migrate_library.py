@@ -72,6 +72,13 @@ class RequestRetryTest(unittest.TestCase):
         self.assertEqual(result, {"ok": True})
         self.assertEqual(len(client.calls), 2)
 
+    def test_retries_on_remote_protocol_error_then_succeeds(self):
+        client = FakeClient([httpx.RemoteProtocolError("Server disconnected without sending a response."), (200, {"ok": True})])
+        with patch.object(migrate_library.time, "sleep"):
+            result = migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(client.calls), 2)
+
     def test_raises_migration_error_after_max_attempts(self):
         client = FakeClient([httpx.ConnectError("boom")] * migrate_library._MAX_ATTEMPTS)
         with patch.object(migrate_library.time, "sleep"):
