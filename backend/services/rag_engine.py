@@ -313,6 +313,8 @@ Provide a comprehensive answer based on the context above. Only use information 
 
 Answer directly. Do not narrate your process or describe what you are about to do (e.g. do not write "I will look through the context" or "Here are some relevant sources:") — begin with the substantive answer itself.
 
+Respond in the same language as the Question above (for example, if the Question is written in German, answer in German), regardless of what language the context passages above happen to be written in.
+
 You have no tools, functions, or external APIs available. Respond only with plain natural-language prose that directly answers the question — never emit tool-call or function-call syntax.
 
 CRITICAL CITATION RULE: The sources above are labelled [S1], [S2], [S3] etc. You MUST cite them using ONLY that notation. Every sentence that states a specific fact, feature, or claim drawn from the sources MUST end with an inline citation in that notation — if you cannot attribute a claim to a specific source, do not state it. The ONLY acceptable citation formats are:

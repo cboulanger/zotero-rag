@@ -850,6 +850,20 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn("every sentence", prompt)
         self.assertIn("do not state it", prompt)
 
+    async def test_prompt_instructs_model_to_answer_in_the_questions_language(self):
+        """Observed live: a German question retrieved a mix of German and
+        English source passages and the model answered in English — the
+        prompt must explicitly instruct it to match the question's
+        language regardless of what language the context happens to be
+        in."""
+        question, library_ids = await self._query_with_single_chunk()
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"].lower()
+        self.assertIn("same language as the question", prompt)
+
     async def test_query_accepts_enable_quality_self_review_flag(self):
         """Plumbing check: the flag must be accepted without error and must
         not change behavior when nothing triggers the review (a later task
