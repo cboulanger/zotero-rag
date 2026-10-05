@@ -79,3 +79,25 @@ jobs:
           name: zotero-rag-plugin-ci
           path: plugin/dist/*.xpi
           retention-days: 7
+
+  release:
+    name: Release
+    needs: [test, build-plugin]
+    # Only on a direct push to main, once tests (if they ran) and the plugin
+    # build both succeeded. Calling this as a reusable workflow (rather than
+    # the old workflow_run trigger on release.yml) keeps it in this same push
+    # event's context, so github.ref is correctly refs/heads/main for
+    # semantic-release's branch detection — see release.yml's top comment.
+    if: |
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      needs.build-plugin.result == 'success'
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      packages: write

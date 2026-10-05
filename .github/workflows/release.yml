@@ -1,12 +1,15 @@
 name: Release
 
+# Called directly from ci.yml as a reusable workflow (job `release`), after
+# tests pass on a push to main — NOT via `workflow_run`. workflow_run runs in
+# a decoupled event context where GITHUB_REF/GITHUB_REF_NAME are fixed to the
+# repo's default branch (devel here) for the whole run, which made
+# semantic-release always see "devel" and refuse to publish from "main" —
+# and those are reserved variables the runner silently refuses to let any
+# step's own `env:` override. workflow_call instead runs in the SAME event
+# context as its caller, so github.ref is correctly refs/heads/main here.
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types:
-      - completed
-    branches:
-      - main
+  workflow_call:
 
 permissions:
   contents: write
@@ -18,13 +21,12 @@ jobs:
   release:
     name: Semantic Release
     runs-on: ubuntu-latest
-    # Only run if CI workflow succeeded
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -63,6 +65,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Update latest and stable tags
