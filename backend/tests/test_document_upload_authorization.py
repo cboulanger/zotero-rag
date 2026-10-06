@@ -2,6 +2,9 @@
 - batch metadata update, abstract indexing, and file upload all 403 for a
   library outside the caller's targets
 - user_id is taken from the validated identity, not the request body
+- check-indexed reports "queued"/eta for attachments sitting in the
+  deferred-upload cache (reuses this file's TestClient/mock-vector-store
+  scaffolding; not itself an authorization test)
 """
 
 import io
@@ -203,6 +206,7 @@ class TestCheckIndexedQueuedStatus(unittest.TestCase):
         self.assertEqual(len(statuses), 1)
         self.assertEqual(statuses[0]["reason"], "queued")
         self.assertFalse(statuses[0]["needs_indexing"])
+        self.assertIsNotNone(statuses[0].get("eta"))
         self.assertIsNone(statuses[0].get("queue_block_reason"))
 
     def test_reports_queue_block_reason_when_key_invalid(self):

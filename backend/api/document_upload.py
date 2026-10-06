@@ -603,6 +603,9 @@ async def check_indexed(
                 needs_metadata_update=schema_outdated,
             ))
 
+    # Overlay pending-upload-cache entries: an attachment already uploaded via
+    # the deferred path but not yet drained by an autoindex run should report
+    # "queued" (with an ETA), not "not_indexed" — it doesn't need re-uploading.
     settings = get_settings()
     cached_entries = await asyncio.to_thread(pending_upload_cache.list_entries, settings.data_path, library_id)
     cached_keys = {entry["attachment_key"] for entry in cached_entries}
