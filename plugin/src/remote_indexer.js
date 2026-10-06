@@ -952,32 +952,64 @@ var RemoteIndexer = {
 			pluginDiag.result_error_detail = result.error_detail ?? null;
 			pluginDiag.rate_limit_retries = result.rate_limit_retries ?? 0;
 		}
-		/** Diagnostics fields merged into every terminal return when requested. */
-		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 
 		const rateLimitNote = result.rate_limit_retries > 0
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
 
+		return this._mapTerminalResult(result, result.rate_limit_headers || null, pluginDiag, includeDiagnostics);
+	},
+
+	/**
+	 * Map a terminal DocumentUploadResult (from polling or process-now) to the
+	 * shape callers expect. Throws for status "error".
+	 * @param {any} result
+	 * @param {Record<string,string>|null} rateLimitHeaders
+	 * @param {any} pluginDiag
+	 * @param {boolean} includeDiagnostics
+	 */
+	_mapTerminalResult(result, rateLimitHeaders, pluginDiag, includeDiagnostics) {
+		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 		if (result.status === 'error') {
-			const err = /** @type {any} */ (new Error(result.message || `Indexing failed for ${att.attachment_key}`));
+			const err = /** @type {any} */ (new Error(result.message || 'Upload failed'));
 			err.diagnostics = result.diagnostics ?? null;
 			throw err;
 		}
 		if (result.status === 'skipped_parse_error') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_empty') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (no text extracted)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_timeout') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (Kreuzberg timeout)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
-		return { rateLimitHeaders: result.rate_limit_headers || null, ...diagFields };
+		return { rateLimitHeaders, ...diagFields };
+	},
+
+	/**
+	 * Force immediate indexing of an attachment already sitting in the
+	 * backend's deferred-upload cache — no file read, no FormData, since the
+	 * bytes are already server-side.
+	 * @param {Object} opts
+	 * @param {string} opts.libraryId
+	 * @param {string} opts.attachmentKey
+	 * @param {string} opts.backendURL
+	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
+	 * @param {function(string): void} opts.log
+	 * @param {AbortSignal} [opts.signal]
+	 * @param {boolean} [opts.includeDiagnostics=false]
+	 */
+	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false }) {
+		const url = `${backendURL}/api/index/document/cache/${encodeURIComponent(libraryId)}/${encodeURIComponent(attachmentKey)}/process-now`
+			+ (includeDiagnostics ? '?include_diagnostics=true' : '');
+		const response = await this._apiFetch('POST', url, { headers: getAuthHeaders(), signal, timeout: 10 * 60 * 1000 });
+		if (response.status === 404) {
+			throw new Error('Cached upload not found — it may already have been indexed by a scheduled run.');
+		}
+		const result = await response.json();
+		return this._mapTerminalResult(result, null, includeDiagnostics ? {} : null, includeDiagnostics);
 	},
 
 	/**

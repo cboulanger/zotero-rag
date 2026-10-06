@@ -196,3 +196,31 @@ test('_uploadAttachment with defer:false (default) still posts to the async endp
 	await call();
 	assert.ok(urls[0].endsWith('/api/index/document/async'));
 });
+
+test('_processQueuedNow posts to the process-now endpoint and maps a success result', async () => {
+	const { ri } = makeDeferUploader({});
+	ri._apiFetch = async (_m, url, _opts) => {
+		assert.ok(url.endsWith('/api/index/document/cache/u1/ATT1/process-now'));
+		return { status: 200, json: async () => ({ status: 'indexed', chunks_added: 3, library_id: 'u1', item_key: 'I', attachment_key: 'ATT1' }) };
+	};
+	const result = await ri._processQueuedNow({ libraryId: 'u1', attachmentKey: 'ATT1', backendURL: 'http://x', getAuthHeaders: () => ({}), log: () => {} });
+	assert.strictEqual(result.parseError, undefined);
+	assert.strictEqual(result.skippedEmpty, undefined);
+});
+
+test('_processQueuedNow maps skipped_parse_error the same way as a polled upload', async () => {
+	const { ri } = makeDeferUploader({});
+	ri._apiFetch = async () => ({ status: 200, json: async () => ({ status: 'skipped_parse_error', error_detail: 'binary data', library_id: 'u1', item_key: 'I', attachment_key: 'ATT1' }) });
+	const result = await ri._processQueuedNow({ libraryId: 'u1', attachmentKey: 'ATT1', backendURL: 'http://x', getAuthHeaders: () => ({}), log: () => {} });
+	assert.strictEqual(result.parseError, true);
+	assert.strictEqual(result.errorDetail, 'binary data');
+});
+
+test('_processQueuedNow throws on an error result, same as a polled upload', async () => {
+	const { ri } = makeDeferUploader({});
+	ri._apiFetch = async () => ({ status: 200, json: async () => ({ status: 'error', message: 'boom', library_id: 'u1', item_key: 'I', attachment_key: 'ATT1' }) });
+	await assert.rejects(
+		() => ri._processQueuedNow({ libraryId: 'u1', attachmentKey: 'ATT1', backendURL: 'http://x', getAuthHeaders: () => ({}), log: () => {} }),
+		/boom/
+	);
+});
