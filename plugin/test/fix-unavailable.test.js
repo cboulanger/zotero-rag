@@ -80,6 +80,7 @@ test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from t
 	const removedCalls = [];
 	dialog.plugin = {
 		_tryDownloadAttachment: async () => ({ downloaded: true }),
+		retryDownloadFailedAttachment: async () => ({ fixed: true, stillMissing: false }),
 		removeDownloadFailedItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
 	};
 
@@ -102,7 +103,9 @@ test('searchAndFix removes fixed rows immediately and keeps unresolved rows with
 		{ attachmentItem: { key: 'ERRORED' }, serverDownloadFailed: true, isLinked: false },
 	];
 	dialog.plugin = {
-		_tryDownloadAttachment: async (att) => ({ downloaded: att.key === 'FIXED' }),
+		retryDownloadFailedAttachment: async (att) => (
+			att.key === 'FIXED' ? { fixed: true, stillMissing: false } : { fixed: false, stillMissing: true }
+		),
 		_searchAndFixUnavailableAttachment: async (att) => {
 			if (att.key === 'ERRORED') throw new Error('boom');
 			return { found: false };
@@ -121,6 +124,37 @@ test('searchAndFix removes fixed rows immediately and keeps unresolved rows with
 	assert.strictEqual(dialog.rowStatus.get(1)?.cssClass, 'error');
 });
 
+test('searchAndFix uploads to the backend after Phase 2 recovers a serverDownloadFailed file some other way', async () => {
+	// retryDownloadFailedAttachment's own Zotero-sync download fails (e.g. the
+	// server and the client both lack access to wherever this copy actually
+	// lives), but Phase 2's other-library search finds a copy some other way.
+	// Phase 2 only recovers the file — serverDownloadFailed rows still need an
+	// explicit upload afterward, since nothing else will ever index them.
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'ATT1' }, serverDownloadFailed: true, isLinked: false },
+	];
+	const removedCalls = [];
+	let uploadCalled = false;
+	dialog.plugin = {
+		retryDownloadFailedAttachment: async () => ({ fixed: false, stillMissing: true }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: true, via: 'md5' }),
+		_uploadDownloadFailedAttachment: async () => { uploadCalled = true; return { fixed: true }; },
+		removeDownloadFailedItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(uploadCalled, true);
+	assert.strictEqual(dialog.items.length, 0);
+	assert.strictEqual(removedCalls.length, 1);
+	assert.deepStrictEqual([...removedCalls[0].keys], ['ATT1']);
+});
+
 test('searchAndFix does not call removeDownloadFailedItems when nothing was fixed', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
@@ -132,7 +166,7 @@ test('searchAndFix does not call removeDownloadFailedItems when nothing was fixe
 	];
 	let called = false;
 	dialog.plugin = {
-		_tryDownloadAttachment: async () => ({ downloaded: false, reason: 'still-missing' }),
+		retryDownloadFailedAttachment: async () => ({ fixed: false, stillMissing: true }),
 		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
 		removeDownloadFailedItems: async () => { called = true; },
 	};
@@ -473,6 +507,178 @@ test('a cancelled save dialog does not throw or change row statuses', async () =
 	assert.strictEqual(dialog.rowStatus.get(0).cssClass, 'not-found');
 	assert.strictEqual(dialog.isRunning, false);
 	assert.ok(off.statuses.length > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Split button: defer threading and queued-row handling
+// ---------------------------------------------------------------------------
+
+test('searchAndFix threads defer:true into an upload call site when deferCapable and not forcing', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.deferCapable = true;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'T1' }, parentItem: { key: 'P1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let capturedOpts = null;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async (att, parent, libId, opts) => {
+			capturedOpts = opts;
+			return { fixed: true, stillTimedOut: false };
+		},
+		removeSkippedServerItems: async () => {},
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: false });
+
+	assert.strictEqual(capturedOpts.defer, true);
+});
+
+test('searchAndFix({forceIndexNow: true}) threads defer:false into an upload call site', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.deferCapable = true;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'T1' }, parentItem: { key: 'P1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let capturedOpts = null;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async (att, parent, libId, opts) => {
+			capturedOpts = opts;
+			return { fixed: true, stillTimedOut: false };
+		},
+		removeSkippedServerItems: async () => {},
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: true });
+
+	assert.strictEqual(capturedOpts.defer, false);
+});
+
+test('a row already in status-queued is left untouched by the default (non-forcing) action', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.deferCapable = true;
+	dialog.rowStatus = new Map([[0, { cssClass: 'queued', text: 'Waiting to be indexed' }]]);
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'Q1' }, parentItem: { key: 'P1' }, isLinked: false },
+	];
+	let processNowCalled = false;
+	dialog.plugin = {
+		processQueuedAttachmentNow: async () => { processNowCalled = true; return { fixed: true }; },
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: false });
+
+	assert.strictEqual(processNowCalled, false);
+	assert.strictEqual(dialog.items.length, 1);
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'queued');
+});
+
+test('a row already in status-queued is processed via processQueuedAttachmentNow when forceIndexNow is true, and becomes fixed on success', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.deferCapable = true;
+	dialog.rowStatus = new Map([[0, { cssClass: 'queued', text: 'Waiting to be indexed' }]]);
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'Q1' }, parentItem: { key: 'P1' }, isLinked: false },
+	];
+	const calls = [];
+	dialog.plugin = {
+		processQueuedAttachmentNow: async (att, parent, libId, opts) => {
+			calls.push({ key: att.key, libId, opts });
+			return { fixed: true };
+		},
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: true });
+
+	assert.strictEqual(calls.length, 1);
+	assert.strictEqual(calls[0].key, 'Q1');
+	assert.strictEqual(calls[0].libId, 1);
+	// Fixed row is dropped from the table immediately, same as every other fix path.
+	assert.strictEqual(dialog.items.length, 0);
+});
+
+test('a result.queued response sets the row to status-queued and the row survives the "drop fixed rows" step', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.deferCapable = true;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'TQ1' }, parentItem: { key: 'P1' }, skipReason: 'timeout', isLinked: false },
+	];
+	let removeCalled = null;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => ({ fixed: false, queued: true, eta: '2026-10-06T12:00:00Z', queueBlockReason: null }),
+		removeSkippedServerItems: async (libId, keys) => { removeCalled = { libId, keys }; },
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: false });
+
+	assert.strictEqual(dialog.rowStatus.get(0)?.cssClass, 'queued');
+	// The row survives the "drop fixed rows" step — it's queued, not fixed.
+	assert.strictEqual(dialog.items.length, 1);
+	// Still pruned from the skipped-server store: the row is no longer stuck
+	// skipping, it's now tracked by the backend's deferred-upload cache instead.
+	assert.ok(removeCalled);
+	assert.deepStrictEqual([...removeCalled.keys], ['TQ1']);
+});
+
+test('debug collection produces a populated report when the whole selection is already-queued rows processed via forceIndexNow', async () => {
+	// Regression test: _shouldCollectDebug and the itemHandles map must be built
+	// from the FULL selection (allSelectedIndices), not the narrowed `indices`
+	// that excludes already-queued rows — otherwise a selection consisting
+	// entirely of already-queued rows (indices.length === 0) would silently
+	// produce no report at all, even with the debug checkbox checked and real
+	// indexing work happening via processQueuedAttachmentNow.
+	const { dialog, saves } = loadDialogWithDebug({ checked: true });
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map([[0, { cssClass: 'queued', text: 'Waiting to be indexed' }]]);
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'Q1' }, parentItem: { key: 'P1' }, isLinked: false },
+	];
+	dialog.plugin = {
+		processQueuedAttachmentNow: async () => ({
+			fixed: true,
+			backendDiag: { request_id: 'pn1' },
+			pluginDiag: { upload_attempts: 1 },
+		}),
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: true });
+
+	// A report was actually saved (not silently skipped).
+	assert.strictEqual(saves.length, 1);
+	const data = saves[0].data;
+	assert.strictEqual(data.items.length, 1);
+	const item = data.items[0];
+	assert.strictEqual(item.attachment_key, 'Q1');
+	assert.strictEqual(item.steps.length, 1);
+	assert.strictEqual(item.steps[0].phase, 'process_now');
+	assert.strictEqual(item.steps[0].outcome, 'fixed');
+	assert.strictEqual(item.steps[0].backend.request_id, 'pn1');
+	assert.strictEqual(item.final_row_status.css_class, 'fixed');
 });
 
 test('a failing save is reported in the status bar and still restores the dialog state', async () => {

@@ -43,6 +43,14 @@ function makeStubs(attachmentsByKey = {}) {
 				return attachmentsByKey[`__parent_${id}`] || null;
 			},
 		},
+		Sync: {
+			Storage: {
+				Local: {
+					SYNC_STATE_TO_UPLOAD: 0,
+					getModeForLibrary: () => 'zfs',
+				},
+			},
+		},
 	};
 	return { zotero, ioUtils, pathUtils, files };
 }
@@ -85,6 +93,7 @@ test('removeDownloadFailedItems prunes fixed keys so they stop reappearing', asy
 		deleted: false,
 		parentItemID: null,
 		key,
+		isImportedAttachment: () => true,
 		getCreators: () => [],
 		getField: () => '',
 	});
@@ -116,6 +125,7 @@ test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFail
 		deleted: false,
 		parentItemID: null,
 		key: 'ATT1',
+		isImportedAttachment: () => true,
 		getCreators: () => [{ lastName: 'Doe' }],
 		getField: (f) => (f === 'title' ? 'A Paper' : f === 'date' ? '2020' : ''),
 	};
@@ -134,6 +144,49 @@ test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFail
 	assert.strictEqual(results[0].title, 'A Paper');
 });
 
+test('_getDownloadFailedAttachments sets isLinked from the attachment\'s actual import status, not hardcoded false', async () => {
+	// Regression test: a server-reported download failure for a genuine link
+	// attachment (LINK_MODE_LINKED_URL — a bare web link with no stored file,
+	// the norm for these server-reported entries) was previously always marked
+	// isLinked=false, routing it into fix-unavailable's "imported" retry bucket.
+	// That bucket's copy-based repair strategies end by calling
+	// attachmentItem.fileExists(), which Zotero itself throws on for
+	// LINK_MODE_LINKED_URL items ("Zotero.Item.fileExists() cannot be called on
+	// link attachments"), surfacing as a "Copy failed" error for every such item
+	// instead of the correct "Linked file — fix path in Zotero" skip.
+	//
+	// An earlier version of this fix checked `attachmentLinkMode === 2`
+	// (LINK_MODE_LINKED_FILE) — the wrong constant: fileExists() only throws for
+	// LINK_MODE_LINKED_URL (3), not LINK_MODE_LINKED_FILE (2), so that check
+	// never matched the attachments actually hitting this bug. Using Zotero's
+	// own isImportedAttachment() avoids hardcoding either numeric constant.
+	const linkedAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		isImportedAttachment: () => false, // LINK_MODE_LINKED_URL in real Zotero
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const importedAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT2',
+		isImportedAttachment: () => true, // LINK_MODE_IMPORTED_FILE in real Zotero
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: linkedAttachment, ATT2: importedAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2']);
+	const results = await plugin._getDownloadFailedAttachments(1);
+
+	const byKey = Object.fromEntries(results.map(r => [r.attachmentItem.key, r]));
+	assert.strictEqual(byKey.ATT1.isLinked, true);
+	assert.strictEqual(byKey.ATT2.isLinked, false);
+});
+
 test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exists', async () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs({}); // ATT1 resolves to null
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
@@ -145,6 +198,313 @@ test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exist
 	// from the vm context's separate realm, and assert.deepStrictEqual treats
 	// same-shape-but-cross-realm objects as unequal ("not reference-equal").
 	assert.deepStrictEqual([...results], []);
+});
+
+test('_describeDownloadFailureReason explains a linked attachment as having no file to download', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason({}, true, 1);
+	assert.match(downloadFailureReason, /no file to download/i);
+});
+
+test('_describeDownloadFailureReason flags WebDAV-mode libraries, which the backend can never reach', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getModeForLibrary = () => 'webdav';
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason({ attachmentSyncState: 2 }, false, 1);
+	assert.match(downloadFailureReason, /webdav/i);
+});
+
+test('_describeDownloadFailureReason flags a zfs-mode attachment never uploaded by any device', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason(
+		{ attachmentSyncState: zotero.Sync.Storage.Local.SYNC_STATE_TO_UPLOAD }, false, 1
+	);
+	assert.match(downloadFailureReason, /not yet uploaded/i);
+});
+
+test('_getUnavailableAttachments includes download-failed entries only when includeDownloadFailed is true', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+	];
+
+	const withoutFlag = await plugin._getUnavailableAttachments(1);
+	assert.strictEqual(withoutFlag.length, 0);
+
+	const withFlag = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+	assert.strictEqual(withFlag.length, 1);
+	assert.strictEqual(withFlag[0].attachmentItem.key, 'DL1');
+});
+
+test('retryDownloadFailedAttachment reports stillMissing, without attempting an upload, when the download itself fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => { throw new Error('nope'); } };
+	let uploadCalled = false;
+	const RemoteIndexer = { _uploadAttachment: async () => { uploadCalled = true; return {}; } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+
+	const attachmentItem = { libraryID: 1, key: 'ATT1', fileExists: async () => false };
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillMissing, true);
+	assert.strictEqual(uploadCalled, false);
+});
+
+test('retryDownloadFailedAttachment downloads then uploads to the backend, returning fixed:true on success', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => {} };
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const uploadCalls = [];
+	const RemoteIndexer = {
+		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitHeaders: null }; },
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const attachmentItem = {
+		libraryID: 1, key: 'ATT1', version: 5, attachmentContentType: 'application/pdf',
+		fileExists: async () => true,
+	};
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, true);
+	assert.strictEqual(uploadCalls.length, 1);
+	assert.strictEqual(uploadCalls[0].att.attachment_key, 'ATT1');
+	assert.strictEqual(uploadCalls[0].libraryId, 'u1');
+});
+
+test('retryDownloadFailedAttachment treats a parse-error upload result as not fixed, with a descriptive error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => {} };
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = { _uploadAttachment: async () => ({ parseError: true, errorDetail: 'binary junk' }) };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const attachmentItem = { libraryID: 1, key: 'ATT1', fileExists: async () => true };
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillMissing, false);
+	assert.strictEqual(result.error, 'binary junk');
+});
+
+test('_uploadDownloadFailedAttachment returns queued:true when the upload is deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	let capturedDefer;
+	const RemoteIndexer = {
+		_uploadAttachment: async (opts) => {
+			capturedDefer = opts.defer;
+			return { queued: true, eta: '2026-10-06T15:30:00Z', queueBlockReason: 'key_invalid' };
+		},
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin._uploadDownloadFailedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(capturedDefer, true);
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T15:30:00Z');
+	assert.strictEqual(result.queueBlockReason, 'key_invalid');
+});
+
+test('retryTimeoutSkippedAttachment returns queued:true with the server-reported queueBlockReason when deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = {
+		_uploadAttachment: async () => ({ queued: true, eta: '2026-10-06T16:00:00Z', queueBlockReason: 'paused' }),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.retryTimeoutSkippedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillTimedOut, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T16:00:00Z');
+	assert.strictEqual(result.queueBlockReason, 'paused');
+});
+
+test('retryEmptyTextSkippedAttachment returns queued:true with the server-reported queueBlockReason when deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = {
+		_uploadAttachment: async () => ({ queued: true, eta: '2026-10-06T16:00:00Z', queueBlockReason: 'key_invalid' }),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.retryEmptyTextSkippedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillEmpty, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T16:00:00Z');
+	assert.strictEqual(result.queueBlockReason, 'key_invalid');
+});
+
+test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps success to fixed:true', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	let capturedOpts;
+	const RemoteIndexer = { _processQueuedNow: async (opts) => { capturedOpts = opts; return {}; } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.processQueuedAttachmentNow(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+	);
+
+	assert.strictEqual(result.fixed, true);
+	assert.strictEqual(capturedOpts.attachmentKey, 'A');
+	assert.strictEqual(capturedOpts.libraryId, 'u1');
+	assert.strictEqual(capturedOpts.backendURL, 'http://backend');
+});
+
+test('processQueuedAttachmentNow maps a skippedTimeout result to fixed:false with a descriptive error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = { _processQueuedNow: async () => ({ skippedTimeout: true, errorDetail: null }) };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.processQueuedAttachmentNow(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.error, 'Text extraction timed out');
+});
+
+test('getQueuedStatusMap returns only attachments the backend reports as queued', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = {
+		_checkIndexed: async () => ([
+			{ item_key: 'I1', attachment_key: 'A1', needs_indexing: false, reason: 'queued', eta: '2026-10-06T15:30:00Z', queue_block_reason: null },
+			{ item_key: 'I2', attachment_key: 'A2', needs_indexing: true, reason: 'not_indexed' },
+		]),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+		{ parentItem: { key: 'I2', version: 1 }, attachmentItem: { key: 'A2', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	const map = await plugin.getQueuedStatusMap(1, items);
+	assert.strictEqual(map.size, 1);
+	// Spread into a plain object first: the value is an object literal from the
+	// vm context's separate realm, and assert.deepStrictEqual treats
+	// same-shape-but-cross-realm objects as unequal ("not reference-equal").
+	assert.deepStrictEqual({ ...map.get('A1') }, { eta: '2026-10-06T15:30:00Z', queueBlockReason: null });
+	assert.strictEqual(map.has('A2'), false);
+});
+
+test('getQueuedStatusMap excludes check_failed entries (an unreachable batch is not the same as queued)', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = {
+		_checkIndexed: async () => ([
+			{ item_key: 'I1', attachment_key: 'A1', needs_indexing: false, reason: 'queued', eta: '2026-10-06T15:30:00Z', queue_block_reason: null },
+			{ item_key: 'I3', attachment_key: 'A3', needs_indexing: true, reason: 'check_failed' },
+		]),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+		{ parentItem: { key: 'I3', version: 1 }, attachmentItem: { key: 'A3', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	const map = await plugin.getQueuedStatusMap(1, items);
+	assert.strictEqual(map.size, 1);
+	assert.strictEqual(map.has('A1'), true);
+	assert.strictEqual(map.has('A3'), false);
+});
+
+test('getQueuedStatusMap returns an empty map instead of throwing when _checkIndexed fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = { _checkIndexed: async () => { throw new Error('network down'); } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.log = () => {};
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	const map = await plugin.getQueuedStatusMap(1, items);
+	assert.strictEqual(map.size, 0);
+});
+
+test('getQueuedStatusMap returns an empty map for an empty item list without calling the backend', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	let called = false;
+	const RemoteIndexer = { _checkIndexed: async () => { called = true; return []; } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const map = await plugin.getQueuedStatusMap(1, []);
+	assert.strictEqual(map.size, 0);
+	assert.strictEqual(called, false);
 });
 
 test('getBackendLibraryId returns "u{userId}" for the personal library', () => {

@@ -20,6 +20,7 @@ from backend.services.cron_indexer import (
     read_live_status,
     write_control_state,
 )
+from backend.services import pending_upload_cache
 
 
 def _make_target(zotero_key: str = "test-api-key", embedding_key: str = "test-emb-key",
@@ -813,6 +814,124 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
             await indexer.run()
 
         self.assertIsNone(read_control_state(self.tmp).get("skip_slug"))
+
+
+class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_path = Path(self._tmp.name)
+        (self.data_path / "system").mkdir(parents=True)
+        self._settings_patch = patch(
+            "backend.services.cron_indexer.get_settings",
+            return_value=MagicMock(data_path=self.data_path),
+        )
+        self._settings_patch.start()
+
+        pending_upload_cache.write_entry(
+            self.data_path, "u1", "ATT_OK", b"good bytes",
+            {"item_key": "ITEM_OK", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/1"},
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u1", "ATT_FAIL", b"bad bytes",
+            {"item_key": "ITEM_FAIL", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/1"},
+        )
+
+    def tearDown(self):
+        self._settings_patch.stop()
+        self._tmp.cleanup()
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_drains_successful_entries_and_keeps_failed_ones(self, mock_execute):
+        async def fake_execute(**kwargs):
+            if kwargs["attachment_key"] == "ATT_OK":
+                return MagicMock(status="indexed", message="ok")
+            return MagicMock(status="error", message="boom")
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        embedding_service = MagicMock()
+        drained, failed = await indexer._drain_pending_uploads(
+            indexer.parse_slug("users/1"), embedding_service
+        )
+
+        self.assertEqual(drained, 1)
+        self.assertEqual(failed, 1)
+        self.assertFalse(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_OK"))
+        self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_FAIL"))
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_FAIL")
+        self.assertEqual(meta["attempts"], 1)
+
+    async def test_no_op_when_nothing_cached_for_the_library(self):
+        indexer = CronIndexer(
+            targets={"users/2": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock2",
+            status_file=self.data_path / "status2.json", log=MagicMock(),
+        )
+        drained, failed = await indexer._drain_pending_uploads(
+            indexer.parse_slug("users/2"), MagicMock()
+        )
+        self.assertEqual((drained, failed), (0, 0))
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_a_malformed_cache_entry_does_not_abort_processing_of_other_entries(self, mock_execute):
+        """A cache entry whose sidecar JSON is missing a required field (e.g. schema
+        drift, a bad write, a hand-edited file) must be recorded as a per-entry
+        failure, not raise out of _drain_pending_uploads — a KeyError/ValidationError
+        while building DocumentMetadata must not abort every other entry (or every
+        other library in the run's per-slug loop)."""
+        # write_entry doesn't validate required fields, so this simulates a
+        # malformed sidecar missing "item_key" — accessing meta["item_key"] directly
+        # (instead of meta.get(...)) raises KeyError while building DocumentMetadata.
+        pending_upload_cache.write_entry(
+            self.data_path, "u9", "ATT_MALFORMED", b"bytes",
+            {"mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/9"},  # missing "item_key"
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u9", "ATT_GOOD", b"good bytes",
+            {"item_key": "ITEM_GOOD", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/9"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(status="indexed", message="ok")
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/9": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock9",
+            status_file=self.data_path / "status9.json", log=MagicMock(),
+        )
+        embedding_service = MagicMock()
+
+        # Must return normally (not raise) despite the malformed entry.
+        drained, failed = await indexer._drain_pending_uploads(
+            indexer.parse_slug("users/9"), embedding_service
+        )
+
+        self.assertEqual(drained, 1)
+        self.assertEqual(failed, 1)
+        # The well-formed entry was processed and removed from the cache.
+        self.assertFalse(pending_upload_cache.has_entry(self.data_path, "u9", "ATT_GOOD"))
+        # The malformed entry stays cached, with attempts bumped, for visibility/retry.
+        self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u9", "ATT_MALFORMED"))
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u9", "ATT_MALFORMED")
+        self.assertEqual(meta["attempts"], 1)
+        self.assertIsNotNone(meta["last_error"])
+        # The malformed entry must never have reached the upload pipeline.
+        called_attachment_keys = {call.kwargs["attachment_key"] for call in mock_execute.call_args_list}
+        self.assertNotIn("ATT_MALFORMED", called_attachment_keys)
+        self.assertIn("ATT_GOOD", called_attachment_keys)
 
 
 if __name__ == "__main__":

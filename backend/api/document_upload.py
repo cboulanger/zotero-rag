@@ -38,6 +38,8 @@ from backend.models.document import (
 from backend.models.diagnostics import DiagnosticsPayload
 from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
+from backend.services import pending_upload_cache
+from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -172,8 +174,10 @@ class AttachmentIndexStatus(BaseModel):
     item_key: str
     attachment_key: str
     needs_indexing: bool
-    reason: str  # "not_indexed" | "version_changed" | "up_to_date"
+    reason: str  # "not_indexed" | "version_changed" | "up_to_date" | "queued"
     needs_metadata_update: bool = False  # True when schema_version < CURRENT_SCHEMA_VERSION
+    eta: Optional[str] = None  # set only when reason == "queued"
+    queue_block_reason: Optional[str] = None  # None | "paused" | "key_invalid"; set only when reason == "queued"
 
 
 class ItemMetadataUpdate(BaseModel):
@@ -233,6 +237,14 @@ class AsyncUploadResponse(BaseModel):
     status: str  # "processing" | "done" | any DocumentUploadResult.status
     result: DocumentUploadResult | None = None
     progress_message: str | None = None
+
+
+class CacheUploadResponse(BaseModel):
+    """Response from the deferred-upload cache endpoint."""
+
+    status: str  # always "queued"
+    eta: Optional[str] = None  # ISO 8601; null if `reason` is set
+    reason: Optional[str] = None  # None | "paused" | "key_invalid"
 
 
 class AbstractIndexRequest(BaseModel):
@@ -591,6 +603,22 @@ async def check_indexed(
                 needs_metadata_update=schema_outdated,
             ))
 
+    # Overlay pending-upload-cache entries: an attachment already uploaded via
+    # the deferred path but not yet drained by an autoindex run should report
+    # "queued" (with an ETA), not "not_indexed" — it doesn't need re-uploading.
+    settings = get_settings()
+    cached_entries = await asyncio.to_thread(pending_upload_cache.list_entries, settings.data_path, library_id)
+    cached_keys = {entry["attachment_key"] for entry in cached_entries}
+    if cached_keys:
+        key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        queue_status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
+        for s in statuses:
+            if s.attachment_key in cached_keys:
+                s.needs_indexing = False
+                s.reason = "queued"
+                s.eta = queue_status["eta"]
+                s.queue_block_reason = queue_status["reason"]
+
     # Repair missing library metadata if chunks already exist.
     # This handles the case where a previous indexing run stored chunks
     # but never wrote library_metadata (e.g. before the metadata-update fix).
@@ -833,6 +861,124 @@ async def upload_and_index_document_async(
     ))
     logger.info(f"Async upload task {task_id} created for {attachment_key}")
     return AsyncUploadResponse(task_id=task_id, status="processing")
+
+
+@router.post(
+    "/index/document/cache",
+    response_model=CacheUploadResponse,
+    summary="Upload a document for deferred indexing (remote mode)",
+)
+async def upload_document_to_cache(
+    file: UploadFile = File(..., description="Raw attachment bytes"),
+    metadata: str = Form(...),
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+):
+    """
+    Cache a document's bytes for the library's next autoindex run instead of
+    indexing it now. Returns immediately — no extraction, no embedding.
+
+    Use POST /api/index/document/cache/{library_id}/{attachment_key}/process-now
+    to force immediate indexing of an entry already sitting in the cache.
+    """
+    meta_dict, _doc_metadata, library_id, item_key, attachment_key, _user_id, \
+        library_type, mime_type, item_version, attachment_version, item_modified, \
+        file_bytes, _timeout_multiplier = await _parse_upload_request(file, metadata, identity)
+
+    settings = get_settings()
+    await asyncio.to_thread(
+        pending_upload_cache.write_entry,
+        settings.data_path, library_id, attachment_key, file_bytes,
+        {
+            "item_key": item_key,
+            "mime_type": mime_type,
+            "item_version": item_version,
+            "attachment_version": attachment_version,
+            "zotero_modified": item_modified,
+            "title": meta_dict.get("title", "Untitled"),
+            "authors": meta_dict.get("authors", []),
+            "year": meta_dict.get("year"),
+            "item_type": meta_dict.get("item_type"),
+            "library_type": library_type,
+            "library_name": meta_dict.get("library_name", ""),
+        },
+    )
+    logger.info(f"Cached deferred upload: library={library_id} attachment={attachment_key}")
+
+    key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
+    return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
+
+
+@router.post(
+    "/index/document/cache/{library_id}/{attachment_key}/process-now",
+    response_model=DocumentUploadResult,
+    summary="Force immediate indexing of a cached deferred upload",
+)
+async def process_cached_upload_now(
+    library_id: str,
+    attachment_key: str,
+    http_request: Request,
+    include_diagnostics: bool = False,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """
+    Pull one entry out of the pending-upload cache and index it synchronously
+    right now, instead of waiting for the library's next autoindex run.
+
+    Removes the cache entry whether this succeeds or fails terminally — a
+    failure here surfaces the real error immediately rather than retrying
+    silently on a future scheduled run.
+    """
+    assert_can_access(identity, library_id)
+
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    settings = get_settings()
+    cached = await asyncio.to_thread(pending_upload_cache.read_entry, settings.data_path, library_id, attachment_key)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="No cached upload found for this attachment")
+    file_bytes, meta = cached
+
+    doc_metadata = DocumentMetadata(
+        library_id=library_id,
+        item_key=meta["item_key"],
+        attachment_key=attachment_key,
+        title=meta.get("title", "Untitled"),
+        authors=meta.get("authors", []),
+        year=meta.get("year"),
+        item_type=meta.get("item_type"),
+    )
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+    client_keys = get_client_api_keys(http_request)
+    embedding_service = make_embedding_service(client_keys)
+
+    result = await _execute_upload(
+        file_bytes=file_bytes,
+        content_hash=content_hash,
+        doc_metadata=doc_metadata,
+        library_id=library_id,
+        library_type=meta.get("library_type", "user"),
+        item_key=meta["item_key"],
+        attachment_key=attachment_key,
+        mime_type=meta.get("mime_type", "application/pdf"),
+        item_version=meta.get("item_version", 0),
+        attachment_version=meta.get("attachment_version", 0),
+        item_modified=meta.get("zotero_modified", ""),
+        library_name=meta.get("library_name", ""),
+        vector_store=vector_store,
+        embedding_service=embedding_service,
+        include_diagnostics=include_diagnostics,
+    )
+
+    if result.status == "error":
+        await asyncio.to_thread(
+            pending_upload_cache.record_failure, settings.data_path, library_id, attachment_key, result.message
+        )
+    else:
+        await asyncio.to_thread(pending_upload_cache.delete_entry, settings.data_path, library_id, attachment_key)
+    return result
 
 
 @router.get(

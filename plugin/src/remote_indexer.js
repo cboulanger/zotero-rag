@@ -803,9 +803,11 @@ var RemoteIndexer = {
 	 *   the returned object (`diagnostics`, `pluginDiag`) — or, when the upload throws, to the
 	 *   thrown Error (`err.diagnostics`, `err.pluginDiag`). Used by the Fix Unavailable
 	 *   "Download debugging information" option. Defaults to false (no extra data requested).
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 * @param {boolean} [opts.defer=false] - When true, upload to the deferred-indexing
+	 *   cache instead of indexing now; returns {queued, eta, queueBlockReason} immediately.
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false, defer = false }) {
 		/** @type {Record<string, any>|null} */
 		const pluginDiag = includeDiagnostics ? {
 			timeout_multiplier: timeoutMultiplier,
@@ -826,7 +828,7 @@ var RemoteIndexer = {
 			return err;
 		};
 		try {
-			return await this._uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag });
+			return await this._uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag, defer });
 		} catch (err) {
 			throw withDiag(err, err && err.diagnostics);
 		}
@@ -838,7 +840,7 @@ var RemoteIndexer = {
 	 * @param {any} opts
 	 * @returns {Promise<any>}
 	 */
-	async _uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag }) {
+	async _uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag, defer }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -892,7 +894,7 @@ var RemoteIndexer = {
 		for (let attempt = 1; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
 			if (pluginDiag) pluginDiag.upload_attempts = attempt;
 			try {
-				response = await this._apiFetch('POST', `${backendURL}/api/index/document/async`, {
+				response = await this._apiFetch('POST', `${backendURL}/api/index/document/${defer ? 'cache' : 'async'}`, {
 					headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 					body: formData,
 					signal,
@@ -920,7 +922,16 @@ var RemoteIndexer = {
 		debug(log, `${att.attachment_key}: async response received in ${Date.now() - t0}ms`);
 		if (pluginDiag) pluginDiag.http_status = response.status ?? null;
 
-		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult}} */ (/** @type {unknown} */ (await response.json()));
+		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult, eta?: string|null, reason?: string|null}} */ (/** @type {unknown} */ (await response.json()));
+		if (defer) {
+			// /cache never indexes — nothing to poll. includeDiagnostics is ignored
+			// here by design: any pluginDiag/diagnostics gathered up to this point
+			// (upload_attempts, file_size_bytes, http_status) is discarded rather
+			// than surfaced, since there's nothing server-side to diagnose yet.
+			// The real diagnostics path for a deferred upload is process-now
+			// (_processQueuedNow) or the autoindex drain, not this response.
+			return { rateLimitHeaders: null, queued: true, eta: asyncData.eta ?? null, queueBlockReason: asyncData.reason ?? null };
+		}
 		/** @type {DocumentUploadResult} */
 		let result;
 		if (asyncData.status === 'processing' && asyncData.task_id) {
@@ -941,32 +952,67 @@ var RemoteIndexer = {
 			pluginDiag.result_error_detail = result.error_detail ?? null;
 			pluginDiag.rate_limit_retries = result.rate_limit_retries ?? 0;
 		}
-		/** Diagnostics fields merged into every terminal return when requested. */
-		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 
 		const rateLimitNote = result.rate_limit_retries > 0
 			? ` [rate-limited, ${result.rate_limit_retries} retr${result.rate_limit_retries === 1 ? 'y' : 'ies'}]`
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
 
+		return this._mapTerminalResult(result, result.rate_limit_headers || null, pluginDiag);
+	},
+
+	/**
+	 * Map a terminal DocumentUploadResult (from polling or process-now) to the
+	 * shape callers expect. Throws for status "error".
+	 * @param {any} result
+	 * @param {Record<string,string>|null} rateLimitHeaders
+	 * @param {any} pluginDiag - When truthy, `diagnostics`/`pluginDiag` fields are included
+	 *   in the returned object (and on a thrown error's `.diagnostics`).
+	 * @returns {{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}}
+	 */
+	_mapTerminalResult(result, rateLimitHeaders, pluginDiag) {
+		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 		if (result.status === 'error') {
-			const err = /** @type {any} */ (new Error(result.message || `Indexing failed for ${att.attachment_key}`));
+			const err = /** @type {any} */ (new Error(result.message || 'Upload failed'));
 			err.diagnostics = result.diagnostics ?? null;
 			throw err;
 		}
 		if (result.status === 'skipped_parse_error') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (binary data / parse error)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_empty') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (no text extracted)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_timeout') {
-			log(`[RemoteIndexer] ${att.attachment_key}: skipped (Kreuzberg timeout)`);
-			return { rateLimitHeaders: result.rate_limit_headers || null, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitHeaders, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
-		return { rateLimitHeaders: result.rate_limit_headers || null, ...diagFields };
+		return { rateLimitHeaders, ...diagFields };
+	},
+
+	/**
+	 * Force immediate indexing of an attachment already sitting in the
+	 * backend's deferred-upload cache — no file read, no FormData, since the
+	 * bytes are already server-side.
+	 * @param {Object} opts
+	 * @param {string} opts.libraryId
+	 * @param {string} opts.attachmentKey
+	 * @param {string} opts.backendURL
+	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
+	 * @param {function(string): void} opts.log
+	 * @param {AbortSignal} [opts.signal]
+	 * @param {boolean} [opts.includeDiagnostics=false]
+	 * @returns {Promise<{rateLimitHeaders: null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 */
+	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false }) {
+		const url = `${backendURL}/api/index/document/cache/${encodeURIComponent(libraryId)}/${encodeURIComponent(attachmentKey)}/process-now`
+			+ (includeDiagnostics ? '?include_diagnostics=true' : '');
+		// _apiFetch already throws a descriptive error (including the backend's own
+		// detail message) for any non-2xx response, 404 included — no need (and no
+		// way) to special-case it here on the resolved response.
+		const response = await this._apiFetch('POST', url, { headers: getAuthHeaders(), signal, timeout: 10 * 60 * 1000 });
+		const result = await response.json();
+		log(`[RemoteIndexer] ${attachmentKey}: process-now ${result.status} (${result.chunks_added} chunks)`);
+		return this._mapTerminalResult(result, null, includeDiagnostics ? {} : null);
 	},
 
 	/**

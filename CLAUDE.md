@@ -283,7 +283,7 @@ configured) needs no admin key for that side.
 uv run python bin/migrate_library.py <slug> <source-url> <dest-url> \
   --source-key <source-admin-zotero-api-key> \
   --dest-key <dest-admin-zotero-api-key> \
-  [--batch-size 200] [--dry-run]
+  [--batch-size 200] [--dry-run] [--mode clean|resume]
 ```
 
 `<slug>` is a Zotero.org library slug (`users/<id>` or `groups/<id>`), e.g.
@@ -292,9 +292,15 @@ source library's indexed size and checks embedding-model compatibility
 without writing anything. The script aborts before any write if source
 and destination use different embedding models/dimensions — re-index on
 the destination in that case rather than migrating incompatible vectors.
-A failed run is recovered by simply re-running the script; the
-destination is re-cleared on every run, so there is no
-resume-from-cursor logic.
+
+If a run is interrupted (crash, network outage, kill), it can resume
+instead of restarting: progress is checkpointed to
+`<data_path>/system/migration_state/` after every batch. Re-running the
+same command with no `--mode` flag finds the incomplete state and prompts
+`Resume, Clean, or Abort? [r/c/a]`; pass `--mode=resume` to continue
+non-interactively or `--mode=clean` to discard it and start over (the
+original "always re-clear the destination" behavior). See
+`docs/superpowers/specs/2026-10-05-library-rag-migration-resume-design.md`.
 
 ## Python Environment
 
@@ -727,6 +733,7 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 - Validate and sanitize all user inputs
 - Use parameterized queries to prevent injection attacks
 - Keep dependencies updated to patch security vulnerabilities
+- **Never echo, print, or otherwise expose a credential's literal value in a session** — not in command output, not in a tool call's own command text, not in a file. This includes indirect leaks: a captured `$VAR` is still exposed if a later command prints it (directly, via `echo`/`printf`, or incidentally via something like `ps -o command`/`ps aux`, which prints full argv including any secret passed as a CLI argument), and a key fetched into a shell variable is still exposed if that fetch command itself embeds the plaintext value in its own invocation rather than reading it from a file/env var. Prefer sourcing `.env` (or whatever env file holds the credential) and referencing the resulting shell/environment variable via bash expansion (`"$API_KEY"`) in subsequent commands, rather than ever typing, printing, or re-displaying the literal value. When a command must pass a secret as a CLI argument to another program (unavoidable for some CLIs), avoid any follow-up command that would echo that process's argv back (e.g. check a background job with `ps -p <pid> -o pid,etime,%cpu` — omit the `command`/`args`/`cmd` column — rather than `ps aux | grep ...` or any `ps -o command`).
 
 ## Performance
 

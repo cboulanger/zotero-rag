@@ -9,6 +9,7 @@ import numpy as np
 
 from openai import (
     AuthenticationError as OpenAIAuthenticationError,
+    BadRequestError as OpenAIBadRequestError,
     InternalServerError as OpenAIInternalServerError,
     PermissionDeniedError as OpenAIPermissionDeniedError,
     RateLimitError as OpenAIRateLimitError,
@@ -453,6 +454,73 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(OpenAIInternalServerError):
                 await service._create_embeddings_with_backoff(["hello"])
+
+
+class TestEmbeddingContextLengthRetry(unittest.IsolatedAsyncioTestCase):
+    """A "context length exceeded" BadRequestError must be retried with the
+    input truncated, same as the existing per-text truncation path — and if
+    every attempt still exceeds the limit, the call must raise, not silently
+    return None.
+
+    Regression: _create_embeddings_with_backoff's BadRequestError handler
+    truncated `input` and looped again on every attempt, including the last
+    one, with no check for loop exhaustion (unlike the InternalServerError
+    handler just above it, which explicitly re-raises on the last attempt).
+    When every attempt still exceeded the context length, the for loop simply
+    ran out of iterations and the function fell off its end, implicitly
+    returning None. The caller (embed_batch) then crashed with
+    "AttributeError: 'NoneType' object has no attribute 'data'" — a confusing
+    crash that hid the real, actionable "still exceeds context length" error.
+    """
+
+    def _make_service(self) -> RemoteEmbeddingService:
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",
+            batch_size=10,
+            cache_enabled=False,
+        )
+        return RemoteEmbeddingService(config, api_key="test-key")
+
+    def _context_length_error(self) -> OpenAIBadRequestError:
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        return OpenAIBadRequestError(
+            "Error code: 400 - maximum context length is 512 tokens",
+            response=mock_response,
+            body=None,
+        )
+
+    async def test_truncates_and_retries_until_a_short_enough_batch_succeeds(self):
+        service = self._make_service()
+        success_raw = MagicMock()
+        success_raw.headers = {}
+        success_raw.parse.return_value = MagicMock(data=[MagicMock(embedding=[0.1, 0.2])])
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(
+                side_effect=[self._context_length_error(), self._context_length_error(), success_raw]
+            )
+            result = await service._create_embeddings_with_backoff(["a long text " * 100])
+
+        self.assertIsNotNone(result)
+
+    async def test_exhausting_all_truncation_attempts_raises_instead_of_returning_none(self):
+        service = self._make_service()
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(
+                side_effect=self._context_length_error()
+            )
+
+            with self.assertRaises(OpenAIBadRequestError):
+                await service._create_embeddings_with_backoff(["a long text " * 100])
 
 
 class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
