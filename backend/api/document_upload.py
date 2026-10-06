@@ -38,6 +38,8 @@ from backend.models.document import (
 from backend.models.diagnostics import DiagnosticsPayload
 from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
+from backend.services import pending_upload_cache
+from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -233,6 +235,14 @@ class AsyncUploadResponse(BaseModel):
     status: str  # "processing" | "done" | any DocumentUploadResult.status
     result: DocumentUploadResult | None = None
     progress_message: str | None = None
+
+
+class CacheUploadResponse(BaseModel):
+    """Response from the deferred-upload cache endpoint."""
+
+    status: str  # always "queued"
+    eta: Optional[str] = None  # ISO 8601; null if `reason` is set
+    reason: Optional[str] = None  # None | "paused" | "key_invalid"
 
 
 class AbstractIndexRequest(BaseModel):
@@ -833,6 +843,51 @@ async def upload_and_index_document_async(
     ))
     logger.info(f"Async upload task {task_id} created for {attachment_key}")
     return AsyncUploadResponse(task_id=task_id, status="processing")
+
+
+@router.post(
+    "/index/document/cache",
+    response_model=CacheUploadResponse,
+    summary="Upload a document for deferred indexing (remote mode)",
+)
+async def upload_document_to_cache(
+    file: UploadFile = File(..., description="Raw attachment bytes"),
+    metadata: str = Form(...),
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+):
+    """
+    Cache a document's bytes for the library's next autoindex run instead of
+    indexing it now. Returns immediately — no extraction, no embedding.
+
+    Use POST /api/index/document/cache/{library_id}/{attachment_key}/process-now
+    to force immediate indexing of an entry already sitting in the cache.
+    """
+    meta_dict, _doc_metadata, library_id, item_key, attachment_key, _user_id, \
+        library_type, mime_type, item_version, attachment_version, item_modified, \
+        file_bytes, _timeout_multiplier = await _parse_upload_request(file, metadata, identity)
+
+    settings = get_settings()
+    pending_upload_cache.write_entry(
+        settings.data_path, library_id, attachment_key, file_bytes,
+        {
+            "item_key": item_key,
+            "mime_type": mime_type,
+            "item_version": item_version,
+            "attachment_version": attachment_version,
+            "zotero_modified": item_modified,
+            "title": meta_dict.get("title", "Untitled"),
+            "authors": meta_dict.get("authors", []),
+            "year": meta_dict.get("year"),
+            "item_type": meta_dict.get("item_type"),
+            "library_type": library_type,
+            "library_name": meta_dict.get("library_name", ""),
+        },
+    )
+    logger.info(f"Cached deferred upload: library={library_id} attachment={attachment_key}")
+
+    key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    status = pending_upload_cache.get_queue_status(settings, library_id, key_store)
+    return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
 
 
 @router.get(
