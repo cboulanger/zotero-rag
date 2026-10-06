@@ -1,3 +1,10 @@
+## [1.52.2](https://github.com/cboulanger/zotero-rag/compare/v1.52.1...v1.52.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** use live item/attachment version when draining pending uploads ([e3f7f34](https://github.com/cboulanger/zotero-rag/commit/e3f7f345c7798793af2b4eced54a99f0492b0fc1))
+
 ## [1.52.1](https://github.com/cboulanger/zotero-rag/compare/v1.52.0...v1.52.1) (2026-10-06)
 
 
