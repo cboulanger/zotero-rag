@@ -398,8 +398,8 @@ test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps 
 	plugin.backendURL = 'http://backend';
 
 	const result = await plugin.processQueuedAttachmentNow(
-		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
-		{ key: 'I', version: 1 },
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 3 },
+		{ key: 'I', version: 5 },
 		1,
 	);
 
@@ -407,6 +407,11 @@ test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps 
 	assert.strictEqual(capturedOpts.attachmentKey, 'A');
 	assert.strictEqual(capturedOpts.libraryId, 'u1');
 	assert.strictEqual(capturedOpts.backendURL, 'http://backend');
+	// The attachment's CURRENT version must be sent, not whatever was cached
+	// when it was originally deferred — see processQueuedAttachmentNow's
+	// doc comment for why a stale version resurfaces the row as download-failed.
+	assert.strictEqual(capturedOpts.itemVersion, 5);
+	assert.strictEqual(capturedOpts.attachmentVersion, 3);
 });
 
 test('processQueuedAttachmentNow maps a skippedTimeout result to fixed:false with a descriptive error', async () => {

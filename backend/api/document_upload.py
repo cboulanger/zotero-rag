@@ -919,6 +919,8 @@ async def process_cached_upload_now(
     attachment_key: str,
     http_request: Request,
     include_diagnostics: bool = False,
+    item_version: Optional[int] = None,
+    attachment_version: Optional[int] = None,
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
@@ -929,6 +931,15 @@ async def process_cached_upload_now(
     Removes the cache entry whether this succeeds or fails terminally — a
     failure here surfaces the real error immediately rather than retrying
     silently on a future scheduled run.
+
+    `item_version`/`attachment_version`, when given, override the values
+    frozen in the cache at deferral time — an item can sit queued for an
+    arbitrary amount of time before a user forces immediate indexing, during
+    which it may have been edited. Storing the stale cached version would
+    make the vector store believe the item is indexed "as of" an old
+    version, so the next full autoindex scan would see it as changed again
+    and re-attempt (and re-fail) the server-side download that originally
+    put it in the download-failed backlog.
     """
     assert_can_access(identity, library_id)
 
@@ -963,8 +974,10 @@ async def process_cached_upload_now(
         item_key=meta["item_key"],
         attachment_key=attachment_key,
         mime_type=meta.get("mime_type", "application/pdf"),
-        item_version=meta.get("item_version", 0),
-        attachment_version=meta.get("attachment_version", 0),
+        item_version=item_version if item_version is not None else meta.get("item_version", 0),
+        attachment_version=(
+            attachment_version if attachment_version is not None else meta.get("attachment_version", 0)
+        ),
         item_modified=meta.get("zotero_modified", ""),
         library_name=meta.get("library_name", ""),
         vector_store=vector_store,

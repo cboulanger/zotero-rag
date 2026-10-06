@@ -131,6 +131,41 @@ class TestProcessNowEndpoint(unittest.TestCase):
         self.assertEqual(body["status"], "indexed")
         self.assertFalse(pending_upload_cache.has_entry(self.data_path, "u1", "ATT1"))
 
+    @patch("backend.api.document_upload.DocumentProcessor")
+    def test_overrides_the_cached_item_version_with_a_live_one_from_the_caller(self, mock_processor_cls):
+        # The cached entry (set up in setUp) was written with item_version=3,
+        # attachment_version=1 — simulating a deferral that happened a while
+        # ago. If the user edited the item since then, forcing it to index
+        # now must use the CURRENT version the plugin supplies, not the stale
+        # one frozen in the cache — otherwise the vector store would think
+        # the item is indexed "as of" version 3, and the next full autoindex
+        # scan would see the real (higher) live version and treat it as
+        # changed again, re-triggering the same download failure.
+        mock_processor = mock_processor_cls.return_value
+        proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)
+        mock_processor._process_attachment_bytes = AsyncMock(return_value=proc_result)
+
+        response = self.client.post(
+            "/api/index/document/cache/u1/ATT1/process-now",
+            params={"item_version": 9, "attachment_version": 4},
+        )
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = mock_processor._process_attachment_bytes.call_args
+        self.assertEqual(kwargs["item_version"], 9)
+        self.assertEqual(kwargs["attachment_version"], 4)
+
+    @patch("backend.api.document_upload.DocumentProcessor")
+    def test_falls_back_to_the_cached_version_when_no_override_is_given(self, mock_processor_cls):
+        mock_processor = mock_processor_cls.return_value
+        proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)
+        mock_processor._process_attachment_bytes = AsyncMock(return_value=proc_result)
+
+        response = self.client.post("/api/index/document/cache/u1/ATT1/process-now")
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = mock_processor._process_attachment_bytes.call_args
+        self.assertEqual(kwargs["item_version"], 3)
+        self.assertEqual(kwargs["attachment_version"], 1)
+
     def test_returns_404_for_an_attachment_not_in_the_cache(self):
         response = self.client.post("/api/index/document/cache/u1/NEVER_CACHED/process-now")
         self.assertEqual(response.status_code, 404)

@@ -1001,11 +1001,20 @@ var RemoteIndexer = {
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
 	 * @param {boolean} [opts.includeDiagnostics=false]
+	 * @param {number} [opts.itemVersion] - current Zotero item version, overriding the
+	 *   one frozen in the cache at deferral time (see the backend endpoint's docstring
+	 *   for why a stale version causes the item to resurface as download-failed).
+	 * @param {number} [opts.attachmentVersion] - current Zotero attachment version
 	 * @returns {Promise<{rateLimitHeaders: null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
-	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false }) {
+	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false, itemVersion, attachmentVersion }) {
+		/** @type {Array<string>} */
+		const queryParts = [];
+		if (includeDiagnostics) queryParts.push('include_diagnostics=true');
+		if (itemVersion != null) queryParts.push(`item_version=${encodeURIComponent(itemVersion)}`);
+		if (attachmentVersion != null) queryParts.push(`attachment_version=${encodeURIComponent(attachmentVersion)}`);
 		const url = `${backendURL}/api/index/document/cache/${encodeURIComponent(libraryId)}/${encodeURIComponent(attachmentKey)}/process-now`
-			+ (includeDiagnostics ? '?include_diagnostics=true' : '');
+			+ (queryParts.length ? `?${queryParts.join('&')}` : '');
 		// _apiFetch already throws a descriptive error (including the backend's own
 		// detail message) for any non-2xx response, 404 included — no need (and no
 		// way) to special-case it here on the resolved response.
