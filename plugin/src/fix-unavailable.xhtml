@@ -60,6 +60,7 @@
     .status-not-found { color: #999; }
     .status-error    { color: #cc0000; }
     .status-searching { color: #0066cc; }
+    .status-queued   { color: #b36b00; }
     /* Inline action button inside the select column */
     .select-btn { background: none; border: none; padding: 0 2px; cursor: pointer; font-size: 12px; color: #666; line-height: 1; }
     .select-btn:hover { color: #0066cc; }
@@ -82,6 +83,15 @@
     .dialog-button.danger { background: #f5f5f5; color: #cc0000; border-color: #cc0000; }
     .dialog-button.danger:hover { background: #cc0000; color: #fff; }
     .dialog-button.danger:disabled { opacity: 0.5; cursor: not-allowed; }
+    /* Split button: primary action + dropdown alternative */
+    .split-button { position: relative; display: inline-flex; }
+    .split-button .dialog-button.primary { border-radius: 4px 0 0 4px; }
+    .dropdown-toggle { border-radius: 0 4px 4px 0; border-left: 1px solid rgba(255,255,255,0.4); padding: 6px 8px; min-width: auto; }
+    .dropdown-menu { position: absolute; bottom: 100%; right: 0; margin-bottom: 4px; background: #fff; border: 1px solid #ccc; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); min-width: 240px; z-index: 10; }
+    .dropdown-menu[hidden] { display: none; }
+    .dropdown-item { display: block; width: 100%; text-align: left; padding: 8px 12px; border: none; background: none; cursor: pointer; font-family: inherit; font-size: 13px; color: #333; }
+    .dropdown-item:hover { background: #f0f0f0; }
+    .dropdown-item .slow-label { color: #999; font-size: 11px; }
   </style>
 </head>
 
@@ -120,7 +130,13 @@
       <div id="status-bar"></div>
       <button id="close-btn" type="button" class="dialog-button">Close</button>
       <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete Selected</button>
-      <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix Selected</button>
+      <div class="split-button">
+        <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix Selected</button>
+        <button id="fix-dropdown-btn" type="button" class="dialog-button primary dropdown-toggle" disabled="true" style="display:none" title="More options" aria-haspopup="true">&#x25BE;</button>
+        <div id="fix-dropdown-menu" class="dropdown-menu" hidden="true">
+          <button id="fix-index-now-btn" type="button" class="dropdown-item">Fix &amp; Index Selected Now <span class="slow-label">(slow)</span></button>
+        </div>
+      </div>
     </div>
   </div>
 </body>
