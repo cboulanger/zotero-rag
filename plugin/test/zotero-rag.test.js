@@ -312,7 +312,7 @@ test('_uploadDownloadFailedAttachment returns queued:true when the upload is def
 	const RemoteIndexer = {
 		_uploadAttachment: async (opts) => {
 			capturedDefer = opts.defer;
-			return { queued: true, eta: '2026-10-06T15:30:00Z', queueBlockReason: null };
+			return { queued: true, eta: '2026-10-06T15:30:00Z', queueBlockReason: 'key_invalid' };
 		},
 	};
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
@@ -332,16 +332,69 @@ test('_uploadDownloadFailedAttachment returns queued:true when the upload is def
 	assert.strictEqual(result.fixed, false);
 	assert.strictEqual(result.queued, true);
 	assert.strictEqual(result.eta, '2026-10-06T15:30:00Z');
+	assert.strictEqual(result.queueBlockReason, 'key_invalid');
+});
+
+test('retryTimeoutSkippedAttachment returns queued:true with the server-reported queueBlockReason when deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = {
+		_uploadAttachment: async () => ({ queued: true, eta: '2026-10-06T16:00:00Z', queueBlockReason: 'paused' }),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.retryTimeoutSkippedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillTimedOut, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T16:00:00Z');
+	assert.strictEqual(result.queueBlockReason, 'paused');
+});
+
+test('retryEmptyTextSkippedAttachment returns queued:true with the server-reported queueBlockReason when deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = {
+		_uploadAttachment: async () => ({ queued: true, eta: '2026-10-06T16:00:00Z', queueBlockReason: 'key_invalid' }),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.retryEmptyTextSkippedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillEmpty, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T16:00:00Z');
+	assert.strictEqual(result.queueBlockReason, 'key_invalid');
 });
 
 test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps success to fixed:true', async () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	zotero.Libraries.get = () => ({ libraryType: 'user' });
-	const RemoteIndexer = { _processQueuedNow: async () => ({}) };
+	let capturedOpts;
+	const RemoteIndexer = { _processQueuedNow: async (opts) => { capturedOpts = opts; return {}; } };
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
 	plugin.getBackendLibraryId = () => 'u1';
 	plugin.getAuthHeaders = () => ({});
-	plugin.getCurrentZoteroUserId = () => 1;
 	plugin.backendURL = 'http://backend';
 
 	const result = await plugin.processQueuedAttachmentNow(
@@ -351,6 +404,28 @@ test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps 
 	);
 
 	assert.strictEqual(result.fixed, true);
+	assert.strictEqual(capturedOpts.attachmentKey, 'A');
+	assert.strictEqual(capturedOpts.libraryId, 'u1');
+	assert.strictEqual(capturedOpts.backendURL, 'http://backend');
+});
+
+test('processQueuedAttachmentNow maps a skippedTimeout result to fixed:false with a descriptive error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = { _processQueuedNow: async () => ({ skippedTimeout: true, errorDetail: null }) };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.processQueuedAttachmentNow(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+	);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.error, 'Text extraction timed out');
 });
 
 test('getBackendLibraryId returns "u{userId}" for the personal library', () => {

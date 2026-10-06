@@ -2432,7 +2432,7 @@ class ZoteroRAGPlugin {
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
 			if (result.queued) {
-				return { fixed: false, stillTimedOut: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+				return { fixed: false, stillTimedOut: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.queueBlockReason ?? null, ...diag };
 			}
 			if (result.skippedTimeout) {
 				return { fixed: false, stillTimedOut: true, ...diag };
@@ -2495,7 +2495,7 @@ class ZoteroRAGPlugin {
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
 			if (result.queued) {
-				return { fixed: false, stillEmpty: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+				return { fixed: false, stillEmpty: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.queueBlockReason ?? null, ...diag };
 			}
 			if (result.skippedEmpty) {
 				return { fixed: false, stillEmpty: true, ...diag };
@@ -2989,7 +2989,7 @@ class ZoteroRAGPlugin {
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
 			if (result.queued) {
-				return { fixed: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+				return { fixed: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.queueBlockReason ?? null, ...diag };
 			}
 			if (result.parseError) {
 				return { fixed: false, error: result.errorDetail || 'File downloaded but cannot be parsed (binary data)', ...diag };
