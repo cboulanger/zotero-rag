@@ -253,7 +253,6 @@ var ZoteroFixUnavailableDialog = {
 			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
-			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 70, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{
 				dataKey: 'status',
 				label: 'Status',
@@ -284,7 +283,7 @@ var ZoteroFixUnavailableDialog = {
 				getRowCount: () => this.items.length,
 				getRowData: (/** @type {number} */ index) => {
 					const info = this.items[index];
-					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', type: '', status: '', select: '' };
+					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', status: '', select: '' };
 					const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
 					const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
 					return {
@@ -293,7 +292,6 @@ var ZoteroFixUnavailableDialog = {
 						title:    info.title   || '—',
 						zoteroID: info.zoteroID,
 						filename,
-						type:   this._typeLabelFor(info),
 						status: '', // rendered by column.renderer reading this.rowStatus
 						select: '', // rendered by column.renderer
 					};
