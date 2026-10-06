@@ -13,6 +13,7 @@ Key behaviours:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -27,9 +28,11 @@ from typing import Callable, Literal, Optional
 
 from filelock import FileLock, Timeout
 
+from backend.api.document_upload import _execute_upload_impl
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
+from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
@@ -37,6 +40,7 @@ from backend.services.embeddings import (
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
 )
+from backend.services import pending_upload_cache
 from backend.zotero.web_api import ZoteroWebAPI
 
 logger = logging.getLogger(__name__)
@@ -451,6 +455,68 @@ class CronIndexer:
         )
         return "full"
 
+    async def _drain_pending_uploads(self, slug_info: SlugInfo, embedding_service) -> tuple[int, int]:
+        """Process this library's deferred-upload cache through the normal
+        extract+embed+store pipeline, using this run's own embedding_service
+        (the library owner's stored key) and vector_store.
+
+        Returns (drained_count, failed_count). A failed entry stays cached
+        with attempts/last_error updated, to retry on the next run.
+        """
+        data_path = get_settings().data_path
+        entries = await asyncio.to_thread(pending_upload_cache.list_entries, data_path, slug_info.library_id)
+        drained = 0
+        failed = 0
+        for entry in entries:
+            attachment_key = entry["attachment_key"]
+            cached = await asyncio.to_thread(pending_upload_cache.read_entry, data_path, slug_info.library_id, attachment_key)
+            if cached is None:
+                continue
+            file_bytes, meta = cached
+            doc_metadata = DocumentMetadata(
+                library_id=slug_info.library_id,
+                item_key=meta["item_key"],
+                attachment_key=attachment_key,
+                title=meta.get("title", "Untitled"),
+                authors=meta.get("authors", []),
+                year=meta.get("year"),
+                item_type=meta.get("item_type"),
+            )
+            try:
+                result = await _execute_upload_impl(
+                    file_bytes=file_bytes,
+                    content_hash=hashlib.sha256(file_bytes).hexdigest(),
+                    doc_metadata=doc_metadata,
+                    library_id=slug_info.library_id,
+                    library_type=meta.get("library_type", slug_info.library_type),
+                    item_key=meta["item_key"],
+                    attachment_key=attachment_key,
+                    mime_type=meta.get("mime_type", "application/pdf"),
+                    item_version=meta.get("item_version", 0),
+                    attachment_version=meta.get("attachment_version", 0),
+                    item_modified=meta.get("zotero_modified", ""),
+                    library_name=meta.get("library_name", slug_info.slug),
+                    vector_store=self.vector_store,
+                    embedding_service=embedding_service,
+                )
+            except Exception as exc:  # pragma: no cover - defensive, pipeline already catches its own errors
+                self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
+                await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
+                failed += 1
+                continue
+            if result.status == "error":
+                await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
+                failed += 1
+            else:
+                await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
+                drained += 1
+        if drained or failed:
+            self.log.info(
+                "Drained pending uploads for %s: %d indexed, %d failed (retained)",
+                slug_info.slug, drained, failed,
+            )
+        return drained, failed
+
     async def _index_slug(self, slug_info: SlugInfo, status: dict) -> dict:
         """Index a single library slug. Returns stats dict."""
         target = self.targets[slug_info.slug]
@@ -489,6 +555,13 @@ class CronIndexer:
 
         preset = get_settings().get_hardware_preset()
         embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
+
+        pending_drained, pending_failed = await self._drain_pending_uploads(slug_info, embedding_service)
+        if pending_drained or pending_failed:
+            entry = status["slugs"][slug_info.slug]
+            entry["pending_drained"] = pending_drained
+            entry["pending_errors"] = pending_failed
+            self._write_status(status)
 
         try:
             async with web_api:
