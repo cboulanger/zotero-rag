@@ -880,6 +880,59 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual((drained, failed), (0, 0))
 
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_a_malformed_cache_entry_does_not_abort_processing_of_other_entries(self, mock_execute):
+        """A cache entry whose sidecar JSON is missing a required field (e.g. schema
+        drift, a bad write, a hand-edited file) must be recorded as a per-entry
+        failure, not raise out of _drain_pending_uploads — a KeyError/ValidationError
+        while building DocumentMetadata must not abort every other entry (or every
+        other library in the run's per-slug loop)."""
+        # write_entry doesn't validate required fields, so this simulates a
+        # malformed sidecar missing "item_key" — accessing meta["item_key"] directly
+        # (instead of meta.get(...)) raises KeyError while building DocumentMetadata.
+        pending_upload_cache.write_entry(
+            self.data_path, "u9", "ATT_MALFORMED", b"bytes",
+            {"mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/9"},  # missing "item_key"
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u9", "ATT_GOOD", b"good bytes",
+            {"item_key": "ITEM_GOOD", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/9"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(status="indexed", message="ok")
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/9": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock9",
+            status_file=self.data_path / "status9.json", log=MagicMock(),
+        )
+        embedding_service = MagicMock()
+
+        # Must return normally (not raise) despite the malformed entry.
+        drained, failed = await indexer._drain_pending_uploads(
+            indexer.parse_slug("users/9"), embedding_service
+        )
+
+        self.assertEqual(drained, 1)
+        self.assertEqual(failed, 1)
+        # The well-formed entry was processed and removed from the cache.
+        self.assertFalse(pending_upload_cache.has_entry(self.data_path, "u9", "ATT_GOOD"))
+        # The malformed entry stays cached, with attempts bumped, for visibility/retry.
+        self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u9", "ATT_MALFORMED"))
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u9", "ATT_MALFORMED")
+        self.assertEqual(meta["attempts"], 1)
+        self.assertIsNotNone(meta["last_error"])
+        # The malformed entry must never have reached the upload pipeline.
+        called_attachment_keys = {call.kwargs["attachment_key"] for call in mock_execute.call_args_list}
+        self.assertNotIn("ATT_MALFORMED", called_attachment_keys)
+        self.assertIn("ATT_GOOD", called_attachment_keys)
+
 
 if __name__ == "__main__":
     unittest.main()

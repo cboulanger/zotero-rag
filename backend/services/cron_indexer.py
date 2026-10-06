@@ -464,25 +464,34 @@ class CronIndexer:
         with attempts/last_error updated, to retry on the next run.
         """
         data_path = get_settings().data_path
-        entries = await asyncio.to_thread(pending_upload_cache.list_entries, data_path, slug_info.library_id)
+        try:
+            entries = await asyncio.to_thread(pending_upload_cache.list_entries, data_path, slug_info.library_id)
+        except Exception as exc:
+            # list_entries already swallows per-file OSError/JSONDecodeError internally;
+            # this only catches something like a directory-level permissions error. Treat
+            # it as "nothing to drain this run" rather than letting it propagate up through
+            # _index_slug and CronIndexer.run()'s per-slug loop, which would abort every
+            # other library processed after this one in the same run.
+            self.log.error("Could not list pending uploads for %s: %s", slug_info.slug, exc)
+            return 0, 0
         drained = 0
         failed = 0
         for entry in entries:
             attachment_key = entry["attachment_key"]
-            cached = await asyncio.to_thread(pending_upload_cache.read_entry, data_path, slug_info.library_id, attachment_key)
-            if cached is None:
-                continue
-            file_bytes, meta = cached
-            doc_metadata = DocumentMetadata(
-                library_id=slug_info.library_id,
-                item_key=meta["item_key"],
-                attachment_key=attachment_key,
-                title=meta.get("title", "Untitled"),
-                authors=meta.get("authors", []),
-                year=meta.get("year"),
-                item_type=meta.get("item_type"),
-            )
             try:
+                cached = await asyncio.to_thread(pending_upload_cache.read_entry, data_path, slug_info.library_id, attachment_key)
+                if cached is None:
+                    continue
+                file_bytes, meta = cached
+                doc_metadata = DocumentMetadata(
+                    library_id=slug_info.library_id,
+                    item_key=meta["item_key"],
+                    attachment_key=attachment_key,
+                    title=meta.get("title", "Untitled"),
+                    authors=meta.get("authors", []),
+                    year=meta.get("year"),
+                    item_type=meta.get("item_type"),
+                )
                 result = await _execute_upload_impl(
                     file_bytes=file_bytes,
                     content_hash=hashlib.sha256(file_bytes).hexdigest(),
@@ -499,7 +508,13 @@ class CronIndexer:
                     vector_store=self.vector_store,
                     embedding_service=embedding_service,
                 )
-            except Exception as exc:  # pragma: no cover - defensive, pipeline already catches its own errors
+            except Exception as exc:
+                # Catches both a malformed cache entry (e.g. missing "item_key" —
+                # KeyError, or a bad "year" — pydantic ValidationError, while building
+                # DocumentMetadata above) and anything _execute_upload_impl itself
+                # raises (defensive — the pipeline already catches its own errors).
+                # Either way, one bad entry must not abort the rest of this library's
+                # queue or any other library in the run.
                 self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
                 await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
                 failed += 1
