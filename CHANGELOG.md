@@ -1,3 +1,39 @@
+# [1.52.0](https://github.com/cboulanger/zotero-rag/compare/v1.51.0...v1.52.0) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** guard compute_queue_eta against a naive cron_status.json timestamp ([d950a5b](https://github.com/cboulanger/zotero-rag/commit/d950a5b818d0cebe99a4365e0481f9159dd80641))
+* **backend:** isolate malformed pending-upload cache entries in _drain_pending_uploads ([12416b8](https://github.com/cboulanger/zotero-rag/commit/12416b8002b6d054a3beaa2c3d3c0cf8274e4de8))
+* **backend:** run pending_upload_cache file I/O off the event loop ([f2dff53](https://github.com/cboulanger/zotero-rag/commit/f2dff53305c9fa67bd49c31ac5b7dafee06b835e))
+* **embeddings:** raise instead of returning None when truncation is exhausted ([ba6471e](https://github.com/cboulanger/zotero-rag/commit/ba6471e1be3598bb70644d85e2923894dab6ac74))
+* **migration:** retry all httpx transport errors, not just connect/timeout ([15b0352](https://github.com/cboulanger/zotero-rag/commit/15b0352acfe9ce14d904517b90cabbcebafecf7e))
+* **plugin:** correctly flag link-only attachments in download-failed backlog ([5cb3eaa](https://github.com/cboulanger/zotero-rag/commit/5cb3eaac98c9ee3031df22b55dc47b0da6e68252))
+* **plugin:** fix debug-report gap for already-queued rows in Fix Unavailable dialog ([d74a3ed](https://github.com/cboulanger/zotero-rag/commit/d74a3ed6bc021ff87ef1264ff326e4d3ac5f81ea))
+* **plugin:** make getQueuedStatusMap fail gracefully, add check_failed test ([08691f3](https://github.com/cboulanger/zotero-rag/commit/08691f3fcab1d7b8d47c87e877fbc1d22b1f7e6f))
+* **plugin:** read queueBlockReason instead of nonexistent result.reason ([0dff410](https://github.com/cboulanger/zotero-rag/commit/0dff410a1367d864f8adef4a51ae59a6d0742e72))
+* **plugin:** remove dead 404 branch in _processQueuedNow, add logging ([0d79aba](https://github.com/cboulanger/zotero-rag/commit/0d79aba3674722611383ce4f26da94ec3e3e3369))
+
+
+### Features
+
+* **backend:** add pending-upload cache storage primitives ([2f9b7b3](https://github.com/cboulanger/zotero-rag/commit/2f9b7b348cc583b72acdbef1167360a04e18e5ce))
+* **backend:** add POST /api/index/document/cache deferred-upload endpoint ([216f59a](https://github.com/cboulanger/zotero-rag/commit/216f59aac656e6a30b5af409ec45d433740522ec))
+* **backend:** add process-now endpoint to force-index a cached upload ([cc8e826](https://github.com/cboulanger/zotero-rag/commit/cc8e8265f69b1bd91c53c9f66e3169d665d53e40))
+* **backend:** compute deferred-indexing ETA and block reason ([e86e2b3](https://github.com/cboulanger/zotero-rag/commit/e86e2b39da7906f576ef9d09a7002c25fbdd79c9))
+* **backend:** drain each library's pending-upload cache during its autoindex run ([08a4fc0](https://github.com/cboulanger/zotero-rag/commit/08a4fc02cb578af66da0ea78f1c1244666f16d87))
+* **backend:** report queued/eta status from check-indexed for cached uploads ([5538e4d](https://github.com/cboulanger/zotero-rag/commit/5538e4d69f75b03470d170dbda982d9302596185))
+* **migration:** add --mode flag and interactive resume/clean prompt ([5bcb9a6](https://github.com/cboulanger/zotero-rag/commit/5bcb9a62941bbd597effb0f7002ed630e912f4ef))
+* **migration:** add resume-from-cursor state persistence module ([56fcc3b](https://github.com/cboulanger/zotero-rag/commit/56fcc3be1d20d44278d02ef02475ed1f957bd515))
+* **migration:** make run_migration mode/state-aware for resume support ([f34ce3e](https://github.com/cboulanger/zotero-rag/commit/f34ce3ead47c267c3420e701d41b1303499aba9c))
+* **plugin:** add defer mode to RemoteIndexer._uploadAttachment ([4ade264](https://github.com/cboulanger/zotero-rag/commit/4ade2644bf5b8fb007c42b5ed9bca59a78f29db2))
+* **plugin:** add getQueuedStatusMap for the Fix dialog's queued-row display ([74a3cbc](https://github.com/cboulanger/zotero-rag/commit/74a3cbc94fd7e4d1d6c37fafbc02347946cb3640))
+* **plugin:** add RemoteIndexer._processQueuedNow for forcing a cached upload ([c2f78d4](https://github.com/cboulanger/zotero-rag/commit/c2f78d448c543c85c3e4fe9fd2cfd7d07af1dfa1))
+* **plugin:** add split-button markup and queued-status styling to Fix Unavailable dialog ([b00c72f](https://github.com/cboulanger/zotero-rag/commit/b00c72f067eff6d261500eebbf991ad9d343f3bf))
+* **plugin:** make server-download-failed attachments opt-in, with concrete status reasons ([cd5aa7b](https://github.com/cboulanger/zotero-rag/commit/cd5aa7b327252e4c75ea35992978a397d9d59b8d))
+* **plugin:** thread defer mode through Fix Unavailable upload wrappers ([b4a9127](https://github.com/cboulanger/zotero-rag/commit/b4a91277b0ee00eb191af1b02d0c5a6ed8dd96af))
+* **plugin:** wire split-button and queued-row handling into Fix Unavailable dialog ([9fd631d](https://github.com/cboulanger/zotero-rag/commit/9fd631deb91ea9e4d9e4687f75f2dafba78cc17c))
+
 # [1.51.0](https://github.com/cboulanger/zotero-rag/compare/v1.50.0...v1.51.0) (2026-10-05)
 
 
