@@ -581,10 +581,15 @@ class CronIndexer:
         try:
             async with web_api:
                 mode = await self._resolve_mode(slug_info, web_api)
+                # See _execute_upload_impl's comment (backend/api/document_upload.py)
+                # for why these must come from the preset rather than this class's
+                # own generic defaults.
                 processor = DocumentProcessor(
                     zotero_client=web_api,  # type: ignore[arg-type]  # duck-typed
                     embedding_service=embedding_service,
                     vector_store=self.vector_store,
+                    max_chunk_size=preset.rag.max_chunk_size,
+                    chunk_merge_target_size=preset.rag.max_chunk_size,
                 )
                 stats = await processor.index_library(
                     library_id=slug_info.library_id,

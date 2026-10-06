@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from backend.config import settings as settings_module
 from backend.services.cron_indexer import (
     AlreadyRunningError,
     CronIndexer,
@@ -222,6 +223,36 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["running"])
         self.assertEqual(status["slugs"]["users/1"]["status"], "done")
         self.assertEqual(status["slugs"]["groups/2"]["status"], "done")
+
+    async def test_index_slug_constructs_the_processor_with_the_preset_s_chunk_size(self):
+        # Regression: DocumentProcessor's own generic defaults (512/1500
+        # chars) are disconnected from any particular embedding model's real
+        # token limit — see the identical test in test_cache_upload_endpoints.py
+        # for the full rationale. The cron's full-library-scan processor must
+        # use the active preset's rag.max_chunk_size for both parameters too.
+        indexer = _make_indexer(["users/1"], self.tmp)
+        fake_stats = {"items_processed": 1, "chunks_added": 1, "mode": "full"}
+        fake_preset = MagicMock()
+        fake_preset.rag.max_chunk_size = 999
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             patch.object(settings_module.Settings, "get_hardware_preset", return_value=fake_preset), \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(return_value=fake_stats)
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
+        _, kwargs = MockProcessor.call_args
+        self.assertEqual(kwargs["max_chunk_size"], 999)
+        self.assertEqual(kwargs["chunk_merge_target_size"], 999)
 
     async def test_run_aggregates_items_failed(self):
         """items_failed must be forwarded per-slug and summed across the whole run, so a

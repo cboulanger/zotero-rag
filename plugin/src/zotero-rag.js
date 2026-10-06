@@ -3072,6 +3072,16 @@ class ZoteroRAGPlugin {
 	async processQueuedAttachmentNow(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
 		try {
 			const backendLibraryId = this.getBackendLibraryId(libraryID);
+			// Pass the item's CURRENT version, not whatever was cached when the
+			// upload was originally deferred — an arbitrary amount of time may
+			// have passed since then (the row can sit "queued" indefinitely
+			// until the user forces it), during which the item may have been
+			// edited. Storing a stale version would make the vector store think
+			// the item is indexed "as of" an old version, so the next full
+			// autoindex scan would treat it as changed again, re-attempt the
+			// server-side download that failed in the first place, and silently
+			// resurface this row as "download-failed" even though it was just
+			// successfully fixed.
 			const result = await RemoteIndexer._processQueuedNow({
 				libraryId: backendLibraryId,
 				attachmentKey: attachmentItem.key,
@@ -3079,6 +3089,8 @@ class ZoteroRAGPlugin {
 				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
 				log: (msg) => this.log(msg),
 				includeDiagnostics,
+				itemVersion: parentItem ? (parentItem.version || 0) : (attachmentItem.version || 0),
+				attachmentVersion: attachmentItem.version || 0,
 			});
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 			if (result.parseError) {

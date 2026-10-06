@@ -58,6 +58,9 @@ var ZoteroFixUnavailableDialog = {
 	/** @type {boolean} */
 	isRunning: false,
 
+	/** @type {boolean} */
+	_cancelRequested: false,
+
 	/**
 	 * Per-row status state, indexed by row index.
 	 * @type {Map<number, RowStatus>}
@@ -93,6 +96,15 @@ var ZoteroFixUnavailableDialog = {
 		this.backendLibraryId = args.backendLibraryId || String(args.libraryID);
 
 		document.getElementById('close-btn').addEventListener('click', () => {
+			// While a fix run is in progress, "Close" is repurposed as "Cancel"
+			// (see searchAndFix) — stop the run instead of closing the window.
+			if (this.isRunning) {
+				this._cancelRequested = true;
+				const closeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('close-btn'));
+				closeBtn.disabled = true;
+				closeBtn.textContent = 'Cancelling…';
+				return;
+			}
 			try {
 				if (window.opener && this.plugin) this.plugin._scanUnavailableCount(window.opener);
 			} catch (_) {}
@@ -241,7 +253,6 @@ var ZoteroFixUnavailableDialog = {
 			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
-			{ dataKey: 'type',     label: 'Type',      fixedWidth: true, width: 70, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{
 				dataKey: 'status',
 				label: 'Status',
@@ -272,7 +283,7 @@ var ZoteroFixUnavailableDialog = {
 				getRowCount: () => this.items.length,
 				getRowData: (/** @type {number} */ index) => {
 					const info = this.items[index];
-					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', type: '', status: '', select: '' };
+					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', status: '', select: '' };
 					const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
 					const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
 					return {
@@ -281,7 +292,6 @@ var ZoteroFixUnavailableDialog = {
 						title:    info.title   || '—',
 						zoteroID: info.zoteroID,
 						filename,
-						type:   this._typeLabelFor(info),
 						status: '', // rendered by column.renderer reading this.rowStatus
 						select: '', // rendered by column.renderer
 					};
@@ -596,7 +606,7 @@ var ZoteroFixUnavailableDialog = {
 		}
 
 		this.isRunning = false;
-		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
+		this._resetCloseButton();
 		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
 		await this.populateTable();
 		try {
@@ -614,11 +624,36 @@ var ZoteroFixUnavailableDialog = {
 		if (this.isRunning) return;
 		this.isRunning = true;
 		this._setAllButtonsDisabled(true);
+		// Close is repurposed as Cancel for the duration of the run (see the
+		// close-btn click handler in init()), overriding the blanket disable above.
+		this._cancelRequested = false;
+		const closeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('close-btn'));
+		closeBtn.disabled = false;
+		closeBtn.textContent = 'Cancel';
 
 		const allSelectedIndices = this.getSelectedIndices();
 		const alreadyQueuedIndices = allSelectedIndices.filter(i => this.rowStatus.get(i)?.cssClass === 'queued');
 		const indices = allSelectedIndices.filter(i => !alreadyQueuedIndices.includes(i));
 		const defer = this.deferCapable && !forceIndexNow;
+
+		// Progress tracking: an index counts as "processed" exactly once it
+		// reaches a terminal outcome (fixed/queued/not-found/error) in one of
+		// the phases below — NOT merely passed through a phase, since several
+		// phases hand still-unresolved rows on to the next one (e.g. Phase 1's
+		// stillMissing rows are only finished off in Phase 2).
+		const totalToProcess = indices.length + (forceIndexNow ? alreadyQueuedIndices.length : 0);
+		let processedCount = 0;
+		/** @type {Set<number>} */
+		const processedIndices = new Set();
+		const markProcessed = (/** @type {number} */ i) => {
+			processedIndices.add(i);
+			processedCount++;
+			this._updateProgress(processedCount, totalToProcess);
+		};
+		if (totalToProcess > 0) {
+			this._showProgress();
+			this._updateProgress(0, totalToProcess);
+		}
 		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
 		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
 		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
@@ -656,8 +691,8 @@ var ZoteroFixUnavailableDialog = {
 			for (const i of linkedIndices)     itemHandles.get(i).skip('skipped_linked_file', 'linked file — cannot be auto-downloaded');
 		}
 
-		for (const i of parseErrorIndices)  this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
-		for (const i of linkedIndices)      this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
+		for (const i of parseErrorIndices)  { this.setRowStatus(i, 'not-found', 'Binary data — delete and replace'); markProcessed(i); }
+		for (const i of linkedIndices)      { this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero'); markProcessed(i); }
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of serverFailedIndices) this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');
@@ -675,9 +710,10 @@ var ZoteroFixUnavailableDialog = {
 		/** @type {Array<number>} */
 		const timeoutQueuedIndices = [];
 		let timeoutStillFailed = 0;
-		if (timeoutIndices.length > 0) {
+		if (timeoutIndices.length > 0 && !this._cancelRequested) {
 			this.setStatus(`Retrying ${timeoutIndices.length} timed-out file(s) with a longer timeout...`);
 			for (const i of timeoutIndices) {
+				if (this._cancelRequested) break;
 				const info = this.items[i];
 				const step = itemHandles.get(i)?.addStep('timeout_retry');
 				try {
@@ -709,6 +745,7 @@ var ZoteroFixUnavailableDialog = {
 					timeoutStillFailed++;
 					console.error(`fix-unavailable: timeout retry error for item ${info.zoteroID}: ${msg}`);
 				}
+				markProcessed(i);
 			}
 		}
 		if ((timeoutFixedIndices.length > 0 || timeoutQueuedIndices.length > 0) && this.plugin?.removeSkippedServerItems) {
@@ -735,9 +772,10 @@ var ZoteroFixUnavailableDialog = {
 		/** @type {Array<number>} */
 		const emptyTextQueuedIndices = [];
 		let emptyTextStillFailed = 0;
-		if (emptyTextIndices.length > 0) {
+		if (emptyTextIndices.length > 0 && !this._cancelRequested) {
 			this.setStatus(`Re-checking ${emptyTextIndices.length} previously empty file(s)...`);
 			for (const i of emptyTextIndices) {
+				if (this._cancelRequested) break;
 				const info = this.items[i];
 				const step = itemHandles.get(i)?.addStep('empty_text_retry');
 				try {
@@ -769,6 +807,7 @@ var ZoteroFixUnavailableDialog = {
 					emptyTextStillFailed++;
 					console.error(`fix-unavailable: empty-text retry error for item ${info.zoteroID}: ${msg}`);
 				}
+				markProcessed(i);
 			}
 		}
 		if ((emptyTextFixedIndices.length > 0 || emptyTextQueuedIndices.length > 0) && this.plugin?.removeSkippedServerItems) {
@@ -799,6 +838,7 @@ var ZoteroFixUnavailableDialog = {
 		let serverFailedErrors = 0;
 		if (serverFailedIndices.length > 0) {
 			for (let idx = 0; idx < serverFailedIndices.length; idx++) {
+				if (this._cancelRequested) break;
 				const i = serverFailedIndices[idx];
 				const info = this.items[i];
 				this.setRowStatus(i, 'searching', `Downloading & indexing (${idx + 1}/${serverFailedIndices.length})...`);
@@ -814,14 +854,19 @@ var ZoteroFixUnavailableDialog = {
 					if (result.fixed) {
 						this.setRowStatus(i, 'fixed', 'Downloaded & indexed');
 						serverFailedFixedIndices.push(i);
+						markProcessed(i);
 					} else if (result.queued) {
 						this.setRowStatus(i, 'queued', this._formatQueuedText(result.eta, result.queueBlockReason));
 						serverFailedQueuedIndices.push(i);
+						markProcessed(i);
 					} else if (result.stillMissing) {
+						// Not a terminal outcome yet — falls through to Phase 2 below,
+						// which marks it processed once it reaches a final status.
 						serverFailedStillMissing.push(i);
 					} else {
 						this.setRowStatus(i, 'error', `Indexing failed: ${result.error}`, result.error);
 						serverFailedErrors++;
+						markProcessed(i);
 					}
 				} catch (e) {
 					const msg = e instanceof Error ? e.message : String(e);
@@ -830,6 +875,7 @@ var ZoteroFixUnavailableDialog = {
 					itemHandles.get(i)?.addError('plugin', e);
 					serverFailedErrors++;
 					console.error(`fix-unavailable: download-failed retry error for item ${info.zoteroID}: ${msg}`);
+					markProcessed(i);
 				}
 			}
 		}
@@ -840,6 +886,7 @@ var ZoteroFixUnavailableDialog = {
 		const downloadResults = [];
 
 		for (let batchStart = 0; batchStart < importedIndices.length; batchStart += BATCH_SIZE) {
+			if (this._cancelRequested) break;
 			const batch = importedIndices.slice(batchStart, batchStart + BATCH_SIZE);
 			const batchEnd = Math.min(batchStart + BATCH_SIZE, importedIndices.length);
 			this.setStatus(`Phase 1/2: downloading file(s) via Zotero sync (${batchEnd}/${importedIndices.length})...`);
@@ -861,6 +908,7 @@ var ZoteroFixUnavailableDialog = {
 					const rejection = /** @type {any} */ (outcome).reason;
 					itemHandles.get(index)?.addStep('sync_download').finish('error', { reason: 'rejected', error: String(rejection) });
 					if (rejection) itemHandles.get(index)?.addError('plugin', rejection);
+					markProcessed(index);
 				} else {
 					const { index, downloaded, reason } = outcome.value;
 					downloadResults.push({ index, downloaded, reason });
@@ -870,7 +918,10 @@ var ZoteroFixUnavailableDialog = {
 					);
 					if (downloaded) {
 						this.setRowStatus(index, 'fixed', 'Downloaded');
+						markProcessed(index);
 					} else {
+						// Not terminal yet — falls through to Phase 2's other-library
+						// search below, which marks it processed once it's resolved.
 						this.setRowStatus(index, 'searching',
 							reason === 'sync-disabled' ? 'Sync off — searching...' : 'Searching...'
 						);
@@ -896,9 +947,10 @@ var ZoteroFixUnavailableDialog = {
 		/** @type {Array<number>} */
 		const phase2QueuedIndices = [];
 
-		if (stillMissing.length > 0) {
+		if (stillMissing.length > 0 && !this._cancelRequested) {
 			this.setStatus(`Phase 2/2: searching other libraries for ${stillMissing.length} remaining file(s)...`);
 			for (const i of stillMissing) {
+				if (this._cancelRequested) break;
 				const info = this.items[i];
 				const step = itemHandles.get(i)?.addStep('other_library_search');
 				try {
@@ -964,6 +1016,7 @@ var ZoteroFixUnavailableDialog = {
 					errors++;
 					console.error(`fix-unavailable: error for item ${info.zoteroID}: ${msg}`);
 				}
+				markProcessed(i);
 			}
 		}
 
@@ -1002,8 +1055,9 @@ var ZoteroFixUnavailableDialog = {
 		// (forceIndexNow), force immediate processing of those too. Otherwise
 		// leave them untouched — they're already cached server-side awaiting the
 		// next scheduled run, nothing to repair.
-		if (forceIndexNow && alreadyQueuedIndices.length > 0) {
+		if (forceIndexNow && alreadyQueuedIndices.length > 0 && !this._cancelRequested) {
 			for (const i of alreadyQueuedIndices) {
+				if (this._cancelRequested) break;
 				const info = this.items[i];
 				this.setRowStatus(i, 'searching', 'Indexing now...');
 				const step = itemHandles.get(i)?.addStep('process_now');
@@ -1033,6 +1087,7 @@ var ZoteroFixUnavailableDialog = {
 					errors++;
 					console.error(`fix-unavailable: process-now error for item ${info.zoteroID}: ${msg}`);
 				}
+				markProcessed(i);
 			}
 		}
 		// When !forceIndexNow, alreadyQueuedIndices are deliberately left untouched —
@@ -1048,6 +1103,13 @@ var ZoteroFixUnavailableDialog = {
 			const st = this.rowStatus.get(i);
 			if (st) handle.setFinalStatus(st.cssClass, st.text);
 		}
+
+		// Deselect every row that reached a terminal outcome this run (whether
+		// fixed, queued, not-found, or errored) — including rows about to be
+		// dropped from the table below. If the run was cancelled partway
+		// through, this leaves only the not-yet-processed rows selected, so
+		// "Search & Fix Selected" can simply be clicked again to resume.
+		for (const i of processedIndices) this.selected.delete(i);
 
 		// Drop fixed rows from the table immediately rather than waiting for a
 		// manual Refresh — and do it by filtering this.items in place instead
@@ -1077,13 +1139,24 @@ var ZoteroFixUnavailableDialog = {
 				this.plugin.updateMissingFilesCount(this.backendLibraryId, this.items.length);
 			}
 			this.tableHelper?.render(undefined, () => this.updateActionButtons());
+		} else if (processedIndices.size > 0) {
+			// Nothing was removed from the table, but some checkboxes above were
+			// just cleared by the deselect step — repaint so that's reflected.
+			try {
+				this.tableHelper?.treeInstance?.invalidate();
+			} catch (_) {}
 		}
 
+		const wasCancelled = this._cancelRequested;
 		const parts = [];
 		if (fixed    > 0) parts.push(`${fixed} fixed`);
 		if (notFound > 0) parts.push(`${notFound} not found`);
 		if (errors   > 0) parts.push(`${errors} error${errors !== 1 ? 's' : ''}`);
-		const doneText = `Done. ${parts.join(', ')}.`;
+		const summarySuffix = parts.length > 0 ? ` ${parts.join(', ')}.` : '';
+		const doneText = wasCancelled
+			? `Cancelled after ${processedIndices.size}/${totalToProcess} item(s).${summarySuffix}`
+			: `Done.${summarySuffix}`;
+		this._hideProgress();
 		this.setStatus(doneText);
 
 		if (report) {
@@ -1092,7 +1165,7 @@ var ZoteroFixUnavailableDialog = {
 		}
 
 		this.isRunning = false;
-		/** @type {HTMLButtonElement} */ (document.getElementById('close-btn')).disabled = false;
+		this._resetCloseButton();
 		/** @type {HTMLButtonElement} */ (document.getElementById('refresh-btn')).disabled = false;
 		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = false;
 		this.updateActionButtons();
@@ -1172,8 +1245,57 @@ var ZoteroFixUnavailableDialog = {
 	 * @returns {void}
 	 */
 	setStatus(text) {
-		const bar = document.getElementById('status-bar');
+		const bar = document.getElementById('status-text');
 		if (bar) bar.textContent = text;
+	},
+
+	/**
+	 * Reveal the progress meter (hidden by default / between runs).
+	 * @returns {void}
+	 */
+	_showProgress() {
+		const wrap = /** @type {HTMLElement|null} */ (document.getElementById('progress-wrap'));
+		if (wrap) wrap.style.display = 'inline-flex';
+	},
+
+	/**
+	 * Hide the progress meter and reset it, ready for the next run.
+	 * @returns {void}
+	 */
+	_hideProgress() {
+		const wrap = /** @type {HTMLElement|null} */ (document.getElementById('progress-wrap'));
+		if (wrap) wrap.style.display = 'none';
+		const meter = /** @type {HTMLProgressElement|null} */ (document.getElementById('progress-meter'));
+		if (meter) meter.value = 0;
+	},
+
+	/**
+	 * Update the "x/y items processed" progress meter shown during a run.
+	 * @param {number} processed
+	 * @param {number} total
+	 * @returns {void}
+	 */
+	_updateProgress(processed, total) {
+		const meter = /** @type {HTMLProgressElement|null} */ (document.getElementById('progress-meter'));
+		const text = document.getElementById('progress-text');
+		if (meter) {
+			meter.max = Math.max(total, 1);
+			meter.value = processed;
+		}
+		if (text) text.textContent = `${processed}/${total} items processed`;
+	},
+
+	/**
+	 * Restore the Close button to its idle state (text + enabled) and clear
+	 * any pending cancellation flag. Called when a run (fix or delete) ends,
+	 * regardless of whether it completed, errored, or was cancelled.
+	 * @returns {void}
+	 */
+	_resetCloseButton() {
+		this._cancelRequested = false;
+		const closeBtn = /** @type {HTMLButtonElement} */ (document.getElementById('close-btn'));
+		closeBtn.textContent = 'Close';
+		closeBtn.disabled = false;
 	}
 };
 

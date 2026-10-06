@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import os
+import re
 import time
 import random
 from abc import ABC, abstractmethod
@@ -21,6 +22,32 @@ from backend.config.presets import EmbeddingConfig
 
 
 logger = logging.getLogger(__name__)
+
+
+def _context_length_truncation_fraction(message: str, default: float = 0.85) -> float:
+    """How much of a too-long embedding input to keep, given the API's own
+    "maximum context length is N tokens. However, your request has M input
+    tokens" message.
+
+    A blind fixed fraction can take many rounds to converge — or exhaust the
+    retry budget before converging at all — when the input is far over the
+    limit (e.g. a merged chunk 2-3x the model's context window). Computing
+    the exact overflow ratio from the error message itself lands a single
+    truncation comfortably under the limit instead of guessing. Falls back
+    to `default` if the message doesn't contain both numbers.
+    """
+    actual_match = re.search(r"(\d+)\s*input tokens", message)
+    limit_match = re.search(r"maximum context length is (\d+)", message)
+    if not actual_match or not limit_match:
+        return default
+    actual = int(actual_match.group(1))
+    limit = int(limit_match.group(1))
+    if actual <= 0 or limit <= 0 or actual <= limit:
+        return default
+    # 90% of the exact ratio as a safety margin — token count isn't perfectly
+    # proportional to word count, so aim comfortably under, not right at, the limit.
+    fraction = (limit / actual) * 0.9
+    return max(0.05, min(fraction, default))
 
 
 class EmbeddingRateLimitExhaustedError(Exception):
@@ -537,8 +564,9 @@ class RemoteEmbeddingService(EmbeddingService):
                 self.rate_limit_wait_seconds += retry_after
                 await asyncio.sleep(retry_after)
             except BadRequestError as exc:
-                msg = str(exc).lower()
-                if "context length" not in msg and "maximum context" not in msg:
+                msg = str(exc)
+                msg_lower = msg.lower()
+                if "context length" not in msg_lower and "maximum context" not in msg_lower:
                     raise
                 if attempt == max_attempts - 1:
                     # Truncating further won't help if it hasn't by now, and
@@ -547,19 +575,26 @@ class RemoteEmbeddingService(EmbeddingService):
                     # otherwise return None and crash the caller with a
                     # confusing "'NoneType' object has no attribute 'data'".
                     raise
-                # Truncate and retry: remove ~15% of words from the end each attempt.
+                # Truncate and retry. Prefer the exact overflow ratio reported in
+                # the error message (converges in one round); fall back to a
+                # blind ~15%-per-round cut if the message can't be parsed.
+                fraction = _context_length_truncation_fraction(msg)
                 if isinstance(input, str):
                     words = input.split()
-                    input = " ".join(words[: int(len(words) * 0.85)])
+                    new_len = max(1, int(len(words) * fraction))
+                    input = " ".join(words[:new_len])
                     logger.warning(
-                        f"Embedding input exceeded context length — truncated to {len(words)} words "
-                        f"(attempt {attempt + 1})"
+                        f"Embedding input exceeded context length — truncated from {len(words)} "
+                        f"to {new_len} words (attempt {attempt + 1}, keep_fraction={fraction:.2f})"
                     )
                 elif isinstance(input, list):
-                    input = [" ".join(t.split()[: int(len(t.split()) * 0.85)]) for t in input]
+                    def _truncate(text: str) -> str:
+                        words = text.split()
+                        return " ".join(words[: max(1, int(len(words) * fraction))])
+                    input = [_truncate(t) for t in input]
                     logger.warning(
                         f"Embedding batch exceeded context length — truncated texts "
-                        f"(attempt {attempt + 1})"
+                        f"(attempt {attempt + 1}, keep_fraction={fraction:.2f})"
                     )
                 else:
                     raise
