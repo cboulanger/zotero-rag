@@ -74,10 +74,15 @@ class TestCacheUploadEndpoint(unittest.TestCase):
         # still cached even though nothing will drain it yet
         self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT1"))
 
-    def test_rejects_access_to_a_library_the_identity_cannot_reach(self):
-        with patch("backend.api.document_upload.assert_can_access", side_effect=Exception("forbidden")):
-            response = self._upload()
-        self.assertEqual(response.status_code, 500)  # unhandled Exception surfaces as 500 under raise_server_exceptions=False
+    def test_rejects_access_to_a_library_outside_the_identity_s_targets(self):
+        # self.identity.targets is ["users/1"] — "u2" maps to slug "users/2",
+        # which isn't in it, so the real (unmocked) assert_can_access inside
+        # _parse_upload_request must reject this with a genuine 403, the same
+        # way test_document_upload_authorization.py checks the sibling
+        # sync/async upload endpoints.
+        response = self._upload(library_id="u2")
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(pending_upload_cache.has_entry(self.data_path, "u2", "ATT1"))
 
 
 if __name__ == "__main__":
