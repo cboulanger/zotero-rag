@@ -163,7 +163,14 @@ def compute_queue_eta(settings) -> tuple[Optional[str], Optional[str]]:
         except (OSError, json.JSONDecodeError):
             pass
         last_dt = datetime.fromisoformat(last_ts) if last_ts else now
+        # cron_status.json is always written with an aware UTC timestamp today,
+        # but coerce defensively so a naive one can never raise a naive/aware
+        # TypeError on the comparison below.
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.replace(tzinfo=timezone.utc)
         eta_dt = last_dt + timedelta(minutes=settings.autoindex_interval_minutes)
+        # scheduler missed its tick (or this is the first-ever run) — report
+        # "imminent" rather than a stale past timestamp.
         if eta_dt < now:
             eta_dt = now
         return eta_dt.isoformat(), None

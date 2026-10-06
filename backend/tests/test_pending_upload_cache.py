@@ -130,7 +130,8 @@ class TestQueueStatus(unittest.TestCase):
         eta_dt = datetime.fromisoformat(eta)
         self.assertEqual(eta_dt.minute, 0)
         self.assertEqual(eta_dt.second, 0)
-        self.assertTrue(eta_dt > datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        self.assertTrue(timedelta(0) < (eta_dt - now) <= timedelta(hours=1))
 
     def test_paused_scheduler_reports_paused_reason_and_no_eta(self):
         from backend.services.autoindex_scheduler import write_scheduler_state
