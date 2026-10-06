@@ -867,7 +867,8 @@ async def upload_document_to_cache(
         file_bytes, _timeout_multiplier = await _parse_upload_request(file, metadata, identity)
 
     settings = get_settings()
-    pending_upload_cache.write_entry(
+    await asyncio.to_thread(
+        pending_upload_cache.write_entry,
         settings.data_path, library_id, attachment_key, file_bytes,
         {
             "item_key": item_key,
@@ -886,7 +887,7 @@ async def upload_document_to_cache(
     logger.info(f"Cached deferred upload: library={library_id} attachment={attachment_key}")
 
     key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
-    status = pending_upload_cache.get_queue_status(settings, library_id, key_store)
+    status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
     return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
 
 
@@ -917,7 +918,7 @@ async def process_cached_upload_now(
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
     settings = get_settings()
-    cached = pending_upload_cache.read_entry(settings.data_path, library_id, attachment_key)
+    cached = await asyncio.to_thread(pending_upload_cache.read_entry, settings.data_path, library_id, attachment_key)
     if cached is None:
         raise HTTPException(status_code=404, detail="No cached upload found for this attachment")
     file_bytes, meta = cached
@@ -954,9 +955,11 @@ async def process_cached_upload_now(
     )
 
     if result.status == "error":
-        pending_upload_cache.record_failure(settings.data_path, library_id, attachment_key, result.message)
+        await asyncio.to_thread(
+            pending_upload_cache.record_failure, settings.data_path, library_id, attachment_key, result.message
+        )
     else:
-        pending_upload_cache.delete_entry(settings.data_path, library_id, attachment_key)
+        await asyncio.to_thread(pending_upload_cache.delete_entry, settings.data_path, library_id, attachment_key)
     return result
 
 

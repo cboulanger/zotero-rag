@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
 
@@ -123,11 +123,7 @@ class TestProcessNowEndpoint(unittest.TestCase):
     def test_processes_the_cached_entry_and_removes_it_on_success(self, mock_processor_cls):
         mock_processor = mock_processor_cls.return_value
         proc_result = MagicMock(status="indexed_fresh", chunks_written=3, error_detail=None)
-        mock_processor._process_attachment_bytes = MagicMock(return_value=proc_result)
-
-        async def _async_result(*args, **kwargs):
-            return proc_result
-        mock_processor._process_attachment_bytes.side_effect = _async_result
+        mock_processor._process_attachment_bytes = AsyncMock(return_value=proc_result)
 
         response = self.client.post("/api/index/document/cache/u1/ATT1/process-now")
         self.assertEqual(response.status_code, 200)
