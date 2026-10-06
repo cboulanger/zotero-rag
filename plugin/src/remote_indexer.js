@@ -924,7 +924,12 @@ var RemoteIndexer = {
 
 		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult, eta?: string|null, reason?: string|null}} */ (/** @type {unknown} */ (await response.json()));
 		if (defer) {
-			// /cache never indexes — nothing to poll, no diagnostics possible.
+			// /cache never indexes — nothing to poll. includeDiagnostics is ignored
+			// here by design: any pluginDiag/diagnostics gathered up to this point
+			// (upload_attempts, file_size_bytes, http_status) is discarded rather
+			// than surfaced, since there's nothing server-side to diagnose yet.
+			// The real diagnostics path for a deferred upload is process-now
+			// (_processQueuedNow) or the autoindex drain, not this response.
 			return { rateLimitHeaders: null, queued: true, eta: asyncData.eta ?? null, queueBlockReason: asyncData.reason ?? null };
 		}
 		/** @type {DocumentUploadResult} */
