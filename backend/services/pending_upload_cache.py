@@ -15,7 +15,7 @@ See docs/superpowers/specs/2026-10-06-deferred-server-side-indexing-design.md.
 import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -137,3 +137,61 @@ def record_failure(data_path: Path, library_id: str, attachment_key: str, error:
     entry["attempts"] = entry.get("attempts", 0) + 1
     entry["last_error"] = error
     _atomic_write_json(meta_path, entry)
+
+
+def compute_queue_eta(settings) -> tuple[Optional[str], Optional[str]]:
+    """Return (eta_iso8601_or_None, reason). `reason` is None when `eta` is
+    present, else "paused" if the built-in scheduler is explicitly paused.
+
+    ETA is the built-in interval scheduler's next tick (last run time, or
+    now, plus the configured interval) when `autoindex_interval_minutes` is
+    set, else the top of the next UTC hour — matching the documented
+    external-cron deployment mode's hourly crontab.
+    """
+    from backend.services.autoindex_scheduler import read_scheduler_state
+
+    if read_scheduler_state(settings.data_path).get("paused", False):
+        return None, "paused"
+
+    now = datetime.now(timezone.utc)
+    if settings.autoindex_interval_minutes:
+        status_path = settings.data_path / "system" / "cron_status.json"
+        last_ts = None
+        try:
+            cron_status = json.loads(status_path.read_text(encoding="utf-8"))
+            last_ts = cron_status.get("finished_at") or cron_status.get("started_at")
+        except (OSError, json.JSONDecodeError):
+            pass
+        last_dt = datetime.fromisoformat(last_ts) if last_ts else now
+        eta_dt = last_dt + timedelta(minutes=settings.autoindex_interval_minutes)
+        if eta_dt < now:
+            eta_dt = now
+        return eta_dt.isoformat(), None
+
+    next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    return next_hour.isoformat(), None
+
+
+def library_has_valid_autoindex_target(library_id: str, key_store) -> bool:
+    """Whether some stored autoindex key currently targets this library."""
+    from backend.api.public_query import backend_id_to_slug
+
+    if not key_store.enabled:
+        return False
+    slug = backend_id_to_slug(library_id)
+    return any(slug in (entry.get("targets") or []) for entry in key_store.list_metadata())
+
+
+def get_queue_status(settings, library_id: str, key_store) -> dict:
+    """Combine `compute_queue_eta` with the per-library key-validity check.
+
+    Priority when `eta` would otherwise be null: "paused" (global) takes
+    precedence over "key_invalid" (per-library), since a paused scheduler
+    blocks every library regardless of key state.
+    """
+    eta, reason = compute_queue_eta(settings)
+    if reason == "paused":
+        return {"eta": None, "reason": "paused"}
+    if not library_has_valid_autoindex_target(library_id, key_store):
+        return {"eta": None, "reason": "key_invalid"}
+    return {"eta": eta, "reason": None}
