@@ -155,10 +155,15 @@ def _subprocess_index_batch(
 
         chunks_added = items_added = items_updated = items_skipped = items_failed = 0
         async with web_api:
+            # See _execute_upload_impl's comment (backend/api/document_upload.py)
+            # for why these must come from the preset rather than this class's
+            # own generic defaults.
             processor = DocumentProcessor(
                 zotero_client=web_api,
                 embedding_service=embedding_service,
                 vector_store=vector_store,
+                max_chunk_size=preset.rag.max_chunk_size,
+                chunk_merge_target_size=preset.rag.max_chunk_size,
             )
             for item in items:
                 item_key = item["data"]["key"]

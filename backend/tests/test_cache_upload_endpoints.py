@@ -166,6 +166,30 @@ class TestProcessNowEndpoint(unittest.TestCase):
         self.assertEqual(kwargs["item_version"], 3)
         self.assertEqual(kwargs["attachment_version"], 1)
 
+    @patch("backend.api.document_upload.DocumentProcessor")
+    def test_constructs_the_processor_with_the_preset_s_chunk_size_not_the_class_default(self, mock_processor_cls):
+        # Regression: DocumentProcessor's own generic defaults (512 chars /
+        # 1500 chars for max_chunk_size/chunk_merge_target_size) are
+        # disconnected from any particular embedding model's real token
+        # limit. A merged chunk sized against the 1500-char default can
+        # exceed a small-context model's safe budget even though the active
+        # preset's rag.max_chunk_size was hand-tuned for exactly that model
+        # (see e.g. the apple-silicon-kisski preset's comment) — this
+        # construction must use the preset's value for both parameters.
+        mock_processor = mock_processor_cls.return_value
+        proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)
+        mock_processor._process_attachment_bytes = AsyncMock(return_value=proc_result)
+        fake_preset = MagicMock()
+        fake_preset.rag.max_chunk_size = 777
+
+        with patch.object(settings_module.Settings, "get_hardware_preset", return_value=fake_preset):
+            response = self.client.post("/api/index/document/cache/u1/ATT1/process-now")
+
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = mock_processor_cls.call_args
+        self.assertEqual(kwargs["max_chunk_size"], 777)
+        self.assertEqual(kwargs["chunk_merge_target_size"], 777)
+
     def test_returns_404_for_an_attachment_not_in_the_cache(self):
         response = self.client.post("/api/index/document/cache/u1/NEVER_CACHED/process-now")
         self.assertEqual(response.status_code, 404)

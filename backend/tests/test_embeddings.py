@@ -522,6 +522,82 @@ class TestEmbeddingContextLengthRetry(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OpenAIBadRequestError):
                 await service._create_embeddings_with_backoff(["a long text " * 100])
 
+    def _real_overflow_error(self, actual_tokens: int, limit_tokens: int = 512) -> OpenAIBadRequestError:
+        # The exact message format the KISSKI/OpenAI-compatible API returns —
+        # see _context_length_truncation_fraction, which parses these numbers.
+        mock_response = MagicMock()
+        mock_response.headers = {}
+        return OpenAIBadRequestError(
+            f"Error code: 400 - {{'error': {{'message': \"This model's maximum context "
+            f"length is {limit_tokens} tokens. However, your request has {actual_tokens} "
+            f"input tokens. Please reduce the length of the input messages.\", "
+            f"'type': 'BadRequestError', 'param': None, 'code': 400}}}}",
+            response=mock_response,
+            body=None,
+        )
+
+    async def test_an_input_far_over_the_limit_converges_in_one_truncation_round(self):
+        # Regression: a blind 15%-per-round cut needs many rounds to shrink an
+        # input that's 2-3x over the limit (e.g. a merged chunk far bigger
+        # than the model's context window), and can exhaust the shared retry
+        # budget before converging — see the module's root-cause analysis.
+        # Parsing the real overflow ratio from the error message should land
+        # under the limit in a single extra attempt instead.
+        service = self._make_service()
+        success_raw = MagicMock()
+        success_raw.headers = {}
+        success_raw.parse.return_value = MagicMock(data=[MagicMock(embedding=[0.1, 0.2])])
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(
+                side_effect=[self._real_overflow_error(actual_tokens=1500, limit_tokens=512), success_raw]
+            )
+            result = await service._create_embeddings_with_backoff("word " * 1000)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(mock_client.embeddings.with_raw_response.create.await_count, 2)
+
+
+class TestContextLengthTruncationFraction(unittest.TestCase):
+    """Unit tests for the overflow-ratio parser used by the retry loop above."""
+
+    def test_computes_a_precise_fraction_from_the_reported_token_counts(self):
+        from backend.services.embeddings import _context_length_truncation_fraction
+
+        # limit/actual = 512/656 ≈ 0.78, times a 0.9 safety margin ≈ 0.70.
+        fraction = _context_length_truncation_fraction(
+            "maximum context length is 512 tokens. However, your request has 656 input tokens."
+        )
+        self.assertAlmostEqual(fraction, (512 / 656) * 0.9, places=4)
+
+    def test_falls_back_to_the_default_when_the_message_has_no_parseable_numbers(self):
+        from backend.services.embeddings import _context_length_truncation_fraction
+
+        self.assertEqual(_context_length_truncation_fraction("something went wrong"), 0.85)
+
+    def test_falls_back_to_the_default_when_actual_is_not_actually_over_the_limit(self):
+        from backend.services.embeddings import _context_length_truncation_fraction
+
+        # Degenerate/contradictory input — never trust it blindly.
+        fraction = _context_length_truncation_fraction(
+            "maximum context length is 512 tokens. However, your request has 100 input tokens."
+        )
+        self.assertEqual(fraction, 0.85)
+
+    def test_never_returns_more_than_the_default_even_for_a_barely_over_input(self):
+        from backend.services.embeddings import _context_length_truncation_fraction
+
+        # 511/512 is barely over — the computed fraction would be ~0.998*0.9,
+        # still capped at `default` so a single round never keeps MORE than
+        # the blind heuristic would, avoiding a near-no-op "truncation".
+        fraction = _context_length_truncation_fraction(
+            "maximum context length is 511 tokens. However, your request has 512 input tokens."
+        )
+        self.assertLessEqual(fraction, 0.85)
+
 
 class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
     """An invalid API key (HTTP 401/403) must raise a fatal EmbeddingAuthenticationError.

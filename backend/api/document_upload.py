@@ -375,10 +375,23 @@ async def _execute_upload_impl(
                 purge_stage.skip()
 
     # Process: extract → embed → store
+    #
+    # max_chunk_size/chunk_merge_target_size are tied to the active preset's
+    # rag.max_chunk_size (hand-tuned per embedding model's real token limit —
+    # see e.g. the apple-silicon-kisski preset's comment) rather than left at
+    # DocumentProcessor's own generic defaults (512 chars / 1500 chars). Those
+    # defaults are disconnected from any particular model: merging several
+    # ~512-char extractor chunks up to a 1500-char target can produce a chunk
+    # well past a 512-token-limit model's real safe char budget, which
+    # previously surfaced as an unrecoverable "maximum context length"
+    # embedding error for otherwise-healthy documents.
+    preset = get_settings().get_hardware_preset()
     processor = DocumentProcessor(
         zotero_client=None,  # type: ignore[arg-type]
         embedding_service=embedding_service,
         vector_store=vector_store,
+        max_chunk_size=preset.rag.max_chunk_size,
+        chunk_merge_target_size=preset.rag.max_chunk_size,
     )
     try:
         proc_result = await processor._process_attachment_bytes(

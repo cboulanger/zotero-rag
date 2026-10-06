@@ -2030,6 +2030,55 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
 
         self.assertEqual(captured["api_key"], "per-user-embed-key-456")
 
+    def test_constructs_the_processor_with_the_preset_s_chunk_size_not_the_class_default(self):
+        # Regression: DocumentProcessor's own generic defaults (512/1500
+        # chars) are disconnected from any particular embedding model's real
+        # token limit — see the identical tests in test_cache_upload_endpoints.py
+        # and test_cron_indexer.py for the full rationale. The subprocess
+        # batch worker's processor must use the active preset's
+        # rag.max_chunk_size for both parameters too.
+        from backend.services import document_processor as dp_module
+
+        class FakeWebAPI:
+            def __init__(self, api_key):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        fake_preset = MagicMock()
+        fake_preset.rag.max_chunk_size = 999
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
+             patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
+             patch("backend.dependencies.make_vector_store", return_value=MagicMock()), \
+             patch("backend.services.document_processor.DocumentProcessor") as MockProcessor:
+            mock_settings.return_value = MagicMock(
+                zotero_api_key=None,
+                testing=False,
+                extractor_backend="kreuzberg",
+                ocr_enabled=True,
+                kreuzberg_url="http://kreuzberg.test",
+            )
+            mock_settings.return_value.get_hardware_preset.return_value = fake_preset
+
+            dp_module._subprocess_index_batch(
+                items=[],
+                library_id="lib1",
+                library_type="group",
+                indexed_versions={},
+                zotero_api_key="fake-key",
+                embedding_api_key="fake-embed-key",
+            )
+
+        _, kwargs = MockProcessor.call_args
+        self.assertEqual(kwargs["max_chunk_size"], 999)
+        self.assertEqual(kwargs["chunk_merge_target_size"], 999)
+
     def test_reports_items_failed_for_per_item_exception(self):
         """_subprocess_index_batch must count a per-item exception as items_failed,
         not just log it and move on with no trace in the returned stats."""
