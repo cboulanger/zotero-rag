@@ -43,6 +43,14 @@ function makeStubs(attachmentsByKey = {}) {
 				return attachmentsByKey[`__parent_${id}`] || null;
 			},
 		},
+		Sync: {
+			Storage: {
+				Local: {
+					SYNC_STATE_TO_UPLOAD: 0,
+					getModeForLibrary: () => 'zfs',
+				},
+			},
+		},
 	};
 	return { zotero, ioUtils, pathUtils, files };
 }
@@ -190,6 +198,111 @@ test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exist
 	// from the vm context's separate realm, and assert.deepStrictEqual treats
 	// same-shape-but-cross-realm objects as unequal ("not reference-equal").
 	assert.deepStrictEqual([...results], []);
+});
+
+test('_describeDownloadFailureReason explains a linked attachment as having no file to download', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason({}, true, 1);
+	assert.match(downloadFailureReason, /no file to download/i);
+});
+
+test('_describeDownloadFailureReason flags WebDAV-mode libraries, which the backend can never reach', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getModeForLibrary = () => 'webdav';
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason({ attachmentSyncState: 2 }, false, 1);
+	assert.match(downloadFailureReason, /webdav/i);
+});
+
+test('_describeDownloadFailureReason flags a zfs-mode attachment never uploaded by any device', () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const { downloadFailureReason } = plugin._describeDownloadFailureReason(
+		{ attachmentSyncState: zotero.Sync.Storage.Local.SYNC_STATE_TO_UPLOAD }, false, 1
+	);
+	assert.match(downloadFailureReason, /not yet uploaded/i);
+});
+
+test('_getUnavailableAttachments includes download-failed entries only when includeDownloadFailed is true', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+	];
+
+	const withoutFlag = await plugin._getUnavailableAttachments(1);
+	assert.strictEqual(withoutFlag.length, 0);
+
+	const withFlag = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+	assert.strictEqual(withFlag.length, 1);
+	assert.strictEqual(withFlag[0].attachmentItem.key, 'DL1');
+});
+
+test('retryDownloadFailedAttachment reports stillMissing, without attempting an upload, when the download itself fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => { throw new Error('nope'); } };
+	let uploadCalled = false;
+	const RemoteIndexer = { _uploadAttachment: async () => { uploadCalled = true; return {}; } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+
+	const attachmentItem = { libraryID: 1, key: 'ATT1', fileExists: async () => false };
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillMissing, true);
+	assert.strictEqual(uploadCalled, false);
+});
+
+test('retryDownloadFailedAttachment downloads then uploads to the backend, returning fixed:true on success', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => {} };
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const uploadCalls = [];
+	const RemoteIndexer = {
+		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitHeaders: null }; },
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const attachmentItem = {
+		libraryID: 1, key: 'ATT1', version: 5, attachmentContentType: 'application/pdf',
+		fileExists: async () => true,
+	};
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, true);
+	assert.strictEqual(uploadCalls.length, 1);
+	assert.strictEqual(uploadCalls[0].att.attachment_key, 'ATT1');
+	assert.strictEqual(uploadCalls[0].libraryId, 'u1');
+});
+
+test('retryDownloadFailedAttachment treats a parse-error upload result as not fixed, with a descriptive error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Sync.Storage.Local.getEnabledForLibrary = () => true;
+	zotero.Sync.Runner = { downloadFile: async () => {} };
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = { _uploadAttachment: async () => ({ parseError: true, errorDetail: 'binary junk' }) };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const attachmentItem = { libraryID: 1, key: 'ATT1', fileExists: async () => true };
+	const result = await plugin.retryDownloadFailedAttachment(attachmentItem, null, 1);
+
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.stillMissing, false);
+	assert.strictEqual(result.error, 'binary junk');
 });
 
 test('getBackendLibraryId returns "u{userId}" for the personal library', () => {

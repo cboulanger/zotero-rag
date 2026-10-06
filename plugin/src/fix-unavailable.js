@@ -98,6 +98,7 @@ var ZoteroFixUnavailableDialog = {
 		document.getElementById('search-btn').addEventListener('click', () => this.searchAndFix());
 		document.getElementById('delete-btn').addEventListener('click', () => this.deleteSelected());
 		document.getElementById('refresh-btn').addEventListener('click', () => { if (!this.isRunning) this.populateTable(); });
+		document.getElementById('include-missing-cb')?.addEventListener('change', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('select-all-cb')?.addEventListener('change', (/** @type {Event} */ e) => {
 			if (/** @type {HTMLInputElement} */(e.target).checked) {
 				for (let i = 0; i < this.items.length; i++) this.selected.add(i);
@@ -295,8 +296,11 @@ var ZoteroFixUnavailableDialog = {
 		/** @type {HTMLButtonElement} */ (document.getElementById('search-btn')).disabled = true;
 		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
 
+		const includeMissingCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-missing-cb'));
 		try {
-			this.items = await this.plugin._getUnavailableAttachments(this.libraryID);
+			this.items = await this.plugin._getUnavailableAttachments(this.libraryID, {
+				includeDownloadFailed: includeMissingCb?.checked ?? false,
+			});
 		} catch (e) {
 			this.setStatus(`Error loading items: ${e instanceof Error ? e.message : String(e)}`);
 			return;
@@ -323,6 +327,12 @@ var ZoteroFixUnavailableDialog = {
 				this.rowStatus.set(i, { cssClass: 'not-found', text: 'no text', tooltip: 'No text could be extracted (scanned or protected PDF)' });
 			} else if (item.skipReason === 'timeout') {
 				this.rowStatus.set(i, { cssClass: 'not-found', text: 'timeout', tooltip: 'Text extraction timed out (file may be too large)' });
+			} else if (item.serverDownloadFailed) {
+				this.rowStatus.set(i, {
+					cssClass: 'not-found',
+					text: item.downloadFailureReason || 'Not downloaded',
+					tooltip: item.downloadFailureDetail || '',
+				});
 			}
 		}
 
@@ -537,7 +547,11 @@ var ZoteroFixUnavailableDialog = {
 		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
 		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
 		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
-		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked);
+		// serverDownloadFailed rows need a download-then-upload round trip (see
+		// Phase 1b below), not just a plain sync download, so they're pulled out
+		// of importedIndices rather than sharing Phase 1 with it.
+		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
+		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
 
 		// Optional debug collection (observational only: never alters repair behaviour).
 		const collectDebug = this._shouldCollectDebug(indices);
@@ -564,6 +578,7 @@ var ZoteroFixUnavailableDialog = {
 		for (const i of parseErrorIndices)  this.setRowStatus(i, 'not-found', 'Binary data — delete and replace');
 		for (const i of linkedIndices)      this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero');
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
+		for (const i of serverFailedIndices) this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');
 		for (const i of emptyTextIndices)   this.setRowStatus(i, 'searching', 'Re-checking (file may have changed)...');
 
@@ -677,6 +692,55 @@ var ZoteroFixUnavailableDialog = {
 			}
 		}
 
+		// Phase 1b: resolve serverDownloadFailed rows by downloading them to this
+		// client, then uploading the bytes straight to the backend (the server's
+		// own fetch is what failed in the first place — e.g. a WebDAV-stored file
+		// it has no credentials for — so a plain download like Phase 1's below
+		// would leave the attachment downloaded but still un-indexed). Sequential,
+		// like the timeout/empty-text retries above, since each call also waits
+		// on a full backend upload+processing round trip. Rows whose download
+		// (not upload) fails fall through to Phase 2's other-library search below,
+		// same as an ordinary missing file.
+		/** @type {Array<number>} */
+		const serverFailedFixedIndices = [];
+		/** @type {Array<number>} */
+		const serverFailedStillMissing = [];
+		let serverFailedErrors = 0;
+		if (serverFailedIndices.length > 0) {
+			for (let idx = 0; idx < serverFailedIndices.length; idx++) {
+				const i = serverFailedIndices[idx];
+				const info = this.items[i];
+				this.setRowStatus(i, 'searching', `Downloading & indexing (${idx + 1}/${serverFailedIndices.length})...`);
+				const step = itemHandles.get(i)?.addStep('download_failed_retry');
+				try {
+					const result = await (collectDebug
+						? this.plugin.retryDownloadFailedAttachment(info.attachmentItem, info.parentItem, this.libraryID, { includeDiagnostics: true })
+						: this.plugin.retryDownloadFailedAttachment(info.attachmentItem, info.parentItem, this.libraryID));
+					step?.finish(
+						result.fixed ? 'fixed' : result.stillMissing ? 'not_found' : 'error',
+						{ ...(result.pluginDiag || {}), ...(result.error ? { error: result.error } : {}) },
+						result.backendDiag ?? null, result.backendDiag ? null : NO_DIAG_NOTE
+					);
+					if (result.fixed) {
+						this.setRowStatus(i, 'fixed', 'Downloaded & indexed');
+						serverFailedFixedIndices.push(i);
+					} else if (result.stillMissing) {
+						serverFailedStillMissing.push(i);
+					} else {
+						this.setRowStatus(i, 'error', `Indexing failed: ${result.error}`, result.error);
+						serverFailedErrors++;
+					}
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
+					step?.finish('error', { error: msg });
+					itemHandles.get(i)?.addError('plugin', e);
+					serverFailedErrors++;
+					console.error(`fix-unavailable: download-failed retry error for item ${info.zoteroID}: ${msg}`);
+				}
+			}
+		}
+
 		// Phase 1: batched sync downloads for imported files only (10 at a time)
 		const BATCH_SIZE = 10;
 		/** @type {Array<{index: number, downloaded: boolean, reason?: string}>} */
@@ -723,14 +787,16 @@ var ZoteroFixUnavailableDialog = {
 		}
 
 		/** @type {Array<number>} */
-		const stillMissing = downloadResults
-			.filter(r => !r.downloaded && r.reason !== 'rejected')
-			.map(r => r.index);
+		const stillMissing = [
+			...downloadResults.filter(r => !r.downloaded && r.reason !== 'rejected').map(r => r.index),
+			...serverFailedStillMissing,
+		];
 
 		// Phase 2: copy from another library for imported items still missing
-		let fixed    = downloadResults.filter(r => r.downloaded).length + timeoutFixedIndices.length + emptyTextFixedIndices.length;
+		let fixed    = downloadResults.filter(r => r.downloaded).length + timeoutFixedIndices.length
+			+ emptyTextFixedIndices.length + serverFailedFixedIndices.length;
 		let notFound = linkedIndices.length + parseErrorIndices.length + timeoutStillFailed + emptyTextStillFailed;
-		let errors   = 0;
+		let errors   = serverFailedErrors;
 
 		/** @type {Array<number>} */
 		const phase2FixedIndices = [];
@@ -748,7 +814,29 @@ var ZoteroFixUnavailableDialog = {
 						result.found && !result.error ? 'fixed' : result.found ? 'copy_failed' : 'not_found',
 						{ via: result.via ?? null, ...(result.error ? { error: result.error } : {}) }
 					);
-					if (result.found && !result.error) {
+					if (result.found && !result.error && info.serverDownloadFailed) {
+						// Phase 2 only recovered the file (copy/direct-URL/resolver) —
+						// still need to push it to the backend, same as Phase 1b above,
+						// since the server's own fetch is what failed in the first place.
+						this.setRowStatus(i, 'searching', `Found (${result.via}) — indexing...`);
+						const uploadStep = itemHandles.get(i)?.addStep('download_failed_upload');
+						const uploadResult = await (collectDebug
+							? this.plugin._uploadDownloadFailedAttachment(info.attachmentItem, info.parentItem, this.libraryID, { includeDiagnostics: true })
+							: this.plugin._uploadDownloadFailedAttachment(info.attachmentItem, info.parentItem, this.libraryID));
+						uploadStep?.finish(
+							uploadResult.fixed ? 'fixed' : 'error',
+							{ ...(uploadResult.pluginDiag || {}), ...(uploadResult.error ? { error: uploadResult.error } : {}) },
+							uploadResult.backendDiag ?? null, uploadResult.backendDiag ? null : NO_DIAG_NOTE
+						);
+						if (uploadResult.fixed) {
+							this.setRowStatus(i, 'fixed', `Fixed (${result.via}) & indexed`);
+							fixed++;
+							phase2FixedIndices.push(i);
+						} else {
+							this.setRowStatus(i, 'error', `Indexing failed: ${uploadResult.error}`, uploadResult.error);
+							errors++;
+						}
+					} else if (result.found && !result.error) {
 						this.setRowStatus(i, 'fixed', `Fixed (${result.via})`);
 						fixed++;
 						phase2FixedIndices.push(i);
@@ -795,6 +883,7 @@ var ZoteroFixUnavailableDialog = {
 			...phase2FixedIndices,
 			...timeoutFixedIndices,
 			...emptyTextFixedIndices,
+			...serverFailedFixedIndices,
 		];
 		const fixedDownloadFailedKeys = allFixedIndices
 			.filter(i => this.items[i].serverDownloadFailed)
@@ -927,6 +1016,8 @@ var ZoteroFixUnavailableDialog = {
 		}
 		const debugCb = /** @type {HTMLInputElement|null} */ (document.getElementById('debug-download-cb'));
 		if (debugCb) debugCb.disabled = disabled;
+		const includeMissingCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-missing-cb'));
+		if (includeMissingCb) includeMissingCb.disabled = disabled;
 	},
 
 	/**

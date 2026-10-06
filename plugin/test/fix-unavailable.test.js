@@ -80,6 +80,7 @@ test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from t
 	const removedCalls = [];
 	dialog.plugin = {
 		_tryDownloadAttachment: async () => ({ downloaded: true }),
+		retryDownloadFailedAttachment: async () => ({ fixed: true, stillMissing: false }),
 		removeDownloadFailedItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
 	};
 
@@ -102,7 +103,9 @@ test('searchAndFix removes fixed rows immediately and keeps unresolved rows with
 		{ attachmentItem: { key: 'ERRORED' }, serverDownloadFailed: true, isLinked: false },
 	];
 	dialog.plugin = {
-		_tryDownloadAttachment: async (att) => ({ downloaded: att.key === 'FIXED' }),
+		retryDownloadFailedAttachment: async (att) => (
+			att.key === 'FIXED' ? { fixed: true, stillMissing: false } : { fixed: false, stillMissing: true }
+		),
 		_searchAndFixUnavailableAttachment: async (att) => {
 			if (att.key === 'ERRORED') throw new Error('boom');
 			return { found: false };
@@ -121,6 +124,37 @@ test('searchAndFix removes fixed rows immediately and keeps unresolved rows with
 	assert.strictEqual(dialog.rowStatus.get(1)?.cssClass, 'error');
 });
 
+test('searchAndFix uploads to the backend after Phase 2 recovers a serverDownloadFailed file some other way', async () => {
+	// retryDownloadFailedAttachment's own Zotero-sync download fails (e.g. the
+	// server and the client both lack access to wherever this copy actually
+	// lives), but Phase 2's other-library search finds a copy some other way.
+	// Phase 2 only recovers the file — serverDownloadFailed rows still need an
+	// explicit upload afterward, since nothing else will ever index them.
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'ATT1' }, serverDownloadFailed: true, isLinked: false },
+	];
+	const removedCalls = [];
+	let uploadCalled = false;
+	dialog.plugin = {
+		retryDownloadFailedAttachment: async () => ({ fixed: false, stillMissing: true }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: true, via: 'md5' }),
+		_uploadDownloadFailedAttachment: async () => { uploadCalled = true; return { fixed: true }; },
+		removeDownloadFailedItems: async (libId, keys) => { removedCalls.push({ libId, keys }); },
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(uploadCalled, true);
+	assert.strictEqual(dialog.items.length, 0);
+	assert.strictEqual(removedCalls.length, 1);
+	assert.deepStrictEqual([...removedCalls[0].keys], ['ATT1']);
+});
+
 test('searchAndFix does not call removeDownloadFailedItems when nothing was fixed', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
@@ -132,7 +166,7 @@ test('searchAndFix does not call removeDownloadFailedItems when nothing was fixe
 	];
 	let called = false;
 	dialog.plugin = {
-		_tryDownloadAttachment: async () => ({ downloaded: false, reason: 'still-missing' }),
+		retryDownloadFailedAttachment: async () => ({ fixed: false, stillMissing: true }),
 		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
 		removeDownloadFailedItems: async () => { called = true; },
 	};

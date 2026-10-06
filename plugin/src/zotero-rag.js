@@ -2261,6 +2261,10 @@ class ZoteroRAGPlugin {
 	 *   unlike those, this may be fixable by retrying (the local file may already exist, or search/download
 	 *   may find a copy), so it must fall into the "imported"/"linked" retry buckets in fix-unavailable.js,
 	 *   not the "not indexable" one.
+	 * @property {string} [downloadFailureReason] - Short, concrete explanation of why the server's own
+	 *   download failed (set only alongside serverDownloadFailed), e.g. "On WebDAV storage" or "Not yet
+	 *   uploaded to Zotero storage". See _getDownloadFailedAttachments.
+	 * @property {string} [downloadFailureDetail] - Longer tooltip text for downloadFailureReason.
 	 */
 
 	/**
@@ -2703,6 +2707,52 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Explain, in concrete terms, why the server's own download attempt for an
+	 * attachment failed — using only cheap, synchronous local Zotero state
+	 * (no network calls), so it's safe to compute for every row while
+	 * populating the Fix Unavailable table.
+	 * @param {*} attachment - Zotero attachment item
+	 * @param {boolean} isLinked - Whether the attachment is a bare link (no stored file at all)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {{downloadFailureReason: string, downloadFailureDetail: string}}
+	 */
+	_describeDownloadFailureReason(attachment, isLinked, libraryID) {
+		if (isLinked) {
+			return {
+				downloadFailureReason: 'Linked URL — no file to download',
+				downloadFailureDetail: 'This attachment is a bare link, not a stored file, so there '
+					+ 'is nothing for the server or the client to download.',
+			};
+		}
+		// @ts-ignore - Zotero.Sync.Storage.Local exists at runtime
+		const mode = Zotero.Sync.Storage.Local.getModeForLibrary(libraryID);
+		if (mode === 'webdav') {
+			return {
+				downloadFailureReason: 'On WebDAV storage',
+				downloadFailureDetail: 'This library stores attachment files on your own WebDAV '
+					+ 'server, which the backend has no access to (only your local Zotero client '
+					+ 'has those credentials). Click Search & Fix to download it here and index it '
+					+ 'directly from this computer.',
+			};
+		}
+		// @ts-ignore - SYNC_STATE_TO_UPLOAD exists at runtime
+		if (attachment.attachmentSyncState === Zotero.Sync.Storage.Local.SYNC_STATE_TO_UPLOAD) {
+			return {
+				downloadFailureReason: 'Not yet uploaded to Zotero storage',
+				downloadFailureDetail: 'No device has uploaded this file to Zotero’s cloud '
+					+ 'storage yet, so the server has nothing to fetch. Click Search & Fix to index '
+					+ 'it directly from this computer.',
+			};
+		}
+		return {
+			downloadFailureReason: 'Download failed on server',
+			downloadFailureDetail: 'The server could not download this file from Zotero storage '
+				+ '(it may have been temporarily unavailable, or removed due to a storage-quota '
+				+ 'issue). Click Search & Fix to retry.',
+		};
+	}
+
+	/**
 	 * Load server-reported download-failure attachment keys and resolve them to
 	 * UnavailableAttachmentInfo objects. Deliberately does NOT set isParseError
 	 * or skipReason (see the typedef) — these items must fall into the Fix
@@ -2744,6 +2794,14 @@ class ZoteroRAGPlugin {
 				.join(', ');
 			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
 			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			// Not isImportedAttachment() — covers both LINK_MODE_LINKED_FILE and
+			// LINK_MODE_LINKED_URL. The latter is what server-reported download
+			// failures are typically backed by (a bare web link with no local
+			// file), and Zotero's own fileExists() throws when called on one —
+			// this flag must be true for it so fix-unavailable.js never routes
+			// it into the copy-based repair strategies that end by calling
+			// fileExists() on it.
+			const isLinked = !attachment.isImportedAttachment();
 			result.push({
 				parentItem: parentItem ?? attachment,
 				attachmentItem: attachment,
@@ -2751,15 +2809,9 @@ class ZoteroRAGPlugin {
 				year: yearMatch ? yearMatch[1] : '',
 				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
 				zoteroID: (parentItem ?? attachment).key,
-				// Not isImportedAttachment() — covers both LINK_MODE_LINKED_FILE and
-				// LINK_MODE_LINKED_URL. The latter is what server-reported download
-				// failures are typically backed by (a bare web link with no local
-				// file), and Zotero's own fileExists() throws when called on one —
-				// this flag must be true for it so fix-unavailable.js never routes
-				// it into the copy-based repair strategies that end by calling
-				// fileExists() on it.
-				isLinked: !attachment.isImportedAttachment(),
+				isLinked,
 				serverDownloadFailed: true,
+				...this._describeDownloadFailureReason(attachment, isLinked, libraryID),
 			});
 		}
 		if (validKeys.length !== keys.length) {
@@ -2774,9 +2826,14 @@ class ZoteroRAGPlugin {
 	/**
 	 * Return full detail records for all unavailable attachments in a library.
 	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {{includeDownloadFailed?: boolean}} [opts] - includeDownloadFailed: also include
+	 *   attachments the server merely couldn't download during indexing (see
+	 *   _getDownloadFailedAttachments) — off by default since these aren't actually broken (just
+	 *   not yet downloaded/uploaded), only sometimes worth fixing client-side. Driven by the Fix
+	 *   Unavailable dialog's "Include missing attachments" checkbox.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getUnavailableAttachments(libraryID) {
+	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false } = {}) {
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
 			JOIN items i ON i.itemID = ia.itemID
@@ -2786,8 +2843,10 @@ class ZoteroRAGPlugin {
 			AND (ia.parentItemID IS NULL OR ia.parentItemID NOT IN (SELECT itemID FROM deletedItems))
 		`;
 		const ids = /** @type {number[]} */ (await Zotero.DB.columnQueryAsync(sql, [libraryID]));
-		if (!ids || ids.length === 0) return [];
-		const attachments = /** @type {any[]} */ (await Zotero.Items.getAsync(ids));
+		// Not an early-return on empty: a library with zero stored/imported
+		// attachments can still have parse-error / skipped-server / download-failed
+		// entries appended below, which must not be silently dropped.
+		const attachments = /** @type {any[]} */ (ids && ids.length > 0 ? await Zotero.Items.getAsync(ids) : []);
 		/** @type {Array<UnavailableAttachmentInfo>} */
 		const result = [];
 		for (const attachment of attachments) {
@@ -2840,11 +2899,15 @@ class ZoteroRAGPlugin {
 		}
 		// Append server-reported download failures, deduplicating by key — a file
 		// missing locally may already be in `result` from the SQL-based tier above.
-		const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID);
-		for (const item of downloadFailedItems) {
-			if (!missingKeys.has(item.attachmentItem.key)) {
-				missingKeys.add(item.attachmentItem.key);
-				result.push(item);
+		// Opt-in only (see includeDownloadFailed doc above): these aren't broken
+		// attachments, just ones the server's own fetch never managed to reach.
+		if (includeDownloadFailed) {
+			const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID);
+			for (const item of downloadFailedItems) {
+				if (!missingKeys.has(item.attachmentItem.key)) {
+					missingKeys.add(item.attachmentItem.key);
+					result.push(item);
+				}
 			}
 		}
 		return result;
@@ -2870,6 +2933,86 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			return { downloaded: false, reason: e instanceof Error ? e.message : String(e) };
 		}
+	}
+
+	/**
+	 * Upload an attachment's existing local file straight to the backend for
+	 * indexing — the same client-initiated upload RemoteIndexer uses for a
+	 * normal "Index this library" run, just for one attachment. Used to
+	 * complete the fix for a serverDownloadFailed row once its file is known
+	 * to exist locally (via retryDownloadFailedAttachment, or after Phase 2's
+	 * other-library search recovers it some other way): downloading alone
+	 * never indexes it, since the server's own fetch is what failed in the
+	 * first place, so nothing indexes it unless this pushes the bytes itself.
+	 * @param {*} attachmentItem - Zotero attachment item
+	 * @param {*} parentItem - Zotero parent item (or the attachment itself if standalone)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 */
+	async _uploadDownloadFailedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
+		try {
+			const library = Zotero.Libraries.get(libraryID);
+			const libraryType = library ? library.libraryType : 'user';
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+
+			const att = {
+				item_key: parentItem ? parentItem.key : attachmentItem.key,
+				attachment_key: attachmentItem.key,
+				mime_type: attachmentItem.attachmentContentType || 'application/pdf',
+				item_version: parentItem ? (parentItem.version || 0) : (attachmentItem.version || 0),
+				attachment_version: attachmentItem.version || 0,
+				zoteroItem: attachmentItem,
+				parentItem,
+				filePath: null,
+			};
+
+			const result = await RemoteIndexer._uploadAttachment({
+				att,
+				libraryId: backendLibraryId,
+				libraryType,
+				backendURL: this.backendURL,
+				userId: this.getCurrentZoteroUserId ? this.getCurrentZoteroUserId() : null,
+				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
+				log: (msg) => this.log(msg),
+				includeDiagnostics,
+			});
+			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
+
+			if (result.parseError) {
+				return { fixed: false, error: result.errorDetail || 'File downloaded but cannot be parsed (binary data)', ...diag };
+			}
+			if (result.skippedEmpty) {
+				return { fixed: false, error: result.errorDetail || 'File downloaded but no text could be extracted', ...diag };
+			}
+			if (result.skippedTimeout) {
+				return { fixed: false, error: result.errorDetail || 'File downloaded but text extraction timed out', ...diag };
+			}
+			return { fixed: true, ...diag };
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return { fixed: false, error: msg, ...errorDiag(e, includeDiagnostics) };
+		}
+	}
+
+	/**
+	 * Fully resolve a serverDownloadFailed attachment: download it to this client
+	 * (the step the server itself can never do for e.g. WebDAV-stored files, since
+	 * WebDAV credentials never leave the local Zotero client), then upload it via
+	 * _uploadDownloadFailedAttachment.
+	 * @param {*} attachmentItem - Zotero attachment item
+	 * @param {*} parentItem - Zotero parent item (or the attachment itself if standalone)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, stillMissing: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 */
+	async retryDownloadFailedAttachment(attachmentItem, parentItem, libraryID, opts = {}) {
+		const downloadResult = await this._tryDownloadAttachment(attachmentItem);
+		if (!downloadResult.downloaded) {
+			return { fixed: false, stillMissing: true, error: downloadResult.reason };
+		}
+		const uploadResult = await this._uploadDownloadFailedAttachment(attachmentItem, parentItem, libraryID, opts);
+		return { ...uploadResult, stillMissing: false };
 	}
 
 	/**

@@ -102,6 +102,9 @@
     <!-- Toolbar: select-all toggle + refresh -->
     <div id="table-toolbar">
       <label><input type="checkbox" id="select-all-cb"/> Select all</label>
+      <label title="Also list attachments the server couldn't download during indexing (e.g. WebDAV-stored files) — not an error, just not yet downloaded. Checking this lets you fix (download) them here.">
+        <input type="checkbox" id="include-missing-cb"/> Include missing attachments
+      </label>
       <button id="refresh-btn" type="button" class="toolbar-btn" title="Reload the list of missing files">Refresh</button>
     </div>
 
