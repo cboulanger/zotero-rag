@@ -833,6 +833,37 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Ask the backend which of these attachments are currently sitting in the
+	 * deferred-upload cache ("Waiting to be indexed"), via check-indexed.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {Array<{parentItem: *, attachmentItem: *}>} items
+	 * @returns {Promise<Map<string, {eta: string|null, queueBlockReason: string|null}>>}
+	 */
+	async getQueuedStatusMap(libraryID, items) {
+		/** @type {Map<string, {eta: string|null, queueBlockReason: string|null}>} */
+		const map = new Map();
+		if (!items || items.length === 0) return map;
+		const backendLibraryId = this.getBackendLibraryId(libraryID);
+		const attachments = items.map(info => ({
+			item_key: info.parentItem ? info.parentItem.key : info.attachmentItem.key,
+			attachment_key: info.attachmentItem.key,
+			mime_type: info.attachmentItem.attachmentContentType || 'application/pdf',
+			item_version: info.parentItem ? (info.parentItem.version || 0) : (info.attachmentItem.version || 0),
+			attachment_version: info.attachmentItem.version || 0,
+		}));
+		const statuses = await RemoteIndexer._checkIndexed(
+			backendLibraryId, attachments, this.backendURL,
+			(extra) => this.getAuthHeaders(extra), (msg) => this.log(msg),
+		);
+		for (const s of statuses) {
+			if (s.reason === 'queued') {
+				map.set(s.attachment_key, { eta: s.eta ?? null, queueBlockReason: s.queue_block_reason ?? null });
+			}
+		}
+		return map;
+	}
+
+	/**
 	 * Extract "First Last" display names for authors and editors of an item.
 	 * @param {any} item - Zotero item
 	 * @returns {Array<string>}
