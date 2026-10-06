@@ -2396,11 +2396,11 @@ class ZoteroRAGPlugin {
 	 * @param {any} attachmentItem - Zotero attachment item
 	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDiagnostics?: boolean}} [opts] - includeDiagnostics: also request/return
+	 * @param {{includeDiagnostics?: boolean, defer?: boolean}} [opts] - includeDiagnostics: also request/return
 	 *   server + plugin diagnostics (`backendDiag`, `pluginDiag`) for the debug download option
-	 * @returns {Promise<{fixed: boolean, stillTimedOut: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 * @returns {Promise<{fixed: boolean, stillTimedOut: boolean, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
-	async retryTimeoutSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
+	async retryTimeoutSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false, defer = false } = {}) {
 		try {
 			const library = Zotero.Libraries.get(libraryID);
 			const libraryType = library ? library.libraryType : 'user';
@@ -2427,9 +2427,13 @@ class ZoteroRAGPlugin {
 				log: (msg) => this.log(msg),
 				timeoutMultiplier: 2.0,
 				includeDiagnostics,
+				defer,
 			});
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
+			if (result.queued) {
+				return { fixed: false, stillTimedOut: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+			}
 			if (result.skippedTimeout) {
 				return { fixed: false, stillTimedOut: true, ...diag };
 			}
@@ -2457,10 +2461,10 @@ class ZoteroRAGPlugin {
 	 * @param {any} attachmentItem - Zotero attachment item
 	 * @param {any} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
-	 * @returns {Promise<{fixed: boolean, stillEmpty: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 * @param {{includeDiagnostics?: boolean, defer?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, stillEmpty: boolean, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
-	async retryEmptyTextSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
+	async retryEmptyTextSkippedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false, defer = false } = {}) {
 		try {
 			const library = Zotero.Libraries.get(libraryID);
 			const libraryType = library ? library.libraryType : 'user';
@@ -2486,9 +2490,13 @@ class ZoteroRAGPlugin {
 				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
 				log: (msg) => this.log(msg),
 				includeDiagnostics,
+				defer,
 			});
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
+			if (result.queued) {
+				return { fixed: false, stillEmpty: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+			}
 			if (result.skippedEmpty) {
 				return { fixed: false, stillEmpty: true, ...diag };
 			}
@@ -2947,10 +2955,10 @@ class ZoteroRAGPlugin {
 	 * @param {*} attachmentItem - Zotero attachment item
 	 * @param {*} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
-	 * @returns {Promise<{fixed: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 * @param {{includeDiagnostics?: boolean, defer?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
-	async _uploadDownloadFailedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
+	async _uploadDownloadFailedAttachment(attachmentItem, parentItem, libraryID, { includeDiagnostics = false, defer = false } = {}) {
 		try {
 			const library = Zotero.Libraries.get(libraryID);
 			const libraryType = library ? library.libraryType : 'user';
@@ -2976,9 +2984,13 @@ class ZoteroRAGPlugin {
 				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
 				log: (msg) => this.log(msg),
 				includeDiagnostics,
+				defer,
 			});
 			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
 
+			if (result.queued) {
+				return { fixed: false, queued: true, eta: result.eta ?? null, queueBlockReason: result.reason ?? null, ...diag };
+			}
 			if (result.parseError) {
 				return { fixed: false, error: result.errorDetail || 'File downloaded but cannot be parsed (binary data)', ...diag };
 			}
@@ -2996,6 +3008,45 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Force immediate indexing of an attachment already sitting in the
+	 * backend's deferred-upload cache. No search, no download — the bytes
+	 * are already server-side; this is what "Fix & Index Selected Now"
+	 * calls for a row whose status is already 'queued'.
+	 * @param {*} attachmentItem - Zotero attachment item
+	 * @param {*} parentItem - Zotero parent item (or the attachment itself if standalone)
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {{includeDiagnostics?: boolean}} [opts]
+	 * @returns {Promise<{fixed: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 */
+	async processQueuedAttachmentNow(attachmentItem, parentItem, libraryID, { includeDiagnostics = false } = {}) {
+		try {
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+			const result = await RemoteIndexer._processQueuedNow({
+				libraryId: backendLibraryId,
+				attachmentKey: attachmentItem.key,
+				backendURL: this.backendURL,
+				getAuthHeaders: (extra) => this.getAuthHeaders(extra),
+				log: (msg) => this.log(msg),
+				includeDiagnostics,
+			});
+			const diag = includeDiagnostics ? { backendDiag: result.diagnostics ?? null, pluginDiag: result.pluginDiag ?? null } : {};
+			if (result.parseError) {
+				return { fixed: false, error: result.errorDetail || 'File cannot be parsed (binary data)', ...diag };
+			}
+			if (result.skippedEmpty) {
+				return { fixed: false, error: result.errorDetail || 'No text could be extracted', ...diag };
+			}
+			if (result.skippedTimeout) {
+				return { fixed: false, error: result.errorDetail || 'Text extraction timed out', ...diag };
+			}
+			return { fixed: true, ...diag };
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			return { fixed: false, error: msg, ...errorDiag(e, includeDiagnostics) };
+		}
+	}
+
+	/**
 	 * Fully resolve a serverDownloadFailed attachment: download it to this client
 	 * (the step the server itself can never do for e.g. WebDAV-stored files, since
 	 * WebDAV credentials never leave the local Zotero client), then upload it via
@@ -3003,8 +3054,8 @@ class ZoteroRAGPlugin {
 	 * @param {*} attachmentItem - Zotero attachment item
 	 * @param {*} parentItem - Zotero parent item (or the attachment itself if standalone)
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDiagnostics?: boolean}} [opts] - see retryTimeoutSkippedAttachment
-	 * @returns {Promise<{fixed: boolean, stillMissing: boolean, error?: string, backendDiag?: any, pluginDiag?: any}>}
+	 * @param {{includeDiagnostics?: boolean, defer?: boolean}} [opts] - see retryTimeoutSkippedAttachment
+	 * @returns {Promise<{fixed: boolean, stillMissing: boolean, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, error?: string, backendDiag?: any, pluginDiag?: any}>}
 	 */
 	async retryDownloadFailedAttachment(attachmentItem, parentItem, libraryID, opts = {}) {
 		const downloadResult = await this._tryDownloadAttachment(attachmentItem);

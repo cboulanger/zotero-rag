@@ -305,6 +305,54 @@ test('retryDownloadFailedAttachment treats a parse-error upload result as not fi
 	assert.strictEqual(result.error, 'binary junk');
 });
 
+test('_uploadDownloadFailedAttachment returns queued:true when the upload is deferred', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	let capturedDefer;
+	const RemoteIndexer = {
+		_uploadAttachment: async (opts) => {
+			capturedDefer = opts.defer;
+			return { queued: true, eta: '2026-10-06T15:30:00Z', queueBlockReason: null };
+		},
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin._uploadDownloadFailedAttachment(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+		{ defer: true },
+	);
+
+	assert.strictEqual(capturedDefer, true);
+	assert.strictEqual(result.fixed, false);
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T15:30:00Z');
+});
+
+test('processQueuedAttachmentNow calls RemoteIndexer._processQueuedNow and maps success to fixed:true', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.Libraries.get = () => ({ libraryType: 'user' });
+	const RemoteIndexer = { _processQueuedNow: async () => ({}) };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.getCurrentZoteroUserId = () => 1;
+	plugin.backendURL = 'http://backend';
+
+	const result = await plugin.processQueuedAttachmentNow(
+		{ key: 'A', attachmentContentType: 'application/pdf', version: 1 },
+		{ key: 'I', version: 1 },
+		1,
+	);
+
+	assert.strictEqual(result.fixed, true);
+});
+
 test('getBackendLibraryId returns "u{userId}" for the personal library', () => {
 	const zotero = {
 		Libraries: { userLibraryID: 1 },
