@@ -291,7 +291,9 @@ last run's full status once a run has produced a status file:
       "items_processed": 150,
       "items_total": 500,
       "chunks_added": 1200,
-      "started_at": "2026-06-23T02:00:02Z"
+      "started_at": "2026-06-23T02:00:02Z",
+      "pending_drained": 2,
+      "pending_errors": 0
     },
     "groups/678": { "status": "pending" }
   },
@@ -316,6 +318,13 @@ across **all** libraries, not just cron targets) are available at
 count.
 
 Slug statuses: `pending` → `indexing` → `done` (or `error`).
+
+`pending_drained`/`pending_errors` are present only when that library had at
+least one deferred attachment upload sitting in its pending-upload cache for
+this run — see "Pending-upload cache disk usage" below. `pending_drained` is
+how many of those were indexed successfully this run (and removed from the
+cache); `pending_errors` is how many failed and were kept, with their own
+retry counter, for the next run.
 
 `key_issues` lists keys that failed re-validation this run. `pruned: true` means
 the key was permanently invalid and removed from the store; `pruned: false` means
@@ -362,6 +371,18 @@ Two independent checks watch for the conditions that caused the disk-full /
 Qdrant-optimizer-stuck incident, and push an alert via [ntfy.sh](https://ntfy.sh)
 (a free push-notification service; no account needed — just a topic name) when
 something degrades, instead of relying on a user reporting a 504.
+
+### Pending-upload cache disk usage
+
+Attachments the plugin uploads via the deferred path (the Fix Unavailable
+dialog's default "Search & Fix Selected" action, as opposed to its "Fix &
+Index Selected Now" alternative) are cached on disk at
+`<DEPLOY_DATA_DIR>/system/pending_uploads/<library_id>/` until the next
+autoindex run for that library processes them. A failed entry stays cached
+and retries on every subsequent run rather than being dropped, so a
+persistently broken attachment (and its raw bytes) can accumulate there
+indefinitely. Include this path when checking disk usage (`du -sh`)
+alongside the other system-state paths already covered above.
 
 ### Disk space + Qdrant collection health (built-in scheduler)
 
