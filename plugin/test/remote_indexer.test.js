@@ -85,6 +85,7 @@ test('_collectAbstractItems excludes trashed items from the search', async () =>
 /** Build a RemoteIndexer whose network layer is stubbed. */
 function makeUploader(result, { asyncStatus = 'done' } = {}) {
 	const bodies = [];
+	const urls = [];
 	const zotero = { ZoteroRAG: { _extractAuthors: () => [], _extractYear: () => null } };
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	const context = {
@@ -96,7 +97,8 @@ function makeUploader(result, { asyncStatus = 'done' } = {}) {
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'remote_indexer.js' });
 	const ri = context.RemoteIndexer;
-	ri._apiFetch = async (_m, _u, opts) => {
+	ri._apiFetch = async (_m, url, opts) => {
+		urls.push(url);
 		bodies.push(opts.body.f);
 		return { status: 200, json: async () => ({ status: asyncStatus, result }) };
 	};
@@ -108,7 +110,27 @@ function makeUploader(result, { asyncStatus = 'done' } = {}) {
 		att, libraryId: 'u1', libraryType: 'user', backendURL: 'http://x', userId: 1,
 		getAuthHeaders: () => ({}), log: () => {}, ...extra,
 	});
-	return { call, bodies };
+	return { call, bodies, urls };
+}
+
+/** Build a RemoteIndexer whose network layer is stubbed to respond like the /cache endpoint. */
+function makeDeferUploader(cacheResponse) {
+	const urls = [];
+	const zotero = { ZoteroRAG: { _extractAuthors: () => [], _extractYear: () => null } };
+	const context = {
+		Zotero: zotero,
+		IOUtils: { read: async () => new Uint8Array([1, 2, 3]) },
+		FormData: class { constructor() { this.f = {}; } append(k, v) { this.f[k] = v; } },
+		Blob: class {},
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'remote_indexer.js' });
+	const ri = context.RemoteIndexer;
+	ri._apiFetch = async (_m, url, _opts) => { urls.push(url); return { status: 200, json: async () => ({ status: 'queued', ...cacheResponse }) }; };
+	const att = { attachment_key: 'A', item_key: 'I', mime_type: 'application/pdf', item_version: 1, attachment_version: 1,
+		filePath: '/x.pdf', zoteroItem: {}, parentItem: { getField: () => 't', itemType: 'book', dateModified: 'd' } };
+	const call = (extra = {}) => ri._uploadAttachment({ att, libraryId: 'u1', libraryType: 'user', backendURL: 'http://x', userId: 1, getAuthHeaders: () => ({}), log: () => {}, ...extra });
+	return { ri, urls, call };
 }
 
 test('_uploadAttachment sends include_diagnostics only when requested', async () => {
@@ -147,4 +169,30 @@ test('_uploadAttachment without includeDiagnostics adds no diagnostics fields', 
 	assert.strictEqual(r.skippedEmpty, true);
 	assert.ok(!('diagnostics' in r));
 	assert.ok(!('pluginDiag' in r));
+});
+
+// ---------------------------------------------------------------------------
+// _uploadAttachment: defer mode
+// ---------------------------------------------------------------------------
+
+test('_uploadAttachment with defer:true posts to the cache endpoint and returns queued status without polling', async () => {
+	const { call, urls } = makeDeferUploader({ eta: '2026-10-06T15:30:00Z', reason: null });
+	const result = await call({ defer: true });
+	assert.strictEqual(result.queued, true);
+	assert.strictEqual(result.eta, '2026-10-06T15:30:00Z');
+	assert.strictEqual(result.queueBlockReason, null);
+	assert.ok(urls[0].endsWith('/api/index/document/cache'));
+});
+
+test('_uploadAttachment with defer:true surfaces a block reason when present', async () => {
+	const { call } = makeDeferUploader({ eta: null, reason: 'key_invalid' });
+	const result = await call({ defer: true });
+	assert.strictEqual(result.eta, null);
+	assert.strictEqual(result.queueBlockReason, 'key_invalid');
+});
+
+test('_uploadAttachment with defer:false (default) still posts to the async endpoint', async () => {
+	const { call, urls } = makeUploader({ status: 'indexed', chunks_added: 1 });
+	await call();
+	assert.ok(urls[0].endsWith('/api/index/document/async'));
 });

@@ -803,9 +803,11 @@ var RemoteIndexer = {
 	 *   the returned object (`diagnostics`, `pluginDiag`) — or, when the upload throws, to the
 	 *   thrown Error (`err.diagnostics`, `err.pluginDiag`). Used by the Fix Unavailable
 	 *   "Download debugging information" option. Defaults to false (no extra data requested).
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 * @param {boolean} [opts.defer=false] - When true, upload to the deferred-indexing
+	 *   cache instead of indexing now; returns {queued, eta, queueBlockReason} immediately.
+	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
-	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false }) {
+	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false, defer = false }) {
 		/** @type {Record<string, any>|null} */
 		const pluginDiag = includeDiagnostics ? {
 			timeout_multiplier: timeoutMultiplier,
@@ -826,7 +828,7 @@ var RemoteIndexer = {
 			return err;
 		};
 		try {
-			return await this._uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag });
+			return await this._uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag, defer });
 		} catch (err) {
 			throw withDiag(err, err && err.diagnostics);
 		}
@@ -838,7 +840,7 @@ var RemoteIndexer = {
 	 * @param {any} opts
 	 * @returns {Promise<any>}
 	 */
-	async _uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag }) {
+	async _uploadAttachmentInner({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate, timeoutMultiplier, includeDiagnostics, pluginDiag, defer }) {
 		// Prefer the path already resolved in _collectAttachments (may come from the
 		// downloaded-paths cache); fall back to a fresh getFilePathAsync() call.
 		const filePath = att.filePath || await att.zoteroItem.getFilePathAsync();
@@ -892,7 +894,7 @@ var RemoteIndexer = {
 		for (let attempt = 1; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
 			if (pluginDiag) pluginDiag.upload_attempts = attempt;
 			try {
-				response = await this._apiFetch('POST', `${backendURL}/api/index/document/async`, {
+				response = await this._apiFetch('POST', `${backendURL}/api/index/document/${defer ? 'cache' : 'async'}`, {
 					headers: getAuthHeaders(), // no Content-Type — let browser set multipart boundary
 					body: formData,
 					signal,
@@ -920,7 +922,11 @@ var RemoteIndexer = {
 		debug(log, `${att.attachment_key}: async response received in ${Date.now() - t0}ms`);
 		if (pluginDiag) pluginDiag.http_status = response.status ?? null;
 
-		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult}} */ (/** @type {unknown} */ (await response.json()));
+		const asyncData = /** @type {{status: string, task_id?: string, result?: DocumentUploadResult, eta?: string|null, reason?: string|null}} */ (/** @type {unknown} */ (await response.json()));
+		if (defer) {
+			// /cache never indexes — nothing to poll, no diagnostics possible.
+			return { rateLimitHeaders: null, queued: true, eta: asyncData.eta ?? null, queueBlockReason: asyncData.reason ?? null };
+		}
 		/** @type {DocumentUploadResult} */
 		let result;
 		if (asyncData.status === 'processing' && asyncData.task_id) {
