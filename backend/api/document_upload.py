@@ -174,8 +174,10 @@ class AttachmentIndexStatus(BaseModel):
     item_key: str
     attachment_key: str
     needs_indexing: bool
-    reason: str  # "not_indexed" | "version_changed" | "up_to_date"
+    reason: str  # "not_indexed" | "version_changed" | "up_to_date" | "queued"
     needs_metadata_update: bool = False  # True when schema_version < CURRENT_SCHEMA_VERSION
+    eta: Optional[str] = None  # set only when reason == "queued"
+    queue_block_reason: Optional[str] = None  # None | "paused" | "key_invalid"; set only when reason == "queued"
 
 
 class ItemMetadataUpdate(BaseModel):
@@ -600,6 +602,19 @@ async def check_indexed(
                 reason="up_to_date",
                 needs_metadata_update=schema_outdated,
             ))
+
+    settings = get_settings()
+    cached_entries = await asyncio.to_thread(pending_upload_cache.list_entries, settings.data_path, library_id)
+    cached_keys = {entry["attachment_key"] for entry in cached_entries}
+    if cached_keys:
+        key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        queue_status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
+        for s in statuses:
+            if s.attachment_key in cached_keys:
+                s.needs_indexing = False
+                s.reason = "queued"
+                s.eta = queue_status["eta"]
+                s.queue_block_reason = queue_status["reason"]
 
     # Repair missing library metadata if chunks already exist.
     # This handles the case where a previous indexing run stored chunks
