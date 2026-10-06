@@ -224,3 +224,19 @@ test('_processQueuedNow throws on an error result, same as a polled upload', asy
 		/boom/
 	);
 });
+
+test('_processQueuedNow propagates a real 404 from _apiFetch instead of swallowing it', async () => {
+	// _apiFetch itself throws on any non-ok response (including 404) before ever
+	// returning a response object to the caller — so _processQueuedNow must not
+	// (and, after the fix, does not) try to special-case response.status === 404
+	// on the resolved value. Stub _apiFetch the way the real one behaves on a
+	// 404: by throwing, not by resolving to a {status: 404, ...} object.
+	const { ri } = makeDeferUploader({});
+	ri._apiFetch = async () => {
+		throw new Error('POST /api/index/document/cache/u1/ATT1/process-now: HTTP 404 — No cached upload found for this attachment');
+	};
+	await assert.rejects(
+		() => ri._processQueuedNow({ libraryId: 'u1', attachmentKey: 'ATT1', backendURL: 'http://x', getAuthHeaders: () => ({}), log: () => {} }),
+		/HTTP 404/
+	);
+});

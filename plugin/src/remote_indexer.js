@@ -958,7 +958,7 @@ var RemoteIndexer = {
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
 
-		return this._mapTerminalResult(result, result.rate_limit_headers || null, pluginDiag, includeDiagnostics);
+		return this._mapTerminalResult(result, result.rate_limit_headers || null, pluginDiag);
 	},
 
 	/**
@@ -966,10 +966,11 @@ var RemoteIndexer = {
 	 * shape callers expect. Throws for status "error".
 	 * @param {any} result
 	 * @param {Record<string,string>|null} rateLimitHeaders
-	 * @param {any} pluginDiag
-	 * @param {boolean} includeDiagnostics
+	 * @param {any} pluginDiag - When truthy, `diagnostics`/`pluginDiag` fields are included
+	 *   in the returned object (and on a thrown error's `.diagnostics`).
+	 * @returns {{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}}
 	 */
-	_mapTerminalResult(result, rateLimitHeaders, pluginDiag, includeDiagnostics) {
+	_mapTerminalResult(result, rateLimitHeaders, pluginDiag) {
 		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 		if (result.status === 'error') {
 			const err = /** @type {any} */ (new Error(result.message || 'Upload failed'));
@@ -1000,16 +1001,18 @@ var RemoteIndexer = {
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
 	 * @param {boolean} [opts.includeDiagnostics=false]
+	 * @returns {Promise<{rateLimitHeaders: null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
 	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false }) {
 		const url = `${backendURL}/api/index/document/cache/${encodeURIComponent(libraryId)}/${encodeURIComponent(attachmentKey)}/process-now`
 			+ (includeDiagnostics ? '?include_diagnostics=true' : '');
+		// _apiFetch already throws a descriptive error (including the backend's own
+		// detail message) for any non-2xx response, 404 included — no need (and no
+		// way) to special-case it here on the resolved response.
 		const response = await this._apiFetch('POST', url, { headers: getAuthHeaders(), signal, timeout: 10 * 60 * 1000 });
-		if (response.status === 404) {
-			throw new Error('Cached upload not found — it may already have been indexed by a scheduled run.');
-		}
 		const result = await response.json();
-		return this._mapTerminalResult(result, null, includeDiagnostics ? {} : null, includeDiagnostics);
+		log(`[RemoteIndexer] ${attachmentKey}: process-now ${result.status} (${result.chunks_added} chunks)`);
+		return this._mapTerminalResult(result, null, includeDiagnostics ? {} : null);
 	},
 
 	/**
