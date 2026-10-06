@@ -1,3 +1,12 @@
+## [1.52.1](https://github.com/cboulanger/zotero-rag/compare/v1.52.0...v1.52.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** size indexing chunks for the active embedding model, not generic defaults ([64545bb](https://github.com/cboulanger/zotero-rag/commit/64545bbd567a9843f9a9c77dabb93cac519209fa))
+* **backend:** use the live item version, not the stale deferral-time one, on process-now ([cea9713](https://github.com/cboulanger/zotero-rag/commit/cea971387f5b6abbbf7f876df96eeb9ad5f683b3))
+* **plugin:** fix dropdown button cropping, add progress meter and cancel/resume to Fix Unavailable ([5c6bb5d](https://github.com/cboulanger/zotero-rag/commit/5c6bb5d8bcbc291418cfa93597e7bbdc96f25ad3))
+
 # [1.52.0](https://github.com/cboulanger/zotero-rag/compare/v1.51.0...v1.52.0) (2026-10-06)
 
 
