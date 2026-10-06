@@ -890,6 +890,76 @@ async def upload_document_to_cache(
     return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
 
 
+@router.post(
+    "/index/document/cache/{library_id}/{attachment_key}/process-now",
+    response_model=DocumentUploadResult,
+    summary="Force immediate indexing of a cached deferred upload",
+)
+async def process_cached_upload_now(
+    library_id: str,
+    attachment_key: str,
+    http_request: Request,
+    include_diagnostics: bool = False,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+    vector_store: VectorStore = Depends(get_vector_store),
+):
+    """
+    Pull one entry out of the pending-upload cache and index it synchronously
+    right now, instead of waiting for the library's next autoindex run.
+
+    Removes the cache entry whether this succeeds or fails terminally — a
+    failure here surfaces the real error immediately rather than retrying
+    silently on a future scheduled run.
+    """
+    assert_can_access(identity, library_id)
+
+    if vector_store is None:
+        raise HTTPException(status_code=503, detail="Vector store is unavailable")
+
+    settings = get_settings()
+    cached = pending_upload_cache.read_entry(settings.data_path, library_id, attachment_key)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="No cached upload found for this attachment")
+    file_bytes, meta = cached
+
+    doc_metadata = DocumentMetadata(
+        library_id=library_id,
+        item_key=meta["item_key"],
+        attachment_key=attachment_key,
+        title=meta.get("title", "Untitled"),
+        authors=meta.get("authors", []),
+        year=meta.get("year"),
+        item_type=meta.get("item_type"),
+    )
+    content_hash = hashlib.sha256(file_bytes).hexdigest()
+    client_keys = get_client_api_keys(http_request)
+    embedding_service = make_embedding_service(client_keys)
+
+    result = await _execute_upload(
+        file_bytes=file_bytes,
+        content_hash=content_hash,
+        doc_metadata=doc_metadata,
+        library_id=library_id,
+        library_type=meta.get("library_type", "user"),
+        item_key=meta["item_key"],
+        attachment_key=attachment_key,
+        mime_type=meta.get("mime_type", "application/pdf"),
+        item_version=meta.get("item_version", 0),
+        attachment_version=meta.get("attachment_version", 0),
+        item_modified=meta.get("zotero_modified", ""),
+        library_name=meta.get("library_name", ""),
+        vector_store=vector_store,
+        embedding_service=embedding_service,
+        include_diagnostics=include_diagnostics,
+    )
+
+    if result.status == "error":
+        pending_upload_cache.record_failure(settings.data_path, library_id, attachment_key, result.message)
+    else:
+        pending_upload_cache.delete_entry(settings.data_path, library_id, attachment_key)
+    return result
+
+
 @router.get(
     "/index/tasks/{task_id}",
     response_model=AsyncUploadResponse,
