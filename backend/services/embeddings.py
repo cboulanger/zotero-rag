@@ -540,6 +540,13 @@ class RemoteEmbeddingService(EmbeddingService):
                 msg = str(exc).lower()
                 if "context length" not in msg and "maximum context" not in msg:
                     raise
+                if attempt == max_attempts - 1:
+                    # Truncating further won't help if it hasn't by now, and
+                    # there's no next iteration left to retry on anyway —
+                    # raise instead of falling off the loop, which would
+                    # otherwise return None and crash the caller with a
+                    # confusing "'NoneType' object has no attribute 'data'".
+                    raise
                 # Truncate and retry: remove ~15% of words from the end each attempt.
                 if isinstance(input, str):
                     words = input.split()
