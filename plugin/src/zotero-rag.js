@@ -835,6 +835,21 @@ class ZoteroRAGPlugin {
 	/**
 	 * Ask the backend which of these attachments are currently sitting in the
 	 * deferred-upload cache ("Waiting to be indexed"), via check-indexed.
+	 *
+	 * Never throws: like the other upload/retry wrappers in this file, a
+	 * failure here (network error, etc.) is normalized rather than left to
+	 * propagate, since this is a display enhancement for the Fix dialog, not
+	 * a required step — a caller gets an empty map instead of an exception.
+	 * Note this means a `_checkIndexed` call that only partially failed
+	 * (its own internal retry/circuit-breaker already reduces an unreachable
+	 * batch to per-item `reason: 'check_failed'` entries rather than
+	 * throwing) is already handled upstream; this try/catch only guards
+	 * against `_checkIndexed` itself throwing outright.
+	 *
+	 * Does not thread through an abort signal or progress callback for a
+	 * long-running check over many items — acceptable for now since nothing
+	 * calls this yet, but worth revisiting once the Fix dialog wires it in
+	 * for potentially hundreds of rows.
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @param {Array<{parentItem: *, attachmentItem: *}>} items
 	 * @returns {Promise<Map<string, {eta: string|null, queueBlockReason: string|null}>>}
@@ -843,22 +858,27 @@ class ZoteroRAGPlugin {
 		/** @type {Map<string, {eta: string|null, queueBlockReason: string|null}>} */
 		const map = new Map();
 		if (!items || items.length === 0) return map;
-		const backendLibraryId = this.getBackendLibraryId(libraryID);
-		const attachments = items.map(info => ({
-			item_key: info.parentItem ? info.parentItem.key : info.attachmentItem.key,
-			attachment_key: info.attachmentItem.key,
-			mime_type: info.attachmentItem.attachmentContentType || 'application/pdf',
-			item_version: info.parentItem ? (info.parentItem.version || 0) : (info.attachmentItem.version || 0),
-			attachment_version: info.attachmentItem.version || 0,
-		}));
-		const statuses = await RemoteIndexer._checkIndexed(
-			backendLibraryId, attachments, this.backendURL,
-			(extra) => this.getAuthHeaders(extra), (msg) => this.log(msg),
-		);
-		for (const s of statuses) {
-			if (s.reason === 'queued') {
-				map.set(s.attachment_key, { eta: s.eta ?? null, queueBlockReason: s.queue_block_reason ?? null });
+		try {
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+			const attachments = items.map(info => ({
+				item_key: info.parentItem ? info.parentItem.key : info.attachmentItem.key,
+				attachment_key: info.attachmentItem.key,
+				mime_type: info.attachmentItem.attachmentContentType || 'application/pdf',
+				item_version: info.parentItem ? (info.parentItem.version || 0) : (info.attachmentItem.version || 0),
+				attachment_version: info.attachmentItem.version || 0,
+			}));
+			const statuses = await RemoteIndexer._checkIndexed(
+				backendLibraryId, attachments, this.backendURL,
+				(extra) => this.getAuthHeaders(extra), (msg) => this.log(msg),
+			);
+			for (const s of statuses) {
+				if (s.reason === 'queued') {
+					map.set(s.attachment_key, { eta: s.eta ?? null, queueBlockReason: s.queue_block_reason ?? null });
+				}
 			}
+		} catch (e) {
+			const msg = e instanceof Error ? e.message : String(e);
+			this.log(`[ZoteroRAG] getQueuedStatusMap failed: ${msg}`);
 		}
 		return map;
 	}

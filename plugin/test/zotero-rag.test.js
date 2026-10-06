@@ -454,6 +454,45 @@ test('getQueuedStatusMap returns only attachments the backend reports as queued'
 	assert.strictEqual(map.has('A2'), false);
 });
 
+test('getQueuedStatusMap excludes check_failed entries (an unreachable batch is not the same as queued)', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = {
+		_checkIndexed: async () => ([
+			{ item_key: 'I1', attachment_key: 'A1', needs_indexing: false, reason: 'queued', eta: '2026-10-06T15:30:00Z', queue_block_reason: null },
+			{ item_key: 'I3', attachment_key: 'A3', needs_indexing: true, reason: 'check_failed' },
+		]),
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+		{ parentItem: { key: 'I3', version: 1 }, attachmentItem: { key: 'A3', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	const map = await plugin.getQueuedStatusMap(1, items);
+	assert.strictEqual(map.size, 1);
+	assert.strictEqual(map.has('A1'), true);
+	assert.strictEqual(map.has('A3'), false);
+});
+
+test('getQueuedStatusMap returns an empty map instead of throwing when _checkIndexed fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = { _checkIndexed: async () => { throw new Error('network down'); } };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.log = () => {};
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	const map = await plugin.getQueuedStatusMap(1, items);
+	assert.strictEqual(map.size, 0);
+});
+
 test('getQueuedStatusMap returns an empty map for an empty item list without calling the backend', async () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	let called = false;
