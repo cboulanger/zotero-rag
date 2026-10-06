@@ -455,7 +455,7 @@ class CronIndexer:
         )
         return "full"
 
-    async def _drain_pending_uploads(self, slug_info: SlugInfo, embedding_service) -> tuple[int, int]:
+    async def _drain_pending_uploads(self, slug_info: SlugInfo, embedding_service, web_api) -> tuple[int, int]:
         """Process this library's deferred-upload cache through the normal
         extract+embed+store pipeline, using this run's own embedding_service
         (the library owner's stored key) and vector_store.
@@ -474,6 +474,29 @@ class CronIndexer:
             # other library processed after this one in the same run.
             self.log.error("Could not list pending uploads for %s: %s", slug_info.slug, exc)
             return 0, 0
+
+        # Re-fetch LIVE item/attachment versions rather than trusting the ones frozen
+        # in the cache at original queue time — a cache entry can sit queued for a
+        # while, during which the live Zotero version keeps moving. Writing the stale
+        # cached version into the vector store makes the very next scan think the
+        # item changed since indexing, retrying a doomed re-download (the backend has
+        # no WebDAV credentials) and resurfacing it as a download failure even though
+        # it was genuinely indexed. Same bug class fixed for the on-demand process-now
+        # endpoint in _execute_upload_impl's caller (document_upload.py); this is the
+        # equivalent fix for the background drain path. A fetch failure (or a key
+        # missing from the response, e.g. deleted since queued) falls back to the
+        # cached value below rather than blocking the drain.
+        live_versions: dict[str, int] = {}
+        live_keys = sorted({k for e in entries for k in (e.get("item_key"), e.get("attachment_key")) if k})
+        if live_keys:
+            try:
+                live_items = await web_api.get_items_by_keys(slug_info.library_id, live_keys, slug_info.library_type)
+                live_versions = {
+                    item["key"]: item["version"] for item in live_items if "key" in item and "version" in item
+                }
+            except Exception as exc:
+                self.log.warning("Could not fetch live versions for pending uploads in %s: %s", slug_info.slug, exc)
+
         drained = 0
         failed = 0
         for entry in entries:
@@ -501,8 +524,8 @@ class CronIndexer:
                     item_key=meta["item_key"],
                     attachment_key=attachment_key,
                     mime_type=meta.get("mime_type", "application/pdf"),
-                    item_version=meta.get("item_version", 0),
-                    attachment_version=meta.get("attachment_version", 0),
+                    item_version=live_versions.get(meta["item_key"], meta.get("item_version", 0)),
+                    attachment_version=live_versions.get(attachment_key, meta.get("attachment_version", 0)),
                     item_modified=meta.get("zotero_modified", ""),
                     library_name=meta.get("library_name", slug_info.slug),
                     vector_store=self.vector_store,
@@ -571,7 +594,7 @@ class CronIndexer:
         preset = get_settings().get_hardware_preset()
         embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
 
-        pending_drained, pending_failed = await self._drain_pending_uploads(slug_info, embedding_service)
+        pending_drained, pending_failed = await self._drain_pending_uploads(slug_info, embedding_service, web_api)
         if pending_drained or pending_failed:
             entry = status["slugs"][slug_info.slug]
             entry["pending_drained"] = pending_drained
