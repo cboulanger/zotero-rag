@@ -21,7 +21,7 @@ function loadDialog() {
 	const context = {
 		window: {},
 		document: {
-			getElementById: () => ({ addEventListener: () => {} }),
+			getElementById: () => ({ addEventListener: () => {}, style: {} }),
 		},
 		console,
 		Services: { console: { logStringMessage: () => {}, logMessage: () => {} } },
@@ -695,4 +695,97 @@ test('a failing save is reported in the status bar and still restores the dialog
 	await dialog.searchAndFix();
 	assert.ok(status.includes('Failed to save debug info: disk full'), status);
 	assert.strictEqual(dialog.isRunning, false);
+});
+
+test('searchAndFix reports "x/y items processed" progress as each row finishes, ending at the full total', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1]);
+	dialog.items = [
+		{ attachmentItem: { key: 'A' }, isLinked: false },
+		{ attachmentItem: { key: 'B' }, isLinked: false },
+	];
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: true }),
+	};
+	/** @type {Array<[number, number]>} */
+	const calls = [];
+	dialog._updateProgress = (processed, total) => calls.push([processed, total]);
+
+	await dialog.searchAndFix();
+
+	assert.deepStrictEqual(calls[0], [0, 2]);
+	assert.deepStrictEqual(calls[calls.length - 1], [2, 2]);
+});
+
+test('clicking Cancel (setting _cancelRequested) mid-run stops further processing and reports a cancelled summary', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.items = [
+		{ attachmentItem: { key: 'T1' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+		{ attachmentItem: { key: 'T2' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+		{ attachmentItem: { key: 'T3' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+	];
+	let calls = 0;
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => {
+			calls++;
+			// Simulate the user clicking Cancel while this (first) request was in flight.
+			dialog._cancelRequested = true;
+			return { fixed: true };
+		},
+	};
+	let status = '';
+	dialog.setStatus = (t) => { status = t; };
+
+	await dialog.searchAndFix();
+
+	// Only the first, already in-flight item was processed.
+	assert.strictEqual(calls, 1);
+	assert.ok(status.startsWith('Cancelled after 1/3 item(s).'), status);
+	assert.strictEqual(dialog.isRunning, false);
+});
+
+test('a cancelled run deselects the processed row but leaves not-yet-processed rows selected for resuming', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.items = [
+		{ attachmentItem: { key: 'T1' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+		{ attachmentItem: { key: 'T2' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+		{ attachmentItem: { key: 'T3' }, parentItem: {}, skipReason: 'timeout', isLinked: false },
+	];
+	dialog.plugin = {
+		retryTimeoutSkippedAttachment: async () => {
+			dialog._cancelRequested = true;
+			// Not fixed, so the row stays in the table — exercises deselection
+			// of a processed-but-not-removed row, not just the table-drop path.
+			return { fixed: false, stillTimedOut: true };
+		},
+	};
+
+	await dialog.searchAndFix();
+
+	// Row 0 was processed (and stays in the table, since it wasn't fixed) but
+	// must no longer be selected; rows 1 and 2 were never reached and must
+	// still be selected so the user can resume with just those.
+	assert.strictEqual(dialog.items.length, 3);
+	assert.deepStrictEqual([...dialog.selected].sort(), [1, 2]);
+});
+
+test('a completed (non-cancelled) run deselects every processed row, even ones that errored and stayed in the table', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [{ attachmentItem: { key: 'ERR' }, isLinked: false }];
+	dialog.plugin = {
+		_tryDownloadAttachment: async () => ({ downloaded: false }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(dialog.items.length, 1);
+	assert.deepStrictEqual([...dialog.selected], []);
 });
