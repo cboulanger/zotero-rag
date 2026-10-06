@@ -642,6 +642,45 @@ test('a result.queued response sets the row to status-queued and the row survive
 	assert.deepStrictEqual([...removeCalled.keys], ['TQ1']);
 });
 
+test('debug collection produces a populated report when the whole selection is already-queued rows processed via forceIndexNow', async () => {
+	// Regression test: _shouldCollectDebug and the itemHandles map must be built
+	// from the FULL selection (allSelectedIndices), not the narrowed `indices`
+	// that excludes already-queued rows — otherwise a selection consisting
+	// entirely of already-queued rows (indices.length === 0) would silently
+	// produce no report at all, even with the debug checkbox checked and real
+	// indexing work happening via processQueuedAttachmentNow.
+	const { dialog, saves } = loadDialogWithDebug({ checked: true });
+	dialog.backendLibraryId = 'u1';
+	dialog.libraryID = 1;
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map([[0, { cssClass: 'queued', text: 'Waiting to be indexed' }]]);
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'Q1' }, parentItem: { key: 'P1' }, isLinked: false },
+	];
+	dialog.plugin = {
+		processQueuedAttachmentNow: async () => ({
+			fixed: true,
+			backendDiag: { request_id: 'pn1' },
+			pluginDiag: { upload_attempts: 1 },
+		}),
+	};
+
+	await dialog.searchAndFix({ forceIndexNow: true });
+
+	// A report was actually saved (not silently skipped).
+	assert.strictEqual(saves.length, 1);
+	const data = saves[0].data;
+	assert.strictEqual(data.items.length, 1);
+	const item = data.items[0];
+	assert.strictEqual(item.attachment_key, 'Q1');
+	assert.strictEqual(item.steps.length, 1);
+	assert.strictEqual(item.steps[0].phase, 'process_now');
+	assert.strictEqual(item.steps[0].outcome, 'fixed');
+	assert.strictEqual(item.steps[0].backend.request_id, 'pn1');
+	assert.strictEqual(item.final_row_status.css_class, 'fixed');
+});
+
 test('a failing save is reported in the status bar and still restores the dialog state', async () => {
 	const { dialog } = loadDialogWithDebug({ checked: true, saveImpl: async () => { throw new Error('disk full'); } });
 	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();

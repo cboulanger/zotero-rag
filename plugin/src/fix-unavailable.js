@@ -630,7 +630,12 @@ var ZoteroFixUnavailableDialog = {
 		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
 
 		// Optional debug collection (observational only: never alters repair behaviour).
-		const collectDebug = this._shouldCollectDebug(indices);
+		// Gated on the FULL selection (allSelectedIndices), not the narrowed
+		// `indices` — the debug checkbox's own visibility (_updateDebugCheckboxVisibility)
+		// is likewise gated on the full selection, so a selection consisting entirely
+		// of already-queued rows must still be able to produce a (non-empty) report
+		// when the box is checked and "Fix & Index Selected Now" processes them.
+		const collectDebug = this._shouldCollectDebug(allSelectedIndices);
 		/** @type {any} */
 		let report = null;
 		/** @type {Map<number, any>} */
@@ -640,9 +645,9 @@ var ZoteroFixUnavailableDialog = {
 			const env = this._debugEnvironment();
 			report = ZoteroFixDebug.createReport({
 				plugin: env.plugin, backend: env.backend, library: env.library, pathPrefixes: env.pathPrefixes,
-				selectionCount: indices.length, totalRows: this.items.length,
+				selectionCount: allSelectedIndices.length, totalRows: this.items.length,
 			});
-			for (const i of indices) {
+			for (const i of allSelectedIndices) {
 				const info = this.items[i];
 				const handle = report.startItem(info, { typeLabel: this._typeLabelFor(info), file: await this._describeFile(info) });
 				itemHandles.set(i, handle);
@@ -992,13 +997,6 @@ var ZoteroFixUnavailableDialog = {
 			}
 		}
 
-		// Record each selected row's final status for the debug report (before the
-		// fixed rows are filtered out and indices shift).
-		for (const [i, handle] of itemHandles) {
-			const st = this.rowStatus.get(i);
-			if (st) handle.setFinalStatus(st.cssClass, st.text);
-		}
-
 		// Rows already sitting in the backend's deferred-upload cache from a
 		// previous run: when the user explicitly chose "Fix & Index Selected Now"
 		// (forceIndexNow), force immediate processing of those too. Otherwise
@@ -1014,7 +1012,11 @@ var ZoteroFixUnavailableDialog = {
 						info.attachmentItem, info.parentItem, this.libraryID,
 						collectDebug ? { includeDiagnostics: true } : {},
 					);
-					step?.finish(result.fixed ? 'fixed' : 'error', { ...(result.error ? { error: result.error } : {}) });
+					step?.finish(
+						result.fixed ? 'fixed' : 'error',
+						{ ...(result.pluginDiag || {}), ...(result.error ? { error: result.error } : {}) },
+						result.backendDiag ?? null, result.backendDiag ? null : NO_DIAG_NOTE
+					);
 					if (result.fixed) {
 						this.setRowStatus(i, 'fixed', 'Indexed');
 						fixed++;
@@ -1027,6 +1029,7 @@ var ZoteroFixUnavailableDialog = {
 					const msg = e instanceof Error ? e.message : String(e);
 					this.setRowStatus(i, 'error', `Error: ${msg}`, msg);
 					step?.finish('error', { error: msg });
+					itemHandles.get(i)?.addError('plugin', e);
 					errors++;
 					console.error(`fix-unavailable: process-now error for item ${info.zoteroID}: ${msg}`);
 				}
@@ -1034,6 +1037,17 @@ var ZoteroFixUnavailableDialog = {
 		}
 		// When !forceIndexNow, alreadyQueuedIndices are deliberately left untouched —
 		// nothing to repair, they're already cached server-side awaiting the next run.
+
+		// Record each selected row's final status for the debug report (before the
+		// fixed rows are filtered out and indices shift below). This must run AFTER
+		// the already-queued/forceIndexNow block above, since itemHandles now also
+		// covers already-queued rows (gated on the full selection, see collectDebug
+		// above) — recording it earlier would capture their pre-processing 'queued'
+		// status instead of the 'fixed'/'error' outcome that block just set.
+		for (const [i, handle] of itemHandles) {
+			const st = this.rowStatus.get(i);
+			if (st) handle.setFinalStatus(st.cssClass, st.text);
+		}
 
 		// Drop fixed rows from the table immediately rather than waiting for a
 		// manual Refresh — and do it by filtering this.items in place instead
