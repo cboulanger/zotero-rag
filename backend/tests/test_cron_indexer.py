@@ -889,8 +889,10 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
             status_file=self.data_path / "status.json", log=MagicMock(),
         )
         embedding_service = MagicMock()
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
         drained, failed = await indexer._drain_pending_uploads(
-            indexer.parse_slug("users/1"), embedding_service
+            indexer.parse_slug("users/1"), embedding_service, web_api
         )
 
         self.assertEqual(drained, 1)
@@ -906,10 +908,74 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
             vector_store=MagicMock(), lock_file=self.data_path / "lock2",
             status_file=self.data_path / "status2.json", log=MagicMock(),
         )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
         drained, failed = await indexer._drain_pending_uploads(
-            indexer.parse_slug("users/2"), MagicMock()
+            indexer.parse_slug("users/2"), MagicMock(), web_api
         )
         self.assertEqual((drained, failed), (0, 0))
+        # No entries cached, so the live-version fetch must never even be attempted.
+        web_api.get_items_by_keys.assert_not_called()
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_uses_the_live_version_not_the_stale_cached_one(self, mock_execute):
+        # The cache entries (seeded in setUp) were written with item_version=1,
+        # attachment_version=1 — simulating a deferral that happened a while ago.
+        # If the live Zotero version has since moved on, the drain must index using
+        # the CURRENT version, not the stale one frozen in the cache — otherwise the
+        # vector store would think the item is indexed "as of" version 1, and the
+        # next scan would see the real (higher) live version and treat it as changed
+        # again, re-triggering the same download-failure regression.
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            if kwargs["attachment_key"] == "ATT_OK":
+                captured["item_version"] = kwargs["item_version"]
+                captured["attachment_version"] = kwargs["attachment_version"]
+            return MagicMock(status="indexed", message="ok")
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[
+            {"key": "ITEM_OK", "version": 9},
+            {"key": "ATT_OK", "version": 4},
+            {"key": "ITEM_FAIL", "version": 9},
+            {"key": "ATT_FAIL", "version": 4},
+        ])
+
+        await indexer._drain_pending_uploads(indexer.parse_slug("users/1"), MagicMock(), web_api)
+
+        self.assertEqual(captured["item_version"], 9)
+        self.assertEqual(captured["attachment_version"], 4)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_falls_back_to_the_cached_version_when_the_live_fetch_fails(self, mock_execute):
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            if kwargs["attachment_key"] == "ATT_OK":
+                captured["item_version"] = kwargs["item_version"]
+                captured["attachment_version"] = kwargs["attachment_version"]
+            return MagicMock(status="indexed", message="ok")
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(side_effect=RuntimeError("network down"))
+
+        await indexer._drain_pending_uploads(indexer.parse_slug("users/1"), MagicMock(), web_api)
+
+        self.assertEqual(captured["item_version"], 1)
+        self.assertEqual(captured["attachment_version"], 1)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_a_malformed_cache_entry_does_not_abort_processing_of_other_entries(self, mock_execute):
@@ -944,10 +1010,12 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
             status_file=self.data_path / "status9.json", log=MagicMock(),
         )
         embedding_service = MagicMock()
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
 
         # Must return normally (not raise) despite the malformed entry.
         drained, failed = await indexer._drain_pending_uploads(
-            indexer.parse_slug("users/9"), embedding_service
+            indexer.parse_slug("users/9"), embedding_service, web_api
         )
 
         self.assertEqual(drained, 1)
