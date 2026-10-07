@@ -55,6 +55,35 @@ class TestDocumentMetadataAttachmentTitle(unittest.TestCase):
         self.assertEqual(meta.attachment_title, "Snapshot")
 
 
+class TestIsIndexableAttachment(unittest.TestCase):
+    def test_non_indexable_mime_type_is_always_excluded(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "image/png", "title": "diagram.png"}
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=True))
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_snapshot_titled_html_excluded_when_disabled(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "Snapshot"}
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_snapshot_titled_html_included_when_enabled(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "Snapshot"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
+
+    def test_renamed_html_attachment_always_included_regardless_of_flag(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "My notes on this page"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
+
+    def test_pdf_always_included_regardless_of_title_or_flag(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "application/pdf", "title": "Snapshot"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 
@@ -880,6 +909,35 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.processor._download_failures, [
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
+
+    async def test_index_item_skips_snapshot_attachment_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {
+                "data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "version": 1},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            chunks = await self.processor._index_item(item, "1", "user")
+        self.assertEqual(chunks, 0)
+        self.mock_zotero_client.get_attachment_file.assert_not_called()
+
+    async def test_index_item_indexes_snapshot_attachment_when_setting_on(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": True}):
+            item = {
+                "data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "version": 1},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            self.mock_zotero_client.get_attachment_file.return_value = b"<html>hi</html>"
+            self.mock_vector_store.check_duplicate.return_value = None
+            self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("hi", 1))
+            self.mock_embedding_service.embed_batch.return_value = [[0.1] * 384]
+            chunks = await self.processor._index_item(item, "1", "user")
+        self.assertEqual(chunks, 1)
 
     async def test_index_item_isolates_attachment_processing_failure(self):
         """A multi-attachment item where one attachment's extraction/embedding

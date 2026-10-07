@@ -28,6 +28,7 @@ from backend.services.embeddings import (
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
+from backend.services.admin_settings_store import read_admin_settings
 from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
@@ -89,6 +90,28 @@ INDEXABLE_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/epub+zip",
 }
+
+
+def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> bool:
+    """Whether a Zotero attachment's `data` dict should be indexed.
+
+    Snapshot attachments (Zotero's default title for a saved webpage, an
+    HTML attachment) are excluded when the admin-controlled index_snapshots
+    setting is off — exact, case-sensitive title match, so a user-renamed
+    snapshot is treated as a normal attachment. See backend/services/
+    admin_settings_store.py and docs/superpowers/specs/
+    2026-10-07-configurable-snapshot-indexing-design.md.
+    """
+    if att_data.get("contentType") not in INDEXABLE_MIME_TYPES:
+        return False
+    if (
+        not index_snapshots_enabled
+        and att_data.get("contentType") == "text/html"
+        and att_data.get("title") == "Snapshot"
+    ):
+        return False
+    return True
+
 
 # Trigger gc + malloc_trim when process RSS exceeds this (MB). Keeps long
 # full-sync runs from hitting the OOM killer on memory-constrained hosts.
@@ -1008,6 +1031,8 @@ class DocumentProcessor:
             tags=self._extract_tags(item["data"]),
         )
 
+        index_snapshots_enabled = read_admin_settings(get_settings().data_path).get("index_snapshots", False)
+
         is_standalone_attachment = item["data"].get("itemType") == "attachment"
         if is_standalone_attachment:
             # A standalone attachment (no parentItem) IS the indexable unit — it has
@@ -1022,7 +1047,7 @@ class DocumentProcessor:
 
         indexable_attachments = [
             att for att in attachments
-            if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+            if _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
         ]
 
         abstract_note = "" if is_standalone_attachment else item["data"].get("abstractNote", "")
@@ -1035,6 +1060,7 @@ class DocumentProcessor:
                 attachment_version = attachment.get("version", item_version)
                 mime_type = attachment["data"].get("contentType", "application/pdf")
                 doc_metadata.attachment_key = attachment_key
+                doc_metadata.attachment_title = attachment["data"].get("title")
 
                 # Download attachment
                 file_bytes = await self.zotero_client.get_attachment_file(
@@ -1543,7 +1569,7 @@ class DocumentProcessor:
             return 0
 
         abstract_key = f"{doc_metadata.item_key}:abstract"
-        meta = doc_metadata.model_copy(update={"attachment_key": abstract_key})
+        meta = doc_metadata.model_copy(update={"attachment_key": abstract_key, "attachment_title": None})
         library_id = meta.library_id
         item_key = meta.item_key
 
