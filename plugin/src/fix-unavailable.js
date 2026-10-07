@@ -389,8 +389,11 @@ var ZoteroFixUnavailableDialog = {
 		this._updateSplitButtonVisibility();
 
 		if (this.deferCapable && this.items.length > 0 && typeof this.plugin.getQueuedStatusMap === 'function') {
+			this._showProgress();
+			this._updateProgress(0, this.items.length, 'attachments checked');
 			try {
-				const queuedMap = await this.plugin.getQueuedStatusMap(this.libraryID, this.items);
+				const queuedMap = await this.plugin.getQueuedStatusMap(this.libraryID, this.items,
+					(checked, total) => this._updateProgress(checked, total, 'attachments checked'));
 				for (let i = 0; i < this.items.length; i++) {
 					const q = queuedMap.get(this.items[i].attachmentItem.key);
 					if (q) {
@@ -403,6 +406,8 @@ var ZoteroFixUnavailableDialog = {
 				}
 			} catch (e) {
 				console.error(`fix-unavailable: failed to fetch queued status: ${e}`);
+			} finally {
+				this._hideProgress();
 			}
 		}
 
@@ -1329,19 +1334,22 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
-	 * Update the "x/y items processed" progress meter shown during a run.
+	 * Update the "x/y <label>" progress meter shown during a run. Shared by
+	 * every long-running phase in this dialog (the fix run itself, and the
+	 * check-indexed scan in populateTable) so they all render consistently.
 	 * @param {number} processed
 	 * @param {number} total
+	 * @param {string} [label] - defaults to "items processed"
 	 * @returns {void}
 	 */
-	_updateProgress(processed, total) {
+	_updateProgress(processed, total, label = 'items processed') {
 		const meter = /** @type {HTMLProgressElement|null} */ (document.getElementById('progress-meter'));
 		const text = document.getElementById('progress-text');
 		if (meter) {
 			meter.max = Math.max(total, 1);
 			meter.value = processed;
 		}
-		if (text) text.textContent = `${processed}/${total} items processed`;
+		if (text) text.textContent = `${processed}/${total} ${label}`;
 	},
 
 	/**

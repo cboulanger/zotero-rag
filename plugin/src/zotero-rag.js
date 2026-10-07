@@ -846,15 +846,14 @@ class ZoteroRAGPlugin {
 	 * throwing) is already handled upstream; this try/catch only guards
 	 * against `_checkIndexed` itself throwing outright.
 	 *
-	 * Does not thread through an abort signal or progress callback for a
-	 * long-running check over many items — acceptable for now since nothing
-	 * calls this yet, but worth revisiting once the Fix dialog wires it in
-	 * for potentially hundreds of rows.
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @param {Array<{parentItem: *, attachmentItem: *}>} items
+	 * @param {function(number, number): void} [onProgress] - Called after each
+	 *   batch with (checked, total), so a caller can render progress for
+	 *   large libraries instead of the check appearing to hang.
 	 * @returns {Promise<Map<string, {eta: string|null, queueBlockReason: string|null}>>}
 	 */
-	async getQueuedStatusMap(libraryID, items) {
+	async getQueuedStatusMap(libraryID, items, onProgress) {
 		/** @type {Map<string, {eta: string|null, queueBlockReason: string|null}>} */
 		const map = new Map();
 		if (!items || items.length === 0) return map;
@@ -870,6 +869,8 @@ class ZoteroRAGPlugin {
 			const statuses = await RemoteIndexer._checkIndexed(
 				backendLibraryId, attachments, this.backendURL,
 				(extra) => this.getAuthHeaders(extra), (msg) => this.log(msg),
+				undefined,
+				onProgress ? (p) => onProgress(p.current, p.total) : undefined,
 			);
 			for (const s of statuses) {
 				if (s.reason === 'queued') {

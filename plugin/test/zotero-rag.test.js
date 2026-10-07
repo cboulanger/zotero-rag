@@ -567,6 +567,30 @@ test('getQueuedStatusMap returns an empty map for an empty item list without cal
 	assert.strictEqual(called, false);
 });
 
+test('getQueuedStatusMap forwards check-indexed batch progress to the onProgress callback', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const RemoteIndexer = {
+		_checkIndexed: async (libraryId, attachments, backendURL, getAuthHeaders, log, signal, onProgress) => {
+			onProgress({ current: 1, total: 2, percentage: 50, message: 'Checking attachments' });
+			onProgress({ current: 2, total: 2, percentage: 100, message: 'Checking attachments' });
+			return [];
+		},
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const items = [
+		{ parentItem: { key: 'I1', version: 1 }, attachmentItem: { key: 'A1', version: 1, attachmentContentType: 'application/pdf' } },
+		{ parentItem: { key: 'I2', version: 1 }, attachmentItem: { key: 'A2', version: 1, attachmentContentType: 'application/pdf' } },
+	];
+	/** @type {Array<[number, number]>} */
+	const calls = [];
+	await plugin.getQueuedStatusMap(1, items, (checked, total) => calls.push([checked, total]));
+	assert.deepStrictEqual(calls, [[1, 2], [2, 2]]);
+});
+
 test('getBackendLibraryId returns "u{userId}" for the personal library', () => {
 	const zotero = {
 		Libraries: { userLibraryID: 1 },

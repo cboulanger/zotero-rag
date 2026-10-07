@@ -16,7 +16,7 @@ const vm = require('node:vm');
 const SOURCE_PATH = path.join(__dirname, '..', 'src', 'fix-unavailable.js');
 
 /** @returns {any} a fresh ZoteroFixUnavailableDialog object */
-function loadDialog() {
+function loadDialog(extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	const context = {
 		window: {},
@@ -31,6 +31,7 @@ function loadDialog() {
 			},
 		},
 		Ci: { nsIScriptError: {} },
+		...extra,
 	};
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'fix-unavailable.js' });
@@ -811,4 +812,44 @@ test('a completed (non-cancelled) run deselects every processed row, even ones t
 
 	assert.strictEqual(dialog.items.length, 1);
 	assert.deepStrictEqual([...dialog.selected], []);
+});
+
+test('populateTable shows and updates the progress meter while check-indexed status is fetched for a deferCapable library, then hides it', async () => {
+	const dialog = loadDialog({ Zotero: { Libraries: { get: () => ({ name: 'Test Library' }) } } });
+	dialog.libraryID = 1;
+	dialog.backendLibraryId = 'u1';
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set();
+	/** @type {Array<string>} */
+	const calls = [];
+	dialog._showProgress = () => calls.push('show');
+	dialog._hideProgress = () => calls.push('hide');
+	dialog._updateProgress = (processed, total, label) => calls.push(`update:${processed}/${total}:${label}`);
+
+	dialog.plugin = {
+		_getUnavailableAttachments: async () => ([
+			{ attachmentItem: { key: 'A1' }, isLinked: false },
+			{ attachmentItem: { key: 'A2' }, isLinked: false },
+		]),
+		getAutoIndexedLibraryIds: async () => new Set(['u1']),
+		getQueuedStatusMap: async (libraryID, items, onProgress) => {
+			onProgress(1, 2);
+			onProgress(2, 2);
+			return new Map();
+		},
+	};
+
+	await dialog.populateTable();
+
+	// Progress is shown before the check starts, updated as batches complete
+	// (reusing the same meter the fix run uses), and hidden again once done —
+	// otherwise a large library leaves the dialog looking frozen while the
+	// backend works through check-indexed batches in the background.
+	assert.deepStrictEqual(calls, [
+		'show',
+		'update:0/2:attachments checked',
+		'update:1/2:attachments checked',
+		'update:2/2:attachments checked',
+		'hide',
+	]);
 });
