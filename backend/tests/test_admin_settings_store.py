@@ -34,6 +34,12 @@ class TestAdminSettingsStore(unittest.TestCase):
         (system_dir / "admin_settings.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(read_admin_settings(self.data_path), {"index_snapshots": False})
 
+    def test_read_returns_default_when_file_contains_valid_but_non_dict_json(self):
+        system_dir = self.data_path / "system"
+        system_dir.mkdir(parents=True)
+        (system_dir / "admin_settings.json").write_text("[1, 2, 3]", encoding="utf-8")
+        self.assertEqual(read_admin_settings(self.data_path), {"index_snapshots": False})
+
 
 if __name__ == "__main__":
     unittest.main()
