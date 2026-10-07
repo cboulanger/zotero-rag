@@ -42,6 +42,19 @@ def _attachment(key: str, parent_key: str, content_type: str = "application/pdf"
     }
 
 
+class TestDocumentMetadataAttachmentTitle(unittest.TestCase):
+    def test_attachment_title_defaults_to_none_and_schema_version_is_7(self):
+        from backend.models.document import DocumentMetadata, CURRENT_SCHEMA_VERSION
+        meta = DocumentMetadata(library_id="1", item_key="ABC")
+        self.assertIsNone(meta.attachment_title)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 7)
+
+    def test_attachment_title_can_be_set(self):
+        from backend.models.document import DocumentMetadata
+        meta = DocumentMetadata(library_id="1", item_key="ABC", attachment_title="Snapshot")
+        self.assertEqual(meta.attachment_title, "Snapshot")
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 
