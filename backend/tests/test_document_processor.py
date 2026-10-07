@@ -939,6 +939,39 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             chunks = await self.processor._index_item(item, "1", "user")
         self.assertEqual(chunks, 1)
 
+    async def test_split_indexable_and_catalog_only_excludes_snapshot_only_item_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {"data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "abstractNote": ""}}
+            children_by_parent = {
+                "ITEM1": [{"data": {"contentType": "text/html", "title": "Snapshot"}}],
+            }
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [item], "1", "user", children_by_parent=children_by_parent
+            )
+        self.assertEqual(indexable, [])
+        self.assertEqual(catalog_only, [item])
+
+    async def test_split_indexable_and_catalog_only_includes_snapshot_only_item_when_setting_on(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": True}):
+            item = {"data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "abstractNote": ""}}
+            children_by_parent = {
+                "ITEM1": [{"data": {"contentType": "text/html", "title": "Snapshot"}}],
+            }
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [item], "1", "user", children_by_parent=children_by_parent
+            )
+        self.assertEqual(indexable, [item])
+        self.assertEqual(catalog_only, [])
+
+    async def test_split_indexable_standalone_snapshot_attachment_excluded_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            standalone = {"data": {"key": "SNAP1", "itemType": "attachment", "contentType": "text/html", "title": "Snapshot"}}
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [standalone], "1", "user", children_by_parent={}
+            )
+        self.assertEqual(indexable, [])
+        self.assertEqual(catalog_only, [])  # standalone attachments never become catalog stubs
+
     async def test_index_item_isolates_attachment_processing_failure(self):
         """A multi-attachment item where one attachment's extraction/embedding
         raises must not lose chunks already written for the other attachments —

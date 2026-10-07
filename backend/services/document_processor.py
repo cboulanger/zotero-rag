@@ -1670,6 +1670,7 @@ class DocumentProcessor:
         catalog entries that deserve a stub record (see _add_catalog_stub).
         """
         min_words = get_settings().min_abstract_words
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
         items_with_content = []
         catalog_only_items = []
 
@@ -1685,7 +1686,7 @@ class DocumentProcessor:
                 # A standalone attachment (no parentItem) is itself the indexable
                 # unit — see the matching case in _index_library_full's filter.
                 if not item["data"].get("parentItem") \
-                        and item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                        and _is_indexable_attachment(item["data"], index_snapshots_enabled):
                     items_with_content.append(item)
                 continue
 
@@ -1701,7 +1702,7 @@ class DocumentProcessor:
                 )
 
             has_indexable = any(
-                att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
                 for att in attachments
             )
 
