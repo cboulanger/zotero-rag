@@ -2300,11 +2300,14 @@ class ZoteroRAGPlugin {
 	 * @property {string} year - Publication year (4 digits) or empty string
 	 * @property {string} title - Item title
 	 * @property {string} zoteroID - Parent item key
-	 * @property {boolean} isLinked - True when the attachment isn't a stored/imported file
-	 *   (!isImportedAttachment() — LINK_MODE_LINKED_FILE or LINK_MODE_LINKED_URL); can't be
-	 *   auto-downloaded. Note LINK_MODE_LINKED_URL (bare web link, no local file) is the mode whose
-	 *   fileExists() throws ("cannot be called on link attachments") — do not narrow this to
-	 *   linkMode===2 (LINK_MODE_LINKED_FILE) only, as an earlier version of this code mistakenly did.
+	 * @property {boolean} isLinked - True when the attachment is a linked file on the local
+	 *   filesystem (LINK_MODE_LINKED_FILE) rather than a file Zotero itself stores/imports; can't
+	 *   be auto-downloaded. LINK_MODE_LINKED_URL (a bare web link, no local file at all — the
+	 *   mode whose fileExists() throws "cannot be called on link attachments") is never
+	 *   represented by an UnavailableAttachmentInfo at all: it has no filesystem path to fix and
+	 *   nothing for this dialog to search for or download, so both _getUnavailableAttachments
+	 *   (SQL-filtered to linkMode IN (0,1,2)) and _getDownloadFailedAttachments (explicit linkMode
+	 *   check) exclude it before it ever reaches this typedef.
 	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
 	 * @property {'no text'|'timeout'} [skipReason] - Set for items skipped by the server (skipped_empty / skipped_timeout)
 	 * @property {boolean} [serverDownloadFailed] - True when the server couldn't download this attachment
@@ -2771,16 +2774,18 @@ class ZoteroRAGPlugin {
 	 * (no network calls), so it's safe to compute for every row while
 	 * populating the Fix Unavailable table.
 	 * @param {*} attachment - Zotero attachment item
-	 * @param {boolean} isLinked - Whether the attachment is a bare link (no stored file at all)
+	 * @param {boolean} isLinked - Whether the attachment is a linked file on the local filesystem
+	 *   (LINK_MODE_LINKED_FILE; bare-URL attachments are filtered out before this is called)
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @returns {{downloadFailureReason: string, downloadFailureDetail: string}}
 	 */
 	_describeDownloadFailureReason(attachment, isLinked, libraryID) {
 		if (isLinked) {
 			return {
-				downloadFailureReason: 'Linked URL — no file to download',
-				downloadFailureDetail: 'This attachment is a bare link, not a stored file, so there '
-					+ 'is nothing for the server or the client to download.',
+				downloadFailureReason: 'Linked file — not in Zotero storage',
+				downloadFailureDetail: 'This attachment is a linked file on your filesystem rather than '
+					+ 'a file stored in Zotero, so there is nothing in Zotero storage for the server to '
+					+ 'download. If the path is broken, fix it in Zotero; otherwise use Search & Fix.',
 			};
 		}
 		// @ts-ignore - Zotero.Sync.Storage.Local exists at runtime
@@ -2840,6 +2845,13 @@ class ZoteroRAGPlugin {
 			// @ts-ignore
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
 			if (!attachment || attachment.deleted) continue;
+			// A bare web link (LINK_MODE_LINKED_URL) has no filesystem path at all —
+			// there's no "path to fix" and nothing for Search & Fix to search for or
+			// download, so it doesn't belong in this dialog's list at all. Deliberately
+			// excluded from validKeys too (not just from result below) so the stored
+			// download-failed file prunes it on next write, the same as a deleted item.
+			// @ts-ignore - Zotero.Attachments is a global at runtime
+			if (attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_URL) continue;
 			validKeys.push(key);
 			const parentItem = attachment.parentItemID
 				// @ts-ignore
@@ -2853,13 +2865,12 @@ class ZoteroRAGPlugin {
 				.join(', ');
 			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
 			const yearMatch = dateField.match(/\b(\d{4})\b/);
-			// Not isImportedAttachment() — covers both LINK_MODE_LINKED_FILE and
-			// LINK_MODE_LINKED_URL. The latter is what server-reported download
-			// failures are typically backed by (a bare web link with no local
-			// file), and Zotero's own fileExists() throws when called on one —
-			// this flag must be true for it so fix-unavailable.js never routes
-			// it into the copy-based repair strategies that end by calling
-			// fileExists() on it.
+			// Not isImportedAttachment() — covers LINK_MODE_LINKED_FILE (the only
+			// linkMode that can reach this point now that LINK_MODE_LINKED_URL is
+			// excluded above). Zotero's own fileExists() throws when called on a
+			// link attachment, so this flag must stay true for it so
+			// fix-unavailable.js never routes it into the copy-based repair
+			// strategies that end by calling fileExists() on it.
 			const isLinked = !attachment.isImportedAttachment();
 			result.push({
 				parentItem: parentItem ?? attachment,
