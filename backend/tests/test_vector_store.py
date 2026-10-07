@@ -116,6 +116,61 @@ class TestVectorStore(unittest.TestCase):
         info = self.vector_store.get_collection_info()
         self.assertEqual(info["chunks_count"], 1)
 
+    def test_add_chunk_stores_attachment_title_in_payload(self):
+        chunk = DocumentChunk(
+            text="Snapshot page text.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-snap-1",
+                document_metadata=DocumentMetadata(
+                    library_id="1",
+                    item_key="ABC123",
+                    attachment_key="ATT1",
+                    attachment_title="Snapshot",
+                    title="Test Paper",
+                ),
+                page_number=1,
+                text_preview="Snapshot page",
+                chunk_index=0,
+                content_hash="hash-snap-1",
+            ),
+            embedding=[0.1] * 384,
+        )
+        point_id = self.vector_store.add_chunk(chunk)
+        points = self.vector_store.client.retrieve(
+            collection_name=self.vector_store.CHUNKS_COLLECTION, ids=[point_id]
+        )
+        self.assertEqual(points[0].payload.get("attachment_title"), "Snapshot")
+
+    def test_copy_chunks_cross_library_preserves_attachment_title(self):
+        source = DocumentChunk(
+            text="Snapshot page text.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-src-1",
+                document_metadata=DocumentMetadata(
+                    library_id="1", item_key="SRC1", attachment_key="SA1",
+                    attachment_title="Snapshot",
+                ),
+                page_number=1, text_preview="Snapshot page", chunk_index=0,
+                content_hash="hash-cross-1",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunk(source)
+        target_meta = DocumentMetadata(
+            library_id="2", item_key="TGT1", attachment_key="TA1",
+            attachment_title="Snapshot", title="Copied",
+        )
+        copied = self.vector_store.copy_chunks_cross_library(
+            source_library_id="1", source_item_key="SRC1",
+            target_library_id="2", target_item_key="TGT1",
+            target_attachment_key="TA1", target_doc_metadata=target_meta,
+            target_item_version=1, target_attachment_version=1,
+            target_item_modified="2026-01-01T00:00:00Z",
+        )
+        self.assertEqual(copied, 1)
+        chunks = self.vector_store.get_item_chunks("2", "TGT1")
+        self.assertEqual(chunks[0]["payload"].get("attachment_title"), "Snapshot")
+
     def test_get_chunks_by_ids_returns_matching_payloads(self):
         chunk_a = DocumentChunk(
             text="Chunk A text",
