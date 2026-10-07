@@ -63,6 +63,16 @@ class ParseArgsTest(unittest.TestCase):
         self.assertEqual(args.batch_size, 50)
         self.assertTrue(args.dry_run)
 
+    def test_max_outage_minutes_defaults_to_240(self):
+        args = migrate_library._parse_args(["users/39226", "http://source", "http://dest"])
+        self.assertEqual(args.max_outage_minutes, 240)
+
+    def test_max_outage_minutes_accepts_custom_value(self):
+        args = migrate_library._parse_args([
+            "users/39226", "http://source", "http://dest", "--max-outage-minutes", "60",
+        ])
+        self.assertEqual(args.max_outage_minutes, 60)
+
 
 class RequestRetryTest(unittest.TestCase):
     def test_retries_on_connect_error_then_succeeds(self):
@@ -81,9 +91,11 @@ class RequestRetryTest(unittest.TestCase):
 
     def test_raises_migration_error_after_max_attempts(self):
         client = FakeClient([httpx.ConnectError("boom")] * migrate_library._MAX_ATTEMPTS)
-        with patch.object(migrate_library.time, "sleep"):
+        with patch.object(migrate_library, "_max_outage_seconds", 0), \
+             patch.object(migrate_library.time, "sleep"):
             with self.assertRaises(migrate_library.MigrationError):
                 migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(len(client.calls), migrate_library._MAX_ATTEMPTS)
 
     def test_raises_migration_error_on_non_200(self):
         client = FakeClient([(403, {"detail": "nope"})])
@@ -99,10 +111,52 @@ class RequestRetryTest(unittest.TestCase):
 
     def test_raises_migration_error_after_max_attempts_on_500(self):
         client = FakeClient([(500, {"detail": "boom"})] * migrate_library._MAX_ATTEMPTS)
-        with patch.object(migrate_library.time, "sleep"):
+        with patch.object(migrate_library, "_max_outage_seconds", 0), \
+             patch.object(migrate_library.time, "sleep"):
             with self.assertRaises(migrate_library.MigrationError):
                 migrate_library._get(client, "http://source", "/x", "KEY")
         self.assertEqual(len(client.calls), migrate_library._MAX_ATTEMPTS)
+
+    def test_enters_patient_tier_after_fast_tier_exhausted_and_recovers(self):
+        responses = (
+            [httpx.ConnectError("boom")] * migrate_library._MAX_ATTEMPTS
+            + [httpx.ConnectError("still boom"), httpx.ConnectError("still boom")]
+            + [(200, {"ok": True})]
+        )
+        client = FakeClient(responses)
+        with patch.object(migrate_library, "_max_outage_seconds", 3600), \
+             patch.object(migrate_library.time, "sleep"):
+            result = migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(client.calls), migrate_library._MAX_ATTEMPTS + 3)
+
+    def test_patient_tier_prints_status_to_stderr(self):
+        responses = (
+            [httpx.ConnectError("boom")] * migrate_library._MAX_ATTEMPTS
+            + [httpx.ConnectError("still boom")]
+            + [(200, {"ok": True})]
+        )
+        client = FakeClient(responses)
+        with patch.object(migrate_library, "_max_outage_seconds", 3600), \
+             patch.object(migrate_library.time, "sleep"), \
+             patch("sys.stderr", new_callable=StringIO) as mock_stderr:
+            migrate_library._get(client, "http://source", "/x", "KEY")
+        output = mock_stderr.getvalue()
+        self.assertIn("is unreachable", output)
+        self.assertIn("still retrying", output)
+        self.assertIn("--mode=resume", output)
+
+    def test_patient_tier_raises_after_max_outage_seconds_exceeded(self):
+        client = FakeClient([httpx.ConnectError("boom")] * migrate_library._MAX_ATTEMPTS)
+        with patch.object(migrate_library, "_max_outage_seconds", 0), \
+             patch.object(migrate_library.time, "sleep"):
+            with self.assertRaises(migrate_library.MigrationError) as ctx:
+                migrate_library._get(client, "http://source", "/x", "KEY")
+        self.assertIn("still unreachable after 0 minutes", str(ctx.exception))
+
+    def test_default_max_outage_minutes_is_four_hours(self):
+        self.assertEqual(migrate_library._DEFAULT_MAX_OUTAGE_MINUTES, 240)
+        self.assertEqual(migrate_library._max_outage_seconds, 240 * 60)
 
     def test_does_not_retry_on_400(self):
         client = FakeClient([(400, {"detail": "bad request"})])
@@ -535,6 +589,21 @@ class MainErrorHandlingTest(unittest.TestCase):
                 migrate_library.main()
         self.assertEqual(ctx.exception.code, 1)
 
+    def test_keyboard_interrupt_is_caught_cleanly(self):
+        """Ctrl-C during a long patient-retry wait must exit cleanly with a
+        friendly message (progress is already checkpointed), not a raw
+        KeyboardInterrupt traceback."""
+        argv = ["migrate_library.py", "users/39226", "http://source", "http://dest"]
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(migrate_library, "run_migration", side_effect=KeyboardInterrupt), \
+             patch("backend.config.settings.get_settings") as mock_get_settings, \
+             patch("sys.stderr", new_callable=StringIO) as mock_stderr:
+            mock_get_settings.return_value.data_path = Path("/fake/data")
+            with self.assertRaises(SystemExit) as ctx:
+                migrate_library.main()
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("--mode=resume", mock_stderr.getvalue())
+
 
 class ParseArgsModeTest(unittest.TestCase):
     def test_mode_defaults_to_none(self):
@@ -676,6 +745,25 @@ class MainModeIntegrationTest(unittest.TestCase):
             mock_get_settings.return_value.data_path = Path("/fake/data")
             migrate_library.main()
         self.assertIn("Resumed previous run", mock_stdout.getvalue())
+
+    def test_main_applies_max_outage_minutes_to_patient_retry_ceiling(self):
+        argv = [
+            "migrate_library.py", "users/39226", "http://source", "http://dest",
+            "--mode", "clean", "--max-outage-minutes", "5",
+        ]
+        fake_result = {
+            "library_id": "u39226", "dry_run": False,
+            "begin_result": {"chunks_deleted": 0, "dedup_deleted": 0, "metadata_deleted": False},
+            "transferred": {"chunks": 0, "dedup": 0},
+            "metadata": {"total_chunks": 0, "total_items_indexed": 0},
+        }
+        with patch.object(migrate_library.sys, "argv", argv), \
+             patch.object(migrate_library, "run_migration", return_value=fake_result), \
+             patch("backend.config.settings.get_settings") as mock_get_settings, \
+             patch.object(migrate_library, "_max_outage_seconds"):
+            mock_get_settings.return_value.data_path = Path("/fake/data")
+            migrate_library.main()
+            self.assertEqual(migrate_library._max_outage_seconds, 5 * 60)
 
     def test_main_dry_run_never_touches_settings_or_state(self):
         argv = ["migrate_library.py", "users/39226", "http://source", "http://dest", "--dry-run"]
