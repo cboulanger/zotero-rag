@@ -661,6 +661,7 @@ class DocumentProcessor:
         # without threading a new parameter through every one of its callers.
         self._download_failures = []
         self._too_large_skips = []
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
 
         # Fetch all items from Zotero
         items = await self.zotero_client.get_library_items_since(
@@ -681,9 +682,14 @@ class DocumentProcessor:
                     f.write(json.dumps(_item) + "\n")
                     _parent = _item.get("data", {}).get("parentItem")
                     if _parent and _item.get("data", {}).get("itemType") == "attachment":
-                        # Keep only contentType — avoids referencing full item dicts
+                        # Keep only contentType + title — avoids referencing full item
+                        # dicts, while still letting _is_indexable_attachment correctly
+                        # exclude Snapshot-titled attachments below.
                         children_by_parent.setdefault(_parent, []).append(
-                            {"data": {"contentType": _item["data"].get("contentType")}}
+                            {"data": {
+                                "contentType": _item["data"].get("contentType"),
+                                "title": _item["data"].get("title"),
+                            }}
                         )
             del items
             gc.collect()
@@ -712,13 +718,13 @@ class DocumentProcessor:
                         # bibliographic parent. Attachments that DO have a parent are
                         # handled below via children_by_parent, keyed on the parent.
                         if not _item["data"].get("parentItem") \
-                                and _item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                                and _is_indexable_attachment(_item["data"], index_snapshots_enabled):
                             items_with_attachments.append(_item)
                         continue
                     _key = _item["data"]["key"]
                     _atts = children_by_parent.get(_key, [])
                     _has_indexable = any(
-                        a.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                        _is_indexable_attachment(a.get("data", {}), index_snapshots_enabled)
                         for a in _atts
                     )
                     if _has_indexable:

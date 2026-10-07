@@ -1973,6 +1973,28 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items_failed"], 0)
         self.mock_extractor.extract_and_chunk.assert_not_called()
 
+    async def test_full_sync_treats_snapshot_only_item_as_catalog_only_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            page_item = {
+                "data": {"key": "ITEM1", "itemType": "webpage", "title": "A Page", "abstractNote": "", "dateModified": "2026-01-01T00:00:00Z"},
+                "version": 1,
+            }
+            snap_attachment = {
+                "data": {"key": "SNAP1", "itemType": "attachment", "contentType": "text/html", "title": "Snapshot", "parentItem": "ITEM1"},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_library_items_since.return_value = [page_item, snap_attachment]
+            self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+
+            result = await self.processor.index_library("test_lib", mode="full")
+
+        # The item has no indexable attachment (Snapshot excluded) and no
+        # abstract, so it must become a catalog-only stub, not a failed/zero-
+        # chunk "indexed" item, and get_attachment_file must never be called
+        # for the excluded Snapshot.
+        self.mock_zotero_client.get_attachment_file.assert_not_called()
+        self.assertEqual(result["items_processed"], 0)
+
     async def test_incremental_reports_items_failed_for_dead_download_link(self):
         """Incremental sync must also count a zero-chunk dead-download-link result
         as items_failed, not items_added."""
@@ -2042,7 +2064,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc.exitcode = 0
         mock_process_cls.return_value = mock_proc
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2083,7 +2106,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc2.exitcode = 0
         mock_process_cls.side_effect = [mock_proc1, mock_proc2]
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2123,7 +2147,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         metadata = MagicMock(last_indexed_version=0)
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2167,7 +2192,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         metadata = MagicMock(last_indexed_version=0)
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2214,7 +2240,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc.exitcode = 0
         mock_process_cls.return_value = mock_proc
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             # Global key deliberately unset, as in production auto-indexing.
             mock_settings.return_value = MagicMock(
                 testing=False,
