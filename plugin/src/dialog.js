@@ -39,6 +39,12 @@
  *   library was indexed, by any path (full scan, incremental sync, or the
  *   oversized-item reindex script). Unlike a parse error, these may be fixable
  *   client-side (see mergeDownloadFailures).
+ * @property {Array<{item_key: string, attachment_key: string, detail?: string}>} [last_scan_skipped_too_large] -
+ *   Up to 100 attachments refused outright for exceeding the server's configured
+ *   size limit, by any path (full scan, incremental sync, or the deferred
+ *   pending-upload queue). Unlike last_scan_failed_downloads, there is nothing
+ *   to automatically retry — the file itself needs to be made smaller by the
+ *   user (see mergeTooLargeSkips).
  */
 
 /**
@@ -656,6 +662,28 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Merge a freshly-fetched library's server-refused "too large" attachments
+	 * into the local Fix Unavailable store, and bump the displayed "N unavailable"
+	 * count by however many were actually new. Unlike download failures, there is
+	 * no automatic fix for these — nothing else ever surfaces them either, since
+	 * the server only ever reports them via index-status.
+	 * @param {string} libraryId - Library ID
+	 * @param {LibraryIndexMetadata|null} metadata - Freshly-fetched library metadata
+	 * @returns {Promise<void>}
+	 */
+	async mergeTooLargeSkips(libraryId, metadata) {
+		if (!metadata || !metadata.last_scan_skipped_too_large || metadata.last_scan_skipped_too_large.length === 0) {
+			return;
+		}
+		const entries = metadata.last_scan_skipped_too_large.map(f => ({ key: f.attachment_key, detail: f.detail || '' }));
+		const added = await this.plugin.storeTooLargeItems(libraryId, entries);
+		if (added > 0) {
+			const newTotal = (this.libraryMissingFilesCount.get(libraryId) || 0) + added;
+			this.onUnavailableCountUpdated(libraryId, newTotal);
+		}
+	},
+
+	/**
 	 * Fetch metadata for a single library and update UI.
 	 * @param {string} libraryId - Library ID
 	 * @returns {Promise<void>}
@@ -673,7 +701,10 @@ var ZoteroRAGDialog = {
 			const metadata = await this.fetchLibraryMetadata(libraryId);
 			this.libraryMetadata.set(libraryId, metadata);
 
-			if (this.plugin) await this.mergeDownloadFailures(libraryId, metadata);
+			if (this.plugin) {
+				await this.mergeDownloadFailures(libraryId, metadata);
+				await this.mergeTooLargeSkips(libraryId, metadata);
+			}
 
 			// Update the UI
 			this.updateLibraryStatusIcon(libraryId, metadata);

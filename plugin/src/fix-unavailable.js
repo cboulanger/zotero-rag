@@ -161,6 +161,7 @@ var ZoteroFixUnavailableDialog = {
 		if (info.skipReason === 'no text') return 'empty';
 		if (info.skipReason === 'timeout') return 'timeout';
 		if (info.isParseError) return 'parse err';
+		if (info.tooLarge) return 'too large';
 		if (info.serverDownloadFailed) return 'srv fail';
 		if (info.isLinked) return 'linked';
 		return this.getFileTypeLabel(info.attachmentItem);
@@ -366,6 +367,16 @@ var ZoteroFixUnavailableDialog = {
 					cssClass: 'not-found',
 					text: item.downloadFailureReason || 'Not downloaded',
 					tooltip: item.downloadFailureDetail || '',
+				});
+			} else if (item.tooLarge) {
+				// No automatic fix exists — the file itself needs to be made smaller
+				// (lower-resolution scan, split a combined PDF, etc.) by the user —
+				// so this is shown immediately, the same as the other definitive,
+				// server-verdict statuses above, not only after Search & Fix runs.
+				this.rowStatus.set(i, {
+					cssClass: 'not-found',
+					text: 'File too large',
+					tooltip: item.tooLargeDetail || 'Exceeds the size limit for automatic text extraction',
 				});
 			}
 		}
@@ -699,12 +710,16 @@ var ZoteroFixUnavailableDialog = {
 		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
 		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
 		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
-		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
+		// tooLarge rows have nothing to search for or retry — the file itself needs
+		// to be made smaller by the user — so they're pulled out before every other
+		// bucket below, the same way isParseError/skipReason already are.
+		const tooLargeIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].tooLarge);
+		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && this.items[i].isLinked);
 		// serverDownloadFailed rows need a download-then-upload round trip (see
 		// Phase 1b below), not just a plain sync download, so they're pulled out
 		// of importedIndices rather than sharing Phase 1 with it.
-		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
-		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
+		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
+		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
 
 		// Optional debug collection (observational only: never alters repair behaviour).
 		// Gated on the FULL selection (allSelectedIndices), not the narrowed
@@ -731,10 +746,12 @@ var ZoteroFixUnavailableDialog = {
 			}
 			for (const i of parseErrorIndices) itemHandles.get(i).skip('skipped_parse_error', 'file present but cannot be parsed (binary data)');
 			for (const i of linkedIndices)     itemHandles.get(i).skip('skipped_linked_file', 'linked file — cannot be auto-downloaded');
+			for (const i of tooLargeIndices)   itemHandles.get(i).skip('skipped_too_large', this.items[i].tooLargeDetail || 'file exceeds the size limit for automatic text extraction');
 		}
 
 		for (const i of parseErrorIndices)  { this.setRowStatus(i, 'not-found', 'Binary data — delete and replace'); markProcessed(i); }
 		for (const i of linkedIndices)      { this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero'); markProcessed(i); }
+		for (const i of tooLargeIndices)    { this.setRowStatus(i, 'not-found', 'File too large', this.items[i].tooLargeDetail || 'Exceeds the size limit for automatic text extraction'); markProcessed(i); }
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of serverFailedIndices) this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');

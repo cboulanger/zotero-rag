@@ -2319,6 +2319,12 @@ class ZoteroRAGPlugin {
 	 *   download failed (set only alongside serverDownloadFailed), e.g. "On WebDAV storage" or "Not yet
 	 *   uploaded to Zotero storage". See _getDownloadFailedAttachments.
 	 * @property {string} [downloadFailureDetail] - Longer tooltip text for downloadFailureReason.
+	 * @property {boolean} [tooLarge] - True when the server refused to index this attachment
+	 *   outright for exceeding its configured size limit (Settings.kreuzberg_max_content_bytes).
+	 *   Unlike serverDownloadFailed, there is nothing to retry: the file itself needs to be made
+	 *   smaller by the user. See _getTooLargeAttachments.
+	 * @property {string} [tooLargeDetail] - Human-readable reason (e.g. "329 MB, which exceeds
+	 *   the 200 MB limit...") for display/tooltip when tooLarge is set.
 	 */
 
 	/**
@@ -2769,6 +2775,121 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * @param {number} zoteroLibraryID
+	 * @returns {string}
+	 */
+	_tooLargeFilePath(zoteroLibraryID) {
+		// @ts-ignore
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `too-large-${zoteroLibraryID}.json`);
+	}
+
+	/**
+	 * Merge new server-refused "too large to process" attachment entries into the
+	 * persistent per-library store. Unlike download failures or skipped_timeout,
+	 * there is no automatic fix for these — the file itself needs to be made
+	 * smaller (a lower-resolution scan, splitting a combined PDF, etc.) by the
+	 * user — so this store has no corresponding removeTooLargeItems: nothing in
+	 * the dialog ever "fixes" one on the user's behalf to warrant pruning it.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {Array<{key: string, detail: string}>} newEntries - Attachment keys the
+	 *   server refused, with a human-readable reason (e.g. "329 MB, which exceeds
+	 *   the 200 MB limit...")
+	 * @returns {Promise<number>} Number of keys newly added (not already stored)
+	 */
+	async storeTooLargeItems(backendLibraryId, newEntries) {
+		if (!newEntries || newEntries.length === 0) return 0;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return 0;
+		const filePath = this._tooLargeFilePath(zoteroLibraryID);
+		/** @type {Array<{key: string, detail: string}>} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {}
+		const existingKeys = new Set(existing.map(e => e.key));
+		let added = 0;
+		for (const entry of newEntries) {
+			if (!existingKeys.has(entry.key)) {
+				existing.push(entry);
+				added++;
+			}
+		}
+		try {
+			// @ts-ignore
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			// @ts-ignore
+			await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(existing));
+		} catch (e) {
+			this.log(`[storeTooLargeItems] Failed to write too-large file: ${e}`);
+		}
+		return added;
+	}
+
+	/**
+	 * Load stored "too large to process" attachment entries and resolve them to
+	 * UnavailableAttachmentInfo objects. Silently drops keys where the Zotero
+	 * item no longer exists.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getTooLargeAttachments(libraryID) {
+		const filePath = this._tooLargeFilePath(libraryID);
+		/** @type {Array<{key: string, detail: string}>} */
+		let entries = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			entries = JSON.parse(text);
+		} catch (_) {
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		/** @type {Array<{key: string, detail: string}>} */
+		const validEntries = [];
+		for (const entry of entries) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, entry.key);
+			if (!attachment || attachment.deleted) continue;
+			validEntries.push(entry);
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				tooLarge: true,
+				tooLargeDetail: entry.detail || '',
+			});
+		}
+		if (validEntries.length !== entries.length) {
+			try {
+				// @ts-ignore
+				await IOUtils.writeUTF8(filePath, JSON.stringify(validEntries));
+			} catch (_) {}
+		}
+		return result;
+	}
+
+	/**
 	 * Explain, in concrete terms, why the server's own download attempt for an
 	 * attachment failed — using only cheap, synchronous local Zotero state
 	 * (no network calls), so it's safe to compute for every row while
@@ -2962,6 +3083,16 @@ class ZoteroRAGPlugin {
 		// Append server-skipped items (skipped_empty / skipped_timeout), deduplicating by key
 		const skippedServerItems = await this._getSkippedServerAttachments(libraryID);
 		for (const item of skippedServerItems) {
+			if (!missingKeys.has(item.attachmentItem.key)) {
+				missingKeys.add(item.attachmentItem.key);
+				result.push(item);
+			}
+		}
+		// Append server-refused "too large" items, deduplicating by key — always
+		// shown (not opt-in like download failures), since this is a definitive
+		// server verdict the user needs to act on, not just a not-yet-downloaded file.
+		const tooLargeItems = await this._getTooLargeAttachments(libraryID);
+		for (const item of tooLargeItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) {
 				missingKeys.add(item.attachmentItem.key);
 				result.push(item);

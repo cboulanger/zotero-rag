@@ -1358,3 +1358,57 @@ test('removeSkippedServerItems is a no-op when the store does not exist yet', as
 	// Must not throw even though no file has ever been written
 	await plugin.removeSkippedServerItems('u1', ['ANY']);
 });
+
+test('storeTooLargeItems returns the count of newly-added keys, deduplicating by key', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	const firstAdded = await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT1', detail: '329 MB, which exceeds the 200 MB limit' },
+		{ key: 'ATT2', detail: '250 MB, which exceeds the 200 MB limit' },
+	]);
+	assert.strictEqual(firstAdded, 2);
+
+	const secondAdded = await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT2', detail: 'ignored — ATT2 already stored' },
+		{ key: 'ATT3', detail: '400 MB, which exceeds the 200 MB limit' },
+	]);
+	assert.strictEqual(secondAdded, 1); // ATT2 already stored, only ATT3 is new
+});
+
+test('_getTooLargeAttachments resolves stored entries with tooLarge/tooLargeDetail set', async () => {
+	const fakeAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		getCreators: () => [{ lastName: 'Doe' }],
+		getField: (f) => (f === 'title' ? 'A Big Book' : f === 'date' ? '2020' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT1', detail: '329 MB, which exceeds the 200 MB limit' },
+	]);
+	const results = await plugin._getTooLargeAttachments(1);
+
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].tooLarge, true);
+	assert.strictEqual(results[0].tooLargeDetail, '329 MB, which exceeds the 200 MB limit');
+	assert.strictEqual(results[0].isLinked, false);
+	assert.strictEqual(results[0].authors, 'Doe');
+	assert.strictEqual(results[0].year, '2020');
+	assert.strictEqual(results[0].title, 'A Big Book');
+});
+
+test('_getTooLargeAttachments drops keys whose Zotero item no longer exists', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs({}); // ATT1 resolves to null
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeTooLargeItems('u1', [{ key: 'ATT1', detail: 'too big' }]);
+	const results = await plugin._getTooLargeAttachments(1);
+
+	// Spread into a plain array first — see the analogous comment on
+	// _getDownloadFailedAttachments's "drops keys" test above.
+	assert.deepStrictEqual([...results], []);
+});
