@@ -1,3 +1,21 @@
+# [1.53.0](https://github.com/cboulanger/zotero-rag/compare/v1.52.2...v1.53.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **backend:** report progress while draining pending uploads ([12e2264](https://github.com/cboulanger/zotero-rag/commit/12e2264ed301066cfd27a5a3d5356057f26e227a))
+* **backend:** stop draining pending uploads once the embedding quota is exhausted ([2a4e44f](https://github.com/cboulanger/zotero-rag/commit/2a4e44febfd534a2175bdafceb555c2ecaffe0ca))
+* **plugin:** check "Include missing attachments" by default in Fix Unavailable ([20b8280](https://github.com/cboulanger/zotero-rag/commit/20b82800d085a05adf3a89d58af29ca3f159b13a))
+* **plugin:** exclude bare web-link attachments from Fix Unavailable list ([790573f](https://github.com/cboulanger/zotero-rag/commit/790573f2dc5a3dd5d291ec22ca00fdb37b2dc4b4))
+
+
+### Features
+
+* **backend:** refuse attachments over a hard size cap instead of OOM-killing kreuzberg ([2a43323](https://github.com/cboulanger/zotero-rag/commit/2a43323f082b3ba794930e22be2ee4b7e236ba22))
+* **migration:** add patient retry tier for long connectivity outages ([4c2d576](https://github.com/cboulanger/zotero-rag/commit/4c2d576ae14d15c4e0cd3bdfebe4db409c42f342))
+* **plugin:** add "Copy Row Data Only" option to Fix Unavailable dialog ([8e62da5](https://github.com/cboulanger/zotero-rag/commit/8e62da5531050cf52c7dd0616ac9bda00ad1e3f9))
+* **plugin:** surface server-refused "too large" attachments in Fix Unavailable ([51054b3](https://github.com/cboulanger/zotero-rag/commit/51054b36e686fa2b1ae34592f30067d8fee6df10))
+
 ## [1.52.2](https://github.com/cboulanger/zotero-rag/compare/v1.52.1...v1.52.2) (2026-10-06)
 
 
