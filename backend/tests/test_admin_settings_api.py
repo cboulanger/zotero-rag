@@ -11,6 +11,7 @@ from backend.main import app
 from backend.config.settings import get_settings, reset_settings
 from backend.dependencies import require_authorized_group_admin, get_vector_store
 from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
+from backend.zotero.group_roles import reset_admin_role_cache
 
 
 class AdminSettingsApiTest(unittest.TestCase):
@@ -18,6 +19,7 @@ class AdminSettingsApiTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         reset_settings()
         reset_identity_cache()
+        reset_admin_role_cache()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         self.client = TestClient(app)
@@ -27,6 +29,7 @@ class AdminSettingsApiTest(unittest.TestCase):
         self.tmp.cleanup()
         reset_settings()
         reset_identity_cache()
+        reset_admin_role_cache()
 
     def _override_admin(self, identity):
         app.dependency_overrides[require_authorized_group_admin] = lambda: identity
@@ -40,7 +43,8 @@ class AdminSettingsApiTest(unittest.TestCase):
         get_settings().api_host = "rag.example.com"
         get_settings().authorized_group_id = 999
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
-        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)):
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
             r = self.client.put(
                 "/api/admin/settings", json={"index_snapshots": True},
                 headers={"X-Zotero-API-Key": "K"},
@@ -59,7 +63,8 @@ class AdminSettingsApiTest(unittest.TestCase):
         get_settings().api_host = "rag.example.com"
         get_settings().authorized_group_id = 999
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
-        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)):
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
             r = self.client.post(
                 "/api/admin/settings/purge-snapshots",
                 headers={"X-Zotero-API-Key": "K"},

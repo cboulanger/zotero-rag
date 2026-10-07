@@ -18,7 +18,6 @@ VectorStore.delete_snapshot_chunks.
 """
 
 import asyncio
-import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,7 +30,6 @@ from backend.services.admin_settings_store import read_admin_settings, write_adm
 from backend.services.zotero_identity import ZoteroIdentity
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 class AdminSettings(BaseModel):
@@ -56,7 +54,7 @@ async def put_admin_settings(
     identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
 ) -> AdminSettings:
     settings = get_settings()
-    await asyncio.to_thread(write_admin_settings, settings.data_path, {"index_snapshots": body.index_snapshots})
+    await asyncio.to_thread(write_admin_settings, settings.data_path, body.model_dump())
     return body
 
 
