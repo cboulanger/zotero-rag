@@ -171,6 +171,68 @@ class TestVectorStore(unittest.TestCase):
         chunks = self.vector_store.get_item_chunks("2", "TGT1")
         self.assertEqual(chunks[0]["payload"].get("attachment_title"), "Snapshot")
 
+    def _add_snapshot_chunk(self, library_id, item_key, attachment_key, chunk_id):
+        chunk = DocumentChunk(
+            text="Snapshot text.",
+            metadata=ChunkMetadata(
+                chunk_id=chunk_id,
+                document_metadata=DocumentMetadata(
+                    library_id=library_id, item_key=item_key,
+                    attachment_key=attachment_key, attachment_title="Snapshot",
+                ),
+                page_number=1, text_preview="Snapshot text", chunk_index=0,
+                content_hash=chunk_id,
+            ),
+            embedding=[0.1] * 384,
+        )
+        return self.vector_store.add_chunk(chunk)
+
+    def test_delete_snapshot_chunks_removes_only_snapshot_titled_chunks_across_libraries(self):
+        self._add_snapshot_chunk("1", "ITEM1", "SNAP1", "chunk-s1")
+        self._add_snapshot_chunk("2", "ITEM2", "SNAP2", "chunk-s2")
+        # A normal (non-Snapshot) chunk in library 1 must survive.
+        pdf_chunk = DocumentChunk(
+            text="PDF text.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-pdf",
+                document_metadata=DocumentMetadata(
+                    library_id="1", item_key="ITEM1", attachment_key="PDF1",
+                    attachment_title="Full Paper.pdf",
+                ),
+                page_number=1, text_preview="PDF text", chunk_index=0,
+                content_hash="chunk-pdf",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunk(pdf_chunk)
+        # A legacy chunk with no attachment_title at all must also survive.
+        legacy_chunk = DocumentChunk(
+            text="Legacy text.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-legacy",
+                document_metadata=DocumentMetadata(
+                    library_id="1", item_key="ITEM3", attachment_key="LEG1",
+                ),
+                page_number=1, text_preview="Legacy text", chunk_index=0,
+                content_hash="chunk-legacy",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunk(legacy_chunk)
+
+        deleted_chunks, deleted_attachments = self.vector_store.delete_snapshot_chunks()
+
+        self.assertEqual(deleted_chunks, 2)
+        self.assertEqual(deleted_attachments, 2)
+        self.assertEqual(len(self.vector_store.get_item_chunks("1", "ITEM1")), 1)  # PDF chunk survives
+        self.assertEqual(self.vector_store.get_item_chunks("1", "ITEM1")[0]["payload"]["attachment_key"], "PDF1")
+        self.assertEqual(len(self.vector_store.get_item_chunks("2", "ITEM2")), 0)
+        self.assertEqual(len(self.vector_store.get_item_chunks("1", "ITEM3")), 1)  # legacy chunk survives
+
+    def test_delete_snapshot_chunks_returns_zero_when_nothing_matches(self):
+        deleted_chunks, deleted_attachments = self.vector_store.delete_snapshot_chunks()
+        self.assertEqual((deleted_chunks, deleted_attachments), (0, 0))
+
     def test_get_chunks_by_ids_returns_matching_payloads(self):
         chunk_a = DocumentChunk(
             text="Chunk A text",
