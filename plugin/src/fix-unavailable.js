@@ -121,6 +121,11 @@ var ZoteroFixUnavailableDialog = {
 			if (menu) menu.hidden = true;
 			this.searchAndFix({ forceIndexNow: true });
 		});
+		document.getElementById('copy-rows-btn')?.addEventListener('click', () => {
+			const menu = document.getElementById('fix-dropdown-menu');
+			if (menu) menu.hidden = true;
+			this.copySelectedRowsToClipboard();
+		});
 		document.addEventListener('click', (e) => {
 			const menu = document.getElementById('fix-dropdown-menu');
 			const toggle = document.getElementById('fix-dropdown-btn');
@@ -251,7 +256,8 @@ var ZoteroFixUnavailableDialog = {
 			{ dataKey: 'author',   label: 'Author(s)', flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer, renderCell: textCellRenderer },
-			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer, renderCell: textCellRenderer },
+			// Width is sized for the 8-character Zotero key so it is never truncated.
+			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 100, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{
 				dataKey: 'status',
@@ -420,16 +426,15 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
-	 * Show the dropdown toggle only for libraries with automatic indexing
-	 * configured — the only case the deferred/"force now" split actually
-	 * applies to. Other libraries keep today's single plain button.
+	 * The dropdown toggle itself is always shown — "Copy Row Data Only" applies
+	 * regardless of auto-indexing. Only the "Fix & Index Now" entry inside the
+	 * menu is gated on deferCapable, since the deferred/"force now" split only
+	 * applies to libraries with automatic indexing configured.
 	 * @returns {void}
 	 */
 	_updateSplitButtonVisibility() {
-		const toggle = /** @type {HTMLButtonElement|null} */ (document.getElementById('fix-dropdown-btn'));
-		const menu = document.getElementById('fix-dropdown-menu');
-		if (toggle) toggle.style.display = this.deferCapable ? '' : 'none';
-		if (menu && !this.deferCapable) menu.hidden = true;
+		const fixIndexNowBtn = /** @type {HTMLButtonElement|null} */ (document.getElementById('fix-index-now-btn'));
+		if (fixIndexNowBtn) fixIndexNowBtn.style.display = this.deferCapable ? '' : 'none';
 	},
 
 	/**
@@ -569,6 +574,43 @@ var ZoteroFixUnavailableDialog = {
 			pane.selectItem(info.attachmentItem.id);
 		} catch (e) {
 			console.error('selectItemInZotero failed:', e);
+		}
+	},
+
+	/**
+	 * Copy the visible table data for every selected row to the clipboard as
+	 * a JSON array of objects, and show a status-bar notice confirming the
+	 * copy.
+	 * @returns {void}
+	 */
+	copySelectedRowsToClipboard() {
+		const indices = this.getSelectedIndices();
+		if (indices.length === 0) {
+			this.setStatus('No rows selected to copy.');
+			return;
+		}
+		const rows = indices.map(i => {
+			const info = this.items[i];
+			const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
+			const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
+			const status = this.rowStatus.get(i);
+			return {
+				author: info.authors || '',
+				year: info.year || '',
+				title: info.title || '',
+				zoteroID: info.zoteroID,
+				filename,
+				status: status ? status.text : '',
+			};
+		});
+		const json = JSON.stringify(rows, null, 2);
+		try {
+			// @ts-ignore - Cc/Ci are globals in this chrome-privileged context
+			Cc["@mozilla.org/widget/clipboardhelper;1"].getService(Ci.nsIClipboardHelper).copyString(json);
+			this.setStatus(`Row data for ${rows.length} item${rows.length !== 1 ? 's' : ''} has been copied to the clipboard.`);
+		} catch (e) {
+			console.error('copySelectedRowsToClipboard failed:', e);
+			this.setStatus('Failed to copy row data to clipboard.');
 		}
 	},
 

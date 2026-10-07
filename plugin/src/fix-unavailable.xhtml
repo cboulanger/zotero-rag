@@ -70,11 +70,14 @@
     .toolbar-btn { padding: 2px 10px; border: 1px solid #ccc; border-radius: 3px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 12px; }
     .toolbar-btn:hover { background: #e5e5e5; }
     .toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    /* Button bar — status text left, action buttons right */
-    .dialog-buttons { display: flex; align-items: center; gap: 8px; padding: 10px 0 12px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    /* Button bar — status row on top, action buttons on their own row below */
+    .dialog-buttons { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 12px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    .footer-status-row { display: flex; align-items: center; gap: 8px; min-height: 15px; }
+    .footer-button-row { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
     #debug-download-label { display: flex; align-items: center; gap: 4px; flex-shrink: 0; font-size: 12px; color: #555; cursor: pointer; user-select: none; }
-    #status-bar { flex: 1; font-size: 11px; color: #666; min-height: 15px; }
-    .dialog-button { padding: 6px 16px; min-height: 32px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; }
+    #status-bar { flex: 1; min-width: 0; font-size: 11px; color: #666; min-height: 15px; }
+    /* Buttons must never wrap or shrink — wrapped text used to get clipped by the dialog's fixed height */
+    .dialog-button { padding: 6px 16px; min-height: 32px; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #333; cursor: pointer; font-family: inherit; font-size: 13px; white-space: nowrap; flex-shrink: 0; }
     .dialog-button:hover { background: #e5e5e5; }
     .dialog-button:disabled { opacity: 0.5; cursor: not-allowed; }
     .dialog-button.primary { background: #0066cc; color: #fff; border-color: #0066cc; }
@@ -126,25 +129,30 @@
     <div id="table-container"></div>
 
     <div class="dialog-buttons">
-      <!-- Shown only while 1-10 rows are selected; see _updateDebugCheckboxVisibility() -->
-      <label id="debug-download-label" style="display:none"
-             title="Collect detailed diagnostics for the selected items during repair and save them as a JSON file">
-        <input type="checkbox" id="debug-download-cb"/> Download debugging information
-      </label>
-      <div id="status-bar">
-        <span id="status-text"></span>
-        <span id="progress-wrap">
-          <progress id="progress-meter" value="0" max="1"></progress>
-          <span id="progress-text"></span>
-        </span>
+      <div class="footer-status-row">
+        <div id="status-bar">
+          <span id="status-text"></span>
+          <span id="progress-wrap">
+            <progress id="progress-meter" value="0" max="1"></progress>
+            <span id="progress-text"></span>
+          </span>
+        </div>
+        <!-- Shown only while 1-10 rows are selected; see _updateDebugCheckboxVisibility() -->
+        <label id="debug-download-label" style="display:none"
+               title="Collect detailed diagnostics for the selected items during repair and save them as a JSON file">
+          <input type="checkbox" id="debug-download-cb"/> Download debugging information
+        </label>
       </div>
-      <button id="close-btn" type="button" class="dialog-button">Close</button>
-      <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete Selected</button>
-      <div class="split-button">
-        <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix Selected</button>
-        <button id="fix-dropdown-btn" type="button" class="dialog-button primary dropdown-toggle" disabled="true" style="display:none" title="More options" aria-haspopup="true">&#x25BE;</button>
-        <div id="fix-dropdown-menu" class="dropdown-menu" hidden="true">
-          <button id="fix-index-now-btn" type="button" class="dropdown-item">Fix &amp; Index Selected Now <span class="slow-label">(slow)</span></button>
+      <div class="footer-button-row">
+        <button id="close-btn" type="button" class="dialog-button">Close</button>
+        <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete</button>
+        <div class="split-button">
+          <button id="search-btn" type="button" class="dialog-button primary" disabled="true">Search &amp; Fix</button>
+          <button id="fix-dropdown-btn" type="button" class="dialog-button primary dropdown-toggle" disabled="true" title="More options" aria-haspopup="true">&#x25BE;</button>
+          <div id="fix-dropdown-menu" class="dropdown-menu" hidden="true">
+            <button id="fix-index-now-btn" type="button" class="dropdown-item" style="display:none">Fix &amp; Index Now <span class="slow-label">(slow)</span></button>
+            <button id="copy-rows-btn" type="button" class="dropdown-item">Copy Row Data Only</button>
+          </div>
         </div>
       </div>
     </div>
