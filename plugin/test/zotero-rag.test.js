@@ -35,6 +35,12 @@ function makeStubs(attachmentsByKey = {}) {
 	const zotero = {
 		DataDirectory: { dir: '/fake/zotero/data' },
 		Libraries: { userLibraryID: 1 },
+		Attachments: {
+			LINK_MODE_IMPORTED_FILE: 0,
+			LINK_MODE_IMPORTED_URL: 1,
+			LINK_MODE_LINKED_FILE: 2,
+			LINK_MODE_LINKED_URL: 3,
+		},
 		Items: {
 			async getByLibraryAndKeyAsync(_libraryID, key) {
 				return attachmentsByKey[key] || null;
@@ -144,27 +150,17 @@ test('_getDownloadFailedAttachments resolves stored keys with serverDownloadFail
 	assert.strictEqual(results[0].title, 'A Paper');
 });
 
-test('_getDownloadFailedAttachments sets isLinked from the attachment\'s actual import status, not hardcoded false', async () => {
-	// Regression test: a server-reported download failure for a genuine link
-	// attachment (LINK_MODE_LINKED_URL — a bare web link with no stored file,
-	// the norm for these server-reported entries) was previously always marked
-	// isLinked=false, routing it into fix-unavailable's "imported" retry bucket.
-	// That bucket's copy-based repair strategies end by calling
-	// attachmentItem.fileExists(), which Zotero itself throws on for
-	// LINK_MODE_LINKED_URL items ("Zotero.Item.fileExists() cannot be called on
-	// link attachments"), surfacing as a "Copy failed" error for every such item
-	// instead of the correct "Linked file — fix path in Zotero" skip.
-	//
-	// An earlier version of this fix checked `attachmentLinkMode === 2`
-	// (LINK_MODE_LINKED_FILE) — the wrong constant: fileExists() only throws for
-	// LINK_MODE_LINKED_URL (3), not LINK_MODE_LINKED_FILE (2), so that check
-	// never matched the attachments actually hitting this bug. Using Zotero's
-	// own isImportedAttachment() avoids hardcoding either numeric constant.
-	const linkedAttachment = {
+test('_getDownloadFailedAttachments sets isLinked for a genuine linked-file attachment', async () => {
+	// A linked file (LINK_MODE_LINKED_FILE) points at a real path on the local
+	// filesystem that Zotero doesn't manage — it just happens to be broken or
+	// unreachable, which is why Search & Fix can't auto-download it and the
+	// row is shown as "Linked file — fix path in Zotero".
+	const linkedFileAttachment = {
 		deleted: false,
 		parentItemID: null,
 		key: 'ATT1',
-		isImportedAttachment: () => false, // LINK_MODE_LINKED_URL in real Zotero
+		attachmentLinkMode: 2, // LINK_MODE_LINKED_FILE
+		isImportedAttachment: () => false,
 		getCreators: () => [],
 		getField: () => '',
 	};
@@ -172,11 +168,12 @@ test('_getDownloadFailedAttachments sets isLinked from the attachment\'s actual 
 		deleted: false,
 		parentItemID: null,
 		key: 'ATT2',
-		isImportedAttachment: () => true, // LINK_MODE_IMPORTED_FILE in real Zotero
+		attachmentLinkMode: 0, // LINK_MODE_IMPORTED_FILE
+		isImportedAttachment: () => true,
 		getCreators: () => [],
 		getField: () => '',
 	};
-	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: linkedAttachment, ATT2: importedAttachment });
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: linkedFileAttachment, ATT2: importedAttachment });
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
 
 	await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2']);
@@ -185,6 +182,64 @@ test('_getDownloadFailedAttachments sets isLinked from the attachment\'s actual 
 	const byKey = Object.fromEntries(results.map(r => [r.attachmentItem.key, r]));
 	assert.strictEqual(byKey.ATT1.isLinked, true);
 	assert.strictEqual(byKey.ATT2.isLinked, false);
+});
+
+test('_getDownloadFailedAttachments excludes bare web-link attachments entirely', async () => {
+	// Regression test: a server-reported download failure backed by a bare web
+	// link (LINK_MODE_LINKED_URL — no filesystem path at all, just a URL field)
+	// was previously treated the same as a genuine linked *file* and shown as
+	// "Linked file — fix path in Zotero", even though there is no path to fix
+	// and nothing for Search & Fix to search for or download. It must not
+	// appear in the Fix Unavailable list at all.
+	const webLinkAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		attachmentLinkMode: 3, // LINK_MODE_LINKED_URL
+		isImportedAttachment: () => false,
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const importedAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT2',
+		attachmentLinkMode: 0, // LINK_MODE_IMPORTED_FILE
+		isImportedAttachment: () => true,
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: webLinkAttachment, ATT2: importedAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2']);
+	const results = await plugin._getDownloadFailedAttachments(1);
+
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].attachmentItem.key, 'ATT2');
+});
+
+test('_getDownloadFailedAttachments prunes bare web-link keys from the persisted store', async () => {
+	// Excluding a web-link key from the result on every scan without ever
+	// pruning it from the stored file would mean it silently never clears,
+	// unlike a deleted item's key — it should be dropped the same way.
+	const webLinkAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		attachmentLinkMode: 3, // LINK_MODE_LINKED_URL
+		isImportedAttachment: () => false,
+		getCreators: () => [],
+		getField: () => '',
+	};
+	const { zotero, ioUtils, pathUtils, files } = makeStubs({ ATT1: webLinkAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeDownloadFailedItems('u1', ['ATT1']);
+	await plugin._getDownloadFailedAttachments(1);
+
+	const filePath = plugin._downloadFailedFilePath(1);
+	assert.deepStrictEqual(JSON.parse(files[filePath]), []);
 });
 
 test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exists', async () => {
@@ -200,11 +255,11 @@ test('_getDownloadFailedAttachments drops keys whose Zotero item no longer exist
 	assert.deepStrictEqual([...results], []);
 });
 
-test('_describeDownloadFailureReason explains a linked attachment as having no file to download', () => {
+test('_describeDownloadFailureReason explains a linked-file attachment as not being in Zotero storage', () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
 	const { downloadFailureReason } = plugin._describeDownloadFailureReason({}, true, 1);
-	assert.match(downloadFailureReason, /no file to download/i);
+	assert.match(downloadFailureReason, /not in Zotero storage/i);
 });
 
 test('_describeDownloadFailureReason flags WebDAV-mode libraries, which the backend can never reach', () => {
@@ -1302,4 +1357,58 @@ test('removeSkippedServerItems is a no-op when the store does not exist yet', as
 
 	// Must not throw even though no file has ever been written
 	await plugin.removeSkippedServerItems('u1', ['ANY']);
+});
+
+test('storeTooLargeItems returns the count of newly-added keys, deduplicating by key', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	const firstAdded = await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT1', detail: '329 MB, which exceeds the 200 MB limit' },
+		{ key: 'ATT2', detail: '250 MB, which exceeds the 200 MB limit' },
+	]);
+	assert.strictEqual(firstAdded, 2);
+
+	const secondAdded = await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT2', detail: 'ignored — ATT2 already stored' },
+		{ key: 'ATT3', detail: '400 MB, which exceeds the 200 MB limit' },
+	]);
+	assert.strictEqual(secondAdded, 1); // ATT2 already stored, only ATT3 is new
+});
+
+test('_getTooLargeAttachments resolves stored entries with tooLarge/tooLargeDetail set', async () => {
+	const fakeAttachment = {
+		deleted: false,
+		parentItemID: null,
+		key: 'ATT1',
+		getCreators: () => [{ lastName: 'Doe' }],
+		getField: (f) => (f === 'title' ? 'A Big Book' : f === 'date' ? '2020' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeTooLargeItems('u1', [
+		{ key: 'ATT1', detail: '329 MB, which exceeds the 200 MB limit' },
+	]);
+	const results = await plugin._getTooLargeAttachments(1);
+
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].tooLarge, true);
+	assert.strictEqual(results[0].tooLargeDetail, '329 MB, which exceeds the 200 MB limit');
+	assert.strictEqual(results[0].isLinked, false);
+	assert.strictEqual(results[0].authors, 'Doe');
+	assert.strictEqual(results[0].year, '2020');
+	assert.strictEqual(results[0].title, 'A Big Book');
+});
+
+test('_getTooLargeAttachments drops keys whose Zotero item no longer exists', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs({}); // ATT1 resolves to null
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+
+	await plugin.storeTooLargeItems('u1', [{ key: 'ATT1', detail: 'too big' }]);
+	const results = await plugin._getTooLargeAttachments(1);
+
+	// Spread into a plain array first — see the analogous comment on
+	// _getDownloadFailedAttachments's "drops keys" test above.
+	assert.deepStrictEqual([...results], []);
 });

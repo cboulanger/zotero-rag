@@ -455,10 +455,25 @@ class CronIndexer:
         )
         return "full"
 
-    async def _drain_pending_uploads(self, slug_info: SlugInfo, embedding_service, web_api) -> tuple[int, int]:
+    async def _drain_pending_uploads(
+        self,
+        slug_info: SlugInfo,
+        embedding_service,
+        web_api,
+        progress_callback: Optional[Callable[[int, int, int], None]] = None,
+    ) -> tuple[int, int]:
         """Process this library's deferred-upload cache through the normal
         extract+embed+store pipeline, using this run's own embedding_service
         (the library owner's stored key) and vector_store.
+
+        progress_callback, when given, is called as (current, total, chunks_added)
+        after every entry (success, failure, or skip) — "current"/"total" count
+        position in the pending-upload queue, not Zotero library items. Without
+        this, a library with a large backlog shows a frozen "0/0 items" in the
+        status dialog for the entire drain, since the real items_total/
+        items_processed only start moving once processor.index_library() begins.
+        Reusing _index_slug's own progress_callback here also means the periodic
+        skip-slug check it already does applies during the drain too.
 
         Returns (drained_count, failed_count). A failed entry stays cached
         with attempts/last_error updated, to retry on the next run.
@@ -499,55 +514,81 @@ class CronIndexer:
 
         drained = 0
         failed = 0
-        for entry in entries:
+        chunks_added_total = 0
+        total_entries = len(entries)
+        for idx, entry in enumerate(entries):
             attachment_key = entry["attachment_key"]
             try:
-                cached = await asyncio.to_thread(pending_upload_cache.read_entry, data_path, slug_info.library_id, attachment_key)
-                if cached is None:
+                try:
+                    cached = await asyncio.to_thread(pending_upload_cache.read_entry, data_path, slug_info.library_id, attachment_key)
+                    if cached is None:
+                        continue
+                    file_bytes, meta = cached
+                    doc_metadata = DocumentMetadata(
+                        library_id=slug_info.library_id,
+                        item_key=meta["item_key"],
+                        attachment_key=attachment_key,
+                        title=meta.get("title", "Untitled"),
+                        authors=meta.get("authors", []),
+                        year=meta.get("year"),
+                        item_type=meta.get("item_type"),
+                    )
+                    result = await _execute_upload_impl(
+                        file_bytes=file_bytes,
+                        content_hash=hashlib.sha256(file_bytes).hexdigest(),
+                        doc_metadata=doc_metadata,
+                        library_id=slug_info.library_id,
+                        library_type=meta.get("library_type", slug_info.library_type),
+                        item_key=meta["item_key"],
+                        attachment_key=attachment_key,
+                        mime_type=meta.get("mime_type", "application/pdf"),
+                        item_version=live_versions.get(meta["item_key"], meta.get("item_version", 0)),
+                        attachment_version=live_versions.get(attachment_key, meta.get("attachment_version", 0)),
+                        item_modified=meta.get("zotero_modified", ""),
+                        library_name=meta.get("library_name", slug_info.slug),
+                        vector_store=self.vector_store,
+                        embedding_service=embedding_service,
+                    )
+                except Exception as exc:
+                    # Catches both a malformed cache entry (e.g. missing "item_key" —
+                    # KeyError, or a bad "year" — pydantic ValidationError, while building
+                    # DocumentMetadata above) and anything _execute_upload_impl itself
+                    # raises (defensive — the pipeline already catches its own errors).
+                    # Either way, one bad entry must not abort the rest of this library's
+                    # queue or any other library in the run.
+                    self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
+                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
+                    failed += 1
                     continue
-                file_bytes, meta = cached
-                doc_metadata = DocumentMetadata(
-                    library_id=slug_info.library_id,
-                    item_key=meta["item_key"],
-                    attachment_key=attachment_key,
-                    title=meta.get("title", "Untitled"),
-                    authors=meta.get("authors", []),
-                    year=meta.get("year"),
-                    item_type=meta.get("item_type"),
-                )
-                result = await _execute_upload_impl(
-                    file_bytes=file_bytes,
-                    content_hash=hashlib.sha256(file_bytes).hexdigest(),
-                    doc_metadata=doc_metadata,
-                    library_id=slug_info.library_id,
-                    library_type=meta.get("library_type", slug_info.library_type),
-                    item_key=meta["item_key"],
-                    attachment_key=attachment_key,
-                    mime_type=meta.get("mime_type", "application/pdf"),
-                    item_version=live_versions.get(meta["item_key"], meta.get("item_version", 0)),
-                    attachment_version=live_versions.get(attachment_key, meta.get("attachment_version", 0)),
-                    item_modified=meta.get("zotero_modified", ""),
-                    library_name=meta.get("library_name", slug_info.slug),
-                    vector_store=self.vector_store,
-                    embedding_service=embedding_service,
-                )
-            except Exception as exc:
-                # Catches both a malformed cache entry (e.g. missing "item_key" —
-                # KeyError, or a bad "year" — pydantic ValidationError, while building
-                # DocumentMetadata above) and anything _execute_upload_impl itself
-                # raises (defensive — the pipeline already catches its own errors).
-                # Either way, one bad entry must not abort the rest of this library's
-                # queue or any other library in the run.
-                self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
-                await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
-                failed += 1
-                continue
-            if result.status == "error":
-                await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
-                failed += 1
-            else:
-                await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
-                drained += 1
+                if result.status == "error":
+                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
+                    failed += 1
+                    if result.error_type == "EmbeddingRateLimitExhaustedError":
+                        # The quota is exhausted for (likely) hours, not this one
+                        # attachment's fault — every remaining entry would fail the
+                        # exact same way. Stop here instead of burning through the
+                        # rest of the backlog: each attempt still fully downloads
+                        # and extracts (Kreuzberg OCR included) before reaching the
+                        # embedding call that's guaranteed to fail, which previously
+                        # meant a large backlog kept hammering the kreuzberg sidecar
+                        # — sequential, one request at a time — for nothing, run
+                        # after run, until the quota reset. Raising here (rather
+                        # than returning a flag) reuses _index_slug's existing
+                        # EmbeddingRateLimitExhaustedError handling, including the
+                        # key_store rate_limited status update.
+                        available_at = (
+                            datetime.fromisoformat(result.rate_limit_available_at)
+                            if result.rate_limit_available_at
+                            else datetime.now(timezone.utc)
+                        )
+                        raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
+                else:
+                    await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
+                    drained += 1
+                    chunks_added_total += result.chunks_added
+            finally:
+                if progress_callback:
+                    progress_callback(idx + 1, total_entries, chunks_added_total)
         if drained or failed:
             self.log.info(
                 "Drained pending uploads for %s: %d indexed, %d failed (retained)",
@@ -594,14 +635,22 @@ class CronIndexer:
         preset = get_settings().get_hardware_preset()
         embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
 
-        pending_drained, pending_failed = await self._drain_pending_uploads(slug_info, embedding_service, web_api)
-        if pending_drained or pending_failed:
-            entry = status["slugs"][slug_info.slug]
-            entry["pending_drained"] = pending_drained
-            entry["pending_errors"] = pending_failed
-            self._write_status(status)
-
         try:
+            # Inside the try (not before it): progress_callback can now raise
+            # SlugSkipRequested from the drain phase too (see _drain_pending_uploads),
+            # and that must be handled the same way as a skip raised from the main
+            # indexing loop below — caught here, not left to propagate out of
+            # _index_slug entirely, which would abort every other slug in this run
+            # instead of just moving on to the next one.
+            pending_drained, pending_failed = await self._drain_pending_uploads(
+                slug_info, embedding_service, web_api, progress_callback
+            )
+            if pending_drained or pending_failed:
+                entry = status["slugs"][slug_info.slug]
+                entry["pending_drained"] = pending_drained
+                entry["pending_errors"] = pending_failed
+                self._write_status(status)
+
             async with web_api:
                 mode = await self._resolve_mode(slug_info, web_api)
                 # See _execute_upload_impl's comment (backend/api/document_upload.py)

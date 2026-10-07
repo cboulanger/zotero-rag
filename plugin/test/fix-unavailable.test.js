@@ -58,6 +58,11 @@ test('_typeLabelFor returns "linked" for linked files with no failure reason', (
 	assert.strictEqual(dialog._typeLabelFor({ isLinked: true }), 'linked');
 });
 
+test('_typeLabelFor returns "too large" for refused attachments (when no skipReason/parse error)', () => {
+	const dialog = loadDialog();
+	assert.strictEqual(dialog._typeLabelFor({ tooLarge: true, serverDownloadFailed: true, isLinked: true }), 'too large');
+});
+
 test('_typeLabelFor falls back to the file type label', () => {
 	const dialog = loadDialog();
 	dialog.getFileTypeLabel = () => 'PDF';
@@ -716,6 +721,24 @@ test('searchAndFix reports "x/y items processed" progress as each row finishes, 
 
 	assert.deepStrictEqual(calls[0], [0, 2]);
 	assert.deepStrictEqual(calls[calls.length - 1], [2, 2]);
+});
+
+test('searchAndFix marks tooLarge rows "File too large" immediately, without calling any plugin repair method', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{ attachmentItem: { key: 'BIG1' }, isLinked: false, tooLarge: true, tooLargeDetail: '329 MB, which exceeds the 200 MB limit' },
+	];
+	// No dialog.plugin at all — if searchAndFix tried to call any repair method
+	// on it (as it would for a fixable bucket), this throws and fails the test.
+
+	await dialog.searchAndFix();
+
+	const status = dialog.rowStatus.get(0);
+	assert.strictEqual(status.cssClass, 'not-found');
+	assert.strictEqual(status.text, 'File too large');
+	assert.strictEqual(status.tooltip, '329 MB, which exceeds the 200 MB limit');
 });
 
 test('clicking Cancel (setting _cancelRequested) mid-run stops further processing and reports a cancelled summary', async () => {

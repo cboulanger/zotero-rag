@@ -8,6 +8,7 @@ Usage:
         --source-key <source-admin-zotero-api-key>
         --dest-key <dest-admin-zotero-api-key>
         [--batch-size 200] [--dry-run] [--mode clean|resume]
+        [--max-outage-minutes 240]
 
 <slug> is a Zotero.org library slug, e.g. users/39226 or groups/6297749.
 --source-key/--dest-key must belong to an account that is an owner/admin of
@@ -20,6 +21,17 @@ interrupted, a state file under <data_path>/system/migration_state/ lets a
 later run resume instead of restarting: pass --mode=resume to continue, or
 --mode=clean to discard the incomplete state and start over. Omitting
 --mode prompts interactively when an incomplete run is found.
+
+A single HTTP request that keeps failing is retried in two tiers: first a
+handful of quick attempts (seconds) for brief blips, then -- rather than
+giving up -- a slower retry every 30s for up to --max-outage-minutes
+(default 240 = 4h) before finally failing. This is meant for running the
+script unattended on a laptop: closing the lid suspends the process
+entirely (so sleep time doesn't count against the budget at all), and the
+slower tier rides out a long stretch of bad/no wifi (e.g. a train
+commute). Ctrl-C during a wait exits cleanly; progress up to the last
+completed batch is always checkpointed either way, so --mode=resume picks
+up where it left off.
 
 See docs/superpowers/specs/2026-10-05-library-rag-migration-design.md and
 docs/superpowers/specs/2026-10-05-library-rag-migration-resume-design.md.
@@ -49,6 +61,14 @@ from backend.utils.migration_state import (  # noqa: E402
 )
 
 _MAX_ATTEMPTS = 4
+_PATIENT_RETRY_INTERVAL_SECONDS = 30
+_DEFAULT_MAX_OUTAGE_MINUTES = 240
+
+# Ceiling for the patient retry tier (see _request below), in seconds.
+# Overridden at startup by main() from --max-outage-minutes. A module-level
+# setting (rather than a parameter threaded through _get/_post/run_migration)
+# keeps every existing call site and test mock untouched.
+_max_outage_seconds = _DEFAULT_MAX_OUTAGE_MINUTES * 60
 
 
 class MigrationError(RuntimeError):
@@ -69,23 +89,54 @@ def _request(
     url = base_url.rstrip("/") + path
     query = {k: v for k, v in (params or {}).items() if v is not None}
     attempt = 0
+    outage_started_at: Optional[float] = None
     while True:
         attempt += 1
         try:
             response = client.request(method, url, headers=_headers(api_key), params=query, json=json_body, timeout=120.0)
         except httpx.TransportError as exc:
-            if attempt >= _MAX_ATTEMPTS:
-                raise MigrationError(f"{method} {url} failed after {_MAX_ATTEMPTS} attempts: {exc}") from exc
+            response = None
+            failure_detail = str(exc)
+        else:
+            if response.status_code < 500:
+                break
+            failure_detail = f"HTTP {response.status_code}: {response.text}"
+
+        if attempt < _MAX_ATTEMPTS:
+            # Fast tier: a handful of quick retries for brief blips.
             time.sleep(2 ** (attempt - 1))
             continue
-        if response.status_code >= 500:
-            if attempt >= _MAX_ATTEMPTS:
-                raise MigrationError(
-                    f"{method} {url} -> HTTP {response.status_code} after {_MAX_ATTEMPTS} attempts: {response.text}"
-                )
-            time.sleep(2 ** (attempt - 1))
-            continue
-        break
+
+        # Fast tier exhausted. This might be a longer outage (laptop asleep,
+        # bad train wifi) rather than a brief blip — switch to patient
+        # retries at a fixed, slower interval instead of giving up.
+        # time.monotonic() does not advance while the machine is suspended,
+        # so time spent fully asleep is "free" against _max_outage_seconds;
+        # only time spent actually failing while awake counts.
+        now = time.monotonic()
+        just_started = outage_started_at is None
+        if just_started:
+            outage_started_at = now
+        elapsed = now - outage_started_at
+        if elapsed >= _max_outage_seconds:
+            raise MigrationError(
+                f"{method} {url} still unreachable after {_max_outage_seconds / 60:.0f} "
+                f"minutes: {failure_detail}"
+            )
+        if just_started:
+            print(
+                f"[..] {method} {url} is unreachable ({failure_detail}); retrying "
+                f"every {_PATIENT_RETRY_INTERVAL_SECONDS}s for up to "
+                f"{_max_outage_seconds / 60:.0f} more minutes (progress is checkpointed; "
+                "Ctrl-C and --mode=resume later also works).",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"[..] still retrying {method} {url} ({elapsed / 60:.1f}m elapsed)",
+                file=sys.stderr,
+            )
+        time.sleep(_PATIENT_RETRY_INTERVAL_SECONDS)
     if response.status_code != 200:
         raise MigrationError(f"{method} {url} -> HTTP {response.status_code}: {response.text}")
     return response.json()
@@ -251,6 +302,14 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         help="Skip the interactive prompt for an incomplete prior run: "
              "'clean' discards it and starts fresh, 'resume' continues it.",
     )
+    parser.add_argument(
+        "--max-outage-minutes", type=float, default=_DEFAULT_MAX_OUTAGE_MINUTES,
+        help=f"After the fast retry tier (a few seconds) is exhausted, keep "
+             f"retrying a stuck request every {_PATIENT_RETRY_INTERVAL_SECONDS}s "
+             f"for up to this many minutes before giving up (default: "
+             f"{_DEFAULT_MAX_OUTAGE_MINUTES}, i.e. {_DEFAULT_MAX_OUTAGE_MINUTES / 60:.0f}h) "
+             "-- covers the laptop sleeping or a long stretch of bad wifi.",
+    )
     return parser.parse_args(argv)
 
 
@@ -291,6 +350,8 @@ def _resolve_mode(args: argparse.Namespace, data_path: Path) -> str:
 
 def main() -> None:
     args = _parse_args()
+    global _max_outage_seconds
+    _max_outage_seconds = args.max_outage_minutes * 60
     start = time.monotonic()
     try:
         if args.dry_run:
@@ -308,6 +369,12 @@ def main() -> None:
             )
     except (MigrationError, ValueError) as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print(
+            "\n[FAIL] Interrupted by user; progress is checkpointed -- resume with --mode=resume.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if result["dry_run"]:

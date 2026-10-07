@@ -121,6 +121,11 @@ var ZoteroFixUnavailableDialog = {
 			if (menu) menu.hidden = true;
 			this.searchAndFix({ forceIndexNow: true });
 		});
+		document.getElementById('copy-rows-btn')?.addEventListener('click', () => {
+			const menu = document.getElementById('fix-dropdown-menu');
+			if (menu) menu.hidden = true;
+			this.copySelectedRowsToClipboard();
+		});
 		document.addEventListener('click', (e) => {
 			const menu = document.getElementById('fix-dropdown-menu');
 			const toggle = document.getElementById('fix-dropdown-btn');
@@ -156,6 +161,7 @@ var ZoteroFixUnavailableDialog = {
 		if (info.skipReason === 'no text') return 'empty';
 		if (info.skipReason === 'timeout') return 'timeout';
 		if (info.isParseError) return 'parse err';
+		if (info.tooLarge) return 'too large';
 		if (info.serverDownloadFailed) return 'srv fail';
 		if (info.isLinked) return 'linked';
 		return this.getFileTypeLabel(info.attachmentItem);
@@ -251,7 +257,8 @@ var ZoteroFixUnavailableDialog = {
 			{ dataKey: 'author',   label: 'Author(s)', flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'year',     label: 'Year',      fixedWidth: true, width: 48, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'title',    label: 'Title',     flex: 3,   renderer: textCellRenderer, renderCell: textCellRenderer },
-			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 84, renderer: textCellRenderer, renderCell: textCellRenderer },
+			// Width is sized for the 8-character Zotero key so it is never truncated.
+			{ dataKey: 'zoteroID', label: 'Zotero ID', fixedWidth: true, width: 100, renderer: textCellRenderer, renderCell: textCellRenderer },
 			{ dataKey: 'filename', label: 'Filename',  flex: 2,   renderer: textCellRenderer, renderCell: textCellRenderer },
 			{
 				dataKey: 'status',
@@ -361,6 +368,16 @@ var ZoteroFixUnavailableDialog = {
 					text: item.downloadFailureReason || 'Not downloaded',
 					tooltip: item.downloadFailureDetail || '',
 				});
+			} else if (item.tooLarge) {
+				// No automatic fix exists — the file itself needs to be made smaller
+				// (lower-resolution scan, split a combined PDF, etc.) by the user —
+				// so this is shown immediately, the same as the other definitive,
+				// server-verdict statuses above, not only after Search & Fix runs.
+				this.rowStatus.set(i, {
+					cssClass: 'not-found',
+					text: 'File too large',
+					tooltip: item.tooLargeDetail || 'Exceeds the size limit for automatic text extraction',
+				});
 			}
 		}
 
@@ -420,16 +437,15 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
-	 * Show the dropdown toggle only for libraries with automatic indexing
-	 * configured — the only case the deferred/"force now" split actually
-	 * applies to. Other libraries keep today's single plain button.
+	 * The dropdown toggle itself is always shown — "Copy Row Data Only" applies
+	 * regardless of auto-indexing. Only the "Fix & Index Now" entry inside the
+	 * menu is gated on deferCapable, since the deferred/"force now" split only
+	 * applies to libraries with automatic indexing configured.
 	 * @returns {void}
 	 */
 	_updateSplitButtonVisibility() {
-		const toggle = /** @type {HTMLButtonElement|null} */ (document.getElementById('fix-dropdown-btn'));
-		const menu = document.getElementById('fix-dropdown-menu');
-		if (toggle) toggle.style.display = this.deferCapable ? '' : 'none';
-		if (menu && !this.deferCapable) menu.hidden = true;
+		const fixIndexNowBtn = /** @type {HTMLButtonElement|null} */ (document.getElementById('fix-index-now-btn'));
+		if (fixIndexNowBtn) fixIndexNowBtn.style.display = this.deferCapable ? '' : 'none';
 	},
 
 	/**
@@ -573,6 +589,43 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
+	 * Copy the visible table data for every selected row to the clipboard as
+	 * a JSON array of objects, and show a status-bar notice confirming the
+	 * copy.
+	 * @returns {void}
+	 */
+	copySelectedRowsToClipboard() {
+		const indices = this.getSelectedIndices();
+		if (indices.length === 0) {
+			this.setStatus('No rows selected to copy.');
+			return;
+		}
+		const rows = indices.map(i => {
+			const info = this.items[i];
+			const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
+			const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
+			const status = this.rowStatus.get(i);
+			return {
+				author: info.authors || '',
+				year: info.year || '',
+				title: info.title || '',
+				zoteroID: info.zoteroID,
+				filename,
+				status: status ? status.text : '',
+			};
+		});
+		const json = JSON.stringify(rows, null, 2);
+		try {
+			// @ts-ignore - Cc/Ci are globals in this chrome-privileged context
+			Cc["@mozilla.org/widget/clipboardhelper;1"].getService(Ci.nsIClipboardHelper).copyString(json);
+			this.setStatus(`Row data for ${rows.length} item${rows.length !== 1 ? 's' : ''} has been copied to the clipboard.`);
+		} catch (e) {
+			console.error('copySelectedRowsToClipboard failed:', e);
+			this.setStatus('Failed to copy row data to clipboard.');
+		}
+	},
+
+	/**
 	 * Permanently delete the parent items of all selected rows after user confirmation.
 	 * @returns {Promise<void>}
 	 */
@@ -657,12 +710,16 @@ var ZoteroFixUnavailableDialog = {
 		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
 		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
 		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
-		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].isLinked);
+		// tooLarge rows have nothing to search for or retry — the file itself needs
+		// to be made smaller by the user — so they're pulled out before every other
+		// bucket below, the same way isParseError/skipReason already are.
+		const tooLargeIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].tooLarge);
+		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && this.items[i].isLinked);
 		// serverDownloadFailed rows need a download-then-upload round trip (see
 		// Phase 1b below), not just a plain sync download, so they're pulled out
 		// of importedIndices rather than sharing Phase 1 with it.
-		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
-		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
+		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
+		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
 
 		// Optional debug collection (observational only: never alters repair behaviour).
 		// Gated on the FULL selection (allSelectedIndices), not the narrowed
@@ -689,10 +746,12 @@ var ZoteroFixUnavailableDialog = {
 			}
 			for (const i of parseErrorIndices) itemHandles.get(i).skip('skipped_parse_error', 'file present but cannot be parsed (binary data)');
 			for (const i of linkedIndices)     itemHandles.get(i).skip('skipped_linked_file', 'linked file — cannot be auto-downloaded');
+			for (const i of tooLargeIndices)   itemHandles.get(i).skip('skipped_too_large', this.items[i].tooLargeDetail || 'file exceeds the size limit for automatic text extraction');
 		}
 
 		for (const i of parseErrorIndices)  { this.setRowStatus(i, 'not-found', 'Binary data — delete and replace'); markProcessed(i); }
 		for (const i of linkedIndices)      { this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero'); markProcessed(i); }
+		for (const i of tooLargeIndices)    { this.setRowStatus(i, 'not-found', 'File too large', this.items[i].tooLargeDetail || 'Exceeds the size limit for automatic text extraction'); markProcessed(i); }
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of serverFailedIndices) this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of timeoutIndices)     this.setRowStatus(i, 'searching', 'Retrying with longer timeout...');

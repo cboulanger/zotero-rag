@@ -15,7 +15,7 @@ See https://docs.kreuzberg.dev/guides/docker/ for full API reference.
 
 import json
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -57,6 +57,18 @@ class KreuzbergParsingError(RuntimeError):
     """Raised when kreuzberg returns a 422 ParsingError (e.g. binary data in an HTML file)."""
 
 
+class AttachmentTooLargeError(RuntimeError):
+    """Raised when content exceeds max_content_bytes — refused before ever reaching kreuzberg.
+
+    Unlike KreuzbergTimeoutError (kreuzberg tried and ran out of time) this is a
+    pre-flight refusal: the request is never sent. This is what protects kreuzberg's
+    memory limit from a single pathologically large document (a 329MB scanned PDF
+    OOM-killed the sidecar's 8GB cgroup in production) — including the PDF-splitting
+    fallback path, which otherwise sends the whole original file as one part when
+    splitting itself fails, bypassing the size-based splitting entirely.
+    """
+
+
 class KreuzbergExtractor(DocumentExtractor):
     """
     Extraction adapter that calls the kreuzberg sidecar HTTP API.
@@ -72,6 +84,7 @@ class KreuzbergExtractor(DocumentExtractor):
         chunk_overlap: int = 50,
         ocr_enabled: bool = True,
         timeout_cap: int = _TIMEOUT_CAP_DEFAULT,
+        max_content_bytes: Optional[int] = None,
     ):
         """
         Args:
@@ -82,10 +95,17 @@ class KreuzbergExtractor(DocumentExtractor):
             timeout_cap: Upper bound (seconds) for the per-request timeout computed
                 from document size — see _compute_timeout(). Normally comes from
                 Settings.kreuzberg_timeout_seconds.
+            max_content_bytes: Hard cap on bytes sent to kreuzberg in one request;
+                None means no cap. Normally comes from Settings.kreuzberg_max_content_bytes.
+                Deliberately NOT scaled by extract_and_chunk's timeout_multiplier — a
+                document refused for being too large needs a smaller/better file, not
+                a longer timeout, so the Fix Unavailable "retry with longer timeout"
+                action must not be able to bypass this cap.
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
         self._ocr_enabled = ocr_enabled
         self._timeout_cap = timeout_cap
+        self._max_content_bytes = max_content_bytes
         self._config: dict[str, Any] = {
             "chunking": {
                 "max_characters": max_chunk_size,
@@ -118,7 +138,18 @@ class KreuzbergExtractor(DocumentExtractor):
 
         Returns:
             List of ExtractionChunk objects, empty if extraction fails.
+
+        Raises:
+            AttachmentTooLargeError: If content exceeds max_content_bytes — refused
+                before ever contacting kreuzberg.
         """
+        if self._max_content_bytes and len(content) > self._max_content_bytes:
+            size_mb = len(content) / (1024 * 1024)
+            limit_mb = self._max_content_bytes / (1024 * 1024)
+            raise AttachmentTooLargeError(
+                f"File is {size_mb:.0f} MB, which exceeds the {limit_mb:.0f} MB limit "
+                f"for automatic text extraction (mime={mime_type})"
+            )
         url = f"{self._kreuzberg_url}/extract"
         timeout = _compute_timeout(len(content), mime_type, cap=self._timeout_cap, multiplier=timeout_multiplier)
         logger.debug(

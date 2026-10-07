@@ -115,8 +115,21 @@ class Settings(BaseSettings):
         description="Target byte size of each part when splitting a large PDF. "
                     "Accepts '30MB', '500KB', or a raw byte count.",
     )
+    kreuzberg_max_content_bytes: int = Field(
+        default=200 * 1024 ** 2,
+        description="Hard cap on the bytes sent to the kreuzberg sidecar in a single request. "
+                    "Applies both to a whole document and to each part after PDF splitting — "
+                    "including the fallback that sends the whole file when splitting itself "
+                    "fails, which would otherwise bypass pdf_split_threshold entirely. Refusing "
+                    "outright above this size (raising AttachmentTooLargeError, surfaced to the "
+                    "Fix Unavailable dialog as skipped_too_large) protects the sidecar's memory "
+                    "limit — production saw an 8GB OOM kill from a single 329MB scanned PDF. "
+                    "Accepts '200MB', '1GB', or a raw byte count.",
+    )
 
-    @field_validator("pdf_split_threshold", "pdf_split_target_part_size", mode="before")
+    @field_validator(
+        "pdf_split_threshold", "pdf_split_target_part_size", "kreuzberg_max_content_bytes", mode="before"
+    )
     @classmethod
     def _parse_size_fields(cls, v: int | str) -> int:
         if isinstance(v, int):

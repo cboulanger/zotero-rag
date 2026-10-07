@@ -40,6 +40,7 @@ from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
 from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.embeddings import EmbeddingRateLimitExhaustedError
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -47,7 +48,7 @@ from backend.services.diagnostics_collector import (
     current as current_diagnostics,
     stage as diag_stage,
 )
-from backend.services.document_processor import DocumentProcessor
+from backend.services.document_processor import DocumentProcessor, merge_download_failures
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.config.settings import get_settings
 from backend.utils import format_file_size
@@ -227,6 +228,14 @@ class DocumentUploadResult(BaseModel):
     rate_limit_retries: int = 0
     rate_limit_headers: dict[str, str] | None = None
     error_detail: Optional[str] = None
+    # Set only on status="error": the raised exception's class name, and (for
+    # EmbeddingRateLimitExhaustedError specifically) its available_at as an ISO
+    # string. Lets a bulk caller like CronIndexer._drain_pending_uploads detect
+    # "the embedding quota is exhausted for hours" without string-matching
+    # `message`, and stop processing the rest of a backlog instead of
+    # re-extracting (and re-failing on) every remaining queued attachment.
+    error_type: Optional[str] = None
+    rate_limit_available_at: Optional[str] = None
     diagnostics: Optional[DiagnosticsPayload] = None  # only when include_diagnostics was requested
 
 
@@ -426,6 +435,15 @@ async def _execute_upload_impl(
             lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
             if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
                 lib_meta.total_items_indexed += 1
+            if proc_result.status == "skipped_too_large":
+                # Surfaced to the plugin's Fix Unavailable tool as a non-actionable,
+                # explanatory status — covers both the plugin's direct process-now
+                # endpoint and CronIndexer._drain_pending_uploads (the deferred
+                # queue), which both funnel through this same function.
+                lib_meta.last_scan_skipped_too_large = merge_download_failures(
+                    lib_meta.last_scan_skipped_too_large,
+                    [{"item_key": item_key, "attachment_key": attachment_key, "detail": proc_result.error_detail}],
+                )
             await asyncio.to_thread(vector_store.update_library_metadata, lib_meta)
             meta_stage.set(total_chunks=lib_meta.total_chunks)
     except Exception as e:
@@ -467,12 +485,17 @@ async def _execute_upload_impl(
             chunks_added=0,
             status="error",
             message=str(e),
+            error_type=type(e).__name__,
+            rate_limit_available_at=(
+                e.available_at.isoformat() if isinstance(e, EmbeddingRateLimitExhaustedError) else None
+            ),
         )
 
     api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status
     if proc_result.status in (
         "indexed_fresh", "copied_cross_library", "copied_same_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
+        "skipped_too_large",
     ):
         _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(

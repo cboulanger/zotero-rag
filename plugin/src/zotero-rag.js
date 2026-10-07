@@ -2300,11 +2300,14 @@ class ZoteroRAGPlugin {
 	 * @property {string} year - Publication year (4 digits) or empty string
 	 * @property {string} title - Item title
 	 * @property {string} zoteroID - Parent item key
-	 * @property {boolean} isLinked - True when the attachment isn't a stored/imported file
-	 *   (!isImportedAttachment() — LINK_MODE_LINKED_FILE or LINK_MODE_LINKED_URL); can't be
-	 *   auto-downloaded. Note LINK_MODE_LINKED_URL (bare web link, no local file) is the mode whose
-	 *   fileExists() throws ("cannot be called on link attachments") — do not narrow this to
-	 *   linkMode===2 (LINK_MODE_LINKED_FILE) only, as an earlier version of this code mistakenly did.
+	 * @property {boolean} isLinked - True when the attachment is a linked file on the local
+	 *   filesystem (LINK_MODE_LINKED_FILE) rather than a file Zotero itself stores/imports; can't
+	 *   be auto-downloaded. LINK_MODE_LINKED_URL (a bare web link, no local file at all — the
+	 *   mode whose fileExists() throws "cannot be called on link attachments") is never
+	 *   represented by an UnavailableAttachmentInfo at all: it has no filesystem path to fix and
+	 *   nothing for this dialog to search for or download, so both _getUnavailableAttachments
+	 *   (SQL-filtered to linkMode IN (0,1,2)) and _getDownloadFailedAttachments (explicit linkMode
+	 *   check) exclude it before it ever reaches this typedef.
 	 * @property {boolean} [isParseError] - True when the file exists but kreuzberg cannot parse it (binary data)
 	 * @property {'no text'|'timeout'} [skipReason] - Set for items skipped by the server (skipped_empty / skipped_timeout)
 	 * @property {boolean} [serverDownloadFailed] - True when the server couldn't download this attachment
@@ -2316,6 +2319,12 @@ class ZoteroRAGPlugin {
 	 *   download failed (set only alongside serverDownloadFailed), e.g. "On WebDAV storage" or "Not yet
 	 *   uploaded to Zotero storage". See _getDownloadFailedAttachments.
 	 * @property {string} [downloadFailureDetail] - Longer tooltip text for downloadFailureReason.
+	 * @property {boolean} [tooLarge] - True when the server refused to index this attachment
+	 *   outright for exceeding its configured size limit (Settings.kreuzberg_max_content_bytes).
+	 *   Unlike serverDownloadFailed, there is nothing to retry: the file itself needs to be made
+	 *   smaller by the user. See _getTooLargeAttachments.
+	 * @property {string} [tooLargeDetail] - Human-readable reason (e.g. "329 MB, which exceeds
+	 *   the 200 MB limit...") for display/tooltip when tooLarge is set.
 	 */
 
 	/**
@@ -2766,21 +2775,138 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * @param {number} zoteroLibraryID
+	 * @returns {string}
+	 */
+	_tooLargeFilePath(zoteroLibraryID) {
+		// @ts-ignore
+		return PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag', `too-large-${zoteroLibraryID}.json`);
+	}
+
+	/**
+	 * Merge new server-refused "too large to process" attachment entries into the
+	 * persistent per-library store. Unlike download failures or skipped_timeout,
+	 * there is no automatic fix for these — the file itself needs to be made
+	 * smaller (a lower-resolution scan, splitting a combined PDF, etc.) by the
+	 * user — so this store has no corresponding removeTooLargeItems: nothing in
+	 * the dialog ever "fixes" one on the user's behalf to warrant pruning it.
+	 * @param {string} backendLibraryId - Backend library ID
+	 * @param {Array<{key: string, detail: string}>} newEntries - Attachment keys the
+	 *   server refused, with a human-readable reason (e.g. "329 MB, which exceeds
+	 *   the 200 MB limit...")
+	 * @returns {Promise<number>} Number of keys newly added (not already stored)
+	 */
+	async storeTooLargeItems(backendLibraryId, newEntries) {
+		if (!newEntries || newEntries.length === 0) return 0;
+		const zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
+		if (!zoteroLibraryID) return 0;
+		const filePath = this._tooLargeFilePath(zoteroLibraryID);
+		/** @type {Array<{key: string, detail: string}>} */
+		let existing = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			existing = JSON.parse(text);
+		} catch (_) {}
+		const existingKeys = new Set(existing.map(e => e.key));
+		let added = 0;
+		for (const entry of newEntries) {
+			if (!existingKeys.has(entry.key)) {
+				existing.push(entry);
+				added++;
+			}
+		}
+		try {
+			// @ts-ignore
+			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
+			// @ts-ignore
+			await IOUtils.makeDirectory(dir, { createAncestors: true, ignoreExisting: true });
+			// @ts-ignore
+			await IOUtils.writeUTF8(filePath, JSON.stringify(existing));
+		} catch (e) {
+			this.log(`[storeTooLargeItems] Failed to write too-large file: ${e}`);
+		}
+		return added;
+	}
+
+	/**
+	 * Load stored "too large to process" attachment entries and resolve them to
+	 * UnavailableAttachmentInfo objects. Silently drops keys where the Zotero
+	 * item no longer exists.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getTooLargeAttachments(libraryID) {
+		const filePath = this._tooLargeFilePath(libraryID);
+		/** @type {Array<{key: string, detail: string}>} */
+		let entries = [];
+		try {
+			// @ts-ignore
+			const text = await IOUtils.readUTF8(filePath);
+			entries = JSON.parse(text);
+		} catch (_) {
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		/** @type {Array<{key: string, detail: string}>} */
+		const validEntries = [];
+		for (const entry of entries) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, entry.key);
+			if (!attachment || attachment.deleted) continue;
+			validEntries.push(entry);
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				tooLarge: true,
+				tooLargeDetail: entry.detail || '',
+			});
+		}
+		if (validEntries.length !== entries.length) {
+			try {
+				// @ts-ignore
+				await IOUtils.writeUTF8(filePath, JSON.stringify(validEntries));
+			} catch (_) {}
+		}
+		return result;
+	}
+
+	/**
 	 * Explain, in concrete terms, why the server's own download attempt for an
 	 * attachment failed — using only cheap, synchronous local Zotero state
 	 * (no network calls), so it's safe to compute for every row while
 	 * populating the Fix Unavailable table.
 	 * @param {*} attachment - Zotero attachment item
-	 * @param {boolean} isLinked - Whether the attachment is a bare link (no stored file at all)
+	 * @param {boolean} isLinked - Whether the attachment is a linked file on the local filesystem
+	 *   (LINK_MODE_LINKED_FILE; bare-URL attachments are filtered out before this is called)
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @returns {{downloadFailureReason: string, downloadFailureDetail: string}}
 	 */
 	_describeDownloadFailureReason(attachment, isLinked, libraryID) {
 		if (isLinked) {
 			return {
-				downloadFailureReason: 'Linked URL — no file to download',
-				downloadFailureDetail: 'This attachment is a bare link, not a stored file, so there '
-					+ 'is nothing for the server or the client to download.',
+				downloadFailureReason: 'Linked file — not in Zotero storage',
+				downloadFailureDetail: 'This attachment is a linked file on your filesystem rather than '
+					+ 'a file stored in Zotero, so there is nothing in Zotero storage for the server to '
+					+ 'download. If the path is broken, fix it in Zotero; otherwise use Search & Fix.',
 			};
 		}
 		// @ts-ignore - Zotero.Sync.Storage.Local exists at runtime
@@ -2840,6 +2966,13 @@ class ZoteroRAGPlugin {
 			// @ts-ignore
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
 			if (!attachment || attachment.deleted) continue;
+			// A bare web link (LINK_MODE_LINKED_URL) has no filesystem path at all —
+			// there's no "path to fix" and nothing for Search & Fix to search for or
+			// download, so it doesn't belong in this dialog's list at all. Deliberately
+			// excluded from validKeys too (not just from result below) so the stored
+			// download-failed file prunes it on next write, the same as a deleted item.
+			// @ts-ignore - Zotero.Attachments is a global at runtime
+			if (attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_URL) continue;
 			validKeys.push(key);
 			const parentItem = attachment.parentItemID
 				// @ts-ignore
@@ -2853,13 +2986,12 @@ class ZoteroRAGPlugin {
 				.join(', ');
 			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
 			const yearMatch = dateField.match(/\b(\d{4})\b/);
-			// Not isImportedAttachment() — covers both LINK_MODE_LINKED_FILE and
-			// LINK_MODE_LINKED_URL. The latter is what server-reported download
-			// failures are typically backed by (a bare web link with no local
-			// file), and Zotero's own fileExists() throws when called on one —
-			// this flag must be true for it so fix-unavailable.js never routes
-			// it into the copy-based repair strategies that end by calling
-			// fileExists() on it.
+			// Not isImportedAttachment() — covers LINK_MODE_LINKED_FILE (the only
+			// linkMode that can reach this point now that LINK_MODE_LINKED_URL is
+			// excluded above). Zotero's own fileExists() throws when called on a
+			// link attachment, so this flag must stay true for it so
+			// fix-unavailable.js never routes it into the copy-based repair
+			// strategies that end by calling fileExists() on it.
 			const isLinked = !attachment.isImportedAttachment();
 			result.push({
 				parentItem: parentItem ?? attachment,
@@ -2951,6 +3083,16 @@ class ZoteroRAGPlugin {
 		// Append server-skipped items (skipped_empty / skipped_timeout), deduplicating by key
 		const skippedServerItems = await this._getSkippedServerAttachments(libraryID);
 		for (const item of skippedServerItems) {
+			if (!missingKeys.has(item.attachmentItem.key)) {
+				missingKeys.add(item.attachmentItem.key);
+				result.push(item);
+			}
+		}
+		// Append server-refused "too large" items, deduplicating by key — always
+		// shown (not opt-in like download failures), since this is a definitive
+		// server verdict the user needs to act on, not just a not-yet-downloaded file.
+		const tooLargeItems = await this._getTooLargeAttachments(libraryID);
+		for (const item of tooLargeItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) {
 				missingKeys.add(item.attachmentItem.key);
 				result.push(item);

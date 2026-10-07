@@ -28,7 +28,7 @@ from backend.services.embeddings import (
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
-from backend.services.extraction.kreuzberg import KreuzbergTimeoutError, KreuzbergParsingError
+from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
 from backend.services import diagnostics_collector as diag
@@ -206,6 +206,7 @@ def _subprocess_index_batch(
             "items_skipped": items_skipped,
             "items_failed": items_failed,
             "failed_downloads": processor._download_failures[:MAX_TRACKED_DOWNLOAD_FAILURES],
+            "too_large_skips": processor._too_large_skips[:MAX_TRACKED_DOWNLOAD_FAILURES],
         }
 
     return _asyncio.run(_run())
@@ -306,6 +307,7 @@ class DocumentProcessor:
                 ocr_enabled=settings.ocr_enabled,
                 kreuzberg_url=settings.kreuzberg_url,
                 kreuzberg_timeout_cap=settings.kreuzberg_timeout_seconds,
+                kreuzberg_max_content_bytes=settings.kreuzberg_max_content_bytes,
             )
         self.document_extractor = document_extractor
 
@@ -318,6 +320,13 @@ class DocumentProcessor:
         # as opposed to _download_failures (couldn't even fetch the bytes). See
         # _index_item's per-attachment try/except.
         self._attachment_failures: list[dict] = []
+
+        # Attachments refused outright for exceeding kreuzberg_max_content_bytes —
+        # see _process_attachment_bytes. Surfaced to the plugin's Fix Unavailable
+        # tool the same way _download_failures is (last_scan_skipped_too_large),
+        # since there's nothing to automatically retry: the file itself needs to
+        # be made smaller (lower scan resolution, split the PDF, etc.) by the user.
+        self._too_large_skips: list[dict] = []
 
         logger.debug("Initialized DocumentProcessor")
 
@@ -421,6 +430,7 @@ class DocumentProcessor:
         """Incremental indexing: only process new/modified items."""
         logger.debug(f"Incremental index from version {metadata.last_indexed_version}")
         self._download_failures = []
+        self._too_large_skips = []
 
         # Fetch items modified since last index
         since_version = metadata.last_indexed_version
@@ -584,6 +594,10 @@ class DocumentProcessor:
             metadata.last_scan_failed_downloads = merge_download_failures(
                 metadata.last_scan_failed_downloads, self._download_failures
             )
+        if self._too_large_skips:
+            metadata.last_scan_skipped_too_large = merge_download_failures(
+                metadata.last_scan_skipped_too_large, self._too_large_skips
+            )
 
         if items_failed:
             logger.warning(
@@ -623,6 +637,7 @@ class DocumentProcessor:
         # Reset per-run: this list is instance-level so _index_item can append to it
         # without threading a new parameter through every one of its callers.
         self._download_failures = []
+        self._too_large_skips = []
 
         # Fetch all items from Zotero
         items = await self.zotero_client.get_library_items_since(
@@ -762,6 +777,7 @@ class DocumentProcessor:
         # Aggregated across subprocess batches (each batch's own DocumentProcessor
         # instance's _download_failures never reaches this process directly).
         subprocess_download_failures: list[dict] = []
+        subprocess_too_large_skips: list[dict] = []
         total_items = len(items_with_attachments)
 
         if progress_callback:
@@ -816,6 +832,7 @@ class DocumentProcessor:
                     items_skipped += result.get("items_skipped", 0)
                     items_failed += result.get("items_failed", 0)
                     subprocess_download_failures.extend(result.get("failed_downloads", []))
+                    subprocess_too_large_skips.extend(result.get("too_large_skips", []))
                 elif proc.exitcode is not None and proc.exitcode < 0:
                     logger.warning(
                         "Batch %d–%d killed by signal %d (likely OOM); "
@@ -928,6 +945,12 @@ class DocumentProcessor:
         # both unconditionally is safe and needs no extra branching.
         metadata.last_scan_failed_downloads = (
             self._download_failures + subprocess_download_failures
+        )[:MAX_TRACKED_DOWNLOAD_FAILURES]
+        # Same replace-outright reasoning as last_scan_failed_downloads above —
+        # a full scan sees every candidate, so this is the complete, authoritative
+        # view, not a merge.
+        metadata.last_scan_skipped_too_large = (
+            self._too_large_skips + subprocess_too_large_skips
         )[:MAX_TRACKED_DOWNLOAD_FAILURES]
 
         if items_failed:
@@ -1262,6 +1285,15 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (parse error — unsplittable PDF): {e}")
                     ex_stage.set(result="skipped_parse_error", error=f"{type(e).__name__}: {e}")
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
+                except AttachmentTooLargeError as e:
+                    # Reached via the "splitting failed, send the whole file" fallback
+                    # in _extract_pdf_in_parts — without this cap that fallback would
+                    # bypass pdf_split_threshold entirely and resubmit the original
+                    # oversized file as a single part.
+                    logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
+                    ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
+                    self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
             else:
                 if on_progress:
                     on_progress("Extracting text...")
@@ -1277,6 +1309,11 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (parse error — binary data): {e}")
                     ex_stage.set(result="skipped_parse_error", error=f"{type(e).__name__}: {e}")
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_parse_error", error_detail=str(e))
+                except AttachmentTooLargeError as e:
+                    logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
+                    ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
+                    self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
                 except Exception as e:
                     logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
                     raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
@@ -1395,6 +1432,10 @@ class DocumentProcessor:
                 this distinguishes "every part ran out of time" from a genuinely
                 empty document, so the caller can classify it as ``skipped_timeout``
                 (retryable with a longer timeout) rather than ``skipped_empty``.
+            AttachmentTooLargeError: If split_pdf_bytes itself fails (e.g. an
+                unsplittable PDF structure) and the whole-file fallback below then
+                exceeds kreuzberg_max_content_bytes — propagated un-caught from
+                extract_and_chunk since there is nothing to retry per-part here.
         """
         from backend.utils.pdf_splitter import split_pdf_bytes
 

@@ -966,6 +966,69 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             {"item_key": "OLD", "attachment_key": "OLDATT"},
         ])
 
+    async def test_full_sync_persists_too_large_skips_on_metadata(self):
+        """Full sync must persist attachments refused for exceeding
+        kreuzberg_max_content_bytes onto
+        LibraryIndexMetadata.last_scan_skipped_too_large, mirroring how
+        last_scan_failed_downloads already works — these are surfaced to the
+        Fix Unavailable dialog as a non-actionable, explanatory status."""
+        from backend.services.extraction.kreuzberg import AttachmentTooLargeError
+
+        mock_item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
+        self.mock_extractor.extract_and_chunk.side_effect = AttachmentTooLargeError("too big")
+
+        result = await self.processor.index_library("test_lib")
+
+        self.assertIn("mode", result)
+        saved_metadata = self.mock_vector_store.update_library_metadata.call_args.args[0]
+        self.assertEqual(saved_metadata.last_scan_skipped_too_large, [
+            {"item_key": "ITEM123", "attachment_key": "PDF123", "detail": "too big"},
+        ])
+
+    async def test_incremental_sync_merges_too_large_skips_into_metadata(self):
+        """Incremental sync must merge its own too-large skips into
+        LibraryIndexMetadata.last_scan_skipped_too_large rather than
+        discarding them or overwriting pre-existing entries — same
+        replace-vs-merge reasoning as last_scan_failed_downloads."""
+        from backend.models.library import LibraryIndexMetadata
+        from backend.services.extraction.kreuzberg import AttachmentTooLargeError
+
+        metadata = LibraryIndexMetadata(
+            library_id="test_lib",
+            library_type="user",
+            library_name="Test Library",
+            last_indexed_version=5,
+            last_scan_skipped_too_large=[{"item_key": "OLD", "attachment_key": "OLDATT"}],
+        )
+        self.mock_vector_store.get_library_metadata.return_value = metadata
+        self.mock_vector_store.get_item_version.return_value = None
+
+        mock_item = {
+            "version": 6,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = _attachment("PDF123", "ITEM123")
+        self.mock_zotero_client.get_library_items_since.return_value = [mock_item, mock_pdf_attachment]
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = b"fake pdf bytes"
+        self.mock_extractor.extract_and_chunk.side_effect = AttachmentTooLargeError("too big")
+
+        result = await self.processor.index_library("test_lib", mode="incremental")
+
+        self.assertEqual(result["mode"], "incremental")
+        self.assertEqual(metadata.last_scan_skipped_too_large, [
+            {"item_key": "ITEM123", "attachment_key": "PDF123", "detail": "too big"},
+            {"item_key": "OLD", "attachment_key": "OLDATT"},
+        ])
+
     async def test_index_library_html_attachment(self):
         """Test that HTML snapshot attachments are indexed."""
         mock_item = {
@@ -1028,6 +1091,73 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.mock_extractor.extract_and_chunk.assert_called_once_with(
             b"fake pdf bytes", "application/pdf", timeout_multiplier=2.0
+        )
+
+    async def test_process_attachment_bytes_returns_skipped_too_large_when_extractor_refuses(self):
+        """AttachmentTooLargeError from the extractor (content over
+        kreuzberg_max_content_bytes) must become a clean skipped_too_large
+        result, not a generic RuntimeError — there's nothing to retry, the
+        file itself needs to be made smaller by the user."""
+        from backend.services.extraction.kreuzberg import AttachmentTooLargeError
+
+        self.mock_extractor.extract_and_chunk.side_effect = AttachmentTooLargeError("too big")
+
+        doc_metadata = DocumentMetadata(
+            library_id="test_lib", item_key="ITEM1", attachment_key="ATT1",
+            title="T", authors=[], year=None, item_type=None,
+        )
+
+        result = await self.processor._process_attachment_bytes(
+            file_bytes=b"fake pdf bytes",
+            mime_type="application/pdf",
+            doc_metadata=doc_metadata,
+            item_version=1,
+            attachment_version=1,
+            item_modified="2026-01-01T00:00:00Z",
+        )
+
+        self.assertEqual(result.status, "skipped_too_large")
+        self.assertEqual(result.chunks_written, 0)
+        self.assertIn("too big", result.error_detail)
+        self.assertEqual(
+            self.processor._too_large_skips,
+            [{"item_key": "ITEM1", "attachment_key": "ATT1", "detail": "too big"}],
+        )
+
+    async def test_split_pdf_fallback_to_whole_file_is_still_subject_to_the_size_cap(self):
+        """Regression test: when a large PDF can't be split (split_pdf_bytes
+        raises ValueError), _extract_pdf_in_parts falls back to sending the
+        whole original file as a single "part". Without AttachmentTooLargeError
+        enforced at the extractor's own choke point, that fallback would bypass
+        pdf_split_threshold entirely and resubmit an oversized file whole —
+        exactly how a 329MB PDF OOM-killed the kreuzberg sidecar in production."""
+        from backend.services.extraction.kreuzberg import AttachmentTooLargeError
+
+        with patch("backend.services.document_processor.get_settings") as mock_get_settings:
+            mock_get_settings.return_value.pdf_split_threshold = 100  # force the split branch
+            mock_get_settings.return_value.pdf_split_target_part_size = 50
+
+            with patch("backend.utils.pdf_splitter.split_pdf_bytes", side_effect=ValueError("cannot split")):
+                self.mock_extractor.extract_and_chunk.side_effect = AttachmentTooLargeError("too big")
+
+                doc_metadata = DocumentMetadata(
+                    library_id="test_lib", item_key="ITEM1", attachment_key="ATT1",
+                    title="T", authors=[], year=None, item_type=None,
+                )
+
+                result = await self.processor._process_attachment_bytes(
+                    file_bytes=b"x" * 200,  # > pdf_split_threshold(100) — triggers the split branch
+                    mime_type="application/pdf",
+                    doc_metadata=doc_metadata,
+                    item_version=1,
+                    attachment_version=1,
+                    item_modified="2026-01-01T00:00:00Z",
+                )
+
+        self.assertEqual(result.status, "skipped_too_large")
+        self.assertEqual(
+            self.processor._too_large_skips,
+            [{"item_key": "ITEM1", "attachment_key": "ATT1", "detail": "too big"}],
         )
 
 
@@ -1880,6 +2010,50 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             metadata.last_scan_failed_downloads,
+            [{"item_key": "AAA", "attachment_key": "PDF"}],
+        )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_batch_aggregates_too_large_skips(self, mock_queue_cls, mock_process_cls):
+        """too_large_skips reported by a subprocess batch must be aggregated onto
+        metadata.last_scan_skipped_too_large via _index_library_full's dispatch
+        loop — same plumbing as failed_downloads, since each batch's own
+        DocumentProcessor instance never reaches the parent process directly."""
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": False, "chunks_added": 0, "items_added": 0,
+            "items_updated": 0, "items_skipped": 0,
+            "too_large_skips": [{"item_key": "AAA", "attachment_key": "PDF"}],
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        metadata = MagicMock(last_indexed_version=0)
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings:
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            await self.processor._index_library_full(
+                library_id="test_lib",
+                library_type="user",
+                metadata=metadata,
+            )
+
+        self.assertEqual(
+            metadata.last_scan_skipped_too_large,
             [{"item_key": "AAA", "attachment_key": "PDF"}],
         )
 

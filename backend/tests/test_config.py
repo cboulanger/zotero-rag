@@ -130,6 +130,14 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(settings.model_preset, "cpu-only")
             self.assertEqual(settings.log_level, "DEBUG")
 
+    def test_kreuzberg_max_content_bytes_default_and_size_string_parsing(self):
+        """Default is 200MB; human-friendly size strings ('200MB', '1GB') parse
+        to raw byte counts the same way pdf_split_threshold already does."""
+        self.assertEqual(Settings().kreuzberg_max_content_bytes, 200 * 1024 ** 2)
+        self.assertEqual(Settings(kreuzberg_max_content_bytes="200MB").kreuzberg_max_content_bytes, 200 * 1024 ** 2)
+        self.assertEqual(Settings(kreuzberg_max_content_bytes="1GB").kreuzberg_max_content_bytes, 1024 ** 3)
+        self.assertEqual(Settings(kreuzberg_max_content_bytes=12345).kreuzberg_max_content_bytes, 12345)
+
     def test_invalid_log_level(self):
         """Test that invalid log level raises error."""
         with self.assertRaises(ValueError):

@@ -283,7 +283,8 @@ configured) needs no admin key for that side.
 uv run python bin/migrate_library.py <slug> <source-url> <dest-url> \
   --source-key <source-admin-zotero-api-key> \
   --dest-key <dest-admin-zotero-api-key> \
-  [--batch-size 200] [--dry-run] [--mode clean|resume]
+  [--batch-size 200] [--dry-run] [--mode clean|resume] \
+  [--max-outage-minutes 240]
 ```
 
 `<slug>` is a Zotero.org library slug (`users/<id>` or `groups/<id>`), e.g.
@@ -301,6 +302,15 @@ same command with no `--mode` flag finds the incomplete state and prompts
 non-interactively or `--mode=clean` to discard it and start over (the
 original "always re-clear the destination" behavior). See
 `docs/superpowers/specs/2026-10-05-library-rag-migration-resume-design.md`.
+
+A single stuck request is retried in two tiers: a few quick attempts for
+brief blips, then — rather than giving up — a slower retry every 30s for
+up to `--max-outage-minutes` (default 240 = 4h) before finally failing.
+This is meant for running unattended on a laptop: closing the lid
+suspends the process entirely, so sleep time is free against that budget,
+and the slower tier rides out a long stretch of bad/no wifi (e.g. a train
+commute). Ctrl-C during a wait exits cleanly; resume with `--mode=resume`
+afterward either way.
 
 ## Python Environment
 
