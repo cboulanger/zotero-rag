@@ -342,7 +342,8 @@ In `backend/db/vector_store.py`, add this method right after `delete_chunks_by_i
 
         deleted_chunks = self.delete_chunks_by_ids(point_ids)
         for library_id, item_key in touched_items:
-            self.delete_item_deduplication_records(library_id, item_key)
+            if not self.get_item_chunks(library_id, item_key):
+                self.delete_item_deduplication_records(library_id, item_key)
 
         logger.info(
             f"Purged {deleted_chunks} Snapshot chunk(s) across {len(touched_attachments)} attachment(s)"

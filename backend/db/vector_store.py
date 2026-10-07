@@ -1506,9 +1506,17 @@ class VectorStore:
     def delete_snapshot_chunks(self) -> tuple[int, int]:
         """
         Delete every chunk across ALL libraries whose source attachment was
-        titled exactly "Snapshot" (Zotero's default webpage-snapshot title),
-        plus the deduplication record for each (library_id, item_key) pair
-        touched — same item-level dedup granularity as delete_item_chunks.
+        titled exactly "Snapshot" (Zotero's default webpage-snapshot title).
+
+        For each (library_id, item_key) pair touched, the deduplication
+        record is cleared only once NONE of that item's chunks remain
+        (checked via get_item_chunks) — mirroring delete_item_chunks's own
+        dedup-cleanup convention elsewhere in this codebase. This matters
+        when an item has both a Snapshot attachment and another, surviving
+        attachment (e.g. a PDF): purging the Snapshot's chunks must not wipe
+        the dedup record for the still-fully-indexed PDF, since that record
+        is what lets a future duplicate of the PDF's content be recognized
+        instead of wastefully re-extracted.
 
         Used by the admin-only POST /api/admin/settings/purge-snapshots
         endpoint. Chunks indexed before the attachment_title field existed
@@ -1553,7 +1561,8 @@ class VectorStore:
 
         deleted_chunks = self.delete_chunks_by_ids(point_ids)
         for library_id, item_key in touched_items:
-            self.delete_item_deduplication_records(library_id, item_key)
+            if not self.get_item_chunks(library_id, item_key):
+                self.delete_item_deduplication_records(library_id, item_key)
 
         logger.info(
             f"Purged {deleted_chunks} Snapshot chunk(s) across {len(touched_attachments)} attachment(s)"

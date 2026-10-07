@@ -229,6 +229,49 @@ class TestVectorStore(unittest.TestCase):
         self.assertEqual(len(self.vector_store.get_item_chunks("2", "ITEM2")), 0)
         self.assertEqual(len(self.vector_store.get_item_chunks("1", "ITEM3")), 1)  # legacy chunk survives
 
+    def test_delete_snapshot_chunks_preserves_dedup_record_for_a_surviving_cooccurring_attachment(self):
+        """An item with BOTH a Snapshot and a surviving (non-Snapshot) attachment:
+        purging the Snapshot must not wipe the dedup record for the item's still-
+        fully-indexed other attachment — that record is what lets a future
+        cross-library/same-library duplicate of that PDF's content be recognized
+        instead of wastefully re-extracted."""
+        self._add_snapshot_chunk("1", "ITEM1", "SNAP1", "chunk-snap-coexist")
+        pdf_chunk = DocumentChunk(
+            text="PDF text.",
+            metadata=ChunkMetadata(
+                chunk_id="chunk-pdf-coexist",
+                document_metadata=DocumentMetadata(
+                    library_id="1", item_key="ITEM1", attachment_key="PDF1",
+                    attachment_title="Full Paper.pdf",
+                ),
+                page_number=1, text_preview="PDF text", chunk_index=0,
+                content_hash="hash-pdf-coexist",
+            ),
+            embedding=[0.1] * 384,
+        )
+        self.vector_store.add_chunk(pdf_chunk)
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="hash-pdf-coexist", library_id="1", item_key="ITEM1")
+        )
+
+        self.vector_store.delete_snapshot_chunks()
+
+        # The PDF's dedup record must survive — its chunk is still fully indexed.
+        self.assertIsNotNone(self.vector_store.check_duplicate("hash-pdf-coexist", "1"))
+
+    def test_delete_snapshot_chunks_clears_dedup_record_when_the_item_had_only_the_snapshot(self):
+        """An item whose ONLY indexed content was the (now-purged) Snapshot:
+        its dedup record should be cleared, same as delete_item_chunks does
+        when an item's last chunk is removed."""
+        self._add_snapshot_chunk("1", "ITEM2", "SNAP2", "chunk-snap-only")
+        self.vector_store.add_deduplication_record(
+            DeduplicationRecord(content_hash="chunk-snap-only", library_id="1", item_key="ITEM2")
+        )
+
+        self.vector_store.delete_snapshot_chunks()
+
+        self.assertIsNone(self.vector_store.check_duplicate("chunk-snap-only", "1"))
+
     def test_delete_snapshot_chunks_returns_zero_when_nothing_matches(self):
         deleted_chunks, deleted_attachments = self.vector_store.delete_snapshot_chunks()
         self.assertEqual((deleted_chunks, deleted_attachments), (0, 0))
