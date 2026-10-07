@@ -1031,7 +1031,7 @@ class DocumentProcessor:
             tags=self._extract_tags(item["data"]),
         )
 
-        index_snapshots_enabled = read_admin_settings(get_settings().data_path).get("index_snapshots", False)
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
 
         is_standalone_attachment = item["data"].get("itemType") == "attachment"
         if is_standalone_attachment:
