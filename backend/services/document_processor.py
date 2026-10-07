@@ -1798,6 +1798,7 @@ class DocumentProcessor:
             the normal reindex path.
         """
         item_key = item["data"]["key"]
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
 
         # Standalone attachments (itemType == "attachment") ARE the indexable
         # unit, and Zotero bumps their own version for both a metadata-only
@@ -1832,7 +1833,7 @@ class DocumentProcessor:
                 library_id=library_id, item_key=item_key, library_type=library_type
             )
             has_indexable_attachment = any(
-                att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
                 for att in current_attachments
             )
             if has_indexable_attachment:
@@ -1855,7 +1856,7 @@ class DocumentProcessor:
             current_indexable = {
                 att["data"]["key"]: att.get("version", 0)
                 for att in current_attachments
-                if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                if _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
             }
 
             if set(stored_versions) != set(current_indexable):

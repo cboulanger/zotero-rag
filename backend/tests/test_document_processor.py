@@ -804,6 +804,29 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result)
 
+    async def test_metadata_only_update_ignores_a_cooccurring_snapshot_attachment(self):
+        """A PDF + a Snapshot on the same item: the Snapshot must not be counted
+        as 'currently indexable' when deciding if the PDF's version is unchanged,
+        or metadata-only updates break for every item that also has a snapshot."""
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {
+                "data": {
+                    "key": "ITEM1", "itemType": "document", "title": "New Title",
+                    "abstractNote": "", "dateModified": "2026-01-02T00:00:00Z",
+                },
+                "version": 5,
+            }
+            self.mock_vector_store.get_item_chunks.return_value = [
+                {"payload": {"has_content": True, "attachment_key": "PDF1", "attachment_version": 3, "content_hash": "h1"}},
+            ]
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "PDF1", "contentType": "application/pdf", "title": "paper.pdf"}, "version": 3},
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            result = await self.processor._try_metadata_only_update(item, "1", "user")
+        self.assertTrue(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_called_once()
+
     async def test_extract_year_various_formats(self):
         """Test year extraction from various date formats."""
         test_cases = [
@@ -2541,6 +2564,7 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
         ]
 
         with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}), \
              patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
              patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
              patch("backend.dependencies.make_vector_store", return_value=mock_vector_store):
