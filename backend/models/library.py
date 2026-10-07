@@ -94,4 +94,26 @@ class LibraryIndexMetadata(BaseModel):
         )
     )
 
+    last_scan_skipped_too_large: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Up to MAX_TRACKED_DOWNLOAD_FAILURES (see document_processor.py) "
+            "{item_key, attachment_key, detail} records refused outright for "
+            "exceeding Settings.kreuzberg_max_content_bytes the last time this "
+            "library was indexed, by any path — a full scan, an incremental "
+            "sync, or the deferred pending-upload queue. `detail` is a "
+            "human-readable message (e.g. '329 MB, which exceeds the 200 MB "
+            "limit') for display in the plugin; older entries merged in before "
+            "this field existed may lack it. Unlike last_scan_failed_downloads, "
+            "there is nothing to automatically retry here: the file itself needs "
+            "to be made smaller (a lower-resolution scan, splitting a combined "
+            "PDF, etc.) by the user before it can be indexed. Surfaced to the "
+            "plugin's Fix Unavailable tool as a non-actionable, explanatory "
+            "status rather than something Search & Fix can resolve on its own. "
+            "Same replace-vs-merge semantics as last_scan_failed_downloads: a "
+            "full scan replaces this list outright, an incremental sync or a "
+            "single deferred-upload drain merges into it."
+        )
+    )
+
     schema_version: int = Field(default=1)

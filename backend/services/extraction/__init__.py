@@ -10,6 +10,8 @@ Available backends:
   - "legacy"     LegacyExtractor     — original pypdf + spaCy pipeline
 """
 
+from typing import Optional
+
 from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
 from backend.services.extraction.legacy import LegacyExtractor
 from backend.services.extraction.kreuzberg import KreuzbergExtractor
@@ -30,6 +32,7 @@ def create_document_extractor(
     ocr_enabled: bool = True,
     kreuzberg_url: str = "http://localhost:8100",
     kreuzberg_timeout_cap: int = 1800,
+    kreuzberg_max_content_bytes: Optional[int] = None,
 ) -> DocumentExtractor:
     """
     Factory: create a DocumentExtractor for the named backend.
@@ -42,6 +45,8 @@ def create_document_extractor(
         kreuzberg_url: Base URL of the kreuzberg sidecar (kreuzberg backend only).
         kreuzberg_timeout_cap: Upper bound (seconds) for the per-request timeout
             computed from document size (kreuzberg backend only).
+        kreuzberg_max_content_bytes: Hard cap on bytes sent to kreuzberg in one
+            request; None means no cap (kreuzberg backend only).
 
     Returns:
         Configured DocumentExtractor instance.
@@ -57,6 +62,7 @@ def create_document_extractor(
                 chunk_overlap=chunk_overlap,
                 ocr_enabled=ocr_enabled,
                 timeout_cap=kreuzberg_timeout_cap,
+                max_content_bytes=kreuzberg_max_content_bytes,
             )
         case "legacy":
             return LegacyExtractor(

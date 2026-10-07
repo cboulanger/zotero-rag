@@ -88,6 +88,23 @@ class TestExecuteUploadDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error_type, "RuntimeError")
         self.assertIsNone(result.rate_limit_available_at)
 
+    async def test_skipped_too_large_merges_into_library_metadata(self):
+        # Surfaced to the plugin's Fix Unavailable tool via
+        # LibraryIndexMetadata.last_scan_skipped_too_large, the same mechanism
+        # used for download failures — covers both this endpoint and
+        # CronIndexer._drain_pending_uploads, which both funnel through
+        # _execute_upload_impl.
+        res = AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail="too big")
+        kwargs = _kwargs()
+        with _patch_processor(res):
+            result = await _execute_upload(**kwargs)
+        self.assertEqual(result.status, "skipped_too_large")
+        saved_metadata = kwargs["vector_store"].update_library_metadata.call_args.args[0]
+        self.assertEqual(
+            saved_metadata.last_scan_skipped_too_large,
+            [{"item_key": "I", "attachment_key": "A", "detail": "too big"}],
+        )
+
     async def test_rate_limit_exhausted_error_carries_type_and_available_at(self):
         # CronIndexer._drain_pending_uploads detects an exhausted embedding quota
         # via these two fields (not by string-matching `message`) to stop

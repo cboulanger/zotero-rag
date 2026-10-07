@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.services.extraction.kreuzberg import KreuzbergExtractor, _compute_timeout
+from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergExtractor, _compute_timeout
 
 
 class TestComputeTimeout(unittest.TestCase):
@@ -64,6 +64,44 @@ class TestKreuzbergExtractorTimeoutWiring(unittest.IsolatedAsyncioTestCase):
 
         # cap=600, multiplier=2.0 → expect the doubled cap, not the default 1800-based one.
         mock_client_cls.assert_called_once_with(timeout=1200)
+
+
+class TestMaxContentBytes(unittest.IsolatedAsyncioTestCase):
+    async def test_refuses_content_over_the_cap_without_contacting_kreuzberg(self):
+        extractor = KreuzbergExtractor(max_content_bytes=1000)
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient") as mock_client_cls:
+            with self.assertRaises(AttachmentTooLargeError):
+                await extractor.extract_and_chunk(b"x" * 1001, "application/pdf")
+        mock_client_cls.assert_not_called()
+
+    async def test_allows_content_at_exactly_the_cap(self):
+        extractor = KreuzbergExtractor(max_content_bytes=1000)
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=[{"chunks": []}])
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client):
+            await extractor.extract_and_chunk(b"x" * 1000, "application/pdf")  # must not raise
+
+    async def test_no_cap_configured_never_refuses(self):
+        # Default (max_content_bytes=None) — the pre-existing, uncapped behaviour
+        # other tests in this file rely on — must be unaffected.
+        extractor = KreuzbergExtractor()
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=[{"chunks": []}])
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client):
+            await extractor.extract_and_chunk(b"x" * 1_000_000, "application/pdf")  # must not raise
 
 
 if __name__ == "__main__":
