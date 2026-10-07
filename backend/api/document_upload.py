@@ -40,6 +40,7 @@ from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
 from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.embeddings import EmbeddingRateLimitExhaustedError
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -227,6 +228,14 @@ class DocumentUploadResult(BaseModel):
     rate_limit_retries: int = 0
     rate_limit_headers: dict[str, str] | None = None
     error_detail: Optional[str] = None
+    # Set only on status="error": the raised exception's class name, and (for
+    # EmbeddingRateLimitExhaustedError specifically) its available_at as an ISO
+    # string. Lets a bulk caller like CronIndexer._drain_pending_uploads detect
+    # "the embedding quota is exhausted for hours" without string-matching
+    # `message`, and stop processing the rest of a backlog instead of
+    # re-extracting (and re-failing on) every remaining queued attachment.
+    error_type: Optional[str] = None
+    rate_limit_available_at: Optional[str] = None
     diagnostics: Optional[DiagnosticsPayload] = None  # only when include_diagnostics was requested
 
 
@@ -467,6 +476,10 @@ async def _execute_upload_impl(
             chunks_added=0,
             status="error",
             message=str(e),
+            error_type=type(e).__name__,
+            rate_limit_available_at=(
+                e.available_at.isoformat() if isinstance(e, EmbeddingRateLimitExhaustedError) else None
+            ),
         )
 
     api_status = "indexed" if proc_result.status == "indexed_fresh" else proc_result.status

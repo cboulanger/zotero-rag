@@ -22,6 +22,7 @@ from backend.services.cron_indexer import (
     write_control_state,
 )
 from backend.services import pending_upload_cache
+from backend.services.embeddings import EmbeddingRateLimitExhaustedError
 
 
 def _make_target(zotero_key: str = "test-api-key", embedding_key: str = "test-emb-key",
@@ -535,6 +536,61 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["slugs"]["users/1"]["skip_reason"], "embedding_rate_limit")
         # The other user's slug must still succeed, not be skipped.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        key_store.set_embedding_key_status.assert_called_once_with(
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
+        )
+
+    async def test_rate_limit_exhausted_during_drain_is_isolated_to_one_slug(self):
+        """An EmbeddingRateLimitExhaustedError raised while draining a slug's
+        pending-upload backlog (not from processor.index_library) is handled
+        identically: that slug is marked skipped, the main indexing loop never
+        even runs for it, and the next slug is unaffected."""
+        from datetime import timedelta
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+        from backend.services import pending_upload_cache
+        available_at = datetime.now(timezone.utc) + timedelta(hours=6)
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
+
+        pending_upload_cache.write_entry(
+            self.tmp, "u1", "ATT1", b"bytes",
+            {"item_key": "ITEM1", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/1"},
+        )
+
+        async def fake_execute_upload_impl(**kwargs):
+            return MagicMock(
+                status="error", message="Embedding rate limit exhausted; available later.",
+                error_type="EmbeddingRateLimitExhaustedError",
+                rate_limit_available_at=available_at.isoformat(),
+                chunks_added=0,
+            )
+
+        with patch("backend.services.cron_indexer.get_settings") as mock_get_settings, \
+             patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute_upload_impl), \
+             _patch_embedding_service():
+            mock_get_settings.return_value.data_path = self.tmp
+
+            MockWebAPI.return_value.get_items_by_keys = AsyncMock(return_value=[])
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+            mock_proc_instance.index_library = AsyncMock(return_value={"items_processed": 5, "chunks_added": 10})
+            MockProcessor.return_value = mock_proc_instance
+
+            await indexer.run()
+
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["status"], "skipped")
+        self.assertEqual(status["slugs"]["users/1"]["skip_reason"], "embedding_rate_limit")
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        # Only users/2 ever reached the main indexing loop — the drain pre-empted
+        # it entirely for users/1.
+        mock_proc_instance.index_library.assert_awaited_once()
         key_store.set_embedding_key_status.assert_called_once_with(
             "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
         )
@@ -1078,6 +1134,95 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         called_attachment_keys = {call.kwargs["attachment_key"] for call in mock_execute.call_args_list}
         self.assertNotIn("ATT_MALFORMED", called_attachment_keys)
         self.assertIn("ATT_GOOD", called_attachment_keys)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_stops_draining_once_the_embedding_quota_is_exhausted(self, mock_execute):
+        # Regression test: a server-reported EmbeddingRateLimitExhaustedError from
+        # one entry means the quota is exhausted for the whole key (often hours,
+        # per the server's retry-after), not just that one attachment — every
+        # remaining entry would fail the exact same way. Previously the drain
+        # loop treated this as an ordinary per-entry failure and kept going,
+        # which meant it fully downloaded + extracted (kreuzberg OCR included)
+        # every remaining queued attachment only to also hit the same exhausted
+        # quota — wasted, and a real contributor to kreuzberg sidecar memory
+        # pressure under a large backlog. It must now raise immediately and
+        # leave every later entry completely untouched.
+        pending_upload_cache.write_entry(
+            self.data_path, "u5", "ATT_A", b"bytes-a",
+            {"item_key": "ITEM_A", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/5"},
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u5", "ATT_B", b"bytes-b",
+            {"item_key": "ITEM_B", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/5"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(
+                status="error", message="Embedding rate limit exhausted; available later.",
+                error_type="EmbeddingRateLimitExhaustedError",
+                rate_limit_available_at="2026-10-08T00:00:00+00:00",
+                chunks_added=0,
+            )
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/5": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock5",
+            status_file=self.data_path / "status5.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        with self.assertRaises(EmbeddingRateLimitExhaustedError) as ctx:
+            await indexer._drain_pending_uploads(indexer.parse_slug("users/5"), MagicMock(), web_api)
+
+        from datetime import datetime, timezone
+        self.assertEqual(ctx.exception.available_at, datetime(2026, 10, 8, 0, 0, 0, tzinfo=timezone.utc))
+        # Only the first (oldest-enqueued) entry was ever attempted.
+        mock_execute.assert_awaited_once()
+        self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
+        # ATT_A's failure was recorded for retry next run...
+        _, meta_a = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_A")
+        self.assertEqual(meta_a["attempts"], 1)
+        # ...but ATT_B was never even read — completely untouched, attempts still 0.
+        _, meta_b = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_B")
+        self.assertEqual(meta_b["attempts"], 0)
+
+    async def test_falls_back_to_now_when_the_rate_limit_result_has_no_available_at(self):
+        # A defensive fallback for a malformed/missing rate_limit_available_at
+        # (e.g. an older plugin/server mismatch) — must still raise and stop
+        # draining rather than crashing on a None.isoformat() or silently
+        # continuing to burn through the backlog.
+        pending_upload_cache.write_entry(
+            self.data_path, "u6", "ATT_ONLY", b"bytes",
+            {"item_key": "ITEM_ONLY", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/6"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(
+                status="error", message="Embedding rate limit exhausted; available later.",
+                error_type="EmbeddingRateLimitExhaustedError",
+                rate_limit_available_at=None,
+                chunks_added=0,
+            )
+
+        indexer = CronIndexer(
+            targets={"users/6": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock6",
+            status_file=self.data_path / "status6.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        with patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute):
+            with self.assertRaises(EmbeddingRateLimitExhaustedError):
+                await indexer._drain_pending_uploads(indexer.parse_slug("users/6"), MagicMock(), web_api)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_reports_progress_after_each_entry_including_failures(self, mock_execute):

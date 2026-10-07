@@ -563,6 +563,25 @@ class CronIndexer:
                 if result.status == "error":
                     await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
                     failed += 1
+                    if result.error_type == "EmbeddingRateLimitExhaustedError":
+                        # The quota is exhausted for (likely) hours, not this one
+                        # attachment's fault — every remaining entry would fail the
+                        # exact same way. Stop here instead of burning through the
+                        # rest of the backlog: each attempt still fully downloads
+                        # and extracts (Kreuzberg OCR included) before reaching the
+                        # embedding call that's guaranteed to fail, which previously
+                        # meant a large backlog kept hammering the kreuzberg sidecar
+                        # — sequential, one request at a time — for nothing, run
+                        # after run, until the quota reset. Raising here (rather
+                        # than returning a flag) reuses _index_slug's existing
+                        # EmbeddingRateLimitExhaustedError handling, including the
+                        # key_store rate_limited status update.
+                        available_at = (
+                            datetime.fromisoformat(result.rate_limit_available_at)
+                            if result.rate_limit_available_at
+                            else datetime.now(timezone.utc)
+                        )
+                        raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
                 else:
                     await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
                     drained += 1

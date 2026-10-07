@@ -81,6 +81,27 @@ class TestExecuteUploadDiagnostics(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(d.error["type"], "RuntimeError")
         self.assertIn("exploded", d.error["traceback"])
 
+    async def test_generic_error_carries_type_but_no_rate_limit_timestamp(self):
+        with _patch_processor(exc=RuntimeError("kreuzberg sidecar exploded")):
+            result = await _execute_upload(**_kwargs())
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error_type, "RuntimeError")
+        self.assertIsNone(result.rate_limit_available_at)
+
+    async def test_rate_limit_exhausted_error_carries_type_and_available_at(self):
+        # CronIndexer._drain_pending_uploads detects an exhausted embedding quota
+        # via these two fields (not by string-matching `message`) to stop
+        # processing the rest of a pending-upload backlog instead of wastefully
+        # re-extracting (and re-failing on) every remaining queued attachment.
+        from datetime import datetime, timezone
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+        available_at = datetime(2026, 10, 8, 0, 0, 0, tzinfo=timezone.utc)
+        with _patch_processor(exc=EmbeddingRateLimitExhaustedError("quota exhausted", available_at=available_at)):
+            result = await _execute_upload(**_kwargs())
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error_type, "EmbeddingRateLimitExhaustedError")
+        self.assertEqual(result.rate_limit_available_at, available_at.isoformat())
+
 
 class TestKreuzbergStageRecording(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_details_recorded(self):
