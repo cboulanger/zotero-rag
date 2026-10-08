@@ -106,6 +106,19 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             document_extractor=self.mock_extractor,
         )
 
+        # Default: deterministically disable snapshot indexing for every test
+        # in this class unless a test overrides it with its own inner
+        # `with patch(...)` block (which always wins for its duration).
+        # Without this, get_settings()/read_admin_settings() hit the real
+        # data/system/admin_settings.json on disk, making tests depend on
+        # whatever value happens to be there.
+        self._read_admin_settings_patcher = patch(
+            "backend.services.document_processor.read_admin_settings",
+            return_value={"index_snapshots": False},
+        )
+        self._read_admin_settings_patcher.start()
+        self.addCleanup(self._read_admin_settings_patcher.stop)
+
         # Default stubs for new methods added by the sync-deletion changes
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
         self.mock_zotero_client.get_deleted_item_keys.return_value = []

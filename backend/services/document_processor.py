@@ -672,7 +672,7 @@ class DocumentProcessor:
         logger.debug(f"Retrieved {len(items)} total items from Zotero")
 
         # Spill the full item list to a temp JSONL file and build a minimal
-        # children lookup (only contentType) in one pass, then free the list.
+        # children lookup (only contentType + title) in one pass, then free the list.
         # This drops the ~3-4 GB in-memory list before the processing loop.
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="zotero_items_")
         try:
