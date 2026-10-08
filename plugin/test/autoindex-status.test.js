@@ -133,6 +133,25 @@ test('toggleIndexSnapshots unchecking does not purge when only the second confir
 	assert.strictEqual(calls.length, 1); // PUT only, no purge call
 });
 
+test('toggleIndexSnapshots renders an error banner and does not proceed to the purge confirm when the PUT fails', async () => {
+	const toggle = makeElement();
+	toggle.checked = false;
+	const banner = makeElement();
+	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle, 'run-banner': banner });
+	/** @type {Array<{url: string, opts: any}>} */
+	const calls = [];
+	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
+	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: false, status: 500, json: async () => ({ detail: 'disk full' }) }; };
+	let confirmCalled = false;
+	global.window = { confirm: () => { confirmCalled = true; return true; } };
+
+	await dialog.toggleIndexSnapshots();
+
+	assert.strictEqual(confirmCalled, false);
+	assert.strictEqual(calls.length, 1); // PUT only, no purge call
+	assert.match(banner.textContent, /disk full/);
+});
+
 test('purgeSnapshotsNow runs the same two-step confirm independent of checkbox state and reports the result', async () => {
 	const banner = makeElement();
 	const dialog = loadDialog({ 'run-banner': banner });

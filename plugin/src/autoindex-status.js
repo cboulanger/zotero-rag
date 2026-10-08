@@ -271,14 +271,20 @@ var ZoteroRAGAutoIndexStatus = {
 		if (!this.plugin) return;
 		const toggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-index-snapshots-toggle'));
 		const enabled = toggle.checked;
+		let response;
 		try {
-			await fetch(`${this.plugin.backendURL}/api/admin/settings`, {
+			response = await fetch(`${this.plugin.backendURL}/api/admin/settings`, {
 				method: 'PUT',
 				headers: this.plugin.getAuthHeaders({ 'Content-Type': 'application/json' }),
 				body: JSON.stringify({ index_snapshots: enabled }),
 			});
 		} catch (e) {
 			this.renderBanner(`Error updating setting: ${e}`, 'crashed');
+			return;
+		}
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			this.renderBanner(body.detail || `Could not update setting (HTTP ${response.status}).`, 'crashed');
 			return;
 		}
 		if (!enabled) {
