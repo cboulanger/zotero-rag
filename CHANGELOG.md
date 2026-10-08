@@ -1,3 +1,10 @@
+# [1.54.0](https://github.com/cboulanger/zotero-rag/compare/v1.53.0...v1.54.0) (2026-10-08)
+
+
+### Features
+
+* **plugin:** show progress while checking queued status in Fix Unavailable ([f3bfe97](https://github.com/cboulanger/zotero-rag/commit/f3bfe9750021050226f3761c7b37d179129408be))
+
 # [1.53.0](https://github.com/cboulanger/zotero-rag/compare/v1.52.2...v1.53.0) (2026-10-07)
 
 
