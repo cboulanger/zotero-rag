@@ -12,6 +12,7 @@
  * @property {number} [chunks_added]
  * @property {string} [error]
  * @property {string} [skip_reason]
+ * @property {string} [rate_limit_until] - ISO timestamp; set when skip_reason is "embedding_rate_limit"
  * @property {string} [library_name] - human-readable name, falls back to the raw slug server-side
  * @property {number} [owner_id] - numeric Zotero user id; not shown in the UI (no username resolution available), kept for potential future use
  */
@@ -573,6 +574,24 @@ var ZoteroRAGAutoIndexStatus = {
 	},
 
 	/**
+	 * Turn a per-library skip_reason/error into a human-readable message.
+	 * Known machine-readable reasons (currently just "embedding_rate_limit")
+	 * get a friendly, actionable message; anything else (admin skip messages,
+	 * arbitrary exception text) is already human-written and passed through.
+	 * @param {AutoIndexSlugStatus} info
+	 * @returns {string}
+	 */
+	_formatSkipOrErrorReason(info) {
+		if (info.error) return info.error;
+		if (info.skip_reason === 'embedding_rate_limit') {
+			return info.rate_limit_until
+				? `Embedding quota exhausted for today — resumes automatically at ${this.formatTime(info.rate_limit_until)}.`
+				: 'Embedding quota exhausted for today — indexing will resume automatically once the limit resets.';
+		}
+		return info.skip_reason || '';
+	},
+
+	/**
 	 * Render one row per library with a progress bar reflecting its status.
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
 	 * @param {boolean} [isAdmin]
@@ -669,7 +688,7 @@ var ZoteroRAGAutoIndexStatus = {
 			if (info.error || info.skip_reason) {
 				const errorDiv = document.createElement('div');
 				errorDiv.className = 'library-error';
-				errorDiv.textContent = info.error || info.skip_reason || '';
+				errorDiv.textContent = this._formatSkipOrErrorReason(info);
 				row.appendChild(errorDiv);
 			}
 

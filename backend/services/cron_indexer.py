@@ -782,8 +782,13 @@ class CronIndexer:
             )
             status["slugs"][slug_info.slug]["status"] = "skipped"
             status["slugs"][slug_info.slug]["skip_reason"] = "embedding_rate_limit"
+            status["slugs"][slug_info.slug]["rate_limit_until"] = exc.available_at.isoformat()
             self._write_status(status)
-            return {"status": "skipped", "skip_reason": "embedding_rate_limit"}
+            return {
+                "status": "skipped",
+                "skip_reason": "embedding_rate_limit",
+                "rate_limit_until": exc.available_at.isoformat(),
+            }
         except SlugSkipRequested:
             self.log.info("Skip requested by admin for %s; moving to next slug.", slug_info.slug)
             status["slugs"][slug_info.slug]["status"] = "skipped"

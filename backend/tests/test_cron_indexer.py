@@ -638,6 +638,9 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         status = indexer._read_status()
         self.assertEqual(status["slugs"]["users/1"]["status"], "skipped")
         self.assertEqual(status["slugs"]["users/1"]["skip_reason"], "embedding_rate_limit")
+        # Surfaced so the UI can show a human-readable "resumes at ..." message
+        # instead of the opaque "embedding_rate_limit" string alone.
+        self.assertEqual(status["slugs"]["users/1"]["rate_limit_until"], available_at.isoformat())
         # The other user's slug must still succeed, not be skipped.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
         key_store.set_embedding_key_status.assert_called_once_with(

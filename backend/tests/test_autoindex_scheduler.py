@@ -11,7 +11,10 @@ from pydantic import ValidationError
 
 from backend.config.settings import Settings
 from backend.services.autoindex_scheduler import (
+    _CLAIM_TTL_SECONDS,
     _STARTUP_DELAY_SECONDS,
+    _claim_is_fresh,
+    _write_claim,
     read_scheduler_state,
     run_scheduler_loop,
     trigger_index_run,
@@ -91,6 +94,51 @@ class TriggerIndexRunTest(unittest.IsolatedAsyncioTestCase):
         args = mock_spawn.await_args.args
         self.assertIn("--slug", args)
         self.assertIn("groups/42", args)
+
+    async def test_concurrent_calls_spawn_only_one_subprocess(self):
+        # Regression: two near-simultaneous calls (e.g. a double-clicked
+        # "Index" button) must not both spawn a subprocess. read_live_status
+        # is pinned to "not running" for the whole test — on purpose, since
+        # in reality the spawned subprocess hasn't had time to report its own
+        # "running" status yet either; the claim file (not the status file)
+        # is what must close this gap.
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            results = await asyncio.gather(
+                trigger_index_run(self.settings, slug="users/1"),
+                trigger_index_run(self.settings, slug="users/1"),
+            )
+        self.assertEqual(mock_spawn.await_count, 1)
+        self.assertEqual(sorted(results), ["already_running", "started"])
+
+    async def test_claim_is_fresh_immediately_after_write(self):
+        _write_claim(self.tmp)
+        self.assertTrue(_claim_is_fresh(self.tmp))
+
+    async def test_claim_is_fresh_false_when_no_claim_written(self):
+        self.assertFalse(_claim_is_fresh(self.tmp))
+
+    async def test_claim_is_fresh_false_once_ttl_expires(self):
+        from datetime import datetime, timedelta, timezone
+
+        from backend.services.autoindex_scheduler import _atomic_write_json, _claim_path
+
+        stale_claim_at = datetime.now(timezone.utc) - timedelta(seconds=_CLAIM_TTL_SECONDS + 1)
+        _atomic_write_json(_claim_path(self.tmp), {"claimed_at": stale_claim_at.isoformat()})
+        self.assertFalse(_claim_is_fresh(self.tmp))
+
+    async def test_fresh_claim_blocks_a_new_run_even_when_not_yet_reflected_in_status(self):
+        # A third call, slightly later than the two above, must also be
+        # blocked for as long as the claim is fresh — not just the exact
+        # concurrent pair.
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        _write_claim(self.tmp)
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            result = await trigger_index_run(self.settings, slug="users/1")
+        self.assertEqual(result, "already_running")
+        mock_spawn.assert_not_awaited()
 
 
 class SchedulerStateTest(unittest.TestCase):

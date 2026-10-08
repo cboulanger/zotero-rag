@@ -153,3 +153,36 @@ test('_updatePendingRunState gives up after the grace window if never confirmed 
 	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'skipped' }), false);
 	assert.strictEqual(dialog.pendingRunSlugs.has('users/1'), false);
 });
+
+test('_formatSkipOrErrorReason prefers error over skip_reason', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'error', error: 'boom', skip_reason: 'embedding_rate_limit' }),
+		'boom'
+	);
+});
+
+test('_formatSkipOrErrorReason turns embedding_rate_limit into a human-readable message with the reset time', () => {
+	const dialog = loadDialog({});
+	const until = new Date(Date.now() + 3600000).toISOString();
+	const msg = dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'embedding_rate_limit', rate_limit_until: until });
+	assert.match(msg, /Embedding quota exhausted/);
+	assert.match(msg, /resumes automatically at/);
+	assert.ok(!msg.includes('embedding_rate_limit'), 'must not leak the raw machine-readable string');
+});
+
+test('_formatSkipOrErrorReason falls back to a generic message for embedding_rate_limit with no timestamp', () => {
+	// Covers status entries written before rate_limit_until existed.
+	const dialog = loadDialog({});
+	const msg = dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'embedding_rate_limit' });
+	assert.match(msg, /Embedding quota exhausted/);
+	assert.ok(!msg.includes('embedding_rate_limit'));
+});
+
+test('_formatSkipOrErrorReason passes through other skip reasons unchanged', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'Skipped by admin request' }),
+		'Skipped by admin request'
+	);
+});
