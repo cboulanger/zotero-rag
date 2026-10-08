@@ -528,11 +528,13 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		});
 	}
 
-	// Admin-only "Index Snapshots of webpages" setting + purge action. This is
-	// a fundamental policy decision (what gets indexed at all), not a runtime
-	// indexing-run consideration, so it lives here rather than in the
-	// "View indexing status" monitor dialog.
-	const adminIndexingSettings = doc.getElementById('zotero-rag-admin-indexing-settings');
+	// "Indexed Content" section: admin-only "Index Snapshots of webpages"
+	// setting + purge action. This controls what gets indexed at all,
+	// independent of how indexing was triggered (scheduled auto-indexing or
+	// client-initiated, e.g. "Fix unavailable"), so it lives in its own
+	// section rather than under "Automatic indexing" or the status-monitor
+	// dialog's runtime controls.
+	const indexedContentGroup = doc.getElementById('zotero-rag-indexed-content-group');
 	const indexSnapshotsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-index-snapshots-toggle'));
 	const purgeSnapshotsButton = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-purge-snapshots-button'));
 	const purgeSnapshotsMessage = doc.getElementById('zotero-rag-purge-snapshots-message');
@@ -549,29 +551,30 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	};
 
 	/**
-	 * Show the admin block only for an admin of the authorizing group (or
-	 * always, on a loopback backend) — mirrors the is_admin flag already
-	 * reported by /api/autoindex/status for the status-monitor dialog's own
-	 * admin controls, reused here to avoid a separate admin-check endpoint.
-	 * When shown, also loads the live index_snapshots value into the checkbox.
+	 * Show the "Indexed Content" section only for an admin of the authorizing
+	 * group (or always, on a loopback backend) — mirrors the is_admin flag
+	 * already reported by /api/autoindex/status for the status-monitor
+	 * dialog's own admin controls, reused here to avoid a separate
+	 * admin-check endpoint. When shown, also loads the live index_snapshots
+	 * value into the checkbox.
 	 * @returns {Promise<void>}
 	 */
-	const refreshAdminIndexingControls = async () => {
-		if (!adminIndexingSettings) return;
+	const refreshIndexedContentSection = async () => {
+		if (!indexedContentGroup) return;
 		try {
 			const statusResponse = await fetch(`${this.backendURL}/api/autoindex/status`, {
 				headers: this.getAuthHeaders(),
 			});
 			if (!statusResponse.ok) {
-				adminIndexingSettings.style.display = 'none';
+				indexedContentGroup.style.display = 'none';
 				return;
 			}
 			const statusData = await statusResponse.json();
 			if (statusData.is_admin !== true) {
-				adminIndexingSettings.style.display = 'none';
+				indexedContentGroup.style.display = 'none';
 				return;
 			}
-			adminIndexingSettings.style.display = '';
+			indexedContentGroup.style.display = '';
 			if (indexSnapshotsToggle) {
 				const settingsResponse = await fetch(`${this.backendURL}/api/admin/settings`, {
 					headers: this.getAuthHeaders(),
@@ -582,7 +585,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				}
 			}
 		} catch (_) {
-			adminIndexingSettings.style.display = 'none';
+			indexedContentGroup.style.display = 'none';
 		}
 	};
 
@@ -661,5 +664,5 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 
 	// Initial population, now that both closures above exist
 	refreshZoteroIdentityStatus();
-	refreshAdminIndexingControls();
+	refreshIndexedContentSection();
 };

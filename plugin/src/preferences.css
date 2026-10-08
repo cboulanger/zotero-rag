@@ -84,12 +84,6 @@ body {
   line-height: 1.4;
 }
 
-.setting-admin-block {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #ddd;
-}
-
 .diversity-tuning-row {
   display: flex;
   align-items: baseline;
