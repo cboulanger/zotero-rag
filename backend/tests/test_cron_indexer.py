@@ -1005,6 +1005,38 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_FAIL")
         self.assertEqual(meta["attempts"], 1)
 
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_threads_attachment_title_from_the_cached_entry_into_doc_metadata(self, mock_execute):
+        # Regression: the drain loop rebuilt DocumentMetadata from the persisted
+        # cache entry without copying attachment_title, so a Snapshot attachment
+        # queued via the deferred/auto-index path would never be findable by the
+        # purge-snapshots admin endpoint.
+        pending_upload_cache.write_entry(
+            self.data_path, "u1", "ATT_SNAPSHOT", b"snapshot bytes",
+            {"item_key": "ITEM_SNAPSHOT", "mime_type": "text/html", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/1", "attachment_title": "Snapshot"},
+        )
+        captured = {}
+
+        async def fake_execute(**kwargs):
+            if kwargs["attachment_key"] == "ATT_SNAPSHOT":
+                captured["doc_metadata"] = kwargs["doc_metadata"]
+            return MagicMock(status="indexed", message="ok", chunks_added=1)
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        await indexer._drain_pending_uploads(indexer.parse_slug("users/1"), MagicMock(), web_api)
+
+        self.assertEqual(captured["doc_metadata"].attachment_title, "Snapshot")
+
     async def test_no_op_when_nothing_cached_for_the_library(self):
         indexer = CronIndexer(
             targets={"users/2": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},

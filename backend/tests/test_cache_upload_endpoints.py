@@ -43,12 +43,14 @@ class TestCacheUploadEndpoint(unittest.TestCase):
         self._key_store_patch.stop()
         self._tmp.cleanup()
 
-    def _upload(self, library_id="u1", attachment_key="ATT1"):
+    def _upload(self, library_id="u1", attachment_key="ATT1", attachment_title=None):
         metadata = {
             "library_id": library_id, "library_type": "user", "item_key": "ITEM1",
             "attachment_key": attachment_key, "mime_type": "application/pdf",
             "item_version": 3, "attachment_version": 1,
         }
+        if attachment_title is not None:
+            metadata["attachment_title"] = attachment_title
         return self.client.post(
             "/api/index/document/cache",
             files={"file": ("x.pdf", b"file bytes", "application/pdf")},
@@ -73,6 +75,18 @@ class TestCacheUploadEndpoint(unittest.TestCase):
         self.assertEqual(body["reason"], "key_invalid")
         # still cached even though nothing will drain it yet
         self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT1"))
+
+    def test_persists_attachment_title_through_the_cache_write(self):
+        # Regression: upload_document_to_cache used to hand-build a separate
+        # dict for write_entry that dropped attachment_title even though
+        # _parse_upload_request correctly parsed it into DocumentMetadata.
+        # Confirm it now survives the round trip through the pending-upload
+        # cache, since that's what the purge-snapshots admin endpoint later
+        # filters on.
+        response = self._upload(attachment_title="Snapshot")
+        self.assertEqual(response.status_code, 200)
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT1")
+        self.assertEqual(meta["attachment_title"], "Snapshot")
 
     def test_rejects_access_to_a_library_outside_the_identity_s_targets(self):
         # self.identity.targets is ["users/1"] — "u2" maps to slug "users/2",
@@ -189,6 +203,29 @@ class TestProcessNowEndpoint(unittest.TestCase):
         _, kwargs = mock_processor_cls.call_args
         self.assertEqual(kwargs["max_chunk_size"], 777)
         self.assertEqual(kwargs["chunk_merge_target_size"], 777)
+
+    @patch("backend.api.document_upload.DocumentProcessor")
+    def test_threads_attachment_title_from_the_cached_entry_into_doc_metadata(self, mock_processor_cls):
+        # Regression: process_cached_upload_now rebuilt DocumentMetadata from
+        # the persisted cache entry without copying attachment_title, so a
+        # Snapshot attachment queued via the deferred path would never be
+        # findable by the purge-snapshots admin endpoint once forced through
+        # process-now.
+        pending_upload_cache.write_entry(
+            self.data_path, "u1", "ATT_SNAPSHOT", b"cached bytes",
+            {"item_key": "ITEM_SNAPSHOT", "mime_type": "application/pdf", "item_version": 3,
+             "attachment_version": 1, "title": "T", "authors": [], "year": None,
+             "item_type": None, "library_type": "user", "library_name": "",
+             "attachment_title": "Snapshot"},
+        )
+        mock_processor = mock_processor_cls.return_value
+        proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)
+        mock_processor._process_attachment_bytes = AsyncMock(return_value=proc_result)
+
+        response = self.client.post("/api/index/document/cache/u1/ATT_SNAPSHOT/process-now")
+        self.assertEqual(response.status_code, 200)
+        _, kwargs = mock_processor._process_attachment_bytes.call_args
+        self.assertEqual(kwargs["doc_metadata"].attachment_title, "Snapshot")
 
     def test_returns_404_for_an_attachment_not_in_the_cache(self):
         response = self.client.post("/api/index/document/cache/u1/NEVER_CACHED/process-now")
