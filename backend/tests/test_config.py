@@ -2,6 +2,7 @@
 Unit tests for configuration system.
 """
 
+import json
 import os
 import tempfile
 import unittest
@@ -10,18 +11,67 @@ from unittest.mock import patch
 
 import pytest
 
-from backend.config.presets import get_preset, list_presets, PRESETS
+from backend.config.presets import (
+    DEFAULT_PRESETS_DIR,
+    HardwarePreset,
+    ensure_default_presets,
+    get_preset,
+    list_presets,
+)
 from backend.config.settings import Settings, get_settings, reset_settings
 from backend.services.zotero_identity import reset_identity_cache
 from backend.zotero.group_roles import reset_admin_role_cache
 
+# The 9 preset names this project ships as bundled defaults. Hardcoded (not
+# derived from DEFAULT_PRESETS_DIR.glob(...)) so an accidental deletion of
+# one of these files is actually caught — a count/name comparison against
+# the same glob the code under test reads would be circular and could never
+# fail that way.
+EXPECTED_BUNDLED_PRESET_NAMES = {
+    "apple-silicon-32gb",
+    "high-memory",
+    "cpu-only",
+    "remote-openai",
+    "apple-silicon-kisski",
+    "remote-kisski",
+    "cloud-server-kisski",
+    "windows-test",
+    "remote-mpcdf",
+}
+
+
+class TestBundledDefaultPresets(unittest.TestCase):
+    """Validate the actual shipped files in backend/config/default_presets/
+    directly against the schema — these are source code, not user data, so
+    (unlike a user's own preset file) a broken one here should fail CI, not
+    just log a warning at runtime (see list_presets()'s tolerant handling)."""
+
+    def test_exactly_the_expected_bundled_preset_files_exist(self):
+        names = {p.stem for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+        self.assertEqual(names, EXPECTED_BUNDLED_PRESET_NAMES)
+
+    def test_every_bundled_default_validates_against_hardware_preset(self):
+        for path in DEFAULT_PRESETS_DIR.glob("*.json"):
+            with self.subTest(preset=path.stem):
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data["name"] = path.stem
+                HardwarePreset.model_validate(data)  # raises on a schema violation
+
 
 class TestPresets(unittest.TestCase):
-    """Test hardware presets."""
+    """Test hardware presets, loaded from JSON files under data_path/presets/."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_path = Path(self._tmp.name)
+        ensure_default_presets(self.data_path)
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def test_get_preset_cpu_only(self):
         """Test getting cpu-only preset."""
-        preset = get_preset("cpu-only")
+        preset = get_preset("cpu-only", self.data_path)
 
         self.assertEqual(preset.name, "cpu-only")
         self.assertEqual(preset.embedding.model_name, "sentence-transformers/all-MiniLM-L6-v2")
@@ -29,7 +79,7 @@ class TestPresets(unittest.TestCase):
 
     def test_get_preset_remote_openai(self):
         """Test getting remote-openai preset."""
-        preset = get_preset("remote-openai")
+        preset = get_preset("remote-openai", self.data_path)
 
         self.assertEqual(preset.name, "remote-openai")
         self.assertEqual(preset.embedding.model_type, "remote")
@@ -37,7 +87,7 @@ class TestPresets(unittest.TestCase):
 
     def test_get_preset_remote_kisski(self):
         """Test getting remote-kisski preset."""
-        preset = get_preset("remote-kisski")
+        preset = get_preset("remote-kisski", self.data_path)
 
         self.assertEqual(preset.name, "remote-kisski")
         self.assertEqual(preset.embedding.model_type, "remote")  # Fully remote — no local torch
@@ -52,7 +102,7 @@ class TestPresets(unittest.TestCase):
         """remote-mpcdf has no static base_url — both base_url and API key are
         resolved at request time from the shared admin-set store (see
         backend.services.admin_settings_store), not baked into the preset."""
-        preset = get_preset("remote-mpcdf")
+        preset = get_preset("remote-mpcdf", self.data_path)
 
         self.assertEqual(preset.name, "remote-mpcdf")
         self.assertEqual(preset.embedding.model_type, "remote")
@@ -64,24 +114,157 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "MPCDF_LLM_BASE_URL")
         self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "MPCDF_LLM_API_KEY")
         # Same embedding model as remote-kisski — same vector space, so the two
-        # presets are mutually hot-swappable at runtime (see Task 6).
-        self.assertEqual(preset.embedding.model_name, get_preset("remote-kisski").embedding.model_name)
+        # presets are mutually hot-swappable at runtime.
+        self.assertEqual(
+            preset.embedding.model_name,
+            get_preset("remote-kisski", self.data_path).embedding.model_name,
+        )
 
     def test_get_preset_invalid(self):
         """Test getting invalid preset raises error."""
         with self.assertRaises(ValueError) as ctx:
-            get_preset("invalid-preset")
+            get_preset("invalid-preset", self.data_path)
 
         self.assertIn("Unknown preset", str(ctx.exception))
 
     def test_list_presets(self):
         """Test listing all presets."""
-        presets = list_presets()
+        presets = list_presets(self.data_path)
 
         self.assertIn("cpu-only", presets)
         self.assertIn("remote-openai", presets)
         self.assertIn("remote-kisski", presets)
-        self.assertEqual(len(presets), len(PRESETS))
+        expected_count = len(list(DEFAULT_PRESETS_DIR.glob("*.json")))
+        self.assertEqual(len(presets), expected_count)
+
+    def test_get_preset_auto_seeds_a_data_path_whose_presets_dir_was_never_created(self):
+        """A caller that points Settings.data_path at a fresh directory without
+        ever calling ensure_default_presets/ensure_directories (e.g. a test
+        fixture) still gets a working preset lookup — get_preset/list_presets
+        self-heal by seeding defaults on demand."""
+        with tempfile.TemporaryDirectory() as fresh:
+            fresh_path = Path(fresh)
+            self.assertFalse((fresh_path / "presets").exists())
+
+            preset = get_preset("cpu-only", fresh_path)
+
+            self.assertEqual(preset.name, "cpu-only")
+            self.assertIn("cpu-only", list_presets(fresh_path))
+
+    def test_ensure_default_presets_copies_every_bundled_default(self):
+        """Every bundled default file ends up in the (empty) target directory."""
+        presets_dir = self.data_path / "presets"
+        bundled_names = {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+        copied_names = {p.name for p in presets_dir.glob("*.json")}
+        self.assertEqual(bundled_names, copied_names)
+
+    def test_ensure_default_presets_does_not_overwrite_existing_file(self):
+        """A user's edited preset file survives re-running the seeder (e.g. on
+        every backend startup)."""
+        presets_dir = self.data_path / "presets"
+        custom_content = (
+            '{"description": "edited by user", '
+            '"embedding": {"model_type": "local", "model_name": "x"}, '
+            '"llm": {"model_type": "local", "model_names": ["y"]}, '
+            '"rag": {}, "memory_budget_gb": 1.0}'
+        )
+        (presets_dir / "cpu-only.json").write_text(custom_content)
+
+        ensure_default_presets(self.data_path)
+
+        self.assertEqual((presets_dir / "cpu-only.json").read_text(), custom_content)
+
+    def test_get_preset_raises_for_malformed_json(self):
+        """A file that isn't valid JSON raises ValueError naming the file."""
+        presets_dir = self.data_path / "presets"
+        broken_path = presets_dir / "broken.json"
+        broken_path.write_text("{not valid json")
+
+        with self.assertRaises(ValueError) as ctx:
+            get_preset("broken", self.data_path)
+
+        self.assertIn(str(broken_path), str(ctx.exception))
+
+    def test_get_preset_raises_for_schema_invalid_file(self):
+        """A file missing required HardwarePreset fields raises ValueError
+        naming the file."""
+        presets_dir = self.data_path / "presets"
+        invalid_path = presets_dir / "invalid.json"
+        invalid_path.write_text(json.dumps({"description": "missing required fields"}))
+
+        with self.assertRaises(ValueError) as ctx:
+            get_preset("invalid", self.data_path)
+
+        self.assertIn(str(invalid_path), str(ctx.exception))
+
+    def test_list_presets_skips_malformed_file(self):
+        """One broken custom preset doesn't hide the rest."""
+        presets_dir = self.data_path / "presets"
+        (presets_dir / "broken.json").write_text("{not valid json")
+
+        presets = list_presets(self.data_path)
+
+        self.assertNotIn("broken", presets)
+        self.assertIn("cpu-only", presets)
+
+    def test_name_field_in_file_is_ignored_in_favor_of_filename(self):
+        """The filename is authoritative; a stray "name" key in the file content
+        can't make the preset's name drift from its filename."""
+        presets_dir = self.data_path / "presets"
+        data = json.loads((presets_dir / "cpu-only.json").read_text())
+        data["name"] = "something-else"
+        (presets_dir / "cpu-only.json").write_text(json.dumps(data))
+
+        preset = get_preset("cpu-only", self.data_path)
+
+        self.assertEqual(preset.name, "cpu-only")
+
+    def test_get_preset_returns_independent_copies_across_calls(self):
+        """get_preset() caches the loaded/validated object internally for
+        performance (see module docstring), but each call must return an
+        independent copy — mutating one caller's result (e.g.
+        Settings.get_hardware_preset()'s EMBEDDING_BATCH_SIZE override)
+        must never leak into another caller's."""
+        first = get_preset("cpu-only", self.data_path)
+        first.embedding.batch_size = 999999
+
+        second = get_preset("cpu-only", self.data_path)
+
+        self.assertEqual(second.embedding.batch_size, 16)
+
+    def test_get_preset_rejects_path_traversal_in_name(self):
+        with self.assertRaises(ValueError):
+            get_preset("../../../../etc/passwd", self.data_path)
+        with self.assertRaises(ValueError):
+            get_preset("sub/dir", self.data_path)
+
+    def test_list_presets_platform_filter_hides_other_platforms(self):
+        linux_presets = list_presets(self.data_path, platform="linux")
+
+        self.assertNotIn("windows-test", linux_presets)
+        self.assertNotIn("apple-silicon-kisski", linux_presets)
+        self.assertNotIn("apple-silicon-32gb", linux_presets)
+        self.assertIn("cpu-only", linux_presets)  # platform: "any"
+        self.assertIn("remote-kisski", linux_presets)  # platform: "any"
+
+    def test_list_presets_platform_filter_keeps_matching_platform(self):
+        windows_presets = list_presets(self.data_path, platform="windows")
+
+        self.assertIn("windows-test", windows_presets)
+        self.assertNotIn("apple-silicon-kisski", windows_presets)
+
+    def test_list_presets_with_no_platform_filter_returns_everything(self):
+        unfiltered = list_presets(self.data_path)
+
+        self.assertIn("windows-test", unfiltered)
+        self.assertIn("apple-silicon-kisski", unfiltered)
+        self.assertIn("apple-silicon-32gb", unfiltered)
+
+    def test_current_platform_matches_python_platform_module(self):
+        import platform as platform_module
+        from backend.config.presets import current_platform
+
+        self.assertEqual(current_platform(), platform_module.system().lower())
 
 
 class TestSettings(unittest.TestCase):
@@ -168,29 +351,45 @@ class TestSettings(unittest.TestCase):
 
     def test_get_hardware_preset(self):
         """Test getting hardware preset from settings."""
-        settings = Settings(model_preset="cpu-only")
-        preset = settings.get_hardware_preset()
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(model_preset="cpu-only", data_path=tmp)
+            settings.ensure_directories()
+            preset = settings.get_hardware_preset()
 
-        self.assertEqual(preset.name, "cpu-only")
+            self.assertEqual(preset.name, "cpu-only")
 
     def test_get_hardware_preset_uses_active_preset_override_when_set(self):
         from backend.services.admin_settings_store import set_active_preset_override
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
+            settings.ensure_directories()
             set_active_preset_override(settings.data_path, "remote-mpcdf")
             self.assertEqual(settings.get_hardware_preset().name, "remote-mpcdf")
 
     def test_get_hardware_preset_falls_back_to_model_preset_when_no_override_set(self):
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
+            settings.ensure_directories()
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
 
     def test_get_hardware_preset_ignores_unknown_override(self):
         from backend.services.admin_settings_store import set_active_preset_override
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
+            settings.ensure_directories()
             set_active_preset_override(settings.data_path, "no-such-preset")
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
+
+    def test_get_hardware_preset_applies_embedding_batch_size_env_override(self):
+        """EMBEDDING_BATCH_SIZE (docs/cron-indexing.md's low-RAM tuning knob)
+        overrides embedding.batch_size for whichever preset is active, not
+        just remote-kisski."""
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(model_preset="cpu-only", data_path=tmp)
+            settings.ensure_directories()
+            with patch.dict(os.environ, {"EMBEDDING_BATCH_SIZE": "7"}):
+                preset = settings.get_hardware_preset()
+            self.assertEqual(preset.embedding.batch_size, 7)
 
     def test_get_api_key(self):
         """Test getting API keys from environment variables."""
@@ -247,6 +446,7 @@ class TestConfigApi(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         s = get_settings()
         s.data_path = Path(self.tmp.name)
+        ensure_default_presets(s.data_path)
         s.model_preset = "remote-kisski"
         self.app = app
         from fastapi.testclient import TestClient
@@ -273,10 +473,36 @@ class TestConfigApi(unittest.TestCase):
         compatible = set(r.json()["compatible_presets"])
         self.assertIn("remote-kisski", compatible)
         self.assertIn("remote-mpcdf", compatible)
-        self.assertIn("windows-test", compatible)
-        self.assertIn("apple-silicon-kisski", compatible)
         self.assertNotIn("remote-openai", compatible)  # different embedding model
         self.assertNotIn("cpu-only", compatible)  # local preset
+        # windows-test/apple-silicon-kisski share the embedding model too, but
+        # are each platform-gated (see test_get_config_hides_other_platforms_presets
+        # below) — only the one matching this host's actual platform shows up.
+        from backend.config.presets import current_platform
+        host = current_platform()
+        self.assertEqual("windows-test" in compatible, host == "windows")
+        self.assertEqual("apple-silicon-kisski" in compatible, host == "darwin")
+
+    def test_get_config_hides_other_platforms_presets(self):
+        """available_presets/compatible_presets never include a preset whose
+        `platform` field names a different OS than current_platform()."""
+        from unittest.mock import patch
+        with patch("backend.api.config.current_platform", return_value="linux"):
+            r = self.client.get("/api/config")
+        available = set(r.json()["available_presets"])
+        self.assertNotIn("windows-test", available)
+        self.assertNotIn("apple-silicon-kisski", available)
+        self.assertNotIn("apple-silicon-32gb", available)
+        self.assertIn("remote-kisski", available)  # platform: "any"
+        self.assertIn("cpu-only", available)  # platform: "any"
+
+    def test_post_config_rejects_preset_hidden_on_this_platform(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        from unittest.mock import patch
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        with patch("backend.api.config.current_platform", return_value="linux"):
+            r = self.client.post("/api/config", json={"preset_name": "windows-test"})
+        self.assertEqual(r.status_code, 400)
 
     def test_post_config_requires_admin(self):
         from unittest.mock import AsyncMock

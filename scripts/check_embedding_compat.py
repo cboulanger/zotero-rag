@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend.config.presets import PRESETS, get_preset
+from backend.config.presets import get_preset, list_presets
 from backend.services.embeddings import create_embedding_service
 
 # A small, diverse set of probe texts used to compare embeddings.
@@ -55,10 +55,10 @@ def cosine(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def pick_preset(prompt: str) -> str:
-    available = sorted(PRESETS.keys())
+    available = list_presets()
     print(f"\n{prompt}")
     for i, name in enumerate(available, 1):
-        p = PRESETS[name]
+        p = get_preset(name)
         print(f"  {i:2d}. {name:<32s}  [{p.embedding.model_type}] {p.embedding.model_name}")
     while True:
         raw = input("Enter number or preset name: ").strip()
@@ -66,7 +66,7 @@ def pick_preset(prompt: str) -> str:
             idx = int(raw) - 1
             if 0 <= idx < len(available):
                 return available[idx]
-        elif raw in PRESETS:
+        elif raw in available:
             return raw
         print("  Invalid choice, try again.")
 

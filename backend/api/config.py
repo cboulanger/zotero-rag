@@ -4,13 +4,14 @@ Configuration API endpoints.
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from pathlib import Path
 from typing import Dict, List, Optional
 import asyncio
 import logging
 import os
 
 from backend.config.settings import get_settings
-from backend.config.presets import PRESETS, HardwarePreset
+from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
 from backend.dependencies import require_authorized_group_admin
 from backend.services.admin_settings_store import (
     set_active_preset_override,
@@ -26,20 +27,37 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _compatible_presets(current: HardwarePreset) -> List[str]:
+def _compatible_presets(current: HardwarePreset, data_path: Path, available: List[str]) -> List[str]:
     """Presets safe to switch to at runtime without a restart: both the
     embedding and LLM must be remote (no local model to load/unload), and
     the embedding model must match exactly — same model means the same
     vector space, so the already-open VectorStore singleton stays valid.
+
+    `available` is the already-computed, platform-filtered preset name
+    list (see list_presets(..., platform=...)) — passed in rather than
+    re-derived here so a single request only lists the presets directory
+    once.
     """
     if current.embedding.model_type != "remote" or current.llm.model_type != "remote":
         return [current.name]
-    return [
-        name for name, preset in PRESETS.items()
-        if preset.embedding.model_type == "remote"
-        and preset.llm.model_type == "remote"
-        and preset.embedding.model_name == current.embedding.model_name
-    ]
+    compatible = []
+    for name in available:
+        try:
+            preset = get_preset(name, data_path)
+        except ValueError as exc:
+            # A preset file can be deleted/corrupted between list_presets()'s
+            # read and this one (the feature's whole point is that these
+            # files are live-editable) — skip it like list_presets() itself
+            # does, rather than letting one bad file 500 the whole request.
+            logger.warning("Skipping preset %r while computing compatible_presets: %s", name, exc)
+            continue
+        if (
+            preset.embedding.model_type == "remote"
+            and preset.llm.model_type == "remote"
+            and preset.embedding.model_name == current.embedding.model_name
+        ):
+            compatible.append(name)
+    return compatible
 
 
 class ConfigResponse(BaseModel):
@@ -53,7 +71,7 @@ class ConfigResponse(BaseModel):
     llm_models: List[str]  # all model names for the active preset
     vector_db_path: str
     model_cache_dir: str
-    available_presets: List[str]
+    available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
     # RAG configuration
     default_top_k: int
@@ -134,6 +152,7 @@ def get_config(request: Request):
                         base_url, exc,
                     )
 
+    available = list_presets(settings.data_path, platform=current_platform())
     return ConfigResponse(
         preset_name=preset.name,
         preset_description=preset.description,
@@ -144,8 +163,8 @@ def get_config(request: Request):
         llm_models=llm_models,
         vector_db_path=str(settings.vector_db_path),
         model_cache_dir=str(settings.model_weights_path),
-        available_presets=list(PRESETS.keys()),
-        compatible_presets=_compatible_presets(preset),
+        available_presets=available,
+        compatible_presets=_compatible_presets(preset, settings.data_path, available),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
@@ -175,21 +194,24 @@ async def update_config(
             ignored — this backend has no other runtime-mutable config.
 
     Raises:
-        HTTPException: 400 if `preset_name` is missing, unknown, or not in
-            the current `compatible_presets` list.
+        HTTPException: 400 if `preset_name` is missing, unknown, not in the
+            current `compatible_presets` list, or hidden on this host's
+            platform (a preset whose own `platform` field names a different
+            OS than `current_platform()` — see backend.config.presets).
     """
     settings = get_settings()
 
     if not update.preset_name:
         raise HTTPException(status_code=400, detail="preset_name is required.")
-    if update.preset_name not in PRESETS:
+    available = list_presets(settings.data_path, platform=current_platform())
+    if update.preset_name not in available:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid preset: {update.preset_name}. Available: {list(PRESETS.keys())}",
+            detail=f"Invalid preset: {update.preset_name}. Available: {available}",
         )
 
     current = settings.get_hardware_preset()
-    compatible = _compatible_presets(current)
+    compatible = _compatible_presets(current, settings.data_path, available)
     if update.preset_name not in compatible:
         raise HTTPException(
             status_code=400,

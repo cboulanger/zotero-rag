@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cryptography.fernet import Fernet
@@ -13,11 +14,17 @@ from backend.services.autoindex_resolver import is_embedding_key_usable, resolve
 from backend.zotero.key_validator import KeyValidation
 
 
-def _mock_settings(model_type: str = "remote") -> MagicMock:
-    """A fake get_settings() return value with a controllable embedding model_type,
-    so tests don't depend on whatever preset this machine's real .env configures."""
+def _mock_settings(model_type: str = "remote", model_kwargs: Optional[dict] = None) -> MagicMock:
+    """A fake get_settings() return value with a controllable embedding model_type
+    and model_kwargs, so tests don't depend on whatever preset this machine's
+    real .env configures. Defaults model_kwargs to a personal-key preset
+    (api_key_env, e.g. KISSKI) when model_type="remote" and not overridden,
+    matching the existing tests below that assume per-user key gating applies."""
     settings = MagicMock()
     settings.get_hardware_preset.return_value.embedding.model_type = model_type
+    if model_kwargs is None:
+        model_kwargs = {"api_key_env": "KISSKI_API_KEY"} if model_type == "remote" else {}
+    settings.get_hardware_preset.return_value.embedding.model_kwargs = model_kwargs
     return settings
 
 
@@ -197,6 +204,34 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]["kind"], "embedding_key")
         self.assertEqual(issues[0]["fingerprint"], fp2)
+
+    async def test_shared_key_preset_bypasses_personal_key_gating(self):
+        """A preset with a shared, admin-set embedding key (e.g. remote-mpcdf,
+        which declares shared_api_key_env instead of api_key_env) has no
+        per-user key at all — a stale rate-limited status left over from a
+        previously-active *personal*-key preset (e.g. KISSKI) must not block
+        this user's targets. Regression test for a real bug: switching from
+        apple-silicon-kisski (personal key, hit a genuine KISSKI rate limit)
+        to remote-mpcdf (shared key, unaffected) still excluded every target
+        because resolve_targets only checked model_type == "remote"."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp1 = store.add("KA", v1)
+        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        store.set_embedding_key_status(fp1, "rate_limited", rate_limit_until=future)
+        with patch("backend.services.autoindex_resolver.get_settings",
+                   return_value=_mock_settings("remote", model_kwargs={
+                       "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                       "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                   })), \
+             patch("backend.services.autoindex_resolver.validate_key",
+                   new=AsyncMock(return_value=v1)):
+            targets, issues = await resolve_targets(store)
+        self.assertEqual(set(targets), {"users/1"})
+        self.assertIsNone(targets["users/1"]["embedding_key"])
+        self.assertIsNone(targets["users/1"]["embedding_key_name"])
+        self.assertEqual(issues, [])
 
     async def test_local_model_type_bypasses_embedding_key_gating(self):
         """A local (non-remote) embedding preset has no API key at all, so

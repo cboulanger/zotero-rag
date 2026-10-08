@@ -1,0 +1,38 @@
+{
+  "description": "Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote)",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "multilingual-e5-large-instruct",
+    "batch_size": 64,
+    "model_kwargs": {
+      "base_url": "https://chat-ai.academiccloud.de/v1",
+      "api_key_env": "KISSKI_API_KEY"
+    }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": [
+      "mistral-large-3-675b-instruct-2512",
+      "qwen3.5-122b-a10b",
+      "gemma-4-31b-it",
+      "deepseek-r1-distill-llama-70b",
+      "qwen3-30b-a3b-instruct-2507"
+    ],
+    "max_context_length": 128000,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "model_kwargs": {
+      "base_url": "https://chat-ai.academiccloud.de/v1",
+      "api_key_env": "KISSKI_API_KEY",
+      "extra_body": {"chat_template_kwargs": {"enable_thinking": false}}
+    },
+    "models_status_url": "https://chat-ai.academiccloud.de/v1/models"
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "darwin"
+}

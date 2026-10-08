@@ -14,7 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings import NoDecode
 
 from backend.__version__ import __version__
-from .presets import HardwarePreset, get_preset
+from .presets import HardwarePreset, get_preset, ensure_default_presets
 
 logger = logging.getLogger(__name__)
 
@@ -330,18 +330,40 @@ class Settings(BaseSettings):
         docs/superpowers/specs/2026-10-08-dynamic-remote-preset-config-design.md.
         An override naming an unknown preset (e.g. after a code change removes
         it) is ignored with a warning, falling back to MODEL_PRESET.
+
+        EMBEDDING_BATCH_SIZE, if set in the environment, overrides
+        embedding.batch_size on the returned preset regardless of which
+        preset is active — a documented memory-tuning knob for the cron
+        indexer on low-RAM hosts (see docs/cron-indexing.md). A non-integer
+        value is ignored with a warning rather than raising, since this is
+        called from request-handling code, not just at startup.
         """
         from backend.services.admin_settings_store import get_active_preset_override
         override = get_active_preset_override(self.data_path)
         if override:
             try:
-                return get_preset(override)
+                preset = get_preset(override, self.data_path)
             except ValueError:
                 logger.warning(
                     "active_preset_override=%r is not a known preset; falling back to MODEL_PRESET=%r",
                     override, self.model_preset,
                 )
-        return get_preset(self.model_preset)
+                preset = get_preset(self.model_preset, self.data_path)
+        else:
+            preset = get_preset(self.model_preset, self.data_path)
+
+        batch_size_override = os.environ.get("EMBEDDING_BATCH_SIZE")
+        if batch_size_override:
+            try:
+                preset.embedding.batch_size = int(batch_size_override)
+            except ValueError:
+                logger.warning(
+                    "EMBEDDING_BATCH_SIZE=%r is not a valid integer; ignoring it and using "
+                    "the preset's own default (%d)",
+                    batch_size_override, preset.embedding.batch_size,
+                )
+
+        return preset
 
     def ensure_directories(self):
         """Create necessary directories if they don't exist."""
@@ -354,6 +376,7 @@ class Settings(BaseSettings):
             self.registrations_path.parent.mkdir(parents=True, exist_ok=True)
         if self.autoindex_keys_path:
             self.autoindex_keys_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_default_presets(self.data_path)
 
     def get_api_key(self, env_var_name: str) -> Optional[str]:
         """
