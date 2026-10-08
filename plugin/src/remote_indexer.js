@@ -530,6 +530,8 @@ var RemoteIndexer = {
 	 * @param {string} libraryType
 	 * @param {function(string): void} log
 	 * @param {Map<string, string>} [downloadedFilePaths] - Cache of attachment key → local path
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled webpage attachments should be
+	 *   included; defaults to false (exclude) when omitted, matching getIndexSnapshotsEnabled()'s safe default
 	 * @returns {Promise<{attachments: Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>, linkedUrls: number}>}
 	 */
 	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths, indexSnapshotsEnabled = false) {
