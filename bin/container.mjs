@@ -1132,12 +1132,13 @@ export function writeServiceEnvFile(serviceName, env) {
  *   network?: string,
  * }} cfg
  * @param {string} [kreuzbergService] - systemd service name of the kreuzberg sidecar to depend on
+ * @param {string} [kreuzbergContainerName] - container name to force-recreate on every (re)start
  * @param {string} [qdrantService] - systemd service name of the Qdrant sidecar to depend on
  * @param {string} [qdrantContainerName]
  * @param {string|null} [envFilePath] - path to a podman --env-file with user-provided env (secrets)
  * @returns {string}
  */
-export function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrantContainerName, envFilePath) {
+export function buildQuadletContent(cfg, kreuzbergService, kreuzbergContainerName, qdrantService, qdrantContainerName, envFilePath) {
   const { name, imageName, port, volumes = [], extraEnv = [], addHost, network } = cfg;
   const sidecars = [kreuzbergService, qdrantService].filter(Boolean).map(s => `${s}.service`);
   const afterTargets = sidecars.length
@@ -1150,7 +1151,14 @@ export function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrant
     `After=${afterTargets}`,
     'Wants=network-online.target',
   ];
-  for (const s of sidecars) lines.push(`Requires=${s}`);
+  // Kreuzberg is a soft dependency (Wants=, not Requires=): this app already
+  // tolerates it being briefly unreachable (see system_health.py's "unreachable"/
+  // "timeout" statuses), and a hard Requires= here would propagate any kreuzberg
+  // stop/restart — including the ExecStartPre below clearing an orphaned job —
+  // back onto this unit via systemd's dependency semantics, crash-looping it.
+  // Qdrant stays a hard Requires=; the readiness probe below blocks startup on it.
+  if (kreuzbergService) lines.push(`Wants=${kreuzbergService}.service`);
+  if (qdrantService) lines.push(`Requires=${qdrantService}.service`);
   lines.push('', '[Container]', `ContainerName=${name}`, `Image=${imageName}`, `PublishPort=${port}:${CONTAINER_PORT}`);
 
   if (network) lines.push(`Network=${network}`);
@@ -1174,11 +1182,15 @@ export function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrant
   }
 
   lines.push('', '[Service]', 'TimeoutStartSec=300');
-  if (kreuzbergService) {
+  if (kreuzbergContainerName) {
     // A killed main container leaves any in-flight Kreuzberg extraction orphaned
-    // (its client is gone, but Kreuzberg has no way to know to cancel) — restarting
-    // the sidecar here clears it on every deploy/restart without manual intervention.
-    lines.push(`ExecStartPre=-/usr/bin/systemctl restart ${kreuzbergService}.service`);
+    // (its client is gone, but Kreuzberg has no way to know to cancel) — removing
+    // the container directly (as opposed to `systemctl restart` on the kreuzberg
+    // service, which this unit Requires=/After=, and which deadlocks: that issues
+    // a competing job on a unit this unit's own start job is already waiting on)
+    // lets kreuzberg's own Restart=always bring it back independently, clearing
+    // the orphaned job on every deploy/restart without manual intervention.
+    lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${kreuzbergContainerName}`);
   }
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
@@ -1244,12 +1256,13 @@ function isQuadletAvailable() {
  * Used as a fallback when Quadlet is unavailable (Podman < 4.4).
  * @param {Parameters<typeof buildQuadletContent>[0]} cfg
  * @param {string} [kreuzbergService]
+ * @param {string} [kreuzbergContainerName] - container name to force-recreate on every (re)start
  * @param {string} [qdrantService]
  * @param {string} [qdrantContainerName]
  * @param {string|null} [envFilePath] - path to a podman --env-file with user-provided env (secrets)
  * @returns {string}
  */
-export function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdrantContainerName, envFilePath) {
+export function buildLegacyUnitContent(cfg, kreuzbergService, kreuzbergContainerName, qdrantService, qdrantContainerName, envFilePath) {
   const { name, imageName, port, volumes = [], extraEnv = [], addHost, network } = cfg;
 
   let hostIp = 'host-gateway';
@@ -1281,14 +1294,25 @@ export function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdr
     `After=${afterTargets}`,
     'Wants=network-online.target',
   ];
-  for (const s of sidecars) lines.push(`Requires=${s}`);
+  // Kreuzberg is a soft dependency (Wants=, not Requires=): this app already
+  // tolerates it being briefly unreachable (see system_health.py's "unreachable"/
+  // "timeout" statuses), and a hard Requires= here would propagate any kreuzberg
+  // stop/restart — including the ExecStartPre below clearing an orphaned job —
+  // back onto this unit via systemd's dependency semantics, crash-looping it.
+  // Qdrant stays a hard Requires=; the readiness probe below blocks startup on it.
+  if (kreuzbergService) lines.push(`Wants=${kreuzbergService}.service`);
+  if (qdrantService) lines.push(`Requires=${qdrantService}.service`);
   lines.push('', '[Service]', 'TimeoutStartSec=300', 'Restart=always', 'RestartSec=5');
   lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${name}`);
-  if (kreuzbergService) {
+  if (kreuzbergContainerName) {
     // A killed main container leaves any in-flight Kreuzberg extraction orphaned
-    // (its client is gone, but Kreuzberg has no way to know to cancel) — restarting
-    // the sidecar here clears it on every deploy/restart without manual intervention.
-    lines.push(`ExecStartPre=-/usr/bin/systemctl restart ${kreuzbergService}.service`);
+    // (its client is gone, but Kreuzberg has no way to know to cancel) — removing
+    // the container directly (as opposed to `systemctl restart` on the kreuzberg
+    // service, which this unit Requires=/After=, and which deadlocks: that issues
+    // a competing job on a unit this unit's own start job is already waiting on)
+    // lets kreuzberg's own Restart=always bring it back independently, clearing
+    // the orphaned job on every deploy/restart without manual intervention.
+    lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${kreuzbergContainerName}`);
   }
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
@@ -1371,7 +1395,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
       }
       fs.writeFileSync(
         `/etc/containers/systemd/${serviceName}.container`,
-        buildQuadletContent(cfg, kreuzberg.serviceName, qdrant.serviceName, qdrant.containerName, envFilePath)
+        buildQuadletContent(cfg, kreuzberg.serviceName, kreuzberg.containerName, qdrant.serviceName, qdrant.containerName, envFilePath)
       );
       console.log('[INFO] Setting up systemd services via Quadlet...');
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
@@ -1403,7 +1427,7 @@ function setupSystemdService(serviceName, cfg, kreuzberg, qdrant) {
         console.log(`[INFO] Qdrant unit written to ${qdrantPath}`);
       }
       const mainPath = `/etc/systemd/system/${serviceName}.service`;
-      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName, qdrant.serviceName, qdrant.containerName, envFilePath));
+      fs.writeFileSync(mainPath, buildLegacyUnitContent(cfg, kreuzberg.serviceName, kreuzberg.containerName, qdrant.serviceName, qdrant.containerName, envFilePath));
       console.log(`[INFO] App unit written to ${mainPath}`);
       execSync('systemctl daemon-reload', { stdio: 'inherit' });
     }
