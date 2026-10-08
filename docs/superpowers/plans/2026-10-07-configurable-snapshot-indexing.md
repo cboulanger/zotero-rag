@@ -795,14 +795,16 @@ def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> b
 
     Snapshot attachments (Zotero's default title for a saved webpage, an
     HTML attachment) are excluded when the admin-controlled index_snapshots
-    setting is off — exact, case-sensitive title match, so a user-renamed
-    snapshot is treated as a normal attachment. See backend/services/
-    admin_settings_store.py and docs/superpowers/specs/
+    setting is off — exact, case-sensitive title match, scoped to text/html
+    attachments only (Zotero never auto-assigns that title to any other
+    type, so e.g. a PDF titled "Snapshot" is never excluded), so a
+    user-renamed snapshot is treated as a normal attachment. See
+    backend/services/admin_settings_store.py and docs/superpowers/specs/
     2026-10-07-configurable-snapshot-indexing-design.md.
     """
     if att_data.get("contentType") not in INDEXABLE_MIME_TYPES:
         return False
-    if not index_snapshots_enabled and att_data.get("title") == "Snapshot":
+    if not index_snapshots_enabled and att_data.get("contentType") == "text/html" and att_data.get("title") == "Snapshot":
         return False
     return True
 ```

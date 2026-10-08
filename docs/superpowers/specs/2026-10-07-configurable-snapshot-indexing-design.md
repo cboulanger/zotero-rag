@@ -90,7 +90,7 @@ server's `AUTHORIZED_GROUP_ID`) — not a per-library preference.
 | --- | --- |
 | Setting scope | Global/server-wide, not per-library |
 | Default | Off (snapshots excluded) |
-| Title match | Exact, case-sensitive match on `"Snapshot"` — a renamed snapshot is treated as a normal attachment |
+| Title match | Exact, case-sensitive match on `"Snapshot"`, applied only to `text/html` attachments — a renamed snapshot is treated as a normal attachment, and a non-HTML file (e.g. a PDF) titled "Snapshot" is never excluded, since Zotero never auto-assigns that title outside a webpage snapshot |
 | Exclusion visibility | Fully silent — no skip-reason, no persisted record, never shown in Fix Unavailable, unlike the `skipped_too_large`/`skipped_empty` family |
 | Where admin reads/writes it | Existing `#admin-controls` block in the autoindex-status dialog |
 | Read access | Any authenticated Zotero identity may `GET` the current value (the plugin needs it outside admin contexts too) |
@@ -183,7 +183,11 @@ POST /api/admin/settings/purge-snapshots  — admin only; no body
 def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> bool:
     if att_data.get("contentType") not in INDEXABLE_MIME_TYPES:
         return False
-    if not index_snapshots_enabled and att_data.get("title") == "Snapshot":
+    # Scoped to text/html specifically, not any indexable MIME type: Zotero
+    # only ever auto-titles HTML webpage-snapshot attachments "Snapshot", so
+    # a PDF (or other type) that happens to carry that exact title must not
+    # be excluded.
+    if not index_snapshots_enabled and att_data.get("contentType") == "text/html" and att_data.get("title") == "Snapshot":
         return False
     return True
 ```
@@ -328,9 +332,10 @@ title check (`attachmentItem.getField('title') === 'Snapshot'`):
 
 - Per-library overrides of this setting.
 - Detecting snapshot-type attachments by anything other than exact title
-  match (e.g. `linkMode`/mime heuristics) — a user-renamed snapshot is
-  treated as a normal attachment, and a non-snapshot file someone happens to
-  title "Snapshot" is excluded; both are accepted trade-offs of the
+  match on `text/html` attachments (e.g. `linkMode` heuristics, or applying
+  the title match to other MIME types) — a user-renamed snapshot is treated
+  as a normal attachment, and a non-HTML file (e.g. a PDF) someone happens
+  to title "Snapshot" is never excluded; both are accepted trade-offs of the
   title-match approach chosen here.
 - Retroactively re-indexing anything — this feature only ever removes or
   skips; turning the setting back on does not automatically re-index
