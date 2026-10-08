@@ -69,7 +69,7 @@ test('writeServiceEnvFile returns null when there is nothing to write', () => {
 
 test('legacy unit references --env-file and never inlines the secret value', () => {
   const envFile = writeServiceEnvFile('zotero-rag', appCfg().env);
-  const unit = buildLegacyUnitContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-qdrant', 'zotero-rag-qdrant', envFile);
+  const unit = buildLegacyUnitContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', envFile);
   assert.ok(unit.includes(`--env-file ${envFile}`), 'ExecStart must reference the env file');
   assert.ok(!unit.includes(SECRET), 'secret value must NOT appear in the unit');
   // Non-secret internal config is still inlined.
@@ -78,7 +78,7 @@ test('legacy unit references --env-file and never inlines the secret value', () 
 
 test('quadlet unit references EnvironmentFile and never inlines the secret value', () => {
   const envFile = writeServiceEnvFile('zotero-rag', appCfg().env);
-  const unit = buildQuadletContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-qdrant', 'zotero-rag-qdrant', envFile);
+  const unit = buildQuadletContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', envFile);
   assert.ok(unit.includes(`EnvironmentFile=${envFile}`), 'must reference EnvironmentFile=');
   assert.ok(!unit.includes(SECRET), 'secret value must NOT appear in the unit');
   assert.ok(unit.includes('Environment=QDRANT_URL=http://qdrant:6333'), 'extraEnv stays inline');
@@ -86,10 +86,40 @@ test('quadlet unit references EnvironmentFile and never inlines the secret value
 
 test('units omit env-file directives when there is no env file', () => {
   const cfg = appCfg({ env: [] });
-  const legacy = buildLegacyUnitContent(cfg, 'k', 'q', 'q', null);
-  const quad = buildQuadletContent(cfg, 'k', 'q', 'q', null);
+  const legacy = buildLegacyUnitContent(cfg, 'k', 'kc', 'q', 'q', null);
+  const quad = buildQuadletContent(cfg, 'k', 'kc', 'q', 'q', null);
   assert.ok(!legacy.includes('--env-file'));
   assert.ok(!quad.includes('EnvironmentFile='));
+});
+
+test('main unit removes the kreuzberg container directly, never via systemctl restart on its own Requires= dependency', () => {
+  // Regression: `ExecStartPre=systemctl restart <kreuzberg>.service` on a unit that
+  // itself Requires=/After= that same kreuzberg unit creates a job-transaction
+  // conflict — systemd kills the ExecStartPre (SIGTERM) and the whole unit
+  // crash-loops. Removing the container directly lets kreuzberg's own
+  // Restart=always bring it back independently, with no competing job.
+  const legacy = buildLegacyUnitContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', null);
+  const quad = buildQuadletContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', null);
+  for (const unit of [legacy, quad]) {
+    assert.ok(!/systemctl restart .*kreuzberg/.test(unit), 'must not systemctl-restart the kreuzberg service from its own dependent unit');
+    assert.ok(unit.includes('ExecStartPre=-/usr/bin/podman rm -f zotero-rag-kreuzberg-container'), 'must remove the kreuzberg container directly');
+  }
+});
+
+test('main unit depends on kreuzberg via Wants=, not Requires=, to avoid stop propagation', () => {
+  // Regression: even with the raw `podman rm -f` ExecStartPre above (no systemctl
+  // job involved), a hard Requires=<kreuzberg>.service on this unit still
+  // crash-loops it — systemd propagates kreuzberg's own stop/restart cycle
+  // (triggered by having its container ripped out) back onto any unit that
+  // Requires= it. Qdrant has no such ExecStartPre disruption and keeps Requires=
+  // since its own readiness probe below is a genuine hard dependency.
+  const legacy = buildLegacyUnitContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', null);
+  const quad = buildQuadletContent(appCfg(), 'zotero-rag-kreuzberg', 'zotero-rag-kreuzberg-container', 'zotero-rag-qdrant', 'zotero-rag-qdrant', null);
+  for (const unit of [legacy, quad]) {
+    assert.ok(unit.includes('Wants=zotero-rag-kreuzberg.service'), 'kreuzberg must be a soft (Wants=) dependency');
+    assert.ok(!unit.includes('Requires=zotero-rag-kreuzberg.service'), 'kreuzberg must NOT be a hard (Requires=) dependency');
+    assert.ok(unit.includes('Requires=zotero-rag-qdrant.service'), 'qdrant must remain a hard (Requires=) dependency');
+  }
 });
 
 test.after(() => {
