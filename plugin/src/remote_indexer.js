@@ -620,9 +620,11 @@ var RemoteIndexer = {
 	 *
 	 * @param {string} libraryId
 	 * @param {string} libraryType
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled webpage attachments should be
+	 *   included; defaults to false (exclude) when omitted, matching getIndexSnapshotsEnabled()'s safe default
 	 * @returns {Promise<number>}
 	 */
-	async countIndexableAttachments(libraryId, libraryType) {
+	async countIndexableAttachments(libraryId, libraryType, indexSnapshotsEnabled = false) {
 		const INDEXABLE_TYPES = new Set([
 			'application/pdf',
 			'text/html',
@@ -657,6 +659,7 @@ var RemoteIndexer = {
 			if (!item.isAttachment()) continue;
 			if (!INDEXABLE_TYPES.has(item.attachmentContentType || '')) continue;
 			if ((item.attachmentLinkMode ?? 0) === 3) continue; // linked_url — no local file possible
+			if (!indexSnapshotsEnabled && (item.getField ? item.getField('title') : '') === 'Snapshot') continue;
 			const parentKey = item.parentItemID
 				? (Zotero.Items.get(item.parentItemID)?.key ?? item.key)
 				: item.key;

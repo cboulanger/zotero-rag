@@ -60,6 +60,42 @@ test('countIndexableAttachments excludes trashed items from the search', async (
 	assert.deepStrictEqual(addedConditions, [['deleted', 'false']]);
 });
 
+test('countIndexableAttachments excludes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is false', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, isNote: () => false, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem], get: () => null },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const count = await RemoteIndexer.countIndexableAttachments('123', 'group', false);
+
+	assert.strictEqual(count, 0);
+});
+
+test('countIndexableAttachments includes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is true', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, isNote: () => false, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem], get: () => null },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const count = await RemoteIndexer.countIndexableAttachments('123', 'group', true);
+
+	assert.strictEqual(count, 1);
+});
+
 test('_collectAttachments excludes trashed items from the search', async () => {
 	const { zotero, addedConditions } = makeZoteroStub();
 	const RemoteIndexer = loadRemoteIndexer(zotero);
