@@ -863,7 +863,7 @@ class VectorStore:
         Text indexes on authors and title enable substring matching.
         Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower", "chunk_id")
+        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower", "chunk_id", "attachment_title")
         for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
@@ -1523,9 +1523,13 @@ class VectorStore:
         have attachment_title=None and are never matched, so this is a no-op
         on data from before this feature shipped until it's re-indexed.
 
-        No payload index exists on attachment_title (this runs rarely, as an
-        explicit admin maintenance action, not a hot path — same tradeoff
-        already made for attachment_key, which also has no index).
+        attachment_title has a keyword payload index (see
+        _ensure_chunks_indexes) so this filter is a fast index lookup rather
+        than a full collection scan — on a large production collection
+        (millions of points, on_disk_payload), scanning every point's
+        payload for an unindexed field exceeded the Qdrant client timeout.
+        attachment_key still has no index (same original tradeoff, not yet
+        needed by any query).
 
         Returns:
             (deleted_chunks, deleted_attachments) — deleted_attachments counts
