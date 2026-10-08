@@ -375,7 +375,7 @@ var ZoteroRAGAutoIndexStatus = {
 				this.renderBanner(body.detail || `Could not skip job (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
-					button.textContent = 'Skip this job';
+					button.textContent = 'Skip';
 				}
 				return;
 			}
@@ -410,7 +410,7 @@ var ZoteroRAGAutoIndexStatus = {
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
-					button.textContent = 'Run this library';
+					button.textContent = 'Index';
 				}
 				return;
 			}
@@ -524,7 +524,7 @@ var ZoteroRAGAutoIndexStatus = {
 				const runButton = document.createElement('button');
 				runButton.type = 'button';
 				runButton.className = 'dialog-button library-run-button';
-				runButton.textContent = 'Run this library';
+				runButton.textContent = 'Index';
 				runButton.disabled = running;
 				runButton.dataset.runSlug = slug;
 				runButton.addEventListener('click', () => this.runSlug(slug));
@@ -535,7 +535,7 @@ var ZoteroRAGAutoIndexStatus = {
 				const skipButton = document.createElement('button');
 				skipButton.type = 'button';
 				skipButton.className = 'dialog-button library-skip-button';
-				skipButton.textContent = 'Skip this job';
+				skipButton.textContent = 'Skip';
 				skipButton.dataset.skipSlug = slug;
 				skipButton.addEventListener('click', () => this.skipSlug(slug));
 				header.appendChild(skipButton);
