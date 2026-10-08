@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -61,6 +62,10 @@ async def run_scheduler_loop(settings: Settings) -> None:
     exception in trigger_index_run itself, not the subprocess it spawns)
     must not kill the scheduler task permanently — the loop must keep
     ticking on the configured interval indefinitely.
+
+    Persists next_tick_at to the scheduler state file after every tick, so
+    the status dialog can show "Next run at ..." without guessing — see
+    _record_next_tick.
     """
     if not settings.autoindex_interval_minutes:
         logger.error("run_scheduler_loop called without autoindex_interval_minutes set; exiting immediately.")
@@ -68,16 +73,33 @@ async def run_scheduler_loop(settings: Settings) -> None:
     await asyncio.sleep(_STARTUP_DELAY_SECONDS)
     while True:
         try:
-            if not read_scheduler_state(settings.data_path).get("paused", False):
+            state = await asyncio.to_thread(read_scheduler_state, settings.data_path)
+            if not state.get("paused", False):
                 result = await trigger_index_run(settings)
                 logger.info("Scheduler tick: %s", result)
             else:
                 logger.debug("Scheduler tick skipped: paused by admin.")
+            next_tick_at = datetime.now(timezone.utc) + timedelta(seconds=settings.autoindex_interval_minutes * 60)
+            await asyncio.to_thread(_record_next_tick, settings.data_path, next_tick_at)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("Scheduler tick failed unexpectedly; will retry next interval.")
         await asyncio.sleep(settings.autoindex_interval_minutes * 60)
+
+
+def update_scheduler_state(data_path: Path, **fields) -> dict:
+    """Merge fields into the scheduler state file instead of overwriting it —
+    used by pause_scheduler/resume_scheduler (paused) and the scheduler loop
+    (next_tick_at) so neither write stomps on the other's field."""
+    state = read_scheduler_state(data_path)
+    state.update(fields)
+    write_scheduler_state(data_path, state)
+    return state
+
+
+def _record_next_tick(data_path: Path, next_tick_at: datetime) -> None:
+    update_scheduler_state(data_path, next_tick_at=next_tick_at.isoformat())
 
 
 async def _spawn_index_run(settings: Settings, fingerprint: Optional[str], slug: Optional[str] = None) -> None:

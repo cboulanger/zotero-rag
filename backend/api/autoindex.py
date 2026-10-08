@@ -30,7 +30,7 @@ from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
-from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, write_scheduler_state
+from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.registration_service import RegistrationService
@@ -187,6 +187,7 @@ async def status(
         "active": bool(settings.autoindex_interval_minutes),
         "interval_minutes": settings.autoindex_interval_minutes,
         "paused": scheduler_state.get("paused", False),
+        "next_tick_at": scheduler_state.get("next_tick_at"),
     }
 
     try:
@@ -317,14 +318,14 @@ async def run_now(request: Request) -> dict:
 @router.post("/autoindex/scheduler/pause", summary="Pause the built-in scheduler (admin only)")
 async def pause_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
     settings = get_settings()
-    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": True})
+    await asyncio.to_thread(update_scheduler_state, settings.data_path, paused=True)
     return {"paused": True}
 
 
 @router.post("/autoindex/scheduler/resume", summary="Resume the built-in scheduler (admin only)")
 async def resume_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
     settings = get_settings()
-    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": False})
+    await asyncio.to_thread(update_scheduler_state, settings.data_path, paused=False)
     return {"paused": False}
 
 

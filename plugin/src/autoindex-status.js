@@ -37,7 +37,7 @@
  * @property {Record<string, AutoIndexSlugStatus>} [slugs]
  * @property {AutoIndexKeyIssue[]} [key_issues]
  * @property {boolean} [is_admin]
- * @property {{active: boolean, interval_minutes: number|null, paused: boolean}} [scheduler]
+ * @property {{active: boolean, interval_minutes: number|null, paused: boolean, next_tick_at: string|null}} [scheduler]
  * @property {SystemHealth} [system_health] - admin-only; omitted entirely for non-admin callers
  */
 
@@ -167,6 +167,26 @@ var ZoteroRAGAutoIndexStatus = {
 	},
 
 	/**
+	 * Format the elapsed/remaining time between now and an ISO timestamp as
+	 * "X hours, Y minutes" (hours omitted when zero), for a parenthetical
+	 * like "(since 2 hours, 5 minutes)" or "(in 45 minutes)".
+	 * @param {string|undefined} isoString
+	 * @returns {string|null} null if isoString is missing/invalid
+	 */
+	_formatDurationFromNow(isoString) {
+		if (!isoString) return null;
+		const then = new Date(isoString).getTime();
+		if (Number.isNaN(then)) return null;
+		const totalMinutes = Math.floor(Math.abs(Date.now() - then) / 60000);
+		const hours = Math.floor(totalMinutes / 60);
+		const minutes = totalMinutes % 60;
+		const parts = [];
+		if (hours > 0) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`);
+		if (minutes > 0 || hours === 0) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`);
+		return parts.join(', ');
+	},
+
+	/**
 	 * Render the full dialog from a status response.
 	 * @param {AutoIndexStatusResponse} data
 	 * @returns {void}
@@ -177,6 +197,7 @@ var ZoteroRAGAutoIndexStatus = {
 			return;
 		}
 		const ownSlugCount = Object.keys(data.slugs || {}).length;
+		const scheduler = data.scheduler || {};
 		if (data.aborted) {
 			this.renderBanner('The last automatic indexing run was stopped by an admin.', 'idle');
 		} else if (data.crashed) {
@@ -186,7 +207,13 @@ var ZoteroRAGAutoIndexStatus = {
 			// most likely another user's manual trigger or a shared-lock cron tick.
 			this.renderBanner('Indexing server currently busy, please wait and try again later.', 'running');
 		} else if (data.running) {
-			this.renderBanner(`Running since ${this.formatTime(data.started_at)}…`, 'running');
+			const elapsed = this._formatDurationFromNow(data.started_at);
+			const suffix = elapsed ? ` (since ${elapsed})` : '';
+			this.renderBanner(`Running since ${this.formatTime(data.started_at)}${suffix}`, 'running');
+		} else if (scheduler.active && !scheduler.paused && scheduler.next_tick_at) {
+			const remaining = this._formatDurationFromNow(scheduler.next_tick_at);
+			const suffix = remaining ? ` (in ${remaining})` : '';
+			this.renderBanner(`Next run at ${this.formatTime(scheduler.next_tick_at)}${suffix}`, 'idle');
 		} else if (data.finished_at) {
 			this.renderBanner(`Idle. Last run finished ${this.formatTime(data.finished_at)}.`, 'idle');
 		} else {

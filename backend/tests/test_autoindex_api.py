@@ -309,6 +309,15 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.json(), {"paused": False})
         self.assertFalse(read_scheduler_state(get_settings().data_path)["paused"])
 
+    def test_pause_preserves_existing_next_tick_at(self):
+        from backend.services.autoindex_scheduler import update_scheduler_state
+        update_scheduler_state(get_settings().data_path, next_tick_at="2026-01-01T00:00:00+00:00")
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/autoindex/scheduler/pause")
+        state = read_scheduler_state(get_settings().data_path)
+        self.assertTrue(state["paused"])
+        self.assertEqual(state["next_tick_at"], "2026-01-01T00:00:00+00:00")
+
     def test_run_now_admin_starts_unscoped_run(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
@@ -715,6 +724,18 @@ class StatusAdminFieldTest(unittest.TestCase):
         scheduler = r.json()["scheduler"]
         self.assertFalse(scheduler["active"])
         self.assertFalse(scheduler["paused"])  # no state file written -> defaults False
+
+    def test_scheduler_subobject_reports_next_tick_at(self):
+        from backend.services.autoindex_scheduler import update_scheduler_state
+        update_scheduler_state(get_settings().data_path, next_tick_at="2026-01-01T00:00:00+00:00")
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.json()["scheduler"]["next_tick_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_scheduler_subobject_next_tick_at_none_when_unset(self):
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertIsNone(r.json()["scheduler"]["next_tick_at"])
 
 
 if __name__ == "__main__":

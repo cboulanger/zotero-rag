@@ -30,9 +30,9 @@
   </script>
   <style>
     body { margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; box-sizing: border-box; }
-    #run-banner { padding: 8px 10px; border-radius: 4px; margin-top: 12px; font-size: 13px; background-color: #f5f5f5; }
-    #run-banner.running { background-color: #eef6ff; color: #0052a3; }
-    #run-banner.crashed { background-color: #fff5f5; color: #cc0000; }
+    #run-banner { font-size: 12px; color: #333; }
+    #run-banner.running { color: #0052a3; }
+    #run-banner.crashed { color: #cc0000; }
     .library-row { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
     .library-row-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
     .library-row-spacer { flex: 1 1 auto; }
@@ -72,11 +72,24 @@
 </head>
 
 <body>
+  <div id="status-section" class="actions-section">
+    <h3 class="section-heading">Status</h3>
+    <div id="run-banner">Loading status…</div>
+  </div>
   <div id="user-actions" class="actions-section">
     <h3 class="section-heading">Your indexing</h3>
     <div class="actions-row">
       <button id="run-now-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9654;&#65038;</span><span class="button-label">Run indexing now</span></button>
     </div>
+  </div>
+  <div id="libraries-section" class="actions-section">
+    <h3 class="section-heading">Libraries</h3>
+    <div id="libraries-container"></div>
+    <div id="empty-state" style="display:none;">No libraries are registered for automatic indexing yet.</div>
+  </div>
+  <div id="problems-section" style="display:none;">
+    <h3>Problems</h3>
+    <div id="problems-list"></div>
   </div>
   <div id="admin-controls" class="actions-section" style="display:none;">
     <h3 class="section-heading">Admin</h3>
@@ -92,17 +105,10 @@
       </label>
     </div>
   </div>
-  <div id="libraries-container"></div>
-  <div id="empty-state" style="display:none;">No libraries are registered for automatic indexing yet.</div>
-  <div id="problems-section" style="display:none;">
-    <h3>Problems</h3>
-    <div id="problems-list"></div>
-  </div>
   <div id="system-health-section" class="actions-section" style="display:none;">
     <h3 class="section-heading">System health</h3>
     <div id="system-health-content" class="system-health-grid"></div>
   </div>
-  <div id="run-banner">Loading status…</div>
   <div class="dialog-buttons">
     <button id="close-button" type="button" class="dialog-button">Close</button>
   </div>
