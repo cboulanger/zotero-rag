@@ -69,6 +69,67 @@ test('_collectAttachments excludes trashed items from the search', async () => {
 	assert.deepStrictEqual(addedConditions, [['deleted', 'false']]);
 });
 
+test('_collectAttachments excludes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is false', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {}, undefined, false);
+
+	// Note: deepStrictEqual against a literal `[]` is avoided here because `attachments` is
+	// returned from a separate vm.runInContext realm (see loadRemoteIndexer) — Node's assert
+	// module treats cross-realm arrays as not reference-equal even when structurally identical.
+	assert.strictEqual(attachments.length, 0);
+});
+
+test('_collectAttachments includes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is true', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {}, undefined, true);
+
+	assert.strictEqual(attachments.length, 1);
+});
+
+test('_collectAttachments defaults indexSnapshotsEnabled to false when the argument is omitted', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {});
+
+	// See note above: avoid deepStrictEqual against a literal `[]` for a cross-realm array.
+	assert.strictEqual(attachments.length, 0);
+});
+
 test('_collectAbstractItems excludes trashed items from the search', async () => {
 	const { zotero, addedConditions } = makeZoteroStub();
 	const RemoteIndexer = loadRemoteIndexer(zotero);

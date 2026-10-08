@@ -1848,6 +1848,7 @@ var ZoteroRAGDialog = {
 					mode,
 					userId: this.plugin.getCurrentZoteroUserId(),
 					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
+					getIndexSnapshotsEnabled: () => plugin.getIndexSnapshotsEnabled(),
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {
 						/** @type {Array<[(m: string) => boolean, string]>} */
