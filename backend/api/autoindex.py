@@ -339,7 +339,8 @@ async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authori
     pid = live_status.get("pid")
     if pid is None:
         raise HTTPException(status_code=500, detail="Indexing is reported as running but no PID was recorded.")
-    aborted = await asyncio.to_thread(abort_process, pid)
+    create_time = live_status.get("pid_create_time")
+    aborted = await asyncio.to_thread(abort_process, pid, create_time)
     return {"aborted": aborted, "pid": pid}
 
 

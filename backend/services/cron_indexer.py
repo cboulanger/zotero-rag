@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
+import psutil
 from filelock import FileLock, Timeout
 
 from backend.api.document_upload import _execute_upload_impl
@@ -72,8 +73,32 @@ class SlugInfo:
     numeric_id: str     # "12345" (display and web API)
 
 
-def is_process_alive(pid: int) -> bool:
-    """Return True if a process with the given PID is currently running."""
+def is_process_alive(pid: int, expected_create_time: Optional[float] = None) -> bool:
+    """Return True if a process with the given PID is currently running.
+
+    If `expected_create_time` is given (a process's creation time as recorded
+    via `psutil.Process.create_time()` at the moment its PID was captured),
+    this also verifies the process currently holding `pid` is the SAME
+    process that was recorded, not merely some process that happens to have
+    the same number now.
+
+    A bare PID check is not sufficient for that: once a process exits, the
+    OS is free to recycle its PID number for an unrelated process — or even
+    for a *thread* of a different, long-lived process, since Linux allocates
+    PIDs and TIDs from the same namespace, and `os.kill(tid, 0)` against a
+    reused PID that is now a thread of another process still succeeds. That
+    let a long-dead indexer run appear perpetually "alive" in production
+    (the recycled PID had become a thread of the backend's own process),
+    permanently wedging the status and, worse, making an abort request
+    deliver SIGTERM to the backend itself (see abort_process).
+    """
+    if expected_create_time is not None:
+        try:
+            actual_create_time = psutil.Process(pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        return abs(actual_create_time - expected_create_time) < 1.0
+
     if sys.platform == "win32":
         # On Windows, os.kill(pid, 0) opens the process handle; raises
         # PermissionError if alive but inaccessible, OSError if not found.
@@ -94,8 +119,14 @@ def is_process_alive(pid: int) -> bool:
             return True  # alive, insufficient permission
 
 
-def abort_process(pid: int) -> bool:
+def abort_process(pid: int, expected_create_time: Optional[float] = None) -> bool:
     """Send a termination signal to a running cron-indexer process.
+
+    `expected_create_time` (see is_process_alive) must match the live
+    process at `pid`, or no signal is sent — this is the safety check that
+    stops a recycled PID (e.g. one that now belongs to a thread of the
+    backend's own process) from being signalled, which would otherwise kill
+    the wrong thing entirely.
 
     Returns False if the process was already gone. Uses the same POSIX/Windows
     branching as is_process_alive(): SIGTERM on POSIX (kernel releases the
@@ -103,7 +134,7 @@ def abort_process(pid: int) -> bool:
     via os.kill(pid, signal.SIGTERM) on Windows (Python maps this to
     TerminateProcess for non-Python-created handles).
     """
-    if not is_process_alive(pid):
+    if not is_process_alive(pid, expected_create_time):
         return False
     try:
         os.kill(pid, signal.SIGTERM)
@@ -118,15 +149,16 @@ def read_live_status(data_path: Path) -> dict:
     """Return the last cron run's live status from ``system/cron_status.json``.
 
     Applies a liveness check: if the status file claims ``running=True`` but the
-    recorded PID is no longer alive, the run is reported as crashed. Returns an
-    empty dict when no status file exists yet (no cron run has happened).
+    recorded PID is no longer alive (or now belongs to a different process —
+    see is_process_alive), the run is reported as crashed. Returns an empty
+    dict when no status file exists yet (no cron run has happened).
     """
     status_path = data_path / "system" / "cron_status.json"
     if not status_path.exists():
         return {}
     cron_data = json.loads(status_path.read_text(encoding="utf-8"))
     if cron_data.get("running") and cron_data.get("pid"):
-        if not is_process_alive(int(cron_data["pid"])):
+        if not is_process_alive(int(cron_data["pid"]), cron_data.get("pid_create_time")):
             cron_data["running"] = False
             cron_data["crashed"] = True
     return cron_data
@@ -333,6 +365,7 @@ class CronIndexer:
             "running": True,
             "started_at": started_at,
             "pid": os.getpid(),
+            "pid_create_time": psutil.Process(os.getpid()).create_time(),
             "slugs": {s.slug: {"status": "pending"} for s in slug_infos},
             "key_issues": getattr(self, "key_issues", []),
         }

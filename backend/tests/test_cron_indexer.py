@@ -429,6 +429,18 @@ class TestIsProcessAlive(unittest.TestCase):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
 
+    def test_matching_create_time_confirms_identity(self):
+        import psutil
+        create_time = psutil.Process(os.getpid()).create_time()
+        self.assertTrue(is_process_alive(os.getpid(), create_time))
+
+    def test_mismatched_create_time_rejects_recycled_pid(self):
+        # A live PID that does NOT match the recorded creation time means the
+        # number was recycled by the OS for a different process (or, as seen
+        # in production, a thread of a different, long-lived process) — must
+        # not be reported as the originally-recorded process.
+        self.assertFalse(is_process_alive(os.getpid(), 1.0))
+
 
 class TestReadLiveStatus(unittest.TestCase):
     def setUp(self):
@@ -461,6 +473,33 @@ class TestReadLiveStatus(unittest.TestCase):
         result = read_live_status(self.tmp)
         self.assertTrue(result["running"])
         self.assertNotIn("crashed", result)
+
+    def test_running_with_live_pid_and_matching_create_time_stays_running(self):
+        import psutil
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": psutil.Process(os.getpid()).create_time(),
+        })
+        result = read_live_status(self.tmp)
+        self.assertTrue(result["running"])
+        self.assertNotIn("crashed", result)
+
+    def test_running_with_recycled_pid_marked_crashed(self):
+        # Regression test: a PID can be legitimately alive right now without
+        # being the SAME process that was originally recorded — e.g. after
+        # the real indexer subprocess (PID 11) died, the OS later reused 11
+        # as a thread ID inside the long-lived backend process itself, which
+        # made a bare `os.kill(11, 0)` liveness check report the run as
+        # "alive" forever, wedging the indexing status permanently.
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": 1.0,  # does not match the real process's creation time
+        })
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertTrue(result["crashed"])
 
 
 class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
@@ -760,6 +799,23 @@ class TestAbortProcess(unittest.TestCase):
         with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
              patch("backend.services.cron_indexer.os.kill", side_effect=ProcessLookupError):
             self.assertFalse(abort_process(1234))
+
+    def test_passes_expected_create_time_to_identity_check(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True) as mock_alive, \
+             patch("backend.services.cron_indexer.os.kill"):
+            abort_process(1234, expected_create_time=5555.5)
+        mock_alive.assert_called_once_with(1234, 5555.5)
+
+    def test_does_not_signal_a_recycled_pid(self):
+        # The real identity check (no mocking) must refuse to signal a PID
+        # that is alive but does not match the recorded creation time —
+        # this is what stops abort from killing an unrelated process (e.g.
+        # the backend's own process, if its PID was recycled from a dead
+        # indexer run) that merely happens to share the old PID number.
+        with patch("backend.services.cron_indexer.os.kill") as mock_kill:
+            result = abort_process(os.getpid(), expected_create_time=1.0)
+        self.assertFalse(result)
+        mock_kill.assert_not_called()
 
 
 class TestControlState(unittest.TestCase):
