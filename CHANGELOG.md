@@ -1,3 +1,16 @@
+# [1.56.0](https://github.com/cboulanger/zotero-rag/compare/v1.55.1...v1.56.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend,plugin:** close duplicate-run race and show readable rate-limit message ([06af946](https://github.com/cboulanger/zotero-rag/commit/06af94656b6b186a407015558ec598ec9d17d5e3))
+* **plugin:** keep per-library Index button disabled until its run truly ends ([e27b5ee](https://github.com/cboulanger/zotero-rag/commit/e27b5ee5b471c4dbdeb4934d91660a51ecfb561d))
+
+
+### Features
+
+* dynamic remote preset config with runtime preset switching ([a2288d9](https://github.com/cboulanger/zotero-rag/commit/a2288d9256d4109debf2d40e5d82bb087b107a51))
+
 ## [1.55.1](https://github.com/cboulanger/zotero-rag/compare/v1.55.0...v1.55.1) (2026-10-08)
 
 
