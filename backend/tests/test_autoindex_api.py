@@ -350,6 +350,28 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.json(), {"aborted": True, "pid": 4242})
         mock_abort.assert_called_once_with(4242, None)
 
+    def test_abort_persists_aborted_status_not_crashed(self):
+        # Regression test: a deliberate admin abort must not read back to the
+        # client as "crashed unexpectedly" (that wording is reserved for a
+        # run dying on its own) — the status file must be updated immediately.
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        status_path = system_dir / "cron_status.json"
+        status_path.write_text(
+            json.dumps({"running": True, "pid": 4242, "slugs": {"users/1": {"status": "indexing"}}}),
+            encoding="utf-8",
+        )
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.api.autoindex.abort_process", return_value=True):
+            r = self.client.post("/api/autoindex/abort")
+        self.assertEqual(r.status_code, 200)
+        on_disk = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["running"])
+        self.assertTrue(on_disk["aborted"])
+        self.assertNotIn("crashed", on_disk)
+        self.assertEqual(on_disk["slugs"]["users/1"]["status"], "aborted")
+
     def test_abort_passes_recorded_create_time_through(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         system_dir = Path(self.tmp.name) / "system"

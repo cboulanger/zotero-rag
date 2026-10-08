@@ -30,7 +30,7 @@ from backend.dependencies import get_zotero_identity, require_authorized_group_a
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, write_scheduler_state
-from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
+from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.registration_service import RegistrationService
 from backend.services.zotero_identity import ZoteroIdentity
@@ -341,6 +341,8 @@ async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authori
         raise HTTPException(status_code=500, detail="Indexing is reported as running but no PID was recorded.")
     create_time = live_status.get("pid_create_time")
     aborted = await asyncio.to_thread(abort_process, pid, create_time)
+    if aborted:
+        await asyncio.to_thread(mark_run_stopped, settings.data_path, "aborted")
     return {"aborted": aborted, "pid": pid}
 
 

@@ -145,13 +145,55 @@ def abort_process(pid: int, expected_create_time: Optional[float] = None) -> boo
     return True
 
 
+def mark_run_stopped(data_path: Path, reason: Literal["crashed", "aborted"]) -> dict:
+    """Persist that the current run is no longer active, resolving any slug
+    still marked "indexing" to the same reason (with a finished_at) so it
+    doesn't keep showing as actively running in the UI forever.
+
+    Called from two places: read_live_status, to self-heal a status file
+    left behind by a process that died without updating it (reason=
+    "crashed"), and the abort endpoint, immediately after signalling the
+    process (reason="aborted") — so a deliberate stop is reported
+    correctly instead of looking identical to an unexpected crash.
+    Idempotent: safe to call even if another reader already applied this
+    same update (running is already False, so there's nothing to resolve).
+    """
+    status_path = data_path / "system" / "cron_status.json"
+    try:
+        cron_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not cron_data.get("running"):
+        return cron_data
+    cron_data["running"] = False
+    cron_data[reason] = True
+    finished_at = datetime.now(timezone.utc).isoformat()
+    for slug_status in cron_data.get("slugs", {}).values():
+        if slug_status.get("status") == "indexing":
+            slug_status["status"] = reason
+            slug_status["finished_at"] = finished_at
+    fd, tmp_path = tempfile.mkstemp(dir=status_path.parent, suffix=".tmp", prefix="cron_status_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cron_data, f, indent=2, default=str)
+        os.replace(tmp_path, status_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return cron_data
+
+
 def read_live_status(data_path: Path) -> dict:
     """Return the last cron run's live status from ``system/cron_status.json``.
 
     Applies a liveness check: if the status file claims ``running=True`` but the
     recorded PID is no longer alive (or now belongs to a different process —
-    see is_process_alive), the run is reported as crashed. Returns an empty
-    dict when no status file exists yet (no cron run has happened).
+    see is_process_alive), the run is persisted and reported as crashed (see
+    mark_run_stopped). Returns an empty dict when no status file exists yet
+    (no cron run has happened).
     """
     status_path = data_path / "system" / "cron_status.json"
     if not status_path.exists():
@@ -159,8 +201,7 @@ def read_live_status(data_path: Path) -> dict:
     cron_data = json.loads(status_path.read_text(encoding="utf-8"))
     if cron_data.get("running") and cron_data.get("pid"):
         if not is_process_alive(int(cron_data["pid"]), cron_data.get("pid_create_time")):
-            cron_data["running"] = False
-            cron_data["crashed"] = True
+            cron_data = mark_run_stopped(data_path, "crashed")
     return cron_data
 
 

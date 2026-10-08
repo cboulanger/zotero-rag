@@ -17,6 +17,7 @@ from backend.services.cron_indexer import (
     abort_process,
     clear_control_state,
     is_process_alive,
+    mark_run_stopped,
     read_control_state,
     read_live_status,
     write_control_state,
@@ -500,6 +501,70 @@ class TestReadLiveStatus(unittest.TestCase):
         result = read_live_status(self.tmp)
         self.assertFalse(result["running"])
         self.assertTrue(result["crashed"])
+
+    def test_dead_run_self_heals_on_disk_including_indexing_slug(self):
+        # Regression test: a stale "running" status must not require manual
+        # intervention to clear (production needed cron_status.json hand-edited
+        # before this fix) — the first read should persist the correction, and
+        # resolve any slug still mid-"indexing" so the UI stops showing it as
+        # actively running forever.
+        self._write_status({
+            "running": True,
+            "pid": 99999999,
+            "slugs": {
+                "users/1": {"status": "indexing", "items_processed": 0},
+                "groups/2": {"status": "pending"},
+                "groups/3": {"status": "done"},
+            },
+        })
+        read_live_status(self.tmp)
+        on_disk = json.loads((self.tmp / "system" / "cron_status.json").read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["running"])
+        self.assertTrue(on_disk["crashed"])
+        self.assertEqual(on_disk["slugs"]["users/1"]["status"], "crashed")
+        self.assertIn("finished_at", on_disk["slugs"]["users/1"])
+        self.assertEqual(on_disk["slugs"]["groups/2"]["status"], "pending")
+        self.assertEqual(on_disk["slugs"]["groups/3"]["status"], "done")
+
+
+class TestMarkRunStopped(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "system").mkdir()
+
+    def _write_status(self, data: dict) -> None:
+        (self.tmp / "system" / "cron_status.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(mark_run_stopped(self.tmp, "aborted"), {})
+
+    def test_not_running_is_a_noop(self):
+        self._write_status({"running": False, "finished_at": "2026-01-01T00:00:00+00:00"})
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertNotIn("aborted", result)
+
+    def test_aborted_reason_sets_aborted_not_crashed(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "indexing"}},
+        })
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertFalse(result["running"])
+        self.assertTrue(result["aborted"])
+        self.assertNotIn("crashed", result)
+        self.assertEqual(result["slugs"]["users/1"]["status"], "aborted")
+
+    def test_pending_slugs_are_left_untouched(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "pending"}},
+        })
+        result = mark_run_stopped(self.tmp, "crashed")
+        self.assertEqual(result["slugs"]["users/1"]["status"], "pending")
 
 
 class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):

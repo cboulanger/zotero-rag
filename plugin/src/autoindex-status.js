@@ -6,7 +6,7 @@
 
 /**
  * @typedef {Object} AutoIndexSlugStatus
- * @property {string} status - pending|indexing|done|error|skipped
+ * @property {string} status - pending|indexing|done|error|skipped|crashed|aborted
  * @property {number} [items_processed]
  * @property {number} [items_total]
  * @property {number} [chunks_added]
@@ -31,6 +31,7 @@
  * @property {string} [disabled_reason]
  * @property {boolean} [running]
  * @property {boolean} [crashed]
+ * @property {boolean} [aborted]
  * @property {string} [started_at]
  * @property {string} [finished_at]
  * @property {Record<string, AutoIndexSlugStatus>} [slugs]
@@ -159,7 +160,9 @@ var ZoteroRAGAutoIndexStatus = {
 			return;
 		}
 		const ownSlugCount = Object.keys(data.slugs || {}).length;
-		if (data.crashed) {
+		if (data.aborted) {
+			this.renderBanner('The last automatic indexing run was stopped by an admin.', 'idle');
+		} else if (data.crashed) {
 			this.renderBanner('The last automatic indexing run crashed unexpectedly.', 'crashed');
 		} else if (data.running && ownSlugCount === 0) {
 			// A run is active, but none of it is this caller's own libraries —
