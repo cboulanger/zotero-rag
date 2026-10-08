@@ -99,16 +99,6 @@ var ZoteroRAGAutoIndexStatus = {
 			});
 		}
 
-		const adminIndexSnapshotsToggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-index-snapshots-toggle'));
-		if (adminIndexSnapshotsToggle) {
-			adminIndexSnapshotsToggle.addEventListener('change', () => this.toggleIndexSnapshots());
-		}
-
-		const adminPurgeSnapshotsButton = document.getElementById('admin-purge-snapshots-button');
-		if (adminPurgeSnapshotsButton) {
-			adminPurgeSnapshotsButton.addEventListener('click', () => this.purgeSnapshotsNow());
-		}
-
 		window.addEventListener('unload', () => {
 			if (this.refreshTimer !== null) {
 				clearInterval(this.refreshTimer);
@@ -246,8 +236,6 @@ var ZoteroRAGAutoIndexStatus = {
 			this.adminScope = 'own';
 			const toggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-scope-toggle'));
 			if (toggle) toggle.checked = false;
-		} else {
-			this.refreshIndexSnapshotsToggle();
 		}
 
 		const paused = data.scheduler?.paused === true;
@@ -255,124 +243,6 @@ var ZoteroRAGAutoIndexStatus = {
 		const resumeButton = document.getElementById('admin-resume-button');
 		if (pauseButton) pauseButton.style.display = paused ? 'none' : '';
 		if (resumeButton) resumeButton.style.display = paused ? '' : 'none';
-	},
-
-	/**
-	 * Fetch the live index_snapshots value and reflect it in the checkbox,
-	 * without going through the plugin's TTL-cached getIndexSnapshotsEnabled()
-	 * — the admin dialog wants the current server value every poll.
-	 * @returns {Promise<void>}
-	 */
-	async refreshIndexSnapshotsToggle() {
-		if (!this.plugin) return;
-		const toggle = /** @type {HTMLInputElement|null} */ (document.getElementById('admin-index-snapshots-toggle'));
-		if (!toggle) return;
-		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/admin/settings`, {
-				headers: this.plugin.getAuthHeaders(),
-			});
-			if (response.ok) {
-				const data = await response.json();
-				toggle.checked = data.index_snapshots === true;
-			}
-		} catch (_) { /* leave checkbox at its last known state */ }
-	},
-
-	/**
-	 * Checkbox change handler. Checking it simply enables the setting.
-	 * Unchecking it disables the setting, then offers to purge
-	 * already-indexed Snapshot content via the shared two-step confirm.
-	 * @returns {Promise<void>}
-	 */
-	async toggleIndexSnapshots() {
-		if (!this.plugin) return;
-		const toggle = /** @type {HTMLInputElement} */ (document.getElementById('admin-index-snapshots-toggle'));
-		const enabled = toggle.checked;
-		let response;
-		try {
-			response = await fetch(`${this.plugin.backendURL}/api/admin/settings`, {
-				method: 'PUT',
-				headers: this.plugin.getAuthHeaders({ 'Content-Type': 'application/json' }),
-				body: JSON.stringify({ index_snapshots: enabled }),
-			});
-		} catch (e) {
-			this.renderBanner(`Error updating setting: ${e}`, 'crashed');
-			return;
-		}
-		if (!response.ok) {
-			const body = await response.json().catch(() => ({}));
-			this.renderBanner(body.detail || `Could not update setting (HTTP ${response.status}).`, 'crashed');
-			return;
-		}
-		if (!enabled) {
-			await this._confirmAndPurgeSnapshots();
-		}
-	},
-
-	/**
-	 * Standalone admin action: run the same two-step confirm and purge,
-	 * independent of the checkbox's current value — covers cleaning up
-	 * Snapshot content indexed before this feature existed, which never
-	 * fires the checkbox's own uncheck-triggered flow.
-	 * @returns {Promise<void>}
-	 */
-	async purgeSnapshotsNow() {
-		await this._confirmAndPurgeSnapshots();
-	},
-
-	/**
-	 * Two sequential confirms ("delete them?", then "this cannot be undone"),
-	 * only calling the purge endpoint if both are accepted.
-	 * @returns {Promise<void>}
-	 */
-	async _confirmAndPurgeSnapshots() {
-		if (!this.plugin) return;
-		if (!window.confirm('Delete all already-indexed Snapshot entries from the index now?')) return;
-		if (!window.confirm('This cannot be undone. Continue?')) return;
-
-		const button = /** @type {HTMLButtonElement|null} */ (document.getElementById('admin-purge-snapshots-button'));
-		const message = document.getElementById('admin-purge-snapshots-message');
-		const originalLabel = 'Delete indexed Snapshot entries…';
-		if (message) {
-			message.textContent = '';
-			message.className = 'purge-message';
-		}
-		if (button) {
-			button.disabled = true;
-			button.textContent = 'Deleting…';
-		}
-		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/admin/settings/purge-snapshots`, {
-				method: 'POST',
-				headers: this.plugin.getAuthHeaders(),
-			});
-			if (!response.ok) {
-				const body = await response.json().catch(() => ({}));
-				const errorText = body.detail || `Could not purge Snapshot entries (HTTP ${response.status}).`;
-				if (message) {
-					message.textContent = errorText;
-					message.className = 'purge-message error';
-				}
-				return;
-			}
-			const data = await response.json();
-			const successText = `Deleted ${data.deleted_chunks} chunk(s) across ${data.deleted_attachments} attachment(s).`;
-			if (message) {
-				message.textContent = successText;
-				message.className = 'purge-message';
-			}
-		} catch (e) {
-			const errorText = `Error: ${e}`;
-			if (message) {
-				message.textContent = errorText;
-				message.className = 'purge-message error';
-			}
-		} finally {
-			if (button) {
-				button.disabled = false;
-				button.textContent = originalLabel;
-			}
-		}
 	},
 
 	/**

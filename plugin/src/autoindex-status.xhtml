@@ -59,8 +59,6 @@
     .icon-button .button-icon { display: inline-block; margin-right: 4px; }
     .admin-scope-toggle { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
     .library-skip-button { font-size: 11px; padding: 2px 8px; }
-    .purge-message { font-size: 12px; color: #1a6b1a; }
-    .purge-message.error { color: #b30000; }
   </style>
 </head>
 
@@ -83,13 +81,6 @@
       <label id="admin-scope-toggle-label" class="admin-scope-toggle">
         <input id="admin-scope-toggle" type="checkbox"/> Show all users' jobs
       </label>
-      <label id="admin-index-snapshots-label" class="admin-scope-toggle">
-        <input id="admin-index-snapshots-toggle" type="checkbox"/> Index Snapshots of webpages
-      </label>
-    </div>
-    <div class="actions-row">
-      <button id="admin-purge-snapshots-button" type="button" class="dialog-button">Delete indexed Snapshot entries…</button>
-      <span id="admin-purge-snapshots-message" class="purge-message" aria-live="polite"></span>
     </div>
   </div>
   <div id="run-banner">Loading status…</div>

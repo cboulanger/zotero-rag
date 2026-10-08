@@ -1,4 +1,4 @@
-// Tests for plugin/src/autoindex-status.js's admin-only Snapshot-indexing controls.
+// Tests for plugin/src/autoindex-status.js.
 
 const assert = require('node:assert');
 const { test } = require('node:test');
@@ -55,143 +55,6 @@ function loadDialog(elements = {}) {
 	return context.ZoteroRAGAutoIndexStatus;
 }
 
-function makeElement() {
-	return { style: {}, addEventListener: () => {}, checked: false, disabled: false, textContent: '' };
-}
-
-test('toggleIndexSnapshots PUTs true with no confirmation when checking the box', async () => {
-	const toggle = makeElement();
-	toggle.checked = true;
-	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = {
-		backendURL: 'http://backend',
-		getAuthHeaders: () => ({}),
-	};
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true, json: async () => ({ index_snapshots: true }) }; };
-	global.window = { confirm: () => { throw new Error('must not be called'); } };
-
-	await dialog.toggleIndexSnapshots();
-
-	assert.strictEqual(calls.length, 1);
-	assert.strictEqual(calls[0].url, 'http://backend/api/admin/settings');
-	assert.strictEqual(calls[0].opts.method, 'PUT');
-	assert.deepStrictEqual(JSON.parse(calls[0].opts.body), { index_snapshots: true });
-});
-
-test('toggleIndexSnapshots unchecking runs the two-step confirm and purges only on double-yes', async () => {
-	const toggle = makeElement();
-	toggle.checked = false;
-	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true, json: async () => ({ index_snapshots: false, deleted_chunks: 3, deleted_attachments: 1 }) }; };
-	let confirmCallCount = 0;
-	global.window = { confirm: () => { confirmCallCount++; return true; } };
-
-	await dialog.toggleIndexSnapshots();
-
-	assert.strictEqual(confirmCallCount, 2);
-	assert.strictEqual(calls.length, 2); // PUT, then purge
-	assert.strictEqual(calls[0].opts.method, 'PUT');
-	assert.strictEqual(calls[1].url, 'http://backend/api/admin/settings/purge-snapshots');
-	assert.strictEqual(calls[1].opts.method, 'POST');
-});
-
-test('toggleIndexSnapshots unchecking does not purge when the first confirm is declined', async () => {
-	const toggle = makeElement();
-	toggle.checked = false;
-	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true, json: async () => ({ index_snapshots: false }) }; };
-	global.window = { confirm: () => false };
-
-	await dialog.toggleIndexSnapshots();
-
-	assert.strictEqual(calls.length, 1); // PUT only, the flag still gets turned off
-	assert.strictEqual(calls[0].opts.method, 'PUT');
-});
-
-test('toggleIndexSnapshots unchecking does not purge when only the second confirm is declined', async () => {
-	const toggle = makeElement();
-	toggle.checked = false;
-	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true, json: async () => ({ index_snapshots: false }) }; };
-	let confirmCallCount = 0;
-	global.window = { confirm: () => { confirmCallCount++; return confirmCallCount === 1; } };
-
-	await dialog.toggleIndexSnapshots();
-
-	assert.strictEqual(confirmCallCount, 2);
-	assert.strictEqual(calls.length, 1); // PUT only, no purge call
-});
-
-test('toggleIndexSnapshots renders an error banner and does not proceed to the purge confirm when the PUT fails', async () => {
-	const toggle = makeElement();
-	toggle.checked = false;
-	const banner = makeElement();
-	const dialog = loadDialog({ 'admin-index-snapshots-toggle': toggle, 'run-banner': banner });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: false, status: 500, json: async () => ({ detail: 'disk full' }) }; };
-	let confirmCalled = false;
-	global.window = { confirm: () => { confirmCalled = true; return true; } };
-
-	await dialog.toggleIndexSnapshots();
-
-	assert.strictEqual(confirmCalled, false);
-	assert.strictEqual(calls.length, 1); // PUT only, no purge call
-	assert.match(banner.textContent, /disk full/);
-});
-
-test('purgeSnapshotsNow runs the same two-step confirm independent of checkbox state, disables the button during the call, and reports the result in the message span', async () => {
-	const button = makeElement();
-	const message = makeElement();
-	const dialog = loadDialog({ 'admin-purge-snapshots-button': button, 'admin-purge-snapshots-message': message });
-	/** @type {Array<{url: string, opts: any}>} */
-	const calls = [];
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => {
-		calls.push({ url, opts });
-		// The button must already be disabled by the time the request is in flight.
-		assert.strictEqual(button.disabled, true);
-		return { ok: true, json: async () => ({ deleted_chunks: 7, deleted_attachments: 2 }) };
-	};
-	global.window = { confirm: () => true };
-
-	await dialog.purgeSnapshotsNow();
-
-	assert.strictEqual(calls.length, 1);
-	assert.strictEqual(calls[0].url, 'http://backend/api/admin/settings/purge-snapshots');
-	assert.strictEqual(calls[0].opts.method, 'POST');
-	assert.strictEqual(button.disabled, false);
-	assert.match(message.textContent, /7/);
-	assert.match(message.textContent, /2/);
-});
-
-test('purgeSnapshotsNow re-enables the button and reports an error in the message span when the request fails', async () => {
-	const button = makeElement();
-	const message = makeElement();
-	const dialog = loadDialog({ 'admin-purge-snapshots-button': button, 'admin-purge-snapshots-message': message });
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async () => ({ ok: false, status: 500, json: async () => ({ detail: 'disk full' }) });
-	global.window = { confirm: () => true };
-
-	await dialog.purgeSnapshotsNow();
-
-	assert.strictEqual(button.disabled, false);
-	assert.match(message.textContent, /disk full/);
-	assert.match(message.className, /error/);
-});
-
 test("setButtonLabel updates the nested .button-label span's text without touching the icon span", () => {
 	const dialog = loadDialog({});
 	const labelSpan = { textContent: 'Run indexing now' };
@@ -210,16 +73,4 @@ test('setButtonLabel falls back to the button itself when there is no .button-la
 	dialog.setButtonLabel(button, 'Deleting…');
 
 	assert.strictEqual(button.textContent, 'Deleting…');
-});
-
-test('purgeSnapshotsNow makes no network call when either confirm is declined', async () => {
-	const dialog = loadDialog({ 'run-banner': makeElement() });
-	let fetchCalled = false;
-	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async () => { fetchCalled = true; return { ok: true, json: async () => ({}) }; };
-	global.window = { confirm: () => false };
-
-	await dialog.purgeSnapshotsNow();
-
-	assert.strictEqual(fetchCalled, false);
 });

@@ -528,6 +528,138 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		});
 	}
 
+	// Admin-only "Index Snapshots of webpages" setting + purge action. This is
+	// a fundamental policy decision (what gets indexed at all), not a runtime
+	// indexing-run consideration, so it lives here rather than in the
+	// "View indexing status" monitor dialog.
+	const adminIndexingSettings = doc.getElementById('zotero-rag-admin-indexing-settings');
+	const indexSnapshotsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-index-snapshots-toggle'));
+	const purgeSnapshotsButton = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-purge-snapshots-button'));
+	const purgeSnapshotsMessage = doc.getElementById('zotero-rag-purge-snapshots-message');
+
+	/**
+	 * @param {string} text
+	 * @param {'ok'|'error'} [level='ok']
+	 * @returns {void}
+	 */
+	const setPurgeSnapshotsMessage = (text, level = 'ok') => {
+		if (!purgeSnapshotsMessage) return;
+		purgeSnapshotsMessage.textContent = text;
+		purgeSnapshotsMessage.className = level === 'error' ? 'setting-description status-error' : 'setting-description';
+	};
+
+	/**
+	 * Show the admin block only for an admin of the authorizing group (or
+	 * always, on a loopback backend) — mirrors the is_admin flag already
+	 * reported by /api/autoindex/status for the status-monitor dialog's own
+	 * admin controls, reused here to avoid a separate admin-check endpoint.
+	 * When shown, also loads the live index_snapshots value into the checkbox.
+	 * @returns {Promise<void>}
+	 */
+	const refreshAdminIndexingControls = async () => {
+		if (!adminIndexingSettings) return;
+		try {
+			const statusResponse = await fetch(`${this.backendURL}/api/autoindex/status`, {
+				headers: this.getAuthHeaders(),
+			});
+			if (!statusResponse.ok) {
+				adminIndexingSettings.style.display = 'none';
+				return;
+			}
+			const statusData = await statusResponse.json();
+			if (statusData.is_admin !== true) {
+				adminIndexingSettings.style.display = 'none';
+				return;
+			}
+			adminIndexingSettings.style.display = '';
+			if (indexSnapshotsToggle) {
+				const settingsResponse = await fetch(`${this.backendURL}/api/admin/settings`, {
+					headers: this.getAuthHeaders(),
+				});
+				if (settingsResponse.ok) {
+					const settingsData = await settingsResponse.json();
+					indexSnapshotsToggle.checked = settingsData.index_snapshots === true;
+				}
+			}
+		} catch (_) {
+			adminIndexingSettings.style.display = 'none';
+		}
+	};
+
+	/**
+	 * Two sequential confirms ("delete them?", then "this cannot be undone"),
+	 * only calling the purge endpoint if both are accepted. Disables the
+	 * button for the duration and leaves a persistent result message next to
+	 * it (not the transient autoindex status line, which other polling/async
+	 * activity on this pane could otherwise overwrite).
+	 * @returns {Promise<void>}
+	 */
+	const confirmAndPurgeSnapshots = async () => {
+		// @ts-ignore - Services is a Zotero/Firefox global
+		if (!Services.prompt.confirm(_window, 'Delete Snapshot entries', 'Delete all already-indexed Snapshot entries from the index now?')) return;
+		// @ts-ignore
+		if (!Services.prompt.confirm(_window, 'Delete Snapshot entries', 'This cannot be undone. Continue?')) return;
+
+		const originalLabel = 'Delete indexed Snapshot entries…';
+		setPurgeSnapshotsMessage('');
+		if (purgeSnapshotsButton) {
+			purgeSnapshotsButton.disabled = true;
+			purgeSnapshotsButton.textContent = 'Deleting…';
+		}
+		try {
+			const response = await fetch(`${this.backendURL}/api/admin/settings/purge-snapshots`, {
+				method: 'POST',
+				headers: this.getAuthHeaders(),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				setPurgeSnapshotsMessage(body.detail || `Could not purge Snapshot entries (HTTP ${response.status}).`, 'error');
+				return;
+			}
+			const data = await response.json();
+			setPurgeSnapshotsMessage(`Deleted ${data.deleted_chunks} chunk(s) across ${data.deleted_attachments} attachment(s).`);
+		} catch (e) {
+			setPurgeSnapshotsMessage(`Error: ${e}`, 'error');
+		} finally {
+			if (purgeSnapshotsButton) {
+				purgeSnapshotsButton.disabled = false;
+				purgeSnapshotsButton.textContent = originalLabel;
+			}
+		}
+	};
+
+	if (indexSnapshotsToggle) {
+		indexSnapshotsToggle.addEventListener('change', async () => {
+			const enabled = indexSnapshotsToggle.checked;
+			let response;
+			try {
+				response = await fetch(`${this.backendURL}/api/admin/settings`, {
+					method: 'PUT',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ index_snapshots: enabled }),
+				});
+			} catch (e) {
+				setPurgeSnapshotsMessage(`Error updating setting: ${e}`, 'error');
+				return;
+			}
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				indexSnapshotsToggle.checked = !enabled;
+				setPurgeSnapshotsMessage(body.detail || `Could not update setting (HTTP ${response.status}).`, 'error');
+				return;
+			}
+			setPurgeSnapshotsMessage('');
+			if (!enabled) {
+				await confirmAndPurgeSnapshots();
+			}
+		});
+	}
+
+	if (purgeSnapshotsButton) {
+		purgeSnapshotsButton.addEventListener('click', () => confirmAndPurgeSnapshots());
+	}
+
 	// Initial population, now that both closures above exist
 	refreshZoteroIdentityStatus();
+	refreshAdminIndexingControls();
 };
