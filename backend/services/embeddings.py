@@ -647,19 +647,32 @@ class RemoteEmbeddingService(EmbeddingService):
                 # Truncate and retry. Prefer the exact overflow ratio reported in
                 # the error message (converges in one round); fall back to a
                 # blind ~15%-per-round cut if the message can't be parsed.
+                #
+                # Truncate by *character* count, not word count: word-based
+                # truncation (`text.split()`) assumes whitespace reliably
+                # separates tokens, which fails for text dominated by very few,
+                # very long whitespace-delimited units — a CJK passage (no
+                # spaces between words at all), a long URL/DOI/hash, or a dense
+                # table. For such text, cutting 15% of the *word* count removes
+                # almost none of the actual *token* count, so the API keeps
+                # reporting the same overflow every round and the retry budget
+                # is exhausted without ever shrinking the real request —
+                # observed in production as 7-8 rounds of "keep_fraction=0.85"
+                # all failing with the exact same reported token count.
+                # Character count has no such failure mode: it strictly shrinks
+                # every round regardless of script or tokenization.
                 fraction = _context_length_truncation_fraction(msg)
                 if isinstance(input, str):
-                    words = input.split()
-                    new_len = max(1, int(len(words) * fraction))
-                    input = " ".join(words[:new_len])
+                    original_len = len(input)
+                    new_len = max(10, int(original_len * fraction))
+                    input = input[:new_len]
                     logger.warning(
-                        f"Embedding input exceeded context length — truncated from {len(words)} "
-                        f"to {new_len} words (attempt {attempt + 1}, keep_fraction={fraction:.2f})"
+                        f"Embedding input exceeded context length — truncated from {original_len} "
+                        f"to {new_len} characters (attempt {attempt + 1}, keep_fraction={fraction:.2f})"
                     )
                 elif isinstance(input, list):
                     def _truncate(text: str) -> str:
-                        words = text.split()
-                        return " ".join(words[: max(1, int(len(words) * fraction))])
+                        return text[: max(10, int(len(text) * fraction))]
                     input = [_truncate(t) for t in input]
                     logger.warning(
                         f"Embedding batch exceeded context length — truncated texts "

@@ -648,6 +648,35 @@ class TestEmbeddingContextLengthRetry(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OpenAIBadRequestError):
                 await service._create_embeddings_with_backoff(["a long text " * 100])
 
+    async def test_truncation_shrinks_text_with_no_word_boundaries(self):
+        """Regression: a chunk dominated by one giant whitespace-free token
+        (e.g. unsegmented CJK text, a long URL/hash) made the old word-based
+        truncation a no-op — `text.split()` returns a single "word" for such
+        text, and `max(1, int(1 * fraction))` always keeps that one word
+        whole regardless of `fraction`. In production this meant 7-8 retry
+        rounds each logging a shrinking `keep_fraction` while the actual
+        request size — and the API's reported token count — never changed,
+        exhausting the retry budget without ever reducing the real request.
+        Character-based truncation always shrinks the text every round,
+        regardless of script or whitespace."""
+        service = self._make_service()
+        success_raw = MagicMock()
+        success_raw.headers = {}
+        success_raw.parse.return_value = MagicMock(data=[MagicMock(embedding=[0.1, 0.2])])
+        no_space_text = "x" * 2000  # one unbreakable "word" by whitespace splitting
+
+        with patch.object(service, "_get_client") as mock_client_fn, \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            create_mock = AsyncMock(side_effect=[self._context_length_error(), success_raw])
+            mock_client.embeddings.with_raw_response.create = create_mock
+            result = await service._create_embeddings_with_backoff([no_space_text])
+
+        self.assertIsNotNone(result)
+        retried_input = create_mock.await_args_list[1].kwargs["input"]
+        self.assertLess(len(retried_input[0]), 2000)
+
     def _real_overflow_error(self, actual_tokens: int, limit_tokens: int = 512) -> OpenAIBadRequestError:
         # The exact message format the KISSKI/OpenAI-compatible API returns —
         # see _context_length_truncation_fraction, which parses these numbers.
