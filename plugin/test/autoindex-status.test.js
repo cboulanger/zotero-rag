@@ -113,3 +113,43 @@ test('_formatDurationFromNow works for future timestamps too (e.g. "next run")',
 	const in45Minutes = new Date(Date.now() + (45 * 60 + 30) * 1000).toISOString();
 	assert.strictEqual(dialog._formatDurationFromNow(in45Minutes), '45 minutes');
 });
+
+test('_updatePendingRunState returns false when there is no pending entry for the slug', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'done' }), false);
+});
+
+test('_updatePendingRunState stays true and marks confirmedStarted once the server reports indexing', () => {
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'indexing' }), true);
+	assert.strictEqual(dialog.pendingRunSlugs.get('users/1').confirmedStarted, true);
+});
+
+test('_updatePendingRunState clears once a confirmed-started run reaches a terminal status', () => {
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: true });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'done' }), false);
+	assert.strictEqual(dialog.pendingRunSlugs.has('users/1'), false);
+});
+
+test('_updatePendingRunState stays true within the grace window even if status still reads stale/terminal', () => {
+	// Regression: right after a click, the status poll can still show the
+	// PREVIOUS run's terminal status (e.g. "skipped" from an earlier attempt)
+	// because the new subprocess hasn't started yet. Must not be mistaken for
+	// "this run already finished".
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'skipped', skip_reason: 'embedding_rate_limit' }), true);
+});
+
+test('_updatePendingRunState gives up after the grace window if never confirmed started', () => {
+	// Regression: a run-slug request can fail fast server-side (e.g. the
+	// embedding key is already rate-limited) without ever writing a fresh
+	// per-slug status, which would otherwise leave the button disabled
+	// forever. A stale `since` simulates that grace window having elapsed.
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now() - 20000, confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'skipped' }), false);
+	assert.strictEqual(dialog.pendingRunSlugs.has('users/1'), false);
+});
