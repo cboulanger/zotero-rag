@@ -11,10 +11,14 @@ A slug is only included in the returned targets if its owning entry also has a
 usable embedding API key (status "ok" or "unverified", and not currently inside
 its own rate-limit window) — auto-indexing never falls back to a server-wide
 embedding key, so a slug whose owner has no valid embedding key is skipped and
-reported as an issue instead. This gating only applies when the server is
-configured with a remote embedding provider; a local model has no API key at
-all, so per-user key gating is skipped entirely in that case (matching the
-pre-per-user-key behavior for local deployments).
+reported as an issue instead. This per-user gating only applies when the active
+preset's embedding config declares a *personal* key (``api_key_env``, e.g.
+KISSKI, one key per user). It does not apply to a local model (no API key at
+all) or to a preset with a *shared*, admin-set key (``shared_api_key_env``,
+e.g. remote-mpcdf) — there, every caller uses the same server-wide credential,
+so there is no per-user key to validate, and a status left over from a
+previously-active personal-key preset must not be reused to gate an unrelated
+shared-key preset.
 """
 
 import logging
@@ -63,10 +67,22 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
     targets: dict[str, dict] = {}
     issues: list[dict] = []
 
-    # Per-user embedding keys only make sense for a remote provider (the whole
-    # point is per-user billing/quota); a local model has no API key at all,
-    # so gating on one here would make auto-indexing a permanent no-op.
-    requires_embedding_key = get_settings().get_hardware_preset().embedding.model_type == "remote"
+    # Per-user embedding keys only make sense for a remote provider that uses a
+    # *personal* key (api_key_env, e.g. KISSKI — one key per user, so per-user
+    # billing/quota and per-user rate-limit tracking are meaningful). A local
+    # model has no API key at all, and a remote preset with a *shared*,
+    # admin-set key (shared_api_key_env, e.g. remote-mpcdf) has no per-user key
+    # either — every caller uses the same server-wide credential, resolved
+    # later via admin_settings_store, independent of any individual user's
+    # stored status. Gating on a personal-key status in either of those cases
+    # would make auto-indexing a permanent no-op (no key configured) or
+    # incorrectly block it on a stale status left over from a previously
+    # active personal-key preset (the actual bug this guards against).
+    embedding_config = get_settings().get_hardware_preset().embedding
+    requires_embedding_key = (
+        embedding_config.model_type == "remote"
+        and "api_key_env" in embedding_config.model_kwargs
+    )
 
     for fp, api_key, entry in list(store.iter_decrypted()):
         validation = await validate_key(api_key)
