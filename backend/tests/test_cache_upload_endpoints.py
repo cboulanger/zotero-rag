@@ -211,5 +211,32 @@ class TestProcessNowEndpoint(unittest.TestCase):
         self.assertIn("extraction exploded", meta["last_error"])
 
 
+class TestParseUploadRequestAttachmentTitle(unittest.IsolatedAsyncioTestCase):
+    async def test_parse_upload_request_stores_attachment_title(self):
+        from backend.api.document_upload import _parse_upload_request
+        from fastapi import UploadFile
+        import io
+
+        metadata = json.dumps({
+            "library_id": "1", "item_key": "ITEM1", "attachment_key": "ATT1",
+            "attachment_title": "Snapshot", "title": "Parent Title",
+        })
+        upload_file = UploadFile(filename="page.html", file=io.BytesIO(b"<html></html>"))
+        result = await _parse_upload_request(upload_file, metadata, identity=None)
+        doc_metadata = result[1]  # (meta_dict, doc_metadata, library_id, ...)
+        self.assertEqual(doc_metadata.attachment_title, "Snapshot")
+
+    async def test_parse_upload_request_defaults_attachment_title_to_none(self):
+        from backend.api.document_upload import _parse_upload_request
+        from fastapi import UploadFile
+        import io
+
+        metadata = json.dumps({"library_id": "1", "item_key": "ITEM1", "attachment_key": "ATT1"})
+        upload_file = UploadFile(filename="paper.pdf", file=io.BytesIO(b"%PDF-1.4"))
+        result = await _parse_upload_request(upload_file, metadata, identity=None)
+        doc_metadata = result[1]
+        self.assertIsNone(doc_metadata.attachment_title)
+
+
 if __name__ == "__main__":
     unittest.main()

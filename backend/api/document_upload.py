@@ -1287,6 +1287,7 @@ async def _parse_upload_request(
         library_id=library_id,
         item_key=item_key,
         attachment_key=attachment_key,
+        attachment_title=meta_dict.get("attachment_title"),
         title=meta_dict.get("title", "Untitled"),
         authors=meta_dict.get("authors", []),
         year=meta_dict.get("year"),
