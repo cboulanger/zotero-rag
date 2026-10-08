@@ -80,6 +80,22 @@ var ZoteroFixUnavailableDialog = {
 	selected: new Set(),
 
 	/**
+	 * Current text typed into the filename filter box.
+	 * @type {string}
+	 */
+	filterText: '',
+
+	/**
+	 * Display position -> real index into this.items, recomputed whenever
+	 * this.items or this.filterText changes. The VirtualizedTable's
+	 * getRowCount/getRowData/cell renderers are called with a display
+	 * position and must resolve through this array before touching
+	 * this.items/this.selected/this.rowStatus.
+	 * @type {Array<number>}
+	 */
+	visibleIndices: [],
+
+	/**
 	 * Initialise the dialog. Called automatically after DOMContentLoaded loads this script.
 	 * @returns {void}
 	 */
@@ -177,6 +193,25 @@ var ZoteroFixUnavailableDialog = {
 	_filenameFor(info) {
 		const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
 		return linkedPath || info.attachmentItem.attachmentFilename || '';
+	},
+
+	/**
+	 * Recompute this.visibleIndices from this.items + this.filterText.
+	 * Call after this.items changes, or after this.filterText changes.
+	 * @returns {void}
+	 */
+	_computeVisibleIndices() {
+		const q = this.filterText.trim().toLowerCase();
+		if (!q) {
+			this.visibleIndices = this.items.map((_, i) => i);
+			return;
+		}
+		this.visibleIndices = [];
+		for (let i = 0; i < this.items.length; i++) {
+			if (this._filenameFor(this.items[i]).toLowerCase().includes(q)) {
+				this.visibleIndices.push(i);
+			}
+		}
 	},
 
 	/**

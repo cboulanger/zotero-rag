@@ -871,3 +871,46 @@ test('populateTable shows and updates the progress meter while check-indexed sta
 		'hide',
 	]);
 });
+
+// ---------------------------------------------------------------------------
+// Filename filter
+// ---------------------------------------------------------------------------
+
+test('_computeVisibleIndices includes every row when filterText is empty', () => {
+	const dialog = loadDialog();
+	dialog.filterText = '';
+	dialog.items = [
+		{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } },
+		{ isLinked: false, attachmentItem: { attachmentFilename: 'b.docx' } },
+	];
+	dialog._computeVisibleIndices();
+	assert.deepStrictEqual([...dialog.visibleIndices], [0, 1]);
+});
+
+test('_computeVisibleIndices matches the filename case-insensitively, substring anywhere', () => {
+	const dialog = loadDialog();
+	dialog.filterText = 'PDF';
+	dialog.items = [
+		{ isLinked: false, attachmentItem: { attachmentFilename: 'report.pdf' } },
+		{ isLinked: false, attachmentItem: { attachmentFilename: 'notes.docx' } },
+		{ isLinked: false, attachmentItem: { attachmentFilename: 'pdf-scan.docx' } },
+	];
+	dialog._computeVisibleIndices();
+	assert.deepStrictEqual([...dialog.visibleIndices], [0, 2]);
+});
+
+test('_computeVisibleIndices is empty when nothing matches', () => {
+	const dialog = loadDialog();
+	dialog.filterText = 'zzz';
+	dialog.items = [{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } }];
+	dialog._computeVisibleIndices();
+	assert.deepStrictEqual([...dialog.visibleIndices], []);
+});
+
+test('_computeVisibleIndices trims surrounding whitespace from the filter text', () => {
+	const dialog = loadDialog();
+	dialog.filterText = '  pdf  ';
+	dialog.items = [{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } }];
+	dialog._computeVisibleIndices();
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
+});
