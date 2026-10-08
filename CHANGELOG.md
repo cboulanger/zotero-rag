@@ -1,3 +1,21 @@
+# [1.55.0](https://github.com/cboulanger/zotero-rag/compare/v1.54.0...v1.55.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend,plugin:** persist stopped-run state and distinguish abort from crash ([a2d1e92](https://github.com/cboulanger/zotero-rag/commit/a2d1e929a385fed9567a095c2692b7f15b21fe8b))
+* **backend:** index attachment_title to prevent purge-snapshots timeout ([21002ba](https://github.com/cboulanger/zotero-rag/commit/21002ba72882203d95f84e607d67aae14d4cdd6c))
+* **backend:** stop recycled PIDs from wedging autoindex status and crashing abort ([81632f1](https://github.com/cboulanger/zotero-rag/commit/81632f10c91d29062827d4244540af4ee93bf861))
+* **deploy:** restart Kreuzberg sidecar on main container restart ([1edf366](https://github.com/cboulanger/zotero-rag/commit/1edf3666fe42e9d633f9d15f51f90b9a6552e2a9))
+* **plugin:** disable per-library Skip button when no run is active ([ee99b84](https://github.com/cboulanger/zotero-rag/commit/ee99b84f37382df17f2d2fb852fdd384e8774ce9))
+
+
+### Features
+
+* **backend,plugin:** admin system health panel; move run-banner to bottom ([fb8a03a](https://github.com/cboulanger/zotero-rag/commit/fb8a03a2932632454d480dfbabb94ddb62399bcf))
+* **backend,plugin:** per-library run-now and align status badge layout ([8ba17b8](https://github.com/cboulanger/zotero-rag/commit/8ba17b8dbf7eb5ebbf49e1627287b2102823b84f))
+* **plugin,backend:** reorganize status dialog sections; next-run countdown ([13efbbd](https://github.com/cboulanger/zotero-rag/commit/13efbbdb96ca15d050f0a1e8c8b74a81891d74e5))
+
 # [1.54.0](https://github.com/cboulanger/zotero-rag/compare/v1.53.0...v1.54.0) (2026-10-08)
 
 
