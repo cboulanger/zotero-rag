@@ -152,13 +152,19 @@ test('toggleIndexSnapshots renders an error banner and does not proceed to the p
 	assert.match(banner.textContent, /disk full/);
 });
 
-test('purgeSnapshotsNow runs the same two-step confirm independent of checkbox state and reports the result', async () => {
-	const banner = makeElement();
-	const dialog = loadDialog({ 'run-banner': banner });
+test('purgeSnapshotsNow runs the same two-step confirm independent of checkbox state, disables the button during the call, and reports the result in the message span', async () => {
+	const button = makeElement();
+	const message = makeElement();
+	const dialog = loadDialog({ 'admin-purge-snapshots-button': button, 'admin-purge-snapshots-message': message });
 	/** @type {Array<{url: string, opts: any}>} */
 	const calls = [];
 	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
-	global.fetch = async (url, opts) => { calls.push({ url, opts }); return { ok: true, json: async () => ({ deleted_chunks: 7, deleted_attachments: 2 }) }; };
+	global.fetch = async (url, opts) => {
+		calls.push({ url, opts });
+		// The button must already be disabled by the time the request is in flight.
+		assert.strictEqual(button.disabled, true);
+		return { ok: true, json: async () => ({ deleted_chunks: 7, deleted_attachments: 2 }) };
+	};
 	global.window = { confirm: () => true };
 
 	await dialog.purgeSnapshotsNow();
@@ -166,8 +172,44 @@ test('purgeSnapshotsNow runs the same two-step confirm independent of checkbox s
 	assert.strictEqual(calls.length, 1);
 	assert.strictEqual(calls[0].url, 'http://backend/api/admin/settings/purge-snapshots');
 	assert.strictEqual(calls[0].opts.method, 'POST');
-	assert.match(banner.textContent, /7/);
-	assert.match(banner.textContent, /2/);
+	assert.strictEqual(button.disabled, false);
+	assert.match(message.textContent, /7/);
+	assert.match(message.textContent, /2/);
+});
+
+test('purgeSnapshotsNow re-enables the button and reports an error in the message span when the request fails', async () => {
+	const button = makeElement();
+	const message = makeElement();
+	const dialog = loadDialog({ 'admin-purge-snapshots-button': button, 'admin-purge-snapshots-message': message });
+	dialog.plugin = { backendURL: 'http://backend', getAuthHeaders: () => ({}) };
+	global.fetch = async () => ({ ok: false, status: 500, json: async () => ({ detail: 'disk full' }) });
+	global.window = { confirm: () => true };
+
+	await dialog.purgeSnapshotsNow();
+
+	assert.strictEqual(button.disabled, false);
+	assert.match(message.textContent, /disk full/);
+	assert.match(message.className, /error/);
+});
+
+test("setButtonLabel updates the nested .button-label span's text without touching the icon span", () => {
+	const dialog = loadDialog({});
+	const labelSpan = { textContent: 'Run indexing now' };
+	const button = { querySelector: (sel) => (sel === '.button-label' ? labelSpan : null), textContent: 'should not be used' };
+
+	dialog.setButtonLabel(button, 'Indexing in progress…');
+
+	assert.strictEqual(labelSpan.textContent, 'Indexing in progress…');
+	assert.strictEqual(button.textContent, 'should not be used');
+});
+
+test('setButtonLabel falls back to the button itself when there is no .button-label span', () => {
+	const dialog = loadDialog({});
+	const button = { querySelector: () => null, textContent: 'Delete indexed Snapshot entries…' };
+
+	dialog.setButtonLabel(button, 'Deleting…');
+
+	assert.strictEqual(button.textContent, 'Deleting…');
 });
 
 test('purgeSnapshotsNow makes no network call when either confirm is declined', async () => {

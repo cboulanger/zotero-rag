@@ -51,26 +51,45 @@
     .dialog-buttons { display: flex; justify-content: flex-end; padding-top: 12px; border-top: 1px solid #ddd; margin-top: 12px; }
     .dialog-button { padding: 6px 16px; border: 1px solid #ccc; border-radius: 4px; background-color: #f5f5f5; color: #333; cursor: pointer; }
     .dialog-button:hover { background-color: #e5e5e5; }
-    #admin-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+    .actions-section { margin-bottom: 14px; }
+    .actions-section .section-heading { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #888; margin: 0 0 6px 0; }
+    .actions-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .actions-row:last-child { margin-bottom: 0; }
+    .icon-button .button-icon { display: inline-block; margin-right: 4px; }
     .admin-scope-toggle { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
     .library-skip-button { font-size: 11px; padding: 2px 8px; }
+    .purge-message { font-size: 12px; color: #1a6b1a; }
+    .purge-message.error { color: #b30000; }
   </style>
 </head>
 
 <body>
-  <button id="run-now-button" type="button" class="dialog-button">Run indexing now</button>
-  <div id="admin-controls" style="display:none;">
-    <button id="admin-run-now-button" type="button" class="dialog-button">Run full index now (all libraries)</button>
-    <button id="admin-pause-button" type="button" class="dialog-button">Pause scheduler</button>
-    <button id="admin-resume-button" type="button" class="dialog-button" style="display:none;">Resume scheduler</button>
-    <button id="admin-abort-button" type="button" class="dialog-button">Abort running index</button>
-    <label id="admin-scope-toggle-label" class="admin-scope-toggle">
-      <input id="admin-scope-toggle" type="checkbox"/> Show all users' jobs
-    </label>
-    <label id="admin-index-snapshots-label" class="admin-scope-toggle">
-      <input id="admin-index-snapshots-toggle" type="checkbox"/> Index Snapshots of webpages
-    </label>
-    <button id="admin-purge-snapshots-button" type="button" class="dialog-button">Delete indexed Snapshot entries…</button>
+  <div id="user-actions" class="actions-section">
+    <h3 class="section-heading">Your indexing</h3>
+    <div class="actions-row">
+      <button id="run-now-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9654;&#65038;</span><span class="button-label">Run indexing now</span></button>
+    </div>
+  </div>
+  <div id="admin-controls" class="actions-section" style="display:none;">
+    <h3 class="section-heading">Admin</h3>
+    <div class="actions-row">
+      <button id="admin-run-now-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9654;&#65038;</span><span class="button-label">Run full index now (all libraries)</span></button>
+      <button id="admin-pause-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9208;&#65038;</span>Pause scheduler</button>
+      <button id="admin-resume-button" type="button" class="dialog-button icon-button" style="display:none;"><span class="button-icon" aria-hidden="true">&#9654;&#65038;</span>Resume scheduler</button>
+      <button id="admin-abort-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9209;&#65038;</span>Abort running index</button>
+    </div>
+    <div class="actions-row">
+      <label id="admin-scope-toggle-label" class="admin-scope-toggle">
+        <input id="admin-scope-toggle" type="checkbox"/> Show all users' jobs
+      </label>
+      <label id="admin-index-snapshots-label" class="admin-scope-toggle">
+        <input id="admin-index-snapshots-toggle" type="checkbox"/> Index Snapshots of webpages
+      </label>
+    </div>
+    <div class="actions-row">
+      <button id="admin-purge-snapshots-button" type="button" class="dialog-button">Delete indexed Snapshot entries…</button>
+      <span id="admin-purge-snapshots-message" class="purge-message" aria-live="polite"></span>
+    </div>
   </div>
   <div id="run-banner">Loading status…</div>
   <div id="libraries-container"></div>

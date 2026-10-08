@@ -201,13 +201,30 @@ var ZoteroRAGAutoIndexStatus = {
 		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
 		if (button) {
 			button.disabled = busy;
-			button.textContent = busy ? 'Indexing in progress…' : 'Run indexing now';
+			this.setButtonLabel(button, busy ? 'Indexing in progress…' : 'Run indexing now');
 		}
 
 		const adminButton = /** @type {HTMLButtonElement} */ (document.getElementById('admin-run-now-button'));
 		if (adminButton) {
 			adminButton.disabled = busy;
-			adminButton.textContent = busy ? 'Indexing in progress…' : 'Run full index now (all libraries)';
+			this.setButtonLabel(adminButton, busy ? 'Indexing in progress…' : 'Run full index now (all libraries)');
+		}
+	},
+
+	/**
+	 * Set a button's visible label text without clobbering its icon span
+	 * (`.button-icon`), for buttons whose label changes based on state.
+	 * Falls back to plain textContent for buttons with no icon/label spans.
+	 * @param {HTMLButtonElement} button
+	 * @param {string} text
+	 * @returns {void}
+	 */
+	setButtonLabel(button, text) {
+		const label = button.querySelector('.button-label');
+		if (label) {
+			label.textContent = text;
+		} else {
+			button.textContent = text;
 		}
 	},
 
@@ -312,6 +329,18 @@ var ZoteroRAGAutoIndexStatus = {
 		if (!this.plugin) return;
 		if (!window.confirm('Delete all already-indexed Snapshot entries from the index now?')) return;
 		if (!window.confirm('This cannot be undone. Continue?')) return;
+
+		const button = /** @type {HTMLButtonElement|null} */ (document.getElementById('admin-purge-snapshots-button'));
+		const message = document.getElementById('admin-purge-snapshots-message');
+		const originalLabel = 'Delete indexed Snapshot entries…';
+		if (message) {
+			message.textContent = '';
+			message.className = 'purge-message';
+		}
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Deleting…';
+		}
 		try {
 			const response = await fetch(`${this.plugin.backendURL}/api/admin/settings/purge-snapshots`, {
 				method: 'POST',
@@ -319,13 +348,30 @@ var ZoteroRAGAutoIndexStatus = {
 			});
 			if (!response.ok) {
 				const body = await response.json().catch(() => ({}));
-				this.renderBanner(body.detail || `Could not purge Snapshot entries (HTTP ${response.status}).`, 'crashed');
+				const errorText = body.detail || `Could not purge Snapshot entries (HTTP ${response.status}).`;
+				if (message) {
+					message.textContent = errorText;
+					message.className = 'purge-message error';
+				}
 				return;
 			}
 			const data = await response.json();
-			this.renderBanner(`Deleted ${data.deleted_chunks} chunk(s) across ${data.deleted_attachments} attachment(s).`, 'idle');
+			const successText = `Deleted ${data.deleted_chunks} chunk(s) across ${data.deleted_attachments} attachment(s).`;
+			if (message) {
+				message.textContent = successText;
+				message.className = 'purge-message';
+			}
 		} catch (e) {
-			this.renderBanner(`Error: ${e}`, 'crashed');
+			const errorText = `Error: ${e}`;
+			if (message) {
+				message.textContent = errorText;
+				message.className = 'purge-message error';
+			}
+		} finally {
+			if (button) {
+				button.disabled = false;
+				button.textContent = originalLabel;
+			}
 		}
 	},
 
@@ -339,7 +385,7 @@ var ZoteroRAGAutoIndexStatus = {
 		const button = /** @type {HTMLButtonElement} */ (document.getElementById('admin-run-now-button'));
 		if (button) {
 			button.disabled = true;
-			button.textContent = 'Starting…';
+			this.setButtonLabel(button, 'Starting…');
 		}
 		this.renderBanner('Starting full index…', 'running');
 		try {
@@ -352,7 +398,7 @@ var ZoteroRAGAutoIndexStatus = {
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
-					button.textContent = 'Run full index now (all libraries)';
+					this.setButtonLabel(button, 'Run full index now (all libraries)');
 				}
 				return;
 			}
@@ -361,7 +407,7 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner(`Error: ${e}`, 'crashed');
 			if (button) {
 				button.disabled = false;
-				button.textContent = 'Run full index now (all libraries)';
+				this.setButtonLabel(button, 'Run full index now (all libraries)');
 			}
 		}
 	},
@@ -476,7 +522,7 @@ var ZoteroRAGAutoIndexStatus = {
 		// Give immediate feedback rather than waiting for the next 5s poll tick.
 		if (button) {
 			button.disabled = true;
-			button.textContent = 'Indexing in progress…';
+			this.setButtonLabel(button, 'Indexing in progress…');
 		}
 		this.renderBanner('Starting indexing…', 'running');
 		try {
@@ -489,7 +535,7 @@ var ZoteroRAGAutoIndexStatus = {
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
-					button.textContent = 'Run indexing now';
+					this.setButtonLabel(button, 'Run indexing now');
 				}
 				return;
 			}
@@ -500,7 +546,7 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner(`Error: ${e}`, 'crashed');
 			if (button) {
 				button.disabled = false;
-				button.textContent = 'Run indexing now';
+				this.setButtonLabel(button, 'Run indexing now');
 			}
 		}
 	},
