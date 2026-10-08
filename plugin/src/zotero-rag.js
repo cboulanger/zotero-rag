@@ -1076,6 +1076,36 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Fetch (and cache for 5 minutes) whether the server admin has enabled
+	 * indexing of Zotero webpage-snapshot attachments (title exactly
+	 * "Snapshot"). Defaults to false (exclude) on any fetch error — the same
+	 * safe-default convention as getAutoIndexedLibraryIds().
+	 * @returns {Promise<boolean>}
+	 */
+	async getIndexSnapshotsEnabled() {
+		const TTL_MS = 5 * 60 * 1000;
+		const now = Date.now();
+		if (this._indexSnapshotsEnabled !== undefined && (now - this._indexSnapshotsEnabledFetchedAt) < TTL_MS) {
+			return this._indexSnapshotsEnabled;
+		}
+		let enabled = false;
+		try {
+			const resp = await fetch(`${this.backendURL}/api/admin/settings`, {
+				headers: this.getAuthHeaders(),
+			});
+			if (resp.ok) {
+				const data = /** @type {any} */ (await resp.json());
+				enabled = data.index_snapshots === true;
+			}
+		} catch (e) {
+			this.log(`[ZoteroRAG] getIndexSnapshotsEnabled failed: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		this._indexSnapshotsEnabled = enabled;
+		this._indexSnapshotsEnabledFetchedAt = now;
+		return enabled;
+	}
+
+	/**
 	 * Create the "auto-indexed on the server" clock icon element. Uses an inline
 	 * SVG (stroke = currentColor) so it renders as a crisp monochrome glyph at a
 	 * controllable size, rather than a system emoji.

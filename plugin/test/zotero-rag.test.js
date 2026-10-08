@@ -958,6 +958,50 @@ test('submitQuery includes force_fresh_retrieval only when true', async () => {
 	assert.strictEqual(capturedBody.force_fresh_retrieval, true);
 });
 
+test('getIndexSnapshotsEnabled fetches and caches the value, defaulting to false on error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	let fetchCalls = 0;
+	const fetchStub = async () => {
+		fetchCalls++;
+		return { ok: true, json: async () => ({ index_snapshots: true }) };
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const first = await plugin.getIndexSnapshotsEnabled();
+	const second = await plugin.getIndexSnapshotsEnabled();
+
+	assert.strictEqual(first, true);
+	assert.strictEqual(second, true);
+	assert.strictEqual(fetchCalls, 1); // cached, no second network call
+});
+
+test('getIndexSnapshotsEnabled defaults to false (exclude) when the fetch fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const fetchStub = async () => { throw new Error('network down'); };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.log = () => {};
+
+	const enabled = await plugin.getIndexSnapshotsEnabled();
+
+	assert.strictEqual(enabled, false);
+});
+
+test('getIndexSnapshotsEnabled defaults to false when the backend returns a non-ok response', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const fetchStub = async () => ({ ok: false, status: 500 });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+
+	const enabled = await plugin.getIndexSnapshotsEnabled();
+
+	assert.strictEqual(enabled, false);
+});
+
 test('getDiversityTuningPayload returns hardcoded defaults when no prefs are set', () => {
 	const zotero = { Libraries: { userLibraryID: 1 }, Prefs: { get: () => undefined } };
 	const plugin = loadPlugin(zotero, {}, {});
