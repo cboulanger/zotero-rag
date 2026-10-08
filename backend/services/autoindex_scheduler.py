@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _STARTUP_DELAY_SECONDS = 60
 
+# Guards the read-then-spawn sequence in trigger_index_run against concurrent
+# calls within this process (the only process — UVICORN_WORKERS=1 in
+# production). See _write_claim for why the lock alone isn't sufficient.
+_trigger_lock = asyncio.Lock()
+
+# How long a freshly-spawned run's "claim" (see _write_claim) is trusted
+# before being ignored, in case the subprocess never got far enough to write
+# its own status (e.g. it crashed on import before CronIndexer.run() could
+# acquire its lock and report "running"). Generous relative to the ~1-1.5s
+# typical subprocess startup observed in production logs.
+_CLAIM_TTL_SECONDS = 10.0
+
 
 async def trigger_index_run(
     settings: Settings, fingerprint: Optional[str] = None, slug: Optional[str] = None
@@ -42,15 +54,48 @@ async def trigger_index_run(
     a single library (used by the admin per-library run-slug endpoint, so
     an admin can target one library in between scheduled runs or after
     aborting the current one, without waiting for the next tick).
+
+    Two near-simultaneous calls (e.g. a user double-clicking "Index" before
+    the first click's subprocess has started up) could otherwise both read
+    read_live_status() as "not running" and each spawn their own subprocess —
+    observed in production as three concurrent indexing processes from three
+    rapid clicks. _trigger_lock serializes the check-and-spawn sequence, and
+    _write_claim/_claim_is_fresh close the remaining gap: the spawned
+    subprocess itself (not this function) is what eventually writes
+    "running": true to cron_status.json, which can take a second or more
+    (interpreter startup, imports), so a second call arriving in that window
+    would still see the stale "not running" status without the claim check.
     """
     store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
     if not store.enabled:
         return "disabled"
-    live_status = await asyncio.to_thread(read_live_status, settings.data_path)
-    if live_status.get("running"):
-        return "already_running"
-    await _spawn_index_run(settings, fingerprint, slug)
-    return "started"
+    async with _trigger_lock:
+        live_status = await asyncio.to_thread(read_live_status, settings.data_path)
+        if live_status.get("running"):
+            return "already_running"
+        if await asyncio.to_thread(_claim_is_fresh, settings.data_path):
+            return "already_running"
+        await asyncio.to_thread(_write_claim, settings.data_path)
+        await _spawn_index_run(settings, fingerprint, slug)
+        return "started"
+
+
+def _claim_path(data_path: Path) -> Path:
+    return data_path / "system" / "autoindex_claim.json"
+
+
+def _write_claim(data_path: Path) -> None:
+    _atomic_write_json(_claim_path(data_path), {"claimed_at": datetime.now(timezone.utc).isoformat()})
+
+
+def _claim_is_fresh(data_path: Path) -> bool:
+    try:
+        data = json.loads(_claim_path(data_path).read_text(encoding="utf-8"))
+        claimed_at = datetime.fromisoformat(data["claimed_at"])
+        age = (datetime.now(timezone.utc) - claimed_at).total_seconds()
+        return 0 <= age < _CLAIM_TTL_SECONDS
+    except (OSError, json.JSONDecodeError, KeyError, ValueError):
+        return False
 
 
 async def run_scheduler_loop(settings: Settings) -> None:

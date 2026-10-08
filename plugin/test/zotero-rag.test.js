@@ -1600,3 +1600,179 @@ test('_getUnavailableAttachments main scan excludes a Snapshot-titled attachment
 
 	assert.deepStrictEqual([...results], []);
 });
+
+// --- Tests for the shared_base_url/shared_api_key branch of renderServiceApiKeyFields ---
+
+/**
+ * Minimal fake element sufficient for renderServiceApiKeyFields: tracks the
+ * handful of properties/methods it touches (className, textContent, type,
+ * value, placeholder, setAttribute, addEventListener, appendChild) plus a
+ * `dispatchChange` test helper that simulates a 'change' event.
+ * @returns {any}
+ */
+function makeFakeElement() {
+	const listeners = {};
+	return {
+		className: '', textContent: '', id: '', type: undefined, value: '', placeholder: '',
+		children: [],
+		setAttribute() {},
+		appendChild(child) { this.children.push(child); },
+		addEventListener(event, handler) { listeners[event] = handler; },
+		dispatchChange(value) {
+			this.value = value;
+			if (listeners.change) return listeners.change({ target: this });
+		},
+	};
+}
+
+/** @returns {any} a fake `doc` whose createElementNS always returns a fresh fake element */
+function makeFakeDoc() {
+	return { createElementNS: () => makeFakeElement(), createTextNode: () => makeFakeElement() };
+}
+
+/** @returns {any} a fake container tracking every element appended to it */
+function makeFakeContainer() {
+	const appended = [];
+	return {
+		appended,
+		querySelectorAll: () => ({ forEach: () => {} }),
+		appendChild(el) { appended.push(el); },
+	};
+}
+
+/**
+ * Find the <input>-equivalent fake element among a row's children: the only
+ * child whose `.type` was explicitly set to 'text' or 'password' (the label
+ * and status span never set `.type`, so it stays `undefined`).
+ * @param {any} row
+ * @returns {any}
+ */
+function findInputChild(row) {
+	return row.children.find(el => el.type === 'text' || el.type === 'password');
+}
+
+test('renderServiceApiKeyFields renders a shared_base_url field as a text input that POSTs via setSharedRemoteField instead of writing a local pref', async () => {
+	const prefs = {};
+	const zotero = { Prefs: { get: (k) => prefs[k], set: (k, v) => { prefs[k] = v; } } };
+	const plugin = loadPlugin(zotero, {}, {});
+	let posted = null;
+	plugin.setSharedRemoteField = async (keyName, value) => {
+		posted = { keyName, value };
+		return { ok: true, is_set: true };
+	};
+
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		header_name: 'X-Mpcdf-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {
+		throw new Error('onKeyChange must not be called for a shared field');
+	});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'text');
+	assert.strictEqual(input.value, ''); // never prefilled from a pref
+
+	await input.dispatchChange('https://llm.mpcdf.mpg.de/abc123/v1');
+
+	assert.deepStrictEqual(posted, { keyName: 'MPCDF_EMBEDDING_BASE_URL', value: 'https://llm.mpcdf.mpg.de/abc123/v1' });
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
+});
+
+test('renderServiceApiKeyFields renders a shared_api_key field as a password input', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_API_KEY',
+		header_name: 'X-Mpcdf-Embedding-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared API key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: true,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'password');
+	assert.strictEqual(input.placeholder, 'Configured — enter a new value to replace it');
+});
+
+test('renderServiceApiKeyFields still writes a personal api_key field to a local pref (existing behavior unchanged)', async () => {
+	const prefs = {};
+	const zotero = { Prefs: { get: (k) => prefs[k], set: (k, v) => { prefs[k] = v; } } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'KISSKI_API_KEY', header_name: 'X-Kisski-Api-Key', kind: 'api_key',
+		description: 'API key', docs_url: null, required_for: ['indexing', 'querying'],
+	}];
+	let changed = null;
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, (keyInfo, value) => { changed = { keyInfo, value }; });
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'password');
+
+	await input.dispatchChange('my-kisski-key');
+
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.KISSKI_API_KEY'], 'my-kisski-key');
+	assert.strictEqual(changed.value, 'my-kisski-key');
+});
+
+// --- Tests for setSharedRemoteField itself ---
+
+test('setSharedRemoteField POSTs to /api/config/remote-fields and returns is_set on success', async () => {
+	/** @type {Array<{url: string, init: any}>} */
+	const fetchCalls = [];
+	const fetchStub = async (url, init) => {
+		fetchCalls.push({ url, init });
+		return { ok: true, status: 200, json: async () => ({ is_set: { MPCDF_EMBEDDING_BASE_URL: true } }) };
+	};
+	const zotero = { Prefs: { get: () => null } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+	plugin.requiredApiKeys = [];
+
+	const result = await plugin.setSharedRemoteField('MPCDF_EMBEDDING_BASE_URL', 'https://llm.mpcdf.mpg.de/abc123/v1');
+
+	assert.strictEqual(fetchCalls.length, 1);
+	assert.strictEqual(fetchCalls[0].url, 'http://localhost:8119/api/config/remote-fields');
+	assert.deepStrictEqual(
+		JSON.parse(fetchCalls[0].init.body),
+		{ values: { MPCDF_EMBEDDING_BASE_URL: 'https://llm.mpcdf.mpg.de/abc123/v1' } },
+	);
+	// `result` is an object literal returned from inside the vm context (a
+	// separate realm from this test's own global), so assert.deepStrictEqual
+	// would otherwise fail on prototype identity alone — see the identical
+	// `{ ...map.get('A1') }` workaround used earlier in this file.
+	assert.deepStrictEqual({ ...result }, { ok: true, is_set: true });
+});
+
+test('setSharedRemoteField returns ok:false with the server detail message on a non-2xx response', async () => {
+	const fetchStub = async () => ({ ok: false, status: 400, json: async () => ({ detail: 'Unknown remote-config key' }) });
+	const zotero = { Prefs: { get: () => null } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+	plugin.requiredApiKeys = [];
+
+	const result = await plugin.setSharedRemoteField('NOT_A_REAL_FIELD', 'x');
+
+	// Same cross-realm-object caveat as above.
+	assert.deepStrictEqual({ ...result }, { ok: false, error: 'Unknown remote-config key' });
+});

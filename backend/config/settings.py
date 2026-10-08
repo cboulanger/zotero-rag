@@ -5,6 +5,7 @@ Loads configuration from environment variables and provides access to
 hardware presets and storage paths.
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Annotated, Optional
@@ -14,6 +15,8 @@ from pydantic_settings import NoDecode
 
 from backend.__version__ import __version__
 from .presets import HardwarePreset, get_preset
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -319,7 +322,25 @@ class Settings(BaseSettings):
         return v_upper
 
     def get_hardware_preset(self) -> HardwarePreset:
-        """Get the configured hardware preset."""
+        """Get the configured hardware preset.
+
+        An admin-set runtime override (backend.services.admin_settings_store,
+        set via POST /api/config) takes precedence over MODEL_PRESET, letting
+        an admin hot-swap between presets without a restart — see
+        docs/superpowers/specs/2026-10-08-dynamic-remote-preset-config-design.md.
+        An override naming an unknown preset (e.g. after a code change removes
+        it) is ignored with a warning, falling back to MODEL_PRESET.
+        """
+        from backend.services.admin_settings_store import get_active_preset_override
+        override = get_active_preset_override(self.data_path)
+        if override:
+            try:
+                return get_preset(override)
+            except ValueError:
+                logger.warning(
+                    "active_preset_override=%r is not a known preset; falling back to MODEL_PRESET=%r",
+                    override, self.model_preset,
+                )
         return get_preset(self.model_preset)
 
     def ensure_directories(self):

@@ -3,6 +3,7 @@ Unit tests for configuration system.
 """
 
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,8 @@ import pytest
 
 from backend.config.presets import get_preset, list_presets, PRESETS
 from backend.config.settings import Settings, get_settings, reset_settings
+from backend.services.zotero_identity import reset_identity_cache
+from backend.zotero.group_roles import reset_admin_role_cache
 
 
 class TestPresets(unittest.TestCase):
@@ -44,6 +47,25 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(preset.llm.model_type, "remote")
         self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
         self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
+
+    def test_get_preset_remote_mpcdf_uses_shared_dynamic_fields(self):
+        """remote-mpcdf has no static base_url — both base_url and API key are
+        resolved at request time from the shared admin-set store (see
+        backend.services.admin_settings_store), not baked into the preset."""
+        preset = get_preset("remote-mpcdf")
+
+        self.assertEqual(preset.name, "remote-mpcdf")
+        self.assertEqual(preset.embedding.model_type, "remote")
+        self.assertNotIn("base_url", preset.embedding.model_kwargs)
+        self.assertEqual(preset.embedding.model_kwargs["shared_base_url_env"], "MPCDF_EMBEDDING_BASE_URL")
+        self.assertEqual(preset.embedding.model_kwargs["shared_api_key_env"], "MPCDF_EMBEDDING_API_KEY")
+        self.assertEqual(preset.llm.model_type, "remote")
+        self.assertNotIn("base_url", preset.llm.model_kwargs)
+        self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "MPCDF_LLM_BASE_URL")
+        self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "MPCDF_LLM_API_KEY")
+        # Same embedding model as remote-kisski — same vector space, so the two
+        # presets are mutually hot-swappable at runtime (see Task 6).
+        self.assertEqual(preset.embedding.model_name, get_preset("remote-kisski").embedding.model_name)
 
     def test_get_preset_invalid(self):
         """Test getting invalid preset raises error."""
@@ -151,6 +173,25 @@ class TestSettings(unittest.TestCase):
 
         self.assertEqual(preset.name, "cpu-only")
 
+    def test_get_hardware_preset_uses_active_preset_override_when_set(self):
+        from backend.services.admin_settings_store import set_active_preset_override
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(model_preset="cpu-only", data_path=tmp)
+            set_active_preset_override(settings.data_path, "remote-mpcdf")
+            self.assertEqual(settings.get_hardware_preset().name, "remote-mpcdf")
+
+    def test_get_hardware_preset_falls_back_to_model_preset_when_no_override_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(model_preset="cpu-only", data_path=tmp)
+            self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
+
+    def test_get_hardware_preset_ignores_unknown_override(self):
+        from backend.services.admin_settings_store import set_active_preset_override
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Settings(model_preset="cpu-only", data_path=tmp)
+            set_active_preset_override(settings.data_path, "no-such-preset")
+            self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
+
     def test_get_api_key(self):
         """Test getting API keys from environment variables."""
         with patch.dict(os.environ, {
@@ -193,6 +234,133 @@ def test_autoindex_settings_defaults(monkeypatch):
     assert s.autoindex_secret is None
     # Defaults under data_path/system
     assert str(s.autoindex_keys_path).endswith("system/autoindex_keys.json")
+
+
+class TestConfigApi(unittest.TestCase):
+    """Endpoint tests for GET/POST /api/config and POST /api/config/remote-fields."""
+
+    def setUp(self):
+        from backend.main import app
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+        self.tmp = tempfile.TemporaryDirectory()
+        s = get_settings()
+        s.data_path = Path(self.tmp.name)
+        s.model_preset = "remote-kisski"
+        self.app = app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.app.dependency_overrides.clear()
+        self.tmp.cleanup()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+
+    def _override_admin(self, identity):
+        from backend.dependencies import require_authorized_group_admin
+        self.app.dependency_overrides[require_authorized_group_admin] = lambda: identity
+
+    def test_get_config_reflects_current_preset_name(self):
+        r = self.client.get("/api/config")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["preset_name"], "remote-kisski")
+
+    def test_get_config_lists_compatible_presets_for_remote_kisski(self):
+        r = self.client.get("/api/config")
+        compatible = set(r.json()["compatible_presets"])
+        self.assertIn("remote-kisski", compatible)
+        self.assertIn("remote-mpcdf", compatible)
+        self.assertIn("windows-test", compatible)
+        self.assertIn("apple-silicon-kisski", compatible)
+        self.assertNotIn("remote-openai", compatible)  # different embedding model
+        self.assertNotIn("cpu-only", compatible)  # local preset
+
+    def test_post_config_requires_admin(self):
+        from unittest.mock import AsyncMock
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().api_host = "rag.example.com"
+        get_settings().authorized_group_id = 999
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            r = self.client.post(
+                "/api/config", json={"preset_name": "remote-mpcdf"},
+                headers={"X-Zotero-API-Key": "K"},
+            )
+        self.assertEqual(r.status_code, 403)
+
+    def test_post_config_switches_to_compatible_preset_as_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["preset_name"], "remote-mpcdf")
+        r2 = self.client.get("/api/config")
+        self.assertEqual(r2.json()["preset_name"], "remote-mpcdf")
+
+    def test_post_config_rejects_incompatible_preset_as_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        r = self.client.post("/api/config", json={"preset_name": "remote-openai"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_post_config_rejects_unknown_preset_as_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        r = self.client.post("/api/config", json={"preset_name": "no-such-preset"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_required_keys_reports_shared_kind_and_is_set_for_mpcdf(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.get("/api/required-keys")
+        self.assertEqual(r.status_code, 200)
+        by_key = {k["key_name"]: k for k in r.json()["keys"]}
+        self.assertEqual(by_key["MPCDF_EMBEDDING_BASE_URL"]["kind"], "shared_base_url")
+        self.assertFalse(by_key["MPCDF_EMBEDDING_BASE_URL"]["is_set"])
+
+    def test_remote_fields_requires_admin(self):
+        from unittest.mock import AsyncMock
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().api_host = "rag.example.com"
+        get_settings().authorized_group_id = 999
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            r = self.client.post(
+                "/api/config/remote-fields",
+                json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
+                headers={"X-Zotero-API-Key": "K"},
+            )
+        self.assertEqual(r.status_code, 403)
+
+    def test_remote_fields_as_admin_sets_value_and_is_reflected_in_required_keys(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["is_set"]["MPCDF_EMBEDDING_BASE_URL"])
+        r2 = self.client.get("/api/required-keys")
+        by_key = {k["key_name"]: k for k in r2.json()["keys"]}
+        self.assertTrue(by_key["MPCDF_EMBEDDING_BASE_URL"]["is_set"])
+
+    def test_remote_fields_rejects_unknown_key_as_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"NOT_A_REAL_FIELD": "x"}},
+        )
+        self.assertEqual(r.status_code, 400)
 
 
 if __name__ == "__main__":

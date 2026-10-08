@@ -10,8 +10,10 @@
  * @property {number} [items_processed]
  * @property {number} [items_total]
  * @property {number} [chunks_added]
+ * @property {number} [items_failed] - items whose attachment failed to download/process this run; they remain candidates for the next scan
  * @property {string} [error]
  * @property {string} [skip_reason]
+ * @property {string} [rate_limit_until] - ISO timestamp; set when skip_reason is "embedding_rate_limit"
  * @property {string} [library_name] - human-readable name, falls back to the raw slug server-side
  * @property {number} [owner_id] - numeric Zotero user id; not shown in the UI (no username resolution available), kept for potential future use
  */
@@ -64,6 +66,15 @@ var ZoteroRAGAutoIndexStatus = {
 	refreshTimer: null,
 	/** @type {'own'|'all'} */
 	adminScope: 'own',
+	/**
+	 * Slugs with a user-triggered run-slug request in flight, keyed by slug.
+	 * Guards against the Index button re-enabling (and inviting a second,
+	 * concurrent click) during the gap between the server accepting the
+	 * request and the spawned subprocess actually writing "running"/"indexing"
+	 * to its status — see _updatePendingRunState.
+	 * @type {Map<string, {since: number, confirmedStarted: boolean}>}
+	 */
+	pendingRunSlugs: new Map(),
 
 	/**
 	 * Initialize the dialog.
@@ -444,6 +455,10 @@ var ZoteroRAGAutoIndexStatus = {
 			button.disabled = true;
 			button.textContent = 'Starting…';
 		}
+		// Mark pending before the request even lands, so a 5s poll tick firing
+		// mid-request can't see a stale "not running" status and re-enable the
+		// button early — see _updatePendingRunState for how this clears again.
+		this.pendingRunSlugs.set(slug, { since: Date.now(), confirmedStarted: false });
 		try {
 			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/run-slug`, {
 				method: 'POST',
@@ -453,6 +468,7 @@ var ZoteroRAGAutoIndexStatus = {
 			if (!response.ok) {
 				const body = await response.json().catch(() => ({}));
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
+				this.pendingRunSlugs.delete(slug);
 				if (button) {
 					button.disabled = false;
 					button.textContent = 'Index';
@@ -462,7 +478,47 @@ var ZoteroRAGAutoIndexStatus = {
 			await this.fetchAndRender();
 		} catch (e) {
 			this.renderBanner(`Error: ${e}`, 'crashed');
+			this.pendingRunSlugs.delete(slug);
 		}
+	},
+
+	/**
+	 * Decide whether a run-slug request is still "pending" for button-disabling
+	 * purposes, and advance/clear its tracking state as fresher status arrives.
+	 *
+	 * The server accepts a run-slug request and spawns a subprocess
+	 * asynchronously — there's a real gap (subprocess startup, imports) before
+	 * that subprocess writes "indexing" to the status file, during which a
+	 * status poll still reads the previous (not-running) state. Without this
+	 * tracking, that stale read re-enables the button and invites a second
+	 * overlapping click (observed: three concurrent indexing subprocesses
+	 * spawned from rapid clicks). A request that fails fast server-side before
+	 * ever updating per-slug status (e.g. an already-rate-limited embedding
+	 * key) would otherwise leave the button disabled forever, so an unconfirmed
+	 * pending entry expires after a grace window.
+	 * @param {string} slug
+	 * @param {AutoIndexSlugStatus} [info]
+	 * @returns {boolean} true if the Index button for this slug should stay disabled
+	 */
+	_updatePendingRunState(slug, info) {
+		const pending = this.pendingRunSlugs.get(slug);
+		if (!pending) return false;
+		const isActive = !!info && (info.status === 'pending' || info.status === 'indexing');
+		if (isActive) {
+			pending.confirmedStarted = true;
+			return true;
+		}
+		if (pending.confirmedStarted) {
+			// Was confirmed running, now back to a terminal status — finished.
+			this.pendingRunSlugs.delete(slug);
+			return false;
+		}
+		const PENDING_GRACE_MS = 15000;
+		if (Date.now() - pending.since > PENDING_GRACE_MS) {
+			this.pendingRunSlugs.delete(slug);
+			return false;
+		}
+		return true;
 	},
 
 	/**
@@ -519,6 +575,28 @@ var ZoteroRAGAutoIndexStatus = {
 	},
 
 	/**
+	 * Turn a per-library skip_reason/error into a human-readable message.
+	 * Known machine-readable reasons (currently just "embedding_rate_limit")
+	 * get a friendly, actionable message; anything else (admin skip messages,
+	 * arbitrary exception text) is already human-written and passed through.
+	 * @param {AutoIndexSlugStatus} info
+	 * @returns {string}
+	 */
+	_formatSkipOrErrorReason(info) {
+		if (info.error) return info.error;
+		if (info.skip_reason === 'embedding_rate_limit') {
+			return info.rate_limit_until
+				? `Embedding quota exhausted for today — resumes automatically at ${this.formatTime(info.rate_limit_until)}.`
+				: 'Embedding quota exhausted for today — indexing will resume automatically once the limit resets.';
+		}
+		if (info.skip_reason) return info.skip_reason;
+		if (info.items_failed) {
+			return `${info.items_failed} item(s) failed to index this run — check the server logs; they remain candidates for the next scan.`;
+		}
+		return '';
+	},
+
+	/**
 	 * Render one row per library with a progress bar reflecting its status.
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
 	 * @param {boolean} [isAdmin]
@@ -569,8 +647,9 @@ var ZoteroRAGAutoIndexStatus = {
 				const runButton = document.createElement('button');
 				runButton.type = 'button';
 				runButton.className = 'dialog-button library-run-button';
-				runButton.textContent = 'Index';
-				runButton.disabled = running;
+				const isPending = this._updatePendingRunState(slug, info);
+				runButton.textContent = isPending ? 'Starting…' : 'Index';
+				runButton.disabled = running || isPending;
 				runButton.dataset.runSlug = slug;
 				runButton.addEventListener('click', () => this.runSlug(slug));
 				header.appendChild(runButton);
@@ -611,10 +690,10 @@ var ZoteroRAGAutoIndexStatus = {
 			meta.textContent = parts.join(' — ');
 			row.appendChild(meta);
 
-			if (info.error || info.skip_reason) {
+			if (info.error || info.skip_reason || info.items_failed) {
 				const errorDiv = document.createElement('div');
 				errorDiv.className = 'library-error';
-				errorDiv.textContent = info.error || info.skip_reason || '';
+				errorDiv.textContent = this._formatSkipOrErrorReason(info);
 				row.appendChild(errorDiv);
 			}
 

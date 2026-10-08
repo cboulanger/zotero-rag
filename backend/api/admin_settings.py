@@ -53,8 +53,15 @@ async def put_admin_settings(
     body: AdminSettings,
     identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
 ) -> AdminSettings:
+    """Merges `body` into the full current state before writing, rather than
+    replacing it outright — `AdminSettings` only models `index_snapshots`, but
+    the on-disk state also carries `active_preset_override`/`remote_config`
+    (backend.services.admin_settings_store), which a naive full-replace here
+    would silently wipe every time this endpoint is used."""
     settings = get_settings()
-    await asyncio.to_thread(write_admin_settings, settings.data_path, body.model_dump())
+    state = await asyncio.to_thread(read_admin_settings, settings.data_path)
+    state.update(body.model_dump())
+    await asyncio.to_thread(write_admin_settings, settings.data_path, state)
     return body
 
 

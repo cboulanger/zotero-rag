@@ -113,3 +113,102 @@ test('_formatDurationFromNow works for future timestamps too (e.g. "next run")',
 	const in45Minutes = new Date(Date.now() + (45 * 60 + 30) * 1000).toISOString();
 	assert.strictEqual(dialog._formatDurationFromNow(in45Minutes), '45 minutes');
 });
+
+test('_updatePendingRunState returns false when there is no pending entry for the slug', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'done' }), false);
+});
+
+test('_updatePendingRunState stays true and marks confirmedStarted once the server reports indexing', () => {
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'indexing' }), true);
+	assert.strictEqual(dialog.pendingRunSlugs.get('users/1').confirmedStarted, true);
+});
+
+test('_updatePendingRunState clears once a confirmed-started run reaches a terminal status', () => {
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: true });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'done' }), false);
+	assert.strictEqual(dialog.pendingRunSlugs.has('users/1'), false);
+});
+
+test('_updatePendingRunState stays true within the grace window even if status still reads stale/terminal', () => {
+	// Regression: right after a click, the status poll can still show the
+	// PREVIOUS run's terminal status (e.g. "skipped" from an earlier attempt)
+	// because the new subprocess hasn't started yet. Must not be mistaken for
+	// "this run already finished".
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now(), confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'skipped', skip_reason: 'embedding_rate_limit' }), true);
+});
+
+test('_updatePendingRunState gives up after the grace window if never confirmed started', () => {
+	// Regression: a run-slug request can fail fast server-side (e.g. the
+	// embedding key is already rate-limited) without ever writing a fresh
+	// per-slug status, which would otherwise leave the button disabled
+	// forever. A stale `since` simulates that grace window having elapsed.
+	const dialog = loadDialog({});
+	dialog.pendingRunSlugs.set('users/1', { since: Date.now() - 20000, confirmedStarted: false });
+	assert.strictEqual(dialog._updatePendingRunState('users/1', { status: 'skipped' }), false);
+	assert.strictEqual(dialog.pendingRunSlugs.has('users/1'), false);
+});
+
+test('_formatSkipOrErrorReason prefers error over skip_reason', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'error', error: 'boom', skip_reason: 'embedding_rate_limit' }),
+		'boom'
+	);
+});
+
+test('_formatSkipOrErrorReason turns embedding_rate_limit into a human-readable message with the reset time', () => {
+	const dialog = loadDialog({});
+	const until = new Date(Date.now() + 3600000).toISOString();
+	const msg = dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'embedding_rate_limit', rate_limit_until: until });
+	assert.match(msg, /Embedding quota exhausted/);
+	assert.match(msg, /resumes automatically at/);
+	assert.ok(!msg.includes('embedding_rate_limit'), 'must not leak the raw machine-readable string');
+});
+
+test('_formatSkipOrErrorReason falls back to a generic message for embedding_rate_limit with no timestamp', () => {
+	// Covers status entries written before rate_limit_until existed.
+	const dialog = loadDialog({});
+	const msg = dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'embedding_rate_limit' });
+	assert.match(msg, /Embedding quota exhausted/);
+	assert.ok(!msg.includes('embedding_rate_limit'));
+});
+
+test('_formatSkipOrErrorReason passes through other skip reasons unchanged', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'Skipped by admin request' }),
+		'Skipped by admin request'
+	);
+});
+
+test('_formatSkipOrErrorReason surfaces a done run with partial item failures', () => {
+	// A run can finish with status "done" and still have skipped some items
+	// (e.g. an attachment download failure) — this must not be silently
+	// dropped just because there's no top-level error/skip_reason.
+	const dialog = loadDialog({});
+	const msg = dialog._formatSkipOrErrorReason({ status: 'done', items_processed: 1, chunks_added: 0, items_failed: 1 });
+	assert.match(msg, /1 item\(s\) failed to index/);
+});
+
+test('_formatSkipOrErrorReason prefers error and skip_reason over items_failed', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'error', error: 'boom', items_failed: 3 }),
+		'boom'
+	);
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'Skipped by admin request', items_failed: 3 }),
+		'Skipped by admin request'
+	);
+});
+
+test('_formatSkipOrErrorReason returns empty string when nothing failed', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._formatSkipOrErrorReason({ status: 'done', items_processed: 1, chunks_added: 1 }), '');
+});

@@ -185,7 +185,7 @@ PRESETS = {
 
     "apple-silicon-kisski": HardwarePreset(
         name="apple-silicon-kisski",
-        description="Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote, no torch)",
+        description="Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote)",
         embedding=EmbeddingConfig(
             model_type="remote",
             model_name="multilingual-e5-large-instruct",  # KISSKI: good for multilingual academic content
@@ -218,7 +218,7 @@ PRESETS = {
 
     "remote-kisski": HardwarePreset(
         name="remote-kisski",
-        description="Fully remote via GWDG KISSKI/SAIA Academic Cloud (no local GPU or torch required)",
+        description="Fully remote via GWDG KISSKI/SAIA Academic Cloud",
         embedding=EmbeddingConfig(
             model_type="remote",
             model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
@@ -309,6 +309,52 @@ PRESETS = {
             max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
         ),
         memory_budget_gb=0.5,  # Fully remote
+    ),
+
+    "remote-mpcdf": HardwarePreset(
+        name="remote-mpcdf",
+        description=(
+            "Fully remote via MPCDF LLM Inference Service (llm.mpcdf.mpg.de) — Each endpoint is an "
+            "ephemeral (<=8h) Slurm job; the endpoint URL and the API key need to be set for each "
+            "job indidvidually for both the embedding and the inference endpoint. "
+        ),
+        embedding=EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",  # must match --served-model-name below; 1024-dim, same model as KISSKI
+            batch_size=64,
+            model_kwargs={
+                # MPCDF LLM Inference Service job (embedding endpoint):
+                #   Framework:               vLLM
+                #   Framework image:         vllm/vllm-openai-rocm:latest
+                #   Framework CLI arguments: intfloat/multilingual-e5-large-instruct --runner pooling --convert embed --served-model-name multilingual-e5-large-instruct --tensor-parallel-size=1 --enforce-eager
+                "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+            },
+        ),
+        llm=LLMConfig(
+            model_type="remote",
+            # openai/gpt-oss-120b: 120B MoE (~5.1B active params), 131k-token context, Apache-2.0.
+            # Strong instruction-following/reasoning and a context window large enough for many
+            # retrieved chunks — a good RAG-answering model, and it's the MPCDF UI's own vLLM default.
+            model_names="openai/gpt-oss-120b",
+            max_context_length=131072,
+            max_answer_tokens=4096,
+            temperature=0.7,
+            model_kwargs={
+                # MPCDF LLM Inference Service job (chat/completions endpoint):
+                #   Framework:               vLLM
+                #   Framework image:         vllm/vllm-openai-rocm:latest
+                #   Framework CLI arguments: openai/gpt-oss-120b --tensor-parallel-size=1
+                "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                "shared_api_key_env": "MPCDF_LLM_API_KEY",
+            },
+        ),
+        rag=RAGConfig(
+            top_k=10,
+            score_threshold=0.35,  # multilingual-e5-large-instruct scores
+            max_chunk_size=800,    # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
+        ),
+        memory_budget_gb=0.5,  # Fully remote — no local model weights
     ),
 }
 

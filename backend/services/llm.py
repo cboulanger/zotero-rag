@@ -20,8 +20,8 @@ class LLMService(ABC):
     """Abstract base class for LLM services."""
 
     @staticmethod
-    def required_api_keys(settings: "Settings") -> list[dict]:
-        """Return API keys required by this service (empty for local services)."""
+    def required_client_fields(settings: "Settings") -> list[dict]:
+        """Return the client-configurable fields required by this service (empty for local services)."""
         return []
 
     @property
@@ -239,24 +239,44 @@ class RemoteLLMService(LLMService):
         return self._model_name
 
     @staticmethod
-    def required_api_keys(settings: Settings) -> list[dict]:
-        """Return the API key required by this remote LLM service."""
+    def required_client_fields(settings: Settings) -> list[dict]:
+        """Return the fields required by this remote LLM service (see
+        RemoteEmbeddingService.required_client_fields for the api_key/shared_* kinds)."""
         config = settings.get_hardware_preset().llm
         if config.model_type != "remote":
             return []
+        fields: list[dict] = []
         if "api_key_env" in config.model_kwargs:
-            api_key_env = config.model_kwargs["api_key_env"]
-        elif "claude" in config.model_name.lower() or "anthropic" in config.model_name.lower():
-            api_key_env = "ANTHROPIC_API_KEY"
-        else:
-            api_key_env = "OPENAI_API_KEY"
-        return [{
-            "key_name": api_key_env,
-            "header_name": env_var_to_header(api_key_env),
-            "description": f"API key for remote LLM ({config.model_name})",
-            "docs_url": docs_url_for_key(api_key_env),
-            "required_for": ["querying"],
-        }]
+            env_var = config.model_kwargs["api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
+                "description": f"API key for remote LLM ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+            })
+        elif "shared_api_key_env" not in config.model_kwargs:
+            env_var = "ANTHROPIC_API_KEY" if (
+                "claude" in config.model_name.lower() or "anthropic" in config.model_name.lower()
+            ) else "OPENAI_API_KEY"
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
+                "description": f"API key for remote LLM ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+            })
+        if "shared_base_url_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_base_url_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
+                "description": f"Shared endpoint URL for remote LLM ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+            })
+        if "shared_api_key_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
+                "description": f"Shared API key for remote LLM ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+            })
+        return fields
 
     def _dump_inference_request(self, payload: Dict[str, Any]) -> None:
         """Write the inference request payload to logs/last-inference-request.json (overwrite)."""
@@ -288,14 +308,40 @@ class RemoteLLMService(LLMService):
             try:
                 from openai import AsyncOpenAI
 
-                # Get API key from config or default environment variable
-                api_key_env = self.llm_config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-                api_key = self.api_key or os.getenv(api_key_env)
-                if not api_key:
-                    raise ValueError(f"API key not found in environment variable: {api_key_env}")
+                shared_url_env = self.llm_config.model_kwargs.get("shared_base_url_env")
+                shared_key_env = self.llm_config.model_kwargs.get("shared_api_key_env")
+                data_path = None
+                if shared_url_env or shared_key_env:
+                    from backend.services.admin_settings_store import get_remote_config_value
+                    data_path = self.settings.data_path
 
-                # Check for custom base URL (for OpenAI-compatible APIs)
-                base_url = self.llm_config.model_kwargs.get("base_url")
+                if shared_key_env:
+                    api_key = self.api_key or get_remote_config_value(data_path, shared_key_env) or os.getenv(shared_key_env)
+                    if not api_key:
+                        raise ValueError(
+                            f"API key not configured. POST it to /api/config/remote-fields as "
+                            f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
+                            f"environment variable."
+                        )
+                else:
+                    api_key_env = self.llm_config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+                    api_key = self.api_key or os.getenv(api_key_env)
+                    if not api_key:
+                        raise ValueError(f"API key not found in environment variable: {api_key_env}")
+
+                if shared_url_env:
+                    base_url = get_remote_config_value(data_path, shared_url_env) or os.getenv(shared_url_env)
+                    if not base_url:
+                        raise ValueError(
+                            f"Base URL not configured. POST it to /api/config/remote-fields as "
+                            f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
+                            f"environment variable."
+                        )
+                    from backend.services.admin_settings_store import normalize_base_url
+                    base_url = normalize_base_url(base_url)
+                else:
+                    base_url = self.llm_config.model_kwargs.get("base_url")
+
                 # Allow per-preset timeout override via model_kwargs; default 120 s
                 timeout = float(self.llm_config.model_kwargs.get("timeout", 120))
                 if base_url:
@@ -348,7 +394,10 @@ class RemoteLLMService(LLMService):
         try:
             # Determine provider based on model name or base_url
             # If base_url is set, assume OpenAI-compatible API
-            has_base_url = "base_url" in self.llm_config.model_kwargs
+            has_base_url = (
+                "base_url" in self.llm_config.model_kwargs
+                or "shared_base_url_env" in self.llm_config.model_kwargs
+            )
 
             if has_base_url or "gpt" in model_name or "openai" in model_name or "llama" in model_name:
                 return await self._generate_openai(prompt, max_tokens, temperature)
