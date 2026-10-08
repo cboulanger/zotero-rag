@@ -309,6 +309,15 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         self.assertEqual(r.json(), {"paused": False})
         self.assertFalse(read_scheduler_state(get_settings().data_path)["paused"])
 
+    def test_pause_preserves_existing_next_tick_at(self):
+        from backend.services.autoindex_scheduler import update_scheduler_state
+        update_scheduler_state(get_settings().data_path, next_tick_at="2026-01-01T00:00:00+00:00")
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/autoindex/scheduler/pause")
+        state = read_scheduler_state(get_settings().data_path)
+        self.assertTrue(state["paused"])
+        self.assertEqual(state["next_tick_at"], "2026-01-01T00:00:00+00:00")
+
     def test_run_now_admin_starts_unscoped_run(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
@@ -333,6 +342,31 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         r = self.client.post("/api/autoindex/scheduler/run-now")
         self.assertEqual(r.status_code, 503)
 
+    def test_run_slug_admin_starts_scoped_run(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"started": True, "slug": "groups/42"})
+        mock_spawn.assert_awaited_once()
+        self.assertIn("--slug", mock_spawn.await_args.args)
+        self.assertIn("groups/42", mock_spawn.await_args.args)
+
+    def test_run_slug_admin_rejects_when_already_running(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({"running": True, "pid": 1}), encoding="utf-8")
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_run_slug_admin_rejects_when_autoindex_disabled(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        get_settings().autoindex_secret = None
+        r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 503)
+
     def test_abort_rejects_when_nothing_running(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         r = self.client.post("/api/autoindex/abort")
@@ -348,7 +382,42 @@ class AdminSchedulerControlsTest(unittest.TestCase):
             r = self.client.post("/api/autoindex/abort")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"aborted": True, "pid": 4242})
-        mock_abort.assert_called_once_with(4242)
+        mock_abort.assert_called_once_with(4242, None)
+
+    def test_abort_persists_aborted_status_not_crashed(self):
+        # Regression test: a deliberate admin abort must not read back to the
+        # client as "crashed unexpectedly" (that wording is reserved for a
+        # run dying on its own) — the status file must be updated immediately.
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        status_path = system_dir / "cron_status.json"
+        status_path.write_text(
+            json.dumps({"running": True, "pid": 4242, "slugs": {"users/1": {"status": "indexing"}}}),
+            encoding="utf-8",
+        )
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.api.autoindex.abort_process", return_value=True):
+            r = self.client.post("/api/autoindex/abort")
+        self.assertEqual(r.status_code, 200)
+        on_disk = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["running"])
+        self.assertTrue(on_disk["aborted"])
+        self.assertNotIn("crashed", on_disk)
+        self.assertEqual(on_disk["slugs"]["users/1"]["status"], "aborted")
+
+    def test_abort_passes_recorded_create_time_through(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(
+            json.dumps({"running": True, "pid": 4242, "pid_create_time": 1234567.5}), encoding="utf-8"
+        )
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
+             patch("backend.api.autoindex.abort_process", return_value=True) as mock_abort:
+            r = self.client.post("/api/autoindex/abort")
+        self.assertEqual(r.status_code, 200)
+        mock_abort.assert_called_once_with(4242, 1234567.5)
 
     def test_abort_reports_false_when_process_already_gone(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
@@ -360,7 +429,7 @@ class AdminSchedulerControlsTest(unittest.TestCase):
             r = self.client.post("/api/autoindex/abort")
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), {"aborted": False, "pid": 5555})
-        mock_abort.assert_called_once_with(5555)
+        mock_abort.assert_called_once_with(5555, None)
 
     def _seed_running_status(self, slugs: dict) -> None:
         system_dir = Path(self.tmp.name) / "system"
@@ -435,6 +504,28 @@ class StatusAdminFieldTest(unittest.TestCase):
         self._set_identity(None)
         r = self.client.get("/api/autoindex/status")
         self.assertTrue(r.json()["is_admin"])
+
+    def test_system_health_included_for_admin(self):
+        self._set_identity(None)  # loopback => is_admin=True
+        fake_health = {"cpu_percent": 5.0, "memory": {"percent": 10.0}}
+        with patch("backend.api.autoindex.get_system_health", new=AsyncMock(return_value=fake_health)):
+            r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.json()["system_health"], fake_health)
+
+    def test_system_health_omitted_for_non_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = None
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status")
+        self.assertFalse(r.json()["is_admin"])
+        self.assertNotIn("system_health", r.json())
+
+    def test_system_health_failure_does_not_break_status_endpoint(self):
+        self._set_identity(None)
+        with patch("backend.api.autoindex.get_system_health", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("system_health", r.json())
 
     def test_is_admin_false_without_authorized_group_id(self):
         from backend.services.zotero_identity import ZoteroIdentity
@@ -633,6 +724,18 @@ class StatusAdminFieldTest(unittest.TestCase):
         scheduler = r.json()["scheduler"]
         self.assertFalse(scheduler["active"])
         self.assertFalse(scheduler["paused"])  # no state file written -> defaults False
+
+    def test_scheduler_subobject_reports_next_tick_at(self):
+        from backend.services.autoindex_scheduler import update_scheduler_state
+        update_scheduler_state(get_settings().data_path, next_tick_at="2026-01-01T00:00:00+00:00")
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.json()["scheduler"]["next_tick_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_scheduler_subobject_next_tick_at_none_when_unset(self):
+        self._set_identity(None)
+        r = self.client.get("/api/autoindex/status")
+        self.assertIsNone(r.json()["scheduler"]["next_tick_at"])
 
 
 if __name__ == "__main__":

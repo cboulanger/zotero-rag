@@ -16,6 +16,7 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -29,13 +30,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _STARTUP_DELAY_SECONDS = 60
 
 
-async def trigger_index_run(settings: Settings, fingerprint: Optional[str] = None) -> Literal["started", "already_running", "disabled"]:
+async def trigger_index_run(
+    settings: Settings, fingerprint: Optional[str] = None, slug: Optional[str] = None
+) -> Literal["started", "already_running", "disabled"]:
     """Start a server-side indexing run if one isn't already active.
 
     fingerprint=None triggers an unscoped run covering every resolvable
     target (used by the scheduler and the admin run-now endpoint); a
     fingerprint scopes the run to that entry's own targets (used by the
-    on-demand POST /api/autoindex/run endpoint).
+    on-demand POST /api/autoindex/run endpoint). slug further restricts to
+    a single library (used by the admin per-library run-slug endpoint, so
+    an admin can target one library in between scheduled runs or after
+    aborting the current one, without waiting for the next tick).
     """
     store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
     if not store.enabled:
@@ -43,7 +49,7 @@ async def trigger_index_run(settings: Settings, fingerprint: Optional[str] = Non
     live_status = await asyncio.to_thread(read_live_status, settings.data_path)
     if live_status.get("running"):
         return "already_running"
-    await _spawn_index_run(settings, fingerprint)
+    await _spawn_index_run(settings, fingerprint, slug)
     return "started"
 
 
@@ -56,6 +62,10 @@ async def run_scheduler_loop(settings: Settings) -> None:
     exception in trigger_index_run itself, not the subprocess it spawns)
     must not kill the scheduler task permanently — the loop must keep
     ticking on the configured interval indefinitely.
+
+    Persists next_tick_at to the scheduler state file after every tick, so
+    the status dialog can show "Next run at ..." without guessing — see
+    _record_next_tick.
     """
     if not settings.autoindex_interval_minutes:
         logger.error("run_scheduler_loop called without autoindex_interval_minutes set; exiting immediately.")
@@ -63,11 +73,14 @@ async def run_scheduler_loop(settings: Settings) -> None:
     await asyncio.sleep(_STARTUP_DELAY_SECONDS)
     while True:
         try:
-            if not read_scheduler_state(settings.data_path).get("paused", False):
+            state = await asyncio.to_thread(read_scheduler_state, settings.data_path)
+            if not state.get("paused", False):
                 result = await trigger_index_run(settings)
                 logger.info("Scheduler tick: %s", result)
             else:
                 logger.debug("Scheduler tick skipped: paused by admin.")
+            next_tick_at = datetime.now(timezone.utc) + timedelta(seconds=settings.autoindex_interval_minutes * 60)
+            await asyncio.to_thread(_record_next_tick, settings.data_path, next_tick_at)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -75,12 +88,28 @@ async def run_scheduler_loop(settings: Settings) -> None:
         await asyncio.sleep(settings.autoindex_interval_minutes * 60)
 
 
-async def _spawn_index_run(settings: Settings, fingerprint: Optional[str]) -> None:
+def update_scheduler_state(data_path: Path, **fields) -> dict:
+    """Merge fields into the scheduler state file instead of overwriting it —
+    used by pause_scheduler/resume_scheduler (paused) and the scheduler loop
+    (next_tick_at) so neither write stomps on the other's field."""
+    state = read_scheduler_state(data_path)
+    state.update(fields)
+    write_scheduler_state(data_path, state)
+    return state
+
+
+def _record_next_tick(data_path: Path, next_tick_at: datetime) -> None:
+    update_scheduler_state(data_path, next_tick_at=next_tick_at.isoformat())
+
+
+async def _spawn_index_run(settings: Settings, fingerprint: Optional[str], slug: Optional[str] = None) -> None:
     log_path = settings.data_path / "logs" / "cron_indexer.log"
     script_path = _PROJECT_ROOT / "bin" / "index_libraries.py"
     args = [sys.executable, str(script_path)]
     if fingerprint:
         args += ["--fingerprint", fingerprint]
+    if slug:
+        args += ["--slug", slug]
 
     def _open_log():
         log_path.parent.mkdir(parents=True, exist_ok=True)

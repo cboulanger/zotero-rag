@@ -15,6 +15,7 @@ from backend.services.autoindex_scheduler import (
     read_scheduler_state,
     run_scheduler_loop,
     trigger_index_run,
+    update_scheduler_state,
     write_scheduler_state,
 )
 
@@ -75,6 +76,22 @@ class TriggerIndexRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--fingerprint", args)
         self.assertIn("fp-abc", args)
 
+    async def test_unscoped_run_omits_slug_flag(self):
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            await trigger_index_run(self.settings)
+        self.assertNotIn("--slug", mock_spawn.await_args.args)
+
+    async def test_slug_scoped_run_includes_slug_flag(self):
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            await trigger_index_run(self.settings, slug="groups/42")
+        args = mock_spawn.await_args.args
+        self.assertIn("--slug", args)
+        self.assertIn("groups/42", args)
+
 
 class SchedulerStateTest(unittest.TestCase):
     def setUp(self):
@@ -85,6 +102,17 @@ class SchedulerStateTest(unittest.TestCase):
 
     def test_round_trip(self):
         write_scheduler_state(self.tmp, {"paused": True})
+        self.assertEqual(read_scheduler_state(self.tmp), {"paused": True})
+
+    def test_update_merges_without_clobbering_existing_fields(self):
+        write_scheduler_state(self.tmp, {"paused": True})
+        update_scheduler_state(self.tmp, next_tick_at="2026-01-01T00:00:00+00:00")
+        result = read_scheduler_state(self.tmp)
+        self.assertTrue(result["paused"])
+        self.assertEqual(result["next_tick_at"], "2026-01-01T00:00:00+00:00")
+
+    def test_update_on_missing_file_creates_it(self):
+        update_scheduler_state(self.tmp, paused=True)
         self.assertEqual(read_scheduler_state(self.tmp), {"paused": True})
 
 
@@ -107,6 +135,23 @@ class RunSchedulerLoopTest(unittest.IsolatedAsyncioTestCase):
 
         mock_trigger.assert_awaited_once()
         self.assertEqual(calls, [_STARTUP_DELAY_SECONDS, settings.autoindex_interval_minutes * 60])
+
+    async def test_tick_persists_next_tick_at(self):
+        settings = Settings(data_path=Path(tempfile.mkdtemp()), autoindex_interval_minutes=60)
+        calls = []
+
+        async def fake_sleep(seconds):
+            calls.append(seconds)
+            if len(calls) >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("backend.services.autoindex_scheduler.asyncio.sleep", new=AsyncMock(side_effect=fake_sleep)), \
+             patch("backend.services.autoindex_scheduler.trigger_index_run", new=AsyncMock(return_value="started")):
+            with self.assertRaises(asyncio.CancelledError):
+                await run_scheduler_loop(settings)
+
+        state = read_scheduler_state(settings.data_path)
+        self.assertIn("next_tick_at", state)
 
     async def test_tick_exception_does_not_stop_loop(self):
         """A tick that raises is logged and swallowed, not propagated —

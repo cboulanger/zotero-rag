@@ -6,7 +6,7 @@
 
 /**
  * @typedef {Object} AutoIndexSlugStatus
- * @property {string} status - pending|indexing|done|error|skipped
+ * @property {string} status - pending|indexing|done|error|skipped|crashed|aborted
  * @property {number} [items_processed]
  * @property {number} [items_total]
  * @property {number} [chunks_added]
@@ -31,12 +31,30 @@
  * @property {string} [disabled_reason]
  * @property {boolean} [running]
  * @property {boolean} [crashed]
+ * @property {boolean} [aborted]
  * @property {string} [started_at]
  * @property {string} [finished_at]
  * @property {Record<string, AutoIndexSlugStatus>} [slugs]
  * @property {AutoIndexKeyIssue[]} [key_issues]
  * @property {boolean} [is_admin]
- * @property {{active: boolean, interval_minutes: number|null, paused: boolean}} [scheduler]
+ * @property {{active: boolean, interval_minutes: number|null, paused: boolean, next_tick_at: string|null}} [scheduler]
+ * @property {SystemHealth} [system_health] - admin-only; omitted entirely for non-admin callers
+ */
+
+/**
+ * @typedef {Object} SidecarHealth
+ * @property {string} status - ok|unreachable|timeout|local-mode|error|http_<code>
+ * @property {number} [latency_ms]
+ * @property {string} [error]
+ */
+
+/**
+ * @typedef {Object} SystemHealth
+ * @property {number} cpu_percent
+ * @property {{used_gb: number, total_gb: number, percent: number}} memory
+ * @property {{used_gb: number, total_gb: number, percent: number}} swap
+ * @property {{free_gb: number, total_gb: number, free_percent: number}|null} disk
+ * @property {{kreuzberg: SidecarHealth, qdrant: SidecarHealth}} sidecars
  */
 
 var ZoteroRAGAutoIndexStatus = {
@@ -149,6 +167,26 @@ var ZoteroRAGAutoIndexStatus = {
 	},
 
 	/**
+	 * Format the elapsed/remaining time between now and an ISO timestamp as
+	 * "X hours, Y minutes" (hours omitted when zero), for a parenthetical
+	 * like "(since 2 hours, 5 minutes)" or "(in 45 minutes)".
+	 * @param {string|undefined} isoString
+	 * @returns {string|null} null if isoString is missing/invalid
+	 */
+	_formatDurationFromNow(isoString) {
+		if (!isoString) return null;
+		const then = new Date(isoString).getTime();
+		if (Number.isNaN(then)) return null;
+		const totalMinutes = Math.floor(Math.abs(Date.now() - then) / 60000);
+		const hours = Math.floor(totalMinutes / 60);
+		const minutes = totalMinutes % 60;
+		const parts = [];
+		if (hours > 0) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`);
+		if (minutes > 0 || hours === 0) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`);
+		return parts.join(', ');
+	},
+
+	/**
 	 * Render the full dialog from a status response.
 	 * @param {AutoIndexStatusResponse} data
 	 * @returns {void}
@@ -159,22 +197,32 @@ var ZoteroRAGAutoIndexStatus = {
 			return;
 		}
 		const ownSlugCount = Object.keys(data.slugs || {}).length;
-		if (data.crashed) {
+		const scheduler = data.scheduler || {};
+		if (data.aborted) {
+			this.renderBanner('The last automatic indexing run was stopped by an admin.', 'idle');
+		} else if (data.crashed) {
 			this.renderBanner('The last automatic indexing run crashed unexpectedly.', 'crashed');
 		} else if (data.running && ownSlugCount === 0) {
 			// A run is active, but none of it is this caller's own libraries —
 			// most likely another user's manual trigger or a shared-lock cron tick.
 			this.renderBanner('Indexing server currently busy, please wait and try again later.', 'running');
 		} else if (data.running) {
-			this.renderBanner(`Running since ${this.formatTime(data.started_at)}…`, 'running');
+			const elapsed = this._formatDurationFromNow(data.started_at);
+			const suffix = elapsed ? ` (since ${elapsed})` : '';
+			this.renderBanner(`Running since ${this.formatTime(data.started_at)}${suffix}`, 'running');
+		} else if (scheduler.active && !scheduler.paused && scheduler.next_tick_at) {
+			const remaining = this._formatDurationFromNow(scheduler.next_tick_at);
+			const suffix = remaining ? ` (in ${remaining})` : '';
+			this.renderBanner(`Next run at ${this.formatTime(scheduler.next_tick_at)}${suffix}`, 'idle');
 		} else if (data.finished_at) {
 			this.renderBanner(`Idle. Last run finished ${this.formatTime(data.finished_at)}.`, 'idle');
 		} else {
 			this.renderBanner('Idle. No automatic indexing run has happened yet.', 'idle');
 		}
 
-		this.renderLibraries(data.slugs || {}, data.is_admin === true);
+		this.renderLibraries(data.slugs || {}, data.is_admin === true, data.running === true);
 		this.renderProblems(data.key_issues || []);
+		this.renderSystemHealth(data.system_health);
 		this.updateRunNowButtonState(data);
 		this.updateAdminControlsVisibility(data);
 	},
@@ -372,7 +420,42 @@ var ZoteroRAGAutoIndexStatus = {
 				this.renderBanner(body.detail || `Could not skip job (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
-					button.textContent = 'Skip this job';
+					button.textContent = 'Skip';
+				}
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
+	},
+
+	/**
+	 * Trigger an immediate server-side indexing run scoped to a single
+	 * library (admin only) — lets an admin target one library in between
+	 * scheduled runs or after aborting the current one.
+	 * @param {string} slug
+	 * @returns {Promise<void>}
+	 */
+	async runSlug(slug) {
+		if (!this.plugin) return;
+		const button = /** @type {HTMLButtonElement|null} */ (document.querySelector(`[data-run-slug="${slug}"]`));
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Starting…';
+		}
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/run-slug`, {
+				method: 'POST',
+				headers: { ...this.plugin.getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ slug }),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
+				if (button) {
+					button.disabled = false;
+					button.textContent = 'Index';
 				}
 				return;
 			}
@@ -439,9 +522,10 @@ var ZoteroRAGAutoIndexStatus = {
 	 * Render one row per library with a progress bar reflecting its status.
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
 	 * @param {boolean} [isAdmin]
+	 * @param {boolean} [running] - whether any run (own or another's) is currently active server-side
 	 * @returns {void}
 	 */
-	renderLibraries(slugs, isAdmin = false) {
+	renderLibraries(slugs, isAdmin = false, running = false) {
 		const container = document.getElementById('libraries-container');
 		const emptyState = document.getElementById('empty-state');
 		if (!container || !emptyState) return;
@@ -469,16 +553,35 @@ var ZoteroRAGAutoIndexStatus = {
 				: slug;
 			header.appendChild(nameSpan);
 
+			// Push the badge and admin buttons to the right as one group,
+			// so the badge lines up with them consistently whether or not
+			// the run/skip buttons are present for this row.
+			const spacer = document.createElement('span');
+			spacer.className = 'library-row-spacer';
+			header.appendChild(spacer);
+
 			const badge = document.createElement('span');
 			badge.className = `library-status-badge ${info.status}`;
 			badge.textContent = info.status;
 			header.appendChild(badge);
 
+			if (isAdmin) {
+				const runButton = document.createElement('button');
+				runButton.type = 'button';
+				runButton.className = 'dialog-button library-run-button';
+				runButton.textContent = 'Index';
+				runButton.disabled = running;
+				runButton.dataset.runSlug = slug;
+				runButton.addEventListener('click', () => this.runSlug(slug));
+				header.appendChild(runButton);
+			}
+
 			if (isAdmin && (info.status === 'pending' || info.status === 'indexing')) {
 				const skipButton = document.createElement('button');
 				skipButton.type = 'button';
 				skipButton.className = 'dialog-button library-skip-button';
-				skipButton.textContent = 'Skip this job';
+				skipButton.textContent = 'Skip';
+				skipButton.disabled = !running;
 				skipButton.dataset.skipSlug = slug;
 				skipButton.addEventListener('click', () => this.skipSlug(slug));
 				header.appendChild(skipButton);
@@ -539,6 +642,84 @@ var ZoteroRAGAutoIndexStatus = {
 			row.className = 'problem-row';
 			row.textContent = issue.reason;
 			list.appendChild(row);
+		}
+	},
+
+	/**
+	 * Pick a severity class for a metric given "higher is worse" thresholds.
+	 * @param {number} value
+	 * @param {number} warnAt
+	 * @param {number} criticalAt
+	 * @returns {''|'warn'|'critical'}
+	 */
+	_severityHighIsBad(value, warnAt, criticalAt) {
+		if (value >= criticalAt) return 'critical';
+		if (value >= warnAt) return 'warn';
+		return '';
+	},
+
+	/**
+	 * Render the admin-only system health panel (host CPU/memory/swap/disk
+	 * plus Kreuzberg/Qdrant reachability+latency) — lets an admin tell a
+	 * stuck run apart from a slow one without leaving the dialog.
+	 * @param {SystemHealth|undefined} health
+	 * @returns {void}
+	 */
+	renderSystemHealth(health) {
+		const section = document.getElementById('system-health-section');
+		const content = document.getElementById('system-health-content');
+		if (!section || !content) return;
+		if (!health) {
+			section.style.display = 'none';
+			return;
+		}
+		section.style.display = '';
+		content.innerHTML = '';
+
+		/**
+		 * @param {string} label
+		 * @param {string} value
+		 * @param {''|'warn'|'critical'} [severity]
+		 */
+		const addItem = (label, value, severity = '') => {
+			const item = document.createElement('span');
+			item.className = 'health-item';
+			const labelSpan = document.createElement('span');
+			labelSpan.className = 'health-label';
+			labelSpan.textContent = `${label}: `;
+			item.appendChild(labelSpan);
+			const valueSpan = document.createElement('span');
+			valueSpan.className = `health-value${severity ? ` ${severity}` : ''}`;
+			valueSpan.textContent = value;
+			item.appendChild(valueSpan);
+			content.appendChild(item);
+		};
+
+		addItem('CPU', `${health.cpu_percent.toFixed(0)}%`, this._severityHighIsBad(health.cpu_percent, 80, 95));
+		addItem(
+			'Memory',
+			`${health.memory.used_gb.toFixed(1)} / ${health.memory.total_gb.toFixed(1)} GB (${health.memory.percent.toFixed(0)}%)`,
+			this._severityHighIsBad(health.memory.percent, 75, 90),
+		);
+		addItem(
+			'Swap',
+			`${health.swap.used_gb.toFixed(1)} / ${health.swap.total_gb.toFixed(1)} GB (${health.swap.percent.toFixed(0)}%)`,
+			this._severityHighIsBad(health.swap.percent, 50, 80),
+		);
+		if (health.disk) {
+			// "low is bad" for free space, so invert: treat it as a 100-x
+			// high-is-bad value against the same threshold helper.
+			const severity = this._severityHighIsBad(100 - health.disk.free_percent, 80, 90);
+			addItem('Disk free', `${health.disk.free_percent.toFixed(0)}% (${health.disk.free_gb.toFixed(0)} GB)`, severity);
+		}
+		for (const [name, label] of [['kreuzberg', 'Kreuzberg'], ['qdrant', 'Qdrant']]) {
+			const sidecar = health.sidecars && health.sidecars[name];
+			if (!sidecar) continue;
+			const ok = sidecar.status === 'ok' || sidecar.status === 'local-mode';
+			const text = sidecar.latency_ms !== undefined
+				? `${sidecar.status} (${sidecar.latency_ms}ms)`
+				: sidecar.status;
+			addItem(label, text, ok ? '' : 'critical');
 		}
 	},
 };

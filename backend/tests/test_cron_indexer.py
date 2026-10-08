@@ -17,6 +17,7 @@ from backend.services.cron_indexer import (
     abort_process,
     clear_control_state,
     is_process_alive,
+    mark_run_stopped,
     read_control_state,
     read_live_status,
     write_control_state,
@@ -429,6 +430,18 @@ class TestIsProcessAlive(unittest.TestCase):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
 
+    def test_matching_create_time_confirms_identity(self):
+        import psutil
+        create_time = psutil.Process(os.getpid()).create_time()
+        self.assertTrue(is_process_alive(os.getpid(), create_time))
+
+    def test_mismatched_create_time_rejects_recycled_pid(self):
+        # A live PID that does NOT match the recorded creation time means the
+        # number was recycled by the OS for a different process (or, as seen
+        # in production, a thread of a different, long-lived process) — must
+        # not be reported as the originally-recorded process.
+        self.assertFalse(is_process_alive(os.getpid(), 1.0))
+
 
 class TestReadLiveStatus(unittest.TestCase):
     def setUp(self):
@@ -461,6 +474,97 @@ class TestReadLiveStatus(unittest.TestCase):
         result = read_live_status(self.tmp)
         self.assertTrue(result["running"])
         self.assertNotIn("crashed", result)
+
+    def test_running_with_live_pid_and_matching_create_time_stays_running(self):
+        import psutil
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": psutil.Process(os.getpid()).create_time(),
+        })
+        result = read_live_status(self.tmp)
+        self.assertTrue(result["running"])
+        self.assertNotIn("crashed", result)
+
+    def test_running_with_recycled_pid_marked_crashed(self):
+        # Regression test: a PID can be legitimately alive right now without
+        # being the SAME process that was originally recorded — e.g. after
+        # the real indexer subprocess (PID 11) died, the OS later reused 11
+        # as a thread ID inside the long-lived backend process itself, which
+        # made a bare `os.kill(11, 0)` liveness check report the run as
+        # "alive" forever, wedging the indexing status permanently.
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": 1.0,  # does not match the real process's creation time
+        })
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertTrue(result["crashed"])
+
+    def test_dead_run_self_heals_on_disk_including_indexing_slug(self):
+        # Regression test: a stale "running" status must not require manual
+        # intervention to clear (production needed cron_status.json hand-edited
+        # before this fix) — the first read should persist the correction, and
+        # resolve any slug still mid-"indexing" so the UI stops showing it as
+        # actively running forever.
+        self._write_status({
+            "running": True,
+            "pid": 99999999,
+            "slugs": {
+                "users/1": {"status": "indexing", "items_processed": 0},
+                "groups/2": {"status": "pending"},
+                "groups/3": {"status": "done"},
+            },
+        })
+        read_live_status(self.tmp)
+        on_disk = json.loads((self.tmp / "system" / "cron_status.json").read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["running"])
+        self.assertTrue(on_disk["crashed"])
+        self.assertEqual(on_disk["slugs"]["users/1"]["status"], "crashed")
+        self.assertIn("finished_at", on_disk["slugs"]["users/1"])
+        self.assertEqual(on_disk["slugs"]["groups/2"]["status"], "pending")
+        self.assertEqual(on_disk["slugs"]["groups/3"]["status"], "done")
+
+
+class TestMarkRunStopped(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "system").mkdir()
+
+    def _write_status(self, data: dict) -> None:
+        (self.tmp / "system" / "cron_status.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(mark_run_stopped(self.tmp, "aborted"), {})
+
+    def test_not_running_is_a_noop(self):
+        self._write_status({"running": False, "finished_at": "2026-01-01T00:00:00+00:00"})
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertNotIn("aborted", result)
+
+    def test_aborted_reason_sets_aborted_not_crashed(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "indexing"}},
+        })
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertFalse(result["running"])
+        self.assertTrue(result["aborted"])
+        self.assertNotIn("crashed", result)
+        self.assertEqual(result["slugs"]["users/1"]["status"], "aborted")
+
+    def test_pending_slugs_are_left_untouched(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "pending"}},
+        })
+        result = mark_run_stopped(self.tmp, "crashed")
+        self.assertEqual(result["slugs"]["users/1"]["status"], "pending")
 
 
 class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
@@ -760,6 +864,23 @@ class TestAbortProcess(unittest.TestCase):
         with patch("backend.services.cron_indexer.is_process_alive", return_value=True), \
              patch("backend.services.cron_indexer.os.kill", side_effect=ProcessLookupError):
             self.assertFalse(abort_process(1234))
+
+    def test_passes_expected_create_time_to_identity_check(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True) as mock_alive, \
+             patch("backend.services.cron_indexer.os.kill"):
+            abort_process(1234, expected_create_time=5555.5)
+        mock_alive.assert_called_once_with(1234, 5555.5)
+
+    def test_does_not_signal_a_recycled_pid(self):
+        # The real identity check (no mocking) must refuse to signal a PID
+        # that is alive but does not match the recorded creation time —
+        # this is what stops abort from killing an unrelated process (e.g.
+        # the backend's own process, if its PID was recycled from a dead
+        # indexer run) that merely happens to share the old PID number.
+        with patch("backend.services.cron_indexer.os.kill") as mock_kill:
+            result = abort_process(os.getpid(), expected_create_time=1.0)
+        self.assertFalse(result)
+        mock_kill.assert_not_called()
 
 
 class TestControlState(unittest.TestCase):

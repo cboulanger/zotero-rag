@@ -1174,6 +1174,12 @@ export function buildQuadletContent(cfg, kreuzbergService, qdrantService, qdrant
   }
 
   lines.push('', '[Service]', 'TimeoutStartSec=300');
+  if (kreuzbergService) {
+    // A killed main container leaves any in-flight Kreuzberg extraction orphaned
+    // (its client is gone, but Kreuzberg has no way to know to cancel) — restarting
+    // the sidecar here clears it on every deploy/restart without manual intervention.
+    lines.push(`ExecStartPre=-/usr/bin/systemctl restart ${kreuzbergService}.service`);
+  }
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
     lines.push(
@@ -1278,6 +1284,12 @@ export function buildLegacyUnitContent(cfg, kreuzbergService, qdrantService, qdr
   for (const s of sidecars) lines.push(`Requires=${s}`);
   lines.push('', '[Service]', 'TimeoutStartSec=300', 'Restart=always', 'RestartSec=5');
   lines.push(`ExecStartPre=-/usr/bin/podman rm -f ${name}`);
+  if (kreuzbergService) {
+    // A killed main container leaves any in-flight Kreuzberg extraction orphaned
+    // (its client is gone, but Kreuzberg has no way to know to cancel) — restarting
+    // the sidecar here clears it on every deploy/restart without manual intervention.
+    lines.push(`ExecStartPre=-/usr/bin/systemctl restart ${kreuzbergService}.service`);
+  }
   if (qdrantContainerName) {
     // $$i / $$((…)) — systemd expands $$ → $ before the shell sees the command
     lines.push(

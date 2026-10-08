@@ -74,3 +74,42 @@ test('setButtonLabel falls back to the button itself when there is no .button-la
 
 	assert.strictEqual(button.textContent, 'Deleting…');
 });
+
+test('_formatDurationFromNow returns null for missing/invalid input', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._formatDurationFromNow(undefined), null);
+	assert.strictEqual(dialog._formatDurationFromNow('not-a-date'), null);
+});
+
+test('_formatDurationFromNow omits hours when under an hour', () => {
+	const dialog = loadDialog({});
+	const fifteenMinutesAgo = new Date(Date.now() - 15 * 60000).toISOString();
+	assert.strictEqual(dialog._formatDurationFromNow(fifteenMinutesAgo), '15 minutes');
+});
+
+test('_formatDurationFromNow includes both hours and minutes', () => {
+	const dialog = loadDialog({});
+	const twoHoursFiveMinutesAgo = new Date(Date.now() - (2 * 60 + 5) * 60000).toISOString();
+	assert.strictEqual(dialog._formatDurationFromNow(twoHoursFiveMinutesAgo), '2 hours, 5 minutes');
+});
+
+test('_formatDurationFromNow omits minutes when exactly on the hour', () => {
+	const dialog = loadDialog({});
+	const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60000).toISOString();
+	assert.strictEqual(dialog._formatDurationFromNow(threeHoursAgo), '3 hours');
+});
+
+test('_formatDurationFromNow uses singular units for exactly 1', () => {
+	const dialog = loadDialog({});
+	const oneHourOneMinuteAgo = new Date(Date.now() - 61 * 60000).toISOString();
+	assert.strictEqual(dialog._formatDurationFromNow(oneHourOneMinuteAgo), '1 hour, 1 minute');
+});
+
+test('_formatDurationFromNow works for future timestamps too (e.g. "next run")', () => {
+	const dialog = loadDialog({});
+	// +30s buffer so flooring to whole minutes can't flake below 45 due to
+	// the few ms of overhead between building this timestamp and the
+	// function's own Date.now() call.
+	const in45Minutes = new Date(Date.now() + (45 * 60 + 30) * 1000).toISOString();
+	assert.strictEqual(dialog._formatDurationFromNow(in45Minutes), '45 minutes');
+});
