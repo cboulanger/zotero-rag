@@ -866,6 +866,7 @@ var RemoteIndexer = {
 			item_version: att.item_version,
 			attachment_version: att.attachment_version,
 			title: parent.getField ? (parent.getField('title') || 'Untitled') : 'Untitled',
+			attachment_title: att.zoteroItem && att.zoteroItem.getField ? (att.zoteroItem.getField('title') || null) : null,
 			authors: Zotero.ZoteroRAG._extractAuthors(parent),
 			year: Zotero.ZoteroRAG._extractYear(parent),
 			item_type: parent.itemType || null,

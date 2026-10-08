@@ -163,6 +163,20 @@ test('_uploadAttachment attaches diagnostics to the thrown error for status "err
 	});
 });
 
+test('_uploadAttachmentInner includes the attachment\'s own title (not the parent\'s) as attachment_title in the upload metadata', async () => {
+	const { call, bodies } = makeUploader({ status: 'done', chunks_added: 1 });
+	const att = {
+		attachment_key: 'SNAP1', item_key: 'ITEM1', mime_type: 'text/html', item_version: 1, attachment_version: 1,
+		filePath: '/fake/path.html',
+		zoteroItem: { getField: (f) => (f === 'title' ? 'Snapshot' : '') },
+		parentItem: { getField: (f) => (f === 'title' ? 'Parent Title' : ''), itemType: 'webpage', dateModified: 'd' },
+	};
+	await call({ att });
+	const sentMetadata = JSON.parse(bodies[0].metadata);
+	assert.strictEqual(sentMetadata.attachment_title, 'Snapshot');
+	assert.strictEqual(sentMetadata.title, 'Parent Title');
+});
+
 test('_uploadAttachment without includeDiagnostics adds no diagnostics fields', async () => {
 	const { call } = makeUploader({ status: 'skipped_empty', chunks_added: 0 });
 	const r = await call();
