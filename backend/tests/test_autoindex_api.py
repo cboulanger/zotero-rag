@@ -496,6 +496,28 @@ class StatusAdminFieldTest(unittest.TestCase):
         r = self.client.get("/api/autoindex/status")
         self.assertTrue(r.json()["is_admin"])
 
+    def test_system_health_included_for_admin(self):
+        self._set_identity(None)  # loopback => is_admin=True
+        fake_health = {"cpu_percent": 5.0, "memory": {"percent": 10.0}}
+        with patch("backend.api.autoindex.get_system_health", new=AsyncMock(return_value=fake_health)):
+            r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.json()["system_health"], fake_health)
+
+    def test_system_health_omitted_for_non_admin(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        get_settings().authorized_group_id = None
+        self._set_identity(ZoteroIdentity(user_id=1, username="u", targets=["users/1"]))
+        r = self.client.get("/api/autoindex/status")
+        self.assertFalse(r.json()["is_admin"])
+        self.assertNotIn("system_health", r.json())
+
+    def test_system_health_failure_does_not_break_status_endpoint(self):
+        self._set_identity(None)
+        with patch("backend.api.autoindex.get_system_health", new=AsyncMock(side_effect=RuntimeError("boom"))):
+            r = self.client.get("/api/autoindex/status")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("system_health", r.json())
+
     def test_is_admin_false_without_authorized_group_id(self):
         from backend.services.zotero_identity import ZoteroIdentity
         get_settings().authorized_group_id = None

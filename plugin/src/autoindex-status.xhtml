@@ -30,7 +30,7 @@
   </script>
   <style>
     body { margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; box-sizing: border-box; }
-    #run-banner { padding: 8px 10px; border-radius: 4px; margin-bottom: 12px; font-size: 13px; background-color: #f5f5f5; }
+    #run-banner { padding: 8px 10px; border-radius: 4px; margin-top: 12px; font-size: 13px; background-color: #f5f5f5; }
     #run-banner.running { background-color: #eef6ff; color: #0052a3; }
     #run-banner.crashed { background-color: #fff5f5; color: #cc0000; }
     .library-row { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
@@ -62,6 +62,12 @@
     .icon-button .button-icon { display: inline-block; margin-right: 4px; }
     .admin-scope-toggle { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
     .library-skip-button, .library-run-button { font-size: 11px; padding: 2px 8px; }
+    #system-health-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd; }
+    .system-health-grid { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+    .health-item { font-size: 12px; color: #333; white-space: nowrap; }
+    .health-item .health-label { color: #888; }
+    .health-item .health-value.warn { color: #8a6400; font-weight: 500; }
+    .health-item .health-value.critical { color: #cc0000; font-weight: 500; }
   </style>
 </head>
 
@@ -86,13 +92,17 @@
       </label>
     </div>
   </div>
-  <div id="run-banner">Loading status…</div>
   <div id="libraries-container"></div>
   <div id="empty-state" style="display:none;">No libraries are registered for automatic indexing yet.</div>
   <div id="problems-section" style="display:none;">
     <h3>Problems</h3>
     <div id="problems-list"></div>
   </div>
+  <div id="system-health-section" class="actions-section" style="display:none;">
+    <h3 class="section-heading">System health</h3>
+    <div id="system-health-content" class="system-health-grid"></div>
+  </div>
+  <div id="run-banner">Loading status…</div>
   <div class="dialog-buttons">
     <button id="close-button" type="button" class="dialog-button">Close</button>
   </div>

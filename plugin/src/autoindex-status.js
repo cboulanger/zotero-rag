@@ -38,6 +38,23 @@
  * @property {AutoIndexKeyIssue[]} [key_issues]
  * @property {boolean} [is_admin]
  * @property {{active: boolean, interval_minutes: number|null, paused: boolean}} [scheduler]
+ * @property {SystemHealth} [system_health] - admin-only; omitted entirely for non-admin callers
+ */
+
+/**
+ * @typedef {Object} SidecarHealth
+ * @property {string} status - ok|unreachable|timeout|local-mode|error|http_<code>
+ * @property {number} [latency_ms]
+ * @property {string} [error]
+ */
+
+/**
+ * @typedef {Object} SystemHealth
+ * @property {number} cpu_percent
+ * @property {{used_gb: number, total_gb: number, percent: number}} memory
+ * @property {{used_gb: number, total_gb: number, percent: number}} swap
+ * @property {{free_gb: number, total_gb: number, free_percent: number}|null} disk
+ * @property {{kreuzberg: SidecarHealth, qdrant: SidecarHealth}} sidecars
  */
 
 var ZoteroRAGAutoIndexStatus = {
@@ -178,6 +195,7 @@ var ZoteroRAGAutoIndexStatus = {
 
 		this.renderLibraries(data.slugs || {}, data.is_admin === true, data.running === true);
 		this.renderProblems(data.key_issues || []);
+		this.renderSystemHealth(data.system_health);
 		this.updateRunNowButtonState(data);
 		this.updateAdminControlsVisibility(data);
 	},
@@ -596,6 +614,84 @@ var ZoteroRAGAutoIndexStatus = {
 			row.className = 'problem-row';
 			row.textContent = issue.reason;
 			list.appendChild(row);
+		}
+	},
+
+	/**
+	 * Pick a severity class for a metric given "higher is worse" thresholds.
+	 * @param {number} value
+	 * @param {number} warnAt
+	 * @param {number} criticalAt
+	 * @returns {''|'warn'|'critical'}
+	 */
+	_severityHighIsBad(value, warnAt, criticalAt) {
+		if (value >= criticalAt) return 'critical';
+		if (value >= warnAt) return 'warn';
+		return '';
+	},
+
+	/**
+	 * Render the admin-only system health panel (host CPU/memory/swap/disk
+	 * plus Kreuzberg/Qdrant reachability+latency) — lets an admin tell a
+	 * stuck run apart from a slow one without leaving the dialog.
+	 * @param {SystemHealth|undefined} health
+	 * @returns {void}
+	 */
+	renderSystemHealth(health) {
+		const section = document.getElementById('system-health-section');
+		const content = document.getElementById('system-health-content');
+		if (!section || !content) return;
+		if (!health) {
+			section.style.display = 'none';
+			return;
+		}
+		section.style.display = '';
+		content.innerHTML = '';
+
+		/**
+		 * @param {string} label
+		 * @param {string} value
+		 * @param {''|'warn'|'critical'} [severity]
+		 */
+		const addItem = (label, value, severity = '') => {
+			const item = document.createElement('span');
+			item.className = 'health-item';
+			const labelSpan = document.createElement('span');
+			labelSpan.className = 'health-label';
+			labelSpan.textContent = `${label}: `;
+			item.appendChild(labelSpan);
+			const valueSpan = document.createElement('span');
+			valueSpan.className = `health-value${severity ? ` ${severity}` : ''}`;
+			valueSpan.textContent = value;
+			item.appendChild(valueSpan);
+			content.appendChild(item);
+		};
+
+		addItem('CPU', `${health.cpu_percent.toFixed(0)}%`, this._severityHighIsBad(health.cpu_percent, 80, 95));
+		addItem(
+			'Memory',
+			`${health.memory.used_gb.toFixed(1)} / ${health.memory.total_gb.toFixed(1)} GB (${health.memory.percent.toFixed(0)}%)`,
+			this._severityHighIsBad(health.memory.percent, 75, 90),
+		);
+		addItem(
+			'Swap',
+			`${health.swap.used_gb.toFixed(1)} / ${health.swap.total_gb.toFixed(1)} GB (${health.swap.percent.toFixed(0)}%)`,
+			this._severityHighIsBad(health.swap.percent, 50, 80),
+		);
+		if (health.disk) {
+			// "low is bad" for free space, so invert: treat it as a 100-x
+			// high-is-bad value against the same threshold helper.
+			const severity = this._severityHighIsBad(100 - health.disk.free_percent, 80, 90);
+			addItem('Disk free', `${health.disk.free_percent.toFixed(0)}% (${health.disk.free_gb.toFixed(0)} GB)`, severity);
+		}
+		for (const [name, label] of [['kreuzberg', 'Kreuzberg'], ['qdrant', 'Qdrant']]) {
+			const sidecar = health.sidecars && health.sidecars[name];
+			if (!sidecar) continue;
+			const ok = sidecar.status === 'ok' || sidecar.status === 'local-mode';
+			const text = sidecar.latency_ms !== undefined
+				? `${sidecar.status} (${sidecar.latency_ms}ms)`
+				: sidecar.status;
+			addItem(label, text, ok ? '' : 'critical');
 		}
 	},
 };

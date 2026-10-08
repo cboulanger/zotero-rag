@@ -34,6 +34,7 @@ from backend.services.autoindex_scheduler import read_scheduler_state, trigger_i
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.registration_service import RegistrationService
+from backend.services.system_health import get_system_health
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.group_roles import get_admin_role_cache
 from backend.zotero.key_validator import validate_key
@@ -149,7 +150,10 @@ async def status(
     Also reports ``is_admin``: True on loopback, True/False (via the cached
     Zotero group-admin check) when AUTHORIZED_GROUP_ID is configured, False
     when it isn't — the plugin uses this to decide whether to show admin
-    controls, without a separate round trip.
+    controls, without a separate round trip. Admin callers additionally get
+    ``system_health`` (host CPU/memory/swap/disk plus Kreuzberg/Qdrant
+    reachability and latency — see backend.services.system_health), so an
+    admin can tell a stuck run apart from a slow one directly in the dialog.
 
     Every visible job — for any caller, any scope — is labeled with its
     human-readable ``library_name`` and ``owner_id``: joined from
@@ -204,6 +208,12 @@ async def status(
             result["is_admin"] = False
     else:
         result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
+
+    if result["is_admin"]:
+        try:
+            result["system_health"] = await get_system_health(settings)
+        except Exception as exc:
+            logger.warning("Failed to collect system health: %s", exc)
 
     if scope == "all" and not result["is_admin"]:
         raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
