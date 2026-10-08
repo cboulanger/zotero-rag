@@ -2607,9 +2607,13 @@ class ZoteroRAGPlugin {
 	 * Load server-skipped attachment entries and resolve them to UnavailableAttachmentInfo objects.
 	 * Silently drops entries where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s
+	 *   safe default). When false, Snapshot-titled attachments are silently
+	 *   excluded and pruned from the store, the same as a deleted item.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getSkippedServerAttachments(libraryID) {
+	async _getSkippedServerAttachments(libraryID, indexSnapshotsEnabled = false) {
 		const filePath = this._skippedServerFilePath(libraryID);
 		/** @type {Array<{key: string, reason: string}>} */
 		let entries = [];
@@ -2628,6 +2632,7 @@ class ZoteroRAGPlugin {
 			// @ts-ignore
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, entry.key);
 			if (!attachment || attachment.deleted) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
 			validEntries.push(entry);
 			const parentItem = attachment.parentItemID
 				// @ts-ignore
@@ -2667,9 +2672,13 @@ class ZoteroRAGPlugin {
 	 * Load parse-error attachment keys and resolve them to UnavailableAttachmentInfo objects.
 	 * Silently drops keys where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s
+	 *   safe default). When false, Snapshot-titled attachments are silently
+	 *   excluded and pruned from the store, the same as a deleted item.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getParseErrorAttachments(libraryID) {
+	async _getParseErrorAttachments(libraryID, indexSnapshotsEnabled = false) {
 		const filePath = this._parseErrorsFilePath(libraryID);
 		/** @type {string[]} */
 		let keys = [];
@@ -2688,6 +2697,7 @@ class ZoteroRAGPlugin {
 			// @ts-ignore
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, key);
 			if (!attachment || attachment.deleted) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
 			validKeys.push(key);
 			// For standalone attachments (no parent), use the attachment itself as the source item
 			const parentItem = attachment.parentItemID
@@ -2865,9 +2875,13 @@ class ZoteroRAGPlugin {
 	 * UnavailableAttachmentInfo objects. Silently drops keys where the Zotero
 	 * item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s
+	 *   safe default). When false, Snapshot-titled attachments are silently
+	 *   excluded and pruned from the store, the same as a deleted item.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getTooLargeAttachments(libraryID) {
+	async _getTooLargeAttachments(libraryID, indexSnapshotsEnabled = false) {
 		const filePath = this._tooLargeFilePath(libraryID);
 		/** @type {Array<{key: string, detail: string}>} */
 		let entries = [];
@@ -2886,6 +2900,7 @@ class ZoteroRAGPlugin {
 			// @ts-ignore
 			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, entry.key);
 			if (!attachment || attachment.deleted) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
 			validEntries.push(entry);
 			const parentItem = attachment.parentItemID
 				// @ts-ignore
@@ -2976,9 +2991,13 @@ class ZoteroRAGPlugin {
 	 * "not indexable" one parse errors and server-skips use.
 	 * Silently drops keys where the Zotero item no longer exists.
 	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s
+	 *   safe default). When false, Snapshot-titled attachments are silently
+	 *   excluded and pruned from the store, the same as a deleted item.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getDownloadFailedAttachments(libraryID) {
+	async _getDownloadFailedAttachments(libraryID, indexSnapshotsEnabled = false) {
 		const filePath = this._downloadFailedFilePath(libraryID);
 		/** @type {string[]} */
 		let keys = [];
@@ -3004,6 +3023,7 @@ class ZoteroRAGPlugin {
 			// download-failed file prunes it on next write, the same as a deleted item.
 			// @ts-ignore - Zotero.Attachments is a global at runtime
 			if (attachment.attachmentLinkMode === Zotero.Attachments.LINK_MODE_LINKED_URL) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
 			validKeys.push(key);
 			const parentItem = attachment.parentItemID
 				// @ts-ignore
@@ -3056,6 +3076,7 @@ class ZoteroRAGPlugin {
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
 	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false } = {}) {
+		const indexSnapshotsEnabled = await this.getIndexSnapshotsEnabled();
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
 			JOIN items i ON i.itemID = ia.itemID
@@ -3080,6 +3101,7 @@ class ZoteroRAGPlugin {
 				exists = false;
 			}
 			if (exists) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
 			if (!attachment.parentItemID) continue;
 			const parentItem = /** @type {any} */ (await Zotero.Items.getAsync(attachment.parentItemID));
 			if (!parentItem) continue;
@@ -3104,7 +3126,7 @@ class ZoteroRAGPlugin {
 		}
 		// Append parse-error items (file present but unreadable), deduplicating by attachment key
 		const missingKeys = new Set(result.map(r => r.attachmentItem.key));
-		const parseErrorItems = await this._getParseErrorAttachments(libraryID);
+		const parseErrorItems = await this._getParseErrorAttachments(libraryID, indexSnapshotsEnabled);
 		for (const item of parseErrorItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) {
 				missingKeys.add(item.attachmentItem.key);
@@ -3112,7 +3134,7 @@ class ZoteroRAGPlugin {
 			}
 		}
 		// Append server-skipped items (skipped_empty / skipped_timeout), deduplicating by key
-		const skippedServerItems = await this._getSkippedServerAttachments(libraryID);
+		const skippedServerItems = await this._getSkippedServerAttachments(libraryID, indexSnapshotsEnabled);
 		for (const item of skippedServerItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) {
 				missingKeys.add(item.attachmentItem.key);
@@ -3122,7 +3144,7 @@ class ZoteroRAGPlugin {
 		// Append server-refused "too large" items, deduplicating by key — always
 		// shown (not opt-in like download failures), since this is a definitive
 		// server verdict the user needs to act on, not just a not-yet-downloaded file.
-		const tooLargeItems = await this._getTooLargeAttachments(libraryID);
+		const tooLargeItems = await this._getTooLargeAttachments(libraryID, indexSnapshotsEnabled);
 		for (const item of tooLargeItems) {
 			if (!missingKeys.has(item.attachmentItem.key)) {
 				missingKeys.add(item.attachmentItem.key);
@@ -3134,7 +3156,7 @@ class ZoteroRAGPlugin {
 		// Opt-in only (see includeDownloadFailed doc above): these aren't broken
 		// attachments, just ones the server's own fetch never managed to reach.
 		if (includeDownloadFailed) {
-			const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID);
+			const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID, indexSnapshotsEnabled);
 			for (const item of downloadFailedItems) {
 				if (!missingKeys.has(item.attachmentItem.key)) {
 					missingKeys.add(item.attachmentItem.key);

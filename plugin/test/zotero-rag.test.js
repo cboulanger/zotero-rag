@@ -283,6 +283,7 @@ test('_getUnavailableAttachments includes download-failed entries only when incl
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	zotero.DB = { columnQueryAsync: async () => [] };
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.getIndexSnapshotsEnabled = async () => false;
 	plugin._getParseErrorAttachments = async () => [];
 	plugin._getSkippedServerAttachments = async () => [];
 	plugin._getDownloadFailedAttachments = async () => [
@@ -1478,5 +1479,124 @@ test('_getTooLargeAttachments drops keys whose Zotero item no longer exists', as
 
 	// Spread into a plain array first — see the analogous comment on
 	// _getDownloadFailedAttachments's "drops keys" test above.
+	assert.deepStrictEqual([...results], []);
+});
+
+// Snapshot-attachment filtering (Task 12): when the admin has not enabled
+// indexing of Zotero webpage-"Snapshot" attachments, these must be silently
+// excluded from the Fix Unavailable scan's main loop and all four sub-scans,
+// and pruned from the sub-scans' persisted stores the same way a deleted item
+// would be.
+
+test('_getParseErrorAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false, and prunes it from the store', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	await plugin.storeParseErrorItems('u1', ['SNAP1']);
+
+	const results = await plugin._getParseErrorAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+
+	const resultsAgain = await plugin._getParseErrorAttachments(1, true);
+	assert.deepStrictEqual([...resultsAgain], []);
+});
+
+test('_getParseErrorAttachments includes a Snapshot-titled attachment when indexSnapshotsEnabled is true', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	await plugin.storeParseErrorItems('u1', ['SNAP1']);
+
+	const results = await plugin._getParseErrorAttachments(1, true);
+	assert.strictEqual(results.length, 1);
+});
+
+test('_getSkippedServerAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	const filePath = plugin._skippedServerFilePath(1);
+	await ioUtils.writeUTF8(filePath, JSON.stringify([{ key: 'SNAP1', reason: 'skipped_empty' }]));
+
+	const results = await plugin._getSkippedServerAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getTooLargeAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	await plugin.storeTooLargeItems('u1', [{ key: 'SNAP1', detail: 'too big' }]);
+
+	const results = await plugin._getTooLargeAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getDownloadFailedAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		attachmentLinkMode: 0, isImportedAttachment: () => true,
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	await plugin.storeDownloadFailedItems('u1', ['SNAP1']);
+
+	const results = await plugin._getDownloadFailedAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getUnavailableAttachments fetches indexSnapshotsEnabled once and threads it into every sub-scan', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	/** @type {Array<any[]>} */
+	const calls = [];
+	plugin._getParseErrorAttachments = async (...args) => { calls.push(['parseError', ...args]); return []; };
+	plugin._getSkippedServerAttachments = async (...args) => { calls.push(['skippedServer', ...args]); return []; };
+	plugin._getTooLargeAttachments = async (...args) => { calls.push(['tooLarge', ...args]); return []; };
+	plugin._getDownloadFailedAttachments = async (...args) => { calls.push(['downloadFailed', ...args]); return []; };
+
+	await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+
+	assert.deepStrictEqual(calls, [
+		['parseError', 1, false],
+		['skippedServer', 1, false],
+		['tooLarge', 1, false],
+		['downloadFailed', 1, false],
+	]);
+});
+
+test('_getUnavailableAttachments main scan excludes a Snapshot-titled attachment with a missing file when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: 101, key: 'SNAP1', attachmentLinkMode: 0,
+		fileExists: async () => false,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const fakeParent = { getCreators: () => [], getField: () => '', key: 'PARENT1' };
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment, __parent_101: fakeParent });
+	zotero.DB = { columnQueryAsync: async () => [1] };
+	zotero.Items.getAsync = async (ids) => {
+		if (Array.isArray(ids)) return ids.map(id => ({ 1: fakeAttachment }[id])).filter(Boolean);
+		return { 101: fakeParent }[ids] || null;
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.getIndexSnapshotsEnabled = async () => false;
+
+	const results = await plugin._getUnavailableAttachments(1);
+
 	assert.deepStrictEqual([...results], []);
 });
