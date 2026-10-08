@@ -78,6 +78,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(used by the on-demand /api/autoindex/run trigger).",
     )
     parser.add_argument(
+        "--slug",
+        metavar="SLUG",
+        default=None,
+        help="Restrict indexing to this single library slug (e.g. users/123 or "
+             "groups/456), used by the admin per-library run-slug trigger.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -86,11 +93,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _filter_targets(targets: dict, fp: str | None) -> dict:
-    """Restrict targets to those owned by fp, if given; otherwise return them unchanged."""
-    if not fp:
-        return targets
-    return {slug: t for slug, t in targets.items() if t["fingerprint"] == fp}
+def _filter_targets(targets: dict, fp: str | None, slug: str | None = None) -> dict:
+    """Restrict targets to those owned by fp and/or to a single slug, if given;
+    otherwise return them unchanged."""
+    if fp:
+        targets = {s: t for s, t in targets.items() if t["fingerprint"] == fp}
+    if slug:
+        targets = {s: t for s, t in targets.items() if s == slug}
+    return targets
 
 
 def _clear_lock_files(lock_file: Path, log: logging.Logger) -> None:
@@ -140,9 +150,11 @@ async def _main(argv: list[str] | None = None) -> int:
     for issue in key_issues:
         log.warning("Key pruned for user %s: %s", issue.get("user"), issue.get("reason"))
 
-    targets = _filter_targets(targets, args.fingerprint)
-    if args.fingerprint and not targets:
-        log.error("No targets for fingerprint %s; nothing to index for this user.", args.fingerprint)
+    targets = _filter_targets(targets, args.fingerprint, args.slug)
+    if (args.fingerprint or args.slug) and not targets:
+        log.error(
+            "No targets for fingerprint=%s slug=%s; nothing to index.", args.fingerprint, args.slug
+        )
         return 1
 
     if not targets:

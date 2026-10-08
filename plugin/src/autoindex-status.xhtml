@@ -34,7 +34,8 @@
     #run-banner.running { background-color: #eef6ff; color: #0052a3; }
     #run-banner.crashed { background-color: #fff5f5; color: #cc0000; }
     .library-row { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
-    .library-row-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .library-row-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    .library-row-spacer { flex: 1 1 auto; }
     .library-name { font-weight: 500; font-size: 13px; }
     .library-status-badge { font-size: 11px; padding: 1px 6px; border-radius: 3px; background-color: #e0e0e0; }
     .library-status-badge.done { background-color: #e0f2e0; color: #1a6b1a; }
@@ -60,7 +61,7 @@
     .actions-row:last-child { margin-bottom: 0; }
     .icon-button .button-icon { display: inline-block; margin-right: 4px; }
     .admin-scope-toggle { font-size: 12px; color: #333; display: flex; align-items: center; gap: 4px; }
-    .library-skip-button { font-size: 11px; padding: 2px 8px; }
+    .library-skip-button, .library-run-button { font-size: 11px; padding: 2px 8px; }
   </style>
 </head>
 

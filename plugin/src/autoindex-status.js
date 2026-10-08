@@ -176,7 +176,7 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner('Idle. No automatic indexing run has happened yet.', 'idle');
 		}
 
-		this.renderLibraries(data.slugs || {}, data.is_admin === true);
+		this.renderLibraries(data.slugs || {}, data.is_admin === true, data.running === true);
 		this.renderProblems(data.key_issues || []);
 		this.updateRunNowButtonState(data);
 		this.updateAdminControlsVisibility(data);
@@ -386,6 +386,41 @@ var ZoteroRAGAutoIndexStatus = {
 	},
 
 	/**
+	 * Trigger an immediate server-side indexing run scoped to a single
+	 * library (admin only) — lets an admin target one library in between
+	 * scheduled runs or after aborting the current one.
+	 * @param {string} slug
+	 * @returns {Promise<void>}
+	 */
+	async runSlug(slug) {
+		if (!this.plugin) return;
+		const button = /** @type {HTMLButtonElement|null} */ (document.querySelector(`[data-run-slug="${slug}"]`));
+		if (button) {
+			button.disabled = true;
+			button.textContent = 'Starting…';
+		}
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/run-slug`, {
+				method: 'POST',
+				headers: { ...this.plugin.getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ slug }),
+			});
+			if (!response.ok) {
+				const body = await response.json().catch(() => ({}));
+				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
+				if (button) {
+					button.disabled = false;
+					button.textContent = 'Run this library';
+				}
+				return;
+			}
+			await this.fetchAndRender();
+		} catch (e) {
+			this.renderBanner(`Error: ${e}`, 'crashed');
+		}
+	},
+
+	/**
 	 * Trigger an on-demand server-side indexing run for the caller's own libraries.
 	 * @returns {Promise<void>}
 	 */
@@ -442,9 +477,10 @@ var ZoteroRAGAutoIndexStatus = {
 	 * Render one row per library with a progress bar reflecting its status.
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
 	 * @param {boolean} [isAdmin]
+	 * @param {boolean} [running] - whether any run (own or another's) is currently active server-side
 	 * @returns {void}
 	 */
-	renderLibraries(slugs, isAdmin = false) {
+	renderLibraries(slugs, isAdmin = false, running = false) {
 		const container = document.getElementById('libraries-container');
 		const emptyState = document.getElementById('empty-state');
 		if (!container || !emptyState) return;
@@ -472,10 +508,28 @@ var ZoteroRAGAutoIndexStatus = {
 				: slug;
 			header.appendChild(nameSpan);
 
+			// Push the badge and admin buttons to the right as one group,
+			// so the badge lines up with them consistently whether or not
+			// the run/skip buttons are present for this row.
+			const spacer = document.createElement('span');
+			spacer.className = 'library-row-spacer';
+			header.appendChild(spacer);
+
 			const badge = document.createElement('span');
 			badge.className = `library-status-badge ${info.status}`;
 			badge.textContent = info.status;
 			header.appendChild(badge);
+
+			if (isAdmin) {
+				const runButton = document.createElement('button');
+				runButton.type = 'button';
+				runButton.className = 'dialog-button library-run-button';
+				runButton.textContent = 'Run this library';
+				runButton.disabled = running;
+				runButton.dataset.runSlug = slug;
+				runButton.addEventListener('click', () => this.runSlug(slug));
+				header.appendChild(runButton);
+			}
 
 			if (isAdmin && (info.status === 'pending' || info.status === 'indexing')) {
 				const skipButton = document.createElement('button');

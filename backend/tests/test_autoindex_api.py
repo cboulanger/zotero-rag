@@ -333,6 +333,31 @@ class AdminSchedulerControlsTest(unittest.TestCase):
         r = self.client.post("/api/autoindex/scheduler/run-now")
         self.assertEqual(r.status_code, 503)
 
+    def test_run_slug_admin_starts_scoped_run(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        with patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"started": True, "slug": "groups/42"})
+        mock_spawn.assert_awaited_once()
+        self.assertIn("--slug", mock_spawn.await_args.args)
+        self.assertIn("groups/42", mock_spawn.await_args.args)
+
+    def test_run_slug_admin_rejects_when_already_running(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        system_dir = Path(self.tmp.name) / "system"
+        system_dir.mkdir(parents=True, exist_ok=True)
+        (system_dir / "cron_status.json").write_text(json.dumps({"running": True, "pid": 1}), encoding="utf-8")
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True):
+            r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_run_slug_admin_rejects_when_autoindex_disabled(self):
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        get_settings().autoindex_secret = None
+        r = self.client.post("/api/autoindex/scheduler/run-slug", json={"slug": "groups/42"})
+        self.assertEqual(r.status_code, 503)
+
     def test_abort_rejects_when_nothing_running(self):
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         r = self.client.post("/api/autoindex/abort")

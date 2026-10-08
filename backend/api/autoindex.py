@@ -8,6 +8,7 @@ POST   /api/autoindex/run                 — on-demand run scoped to the caller
 POST   /api/autoindex/scheduler/pause     — pause the built-in scheduler (admin only)
 POST   /api/autoindex/scheduler/resume    — resume the built-in scheduler (admin only)
 POST   /api/autoindex/scheduler/run-now   — immediate unscoped run of every library (admin only)
+POST   /api/autoindex/scheduler/run-slug  — immediate run scoped to one library (admin only)
 POST   /api/autoindex/scheduler/skip-slug — cooperatively skip one job in the active run (admin only)
 POST   /api/autoindex/abort               — kill the entire running indexing process (admin only)
 
@@ -47,6 +48,10 @@ class KeyRequest(BaseModel):
 
 
 class SkipSlugRequest(BaseModel):
+    slug: str
+
+
+class RunSlugRequest(BaseModel):
     slug: str
 
 
@@ -328,6 +333,30 @@ async def run_now_admin(identity: Optional[ZoteroIdentity] = Depends(require_aut
             detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
         )
     return {"started": True}
+
+
+@router.post(
+    "/autoindex/scheduler/run-slug",
+    summary="Trigger an immediate indexing run scoped to a single library (admin only)",
+)
+async def run_slug_admin(
+    body: RunSlugRequest,
+    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+) -> dict:
+    """Start a server-side run restricted to one library — lets an admin target
+    a single library in between scheduled runs or after aborting the current
+    one, without waiting for the next scheduler tick or re-running everything.
+    """
+    settings = get_settings()
+    result = await trigger_index_run(settings, slug=body.slug)
+    if result == "already_running":
+        raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
+    if result == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
+        )
+    return {"started": True, "slug": body.slug}
 
 
 @router.post("/autoindex/abort", summary="Abort the entire running indexing process (admin only)")

@@ -75,6 +75,22 @@ class TriggerIndexRunTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--fingerprint", args)
         self.assertIn("fp-abc", args)
 
+    async def test_unscoped_run_omits_slug_flag(self):
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            await trigger_index_run(self.settings)
+        self.assertNotIn("--slug", mock_spawn.await_args.args)
+
+    async def test_slug_scoped_run_includes_slug_flag(self):
+        self.settings.autoindex_secret = Fernet.generate_key().decode()
+        with patch("backend.services.autoindex_scheduler.read_live_status", return_value={}), \
+             patch("backend.services.autoindex_scheduler.asyncio.create_subprocess_exec", new=AsyncMock()) as mock_spawn:
+            await trigger_index_run(self.settings, slug="groups/42")
+        args = mock_spawn.await_args.args
+        self.assertIn("--slug", args)
+        self.assertIn("groups/42", args)
+
 
 class SchedulerStateTest(unittest.TestCase):
     def setUp(self):

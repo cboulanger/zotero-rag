@@ -21,6 +21,14 @@ class ParseArgsTest(unittest.TestCase):
         args = index_libraries._parse_args(["--fingerprint", "abc123"])
         self.assertEqual(args.fingerprint, "abc123")
 
+    def test_slug_defaults_to_none(self):
+        args = index_libraries._parse_args([])
+        self.assertIsNone(args.slug)
+
+    def test_slug_accepted(self):
+        args = index_libraries._parse_args(["--slug", "groups/2"])
+        self.assertEqual(args.slug, "groups/2")
+
 
 class FilterTargetsTest(unittest.TestCase):
     def setUp(self):
@@ -39,6 +47,23 @@ class FilterTargetsTest(unittest.TestCase):
 
     def test_unmatched_fingerprint_returns_empty(self):
         result = index_libraries._filter_targets(self.targets, "fp-does-not-exist")
+        self.assertEqual(result, {})
+
+    def test_slug_restricts_to_single_library(self):
+        result = index_libraries._filter_targets(self.targets, None, "groups/2")
+        self.assertEqual(result, {"groups/2": self.targets["groups/2"]})
+
+    def test_unmatched_slug_returns_empty(self):
+        result = index_libraries._filter_targets(self.targets, None, "groups/999")
+        self.assertEqual(result, {})
+
+    def test_fingerprint_and_slug_combine(self):
+        result = index_libraries._filter_targets(self.targets, "fp-a", "users/1")
+        self.assertEqual(result, {"users/1": self.targets["users/1"]})
+
+    def test_fingerprint_and_mismatched_slug_returns_empty(self):
+        # The slug exists, but not under this fingerprint's own targets.
+        result = index_libraries._filter_targets(self.targets, "fp-a", "groups/2")
         self.assertEqual(result, {})
 
 

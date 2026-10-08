@@ -29,13 +29,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _STARTUP_DELAY_SECONDS = 60
 
 
-async def trigger_index_run(settings: Settings, fingerprint: Optional[str] = None) -> Literal["started", "already_running", "disabled"]:
+async def trigger_index_run(
+    settings: Settings, fingerprint: Optional[str] = None, slug: Optional[str] = None
+) -> Literal["started", "already_running", "disabled"]:
     """Start a server-side indexing run if one isn't already active.
 
     fingerprint=None triggers an unscoped run covering every resolvable
     target (used by the scheduler and the admin run-now endpoint); a
     fingerprint scopes the run to that entry's own targets (used by the
-    on-demand POST /api/autoindex/run endpoint).
+    on-demand POST /api/autoindex/run endpoint). slug further restricts to
+    a single library (used by the admin per-library run-slug endpoint, so
+    an admin can target one library in between scheduled runs or after
+    aborting the current one, without waiting for the next tick).
     """
     store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
     if not store.enabled:
@@ -43,7 +48,7 @@ async def trigger_index_run(settings: Settings, fingerprint: Optional[str] = Non
     live_status = await asyncio.to_thread(read_live_status, settings.data_path)
     if live_status.get("running"):
         return "already_running"
-    await _spawn_index_run(settings, fingerprint)
+    await _spawn_index_run(settings, fingerprint, slug)
     return "started"
 
 
@@ -75,12 +80,14 @@ async def run_scheduler_loop(settings: Settings) -> None:
         await asyncio.sleep(settings.autoindex_interval_minutes * 60)
 
 
-async def _spawn_index_run(settings: Settings, fingerprint: Optional[str]) -> None:
+async def _spawn_index_run(settings: Settings, fingerprint: Optional[str], slug: Optional[str] = None) -> None:
     log_path = settings.data_path / "logs" / "cron_indexer.log"
     script_path = _PROJECT_ROOT / "bin" / "index_libraries.py"
     args = [sys.executable, str(script_path)]
     if fingerprint:
         args += ["--fingerprint", fingerprint]
+    if slug:
+        args += ["--slug", slug]
 
     def _open_log():
         log_path.parent.mkdir(parents=True, exist_ok=True)
