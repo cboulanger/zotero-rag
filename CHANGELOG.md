@@ -1,3 +1,10 @@
+## [1.55.1](https://github.com/cboulanger/zotero-rag/compare/v1.55.0...v1.55.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **deploy:** stop Kreuzberg-restart fix from crash-looping the main service ([fdb7f94](https://github.com/cboulanger/zotero-rag/commit/fdb7f94d47b814fbc7bd4288a9368690381ad977))
+
 # [1.55.0](https://github.com/cboulanger/zotero-rag/compare/v1.54.0...v1.55.0) (2026-10-08)
 
 
