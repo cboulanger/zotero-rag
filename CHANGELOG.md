@@ -1,3 +1,15 @@
+# [1.57.0](https://github.com/cboulanger/zotero-rag/compare/v1.56.0...v1.57.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend:** don't gate shared-key auto-index targets on a personal key's status ([6498168](https://github.com/cboulanger/zotero-rag/commit/6498168e436e2372aec4dfbb474e542ad4b99474))
+
+
+### Features
+
+* **config:** load hardware presets from editable JSON files, with platform filtering ([acd0bb8](https://github.com/cboulanger/zotero-rag/commit/acd0bb8bebfd7648cd7ee1eb8fc9afb59b884400))
+
 # [1.56.0](https://github.com/cboulanger/zotero-rag/compare/v1.55.1...v1.56.0) (2026-10-08)
 
 
