@@ -60,6 +60,42 @@ test('countIndexableAttachments excludes trashed items from the search', async (
 	assert.deepStrictEqual(addedConditions, [['deleted', 'false']]);
 });
 
+test('countIndexableAttachments excludes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is false', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, isNote: () => false, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem], get: () => null },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const count = await RemoteIndexer.countIndexableAttachments('123', 'group', false);
+
+	assert.strictEqual(count, 0);
+});
+
+test('countIndexableAttachments includes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is true', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, isNote: () => false, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem], get: () => null },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const count = await RemoteIndexer.countIndexableAttachments('123', 'group', true);
+
+	assert.strictEqual(count, 1);
+});
+
 test('_collectAttachments excludes trashed items from the search', async () => {
 	const { zotero, addedConditions } = makeZoteroStub();
 	const RemoteIndexer = loadRemoteIndexer(zotero);
@@ -67,6 +103,67 @@ test('_collectAttachments excludes trashed items from the search', async () => {
 	await RemoteIndexer._collectAttachments('123', 'group', () => {});
 
 	assert.deepStrictEqual(addedConditions, [['deleted', 'false']]);
+});
+
+test('_collectAttachments excludes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is false', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {}, undefined, false);
+
+	// Note: deepStrictEqual against a literal `[]` is avoided here because `attachments` is
+	// returned from a separate vm.runInContext realm (see loadRemoteIndexer) — Node's assert
+	// module treats cross-realm arrays as not reference-equal even when structurally identical.
+	assert.strictEqual(attachments.length, 0);
+});
+
+test('_collectAttachments includes a Snapshot-titled text/html attachment when indexSnapshotsEnabled is true', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {}, undefined, true);
+
+	assert.strictEqual(attachments.length, 1);
+});
+
+test('_collectAttachments defaults indexSnapshotsEnabled to false when the argument is omitted', async () => {
+	const snapshotItem = {
+		isAttachment: () => true, attachmentContentType: 'text/html', attachmentLinkMode: 1,
+		getField: (f) => (f === 'title' ? 'Snapshot' : ''), key: 'SNAP1', parentItemID: null,
+		getFilePathAsync: async () => '/fake/snap.html',
+	};
+	const zotero = {
+		Groups: { get: () => ({ libraryID: 1 }) },
+		Libraries: { userLibraryID: 1 },
+		Search: function () { return { libraryID: null, addCondition() {}, async search() { return [1]; } }; },
+		Items: { getAsync: async () => [snapshotItem] },
+	};
+	const RemoteIndexer = loadRemoteIndexer(zotero);
+
+	const { attachments } = await RemoteIndexer._collectAttachments('123', 'group', () => {});
+
+	// See note above: avoid deepStrictEqual against a literal `[]` for a cross-realm array.
+	assert.strictEqual(attachments.length, 0);
 });
 
 test('_collectAbstractItems excludes trashed items from the search', async () => {
@@ -161,6 +258,20 @@ test('_uploadAttachment attaches diagnostics to the thrown error for status "err
 		assert.strictEqual(err.pluginDiag.upload_attempts, 1);
 		return true;
 	});
+});
+
+test('_uploadAttachmentInner includes the attachment\'s own title (not the parent\'s) as attachment_title in the upload metadata', async () => {
+	const { call, bodies } = makeUploader({ status: 'done', chunks_added: 1 });
+	const att = {
+		attachment_key: 'SNAP1', item_key: 'ITEM1', mime_type: 'text/html', item_version: 1, attachment_version: 1,
+		filePath: '/fake/path.html',
+		zoteroItem: { getField: (f) => (f === 'title' ? 'Snapshot' : '') },
+		parentItem: { getField: (f) => (f === 'title' ? 'Parent Title' : ''), itemType: 'webpage', dateModified: 'd' },
+	};
+	await call({ att });
+	const sentMetadata = JSON.parse(bodies[0].metadata);
+	assert.strictEqual(sentMetadata.attachment_title, 'Snapshot');
+	assert.strictEqual(sentMetadata.title, 'Parent Title');
 });
 
 test('_uploadAttachment without includeDiagnostics adds no diagnostics fields', async () => {

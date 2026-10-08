@@ -100,16 +100,19 @@ var RemoteIndexer = {
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
+	 * @param {function(): Promise<boolean>} [opts.getIndexSnapshotsEnabled] - Returns whether the admin has enabled indexing of Snapshot-titled webpage attachments; defaults to false (exclude) when omitted
 	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], failedItems: FailedItem[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate, getIndexSnapshotsEnabled }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
+
+		const indexSnapshotsEnabled = getIndexSnapshotsEnabled ? await getIndexSnapshotsEnabled() : false;
 
 		// 1. Collect all indexable attachments from the local Zotero database.
 		//    Items without a local file are included (filePath: null) so check-indexed
 		//    can decide whether they actually need indexing before we download them.
 		onProgress({ percentage: 0, message: 'Scanning library', current: 0, total: 0 });
-		const { attachments, linkedUrls } = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths);
+		const { attachments, linkedUrls } = await this._collectAttachments(libraryId, libraryType, log, downloadedFilePaths, indexSnapshotsEnabled);
 		log(`[RemoteIndexer] Found ${attachments.length} indexable attachments${linkedUrls > 0 ? `, ${linkedUrls} linked URL(s) skipped (no local file)` : ''}`);
 
 		// 2. Load the client-side caches and pre-classify attachments into three tiers:
@@ -527,9 +530,11 @@ var RemoteIndexer = {
 	 * @param {string} libraryType
 	 * @param {function(string): void} log
 	 * @param {Map<string, string>} [downloadedFilePaths] - Cache of attachment key → local path
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled webpage attachments should be
+	 *   included; defaults to false (exclude) when omitted, matching getIndexSnapshotsEnabled()'s safe default
 	 * @returns {Promise<{attachments: Array<AttachmentInfo & {zoteroItem: any, parentItem: any, filePath: string|null}>, linkedUrls: number}>}
 	 */
-	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths) {
+	async _collectAttachments(libraryId, libraryType, log, downloadedFilePaths, indexSnapshotsEnabled = false) {
 		const INDEXABLE_TYPES = new Set([
 			'application/pdf',
 			'text/html',
@@ -574,6 +579,8 @@ var RemoteIndexer = {
 			// linkMode=3 = linked_url: web-only link, no local file possible — exclude from indexing.
 			if ((item.attachmentLinkMode ?? 0) === 3) { linkedUrls++; continue; }
 
+			if (!indexSnapshotsEnabled && (item.getField ? item.getField('title') : '') === 'Snapshot') continue;
+
 			// Prefer live path; fall back to cached path from a prior download in this session.
 			// Keep items with no local file (filePath: null) so check-indexed can decide
 			// whether they need indexing before we attempt to download them.
@@ -613,9 +620,11 @@ var RemoteIndexer = {
 	 *
 	 * @param {string} libraryId
 	 * @param {string} libraryType
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled webpage attachments should be
+	 *   included; defaults to false (exclude) when omitted, matching getIndexSnapshotsEnabled()'s safe default
 	 * @returns {Promise<number>}
 	 */
-	async countIndexableAttachments(libraryId, libraryType) {
+	async countIndexableAttachments(libraryId, libraryType, indexSnapshotsEnabled = false) {
 		const INDEXABLE_TYPES = new Set([
 			'application/pdf',
 			'text/html',
@@ -650,6 +659,7 @@ var RemoteIndexer = {
 			if (!item.isAttachment()) continue;
 			if (!INDEXABLE_TYPES.has(item.attachmentContentType || '')) continue;
 			if ((item.attachmentLinkMode ?? 0) === 3) continue; // linked_url — no local file possible
+			if (!indexSnapshotsEnabled && (item.getField ? item.getField('title') : '') === 'Snapshot') continue;
 			const parentKey = item.parentItemID
 				? (Zotero.Items.get(item.parentItemID)?.key ?? item.key)
 				: item.key;
@@ -866,6 +876,7 @@ var RemoteIndexer = {
 			item_version: att.item_version,
 			attachment_version: att.attachment_version,
 			title: parent.getField ? (parent.getField('title') || 'Untitled') : 'Untitled',
+			attachment_title: att.zoteroItem && att.zoteroItem.getField ? (att.zoteroItem.getField('title') || null) : null,
 			authors: Zotero.ZoteroRAG._extractAuthors(parent),
 			year: Zotero.ZoteroRAG._extractYear(parent),
 			item_type: parent.itemType || null,

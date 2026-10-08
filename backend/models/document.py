@@ -8,7 +8,7 @@ from datetime import datetime, UTC
 from pydantic import BaseModel, Field
 
 
-CURRENT_SCHEMA_VERSION: int = 6
+CURRENT_SCHEMA_VERSION: int = 7
 
 ProcessingStatus = Literal[
     "indexed_fresh",
@@ -40,6 +40,17 @@ class DocumentMetadata(BaseModel):
     year: Optional[int] = Field(None, description="Publication year")
     item_type: Optional[str] = Field(None, description="Zotero item type")
     attachment_key: Optional[str] = Field(None, description="PDF attachment key")
+    attachment_title: Optional[str] = Field(
+        None,
+        description=(
+            "The attachment's own Zotero title (not the parent item's `title` field "
+            "above). Used to identify Snapshot-titled webpage attachments for the "
+            "admin-controlled indexing toggle and purge (see "
+            "backend.services.admin_settings_store). None for chunks indexed before "
+            "this field existed, or for chunks with no specific source attachment "
+            "(e.g. abstract-fallback chunks)."
+        ),
+    )
     tags: list[str] = Field(default_factory=list, description="Zotero tags/keywords assigned to the item")
 
 
@@ -86,6 +97,7 @@ class ChunkMetadata(BaseModel):
     # v4: added author_lastnames keyword field for Qdrant-native author filtering
     # v5: added has_content flag for catalog-only stub records
     # v6: added tags (Zotero keywords) and tags_lower keyword field for filtering
+    # v7: added attachment_title (DocumentMetadata) for Snapshot-attachment identification
     schema_version: int = Field(default=CURRENT_SCHEMA_VERSION)
 
 

@@ -613,6 +613,7 @@ var ZoteroRAGDialog = {
 		}
 
 		// Load metadata and indexable counts for all libraries in parallel
+		const indexSnapshotsEnabled = await this.plugin.getIndexSnapshotsEnabled();
 		for (const lib of libraries) {
 			const libId = lib.id;
 			const libType = lib.type;
@@ -624,7 +625,7 @@ var ZoteroRAGDialog = {
 			const syncedVer = parseInt(Zotero.Prefs.get(`extensions.zotero-rag.syncedVersion.${libId}`, true) || '0') || 0;
 			this.librarySyncedVersion.set(libId, syncedVer);
 			// @ts-ignore - RemoteIndexer is a global in Zotero plugin context
-			RemoteIndexer.countIndexableAttachments(libId, libType)
+			RemoteIndexer.countIndexableAttachments(libId, libType, indexSnapshotsEnabled)
 				.then(count => {
 					this.libraryIndexableCount.set(libId, count);
 					this.libraryUnavailableCount.set(libId, unavail);
@@ -1848,6 +1849,7 @@ var ZoteroRAGDialog = {
 					mode,
 					userId: this.plugin.getCurrentZoteroUserId(),
 					getAuthHeaders: (extra) => plugin.getAuthHeaders(extra),
+					getIndexSnapshotsEnabled: () => plugin.getIndexSnapshotsEnabled(),
 					log: (msg) => plugin.log(msg),
 					onProgress: ({ percentage, message, current, total }) => {
 						/** @type {Array<[(m: string) => boolean, string]>} */
@@ -2041,7 +2043,7 @@ var ZoteroRAGDialog = {
 
 				// Refresh the local indexable count — abstract-only items may have been
 				// discovered during this run that weren't counted at dialog open time.
-				RemoteIndexer.countIndexableAttachments(libraryId, libraryType)
+				RemoteIndexer.countIndexableAttachments(libraryId, libraryType, await plugin.getIndexSnapshotsEnabled())
 					.then(count => {
 						this.libraryIndexableCount.set(libraryId, count);
 						this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);

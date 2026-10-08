@@ -528,6 +528,7 @@ class CronIndexer:
                         library_id=slug_info.library_id,
                         item_key=meta["item_key"],
                         attachment_key=attachment_key,
+                        attachment_title=meta.get("attachment_title"),
                         title=meta.get("title", "Untitled"),
                         authors=meta.get("authors", []),
                         year=meta.get("year"),
