@@ -2175,7 +2175,7 @@ class ZoteroRAGPlugin {
 		this._autoindexStatusWindow = win.openDialog(
 			'chrome://zotero-rag/content/autoindex-status.xhtml',
 			'zotero-rag-autoindex-status-dialog',
-			'chrome,centerscreen,resizable=yes,width=520,height=520',
+			'chrome,centerscreen,resizable=yes,width=680,height=520',
 			{ plugin: this }
 		);
 	}
