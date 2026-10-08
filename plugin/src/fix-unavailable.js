@@ -168,6 +168,18 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
+	 * The filename shown for a row: the linked path for a linked attachment,
+	 * otherwise the regular attachment filename. Shared by getRowData,
+	 * copySelectedRowsToClipboard, and the filename filter.
+	 * @param {AttachmentInfo} info
+	 * @returns {string}
+	 */
+	_filenameFor(info) {
+		const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
+		return linkedPath || info.attachmentItem.attachmentFilename || '';
+	},
+
+	/**
 	 * Build the VirtualizedTable and render it into #table-container.
 	 * Uses getRowData for plain text columns and column.renderer for status/select.
 	 * The table uses the native selection model (click / Ctrl+click / Shift+click / Ctrl+A).
@@ -291,8 +303,7 @@ var ZoteroFixUnavailableDialog = {
 				getRowData: (/** @type {number} */ index) => {
 					const info = this.items[index];
 					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', status: '', select: '' };
-					const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
-					const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
+					const filename = this._filenameFor(info);
 					return {
 						author:   info.authors || '—',
 						year:     info.year    || '—',
@@ -607,8 +618,7 @@ var ZoteroFixUnavailableDialog = {
 		}
 		const rows = indices.map(i => {
 			const info = this.items[i];
-			const linkedPath = info.isLinked ? (info.attachmentItem.attachmentPath || '') : '';
-			const filename = linkedPath || info.attachmentItem.attachmentFilename || '';
+			const filename = this._filenameFor(info);
 			const status = this.rowStatus.get(i);
 			return {
 				author: info.authors || '',

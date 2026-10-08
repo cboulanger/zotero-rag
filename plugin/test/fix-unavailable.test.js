@@ -70,6 +70,24 @@ test('_typeLabelFor falls back to the file type label', () => {
 	assert.strictEqual(dialog._typeLabelFor({ attachmentItem: {} }), 'PDF');
 });
 
+test('_filenameFor returns the regular attachment filename for a non-linked file', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: false, attachmentItem: { attachmentFilename: 'report.pdf', attachmentPath: '' } };
+	assert.strictEqual(dialog._filenameFor(info), 'report.pdf');
+});
+
+test('_filenameFor returns the linked path for a linked file', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: true, attachmentItem: { attachmentFilename: 'ignored.pdf', attachmentPath: '/Users/x/notes.pdf' } };
+	assert.strictEqual(dialog._filenameFor(info), '/Users/x/notes.pdf');
+});
+
+test('_filenameFor falls back to an empty string when neither is set', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: false, attachmentItem: {} };
+	assert.strictEqual(dialog._filenameFor(info), '');
+});
+
 test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from the persistent store', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
