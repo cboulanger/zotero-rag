@@ -1,0 +1,24 @@
+{
+  "description": "CPU-optimized smaller models",
+  "embedding": {
+    "model_type": "local",
+    "model_name": "sentence-transformers/all-MiniLM-L6-v2",
+    "batch_size": 16
+  },
+  "llm": {
+    "model_type": "local",
+    "model_names": ["TinyLlama/TinyLlama-1.1B-Chat-v1.0"],
+    "quantization": "4bit",
+    "max_context_length": 2048,
+    "max_answer_tokens": 512,
+    "temperature": 0.7,
+    "model_kwargs": {"device_map": "cpu"}
+  },
+  "rag": {
+    "top_k": 5,
+    "score_threshold": 0.3,
+    "max_chunk_size": 384
+  },
+  "memory_budget_gb": 3.0,
+  "platform": "any"
+}

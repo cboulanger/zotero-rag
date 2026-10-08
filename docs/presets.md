@@ -2,19 +2,33 @@
 
 Configuration presets optimized for different hardware scenarios. Each preset defines the models and settings for embeddings, LLM inference, and RAG retrieval.
 
+## How presets are stored
+
+Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The 9 presets documented below ship as bundled defaults in `backend/config/default_presets/`; the backend copies any of them that aren't already present in `<data_path>/presets/` on every startup, but **never overwrites an existing file** there. This means:
+
+- **Editing a preset is just editing its JSON file** — change `top_k`, swap a model name, tune `batch_size`, etc. in `data/presets/<name>.json`. No code change or rebuild needed. An already-running process picks up the edit after a restart (an in-memory cache keeps a loaded preset's *content* fast to re-read for the rest of that process's life — see `backend/config/presets.py`'s module docstring); adding a *new* preset file is picked up immediately, no restart required.
+- **Adding a custom preset** means creating a new `<data_path>/presets/<your-name>.json` matching the schema below. It shows up in `GET /api/config`'s `available_presets` (and the Zotero plugin's preset dropdown) right away.
+- **Deleting or renaming a bundled default** is safe — it won't be silently recreated once you've touched `<data_path>/presets/`; only a file that's *missing entirely* gets reseeded.
+
+A preset file's fields mirror `backend.config.presets.HardwarePreset` and its nested `embedding`/`llm`/`rag` sections (see that module for the full Pydantic schema and field descriptions). The file's own `name` key, if present, is ignored — a preset's identity always comes from its filename.
+
+### The `platform` field
+
+Every preset also declares a `platform` field: `"any"` (the default — visible everywhere), `"darwin"`, `"linux"`, or `"windows"`. A preset naming a specific platform is hidden from `GET /api/config`'s `available_presets`/`compatible_presets` (and rejected by `POST /api/config`) on any other host — e.g. the bundled `apple-silicon-32gb`/`apple-silicon-kisski` presets (`platform: "darwin"`) and `windows-test` (`platform: "windows"`) never appear in the preset list on the production Debian server, even though the files exist on disk. This only gates what's *listed to a client*: an operator can still explicitly run a platform-specific preset via `MODEL_PRESET` in `.env` on a matching host, and internal tooling (`scripts/eval_embeddings.py`, `scripts/check_embedding_compat.py`) lists every preset regardless of platform since it's meant for a developer comparing configs, not an end client.
+
 ## Dependency overview
 
-| Preset | `sentence-transformers` / `torch` required? | API keys |
-| ------ | ------------------------------------------- | -------- |
-| `apple-silicon-32gb` | Yes (~1-2 GB) | — |
-| `high-memory` | Yes (~1-2 GB) | — |
-| `cpu-only` | Yes (~1-2 GB) | — |
-| `apple-silicon-kisski` | **No** | `KISSKI_API_KEY` |
-| `remote-kisski` | **No** | `KISSKI_API_KEY` |
-| `remote-openai` | **No** | `OPENAI_API_KEY` |
-| `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` |
-| `windows-test` | **No** | `KISSKI_API_KEY` |
-| `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) |
+| Preset | `sentence-transformers` / `torch` required? | API keys | Platform |
+| ------ | ------------------------------------------- | -------- | -------- |
+| `apple-silicon-32gb` | Yes (~1-2 GB) | — | `darwin` |
+| `high-memory` | Yes (~1-2 GB) | — | any |
+| `cpu-only` | Yes (~1-2 GB) | — | any |
+| `apple-silicon-kisski` | **No** | `KISSKI_API_KEY` | `darwin` |
+| `remote-kisski` | **No** | `KISSKI_API_KEY` | any |
+| `remote-openai` | **No** | `OPENAI_API_KEY` | any |
+| `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
+| `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
+| `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -57,6 +71,8 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Note:** Uses the same model as `remote-kisski` and `apple-silicon-kisski`, so existing KISSKI-generated vectors are compatible (subject to the server applying no instruction prefix — verify with `scripts/check_embedding_compat.py`). MPS acceleration on Apple Silicon gives ~50–150 texts/sec, far faster than CPU-only inference.
 
 **Requires:** `sentence-transformers`, `torch` (~1-2 GB extra dependencies — see [Optional local dependencies](#optional-local-dependencies))
+
+**Platform:** `darwin` only — hidden from the preset list on any other host (see [How presets are stored](#how-presets-are-stored)).
 
 ---
 
@@ -128,6 +144,8 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 
 **Requires:** `KISSKI_API_KEY` environment variable
 
+**Platform:** `windows` only — hidden from the preset list on any other host (see [How presets are stored](#how-presets-are-stored)).
+
 ---
 
 ### `remote-kisski` (fully remote, no GPU needed, requires KISSKI/SAIA access)
@@ -171,6 +189,8 @@ to reduce peak RSS during indexing.
 
 **Requires:** `KISSKI_API_KEY` environment variable
 
+**Platform:** `darwin` only — hidden from the preset list on any other host (see [How presets are stored](#how-presets-are-stored)).
+
 ---
 
 ### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
@@ -203,7 +223,7 @@ Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires
 
 **Switching the active preset without a restart.** `POST /api/config` with `{"preset_name": "..."}` switches immediately, for every caller and for the hourly cron auto-indexer — but only to a preset that shares the current one's embedding model (same vector space, so the already-open vector store stays valid). `GET /api/config`'s `compatible_presets` field lists which presets currently qualify; switching to anything else (a different embedding model, or a local-model preset) still requires `MODEL_PRESET` + a restart. The Zotero plugin's Preferences pane exposes this as the "Active Model Preset" dropdown.
 
-**Setting shared remote endpoint/API-key values.** Presets like `remote-mpcdf`, whose endpoint URL and API key rotate with each short-lived job, declare this via `shared_base_url_env`/`shared_api_key_env` in `backend/config/presets.py` rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"MPCDF_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` (plaintext; these are short-lived, sandboxed-job credentials, not long-term secrets) and picked up immediately by interactive queries and the cron indexer alike, no restart needed. The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
+**Setting shared remote endpoint/API-key values.** Presets like `remote-mpcdf`, whose endpoint URL and API key rotate with each short-lived job, declare this via `shared_base_url_env`/`shared_api_key_env` in their preset file (`data/presets/remote-mpcdf.json`) rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"MPCDF_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` (plaintext; these are short-lived, sandboxed-job credentials, not long-term secrets) and picked up immediately by interactive queries and the cron indexer alike, no restart needed. The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
 
 A stored `shared_base_url`-kind value is normalized on every read — `backend.services.admin_settings_store.normalize_base_url` appends `/v1` if it's missing (leaving a URL that already ends in `/v1` untouched) — since the openai-compatible client appends `/embeddings`/`/chat/completions` directly to whatever base URL it's given, and a bare job URL without `/v1` would otherwise 404.
 
@@ -359,4 +379,4 @@ MPCDF_LLM_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
 MPCDF_LLM_API_KEY=...
 ```
 
-See [backend/config/presets.py](../backend/config/presets.py) for complete configuration details.
+See `data/presets/*.json` for each preset's actual configuration (or `backend/config/default_presets/*.json` for the bundled defaults before they're copied), and [backend/config/presets.py](../backend/config/presets.py) for the schema (`HardwarePreset`/`EmbeddingConfig`/`LLMConfig`/`RAGConfig`) and loader these files are validated against.
