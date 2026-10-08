@@ -186,3 +186,29 @@ test('_formatSkipOrErrorReason passes through other skip reasons unchanged', () 
 		'Skipped by admin request'
 	);
 });
+
+test('_formatSkipOrErrorReason surfaces a done run with partial item failures', () => {
+	// A run can finish with status "done" and still have skipped some items
+	// (e.g. an attachment download failure) — this must not be silently
+	// dropped just because there's no top-level error/skip_reason.
+	const dialog = loadDialog({});
+	const msg = dialog._formatSkipOrErrorReason({ status: 'done', items_processed: 1, chunks_added: 0, items_failed: 1 });
+	assert.match(msg, /1 item\(s\) failed to index/);
+});
+
+test('_formatSkipOrErrorReason prefers error and skip_reason over items_failed', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'error', error: 'boom', items_failed: 3 }),
+		'boom'
+	);
+	assert.strictEqual(
+		dialog._formatSkipOrErrorReason({ status: 'skipped', skip_reason: 'Skipped by admin request', items_failed: 3 }),
+		'Skipped by admin request'
+	);
+});
+
+test('_formatSkipOrErrorReason returns empty string when nothing failed', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._formatSkipOrErrorReason({ status: 'done', items_processed: 1, chunks_added: 1 }), '');
+});

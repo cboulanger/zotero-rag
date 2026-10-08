@@ -95,21 +95,29 @@ async def require_authorized_group_admin(request: Request) -> Optional[ZoteroIde
 
 
 def get_client_api_keys(request: Request) -> dict[str, str]:
-    """Extract client-supplied API keys from request headers."""
+    """Extract client-supplied *personal* API keys from request headers.
+
+    Only `kind == "api_key"` fields are read from headers — a `shared_base_url`/
+    `shared_api_key` field (e.g. remote-mpcdf) is deliberately never read from a
+    per-request header; it's admin-set globally via POST /api/config/remote-fields
+    and resolved server-side (backend.services.admin_settings_store), the same for
+    every caller and for the cron indexer.
+    """
     settings = get_settings()
     preset = settings.get_hardware_preset()
     keys: dict[str, str] = {}
-    for key_info in RemoteEmbeddingService.required_api_keys(preset.embedding):
+    for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
+        if key_info["kind"] != "api_key":
+            continue
         val = request.headers.get(key_info["header_name"])
-        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
-    for key_info in RemoteLLMService.required_api_keys(settings):
+    for key_info in RemoteLLMService.required_client_fields(settings):
+        if key_info["kind"] != "api_key":
+            continue
         val = request.headers.get(key_info["header_name"])
-        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
-    logger.debug("DEBUG client_api_keys resolved: %s", list(keys.keys()))  # DEBUG
     return keys
 
 
@@ -129,6 +137,7 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
         cache_dir=str(settings.model_weights_path),
         api_key=client_key,
         hf_token=settings.get_api_key("HF_TOKEN"),
+        data_path=settings.data_path,
     )
 
 

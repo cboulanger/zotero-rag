@@ -249,6 +249,132 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.config, self.config)
         self.assertEqual(service._api_key, "test-key")
 
+    def test_required_client_fields_reports_kind_api_key_for_kisski_style_config(self):
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",
+            model_kwargs={"base_url": "https://chat-ai.academiccloud.de/v1", "api_key_env": "KISSKI_API_KEY"},
+        )
+        fields = RemoteEmbeddingService.required_client_fields(config)
+        self.assertEqual(len(fields), 1)
+        self.assertEqual(fields[0]["key_name"], "KISSKI_API_KEY")
+        self.assertEqual(fields[0]["kind"], "api_key")
+
+    def test_required_client_fields_reports_shared_kinds_for_mpcdf_style_config(self):
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",
+            model_kwargs={
+                "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+            },
+        )
+        fields = RemoteEmbeddingService.required_client_fields(config)
+        by_key = {f["key_name"]: f for f in fields}
+        self.assertEqual(len(fields), 2)
+        self.assertEqual(by_key["MPCDF_EMBEDDING_BASE_URL"]["kind"], "shared_base_url")
+        self.assertEqual(by_key["MPCDF_EMBEDDING_API_KEY"]["kind"], "shared_api_key")
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_resolves_shared_fields_from_store_over_env(self, mock_openai_cls):
+        import os
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config(data_path, {
+                "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1",
+                "MPCDF_EMBEDDING_API_KEY": "store-key",
+            })
+            with patch.dict(os.environ, {"MPCDF_EMBEDDING_BASE_URL": "https://should-not-be-used/v1"}):
+                config = EmbeddingConfig(
+                    model_type="remote",
+                    model_name="multilingual-e5-large-instruct",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                        "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                    },
+                )
+                service = RemoteEmbeddingService(config, data_path=data_path)
+                service._get_client()
+
+        _, kwargs = mock_openai_cls.call_args
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+        self.assertEqual(kwargs["api_key"], "store-key")
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_appends_v1_to_shared_base_url_missing_it(self, mock_openai_cls):
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config(data_path, {
+                "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc123",
+                "MPCDF_EMBEDDING_API_KEY": "store-key",
+            })
+            config = EmbeddingConfig(
+                model_type="remote",
+                model_name="multilingual-e5-large-instruct",
+                model_kwargs={
+                    "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                    "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                },
+            )
+            service = RemoteEmbeddingService(config, data_path=data_path)
+            service._get_client()
+
+        _, kwargs = mock_openai_cls.call_args
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+
+    async def test_get_client_falls_back_to_env_when_shared_store_empty(self):
+        import os
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            with patch.dict(os.environ, {
+                "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/from-env/v1",
+                "MPCDF_EMBEDDING_API_KEY": "env-key",
+            }):
+                config = EmbeddingConfig(
+                    model_type="remote",
+                    model_name="multilingual-e5-large-instruct",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                        "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                    },
+                )
+                service = RemoteEmbeddingService(config, data_path=data_path)
+                with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                    service._get_client()
+                    _, kwargs = mock_openai_cls.call_args
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/from-env/v1")
+        self.assertEqual(kwargs["api_key"], "env-key")
+
+    async def test_get_client_raises_clear_error_when_shared_base_url_unset(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            config = EmbeddingConfig(
+                model_type="remote",
+                model_name="multilingual-e5-large-instruct",
+                model_kwargs={
+                    "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                    "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                },
+            )
+            service = RemoteEmbeddingService(config, api_key="explicit-key", data_path=data_path)
+            with self.assertRaises(ValueError) as ctx:
+                service._get_client()
+        self.assertIn("MPCDF_EMBEDDING_BASE_URL", str(ctx.exception))
+
     @patch("openai.AsyncOpenAI")
     async def test_embed_text_returns_correct_dimension(self, mock_openai_cls):
         """Test that remote service calls the API and returns the right dimension."""

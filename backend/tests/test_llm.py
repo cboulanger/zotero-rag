@@ -224,6 +224,140 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service._anthropic_client)
         self.assertEqual(service.api_key, "test-key")
 
+    async def test_required_client_fields_reports_shared_kinds_for_mpcdf_style_preset(self):
+        mpcdf_preset = HardwarePreset(
+            name="test-mpcdf",
+            description="Test MPCDF preset",
+            embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+            llm=LLMConfig(
+                model_type="remote",
+                model_names="openai/gpt-oss-120b",
+                model_kwargs={
+                    "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                    "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                },
+            ),
+            rag=RAGConfig(),
+            memory_budget_gb=0.5,
+        )
+        mock_settings = Mock(spec=Settings)
+        mock_settings.get_hardware_preset.return_value = mpcdf_preset
+
+        fields = RemoteLLMService.required_client_fields(mock_settings)
+        by_key = {f["key_name"]: f for f in fields}
+        self.assertEqual(len(fields), 2)
+        self.assertEqual(by_key["MPCDF_LLM_BASE_URL"]["kind"], "shared_base_url")
+        self.assertEqual(by_key["MPCDF_LLM_API_KEY"]["kind"], "shared_api_key")
+
+    async def test_get_openai_client_resolves_shared_fields_from_store_over_env(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config(data_path, {
+                "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1",
+                "MPCDF_LLM_API_KEY": "store-key",
+            })
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = data_path
+
+            with patch.dict(os.environ, {"MPCDF_LLM_BASE_URL": "https://should-not-be-used/v1"}):
+                service = RemoteLLMService(mock_settings)
+                with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                    service._get_openai_client()
+                    _, kwargs = mock_openai_cls.call_args
+
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+        self.assertEqual(kwargs["api_key"], "store-key")
+
+    async def test_get_openai_client_appends_v1_to_shared_base_url_missing_it(self):
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config(data_path, {
+                "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123",
+                "MPCDF_LLM_API_KEY": "store-key",
+            })
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = data_path
+
+            service = RemoteLLMService(mock_settings)
+            with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                service._get_openai_client()
+                _, kwargs = mock_openai_cls.call_args
+
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+
+    async def test_get_openai_client_raises_clear_error_when_shared_api_key_unset(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = Path(tmp)
+
+            service = RemoteLLMService(mock_settings)
+            with self.assertRaises(ValueError) as ctx:
+                service._get_openai_client()
+        self.assertIn("MPCDF_LLM_API_KEY", str(ctx.exception))
+
     async def test_generate_openai(self):
         """Test generation with OpenAI API."""
         service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")

@@ -10,6 +10,7 @@
  * @property {number} [items_processed]
  * @property {number} [items_total]
  * @property {number} [chunks_added]
+ * @property {number} [items_failed] - items whose attachment failed to download/process this run; they remain candidates for the next scan
  * @property {string} [error]
  * @property {string} [skip_reason]
  * @property {string} [rate_limit_until] - ISO timestamp; set when skip_reason is "embedding_rate_limit"
@@ -588,7 +589,11 @@ var ZoteroRAGAutoIndexStatus = {
 				? `Embedding quota exhausted for today — resumes automatically at ${this.formatTime(info.rate_limit_until)}.`
 				: 'Embedding quota exhausted for today — indexing will resume automatically once the limit resets.';
 		}
-		return info.skip_reason || '';
+		if (info.skip_reason) return info.skip_reason;
+		if (info.items_failed) {
+			return `${info.items_failed} item(s) failed to index this run — check the server logs; they remain candidates for the next scan.`;
+		}
+		return '';
 	},
 
 	/**
@@ -685,7 +690,7 @@ var ZoteroRAGAutoIndexStatus = {
 			meta.textContent = parts.join(' — ');
 			row.appendChild(meta);
 
-			if (info.error || info.skip_reason) {
+			if (info.error || info.skip_reason || info.items_failed) {
 				const errorDiv = document.createElement('div');
 				errorDiv.className = 'library-error';
 				errorDiv.textContent = this._formatSkipOrErrorReason(info);

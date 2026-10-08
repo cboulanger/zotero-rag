@@ -81,6 +81,27 @@ class AdminSettingsApiTest(unittest.TestCase):
         self.assertEqual(r.json(), {"deleted_chunks": 5, "deleted_attachments": 2})
         mock_store.delete_snapshot_chunks.assert_called_once()
 
+    def test_put_preserves_active_preset_override_and_remote_config(self):
+        """PUT /api/admin/settings only has an `index_snapshots` field in its
+        request body, but write_admin_settings is a full-replace — so a naive
+        `write_admin_settings(data_path, body.model_dump())` silently wipes
+        active_preset_override/remote_config every time someone flips the
+        unrelated index-snapshots checkbox."""
+        from backend.services.admin_settings_store import (
+            set_active_preset_override, update_remote_config, read_admin_settings,
+        )
+        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
+        update_remote_config(get_settings().data_path, {"MPCDF_LLM_BASE_URL": "https://x/v1"})
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+
+        r = self.client.put("/api/admin/settings", json={"index_snapshots": True})
+        self.assertEqual(r.status_code, 200)
+
+        state = read_admin_settings(get_settings().data_path)
+        self.assertTrue(state["index_snapshots"])
+        self.assertEqual(state["active_preset_override"], "remote-mpcdf")
+        self.assertEqual(state["remote_config"], {"MPCDF_LLM_BASE_URL": "https://x/v1"})
+
 
 if __name__ == "__main__":
     unittest.main()

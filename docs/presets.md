@@ -14,6 +14,7 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 | `remote-openai` | **No** | `OPENAI_API_KEY` |
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` |
 | `windows-test` | **No** | `KISSKI_API_KEY` |
+| `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -172,6 +173,44 @@ to reduce peak RSS during indexing.
 
 ---
 
+### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
+
+**Best for:** Riding out an exhausted KISSKI rate limit, using a short-lived job on the MPCDF LLM Inference Service (`llm.mpcdf.mpg.de`) instead
+
+**Configuration:**
+
+- Embedding: `multilingual-e5-large-instruct` (MPCDF remote, vLLM, 1024-dim — same model and vector space as `remote-kisski`)
+- LLM: `openai/gpt-oss-120b` (MPCDF remote, vLLM, 131k context)
+- Memory: ~0.5 GB (fully remote)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
+
+**What's different about this preset:** MPCDF's embedding job and LLM job are two independent Slurm jobs, each lasting at most 8 hours, each handing out its own freshly-generated endpoint URL and API key. Rather than editing `.env` and restarting the backend every time a job rotates, these four values are set at runtime through the admin API — see "Admin: runtime preset switching & shared remote config" below.
+
+**Advantages:**
+
+- Uses the same embedding model/vector space as `remote-kisski`, `apple-silicon-kisski`, and `windows-test` — switching to/from this preset at runtime (no restart) is supported for exactly this reason.
+- No local GPU or large Python dependencies.
+
+**Trade-offs:** Requires an active MPCDF HPC allocation and manually starting a job through the MPCDF LLM Inference Service UI; not a general-purpose recommendation — use `remote-kisski` under normal circumstances.
+
+**Requires:** `MPCDF_EMBEDDING_BASE_URL`, `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_BASE_URL`, `MPCDF_LLM_API_KEY` — set via `POST /api/config/remote-fields` (admin only, no restart) or as environment variables. The base URL the MPCDF LLM Inference Service UI hands out for a job doesn't include the `/v1` API-version segment; it's appended automatically if missing (see "Admin: runtime preset switching & shared remote config" below), so pasting the bare job URL works either way.
+
+---
+
+## Admin: runtime preset switching & shared remote config
+
+Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires a restart to change):
+
+**Switching the active preset without a restart.** `POST /api/config` with `{"preset_name": "..."}` switches immediately, for every caller and for the hourly cron auto-indexer — but only to a preset that shares the current one's embedding model (same vector space, so the already-open vector store stays valid). `GET /api/config`'s `compatible_presets` field lists which presets currently qualify; switching to anything else (a different embedding model, or a local-model preset) still requires `MODEL_PRESET` + a restart. The Zotero plugin's Preferences pane exposes this as the "Active Model Preset" dropdown.
+
+**Setting shared remote endpoint/API-key values.** Presets like `remote-mpcdf`, whose endpoint URL and API key rotate with each short-lived job, declare this via `shared_base_url_env`/`shared_api_key_env` in `backend/config/presets.py` rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"MPCDF_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` (plaintext; these are short-lived, sandboxed-job credentials, not long-term secrets) and picked up immediately by interactive queries and the cron indexer alike, no restart needed. The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
+
+A stored `shared_base_url`-kind value is normalized on every read — `backend.services.admin_settings_store.normalize_base_url` appends `/v1` if it's missing (leaving a URL that already ends in `/v1` untouched) — since the openai-compatible client appends `/embeddings`/`/chat/completions` directly to whatever base URL it's given, and a bare job URL without `/v1` would otherwise 404.
+
+Both endpoints require an admin — an owner/admin of the server's `AUTHORIZED_GROUP_ID` (the same requirement as the autoindex scheduler's pause/resume controls, see [cron-indexing.md](cron-indexing.md)) — except on a loopback/personal deployment, where this check is skipped. See `docs/superpowers/specs/2026-10-08-dynamic-remote-preset-config-design.md` for the full design.
+
+---
+
 ## Quick Selection Guide
 
 | Your Setup | Recommended Preset |
@@ -309,6 +348,15 @@ KISSKI_API_KEY=your_kisski_key_here
 
 # OpenAI (remote-openai)
 OPENAI_API_KEY=sk-...
+
+# MPCDF (remote-mpcdf) — typically set at runtime via POST /api/config/remote-fields
+# instead (see "Admin: runtime preset switching & shared remote config" above), since
+# these rotate with each new MPCDF job; shown here only for the env-var fallback path.
+# The trailing /v1 is optional — it's appended automatically if omitted.
+MPCDF_EMBEDDING_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
+MPCDF_EMBEDDING_API_KEY=...
+MPCDF_LLM_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
+MPCDF_LLM_API_KEY=...
 ```
 
 See [backend/config/presets.py](../backend/config/presets.py) for complete configuration details.

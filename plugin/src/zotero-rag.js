@@ -680,9 +680,48 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Render service API key input fields into `container`, one row + description
-	 * per required key, each bound to `extensions.zotero-rag.serviceApiKey.<key_name>`.
+	 * Persist one shared, admin-controlled remote-config value (a preset's
+	 * `shared_base_url_env`/`shared_api_key_env` field, e.g. for the MPCDF
+	 * preset's rotating job endpoint/key) to the backend. Unlike a personal
+	 * API key, this is never stored in a local pref or sent as a per-request
+	 * header — it's global state shared by every caller and the cron
+	 * auto-indexer. Admin-gated server-side (require_authorized_group_admin).
+	 * @param {string} keyName
+	 * @param {string} value
+	 * @returns {Promise<{ok: boolean, is_set?: boolean, error?: string}>}
+	 */
+	async setSharedRemoteField(keyName, value) {
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/remote-fields`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ values: { [keyName]: value } }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				return { ok: false, error: err.detail || `HTTP ${response.status}` };
+			}
+			/** @type {{is_set: Record<string, boolean>}} */
+			const data = await response.json();
+			return { ok: true, is_set: data.is_set ? data.is_set[keyName] : undefined };
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
+	}
+
+	/**
+	 * Render service field input rows into `container`, one row + description
+	 * per required field, as reported by the backend's `/api/required-keys`.
 	 * Shared between the Preferences pane and the setup wizard so both stay in sync.
+	 *
+	 * `kind: "api_key"` fields are personal: each binds to
+	 * `extensions.zotero-rag.serviceApiKey.<key_name>` and is sent as a
+	 * per-request header (unchanged behavior). `kind: "shared_base_url"`/
+	 * `"shared_api_key"` fields are global, admin-set values (e.g. the MPCDF
+	 * preset's rotating job endpoint/key) — they are never stored in a local
+	 * pref; on change they POST to `/api/config/remote-fields` via
+	 * `setSharedRemoteField` instead, and the input is cleared back to a
+	 * placeholder afterward rather than echoing the value back.
 	 *
 	 * Note: generated "Get key" links use `target="_blank"`, which is a no-op in a
 	 * privileged Zotero document. The caller must provide its own delegated
@@ -692,8 +731,8 @@ class ZoteroRAGPlugin {
 	 * @param {Document} doc - Document to create elements in (the Preferences pane document, or a dialog document)
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
-	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
-	 * @param {(keyInfo: {key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}, value: string) => void} [onKeyChange] - Optional callback invoked after a key's pref is set, e.g. to re-sync a server-stored copy
+	 * @param {Array<{key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null}>} requiredKeys
+	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields.
 	 * @returns {void}
 	 */
 	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
@@ -708,8 +747,9 @@ class ZoteroRAGPlugin {
 		if (placeholder) placeholder.style.display = 'none';
 
 		for (const keyInfo of requiredKeys) {
+			const isShared = keyInfo.kind === 'shared_base_url' || keyInfo.kind === 'shared_api_key';
 			const prefKey = `extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`;
-			const storedValue = Zotero.Prefs.get(prefKey, true) || '';
+			const storedValue = isShared ? '' : (Zotero.Prefs.get(prefKey, true) || '');
 
 			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 			row.className = 'setting-row service-key-row';
@@ -719,37 +759,49 @@ class ZoteroRAGPlugin {
 			label.setAttribute('for', `zotero-rag-key-${keyInfo.key_name}`);
 
 			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
-			input.type = 'password';
+			input.type = keyInfo.kind === 'shared_base_url' ? 'text' : 'password';
 			input.id = `zotero-rag-key-${keyInfo.key_name}`;
 			input.className = 'setting-input';
 			input.value = storedValue;
-			input.placeholder = 'Enter API key';
-			input.addEventListener('change', (e) => {
+			input.placeholder = isShared
+				? (keyInfo.is_set ? 'Configured — enter a new value to replace it' : 'Not yet configured')
+				: 'Enter API key';
+
+			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			status.className = 'service-key-status';
+			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
+
+			input.addEventListener('change', async (e) => {
 				const value = /** @type {HTMLInputElement} */ (e.target).value;
-				Zotero.Prefs.set(prefKey, value, true);
-				if (typeof onKeyChange === 'function') {
-					onKeyChange(keyInfo, value);
+				if (isShared) {
+					if (!value) return;
+					status.textContent = 'Saving…';
+					status.className = 'service-key-status';
+					const result = await this.setSharedRemoteField(keyInfo.key_name, value);
+					status.textContent = result.ok ? 'Saved.' : `Error: ${result.error}`;
+					status.className = `service-key-status ${result.ok ? 'status-ok' : 'status-error'}`;
+					if (result.ok) {
+						/** @type {HTMLInputElement} */ (e.target).value = '';
+						/** @type {HTMLInputElement} */ (e.target).placeholder = 'Configured — enter a new value to replace it';
+					}
+				} else {
+					Zotero.Prefs.set(prefKey, value, true);
+					if (typeof onKeyChange === 'function') {
+						onKeyChange(keyInfo, value);
+					}
 				}
 			});
 
 			row.appendChild(label);
 			row.appendChild(input);
-
-			// Populated by callers (e.g. preferences.js) when the server reports this
-			// key's validation status (ok/invalid/unverified), so a rejected key is
-			// flagged right here, right next to the field — not only in a separate
-			// summary section elsewhere.
-			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
-			status.className = 'service-key-status';
-			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
 			row.appendChild(status);
-
 			container.appendChild(row);
 
 			if (keyInfo.description) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 				desc.className = 'setting-description service-key-desc';
-				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				const sharedNote = isShared ? ' (shared — admin only, affects every user and the cron indexer)' : '';
+				desc.textContent = `${keyInfo.description}${sharedNote} (used for: ${keyInfo.required_for.join(', ')})`;
 				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
 					desc.appendChild(doc.createTextNode(' '));
 					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');

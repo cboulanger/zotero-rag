@@ -47,6 +47,19 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Active Model Preset (admin only; populated from the backend's compatible_presets) -->
+  <html:fieldset class="settings-group" id="zotero-rag-preset-group">
+    <html:legend>Active Model Preset</html:legend>
+    <html:div class="setting-row">
+      <html:label for="zotero-rag-preset-select">Preset:</html:label>
+      <html:select id="zotero-rag-preset-select" class="setting-input">
+        <html:option value="">(not connected)</html:option>
+      </html:select>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-preset-description"></html:div>
+    <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
+  </html:fieldset>
+
   <!-- Service API Keys (populated dynamically from the backend's /api/required-keys) -->
   <html:fieldset class="settings-group" id="zotero-rag-service-keys-group">
     <html:legend>Service API Keys</html:legend>

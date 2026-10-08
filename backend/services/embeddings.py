@@ -14,6 +14,7 @@ import re
 import time
 import random
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -178,8 +179,8 @@ class EmbeddingService(ABC):
         """Return a stable identifier for the embedding model (used to detect model changes)."""
 
     @staticmethod
-    def required_api_keys(config: "EmbeddingConfig") -> list[dict]:
-        """Return API keys required by this service (empty for local services)."""
+    def required_client_fields(config: "EmbeddingConfig") -> list[dict]:
+        """Return the client-configurable fields required by this service (empty for local services)."""
         return []
 
     @abstractmethod
@@ -370,9 +371,19 @@ class RemoteEmbeddingService(EmbeddingService):
       - ``api_key_env``: env-var name that holds the API key (default: OPENAI_API_KEY)
     """
 
-    def __init__(self, config: EmbeddingConfig, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        config: EmbeddingConfig,
+        api_key: Optional[str] = None,
+        data_path: Optional[Path] = None,
+    ):
         self.config = config
         self._api_key = api_key  # explicit override; falls back to env-var lookup
+        # Resolves shared-field admin settings (base_url/API key) in _get_client().
+        # Falls back to the global settings singleton when not provided, so
+        # callers that don't care (e.g. the cron indexer, which wants the same
+        # global data_path anyway) see no behavior change.
+        self.data_path = data_path
         self._client: Optional[Any] = None  # AsyncOpenAI, imported lazily
         self._embedding_cache: dict[str, list[float]] = {}
         self._dim: Optional[int] = None
@@ -389,18 +400,43 @@ class RemoteEmbeddingService(EmbeddingService):
         return self._api_key
 
     @staticmethod
-    def required_api_keys(config: EmbeddingConfig) -> list[dict]:
-        """Return the API key required by this remote embedding service."""
+    def required_client_fields(config: EmbeddingConfig) -> list[dict]:
+        """Return the fields required by this remote embedding service: a
+        personal API key (``api_key_env``, per-request header, unchanged), and/or
+        a shared admin-set base_url/API key (``shared_base_url_env``/
+        ``shared_api_key_env`` — see backend.services.admin_settings_store)."""
         if config.model_type != "remote":
             return []
-        api_key_env = config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-        return [{
-            "key_name": api_key_env,
-            "header_name": env_var_to_header(api_key_env),
-            "description": f"API key for remote embeddings ({config.model_name})",
-            "docs_url": docs_url_for_key(api_key_env),
-            "required_for": ["indexing"],
-        }]
+        fields: list[dict] = []
+        if "api_key_env" in config.model_kwargs:
+            env_var = config.model_kwargs["api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
+                "description": f"API key for remote embeddings ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+            })
+        elif "shared_api_key_env" not in config.model_kwargs:
+            env_var = "OPENAI_API_KEY"
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
+                "description": f"API key for remote embeddings ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+            })
+        if "shared_base_url_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_base_url_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
+                "description": f"Shared endpoint URL for remote embeddings ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+            })
+        if "shared_api_key_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
+                "description": f"Shared API key for remote embeddings ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+            })
+        return fields
 
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""
@@ -412,13 +448,46 @@ class RemoteEmbeddingService(EmbeddingService):
                     "openai package is required for remote embeddings. "
                     "Install it with: uv add openai"
                 )
-            api_key_env = self.config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-            api_key = self._api_key or os.getenv(api_key_env)
-            if not api_key:
-                raise ValueError(
-                    f"API key not found. Set the {api_key_env} environment variable."
-                )
-            base_url = self.config.model_kwargs.get("base_url")
+
+            shared_url_env = self.config.model_kwargs.get("shared_base_url_env")
+            shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
+            data_path = None
+            if shared_url_env or shared_key_env:
+                from backend.services.admin_settings_store import get_remote_config_value
+                data_path = self.data_path
+                if data_path is None:
+                    from backend.config.settings import get_settings
+                    data_path = get_settings().data_path
+
+            if shared_key_env:
+                api_key = self._api_key or get_remote_config_value(data_path, shared_key_env) or os.getenv(shared_key_env)
+                if not api_key:
+                    raise ValueError(
+                        f"API key not configured. POST it to /api/config/remote-fields as "
+                        f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
+                        f"environment variable."
+                    )
+            else:
+                api_key_env = self.config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+                api_key = self._api_key or os.getenv(api_key_env)
+                if not api_key:
+                    raise ValueError(
+                        f"API key not found. Set the {api_key_env} environment variable."
+                    )
+
+            if shared_url_env:
+                base_url = get_remote_config_value(data_path, shared_url_env) or os.getenv(shared_url_env)
+                if not base_url:
+                    raise ValueError(
+                        f"Base URL not configured. POST it to /api/config/remote-fields as "
+                        f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
+                        f"environment variable."
+                    )
+                from backend.services.admin_settings_store import normalize_base_url
+                base_url = normalize_base_url(base_url)
+            else:
+                base_url = self.config.model_kwargs.get("base_url")
+
             if base_url:
                 self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
                 logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}")
@@ -741,6 +810,7 @@ def create_embedding_service(
     cache_dir: Optional[str] = None,
     api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
+    data_path: Optional[Path] = None,
 ) -> EmbeddingService:
     """
     Factory: create the appropriate EmbeddingService for the given config.
@@ -752,10 +822,13 @@ def create_embedding_service(
                    named in config.model_kwargs['api_key_env']. Kept for
                    backwards-compatibility.
         hf_token:  HuggingFace token for gated models (local only).
+        data_path: Resolves shared-field admin settings (remote only). When
+                   omitted, RemoteEmbeddingService falls back to the global
+                   settings singleton's data_path.
     """
     if config.model_type == "local":
         return LocalEmbeddingService(config, cache_dir=cache_dir, hf_token=hf_token)
     elif config.model_type == "remote":
-        return RemoteEmbeddingService(config, api_key=api_key)
+        return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path)
     else:
         raise ValueError(f"Invalid model_type: {config.model_type!r}")

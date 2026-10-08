@@ -268,6 +268,66 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange)
 	);
 
+	// Active preset dropdown (admin only — a non-admin or non-loopback caller gets
+	// a 403/400 from POST /api/config and refreshPresetState() reverts the select).
+	const presetSelect = doc.getElementById('zotero-rag-preset-select');
+	const presetDescription = doc.getElementById('zotero-rag-preset-description');
+	const presetStatus = doc.getElementById('zotero-rag-preset-status');
+
+	/**
+	 * Re-fetch GET /api/config and repopulate the preset dropdown from
+	 * `compatible_presets`, selecting the currently active one.
+	 * @returns {Promise<void>}
+	 */
+	const refreshPresetState = async () => {
+		if (!presetSelect) return;
+		try {
+			const response = await fetch(`${this.backendURL}/api/config`, { headers: this.getAuthHeaders() });
+			if (!response.ok) return;
+			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[]}} */
+			const data = await response.json();
+			presetSelect.innerHTML = '';
+			for (const name of data.compatible_presets) {
+				const option = doc.createElementNS('http://www.w3.org/1999/xhtml', 'option');
+				option.value = name;
+				option.textContent = name;
+				presetSelect.appendChild(option);
+			}
+			presetSelect.value = data.preset_name;
+			if (presetDescription) presetDescription.textContent = data.preset_description || '';
+		} catch (e) {
+			this.log('Could not fetch preset config: ' + e);
+		}
+	};
+
+	if (presetSelect) {
+		presetSelect.addEventListener('change', async (e) => {
+			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
+			if (presetStatus) presetStatus.textContent = 'Switching…';
+			try {
+				const response = await fetch(`${this.backendURL}/api/config`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ preset_name: selected }),
+				});
+				if (!response.ok) {
+					const err = await response.json().catch(() => ({}));
+					if (presetStatus) presetStatus.textContent = `Error: ${err.detail || response.status}`;
+					await refreshPresetState(); // revert the select to the still-active preset
+					return;
+				}
+				if (presetStatus) presetStatus.textContent = 'Switched.';
+				await refreshPresetState();
+				// The new preset likely needs different dynamic fields filled in right away.
+				await this.fetchRequiredApiKeys();
+				this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
+			} catch (e) {
+				if (presetStatus) presetStatus.textContent = `Error: ${e}`;
+			}
+		});
+		refreshPresetState();
+	}
+
 	// Library visibility section
 	const populateLibraryVisibilityList = () => {
 		const container = doc.getElementById('zotero-rag-library-visibility-list');
