@@ -107,6 +107,9 @@ test('_formatDurationFromNow uses singular units for exactly 1', () => {
 
 test('_formatDurationFromNow works for future timestamps too (e.g. "next run")', () => {
 	const dialog = loadDialog({});
-	const in45Minutes = new Date(Date.now() + 45 * 60000).toISOString();
+	// +30s buffer so flooring to whole minutes can't flake below 45 due to
+	// the few ms of overhead between building this timestamp and the
+	// function's own Date.now() call.
+	const in45Minutes = new Date(Date.now() + (45 * 60 + 30) * 1000).toISOString();
 	assert.strictEqual(dialog._formatDurationFromNow(in45Minutes), '45 minutes');
 });

@@ -581,6 +581,7 @@ var ZoteroRAGAutoIndexStatus = {
 				skipButton.type = 'button';
 				skipButton.className = 'dialog-button library-skip-button';
 				skipButton.textContent = 'Skip';
+				skipButton.disabled = !running;
 				skipButton.dataset.skipSlug = slug;
 				skipButton.addEventListener('click', () => this.skipSlug(slug));
 				header.appendChild(skipButton);
