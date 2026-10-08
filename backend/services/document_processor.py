@@ -28,6 +28,7 @@ from backend.services.embeddings import (
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
+from backend.services.admin_settings_store import read_admin_settings
 from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergTimeoutError, KreuzbergParsingError
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
@@ -89,6 +90,28 @@ INDEXABLE_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/epub+zip",
 }
+
+
+def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> bool:
+    """Whether a Zotero attachment's `data` dict should be indexed.
+
+    Snapshot attachments (Zotero's default title for a saved webpage, an
+    HTML attachment) are excluded when the admin-controlled index_snapshots
+    setting is off — exact, case-sensitive title match, so a user-renamed
+    snapshot is treated as a normal attachment. See backend/services/
+    admin_settings_store.py and docs/superpowers/specs/
+    2026-10-07-configurable-snapshot-indexing-design.md.
+    """
+    if att_data.get("contentType") not in INDEXABLE_MIME_TYPES:
+        return False
+    if (
+        not index_snapshots_enabled
+        and att_data.get("contentType") == "text/html"
+        and att_data.get("title") == "Snapshot"
+    ):
+        return False
+    return True
+
 
 # Trigger gc + malloc_trim when process RSS exceeds this (MB). Keeps long
 # full-sync runs from hitting the OOM killer on memory-constrained hosts.
@@ -638,6 +661,7 @@ class DocumentProcessor:
         # without threading a new parameter through every one of its callers.
         self._download_failures = []
         self._too_large_skips = []
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
 
         # Fetch all items from Zotero
         items = await self.zotero_client.get_library_items_since(
@@ -648,7 +672,7 @@ class DocumentProcessor:
         logger.debug(f"Retrieved {len(items)} total items from Zotero")
 
         # Spill the full item list to a temp JSONL file and build a minimal
-        # children lookup (only contentType) in one pass, then free the list.
+        # children lookup (only contentType + title) in one pass, then free the list.
         # This drops the ~3-4 GB in-memory list before the processing loop.
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jsonl", prefix="zotero_items_")
         try:
@@ -658,9 +682,14 @@ class DocumentProcessor:
                     f.write(json.dumps(_item) + "\n")
                     _parent = _item.get("data", {}).get("parentItem")
                     if _parent and _item.get("data", {}).get("itemType") == "attachment":
-                        # Keep only contentType — avoids referencing full item dicts
+                        # Keep only contentType + title — avoids referencing full item
+                        # dicts, while still letting _is_indexable_attachment correctly
+                        # exclude Snapshot-titled attachments below.
                         children_by_parent.setdefault(_parent, []).append(
-                            {"data": {"contentType": _item["data"].get("contentType")}}
+                            {"data": {
+                                "contentType": _item["data"].get("contentType"),
+                                "title": _item["data"].get("title"),
+                            }}
                         )
             del items
             gc.collect()
@@ -689,13 +718,13 @@ class DocumentProcessor:
                         # bibliographic parent. Attachments that DO have a parent are
                         # handled below via children_by_parent, keyed on the parent.
                         if not _item["data"].get("parentItem") \
-                                and _item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                                and _is_indexable_attachment(_item["data"], index_snapshots_enabled):
                             items_with_attachments.append(_item)
                         continue
                     _key = _item["data"]["key"]
                     _atts = children_by_parent.get(_key, [])
                     _has_indexable = any(
-                        a.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                        _is_indexable_attachment(a.get("data", {}), index_snapshots_enabled)
                         for a in _atts
                     )
                     if _has_indexable:
@@ -1008,6 +1037,8 @@ class DocumentProcessor:
             tags=self._extract_tags(item["data"]),
         )
 
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
+
         is_standalone_attachment = item["data"].get("itemType") == "attachment"
         if is_standalone_attachment:
             # A standalone attachment (no parentItem) IS the indexable unit — it has
@@ -1022,7 +1053,7 @@ class DocumentProcessor:
 
         indexable_attachments = [
             att for att in attachments
-            if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+            if _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
         ]
 
         abstract_note = "" if is_standalone_attachment else item["data"].get("abstractNote", "")
@@ -1035,6 +1066,7 @@ class DocumentProcessor:
                 attachment_version = attachment.get("version", item_version)
                 mime_type = attachment["data"].get("contentType", "application/pdf")
                 doc_metadata.attachment_key = attachment_key
+                doc_metadata.attachment_title = attachment["data"].get("title")
 
                 # Download attachment
                 file_bytes = await self.zotero_client.get_attachment_file(
@@ -1543,7 +1575,7 @@ class DocumentProcessor:
             return 0
 
         abstract_key = f"{doc_metadata.item_key}:abstract"
-        meta = doc_metadata.model_copy(update={"attachment_key": abstract_key})
+        meta = doc_metadata.model_copy(update={"attachment_key": abstract_key, "attachment_title": None})
         library_id = meta.library_id
         item_key = meta.item_key
 
@@ -1644,6 +1676,7 @@ class DocumentProcessor:
         catalog entries that deserve a stub record (see _add_catalog_stub).
         """
         min_words = get_settings().min_abstract_words
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
         items_with_content = []
         catalog_only_items = []
 
@@ -1659,7 +1692,7 @@ class DocumentProcessor:
                 # A standalone attachment (no parentItem) is itself the indexable
                 # unit — see the matching case in _index_library_full's filter.
                 if not item["data"].get("parentItem") \
-                        and item["data"].get("contentType") in INDEXABLE_MIME_TYPES:
+                        and _is_indexable_attachment(item["data"], index_snapshots_enabled):
                     items_with_content.append(item)
                 continue
 
@@ -1675,7 +1708,7 @@ class DocumentProcessor:
                 )
 
             has_indexable = any(
-                att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
                 for att in attachments
             )
 
@@ -1771,6 +1804,7 @@ class DocumentProcessor:
             the normal reindex path.
         """
         item_key = item["data"]["key"]
+        index_snapshots_enabled = (await asyncio.to_thread(read_admin_settings, get_settings().data_path)).get("index_snapshots", False)
 
         # Standalone attachments (itemType == "attachment") ARE the indexable
         # unit, and Zotero bumps their own version for both a metadata-only
@@ -1805,7 +1839,7 @@ class DocumentProcessor:
                 library_id=library_id, item_key=item_key, library_type=library_type
             )
             has_indexable_attachment = any(
-                att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
                 for att in current_attachments
             )
             if has_indexable_attachment:
@@ -1828,7 +1862,7 @@ class DocumentProcessor:
             current_indexable = {
                 att["data"]["key"]: att.get("version", 0)
                 for att in current_attachments
-                if att.get("data", {}).get("contentType") in INDEXABLE_MIME_TYPES
+                if _is_indexable_attachment(att.get("data", {}), index_snapshots_enabled)
             }
 
             if set(stored_versions) != set(current_indexable):

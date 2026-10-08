@@ -42,6 +42,48 @@ def _attachment(key: str, parent_key: str, content_type: str = "application/pdf"
     }
 
 
+class TestDocumentMetadataAttachmentTitle(unittest.TestCase):
+    def test_attachment_title_defaults_to_none_and_schema_version_is_7(self):
+        from backend.models.document import DocumentMetadata, CURRENT_SCHEMA_VERSION
+        meta = DocumentMetadata(library_id="1", item_key="ABC")
+        self.assertIsNone(meta.attachment_title)
+        self.assertEqual(CURRENT_SCHEMA_VERSION, 7)
+
+    def test_attachment_title_can_be_set(self):
+        from backend.models.document import DocumentMetadata
+        meta = DocumentMetadata(library_id="1", item_key="ABC", attachment_title="Snapshot")
+        self.assertEqual(meta.attachment_title, "Snapshot")
+
+
+class TestIsIndexableAttachment(unittest.TestCase):
+    def test_non_indexable_mime_type_is_always_excluded(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "image/png", "title": "diagram.png"}
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=True))
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_snapshot_titled_html_excluded_when_disabled(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "Snapshot"}
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_snapshot_titled_html_included_when_enabled(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "Snapshot"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
+
+    def test_renamed_html_attachment_always_included_regardless_of_flag(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "text/html", "title": "My notes on this page"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
+
+    def test_pdf_always_included_regardless_of_title_or_flag(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "application/pdf", "title": "Snapshot"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 
@@ -63,6 +105,19 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
             vector_store=self.mock_vector_store,
             document_extractor=self.mock_extractor,
         )
+
+        # Default: deterministically disable snapshot indexing for every test
+        # in this class unless a test overrides it with its own inner
+        # `with patch(...)` block (which always wins for its duration).
+        # Without this, get_settings()/read_admin_settings() hit the real
+        # data/system/admin_settings.json on disk, making tests depend on
+        # whatever value happens to be there.
+        self._read_admin_settings_patcher = patch(
+            "backend.services.document_processor.read_admin_settings",
+            return_value={"index_snapshots": False},
+        )
+        self._read_admin_settings_patcher.start()
+        self.addCleanup(self._read_admin_settings_patcher.stop)
 
         # Default stubs for new methods added by the sync-deletion changes
         self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
@@ -762,6 +817,29 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result)
 
+    async def test_metadata_only_update_ignores_a_cooccurring_snapshot_attachment(self):
+        """A PDF + a Snapshot on the same item: the Snapshot must not be counted
+        as 'currently indexable' when deciding if the PDF's version is unchanged,
+        or metadata-only updates break for every item that also has a snapshot."""
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {
+                "data": {
+                    "key": "ITEM1", "itemType": "document", "title": "New Title",
+                    "abstractNote": "", "dateModified": "2026-01-02T00:00:00Z",
+                },
+                "version": 5,
+            }
+            self.mock_vector_store.get_item_chunks.return_value = [
+                {"payload": {"has_content": True, "attachment_key": "PDF1", "attachment_version": 3, "content_hash": "h1"}},
+            ]
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "PDF1", "contentType": "application/pdf", "title": "paper.pdf"}, "version": 3},
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            result = await self.processor._try_metadata_only_update(item, "1", "user")
+        self.assertTrue(result)
+        self.mock_vector_store.update_item_bibliographic_metadata.assert_called_once()
+
     async def test_extract_year_various_formats(self):
         """Test year extraction from various date formats."""
         test_cases = [
@@ -867,6 +945,68 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.processor._download_failures, [
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
+
+    async def test_index_item_skips_snapshot_attachment_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {
+                "data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "version": 1},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            chunks = await self.processor._index_item(item, "1", "user")
+        self.assertEqual(chunks, 0)
+        self.mock_zotero_client.get_attachment_file.assert_not_called()
+
+    async def test_index_item_indexes_snapshot_attachment_when_setting_on(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": True}):
+            item = {
+                "data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "version": 1},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_item_children.return_value = [
+                {"data": {"key": "SNAP1", "contentType": "text/html", "title": "Snapshot"}, "version": 1},
+            ]
+            self.mock_zotero_client.get_attachment_file.return_value = b"<html>hi</html>"
+            self.mock_vector_store.check_duplicate.return_value = None
+            self.mock_extractor.extract_and_chunk.return_value = _make_extraction_chunks(("hi", 1))
+            self.mock_embedding_service.embed_batch.return_value = [[0.1] * 384]
+            chunks = await self.processor._index_item(item, "1", "user")
+        self.assertEqual(chunks, 1)
+
+    async def test_split_indexable_and_catalog_only_excludes_snapshot_only_item_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            item = {"data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "abstractNote": ""}}
+            children_by_parent = {
+                "ITEM1": [{"data": {"contentType": "text/html", "title": "Snapshot"}}],
+            }
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [item], "1", "user", children_by_parent=children_by_parent
+            )
+        self.assertEqual(indexable, [])
+        self.assertEqual(catalog_only, [item])
+
+    async def test_split_indexable_and_catalog_only_includes_snapshot_only_item_when_setting_on(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": True}):
+            item = {"data": {"key": "ITEM1", "itemType": "document", "title": "A Page", "abstractNote": ""}}
+            children_by_parent = {
+                "ITEM1": [{"data": {"contentType": "text/html", "title": "Snapshot"}}],
+            }
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [item], "1", "user", children_by_parent=children_by_parent
+            )
+        self.assertEqual(indexable, [item])
+        self.assertEqual(catalog_only, [])
+
+    async def test_split_indexable_standalone_snapshot_attachment_excluded_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            standalone = {"data": {"key": "SNAP1", "itemType": "attachment", "contentType": "text/html", "title": "Snapshot"}}
+            indexable, catalog_only = await self.processor._split_indexable_and_catalog_only(
+                [standalone], "1", "user", children_by_parent={}
+            )
+        self.assertEqual(indexable, [])
+        self.assertEqual(catalog_only, [])  # standalone attachments never become catalog stubs
 
     async def test_index_item_isolates_attachment_processing_failure(self):
         """A multi-attachment item where one attachment's extraction/embedding
@@ -1846,6 +1986,28 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items_failed"], 0)
         self.mock_extractor.extract_and_chunk.assert_not_called()
 
+    async def test_full_sync_treats_snapshot_only_item_as_catalog_only_when_setting_off(self):
+        with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            page_item = {
+                "data": {"key": "ITEM1", "itemType": "webpage", "title": "A Page", "abstractNote": "", "dateModified": "2026-01-01T00:00:00Z"},
+                "version": 1,
+            }
+            snap_attachment = {
+                "data": {"key": "SNAP1", "itemType": "attachment", "contentType": "text/html", "title": "Snapshot", "parentItem": "ITEM1"},
+                "version": 1,
+            }
+            self.mock_zotero_client.get_library_items_since.return_value = [page_item, snap_attachment]
+            self.mock_vector_store.get_all_indexed_item_versions.return_value = {}
+
+            result = await self.processor.index_library("test_lib", mode="full")
+
+        # The item has no indexable attachment (Snapshot excluded) and no
+        # abstract, so it must become a catalog-only stub, not a failed/zero-
+        # chunk "indexed" item, and get_attachment_file must never be called
+        # for the excluded Snapshot.
+        self.mock_zotero_client.get_attachment_file.assert_not_called()
+        self.assertEqual(result["items_processed"], 0)
+
     async def test_incremental_reports_items_failed_for_dead_download_link(self):
         """Incremental sync must also count a zero-chunk dead-download-link result
         as items_failed, not items_added."""
@@ -1915,7 +2077,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc.exitcode = 0
         mock_process_cls.return_value = mock_proc
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -1956,7 +2119,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc2.exitcode = 0
         mock_process_cls.side_effect = [mock_proc1, mock_proc2]
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -1996,7 +2160,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         metadata = MagicMock(last_indexed_version=0)
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2040,7 +2205,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
 
         metadata = MagicMock(last_indexed_version=0)
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             mock_settings.return_value = MagicMock(
                 testing=False,
                 min_abstract_words=5,
@@ -2087,7 +2253,8 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
         mock_proc.exitcode = 0
         mock_process_cls.return_value = mock_proc
 
-        with patch("backend.services.document_processor.get_settings") as mock_settings:
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
             # Global key deliberately unset, as in production auto-indexing.
             mock_settings.return_value = MagicMock(
                 testing=False,
@@ -2437,6 +2604,7 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
         ]
 
         with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}), \
              patch("backend.zotero.web_api.ZoteroWebAPI", FakeWebAPI), \
              patch("backend.services.embeddings.create_embedding_service", return_value=MagicMock()), \
              patch("backend.dependencies.make_vector_store", return_value=mock_vector_store):

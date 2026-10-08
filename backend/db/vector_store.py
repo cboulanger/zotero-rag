@@ -303,6 +303,7 @@ class VectorStore:
                 "library_id": chunk.metadata.document_metadata.library_id,
                 "item_key": chunk.metadata.document_metadata.item_key,
                 "attachment_key": chunk.metadata.document_metadata.attachment_key,
+                "attachment_title": chunk.metadata.document_metadata.attachment_title,
                 "title": chunk.metadata.document_metadata.title,
                 "authors": chunk.metadata.document_metadata.authors,
                 "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
@@ -365,6 +366,7 @@ class VectorStore:
                     "library_id": chunk.metadata.document_metadata.library_id,
                     "item_key": chunk.metadata.document_metadata.item_key,
                     "attachment_key": chunk.metadata.document_metadata.attachment_key,
+                    "attachment_title": chunk.metadata.document_metadata.attachment_title,
                     "title": chunk.metadata.document_metadata.title,
                     "authors": chunk.metadata.document_metadata.authors,
                     "author_lastnames": _extract_lastnames(chunk.metadata.document_metadata.authors),
@@ -986,6 +988,7 @@ class VectorStore:
                     "library_id":         target_library_id,
                     "item_key":           target_item_key,
                     "attachment_key":     target_attachment_key,
+                    "attachment_title":   target_doc_metadata.attachment_title,
                     "title":              target_doc_metadata.title,
                     "authors":            target_doc_metadata.authors,
                     "tags":               target_doc_metadata.tags,
@@ -1499,6 +1502,72 @@ class VectorStore:
         )
         logger.info(f"Deleted {len(point_ids)} chunk(s) by explicit ID")
         return len(point_ids)
+
+    def delete_snapshot_chunks(self) -> tuple[int, int]:
+        """
+        Delete every chunk across ALL libraries whose source attachment was
+        titled exactly "Snapshot" (Zotero's default webpage-snapshot title).
+
+        For each (library_id, item_key) pair touched, the deduplication
+        record is cleared only once NONE of that item's chunks remain
+        (checked via get_item_chunks) — mirroring delete_item_chunks's own
+        dedup-cleanup convention elsewhere in this codebase. This matters
+        when an item has both a Snapshot attachment and another, surviving
+        attachment (e.g. a PDF): purging the Snapshot's chunks must not wipe
+        the dedup record for the still-fully-indexed PDF, since that record
+        is what lets a future duplicate of the PDF's content be recognized
+        instead of wastefully re-extracted.
+
+        Used by the admin-only POST /api/admin/settings/purge-snapshots
+        endpoint. Chunks indexed before the attachment_title field existed
+        have attachment_title=None and are never matched, so this is a no-op
+        on data from before this feature shipped until it's re-indexed.
+
+        No payload index exists on attachment_title (this runs rarely, as an
+        explicit admin maintenance action, not a hot path — same tradeoff
+        already made for attachment_key, which also has no index).
+
+        Returns:
+            (deleted_chunks, deleted_attachments) — deleted_attachments counts
+            distinct (library_id, item_key, attachment_key) triples, since one
+            attachment can have multiple chunks.
+        """
+        scroll_filter = Filter(must=[
+            FieldCondition(key="attachment_title", match=MatchValue(value="Snapshot"))
+        ])
+        point_ids: list[str] = []
+        touched_items: set[tuple[str, str]] = set()
+        touched_attachments: set[tuple[str, str, str]] = set()
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=1000,
+                offset=offset,
+                with_payload=["library_id", "item_key", "attachment_key"],
+                with_vectors=False,
+            )
+            for point in points:
+                point_ids.append(point.id)
+                library_id = point.payload.get("library_id")
+                item_key = point.payload.get("item_key")
+                attachment_key = point.payload.get("attachment_key")
+                if library_id and item_key:
+                    touched_items.add((library_id, item_key))
+                    touched_attachments.add((library_id, item_key, attachment_key))
+            if offset is None:
+                break
+
+        deleted_chunks = self.delete_chunks_by_ids(point_ids)
+        for library_id, item_key in touched_items:
+            if not self.get_item_chunks(library_id, item_key):
+                self.delete_item_deduplication_records(library_id, item_key)
+
+        logger.info(
+            f"Purged {deleted_chunks} Snapshot chunk(s) across {len(touched_attachments)} attachment(s)"
+        )
+        return deleted_chunks, len(touched_attachments)
 
     def count_library_chunks(self, library_id: str) -> int:
         """

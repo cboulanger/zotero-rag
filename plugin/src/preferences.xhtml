@@ -78,6 +78,30 @@
     </html:div>
   </html:fieldset>
 
+  <!-- Indexed Content: what gets indexed, regardless of whether indexing was
+       triggered automatically or from the client (e.g. "Fix unavailable"). -->
+  <html:fieldset class="settings-group" id="zotero-rag-indexed-content-group" style="display:none;">
+    <html:legend>Indexed Content</html:legend>
+
+    <html:div class="setting-description">
+      Admin settings controlling what content gets indexed, independent of how indexing was triggered.
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">
+      <html:input type="checkbox" id="zotero-rag-index-snapshots-toggle"/>
+      <html:label for="zotero-rag-index-snapshots-toggle" style="margin-left:6px;cursor:pointer;">Index Snapshots of webpages</html:label>
+    </html:div>
+    <html:div class="setting-description">
+      When off (default), webpage "Snapshot" attachments (Zotero's default title when saving a
+      page snapshot) are excluded from indexing and from the "Fix unavailable" list, for every
+      user.
+    </html:div>
+    <html:div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+      <html:button id="zotero-rag-purge-snapshots-button">Delete indexed Snapshot entries…</html:button>
+      <html:span id="zotero-rag-purge-snapshots-message" class="setting-description"></html:span>
+    </html:div>
+  </html:fieldset>
+
   <!-- Performance Settings -->
   <html:fieldset class="settings-group">
     <html:legend>Performance</html:legend>
