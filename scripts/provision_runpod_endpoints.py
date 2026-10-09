@@ -180,7 +180,13 @@ def _ensure_endpoint(
     if existing is not None:
         existing_gpus = existing.get("gpuTypeIds")
         gpu_mismatch = existing_gpus is not None and set(existing_gpus) != set(gpu_type_ids)
-        mismatched = existing.get("templateId") != template_id or gpu_mismatch
+        # The endpoint listing may not report gpuTypeIds at all; an explicit
+        # --recreate must then still replace it, since the GPU placement (the
+        # thing --recreate is used to correct) can't be verified.
+        gpu_unverifiable = recreate and existing_gpus is None
+        mismatched = (
+            existing.get("templateId") != template_id or gpu_mismatch or gpu_unverifiable
+        )
         if not mismatched:
             return existing
         if not recreate:

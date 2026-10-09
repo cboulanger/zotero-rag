@@ -304,6 +304,21 @@ class EnsureEndpointTest(unittest.TestCase):
         self.assertEqual(client.calls[1][0], "DELETE")
         self.assertEqual(client.calls[2][3]["gpuTypeIds"], ["NVIDIA RTX A4000"])
 
+    def test_recreate_replaces_endpoint_whose_gpus_are_not_reported(self):
+        existing = {"id": "e_old", "name": "zotero-rag-embedding", "templateId": "t1"}
+        client = FakeClient([
+            (200, [existing]),
+            (200, None),  # DELETE
+            (200, {"id": "e_new", "name": "zotero-rag-embedding"}),  # POST
+        ])
+        result = provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-embedding", template_id="t1",
+            gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+            data_center_ids=None, recreate=True,
+        )
+        self.assertEqual(result["id"], "e_new")
+        self.assertEqual(client.calls[1][0], "DELETE")
+
     def test_warns_but_keeps_existing_on_template_mismatch_without_recreate(self):
         existing = {"id": "e_existing", "name": "zotero-rag-embedding", "templateId": "t_old"}
         client = FakeClient([(200, [existing])])
