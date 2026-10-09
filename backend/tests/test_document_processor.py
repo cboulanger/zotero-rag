@@ -84,6 +84,34 @@ class TestIsIndexableAttachment(unittest.TestCase):
         self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
 
 
+class TestDefaultExtractorConnectRetryWiring(unittest.TestCase):
+    """DocumentProcessor's default-constructed KreuzbergExtractor must get a
+    zero connect-retry budget in settings.testing, so tests that exercise the
+    real upload path without mocking httpx (the sidecar is never actually
+    running under pytest) fail on the first connection attempt instead of
+    retrying for minutes and hanging past the test's own timeout."""
+
+    def test_testing_mode_uses_zero_connect_retry_budget(self):
+        mock_settings = MagicMock(testing=True, extractor_backend="kreuzberg", ocr_enabled=True)
+        with patch("backend.services.document_processor.get_settings", return_value=mock_settings):
+            processor = DocumentProcessor(
+                zotero_client=MagicMock(),
+                embedding_service=MagicMock(),
+                vector_store=MagicMock(),
+            )
+        self.assertEqual(processor.document_extractor._connect_retry_budget_seconds, 0)
+
+    def test_non_testing_mode_uses_the_normal_connect_retry_budget(self):
+        mock_settings = MagicMock(testing=False, extractor_backend="kreuzberg", ocr_enabled=True)
+        with patch("backend.services.document_processor.get_settings", return_value=mock_settings):
+            processor = DocumentProcessor(
+                zotero_client=MagicMock(),
+                embedding_service=MagicMock(),
+                vector_store=MagicMock(),
+            )
+        self.assertEqual(processor.document_extractor._connect_retry_budget_seconds, 600)
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 

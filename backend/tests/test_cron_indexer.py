@@ -1420,6 +1420,55 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
                 await indexer._drain_pending_uploads(indexer.parse_slug("users/6"), MagicMock(), web_api)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_stops_draining_once_the_extraction_sidecar_is_unavailable(self, mock_execute):
+        # Regression test, same reasoning as the embedding-quota case above:
+        # the kreuzberg sidecar being unreachable affects every remaining
+        # entry identically (each attempt fully downloads only to fail at the
+        # same extraction step), so draining must stop after the first
+        # KreuzbergUnavailableError instead of churning through the backlog
+        # logging the identical connection failure for every entry.
+        from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
+
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_A", b"bytes-a",
+            {"item_key": "ITEM_A", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_B", b"bytes-b",
+            {"item_key": "ITEM_B", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(
+                status="error",
+                message="kreuzberg sidecar at http://kreuzberg:8000 still unreachable after retrying for 600s",
+                error_type="KreuzbergUnavailableError",
+                rate_limit_available_at=None,
+                chunks_added=0,
+            )
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/7": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock7",
+            status_file=self.data_path / "status7.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        with self.assertRaises(KreuzbergUnavailableError):
+            await indexer._drain_pending_uploads(indexer.parse_slug("users/7"), MagicMock(), web_api)
+
+        mock_execute.assert_awaited_once()
+        self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
+        _, meta_b = pending_upload_cache.read_entry(self.data_path, "u7", "ATT_B")
+        self.assertEqual(meta_b["attempts"], 0)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_reports_progress_after_each_entry_including_failures(self, mock_execute):
         # Regression test: _index_slug's progress_callback used to only ever be
         # invoked from processor.index_library(), so a library with a large
