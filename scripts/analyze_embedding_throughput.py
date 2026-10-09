@@ -103,11 +103,14 @@ def main():
     unmatched_calls = 0
     line_count = 0
 
+    # current_model persists across file boundaries: a batch's summary line
+    # can land in one rotated file while its "call" lines continue into the
+    # next. last_host is reset per file since a trailing HTTP line in one
+    # file must not pair with a call line at the start of the next.
+    current_model = "unknown"
+
     for logfile in logfiles:
-        # Reset per-file: a trailing HTTP line in one file must not pair
-        # with a call line at the start of the next.
         last_host = None
-        current_model = "unknown"
 
         with open(logfile, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
