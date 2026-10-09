@@ -25,6 +25,11 @@ from backend.services.rag_engine import (
 )
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
+from backend.services.embeddings import (
+    EmbeddingAuthenticationError, EmbeddingConfigurationError, EmbeddingEndpointUnavailableError,
+    EmbeddingRateLimitExhaustedError,
+)
+from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
@@ -330,6 +335,19 @@ async def query_libraries(
             status_code=503,
             detail=f"The search backend returned an error: {e}",
         )
+
+    except (EmbeddingEndpointUnavailableError, LLMEndpointUnavailableError, LLMConfigurationError,
+            EmbeddingAuthenticationError, EmbeddingConfigurationError, EmbeddingRateLimitExhaustedError) as e:
+        # The configured remote embedding/LLM provider itself is the problem
+        # (unreachable, cold, misconfigured credentials, or rate-limited) —
+        # not a bug in this backend, so 503 rather than 500. Each of these
+        # already carries a clear, actionable message (see their own
+        # docstrings in backend.services.embeddings / backend.services.llm);
+        # a full traceback would just be log noise for what is, from this
+        # backend's point of view, an expected and already-classified
+        # upstream failure mode.
+        logger.warning(f"Query failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
 
     except Exception as e:
         logger.exception("Query failed")

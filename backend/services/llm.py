@@ -11,9 +11,37 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
-from backend.services.embeddings import env_var_to_header, docs_url_for_key
+from backend.services.embeddings import env_var_to_header, docs_url_for_key, _extract_error_detail
 
 logger = logging.getLogger(__name__)
+
+
+class LLMConfigurationError(Exception):
+    """Raised when the remote LLM client can't even be constructed because a
+    required API key or base URL isn't configured — e.g. a preset's
+    ``shared_api_key_env``/``shared_base_url_env`` value was never set via
+    POST /api/config/remote-fields, or a personal/default env var
+    (``OPENAI_API_KEY``, ``ANTHROPIC_API_KEY``) is unset.
+
+    Distinct from LLMEndpointUnavailableError (which means a working
+    config couldn't *reach* the endpoint): this means the config itself is
+    incomplete. Still a known, classified upstream-provider problem rather
+    than an internal bug, so it gets the same 503 treatment in
+    backend.api.query.
+    """
+
+
+class LLMEndpointUnavailableError(Exception):
+    """Raised when the remote LLM endpoint can't be reached at all — a
+    transport-level ``openai.APIConnectionError``, no HTTP status involved.
+
+    Mirrors backend.services.embeddings.EmbeddingEndpointUnavailableError:
+    most commonly means a self-provisioned serverless endpoint (e.g.
+    RunPod) is cold or was never provisioned. Not retryable here — a cold
+    worker can take minutes to spin up, so the caller should abort and
+    point the admin at GET /api/config/health / the "Provision endpoints"
+    button rather than block the request retrying.
+    """
 
 
 class LLMService(ABC):
@@ -241,7 +269,8 @@ class RemoteLLMService(LLMService):
     @staticmethod
     def required_client_fields(settings: Settings) -> list[dict]:
         """Return the fields required by this remote LLM service (see
-        RemoteEmbeddingService.required_client_fields for the api_key/shared_* kinds)."""
+        RemoteEmbeddingService.required_client_fields for the api_key/shared_*
+        kinds, and for what the optional ``pattern`` entry means)."""
         return RemoteLLMService.required_client_fields_for_config(settings.get_hardware_preset().llm)
 
     @staticmethod
@@ -257,6 +286,7 @@ class RemoteLLMService(LLMService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote LLM ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+                "pattern": config.model_kwargs.get("api_key_pattern"),
             })
         elif "shared_api_key_env" not in config.model_kwargs:
             env_var = "ANTHROPIC_API_KEY" if (
@@ -266,6 +296,17 @@ class RemoteLLMService(LLMService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote LLM ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+                "pattern": config.model_kwargs.get("api_key_pattern"),
+            })
+        # See RemoteEmbeddingService.required_client_fields: the key is listed
+        # before the base_url so it's the first field in the Preferences pane.
+        if "shared_api_key_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
+                "description": f"Shared API key for remote LLM ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+                "pattern": config.model_kwargs.get("shared_api_key_pattern"),
             })
         if "shared_base_url_env" in config.model_kwargs:
             env_var = config.model_kwargs["shared_base_url_env"]
@@ -273,13 +314,7 @@ class RemoteLLMService(LLMService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
                 "description": f"Shared endpoint URL for remote LLM ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
-            })
-        if "shared_api_key_env" in config.model_kwargs:
-            env_var = config.model_kwargs["shared_api_key_env"]
-            fields.append({
-                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
-                "description": f"Shared API key for remote LLM ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["querying"],
+                "pattern": config.model_kwargs.get("shared_base_url_pattern"),
             })
         return fields
 
@@ -317,13 +352,13 @@ class RemoteLLMService(LLMService):
                 shared_key_env = self.llm_config.model_kwargs.get("shared_api_key_env")
                 data_path = None
                 if shared_url_env or shared_key_env:
-                    from backend.services.admin_settings_store import get_remote_config_value
+                    from backend.services.admin_settings_store import resolve_shared_value
                     data_path = self.settings.data_path
 
                 if shared_key_env:
-                    api_key = self.api_key or get_remote_config_value(data_path, shared_key_env) or os.getenv(shared_key_env)
+                    api_key = self.api_key or resolve_shared_value(data_path, shared_key_env)
                     if not api_key:
-                        raise ValueError(
+                        raise LLMConfigurationError(
                             f"API key not configured. POST it to /api/config/remote-fields as "
                             f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
                             f"environment variable."
@@ -332,12 +367,12 @@ class RemoteLLMService(LLMService):
                     api_key_env = self.llm_config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
                     api_key = self.api_key or os.getenv(api_key_env)
                     if not api_key:
-                        raise ValueError(f"API key not found in environment variable: {api_key_env}")
+                        raise LLMConfigurationError(f"API key not found in environment variable: {api_key_env}")
 
                 if shared_url_env:
-                    base_url = get_remote_config_value(data_path, shared_url_env) or os.getenv(shared_url_env)
+                    base_url = resolve_shared_value(data_path, shared_url_env)
                     if not base_url:
-                        raise ValueError(
+                        raise LLMConfigurationError(
                             f"Base URL not configured. POST it to /api/config/remote-fields as "
                             f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
                             f"environment variable."
@@ -370,7 +405,7 @@ class RemoteLLMService(LLMService):
 
                 api_key = self.api_key or os.getenv("ANTHROPIC_API_KEY")
                 if not api_key:
-                    raise ValueError("Anthropic API key not provided")
+                    raise LLMConfigurationError("Anthropic API key not provided")
 
                 self._anthropic_client = AsyncAnthropic(api_key=api_key)
                 logger.info("Initialized Anthropic client")
@@ -411,9 +446,36 @@ class RemoteLLMService(LLMService):
             else:
                 raise ValueError(f"Unsupported remote model: {self._model_name}")
 
+        except (LLMConfigurationError, LLMEndpointUnavailableError):
+            raise
         except Exception as e:
+            connection_error_types: tuple = ()
+            try:
+                from openai import APIConnectionError as OpenAIAPIConnectionError
+                connection_error_types += (OpenAIAPIConnectionError,)
+            except ImportError:
+                pass
+            try:
+                from anthropic import APIConnectionError as AnthropicAPIConnectionError
+                connection_error_types += (AnthropicAPIConnectionError,)
+            except ImportError:
+                pass
+            if connection_error_types and isinstance(e, connection_error_types):
+                raise LLMEndpointUnavailableError(
+                    f"Could not connect to the LLM API ({self._model_name}): {e}. If this preset "
+                    "uses a self-provisioned serverless endpoint (e.g. RunPod), it may be cold or "
+                    "not yet provisioned — check its status and provision/wake it from Preferences."
+                ) from e
+            # _extract_error_detail also handles an HTML error page from an
+            # upstream gateway (e.g. RunPod's openresty edge) — the openai/
+            # anthropic SDKs use that raw markup verbatim as both exc.body
+            # and str(exc) when a response isn't JSON, which would otherwise
+            # leak straight into this message. hasattr-gated since it's only
+            # meaningful for an APIStatusError-shaped exception (one with a
+            # .body attribute); anything else falls back to plain str(e).
+            detail = _extract_error_detail(e) if hasattr(e, "body") else str(e)
             logger.error(f"Error during remote generation: {e}", exc_info=True)
-            raise RuntimeError(f"Remote LLM generation failed: {e}") from e
+            raise RuntimeError(f"Remote LLM generation failed: {detail}") from e
 
     async def _generate_openai(
         self,

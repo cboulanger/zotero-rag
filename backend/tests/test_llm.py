@@ -6,7 +6,12 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import os
 
+import httpx
+from openai import APIConnectionError as OpenAIAPIConnectionError
+
 from backend.services.llm import (
+    LLMConfigurationError,
+    LLMEndpointUnavailableError,
     LLMService,
     LocalLLMService,
     RemoteLLMService,
@@ -354,7 +359,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             mock_settings.data_path = Path(tmp)
 
             service = RemoteLLMService(mock_settings)
-            with self.assertRaises(ValueError) as ctx:
+            with self.assertRaises(LLMConfigurationError) as ctx:
                 service._get_openai_client()
         self.assertIn("MPCDF_LLM_API_KEY", str(ctx.exception))
 
@@ -392,6 +397,57 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "Generated answer from Claude")
         mock_client.messages.create.assert_called_once()
 
+    async def test_generate_openai_raises_endpoint_unavailable_on_connection_error(self):
+        """A transport-level failure (e.g. a cold/unreachable RunPod serverless
+        LLM endpoint) raises openai.APIConnectionError — must become a clear,
+        typed LLMEndpointUnavailableError, not the generic
+        "Remote LLM generation failed: Connection error." RuntimeError that
+        gives the caller (backend.api.query) no way to distinguish this from
+        an actual code bug."""
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = OpenAIAPIConnectionError(
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions")
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMEndpointUnavailableError) as ctx:
+                await service.generate("Test prompt")
+
+        self.assertIn("Connection error", str(ctx.exception))
+
+    async def test_generate_openai_strips_html_from_a_gateway_error_page(self):
+        """Observed live: RunPod's edge gateway (openresty) returned a 405
+        with an HTML body, not JSON — the openai SDK uses that raw HTML text
+        verbatim as both exc.body and str(exc) (see
+        backend.services.embeddings._extract_error_detail's docstring for
+        why). The raw markup must not reach the end user as the error
+        message raised from generate()."""
+        import httpx
+        from openai import APIStatusError
+
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+        html = (
+            "<html>\n<head><title>405 Not Allowed</title></head>\n<body>\n"
+            "<center><h1>405 Not Allowed</h1></center>\n<hr><center>openresty</center>\n"
+            "</body>\n</html>"
+        )
+        response = httpx.Response(
+            status_code=405, request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+        exc = APIStatusError(html, response=response, body=html)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = exc
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(RuntimeError) as ctx:
+                await service.generate("Test prompt")
+
+        self.assertIn("405 Not Allowed", str(ctx.exception))
+        self.assertNotIn("<html>", str(ctx.exception))
+
     async def test_generate_unsupported_model(self):
         """Test error handling for unsupported model."""
         unsupported_preset = HardwarePreset(
@@ -421,38 +477,28 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Unsupported remote model", str(context.exception))
 
     async def test_openai_missing_api_key(self):
-        """Test error handling when OpenAI API key is missing."""
+        """A missing API key is a classified configuration problem
+        (LLMConfigurationError, handled as a 503 by backend.api.query), not
+        a generic RuntimeError indistinguishable from an actual code bug."""
         service = RemoteLLMService(self.mock_openai_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing openai package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("API key not found in environment variable", str(context.exception))
 
     async def test_anthropic_missing_api_key(self):
-        """Test error handling when Anthropic API key is missing."""
+        """Symmetrical case for Anthropic (see test_openai_missing_api_key)."""
         service = RemoteLLMService(self.mock_anthropic_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing anthropic package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("Anthropic API key not provided", str(context.exception))
 
     async def test_generate_with_defaults(self):
         """Test generation uses config defaults when parameters not specified."""

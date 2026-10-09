@@ -30,6 +30,12 @@ body {
   margin-bottom: 10px;
 }
 
+/* `display: flex` above would otherwise override the `hidden` attribute. */
+.setting-row[hidden],
+.setting-description[hidden] {
+  display: none;
+}
+
 .setting-row label {
   min-width: 180px;
   font-weight: 500;

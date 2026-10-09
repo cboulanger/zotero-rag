@@ -1690,6 +1690,85 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
 });
 
+test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.setSharedRemoteField = async () => ({ ok: true, is_set: true });
+
+	class FakeCustomEvent {
+		/** @param {string} type @param {{detail: any}} init */
+		constructor(type, init) { this.type = type; this.detail = init.detail; }
+	}
+	const doc = { ...makeFakeDoc(), defaultView: { CustomEvent: FakeCustomEvent } };
+	const container = makeFakeContainer();
+	/** @type {any[]} */
+	const events = [];
+	container.dispatchEvent = (ev) => { events.push(ev); return true; };
+
+	plugin.renderServiceApiKeyFields(doc, container, null, [{
+		key_name: 'RUNPOD_API_KEY',
+		header_name: 'X-Runpod-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}]);
+
+	const row = container.appended.find(el => el.children.length > 0);
+	await findInputChild(row).dispatchChange('rpa_NEW');
+
+	assert.strictEqual(events.length, 1);
+	assert.strictEqual(events[0].type, 'zotero-rag-shared-field-saved');
+	assert.strictEqual(events[0].detail.keyName, 'RUNPOD_API_KEY');
+});
+
+test('renderServiceApiKeyFields sets input.pattern/title from a declared pattern', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'RUNPOD_EMBEDDING_BASE_URL',
+		header_name: 'X-Runpod-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+		pattern: '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$',
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$');
+	assert.match(input.title, /Must match/);
+});
+
+test('renderServiceApiKeyFields leaves input.pattern unset when the field declares none', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		header_name: 'X-Mpcdf-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, undefined);
+});
+
 test('renderServiceApiKeyFields renders a shared_api_key field as a password input', () => {
 	const zotero = { Prefs: { get: () => null, set: () => {} } };
 	const plugin = loadPlugin(zotero, {}, {});
