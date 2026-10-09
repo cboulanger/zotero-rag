@@ -607,6 +607,45 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["libraries"], ["users/1", "users/2"])
         key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid")
 
+    async def test_endpoint_unavailable_isolated_to_one_slug(self):
+        """An EmbeddingEndpointUnavailableError for one slug only errors that
+        slug — and unlike an auth error, must not touch key_store, since this
+        isn't about any individual user's credentials (e.g. remote-mpcdf's
+        shared key is fine; the ephemeral job's endpoint itself expired)."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+
+            async def fake_index_library(**kwargs):
+                if kwargs.get("library_name") == "users/1":
+                    raise EmbeddingEndpointUnavailableError(
+                        "Embedding API returned an unexpected error (HTTP 405): Method Not Allowed"
+                    )
+                return {"items_processed": 5, "chunks_added": 10}
+
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            result = await indexer.run()
+
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+        self.assertIn("endpoint unavailable", status["slugs"]["users/1"]["error"].lower())
+        # The other user's slug must still succeed, not be aborted.
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        self.assertEqual(result["libraries"], ["users/1", "users/2"])
+        key_store.set_embedding_key_status.assert_not_called()
+
     async def test_rate_limit_exhausted_isolated_to_one_slug(self):
         """An EmbeddingRateLimitExhaustedError for one slug only skips that slug."""
         from datetime import timedelta

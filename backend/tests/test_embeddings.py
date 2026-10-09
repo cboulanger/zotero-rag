@@ -5,9 +5,11 @@ Unit tests for embedding service.
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
+import httpx
 import numpy as np
 
 from openai import (
+    APIStatusError as OpenAIAPIStatusError,
     AuthenticationError as OpenAIAuthenticationError,
     BadRequestError as OpenAIBadRequestError,
     InternalServerError as OpenAIInternalServerError,
@@ -18,6 +20,7 @@ from openai import (
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
     LocalEmbeddingService,
@@ -826,6 +829,61 @@ class TestEmbeddingAuthenticationError(unittest.IsolatedAsyncioTestCase):
             mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
 
             with self.assertRaises(EmbeddingAuthenticationError):
+                await service._create_embeddings_with_backoff(["hello"])
+
+
+class TestEmbeddingEndpointUnavailableError(unittest.IsolatedAsyncioTestCase):
+    """A status code the SDK doesn't give a specific exception for (e.g. 404/405)
+    must raise a fatal EmbeddingEndpointUnavailableError, not propagate as a raw
+    openai.APIStatusError that only fails the one item it was raised for.
+
+    Regression: an ephemeral embedding job's endpoint (e.g. MPCDF's <=8h Slurm
+    jobs) expiring mid-run returned HTTP 405, which no except clause in
+    _create_embeddings_with_backoff caught — the run then churned through every
+    remaining item in the library, each failing identically, instead of
+    aborting once like an authentication failure already does.
+    """
+
+    def _make_service(self) -> RemoteEmbeddingService:
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",
+            batch_size=10,
+            cache_enabled=False,
+        )
+        return RemoteEmbeddingService(config, api_key="test-key")
+
+    def _status_error(self, status_code: int, message: str) -> OpenAIAPIStatusError:
+        response = httpx.Response(
+            status_code=status_code,
+            request=httpx.Request("POST", "https://example.com/v1/embeddings"),
+        )
+        return OpenAIAPIStatusError(message, response=response, body=None)
+
+    async def test_405_raises_endpoint_unavailable_error(self):
+        service = self._make_service()
+        exc = self._status_error(405, "Error code: 405 - Method Not Allowed")
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingEndpointUnavailableError) as ctx:
+                await service._create_embeddings_with_backoff(["hello"])
+
+        self.assertIn("405", str(ctx.exception))
+
+    async def test_404_raises_endpoint_unavailable_error(self):
+        service = self._make_service()
+        exc = self._status_error(404, "Error code: 404 - Not Found")
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
                 await service._create_embeddings_with_backoff(["hello"])
 
 

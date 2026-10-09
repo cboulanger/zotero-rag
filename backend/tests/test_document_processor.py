@@ -2094,6 +2094,46 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
     @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
     @patch("backend.services.document_processor.Process")
     @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_batch_endpoint_unavailable_error_aborts_run(self, mock_queue_cls, mock_process_cls):
+        """An EmbeddingEndpointUnavailableError reported by a subprocess (e.g. an
+        expired ephemeral job's HTTP 405) must abort _index_library_full the same
+        way an auth error does, not be mistaken for a rate-limit error."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": True,
+            "error": "Embedding API returned an unexpected error (HTTP 405): Method Not Allowed",
+            "error_type": "EmbeddingEndpointUnavailableError",
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
+                await self.processor._index_library_full(
+                    library_id="test_lib",
+                    library_type="user",
+                    metadata=MagicMock(last_indexed_version=0),
+                )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
     async def test_subprocess_oom_kill_skips_batch_and_continues(self, mock_queue_cls, mock_process_cls):
         """An OOM-killed subprocess (exitcode -9) must be logged and skipped, not abort the run."""
         item1 = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}

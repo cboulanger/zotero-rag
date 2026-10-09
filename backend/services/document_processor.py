@@ -24,6 +24,7 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import (
     EmbeddingService,
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 # a run that "completes" with zero chunks while reporting success.
 _FATAL_EMBEDDING_ERRORS = (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
 )
 
@@ -849,11 +851,14 @@ class DocumentProcessor:
                         # Re-raise fatal embedding error to abort the full run
                         from backend.services.embeddings import (
                             EmbeddingAuthenticationError,
+                            EmbeddingEndpointUnavailableError,
                             EmbeddingRateLimitExhaustedError,
                         )
                         error_type = result.get("error_type", "")
                         if error_type == "EmbeddingAuthenticationError":
                             raise EmbeddingAuthenticationError(result.get("error", ""))
+                        elif error_type == "EmbeddingEndpointUnavailableError":
+                            raise EmbeddingEndpointUnavailableError(result.get("error", ""))
                         raise EmbeddingRateLimitExhaustedError(result.get("error", ""))
                     chunks_added += result.get("chunks_added", 0)
                     items_added += result.get("items_added", 0)

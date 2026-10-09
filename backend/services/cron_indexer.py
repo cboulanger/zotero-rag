@@ -38,6 +38,7 @@ from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
 )
@@ -767,6 +768,17 @@ class CronIndexer:
                 self.key_store.set_embedding_key_status(fp, "invalid")
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except EmbeddingEndpointUnavailableError as exc:
+            # Not a per-user key problem (e.g. remote-mpcdf's shared key is
+            # fine) — the endpoint route itself is gone, most commonly an
+            # expired ephemeral job. No key_store update: this isn't about
+            # any individual user's credentials.
+            self.log.error("Embedding endpoint unavailable for %s: %s", slug_info.slug, exc)
+            error_message = f"Embedding endpoint unavailable: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
             status["slugs"][slug_info.slug]["error"] = error_message
             self._write_status(status)

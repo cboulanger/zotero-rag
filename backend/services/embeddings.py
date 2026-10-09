@@ -74,6 +74,19 @@ class EmbeddingAuthenticationError(Exception):
     """
 
 
+class EmbeddingEndpointUnavailableError(Exception):
+    """Raised when the embedding API returns a status code that isn't one of
+    the other recognized cases (not a per-item 400, not 401/403, not 429, not
+    a retryable 5xx) — e.g. HTTP 404/405. This most commonly means the route
+    itself no longer exists, such as an ephemeral job's endpoint (MPCDF's
+    <=8h Slurm jobs) having expired mid-run.
+
+    Fatal like EmbeddingAuthenticationError: every subsequent item would fail
+    identically until an admin configures a fresh endpoint, so the whole run
+    must abort rather than churn through every remaining item one at a time.
+    """
+
+
 def _extract_error_detail(exc: Exception) -> str:
     """Pull a short human-readable message out of an OpenAI SDK error's response
     body, instead of the SDK's default str(exc) — which is literally
@@ -545,6 +558,7 @@ class RemoteEmbeddingService(EmbeddingService):
         (max ``max_attempts`` attempts, base delay ``base_delay`` s).
         """
         from openai import (
+            APIStatusError,
             AuthenticationError,
             BadRequestError,
             InternalServerError,
@@ -680,6 +694,20 @@ class RemoteEmbeddingService(EmbeddingService):
                     )
                 else:
                     raise
+            except APIStatusError as exc:
+                # Anything else the SDK doesn't give a specific exception for
+                # (e.g. HTTP 404/405) — not a per-item content issue, not bad
+                # credentials, not a rate limit, not a retryable 5xx. Most
+                # likely the endpoint route itself is gone, e.g. an ephemeral
+                # job (MPCDF's <=8h Slurm jobs) expiring mid-run. Every
+                # subsequent item would fail identically, so abort the whole
+                # run instead of logging an identical error for every
+                # remaining item in the library.
+                status_code = getattr(exc, "status_code", None)
+                raise EmbeddingEndpointUnavailableError(
+                    f"Embedding API returned an unexpected error "
+                    f"(HTTP {status_code}): {_extract_error_detail(exc)}"
+                ) from exc
 
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
