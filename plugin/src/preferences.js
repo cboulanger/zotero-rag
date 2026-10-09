@@ -273,10 +273,111 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const presetSelect = doc.getElementById('zotero-rag-preset-select');
 	const presetDescription = doc.getElementById('zotero-rag-preset-description');
 	const presetStatus = doc.getElementById('zotero-rag-preset-status');
+	const healthRows = {
+		embedding: doc.getElementById('zotero-rag-endpoint-health-embedding'),
+		llm: doc.getElementById('zotero-rag-endpoint-health-llm'),
+	};
+	const provisionButton = /** @type {HTMLButtonElement | null} */ (doc.getElementById('zotero-rag-provision-endpoints'));
+	const provisionRow = doc.getElementById('zotero-rag-provision-row');
+	const provisionHelp = doc.getElementById('zotero-rag-provision-help');
+	const provisionKeyInput = /** @type {HTMLInputElement | null} */ (doc.getElementById('zotero-rag-provision-key'));
+	const provisionStatus = doc.getElementById('zotero-rag-provision-status');
+	/** Whether the active preset declares a provisioning script (from GET /api/config). */
+	let provisionable = false;
+	let provisioning = false;
+	const HEALTH_COLORS = { ready: 'green', cold: 'orange', throttled: 'red', unreachable: 'red' };
+	/** Statuses provisioning can fix; a "cold" endpoint wakes on the next request by itself. */
+	const NEEDS_PROVISIONING = new Set(['unreachable', 'throttled']);
+
+	/**
+	 * Fetch GET /api/config/health and render one status row per non-null side;
+	 * show the "Provision endpoints" row when the preset is provisionable and
+	 * a side needs provisioning (see NEEDS_PROVISIONING). Failures degrade to
+	 * showing no rows.
+	 * @returns {Promise<boolean>} true if every reported side is ready
+	 */
+	const refreshEndpointHealth = async () => {
+		let allReady = true;
+		let needsProvisioning = false;
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/health`, { headers: this.getAuthHeaders() });
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			/** @type {Record<'embedding'|'llm', {status: 'ready'|'cold'|'throttled'|'unreachable', detail: string}|null>} */
+			const data = await response.json();
+			for (const side of /** @type {const} */ (['embedding', 'llm'])) {
+				const row = healthRows[side];
+				const info = data[side];
+				if (!row) continue;
+				if (!info) {
+					row.textContent = '';
+					continue;
+				}
+				if (info.status !== 'ready') allReady = false;
+				if (NEEDS_PROVISIONING.has(info.status)) needsProvisioning = true;
+				// Show the reason inline for anything not ready — a tooltip alone is easy to miss.
+				const detail = info.status !== 'ready' && info.detail ? ` (${info.detail})` : '';
+				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}${detail}`;
+				row.style.color = HEALTH_COLORS[info.status] || '';
+				row.title = info.detail || '';
+			}
+		} catch (e) {
+			this.log('Could not fetch endpoint health: ' + e);
+			for (const row of Object.values(healthRows)) if (row) row.textContent = '';
+		}
+		// Stay visible while a job runs, so its progress isn't yanked away mid-run.
+		const showProvisioning = provisionable && (needsProvisioning || provisioning);
+		if (provisionRow) provisionRow.hidden = !showProvisioning;
+		if (provisionHelp) provisionHelp.hidden = !showProvisioning;
+		if (provisionButton) provisionButton.disabled = provisioning;
+		return allReady;
+	};
+
+	if (provisionButton) {
+		provisionButton.addEventListener('click', async () => {
+			provisioning = true;
+			provisionButton.disabled = true;
+			if (provisionStatus) provisionStatus.textContent = 'Provisioning\u2026';
+			try {
+				// A one-time key, sent with this request only: the backend hands it to
+				// the provisioning script and never stores it.
+				const provisioningKey = provisionKeyInput ? provisionKeyInput.value.trim() : '';
+				if (provisionKeyInput) provisionKeyInput.value = '';
+				const start = await fetch(`${this.backendURL}/api/config/provision`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify(provisioningKey ? { api_key: provisioningKey } : {}),
+				});
+				if (!start.ok) {
+					const err = await start.json().catch(() => ({}));
+					throw new Error(err.detail || `HTTP ${start.status}`);
+				}
+				/** @type {{status: string, message: string|null}} */
+				let job = await start.json();
+				while (job.status === 'running') {
+					await new Promise((resolve) => setTimeout(resolve, 5000));
+					const poll = await fetch(`${this.backendURL}/api/config/provision/status`, { headers: this.getAuthHeaders() });
+					if (!poll.ok) throw new Error(`HTTP ${poll.status}`);
+					job = await poll.json();
+					await refreshEndpointHealth();
+				}
+				if (provisionStatus) {
+					provisionStatus.textContent = job.status === 'succeeded'
+						? 'Provisioning finished.'
+						: `Provisioning failed: ${job.message || 'unknown error'}`;
+				}
+			} catch (e) {
+				if (provisionStatus) provisionStatus.textContent = `Provisioning failed: ${e}`;
+			} finally {
+				provisioning = false;
+				await refreshEndpointHealth();
+			}
+		});
+	}
 
 	/**
 	 * Re-fetch GET /api/config and repopulate the preset dropdown from
 	 * `compatible_presets`, selecting the currently active one.
+	 * Also refreshes the endpoint health rows and provision button.
 	 * @returns {Promise<void>}
 	 */
 	const refreshPresetState = async () => {
@@ -284,7 +385,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		try {
 			const response = await fetch(`${this.backendURL}/api/config`, { headers: this.getAuthHeaders() });
 			if (!response.ok) return;
-			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[]}} */
+			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[], provisionable?: boolean}} */
 			const data = await response.json();
 			presetSelect.innerHTML = '';
 			for (const name of data.compatible_presets) {
@@ -295,12 +396,32 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			}
 			presetSelect.value = data.preset_name;
 			if (presetDescription) presetDescription.textContent = data.preset_description || '';
+			provisionable = !!data.provisionable;
 		} catch (e) {
 			this.log('Could not fetch preset config: ' + e);
+			return;
 		}
+		await refreshEndpointHealth();
+	};
+
+	/**
+	 * Refresh everything that depends on the active preset after a switch
+	 * (made here or in another window).
+	 * @returns {Promise<void>}
+	 */
+	const applyPresetSwitch = async () => {
+		await refreshPresetState();
+		// The new preset likely needs different dynamic fields filled in right away.
+		await this.fetchRequiredApiKeys();
+		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
 	};
 
 	if (presetSelect) {
+		// A switch from the auto-index status dialog must show up here too.
+		this.observePresetChanged(_window, 'preferences', () => {
+			if (presetStatus) presetStatus.textContent = '';
+			applyPresetSwitch();
+		});
 		presetSelect.addEventListener('change', async (e) => {
 			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
 			if (presetStatus) presetStatus.textContent = 'Switching…';
@@ -317,15 +438,20 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					return;
 				}
 				if (presetStatus) presetStatus.textContent = 'Switched.';
-				await refreshPresetState();
-				// The new preset likely needs different dynamic fields filled in right away.
-				await this.fetchRequiredApiKeys();
-				this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
+				this.notifyPresetChanged('preferences');
+				await applyPresetSwitch();
 			} catch (e) {
 				if (presetStatus) presetStatus.textContent = `Error: ${e}`;
 			}
 		});
 		refreshPresetState();
+		// A saved shared value (e.g. a new RunPod API key) can change endpoint
+		// health and which presets have credentials — re-check right away.
+		if (serviceKeysContainer) {
+			serviceKeysContainer.addEventListener('zotero-rag-shared-field-saved', () => {
+				refreshPresetState();
+			});
+		}
 	}
 
 	// Library visibility section
@@ -500,7 +626,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus('', 'ok');
 			} else {
 				const own = data.keys[0];
-				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 				if (embeddingKeyInfo) {
 					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
 				}
@@ -526,7 +652,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		autoindexToggle.addEventListener('change', async () => {
 			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
-			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
 				/** @type {{api_key: string, embedding_api_key?: string}} */
@@ -585,6 +711,59 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	if (autoindexMonitorButton) {
 		autoindexMonitorButton.addEventListener('click', () => {
 			this.openAutoindexStatusDialog(_window);
+		});
+	}
+
+	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a
+	// manual full reconciliation that reuses the key stored for automatic indexing.
+	const indexedTagsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-toggle'));
+	const indexedTagsRefresh = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-refresh'));
+	const indexedTagsStatus = doc.getElementById('zotero-rag-indexed-tags-status');
+
+	/**
+	 * @param {string} message
+	 * @param {'ok'|'warn'|'error'} [level='ok']
+	 * @returns {void}
+	 */
+	const setIndexedTagsStatus = (message, level = 'ok') => {
+		if (!indexedTagsStatus) return;
+		indexedTagsStatus.textContent = message;
+		indexedTagsStatus.className = `setting-description status-${level}`;
+	};
+
+	if (indexedTagsToggle && indexedTagsRefresh) {
+		indexedTagsToggle.checked = IndexedTags.isEnabled();
+		indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+		indexedTagsToggle.addEventListener('change', () => {
+			Zotero.Prefs.set(IndexedTags.PREF_ENABLED, indexedTagsToggle.checked, true);
+			indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			// Re-follow from "now" when re-enabled rather than replaying stale events.
+			if (indexedTagsToggle.checked) IndexedTags.cursor = null;
+		});
+
+		indexedTagsRefresh.addEventListener('click', async () => {
+			indexedTagsRefresh.disabled = true;
+			setIndexedTagsStatus('Starting...');
+			try {
+				const stats = await IndexedTags.refresh({
+					onProgress: (s) => {
+						const lib = s.currentLibrary ? ` (${s.currentLibrary})` : '';
+						setIndexedTagsStatus(
+							`Library ${Math.min(s.librariesDone + 1, s.librariesTotal || 1)} of ${s.librariesTotal || '?'}${lib}: ` +
+							`${s.attachmentsChecked} attachments checked, ${s.added} tagged, ${s.removed} untagged...`
+						);
+					},
+				});
+				const failed = stats.errors.length ? ` ${stats.errors.length} librar${stats.errors.length === 1 ? 'y' : 'ies'} failed: ${stats.errors.join('; ')}` : '';
+				setIndexedTagsStatus(
+					`Done: ${stats.attachmentsChecked} attachments checked, ${stats.added} tagged, ${stats.removed} untagged, ${stats.skipped} skipped.${failed}`,
+					stats.errors.length ? 'warn' : 'ok'
+				);
+			} catch (e) {
+				setIndexedTagsStatus(`Error: ${e instanceof Error ? e.message : e}`, 'error');
+			} finally {
+				indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			}
 		});
 	}
 

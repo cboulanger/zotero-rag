@@ -71,7 +71,8 @@ function makeStubs(attachmentsByKey = {}) {
  */
 function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, ...extra };
+	// IndexedTags (indexed-tags.js) is a separate plugin-lifetime script; stub its lifecycle by default.
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, IndexedTags: { init() {}, shutdown() {} }, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -1331,9 +1332,10 @@ test('createResultNote creates a tagged note from every turn and does not refere
 	assert.ok(noteHtmls[0].includes('Q1') && noteHtmls[0].includes('Q2'));
 });
 
-test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
+test('init() starts the TaskQueue and IndexedTags; removeFromAllWindows() stops both', () => {
 	/** @type {string[]} */
 	const calls = [];
+	const indexedTagsStub = { init: () => calls.push('tags-init'), shutdown: () => calls.push('tags-shutdown') };
 	const taskQueueStub = {
 		start: () => calls.push('start'),
 		stop: () => calls.push('stop'),
@@ -1346,11 +1348,11 @@ test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 		getMainWindows: () => [],
 	};
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, IndexedTags: indexedTagsStub, Services: servicesStub });
 	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
 	plugin.removeFromAllWindows();
 
-	assert.deepStrictEqual(calls, ['start', 'stop']);
+	assert.deepStrictEqual(calls, ['start', 'tags-init', 'stop', 'tags-shutdown']);
 });
 
 test('_getSelectedLibraryIDCompat prefers the Zotero 10+ plural getter when present', () => {
@@ -1686,6 +1688,85 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 
 	assert.deepStrictEqual(posted, { keyName: 'MPCDF_EMBEDDING_BASE_URL', value: 'https://llm.mpcdf.mpg.de/abc123/v1' });
 	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
+});
+
+test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.setSharedRemoteField = async () => ({ ok: true, is_set: true });
+
+	class FakeCustomEvent {
+		/** @param {string} type @param {{detail: any}} init */
+		constructor(type, init) { this.type = type; this.detail = init.detail; }
+	}
+	const doc = { ...makeFakeDoc(), defaultView: { CustomEvent: FakeCustomEvent } };
+	const container = makeFakeContainer();
+	/** @type {any[]} */
+	const events = [];
+	container.dispatchEvent = (ev) => { events.push(ev); return true; };
+
+	plugin.renderServiceApiKeyFields(doc, container, null, [{
+		key_name: 'RUNPOD_API_KEY',
+		header_name: 'X-Runpod-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}]);
+
+	const row = container.appended.find(el => el.children.length > 0);
+	await findInputChild(row).dispatchChange('rpa_NEW');
+
+	assert.strictEqual(events.length, 1);
+	assert.strictEqual(events[0].type, 'zotero-rag-shared-field-saved');
+	assert.strictEqual(events[0].detail.keyName, 'RUNPOD_API_KEY');
+});
+
+test('renderServiceApiKeyFields sets input.pattern/title from a declared pattern', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'RUNPOD_EMBEDDING_BASE_URL',
+		header_name: 'X-Runpod-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+		pattern: '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$',
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$');
+	assert.match(input.title, /Must match/);
+});
+
+test('renderServiceApiKeyFields leaves input.pattern unset when the field declares none', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		header_name: 'X-Mpcdf-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, undefined);
 });
 
 test('renderServiceApiKeyFields renders a shared_api_key field as a password input', () => {

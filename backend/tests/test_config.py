@@ -37,6 +37,13 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "cloud-server-kisski",
     "windows-test",
     "remote-mpcdf",
+    "runpod",
+}
+
+
+MPCDF_ENV = {
+    "MPCDF_EMBEDDING_BASE_URL": "http://x", "MPCDF_EMBEDDING_API_KEY": "k",
+    "MPCDF_LLM_BASE_URL": "http://x", "MPCDF_LLM_API_KEY": "k",
 }
 
 
@@ -119,6 +126,28 @@ class TestPresets(unittest.TestCase):
             preset.embedding.model_name,
             get_preset("remote-kisski", self.data_path).embedding.model_name,
         )
+
+    def test_get_preset_runpod_uses_shared_dynamic_fields(self):
+        """runpod has no static base_url — both the embedding and LLM endpoint
+        URLs are only known after scripts/provision_runpod_endpoints.py creates
+        them, so (like remote-mpcdf) they're resolved at request time from the
+        shared admin-set store rather than baked into the preset."""
+        preset = get_preset("runpod", self.data_path)
+
+        self.assertEqual(preset.name, "runpod")
+        self.assertEqual(preset.embedding.model_type, "remote")
+        self.assertEqual(preset.embedding.model_name, "intfloat/multilingual-e5-large-instruct")
+        self.assertNotIn("base_url", preset.embedding.model_kwargs)
+        self.assertEqual(preset.embedding.model_kwargs["shared_base_url_env"], "RUNPOD_EMBEDDING_BASE_URL")
+        self.assertEqual(preset.embedding.model_kwargs["shared_api_key_env"], "RUNPOD_API_KEY")
+        self.assertEqual(preset.llm.model_type, "remote")
+        self.assertEqual(preset.llm.model_name, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertNotIn("base_url", preset.llm.model_kwargs)
+        self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "RUNPOD_LLM_BASE_URL")
+        # Same env var for both — a RunPod account has one stable API key used
+        # by every endpoint it owns (unlike MPCDF's two independent Slurm jobs,
+        # each with its own distinct generated key).
+        self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "RUNPOD_API_KEY")
 
     def test_get_preset_invalid(self):
         """Test getting invalid preset raises error."""
@@ -483,6 +512,17 @@ class TestConfigApi(unittest.TestCase):
         self.assertEqual("windows-test" in compatible, host == "windows")
         self.assertEqual("apple-silicon-kisski" in compatible, host == "darwin")
 
+    def test_get_config_lists_compatible_presets_includes_runpod_despite_hf_prefix(self):
+        """runpod.json stores its embedding model as the full HuggingFace repo
+        id ("intfloat/multilingual-e5-large-instruct", required by the RunPod
+        worker image's API), while remote-kisski/remote-mpcdf store the short
+        served-model alias ("multilingual-e5-large-instruct") — same
+        underlying model and vector space, different literal string. The
+        compatibility check must treat these as the same model (comparing by
+        basename) rather than rejecting runpod via a literal string mismatch."""
+        r = self.client.get("/api/config")
+        self.assertIn("runpod", set(r.json()["compatible_presets"]))
+
     def test_get_config_hides_other_platforms_presets(self):
         """available_presets/compatible_presets never include a preset whose
         `platform` field names a different OS than current_platform()."""
@@ -521,7 +561,8 @@ class TestConfigApi(unittest.TestCase):
     def test_post_config_switches_to_compatible_preset_as_admin(self):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        with patch.dict(os.environ, MPCDF_ENV):
+            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["preset_name"], "remote-mpcdf")
         r2 = self.client.get("/api/config")
@@ -541,8 +582,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_required_keys_reports_shared_kind_and_is_set_for_mpcdf(self):
         from backend.services.zotero_identity import ZoteroIdentity
+        from backend.services.admin_settings_store import set_active_preset_override
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
         r = self.client.get("/api/required-keys")
         self.assertEqual(r.status_code, 200)
         by_key = {k["key_name"]: k for k in r.json()["keys"]}
@@ -566,8 +608,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_remote_fields_as_admin_sets_value_and_is_reflected_in_required_keys(self):
         from backend.services.zotero_identity import ZoteroIdentity
+        from backend.services.admin_settings_store import set_active_preset_override
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
         r = self.client.post(
             "/api/config/remote-fields",
             json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
@@ -588,6 +631,228 @@ class TestConfigApi(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 400)
 
+    def test_remote_fields_rejects_value_not_matching_declared_pattern(self):
+        """runpod.json declares shared_base_url_pattern/shared_api_key_pattern
+        for its RunPod fields. A pasted-wrong-thing value (e.g. the dashboard
+        URL instead of the API base URL) must be rejected immediately with a
+        400, not silently stored and only surface as a connection error on
+        the next real query."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "runpod"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"RUNPOD_EMBEDDING_BASE_URL": "https://www.runpod.io/console/serverless"}},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("RUNPOD_EMBEDDING_BASE_URL", r.json()["detail"])
+
+    def _switch_to_runpod(self):
+        """Switch the active preset to runpod; devel's POST /api/config rejects a
+        target preset that has no credentials, so provide them first."""
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(get_settings().data_path, {
+            "RUNPOD_API_KEY": "rp_test",
+            "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1",
+            "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/def456/openai/v1",
+        })
+        r = self.client.post("/api/config", json={"preset_name": "runpod"})
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_remote_fields_accepts_value_matching_declared_pattern(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._switch_to_runpod()
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1"}},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["is_set"]["RUNPOD_EMBEDDING_BASE_URL"])
+
+    def test_required_keys_omits_provisioned_base_urls_for_runpod(self):
+        """runpod's endpoint URLs come from POST /api/config/provision, so the
+        Preferences pane only asks for the shared API key."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self._switch_to_runpod()
+        r = self.client.get("/api/required-keys")
+        key_names = [k["key_name"] for k in r.json()["keys"]]
+        self.assertEqual(key_names, ["RUNPOD_API_KEY"])
+
+    def test_provisionable_preset_is_switchable_without_shared_values(self):
+        """A fresh runpod setup has no stored URLs/key yet; the switch must
+        still be allowed, since provisioning (only offered once runpod is
+        active) is what supplies them."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        with patch.dict(os.environ, {}, clear=False):
+            for name in ("RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"):
+                os.environ.pop(name, None)
+            r = self.client.post("/api/config", json={"preset_name": "runpod"})
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_remote_fields_without_declared_pattern_accepts_any_value(self):
+        """mpcdf fields declare no pattern — no regression in the unconstrained case."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(get_settings().data_path, {
+            "MPCDF_EMBEDDING_BASE_URL": "https://e/v1", "MPCDF_EMBEDDING_API_KEY": "k",
+            "MPCDF_LLM_BASE_URL": "https://l/v1", "MPCDF_LLM_API_KEY": "k",
+        })
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        self.assertEqual(r.status_code, 200, r.text)
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"MPCDF_EMBEDDING_BASE_URL": "anything-goes"}},
+        )
+        self.assertEqual(r.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSwitchablePresets(unittest.TestCase):
+    """switchable_presets / credential check / cache reset on GET+POST /api/config."""
+
+    def setUp(self):
+        from backend.main import app
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+        self.tmp = tempfile.TemporaryDirectory()
+        s = get_settings()
+        s.data_path = Path(self.tmp.name)
+        ensure_default_presets(s.data_path)
+        s.model_preset = "remote-kisski"
+        s.autoindex_secret = None
+        self.app = app
+        from fastapi.testclient import TestClient
+        self.client = TestClient(app)
+        for k in list(MPCDF_ENV) + ["KISSKI_API_KEY"]:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        self.app.dependency_overrides.clear()
+        self.tmp.cleanup()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+
+    def _admin(self):
+        from backend.dependencies import require_authorized_group_admin
+        from backend.services.zotero_identity import ZoteroIdentity
+        ident = ZoteroIdentity(user_id=1, username="admin", targets=["users/1"])
+        self.app.dependency_overrides[require_authorized_group_admin] = lambda: ident
+
+    def _names(self, body):
+        return {p["name"]: p for p in body["switchable_presets"]}
+
+    def test_active_always_listed_and_credentialless_excluded(self):
+        body = self.client.get("/api/config").json()
+        by = self._names(body)
+        self.assertIn("remote-kisski", by)
+        self.assertTrue(by["remote-kisski"]["active"])
+        self.assertEqual(by["remote-kisski"]["credentials"], "missing")
+        self.assertNotIn("remote-mpcdf", by)
+        self.assertIn("remote-mpcdf", body["compatible_presets"])
+
+    def test_shared_creds_via_env_make_preset_switchable(self):
+        with patch.dict(os.environ, MPCDF_ENV):
+            by = self._names(self.client.get("/api/config").json())
+        self.assertEqual(by["remote-mpcdf"]["credentials"], "ok")
+        self.assertFalse(by["remote-mpcdf"]["active"])
+
+    def test_shared_creds_via_store(self):
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(get_settings().data_path, MPCDF_ENV)
+        by = self._names(self.client.get("/api/config").json())
+        self.assertIn("remote-mpcdf", by)
+
+    def test_personal_key_via_header_env_and_llm_side(self):
+        from backend.api.config import _preset_credentials
+        s = get_settings()
+        preset = get_preset("remote-kisski", s.data_path)
+
+        class Req:
+            def __init__(self, h): self.headers = h
+        self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
+        self.assertEqual(_preset_credentials(preset, s, Req({"X-Kisski-Api-Key": "v"})), [])
+        with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):
+            self.assertEqual(_preset_credentials(preset, s, Req({})), [])
+        mp = get_preset("remote-mpcdf", s.data_path)
+        with patch.dict(os.environ, {"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}):
+            # LLM-side shared values still missing
+            self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
+
+    def test_personal_key_via_stored_key_but_not_invalid(self):
+        from backend.api.config import _preset_credentials
+        from backend.services.autoindex_key_store import AutoIndexKeyStore
+        from backend.zotero.key_validator import KeyValidation
+        from cryptography.fernet import Fernet
+        s = get_settings()
+        s.autoindex_secret = Fernet.generate_key().decode()
+        store = AutoIndexKeyStore(s.autoindex_keys_path, s.autoindex_secret)
+        fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
+        store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY", status="invalid")
+        preset = get_preset("remote-kisski", s.data_path)
+
+        class Req:
+            headers: dict = {}
+        self.assertEqual(_preset_credentials(preset, s, Req()), ["KISSKI_API_KEY"])
+        store.set_embedding_key_status(fp, "ok")
+        self.assertEqual(_preset_credentials(preset, s, Req()), [])
+
+    def test_post_rejects_missing_credentials_names_only(self):
+        self._admin()
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("MPCDF_EMBEDDING_BASE_URL", r.json()["detail"])
+        self.assertNotIn("http://x", r.json()["detail"])
+
+    def test_post_success_resets_cache_and_clears_rate_limits(self):
+        import backend.services.embeddings as emb
+        from backend.services.autoindex_key_store import AutoIndexKeyStore
+        from backend.zotero.key_validator import KeyValidation
+        from cryptography.fernet import Fernet
+        s = get_settings()
+        s.autoindex_secret = Fernet.generate_key().decode()
+        store = AutoIndexKeyStore(s.autoindex_keys_path, s.autoindex_secret)
+        fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
+        store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY")
+        store.set_embedding_key_status(fp, "rate_limited", "2999-01-01T00:00:00+00:00")
+        emb._last_rate_limit_headers = {"x-ratelimit-limit-hour": "1"}
+        self._admin()
+        with patch.dict(os.environ, MPCDF_ENV):
+            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(emb._last_rate_limit_headers)
+        meta = store.list_metadata()[0]
+        self.assertEqual(meta["embedding_key_status"], "ok")
+        self.assertIsNone(meta["embedding_key_rate_limit_until"])
+
+    def test_post_still_403_for_non_admin(self):
+        from unittest.mock import AsyncMock
+        from backend.services.zotero_identity import ZoteroIdentity
+        s = get_settings()
+        s.api_host = "rag.example.com"
+        s.authorized_group_id = 999
+        identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"},
+                                 headers={"X-Zotero-API-Key": "K"})
+        self.assertEqual(r.status_code, 403)
+
+    def test_key_store_clear_keeps_invalid(self):
+        from backend.services.autoindex_key_store import AutoIndexKeyStore
+        from backend.zotero.key_validator import KeyValidation
+        from cryptography.fernet import Fernet
+        store = AutoIndexKeyStore(Path(self.tmp.name) / "k.json", Fernet.generate_key().decode())
+        fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
+        store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY", status="invalid")
+        self.assertEqual(store.clear_rate_limits(), 0)
+        self.assertEqual(store.list_metadata()[0]["embedding_key_status"], "invalid")
+        self.assertEqual(store.count_embedding_keys_by_name(), {})

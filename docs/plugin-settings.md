@@ -32,7 +32,11 @@ there, so the backend operator never has to hold your provider credentials.
 A single toggle: **Enable automatic indexing of my libraries**. When on, the backend
 periodically re-indexes your libraries on its own schedule using the Zotero API key
 configured above — you don't need to keep Zotero open or index manually. **View
-indexing status** opens a dialog showing recent run results. See
+indexing status** opens a dialog showing recent run results, the remaining embedding
+rate limits (when the active embedding service reports them) and, for server admins,
+a dropdown to switch the active preset. The same dialog opens from the **Indexing
+status** button in the footer of the Ask dialog, which is shown only when the server
+has auto-indexing configured. See
 [Automatic Indexing Setup](auto-indexing-setup.md) for the full picture, including
 what group admins can additionally control.
 

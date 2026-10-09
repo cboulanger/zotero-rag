@@ -84,6 +84,34 @@ class TestIsIndexableAttachment(unittest.TestCase):
         self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
 
 
+class TestDefaultExtractorConnectRetryWiring(unittest.TestCase):
+    """DocumentProcessor's default-constructed KreuzbergExtractor must get a
+    zero connect-retry budget in settings.testing, so tests that exercise the
+    real upload path without mocking httpx (the sidecar is never actually
+    running under pytest) fail on the first connection attempt instead of
+    retrying for minutes and hanging past the test's own timeout."""
+
+    def test_testing_mode_uses_zero_connect_retry_budget(self):
+        mock_settings = MagicMock(testing=True, extractor_backend="kreuzberg", ocr_enabled=True)
+        with patch("backend.services.document_processor.get_settings", return_value=mock_settings):
+            processor = DocumentProcessor(
+                zotero_client=MagicMock(),
+                embedding_service=MagicMock(),
+                vector_store=MagicMock(),
+            )
+        self.assertEqual(processor.document_extractor._connect_retry_budget_seconds, 0)
+
+    def test_non_testing_mode_uses_the_normal_connect_retry_budget(self):
+        mock_settings = MagicMock(testing=False, extractor_backend="kreuzberg", ocr_enabled=True)
+        with patch("backend.services.document_processor.get_settings", return_value=mock_settings):
+            processor = DocumentProcessor(
+                zotero_client=MagicMock(),
+                embedding_service=MagicMock(),
+                vector_store=MagicMock(),
+            )
+        self.assertEqual(processor.document_extractor._connect_retry_budget_seconds, 600)
+
+
 class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
     """Test DocumentProcessor class."""
 
@@ -2085,6 +2113,46 @@ class TestSubprocessBatchIndexing(unittest.IsolatedAsyncioTestCase):
                 zotero_api_key="dummy",
             )
             with self.assertRaises(EmbeddingAuthenticationError):
+                await self.processor._index_library_full(
+                    library_id="test_lib",
+                    library_type="user",
+                    metadata=MagicMock(last_indexed_version=0),
+                )
+
+    @patch("backend.services.document_processor.SUBPROCESS_BATCH_SIZE", 1)
+    @patch("backend.services.document_processor.Process")
+    @patch("backend.services.document_processor.MPQueue")
+    async def test_subprocess_batch_endpoint_unavailable_error_aborts_run(self, mock_queue_cls, mock_process_cls):
+        """An EmbeddingEndpointUnavailableError reported by a subprocess (e.g. an
+        expired ephemeral job's HTTP 405) must abort _index_library_full the same
+        way an auth error does, not be mistaken for a rate-limit error."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+
+        item = {"version": 1, "data": {"key": "AAA", "itemType": "journalArticle", "title": "A"}}
+        pdf = _attachment("PDF", "AAA")
+        self.mock_zotero_client.get_library_items_since.return_value = [item, pdf]
+
+        mock_q = MagicMock()
+        mock_q.empty.return_value = False
+        mock_q.get_nowait.return_value = {
+            "fatal": True,
+            "error": "Embedding API returned an unexpected error (HTTP 405): Method Not Allowed",
+            "error_type": "EmbeddingEndpointUnavailableError",
+        }
+        mock_queue_cls.return_value = mock_q
+
+        mock_proc = MagicMock()
+        mock_proc.exitcode = 0
+        mock_process_cls.return_value = mock_proc
+
+        with patch("backend.services.document_processor.get_settings") as mock_settings, \
+             patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
+            mock_settings.return_value = MagicMock(
+                testing=False,
+                min_abstract_words=5,
+                zotero_api_key="dummy",
+            )
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
                 await self.processor._index_library_full(
                     library_id="test_lib",
                     library_type="user",

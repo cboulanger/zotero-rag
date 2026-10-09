@@ -58,6 +58,19 @@
     </html:div>
     <html:div class="setting-description" id="zotero-rag-preset-description"></html:div>
     <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
+    <html:div class="setting-description" id="zotero-rag-endpoint-health-embedding"></html:div>
+    <html:div class="setting-description" id="zotero-rag-endpoint-health-llm"></html:div>
+    <html:div class="setting-row" id="zotero-rag-provision-row" hidden="hidden">
+      <html:label for="zotero-rag-provision-key">Provisioning key:</html:label>
+      <html:input type="password" id="zotero-rag-provision-key" class="setting-input"
+                  placeholder="Optional — used once, never stored"/>
+      <html:button id="zotero-rag-provision-endpoints">Provision endpoints</html:button>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-provision-help" hidden="hidden">
+      Creating endpoints may need a key with broader rights than the one used for queries.
+      Leave empty to use the stored API key.
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-provision-status"></html:div>
   </html:fieldset>
 
   <!-- Service API Keys (populated dynamically from the backend's /api/required-keys) -->
@@ -89,6 +102,28 @@
     <html:div style="margin-top:8px;">
       <html:button id="zotero-rag-autoindex-monitor">View indexing status</html:button>
     </html:div>
+  </html:fieldset>
+
+  <!-- Indexed-status tags -->
+  <html:fieldset class="settings-group">
+    <html:legend>Indexed-status tags</html:legend>
+
+    <html:div class="setting-description">
+      Mark attachments that are indexed with a "✅ rag-indexed" tag, which Zotero shows as a small
+      icon before the title. Tags are added as automatic tags, so Zotero's "Delete Automatic Tags
+      in This Library" also removes them; in group libraries they are visible to (and synced for)
+      all members.
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">
+      <html:input type="checkbox" id="zotero-rag-indexed-tags-toggle"/>
+      <html:label for="zotero-rag-indexed-tags-toggle" style="margin-left:6px;cursor:pointer;">Keep indexed-status tags up to date</html:label>
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+      <html:button id="zotero-rag-indexed-tags-refresh">Refresh indexed-status tags</html:button>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-indexed-tags-status"></html:div>
   </html:fieldset>
 
   <!-- Indexed Content: what gets indexed, regardless of whether indexing was

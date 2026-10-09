@@ -38,9 +38,11 @@ from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
 )
+from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
 from backend.services import pending_upload_cache
 from backend.zotero.web_api import ZoteroWebAPI
 
@@ -61,6 +63,19 @@ class AlreadyRunningError(Exception):
 
 class SlugSkipRequested(Exception):
     """Raised to unwind out of indexing the current slug when an admin requests a skip."""
+
+
+# DocumentUploadResult.error_type values that mean "this affects every
+# remaining entry in the drain queue identically" — see
+# CronIndexer._drain_pending_uploads, which stops early and re-raises the
+# matching exception on any of these instead of recording each as an
+# isolated per-attachment failure and continuing through the whole backlog.
+_FATAL_UPLOAD_ERROR_TYPES = {
+    "EmbeddingAuthenticationError",
+    "EmbeddingEndpointUnavailableError",
+    "EmbeddingRateLimitExhaustedError",
+    "KreuzbergUnavailableError",
+}
 
 
 @dataclass
@@ -448,6 +463,8 @@ class CronIndexer:
                 rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:
                     status["last_rate_limit_headers"] = rate_limit_headers
+                    status["last_rate_limit_headers_at"] = datetime.now(timezone.utc).isoformat()
+                    status["last_rate_limit_preset"] = get_settings().get_hardware_preset().name
                 status["slugs"][slug_info.slug].update({
                     "status": "done",
                     "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -638,25 +655,34 @@ class CronIndexer:
                 if result.status == "error":
                     await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
                     failed += 1
-                    if result.error_type == "EmbeddingRateLimitExhaustedError":
-                        # The quota is exhausted for (likely) hours, not this one
-                        # attachment's fault — every remaining entry would fail the
-                        # exact same way. Stop here instead of burning through the
-                        # rest of the backlog: each attempt still fully downloads
-                        # and extracts (Kreuzberg OCR included) before reaching the
-                        # embedding call that's guaranteed to fail, which previously
-                        # meant a large backlog kept hammering the kreuzberg sidecar
-                        # — sequential, one request at a time — for nothing, run
-                        # after run, until the quota reset. Raising here (rather
-                        # than returning a flag) reuses _index_slug's existing
-                        # EmbeddingRateLimitExhaustedError handling, including the
-                        # key_store rate_limited status update.
-                        available_at = (
-                            datetime.fromisoformat(result.rate_limit_available_at)
-                            if result.rate_limit_available_at
-                            else datetime.now(timezone.utc)
-                        )
-                        raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
+                    if result.error_type in _FATAL_UPLOAD_ERROR_TYPES:
+                        # A systemic failure — bad/rate-limited credentials, or
+                        # the shared embedding/extraction backend itself being
+                        # down — affects every remaining entry identically.
+                        # Stop here instead of burning through the rest of the
+                        # backlog: each attempt still fully downloads and
+                        # extracts (Kreuzberg OCR included) before reaching
+                        # whichever stage is guaranteed to fail, which
+                        # previously meant a large backlog kept hammering a
+                        # dead sidecar/endpoint — sequential, one request at a
+                        # time — for nothing, run after run, until it
+                        # recovered. Raising here (rather than returning a
+                        # flag) reuses _index_slug's existing per-type
+                        # handling, including the key_store status update for
+                        # the two cases where that's meaningful.
+                        if result.error_type == "EmbeddingRateLimitExhaustedError":
+                            available_at = (
+                                datetime.fromisoformat(result.rate_limit_available_at)
+                                if result.rate_limit_available_at
+                                else datetime.now(timezone.utc)
+                            )
+                            raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
+                        elif result.error_type == "EmbeddingAuthenticationError":
+                            raise EmbeddingAuthenticationError(result.message)
+                        elif result.error_type == "EmbeddingEndpointUnavailableError":
+                            raise EmbeddingEndpointUnavailableError(result.message)
+                        elif result.error_type == "KreuzbergUnavailableError":
+                            raise KreuzbergUnavailableError(result.message)
                 else:
                     await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
                     drained += 1
@@ -767,6 +793,26 @@ class CronIndexer:
                 self.key_store.set_embedding_key_status(fp, "invalid")
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except EmbeddingEndpointUnavailableError as exc:
+            # Not a per-user key problem (e.g. remote-mpcdf's shared key is
+            # fine) — the endpoint route itself is gone, most commonly an
+            # expired ephemeral job. No key_store update: this isn't about
+            # any individual user's credentials.
+            self.log.error("Embedding endpoint unavailable for %s: %s", slug_info.slug, exc)
+            error_message = f"Embedding endpoint unavailable: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except KreuzbergUnavailableError as exc:
+            # Also not a per-user problem — the shared extraction sidecar
+            # itself is down. No key_store update.
+            self.log.error("Extraction sidecar unavailable for %s: %s", slug_info.slug, exc)
+            error_message = f"Extraction sidecar unavailable: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
             status["slugs"][slug_info.slug]["error"] = error_message
             self._write_status(status)

@@ -24,12 +24,18 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import (
     EmbeddingService,
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.admin_settings_store import read_admin_settings
-from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergTimeoutError, KreuzbergParsingError
+from backend.services.extraction.kreuzberg import (
+    AttachmentTooLargeError,
+    KreuzbergParsingError,
+    KreuzbergTimeoutError,
+    KreuzbergUnavailableError,
+)
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
 from backend.services import diagnostics_collector as diag
@@ -45,13 +51,16 @@ from backend.models.library import LibraryIndexMetadata
 
 logger = logging.getLogger(__name__)
 
-# Fatal embedding errors abort the whole indexing run — they are never swallowed
-# per-item. An expired/invalid API key or an exhausted quota affects every item
-# equally, so continuing the loop only produces a stream of identical failures and
-# a run that "completes" with zero chunks while reporting success.
-_FATAL_EMBEDDING_ERRORS = (
+# Fatal embedding/extraction errors abort the whole indexing run — they are
+# never swallowed per-item. An expired/invalid API key, an exhausted quota, or
+# a downed extraction sidecar all affect every item equally, so continuing the
+# loop only produces a stream of identical failures and a run that "completes"
+# with zero chunks while reporting success.
+_FATAL_PROCESSING_ERRORS = (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
+    KreuzbergUnavailableError,
 )
 
 # Upper bound on tracked failed-download records — a safety net against
@@ -216,7 +225,7 @@ def _subprocess_index_batch(
                             items_updated += 1
                     else:
                         items_skipped += 1
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     raise
                 except Exception as e:
                     logger.error("Error processing item %s in subprocess batch: %s", item_key, e, exc_info=True)
@@ -251,7 +260,7 @@ def _run_subprocess_batch(
             items, library_id, library_type, indexed_versions, zotero_api_key, embedding_api_key
         )
         result_queue.put({"fatal": False, **result})
-    except _FATAL_EMBEDDING_ERRORS as e:
+    except _FATAL_PROCESSING_ERRORS as e:
         result_queue.put({"fatal": True, "error": repr(e), "error_type": type(e).__name__})
     except Exception as e:
         logger.error("Subprocess batch worker raised unexpected error: %s", e, exc_info=True)
@@ -331,6 +340,11 @@ class DocumentProcessor:
                 kreuzberg_url=settings.kreuzberg_url,
                 kreuzberg_timeout_cap=settings.kreuzberg_timeout_seconds,
                 kreuzberg_max_content_bytes=settings.kreuzberg_max_content_bytes,
+                # 0 in testing mode: a test exercising the real upload path
+                # without mocking httpx (the sidecar is never actually running
+                # under pytest) must fail on the first connection attempt, not
+                # retry for minutes and hang past the test's own timeout.
+                kreuzberg_connect_retry_seconds=0 if settings.testing else 600,
             )
         self.document_extractor = document_extractor
 
@@ -554,7 +568,7 @@ class DocumentProcessor:
                     # Already up-to-date (shouldn't happen with ?since, but defensive)
                     logger.debug(f"Item {item_key} already up-to-date (version {item_version})")
 
-            except _FATAL_EMBEDDING_ERRORS:
+            except _FATAL_PROCESSING_ERRORS:
                 # Embedding key/quota failure affects every item — abort the run so
                 # the caller surfaces an error instead of silently skipping everything.
                 raise
@@ -846,14 +860,19 @@ class DocumentProcessor:
                 if not result_q.empty():
                     result = result_q.get_nowait()
                     if result.get("fatal"):
-                        # Re-raise fatal embedding error to abort the full run
+                        # Re-raise fatal embedding/extraction error to abort the full run
                         from backend.services.embeddings import (
                             EmbeddingAuthenticationError,
+                            EmbeddingEndpointUnavailableError,
                             EmbeddingRateLimitExhaustedError,
                         )
                         error_type = result.get("error_type", "")
                         if error_type == "EmbeddingAuthenticationError":
                             raise EmbeddingAuthenticationError(result.get("error", ""))
+                        elif error_type == "EmbeddingEndpointUnavailableError":
+                            raise EmbeddingEndpointUnavailableError(result.get("error", ""))
+                        elif error_type == "KreuzbergUnavailableError":
+                            raise KreuzbergUnavailableError(result.get("error", ""))
                         raise EmbeddingRateLimitExhaustedError(result.get("error", ""))
                     chunks_added += result.get("chunks_added", 0)
                     items_added += result.get("items_added", 0)
@@ -920,7 +939,7 @@ class DocumentProcessor:
                     else:
                         items_skipped += 1
 
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     raise
                 except Exception as e:
                     logger.error("Error processing item in full sync mode: %s", e, exc_info=True)
@@ -1090,7 +1109,7 @@ class DocumentProcessor:
                         item_modified=item_modified,
                         force_extraction=force_extraction,
                     )
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     # Affects every attachment equally — propagate rather than
                     # burning through the rest of the item's attachments.
                     raise
@@ -1346,6 +1365,12 @@ class DocumentProcessor:
                     ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
                     self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
+                except KreuzbergUnavailableError:
+                    # Fatal, not per-attachment: the sidecar is down and every
+                    # remaining attachment would fail identically — propagate
+                    # unwrapped so _FATAL_PROCESSING_ERRORS aborts the run
+                    # instead of isolating it like a normal extraction failure.
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
                     raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e

@@ -55,6 +55,11 @@ class EmbeddingConfig(BaseModel):
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
     batch_size: int = Field(default=32, description="Batch size for embedding generation")
     cache_enabled: bool = Field(default=True, description="Enable content-hash based caching")
+    health_check_provider: Optional[Literal["runpod"]] = Field(
+        default=None,
+        description="If set, GET /api/config/health checks this config's "
+                    "shared_base_url_env endpoint via this provider's health API.",
+    )
 
 
 class LLMConfig(BaseModel):
@@ -70,6 +75,11 @@ class LLMConfig(BaseModel):
     models_status_url: Optional[str] = Field(
         default=None,
         description="URL to query for per-model availability metrics (KISSKI format: POST → data[].{id, demand, status})",
+    )
+    health_check_provider: Optional[Literal["runpod"]] = Field(
+        default=None,
+        description="If set, GET /api/config/health checks this config's "
+                    "shared_base_url_env endpoint via this provider's health API.",
     )
 
     @field_validator("model_names", mode="before")
@@ -109,6 +119,15 @@ class HardwarePreset(BaseModel):
                     "preset that needs Apple Silicon's MPS backend, or a Windows-oriented "
                     "preset) is hidden from listings shown to a client on any other "
                     "platform — see current_platform() and list_presets()'s platform= arg.",
+    )
+    provisioning_script: Optional[str] = Field(
+        default=None,
+        description="Repo-relative path to a script that provisions/wakes this "
+                    "preset's remote endpoint(s) (see docs/superpowers/specs/"
+                    "2026-10-09-endpoint-health-provisioning-design.md for the "
+                    "script's --json output contract). Presence of this field "
+                    "is what makes the Preferences pane show a 'Provision "
+                    "endpoints' button.",
     )
 
 

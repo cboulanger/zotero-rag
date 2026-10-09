@@ -607,6 +607,45 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["libraries"], ["users/1", "users/2"])
         key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid")
 
+    async def test_endpoint_unavailable_isolated_to_one_slug(self):
+        """An EmbeddingEndpointUnavailableError for one slug only errors that
+        slug — and unlike an auth error, must not touch key_store, since this
+        isn't about any individual user's credentials (e.g. remote-mpcdf's
+        shared key is fine; the ephemeral job's endpoint itself expired)."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+
+            async def fake_index_library(**kwargs):
+                if kwargs.get("library_name") == "users/1":
+                    raise EmbeddingEndpointUnavailableError(
+                        "Embedding API returned an unexpected error (HTTP 405): Method Not Allowed"
+                    )
+                return {"items_processed": 5, "chunks_added": 10}
+
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            result = await indexer.run()
+
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+        self.assertIn("endpoint unavailable", status["slugs"]["users/1"]["error"].lower())
+        # The other user's slug must still succeed, not be aborted.
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        self.assertEqual(result["libraries"], ["users/1", "users/2"])
+        key_store.set_embedding_key_status.assert_not_called()
+
     async def test_rate_limit_exhausted_isolated_to_one_slug(self):
         """An EmbeddingRateLimitExhaustedError for one slug only skips that slug."""
         from datetime import timedelta
@@ -1379,6 +1418,55 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         with patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute):
             with self.assertRaises(EmbeddingRateLimitExhaustedError):
                 await indexer._drain_pending_uploads(indexer.parse_slug("users/6"), MagicMock(), web_api)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_stops_draining_once_the_extraction_sidecar_is_unavailable(self, mock_execute):
+        # Regression test, same reasoning as the embedding-quota case above:
+        # the kreuzberg sidecar being unreachable affects every remaining
+        # entry identically (each attempt fully downloads only to fail at the
+        # same extraction step), so draining must stop after the first
+        # KreuzbergUnavailableError instead of churning through the backlog
+        # logging the identical connection failure for every entry.
+        from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
+
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_A", b"bytes-a",
+            {"item_key": "ITEM_A", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_B", b"bytes-b",
+            {"item_key": "ITEM_B", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(
+                status="error",
+                message="kreuzberg sidecar at http://kreuzberg:8000 still unreachable after retrying for 600s",
+                error_type="KreuzbergUnavailableError",
+                rate_limit_available_at=None,
+                chunks_added=0,
+            )
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/7": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock7",
+            status_file=self.data_path / "status7.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        with self.assertRaises(KreuzbergUnavailableError):
+            await indexer._drain_pending_uploads(indexer.parse_slug("users/7"), MagicMock(), web_api)
+
+        mock_execute.assert_awaited_once()
+        self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
+        _, meta_b = pending_upload_cache.read_entry(self.data_path, "u7", "ATT_B")
+        self.assertEqual(meta_b["attempts"], 0)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_reports_progress_after_each_entry_including_failures(self, mock_execute):

@@ -13,8 +13,10 @@ Kreuzberg HTTP API (POST /extract):
 See https://docs.kreuzberg.dev/guides/docker/ for full API reference.
 """
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import httpx
@@ -28,6 +30,17 @@ _TIMEOUT_FLOOR = 60       # seconds
 _TIMEOUT_CAP_DEFAULT = 1800    # seconds (30 min) — overridable via Settings.kreuzberg_timeout_seconds
 _BYTES_PER_SECOND_PDF = 3_000    # OCR-heavy; slow per byte
 _BYTES_PER_SECOND_OTHER = 10_000
+
+# A connection failure (sidecar not accepting connections at all) gets a
+# generous retry budget before giving up — the sidecar restarting after a
+# crash/OOM/deploy is a known, recoverable condition (see docs/ci-cd.md's
+# deploy notes), unlike a request the sidecar actively rejected. Once the
+# budget is exhausted, every subsequent attachment would fail identically
+# until the sidecar comes back, so KreuzbergUnavailableError is treated as
+# fatal by the indexing loop (see document_processor._FATAL_PROCESSING_ERRORS)
+# rather than retried fresh for each attachment.
+_CONNECT_RETRY_BUDGET_SECONDS = 600  # 10 minutes
+_CONNECT_RETRY_INTERVAL_SECONDS = 15
 
 
 def _compute_timeout(
@@ -55,6 +68,12 @@ class KreuzbergTimeoutError(RuntimeError):
 
 class KreuzbergParsingError(RuntimeError):
     """Raised when kreuzberg returns a 422 ParsingError (e.g. binary data in an HTML file)."""
+
+
+class KreuzbergUnavailableError(RuntimeError):
+    """Raised when the kreuzberg sidecar is still unreachable after retrying
+    connection attempts for _CONNECT_RETRY_BUDGET_SECONDS. Treated as fatal by
+    the indexing loop — see document_processor._FATAL_PROCESSING_ERRORS."""
 
 
 class AttachmentTooLargeError(RuntimeError):
@@ -85,6 +104,7 @@ class KreuzbergExtractor(DocumentExtractor):
         ocr_enabled: bool = True,
         timeout_cap: int = _TIMEOUT_CAP_DEFAULT,
         max_content_bytes: Optional[int] = None,
+        connect_retry_budget_seconds: int = _CONNECT_RETRY_BUDGET_SECONDS,
     ):
         """
         Args:
@@ -101,8 +121,15 @@ class KreuzbergExtractor(DocumentExtractor):
                 document refused for being too large needs a smaller/better file, not
                 a longer timeout, so the Fix Unavailable "retry with longer timeout"
                 action must not be able to bypass this cap.
+            connect_retry_budget_seconds: How long to retry a connection failure
+                (sidecar not accepting connections at all) before raising
+                KreuzbergUnavailableError — see that class's docstring. 0 means
+                fail on the first attempt (DocumentProcessor passes 0 in
+                settings.testing, so a test exercising the real upload path
+                without mocking httpx fails fast instead of hanging for minutes).
         """
         self._kreuzberg_url = kreuzberg_url.rstrip("/")
+        self._connect_retry_budget_seconds = connect_retry_budget_seconds
         self._ocr_enabled = ocr_enabled
         self._timeout_cap = timeout_cap
         self._max_content_bytes = max_content_bytes
@@ -167,48 +194,70 @@ class KreuzbergExtractor(DocumentExtractor):
     async def _post_extract(
         self, url: str, content: bytes, mime_type: str, timeout: int, kb_stage: Any
     ) -> list[ExtractionChunk]:
-        """POST to the sidecar and parse chunks; records HTTP status/body on ``kb_stage``."""
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                response = await client.post(
-                    url,
-                    files={"files": ("document", content, mime_type)},
-                    data={"config": json.dumps(self._config)},
+        """POST to the sidecar and parse chunks; records HTTP status/body on ``kb_stage``.
+
+        A connection failure (sidecar not accepting connections at all) is
+        retried for up to self._connect_retry_budget_seconds before raising
+        KreuzbergUnavailableError — see that class's docstring. Any other
+        failure (HTTP error status, timeout, dropped connection) is not
+        retried here; those aren't "sidecar is down" conditions.
+        """
+        deadline = time.monotonic() + self._connect_retry_budget_seconds
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    response = await client.post(
+                        url,
+                        files={"files": ("document", content, mime_type)},
+                        data={"config": json.dumps(self._config)},
+                    )
+                    kb_stage.set(http_status=response.status_code)
+                    response.raise_for_status()
+                break
+            except httpx.ConnectError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    kb_stage.set(failure="connect_unavailable", exception=type(exc).__name__)
+                    raise KreuzbergUnavailableError(
+                        f"kreuzberg sidecar at {self._kreuzberg_url} still unreachable after "
+                        f"retrying for {self._connect_retry_budget_seconds}s: {exc}"
+                    ) from exc
+                wait = min(_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
+                logger.warning(
+                    f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url} "
+                    f"(attempt {attempt}, {remaining:.0f}s left in retry budget): {exc}. "
+                    f"Retrying in {wait:.0f}s."
                 )
-                kb_stage.set(http_status=response.status_code)
-                response.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url}: {exc}. "
-                f"Ensure the kreuzberg container is running."
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            kb_stage.set(http_status=exc.response.status_code, response_body=diag.body_excerpt(exc.response.text))
-            if exc.response.status_code == 422:
-                try:
-                    body = exc.response.json()
-                    if body.get("error_type") == "ParsingError":
-                        raise KreuzbergParsingError(
-                            f"kreuzberg sidecar returned HTTP 422 for mime={mime_type}: {exc.response.text}"
-                        ) from exc
-                except (ValueError, AttributeError):
-                    pass
-            raise RuntimeError(
-                f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
-                f"for mime={mime_type}: {exc.response.text}"
-            ) from exc
-        except httpx.TimeoutException as exc:
-            kb_stage.set(failure="timeout", exception=type(exc).__name__)
-            raise KreuzbergTimeoutError(
-                f"kreuzberg sidecar timed out for mime={mime_type} "
-                f"(size={len(content)}, timeout={timeout}s)"
-            ) from exc
-        except httpx.ReadError as exc:
-            kb_stage.set(failure="connection_dropped", exception=type(exc).__name__)
-            raise KreuzbergTimeoutError(
-                f"kreuzberg sidecar connection dropped for mime={mime_type} "
-                f"(size={len(content)}, timeout={timeout}s)"
-            ) from exc
+                await asyncio.sleep(wait)
+            except httpx.HTTPStatusError as exc:
+                kb_stage.set(http_status=exc.response.status_code, response_body=diag.body_excerpt(exc.response.text))
+                if exc.response.status_code == 422:
+                    try:
+                        body = exc.response.json()
+                        if body.get("error_type") == "ParsingError":
+                            raise KreuzbergParsingError(
+                                f"kreuzberg sidecar returned HTTP 422 for mime={mime_type}: {exc.response.text}"
+                            ) from exc
+                    except (ValueError, AttributeError):
+                        pass
+                raise RuntimeError(
+                    f"kreuzberg sidecar returned HTTP {exc.response.status_code} "
+                    f"for mime={mime_type}: {exc.response.text}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                kb_stage.set(failure="timeout", exception=type(exc).__name__)
+                raise KreuzbergTimeoutError(
+                    f"kreuzberg sidecar timed out for mime={mime_type} "
+                    f"(size={len(content)}, timeout={timeout}s)"
+                ) from exc
+            except httpx.ReadError as exc:
+                kb_stage.set(failure="connection_dropped", exception=type(exc).__name__)
+                raise KreuzbergTimeoutError(
+                    f"kreuzberg sidecar connection dropped for mime={mime_type} "
+                    f"(size={len(content)}, timeout={timeout}s)"
+                ) from exc
 
         try:
             results = response.json()
