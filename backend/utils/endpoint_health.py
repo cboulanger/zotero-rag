@@ -45,6 +45,14 @@ def check_runpod_health(
         finally:
             if client is None:
                 http.close()
+        if response.status_code in (401, 403):
+            # An endpoint-restricted RunPod key that doesn't cover this
+            # endpoint (e.g. after a --recreate gave it a new ID) gets 403.
+            return {
+                "status": "unreachable",
+                "detail": f"HTTP {response.status_code}: the API key has no access to "
+                          f"endpoint {match.group(1)}",
+            }
         if not 200 <= response.status_code < 300:
             return {"status": "unreachable", "detail": f"HTTP {response.status_code}"}
         payload = response.json() or {}

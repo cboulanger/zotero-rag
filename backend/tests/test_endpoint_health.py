@@ -95,6 +95,18 @@ class CheckRunpodHealthTest(unittest.TestCase):
         self.assertEqual(result["status"], "unreachable")
         self.assertIn("401", result["detail"])
 
+    def test_forbidden_names_missing_key_access(self):
+        client = FakeClient(FakeResponse(403, {}))
+        result = check_runpod_health(BASE, "k", client=client)
+        self.assertEqual(result["status"], "unreachable")
+        self.assertIn("403", result["detail"])
+        self.assertIn("no access", result["detail"])
+
+    def test_server_error_is_unreachable_with_status_code(self):
+        client = FakeClient(FakeResponse(502, {}))
+        result = check_runpod_health(BASE, "k", client=client)
+        self.assertEqual(result["detail"], "HTTP 502")
+
     def test_timeout_is_unreachable(self):
         client = FakeClient(httpx.ReadTimeout("timed out"))
         result = check_runpod_health(BASE, "k", client=client)
