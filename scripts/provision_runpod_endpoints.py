@@ -34,6 +34,12 @@ REST_BASE_URL = "https://rest.runpod.io/v1"
 
 EMBEDDING_TEMPLATE_NAME = "zotero-rag-embedding"
 EMBEDDING_ENDPOINT_NAME = "zotero-rag-embedding"
+# This image's bundled PyTorch only supports CUDA capabilities sm_50..sm_90,
+# so it crashes at startup ("CUDA error: no kernel image is available") if
+# RunPod schedules a worker on a Blackwell GPU (sm_120, e.g. RTX PRO 6000).
+# The embedding endpoint must therefore stay pinned to older-generation GPU
+# types (see DEFAULT_EMBEDDING_GPU) — _ensure_endpoint detects an existing
+# endpoint whose gpuTypeIds drifted from the requested ones.
 EMBEDDING_IMAGE = "runpod/worker-infinity-embedding:stable-cuda12.1.0"
 EMBEDDING_MODEL = "intfloat/multilingual-e5-large-instruct"
 EMBEDDING_CONTAINER_DISK_GB = 20
@@ -172,7 +178,9 @@ def _ensure_endpoint(
     recreate it; otherwise warn and keep using the existing one unchanged."""
     existing = _find_by_name(client, api_key, "endpoints", name)
     if existing is not None:
-        mismatched = existing.get("templateId") != template_id
+        existing_gpus = existing.get("gpuTypeIds")
+        gpu_mismatch = existing_gpus is not None and set(existing_gpus) != set(gpu_type_ids)
+        mismatched = existing.get("templateId") != template_id or gpu_mismatch
         if not mismatched:
             return existing
         if not recreate:
@@ -180,9 +188,10 @@ def _ensure_endpoint(
             # to respin; default to a loud warning, not silent destruction.
             logger.warning(
                 "Endpoint '%s' exists but its config differs from requested "
-                "(template_id=%r vs %r). Keeping existing endpoint — pass "
-                "--recreate to replace it.",
+                "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
+                "endpoint — pass --recreate to replace it.",
                 name, existing.get("templateId"), template_id,
+                existing_gpus, gpu_type_ids,
             )
             return existing
         _request(client, api_key, "DELETE", f"/endpoints/{existing['id']}")

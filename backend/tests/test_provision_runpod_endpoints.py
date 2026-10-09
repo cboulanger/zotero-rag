@@ -274,6 +274,36 @@ class EnsureEndpointTest(unittest.TestCase):
         self.assertEqual(result["id"], "e_existing")
         self.assertEqual(len(client.calls), 1)
 
+    def test_warns_on_gpu_mismatch_without_recreate(self):
+        existing = {"id": "e_existing", "name": "zotero-rag-embedding", "templateId": "t1",
+                    "gpuTypeIds": ["NVIDIA RTX PRO 6000 Blackwell Server Edition"]}
+        client = FakeClient([(200, [existing])])
+        with self.assertLogs(provision.logger, level="WARNING") as ctx:
+            result = provision._ensure_endpoint(
+                client, "rp_key", name="zotero-rag-embedding", template_id="t1",
+                gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+                data_center_ids=None, recreate=False,
+            )
+        self.assertEqual(result["id"], "e_existing")
+        self.assertIn("--recreate", "\n".join(ctx.output))
+
+    def test_recreates_endpoint_on_gpu_mismatch_with_recreate(self):
+        existing = {"id": "e_old", "name": "zotero-rag-embedding", "templateId": "t1",
+                    "gpuTypeIds": ["NVIDIA RTX PRO 6000 Blackwell Server Edition"]}
+        client = FakeClient([
+            (200, [existing]),  # GET /endpoints
+            (200, None),  # DELETE
+            (200, {"id": "e_new", "name": "zotero-rag-embedding"}),  # POST
+        ])
+        result = provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-embedding", template_id="t1",
+            gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+            data_center_ids=None, recreate=True,
+        )
+        self.assertEqual(result["id"], "e_new")
+        self.assertEqual(client.calls[1][0], "DELETE")
+        self.assertEqual(client.calls[2][3]["gpuTypeIds"], ["NVIDIA RTX A4000"])
+
     def test_warns_but_keeps_existing_on_template_mismatch_without_recreate(self):
         existing = {"id": "e_existing", "name": "zotero-rag-embedding", "templateId": "t_old"}
         client = FakeClient([(200, [existing])])
