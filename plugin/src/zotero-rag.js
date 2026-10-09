@@ -794,10 +794,13 @@ class ZoteroRAGPlugin {
 						/** @type {HTMLInputElement} */ (e.target).value = '';
 						/** @type {HTMLInputElement} */ (e.target).placeholder = 'Configured — enter a new value to replace it';
 						// Let the host pane react (e.g. re-check endpoint health with the new value).
-						container.dispatchEvent(new doc.defaultView.CustomEvent('zotero-rag-shared-field-saved', {
-							bubbles: true,
-							detail: { keyName: keyInfo.key_name },
-						}));
+						const view = doc.defaultView;
+						if (view) {
+							container.dispatchEvent(new view.CustomEvent('zotero-rag-shared-field-saved', {
+								bubbles: true,
+								detail: { keyName: keyInfo.key_name },
+							}));
+						}
 					}
 				} else {
 					Zotero.Prefs.set(prefKey, value, true);

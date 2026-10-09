@@ -1690,6 +1690,39 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
 });
 
+test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.setSharedRemoteField = async () => ({ ok: true, is_set: true });
+
+	class FakeCustomEvent {
+		/** @param {string} type @param {{detail: any}} init */
+		constructor(type, init) { this.type = type; this.detail = init.detail; }
+	}
+	const doc = { ...makeFakeDoc(), defaultView: { CustomEvent: FakeCustomEvent } };
+	const container = makeFakeContainer();
+	/** @type {any[]} */
+	const events = [];
+	container.dispatchEvent = (ev) => { events.push(ev); return true; };
+
+	plugin.renderServiceApiKeyFields(doc, container, null, [{
+		key_name: 'RUNPOD_API_KEY',
+		header_name: 'X-Runpod-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}]);
+
+	const row = container.appended.find(el => el.children.length > 0);
+	await findInputChild(row).dispatchChange('rpa_NEW');
+
+	assert.strictEqual(events.length, 1);
+	assert.strictEqual(events[0].type, 'zotero-rag-shared-field-saved');
+	assert.strictEqual(events[0].detail.keyName, 'RUNPOD_API_KEY');
+});
+
 test('renderServiceApiKeyFields sets input.pattern/title from a declared pattern', () => {
 	const zotero = { Prefs: { get: () => null, set: () => {} } };
 	const plugin = loadPlugin(zotero, {}, {});
