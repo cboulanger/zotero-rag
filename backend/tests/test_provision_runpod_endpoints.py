@@ -473,6 +473,21 @@ class RunTest(unittest.TestCase):
         self.assertIn("RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/e_emb/openai/v1", env_content)
         self.assertIn("RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/e_llm/openai/v1", env_content)
 
+    def test_provision_path_returns_1_on_http_error_instead_of_raising(self):
+        client = FakeClient([
+            (200, []),  # embedding: GET templates -> none
+            (500, {"error": "internal error"}),  # POST template fails
+        ])
+        args = provision._parse_args([])
+        exit_code = provision._run(args, api_key="rp_key", client=client)
+        self.assertEqual(exit_code, 1)
+
+    def test_provision_path_returns_1_on_connection_error_instead_of_raising(self):
+        client = FakeClient([httpx.ConnectError("network unreachable")])
+        args = provision._parse_args([])
+        exit_code = provision._run(args, api_key="rp_key", client=client)
+        self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
