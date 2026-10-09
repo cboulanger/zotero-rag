@@ -26,13 +26,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from backend.utils.cpu_affinity import restrict_current_process_cpus  # noqa: E402
 from backend.utils.disk_space import check_disk_space  # noqa: E402
+from backend.utils.log_rotation import RotatingLogHandler  # noqa: E402
 
 
 def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    # Short-lived cron process: no startup rotation (would rotate hourly);
+    # the handler still rolls over once the file predates midnight.
+    file_handler = RotatingLogHandler(log_file, rotate_on_startup=False)
     file_handler.setFormatter(fmt)
 
     root_logger = logging.getLogger()
