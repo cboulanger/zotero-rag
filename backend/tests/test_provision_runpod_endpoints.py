@@ -1,6 +1,7 @@
 """Unit tests for scripts/provision_runpod_endpoints.py."""
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -328,6 +329,48 @@ class WarmUpTest(unittest.TestCase):
         with patch.object(provision.time, "sleep"):
             provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
         self.assertEqual(len(client.calls), 2)
+
+
+class UpdateEnvFileTest(unittest.TestCase):
+    def test_creates_file_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
+            content = env_path.read_text()
+        self.assertIn("RUNPOD_API_KEY=rp_key\n", content)
+
+    def test_appends_new_keys_to_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("EXISTING_VAR=value\n")
+            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
+            content = env_path.read_text()
+        self.assertIn("EXISTING_VAR=value\n", content)
+        self.assertIn("RUNPOD_API_KEY=rp_key\n", content)
+
+    def test_replaces_existing_key_in_place(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("RUNPOD_API_KEY=old_key\nOTHER_VAR=keep_me\n")
+            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "new_key"})
+            lines = env_path.read_text().splitlines()
+        self.assertIn("RUNPOD_API_KEY=new_key", lines)
+        self.assertIn("OTHER_VAR=keep_me", lines)
+        self.assertNotIn("RUNPOD_API_KEY=old_key", lines)
+        self.assertEqual(len(lines), 2)  # no duplicate line added
+
+    def test_handles_file_without_trailing_newline(self):
+        """Regression guard: a blind `>>` append onto a file with no trailing
+        newline would concatenate onto the last line instead of starting a
+        new one — see this project's documented worktree .env hazard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("EXISTING_VAR=value")  # no trailing newline
+            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
+            lines = env_path.read_text().splitlines()
+        self.assertIn("EXISTING_VAR=value", lines)
+        self.assertIn("RUNPOD_API_KEY=rp_key", lines)
+        self.assertEqual(len(lines), 2)
 
 
 if __name__ == "__main__":

@@ -254,6 +254,33 @@ def _warm_up_with_retry(client: "httpx.Client", api_key: str, url: str, json_bod
         time.sleep(WARMUP_RETRY_INTERVAL_SECONDS)
 
 
+def _update_env_file(env_path: Path, values: dict) -> None:
+    """Insert or replace KEY=value lines in env_path, preserving every other
+    line exactly. Never a blind `>>` append — reads the whole file (if it
+    exists), replaces lines for keys already present, and appends lines for
+    keys that aren't, so a source file missing a trailing newline can't get
+    silently concatenated onto (see this project's documented worktree .env
+    hazard in CLAUDE.md)."""
+    lines = []
+    if env_path.exists():
+        content = env_path.read_text(encoding="utf-8")
+        if content:
+            lines = content.splitlines()
+
+    remaining = dict(values)
+    for i, line in enumerate(lines):
+        if "=" not in line or line.strip().startswith("#"):
+            continue
+        key = line.split("=", 1)[0]
+        if key in remaining:
+            lines[i] = f"{key}={remaining.pop(key)}"
+
+    for key, value in remaining.items():
+        lines.append(f"{key}={value}")
+
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Provision or wake the RunPod embedding+LLM endpoints for the `runpod` preset."
