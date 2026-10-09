@@ -150,6 +150,24 @@ def _extract_error_detail(exc: Exception) -> str:
 # Module-level cache for rate-limit headers received from the last remote embedding call.
 # Updated by RemoteEmbeddingService after every API response (success or 429).
 _last_rate_limit_headers: dict[str, str] | None = None
+# UTC timestamp (ISO 8601) of when ``_last_rate_limit_headers`` was captured.
+_last_rate_limit_headers_at: str | None = None
+
+
+def get_last_rate_limit_snapshot() -> tuple[dict[str, str] | None, str | None]:
+    """Return the in-process rate-limit headers and their capture time (ISO UTC)."""
+    return _last_rate_limit_headers, _last_rate_limit_headers_at
+
+
+def reset_rate_limit_cache() -> None:
+    """Forget the cached rate-limit headers.
+
+    Called when the active preset changes: the cached numbers belong to the
+    previous provider and must not be shown for the new one.
+    """
+    global _last_rate_limit_headers, _last_rate_limit_headers_at
+    _last_rate_limit_headers = None
+    _last_rate_limit_headers_at = None
 
 _KNOWN_HEADERS: dict[str, str] = {
     "OPENAI_API_KEY": "X-OpenAI-Api-Key",
@@ -581,13 +599,14 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:
         """Extract and cache rate-limit headers from an API response."""
-        global _last_rate_limit_headers
+        global _last_rate_limit_headers, _last_rate_limit_headers_at
         extracted = {
             k: v for k, v in headers.items()
             if k.lower().startswith("x-ratelimit") or k.lower().startswith("ratelimit")
         }
         if extracted:
             _last_rate_limit_headers = extracted
+            _last_rate_limit_headers_at = datetime.now(timezone.utc).isoformat()
 
     async def get_rate_limit_info(self) -> dict[str, str] | None:
         return _last_rate_limit_headers

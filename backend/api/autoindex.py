@@ -33,6 +33,7 @@ from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
 from backend.services.embedding_key_validator import validate_embedding_key
+from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.registration_service import RegistrationService
 from backend.services.system_health import get_system_health
 from backend.services.zotero_identity import ZoteroIdentity
@@ -230,6 +231,17 @@ async def status(
                 issue for issue in result["key_issues"]
                 if issue.get("user") == identity.username
             ]
+
+    # Cache-only rate-limit snapshot (never probes: this endpoint is polled
+    # every few seconds and a probe would spend real quota).
+    try:
+        cached_limits = await asyncio.to_thread(get_cached_rate_limits, settings)
+    except Exception as exc:
+        logger.warning("Failed to read cached rate limits: %s", exc)
+        cached_limits = None
+    result["rate_limits"] = (
+        {"available": True, **cached_limits} if cached_limits else {"available": False}
+    )
 
     # Human-readable library_name/owner_id labeling applies to whatever
     # slugs are visible above — for every caller, not just admins on

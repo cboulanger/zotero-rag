@@ -3,6 +3,7 @@
 // @ts-check
 
 /// <reference path='./zotero-rag.js' />
+/// <reference path='./rate-limit-widget.js' />
 
 /**
  * @typedef {Object} AutoIndexSlugStatus
@@ -41,6 +42,22 @@
  * @property {boolean} [is_admin]
  * @property {{active: boolean, interval_minutes: number|null, paused: boolean, next_tick_at: string|null}} [scheduler]
  * @property {SystemHealth} [system_health] - admin-only; omitted entirely for non-admin callers
+ * @property {RateLimitsInfo} [rate_limits] - cached embedding rate limits (never probed server-side)
+ */
+
+/**
+ * @typedef {Object} RateLimitsInfo
+ * @property {boolean} available
+ * @property {Record<string, string>} [limits] - x-ratelimit-{limit,remaining}-{hour,day} headers
+ * @property {string} [as_of] - ISO timestamp the headers were captured, when known
+ * @property {'run'|'cache'} [source]
+ */
+
+/**
+ * @typedef {Object} SwitchablePreset
+ * @property {string} name
+ * @property {boolean} active
+ * @property {'ok'|'missing'} credentials
  */
 
 /**
@@ -95,6 +112,21 @@ var ZoteroRAGAutoIndexStatus = {
 	 */
 	pendingAdminRun: null,
 
+	/** Whether the open-time GET /api/rate-limits fallback has already been tried. @type {boolean} */
+	rateLimitFallbackTried: false,
+
+	/** Last headers rendered into the Status-section widget. @type {Record<string, string>|null} */
+	rateLimitHeaders: null,
+
+	/** Presets the admin may switch to, from GET /api/config. @type {SwitchablePreset[]} */
+	switchablePresets: [],
+
+	/** True while a preset switch POST is in flight. @type {boolean} */
+	presetSwitching: false,
+
+	/** Whether the last status poll reported a running index. @type {boolean} */
+	runInProgress: false,
+
 	/**
 	 * Initialize the dialog.
 	 * @returns {void}
@@ -147,6 +179,11 @@ var ZoteroRAGAutoIndexStatus = {
 			});
 		}
 
+		const presetSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('admin-preset-select'));
+		if (presetSelect) {
+			presetSelect.addEventListener('change', () => this.switchPreset(presetSelect.value));
+		}
+
 		window.addEventListener('unload', () => {
 			if (this.refreshTimer !== null) {
 				clearInterval(this.refreshTimer);
@@ -155,6 +192,7 @@ var ZoteroRAGAutoIndexStatus = {
 		});
 
 		this.fetchAndRender();
+		this.loadSwitchablePresets();
 		this.refreshTimer = setInterval(() => this.fetchAndRender(), 5000);
 	},
 
@@ -277,6 +315,199 @@ var ZoteroRAGAutoIndexStatus = {
 		this.renderSystemHealth(data.system_health);
 		this.updateRunNowButtonState(data, ownRunInPlay, adminRunInPlay);
 		this.updateAdminControlsVisibility(data);
+		this.runInProgress = data.running === true;
+		this.renderRateLimits(data);
+		this.renderPresetRow(data);
+	},
+
+	/**
+	 * Render the rate-limit bars and the "resumes at" banner line in the
+	 * Status section. Falls back once per dialog open to GET /api/rate-limits
+	 * when the status payload carries no cached limits.
+	 * @param {AutoIndexStatusResponse} data
+	 * @returns {void}
+	 */
+	renderRateLimits(data) {
+		const info = data.rate_limits;
+		if (info && info.available && info.limits) {
+			this.rateLimitHeaders = info.limits;
+		} else if (!this.rateLimitFallbackTried) {
+			this.rateLimitFallbackTried = true;
+			ZoteroRAGRateLimitWidget.fetch(this.plugin).then((headers) => {
+				if (headers) {
+					this.rateLimitHeaders = headers;
+					this.paintRateLimits(null);
+				}
+			});
+		}
+		this.paintRateLimits(info || null);
+
+		const banner = document.getElementById('rate-limit-banner');
+		if (banner) {
+			const until = this.earliestRateLimitUntil(data.slugs || {});
+			if (until) {
+				banner.textContent = `Embedding rate limit reached; resumes at ${this.formatClock(until)}.`;
+				banner.style.display = '';
+			} else {
+				banner.textContent = '';
+				banner.style.display = 'none';
+			}
+		}
+	},
+
+	/**
+	 * Paint the bars from the current headers and the optional as-of line.
+	 * @param {RateLimitsInfo|null} info
+	 * @returns {void}
+	 */
+	paintRateLimits(info) {
+		const headers = this.rateLimitHeaders;
+		ZoteroRAGRateLimitWidget.render(document, headers, { visible: !!headers, prefix: 'ai-' });
+		const asOf = document.getElementById('ai-rate-limit-asof');
+		if (asOf) {
+			const ago = info && info.as_of && headers ? this._formatDurationFromNow(info.as_of) : null;
+			asOf.textContent = ago ? `as of ${ago} ago` : '';
+		}
+	},
+
+	/**
+	 * Earliest `rate_limit_until` among slugs skipped for an embedding rate limit.
+	 * @param {Record<string, AutoIndexSlugStatus>} slugs
+	 * @returns {string|null} ISO timestamp, or null
+	 */
+	earliestRateLimitUntil(slugs) {
+		/** @type {{iso: string, ms: number}|null} */
+		let best = null;
+		for (const info of Object.values(slugs)) {
+			if (info.skip_reason !== 'embedding_rate_limit' || !info.rate_limit_until) continue;
+			const ms = new Date(info.rate_limit_until).getTime();
+			if (Number.isNaN(ms)) continue;
+			if (!best || ms < best.ms) best = { iso: info.rate_limit_until, ms };
+		}
+		return best ? best.iso : null;
+	},
+
+	/**
+	 * Format an ISO timestamp as a local HH:MM clock time.
+	 * @param {string} isoString
+	 * @returns {string}
+	 */
+	formatClock(isoString) {
+		try {
+			return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		} catch (_) {
+			return isoString;
+		}
+	},
+
+	/**
+	 * Fetch GET /api/config and (re)populate the admin preset dropdown.
+	 * Called at dialog open and after a successful switch.
+	 * @returns {Promise<void>}
+	 */
+	async loadSwitchablePresets() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) return;
+			/** @type {{switchable_presets?: SwitchablePreset[]}} */
+			const config = await response.json();
+			this.switchablePresets = config.switchable_presets || [];
+			this.populatePresetSelect();
+		} catch (_) {
+			// non-fatal — the row simply stays hidden
+		}
+	},
+
+	/**
+	 * Fill the select from `switchablePresets`, selecting the active one.
+	 * @returns {void}
+	 */
+	populatePresetSelect() {
+		const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('admin-preset-select'));
+		if (!select) return;
+		select.innerHTML = '';
+		for (const preset of this.switchablePresets) {
+			const option = document.createElement('option');
+			option.value = preset.name;
+			option.textContent = preset.name;
+			select.appendChild(option);
+			if (preset.active) select.value = preset.name;
+		}
+		this.applyPresetRowState(this.lastIsAdmin);
+	},
+
+	/** Whether the last status poll flagged the caller as admin. @type {boolean} */
+	lastIsAdmin: false,
+
+	/**
+	 * Update visibility/enabled state of the preset row from a status poll.
+	 * @param {AutoIndexStatusResponse} data
+	 * @returns {void}
+	 */
+	renderPresetRow(data) {
+		this.lastIsAdmin = data.is_admin === true;
+		this.applyPresetRowState(this.lastIsAdmin);
+	},
+
+	/**
+	 * Show the row only for admins with >= 2 options; disable while a run is
+	 * in progress (the running subprocess already built its embedding service).
+	 * @param {boolean} isAdmin
+	 * @returns {void}
+	 */
+	applyPresetRowState(isAdmin) {
+		const row = document.getElementById('admin-preset-row');
+		const select = /** @type {HTMLSelectElement|null} */ (document.getElementById('admin-preset-select'));
+		if (!row) return;
+		row.style.display = isAdmin && this.switchablePresets.length >= 2 ? '' : 'none';
+		if (select) {
+			select.disabled = this.runInProgress || this.presetSwitching;
+			select.title = this.runInProgress
+				? 'A run is in progress; a switch only takes effect from the next run.'
+				: '';
+		}
+	},
+
+	/**
+	 * Switch the active preset via POST /api/config. On error, revert the
+	 * select and show the server's `detail`; on success refresh everything.
+	 * @param {string} name
+	 * @returns {Promise<void>}
+	 */
+	async switchPreset(name) {
+		if (!this.plugin) return;
+		const status = document.getElementById('admin-preset-status');
+		this.presetSwitching = true;
+		this.applyPresetRowState(this.lastIsAdmin);
+		if (status) status.textContent = 'Switching…';
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config`, {
+				method: 'POST',
+				headers: { ...this.plugin.getAuthHeaders(), 'Content-Type': 'application/json' },
+				body: JSON.stringify({ preset_name: name }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				if (status) status.textContent = `Error: ${err.detail || response.status}`;
+				this.populatePresetSelect(); // revert to the still-active preset
+				return;
+			}
+			if (status) status.textContent = 'Switched.';
+			// Cached limits belong to the previous preset.
+			this.rateLimitHeaders = null;
+			this.rateLimitFallbackTried = false;
+			await this.loadSwitchablePresets();
+			await this.fetchAndRender();
+		} catch (e) {
+			if (status) status.textContent = `Error: ${e}`;
+			this.populatePresetSelect();
+		} finally {
+			this.presetSwitching = false;
+			this.applyPresetRowState(this.lastIsAdmin);
+		}
 	},
 
 	/**

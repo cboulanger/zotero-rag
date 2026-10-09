@@ -71,7 +71,8 @@ function makeStubs(attachmentsByKey = {}) {
  */
 function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, ...extra };
+	// IndexedTags (indexed-tags.js) is a separate plugin-lifetime script; stub its lifecycle by default.
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, IndexedTags: { init() {}, shutdown() {} }, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -1331,9 +1332,10 @@ test('createResultNote creates a tagged note from every turn and does not refere
 	assert.ok(noteHtmls[0].includes('Q1') && noteHtmls[0].includes('Q2'));
 });
 
-test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
+test('init() starts the TaskQueue and IndexedTags; removeFromAllWindows() stops both', () => {
 	/** @type {string[]} */
 	const calls = [];
+	const indexedTagsStub = { init: () => calls.push('tags-init'), shutdown: () => calls.push('tags-shutdown') };
 	const taskQueueStub = {
 		start: () => calls.push('start'),
 		stop: () => calls.push('stop'),
@@ -1346,11 +1348,11 @@ test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 		getMainWindows: () => [],
 	};
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, IndexedTags: indexedTagsStub, Services: servicesStub });
 	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
 	plugin.removeFromAllWindows();
 
-	assert.deepStrictEqual(calls, ['start', 'stop']);
+	assert.deepStrictEqual(calls, ['start', 'tags-init', 'stop', 'tags-shutdown']);
 });
 
 test('_getSelectedLibraryIDCompat prefers the Zotero 10+ plural getter when present', () => {
