@@ -132,8 +132,8 @@ def normalize_base_url(base_url: str) -> str:
 def update_remote_config(values: dict, data_path: Optional[Path] = None) -> dict:
     """Merge `values` into the stored remote_config map and persist.
 
-    Merges rather than replaces — setting MPCDF_LLM_BASE_URL must not wipe
-    an already-stored MPCDF_EMBEDDING_BASE_URL. ``*_API_KEY`` values are
+    Merges rather than replaces — updating one key must not wipe the other
+    stored keys. ``*_API_KEY`` values are
     encrypted before they hit disk (any legacy plaintext one already in the
     file is re-encrypted too). Returns the resulting remote_config dict as
     stored, i.e. with secrets still encrypted.
