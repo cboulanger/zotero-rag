@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
 REST_BASE_URL = "https://rest.runpod.io/v1"
 
 EMBEDDING_TEMPLATE_NAME = "zotero-rag-embedding"
@@ -49,14 +51,18 @@ WARMUP_RETRY_INTERVAL_SECONDS = 5
 
 
 class ProvisionError(RuntimeError):
-    """Raised when a RunPod API call fails in a way the script can't recover from."""
+    """Raised for any unrecoverable failure while provisioning or tearing down
+    the RunPod endpoints (a missing credential, a failed API call, etc.)."""
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Provision or wake the RunPod embedding+LLM endpoints for the `runpod` preset."
     )
-    parser.add_argument("--api-key", default=None, help="RunPod API key (default: RUNPOD_API_KEY from .env)")
+    parser.add_argument(
+        "--api-key", default=None,
+        help="RunPod API key (default: RUNPOD_API_KEY from .env)",
+    )
     parser.add_argument(
         "--llm-model", default=DEFAULT_LLM_MODEL,
         help=f"HF repo id for the LLM endpoint (default: {DEFAULT_LLM_MODEL})",
@@ -115,6 +121,7 @@ def _resolve_api_key(cli_value: Optional[str], env: Optional[dict] = None) -> st
 
 
 if __name__ == "__main__":
+    load_dotenv(ENV_PATH)
     args = _parse_args()
     try:
         api_key = _resolve_api_key(args.api_key)

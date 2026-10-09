@@ -1251,6 +1251,7 @@ Replace the existing `if __name__ == "__main__":` block at the bottom of the fil
 ```python
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    load_dotenv(ENV_PATH)
     args = _parse_args()
     try:
         resolved_api_key = _resolve_api_key(args.api_key)
