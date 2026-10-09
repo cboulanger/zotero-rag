@@ -398,21 +398,32 @@ class ConfirmTeardownTest(unittest.TestCase):
     def test_skips_prompt_when_yes_flag_set(self):
         # Should not touch stdin/input() at all when yes=True.
         with patch("builtins.input", side_effect=AssertionError("should not prompt")):
-            result = provision._confirm_teardown(yes=True, interactive=True)
+            result = provision._confirm_teardown(
+                resource_names=["zotero-rag-embedding", "zotero-rag-llm"], yes=True, interactive=True,
+            )
         self.assertTrue(result)
 
     def test_refuses_when_noninteractive_without_yes(self):
-        result = provision._confirm_teardown(yes=False, interactive=False)
+        result = provision._confirm_teardown(
+            resource_names=["zotero-rag-embedding", "zotero-rag-llm"], yes=False, interactive=False,
+        )
         self.assertFalse(result)
 
     def test_prompts_and_honors_yes_answer(self):
-        with patch("builtins.input", return_value="y"):
-            result = provision._confirm_teardown(yes=False, interactive=True)
+        with patch("builtins.input", return_value="y") as mock_input:
+            result = provision._confirm_teardown(
+                resource_names=["zotero-rag-embedding", "zotero-rag-llm"], yes=False, interactive=True,
+            )
         self.assertTrue(result)
+        prompt_text = mock_input.call_args[0][0]
+        self.assertIn("zotero-rag-embedding", prompt_text)
+        self.assertIn("zotero-rag-llm", prompt_text)
 
     def test_prompts_and_honors_no_answer(self):
         with patch("builtins.input", return_value="n"):
-            result = provision._confirm_teardown(yes=False, interactive=True)
+            result = provision._confirm_teardown(
+                resource_names=["zotero-rag-embedding", "zotero-rag-llm"], yes=False, interactive=True,
+            )
         self.assertFalse(result)
 
 

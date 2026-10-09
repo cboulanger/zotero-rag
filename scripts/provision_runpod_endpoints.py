@@ -308,10 +308,11 @@ def _teardown_resource(client: "httpx.Client", api_key: str, *, name: str) -> No
         logger.info("Deleted template '%s' (%s)", name, template["id"])
 
 
-def _confirm_teardown(*, yes: bool, interactive: bool) -> bool:
+def _confirm_teardown(*, resource_names: list, yes: bool, interactive: bool) -> bool:
     """Returns True if teardown should proceed. --yes always proceeds without
     prompting. Without --yes, a non-interactive session (no tty) refuses
-    rather than silently deleting infrastructure; an interactive session asks."""
+    rather than silently deleting infrastructure; an interactive session is
+    told exactly which named resources will be deleted and asked to confirm."""
     if yes:
         return True
     if not interactive:
@@ -320,7 +321,8 @@ def _confirm_teardown(*, yes: bool, interactive: bool) -> bool:
             "Pass --yes to confirm."
         )
         return False
-    answer = input("Delete both RunPod endpoints and templates? [y/N] ").strip().lower()
+    names = ", ".join(resource_names)
+    answer = input(f"Delete these RunPod endpoints and templates: {names}? [y/N] ").strip().lower()
     return answer == "y"
 
 
