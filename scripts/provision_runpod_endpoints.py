@@ -21,6 +21,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -181,6 +182,51 @@ def _ensure_endpoint(
     if data_center_ids:
         body["dataCenterIds"] = data_center_ids
     return _request(client, api_key, "POST", "/endpoints", json_body=body)
+
+
+def _warm_up_embedding(client: "httpx.Client", api_key: str, base_url: str) -> None:
+    """Send one lightweight embedding request to trigger a cold start,
+    retrying with backoff while the worker spins up. Logs a warning (does not
+    raise) if it never succeeds within WARMUP_MAX_SECONDS — the endpoint still
+    exists and will warm up on the next real request regardless."""
+    _warm_up_with_retry(
+        client, api_key, f"{base_url}/embeddings",
+        json_body={"model": EMBEDDING_MODEL, "input": "ping"},
+    )
+
+
+def _warm_up_llm(client: "httpx.Client", api_key: str, base_url: str, model: str) -> None:
+    """Send one 1-token chat completion to trigger a cold start, same retry
+    behavior as _warm_up_embedding."""
+    _warm_up_with_retry(
+        client, api_key, f"{base_url}/chat/completions",
+        json_body={
+            "model": model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        },
+    )
+
+
+def _warm_up_with_retry(client: "httpx.Client", api_key: str, url: str, json_body: dict) -> None:
+    start = time.monotonic()
+    while True:
+        response = client.request(
+            "POST", url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=json_body,
+            timeout=30.0,
+        )
+        if 200 <= response.status_code < 300:
+            return
+        if time.monotonic() - start >= WARMUP_MAX_SECONDS:
+            logger.warning(
+                "Endpoint at %s did not warm up within %ds (last status: %s). "
+                "It still exists and will warm up on the next real request.",
+                url, WARMUP_MAX_SECONDS, response.status_code,
+            )
+            return
+        time.sleep(WARMUP_RETRY_INTERVAL_SECONDS)
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:

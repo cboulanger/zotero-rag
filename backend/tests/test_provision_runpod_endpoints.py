@@ -3,7 +3,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "provision_runpod_endpoints.py"
 _SPEC = importlib.util.spec_from_file_location("provision_runpod_endpoints_script", _SCRIPT_PATH)
@@ -265,6 +265,44 @@ class EnsureEndpointTest(unittest.TestCase):
         delete_call = client.calls[1]
         self.assertEqual(delete_call[0], "DELETE")
         self.assertEqual(delete_call[1], "https://rest.runpod.io/v1/endpoints/e_old")
+
+
+class WarmUpTest(unittest.TestCase):
+    def test_embedding_warmup_posts_to_openai_embeddings_path(self):
+        client = FakeClient([(200, {"data": [{"embedding": [0.1, 0.2]}]})])
+        provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        method, url, headers, body = client.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://api.runpod.ai/v2/e1/openai/v1/embeddings")
+        self.assertEqual(headers["Authorization"], "Bearer rp_key")
+        self.assertEqual(body["input"], "ping")
+        self.assertEqual(body["model"], provision.EMBEDDING_MODEL)
+
+    def test_llm_warmup_posts_to_chat_completions_path(self):
+        client = FakeClient([(200, {"choices": [{"message": {"content": "hi"}}]})])
+        provision._warm_up_llm(client, "rp_key", "https://api.runpod.ai/v2/l1/openai/v1", "Qwen/Qwen2.5-7B-Instruct")
+        method, url, headers, body = client.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://api.runpod.ai/v2/l1/openai/v1/chat/completions")
+        self.assertEqual(body["model"], "Qwen/Qwen2.5-7B-Instruct")
+        self.assertEqual(body["max_tokens"], 1)
+
+    def test_retries_on_failure_then_succeeds(self):
+        client = FakeClient([(503, {"error": "cold starting"}), (200, {"data": [{"embedding": [0.1]}]})])
+        with patch.object(provision.time, "sleep"):
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_gives_up_after_max_seconds_and_warns(self):
+        # Every call fails; the retry loop must stop instead of looping forever.
+        responses = [(503, {"error": "cold starting"})] * 50
+        client = FakeClient(responses)
+        fake_times = iter([0, 10, 50, 100, 200])  # exceeds WARMUP_MAX_SECONDS=180 on the 5th check
+        with patch.object(provision.time, "sleep"), \
+             patch.object(provision.time, "monotonic", side_effect=lambda: next(fake_times)), \
+             self.assertLogs(provision.logger, level="WARNING") as ctx:
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        self.assertTrue(any("did not warm up" in msg for msg in ctx.output))
 
 
 if __name__ == "__main__":
