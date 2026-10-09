@@ -311,6 +311,16 @@ class Settings(BaseSettings):
             self.autoindex_keys_path = self.data_path / "system" / "autoindex_keys.json"
         return self
 
+    @property
+    def index_events_path(self) -> Path:
+        """Append-only log of attachment indexed/un-indexed transitions (see IndexEventLog)."""
+        return self.data_path / "system" / "index_events.jsonl"
+
+    @property
+    def indexed_tag_runs_path(self) -> Path:
+        """Directory of per-run JSON-lines files written by bin/sync_indexed_tags.py."""
+        return self.data_path / "system" / "indexed_tag_sync"
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v):

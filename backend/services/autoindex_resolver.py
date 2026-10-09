@@ -55,7 +55,11 @@ def is_embedding_key_usable(status: Optional[str], rate_limit_until_str: Optiona
         return False
 
 
-async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], list[dict]]:
+async def resolve_targets(
+    store: AutoIndexKeyStore,
+    only_fingerprint: Optional[str] = None,
+    require_embedding_key: bool = True,
+) -> tuple[dict[str, dict], list[dict]]:
     """Return (targets, issues).
 
     targets: {slug: {"zotero_key", "embedding_key", "embedding_key_name", "fingerprint"}}
@@ -63,6 +67,12 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
     issues:  list of {fingerprint, user, reason, pruned, kind} — "kind" is
              "zotero_key" for Zotero-key problems (unchanged from before) or
              "embedding_key" for a missing/invalid/rate-limited embedding key.
+
+    only_fingerprint: re-validate and resolve just this stored key, leaving every
+        other user's key untouched (no api.zotero.org round trip, no pruning).
+    require_embedding_key: False skips the embedding-key gating above, for
+        read-only consumers (e.g. the indexed-status tag sync) that list a
+        user's libraries but never embed anything.
     """
     targets: dict[str, dict] = {}
     issues: list[dict] = []
@@ -82,9 +92,12 @@ async def resolve_targets(store: AutoIndexKeyStore) -> tuple[dict[str, dict], li
     requires_embedding_key = (
         embedding_config.model_type == "remote"
         and "api_key_env" in embedding_config.model_kwargs
+        and require_embedding_key
     )
 
     for fp, api_key, entry in list(store.iter_decrypted()):
+        if only_fingerprint and fp != only_fingerprint:
+            continue
         validation = await validate_key(api_key)
         if validation.read_only:
             store.set_status(

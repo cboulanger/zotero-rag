@@ -15,6 +15,7 @@ from fastapi import HTTPException, Request
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.services.access_gate import is_loopback, passes_gate
+from backend.services.index_event_log import IndexEventLog
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
 from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
@@ -191,13 +192,15 @@ def make_vector_store() -> VectorStore:
     qdrant_url = settings.qdrant_url or None
     if not qdrant_url:
         _migrate_legacy_db(settings.vector_db_path)
-    return VectorStore(
+    store = VectorStore(
         storage_path=storage_path,
         embedding_dim=embedding_service.get_embedding_dim(),
         embedding_model_name=model_name,
         url=qdrant_url,
         timeout=settings.qdrant_timeout,
     )
+    store.index_events = IndexEventLog(settings.index_events_path)
+    return store
 
 
 def get_vector_store(request: Request) -> VectorStore:
