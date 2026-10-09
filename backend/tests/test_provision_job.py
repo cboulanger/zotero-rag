@@ -116,10 +116,13 @@ class ProvisionEndpointsTest(unittest.TestCase):
     def test_success_flow_applies_config_and_reports_status(self):
         self._override_admin()
         proc = _fake_proc(0, b'PROVISION_RESULT: {"RUNPOD_EMBEDDING_BASE_URL": "https://e/v1"}\n')
-        with patch("backend.services.provisioning.start_job", new=AsyncMock(return_value=proc)) as start:
+        import os
+        with patch.dict("os.environ", {}, clear=False), \
+             patch("backend.services.provisioning.start_job", new=AsyncMock(return_value=proc)) as start:
+            os.environ.pop("RUNPOD_API_KEY", None)
             r = self.client.post("/api/config/provision")
             self.assertEqual(r.status_code, 202)
-            start.assert_awaited_once_with("scripts/provision_runpod_endpoints.py", None)
+            start.assert_awaited_once_with("bin/provision_runpod_endpoints.py", None)
         # TestClient runs the background task on its portal loop; poll briefly.
         import time
         for _ in range(50):
@@ -155,7 +158,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
     def test_supplied_key_is_passed_to_script_and_kept_when_none_stored(self):
         r, start, status = self._provision({"api_key": "rpa_FULL"})
         self.assertEqual(r.status_code, 202)
-        start.assert_awaited_once_with("scripts/provision_runpod_endpoints.py", "rpa_FULL")
+        start.assert_awaited_once_with("bin/provision_runpod_endpoints.py", "rpa_FULL")
         self.assertEqual(status["status"], "succeeded")
         self.assertEqual(get_remote_config_value(get_settings().data_path, "RUNPOD_API_KEY"), "rpa_FULL")
 
@@ -163,7 +166,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         from backend.services.admin_settings_store import update_remote_config
         update_remote_config(get_settings().data_path, {"RUNPOD_API_KEY": "rpa_RESTRICTED"})
         r, start, status = self._provision({"api_key": "rpa_FULL"})
-        start.assert_awaited_once_with("scripts/provision_runpod_endpoints.py", "rpa_FULL")
+        start.assert_awaited_once_with("bin/provision_runpod_endpoints.py", "rpa_FULL")
         self.assertEqual(status["status"], "succeeded")
         self.assertEqual(
             get_remote_config_value(get_settings().data_path, "RUNPOD_API_KEY"), "rpa_RESTRICTED"
@@ -173,7 +176,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         from backend.services.admin_settings_store import update_remote_config
         update_remote_config(get_settings().data_path, {"RUNPOD_API_KEY": "rpa_STORED"})
         r, start, _ = self._provision({})
-        start.assert_awaited_once_with("scripts/provision_runpod_endpoints.py", "rpa_STORED")
+        start.assert_awaited_once_with("bin/provision_runpod_endpoints.py", "rpa_STORED")
 
     def test_failed_run_does_not_keep_supplied_key(self):
         r, start, status = self._provision({"api_key": "rpa_FULL"}, stdout=b"no result")

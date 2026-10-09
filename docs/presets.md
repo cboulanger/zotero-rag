@@ -205,7 +205,7 @@ to reduce peak RSS during indexing.
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 1024 tokens
 
-**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in your own RunPod account. Select `runpod` as the active preset, then click "Provision endpoints" in the Preferences pane: the backend creates (or wakes) both endpoints and stores their URLs itself, so there are no URL fields to fill in. The optional "Provisioning key" next to the button is a RunPod API key used for that run only; if no `RUNPOD_API_KEY` is stored yet, a successful run keeps it as the key for queries, otherwise the stored key is left untouched. After provisioning you can replace `RUNPOD_API_KEY` with a key restricted to the two endpoints (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision. Admins can also run `uv run python scripts/provision_runpod_endpoints.py` on the server (it reads `RUNPOD_API_KEY` from `.env`; pass `--api-key` to override); it is idempotent and finds existing endpoints by name.
+**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in your own RunPod account. Select `runpod` as the active preset, then click "Provision endpoints" in the Preferences pane: the backend creates (or wakes) both endpoints and stores their URLs itself, so there are no URL fields to fill in. The optional "Provisioning key" next to the button is a RunPod API key used for that run only; if no `RUNPOD_API_KEY` is stored yet, a successful run keeps it as the key for queries, otherwise the stored key is left untouched. After provisioning you can replace `RUNPOD_API_KEY` with a key restricted to the two endpoints (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision. Admins can also run `uv run python bin/provision_runpod_endpoints.py` on the server (it reads `RUNPOD_API_KEY` from `.env`; pass `--api-key` to override); it is idempotent and finds existing endpoints by name.
 
 **Advantages:**
 
@@ -229,7 +229,7 @@ to reduce peak RSS during indexing.
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 800 tokens
 
-**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints you provision yourself by running `uv run python scripts/provision_runpod_endpoints.py` (it reads `RUNPOD_API_KEY` from `.env`; pass `--api-key` to override). The script is idempotent — re-running it finds existing endpoints by name and sends a lightweight warm-up request to wake them from scale-to-zero, rather than creating duplicates. Endpoint URLs are only known after provisioning, so (like `remote-mpcdf`) they're set at runtime through the admin API rather than being a fixed literal in the preset file — see "Admin: runtime preset switching & shared remote config" below.
+**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints you provision yourself by running `uv run python bin/provision_runpod_endpoints.py` (it reads `RUNPOD_API_KEY` from `.env`; pass `--api-key` to override). The script is idempotent — re-running it finds existing endpoints by name and sends a lightweight warm-up request to wake them from scale-to-zero, rather than creating duplicates. Endpoint URLs are only known after provisioning, so (like `remote-mpcdf`) they're set at runtime through the admin API rather than being a fixed literal in the preset file — see "Admin: runtime preset switching & shared remote config" below.
 
 **Advantages:**
 
@@ -409,7 +409,7 @@ MPCDF_EMBEDDING_API_KEY=...
 MPCDF_LLM_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
 MPCDF_LLM_API_KEY=...
 
-# RunPod (runpod) — set automatically by scripts/provision_runpod_endpoints.py;
+# RunPod (runpod) — set automatically by bin/provision_runpod_endpoints.py;
 # shown here only for the env-var fallback path / manual editing.
 RUNPOD_API_KEY=...
 RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/<embedding-endpoint-id>/openai/v1

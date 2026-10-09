@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -74,7 +75,7 @@ async def start_job(script: str, api_key: Optional[str] = None) -> asyncio.subpr
     if api_key:
         env[API_KEY_ENV] = api_key
     return await asyncio.create_subprocess_exec(
-        "uv", "run", "python", str(REPO_ROOT / script), "--json",
+        sys.executable, str(REPO_ROOT / script), "--json",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(REPO_ROOT),

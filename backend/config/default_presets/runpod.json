@@ -31,7 +31,7 @@
     "score_threshold": 0.35,
     "max_chunk_size": 800
   },
-  "provisioning_script": "scripts/provision_runpod_endpoints.py",
+  "provisioning_script": "bin/provision_runpod_endpoints.py",
   "memory_budget_gb": 0.5,
   "platform": "any"
 }

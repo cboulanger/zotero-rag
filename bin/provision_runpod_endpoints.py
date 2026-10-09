@@ -10,10 +10,10 @@ endpoint by name, leaves a matching one alone, and sends a lightweight
 warm-up request to trigger a cold start proactively.
 
 Usage:
-    uv run python scripts/provision_runpod_endpoints.py
-    uv run python scripts/provision_runpod_endpoints.py --llm-model Qwen/Qwen2.5-14B-Instruct
-    uv run python scripts/provision_runpod_endpoints.py --teardown
-    uv run python scripts/provision_runpod_endpoints.py --backend-url http://localhost:8119
+    uv run python bin/provision_runpod_endpoints.py
+    uv run python bin/provision_runpod_endpoints.py --llm-model Qwen/Qwen2.5-14B-Instruct
+    uv run python bin/provision_runpod_endpoints.py --teardown
+    uv run python bin/provision_runpod_endpoints.py --backend-url http://localhost:8119
 
 Requires RUNPOD_API_KEY in .env (or pass --api-key).
 

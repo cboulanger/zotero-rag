@@ -129,7 +129,7 @@ class TestPresets(unittest.TestCase):
 
     def test_get_preset_runpod_uses_shared_dynamic_fields(self):
         """runpod has no static base_url — both the embedding and LLM endpoint
-        URLs are only known after scripts/provision_runpod_endpoints.py creates
+        URLs are only known after bin/provision_runpod_endpoints.py creates
         them, so (like remote-mpcdf) they're resolved at request time from the
         shared admin-set store rather than baked into the preset."""
         preset = get_preset("runpod", self.data_path)

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/provision_runpod_endpoints.py."""
+"""Unit tests for bin/provision_runpod_endpoints.py."""
 
 import importlib.util
 import json
@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
-_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "provision_runpod_endpoints.py"
+_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "bin" / "provision_runpod_endpoints.py"
 _SPEC = importlib.util.spec_from_file_location("provision_runpod_endpoints_script", _SCRIPT_PATH)
 provision = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(provision)
