@@ -18,7 +18,8 @@ from backend.services.admin_settings_store import (
     update_remote_config,
     get_remote_config_value,
 )
-from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header
+from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header, reset_rate_limit_cache
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.utils.kisski import fetch_kisski_rag_models
@@ -60,6 +61,98 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
     return compatible
 
 
+def _stored_embedding_key_counts(settings) -> Dict[str, int]:
+    """Count stored, non-invalid auto-index embedding keys by provider key name.
+
+    Returns an empty dict when the key store is disabled or unreadable.
+    """
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        if not store.enabled:
+            return {}
+        return store.count_embedding_keys_by_name()
+    except Exception as exc:
+        logger.warning("Could not read auto-index key store for credential check: %s", exc)
+        return {}
+
+
+def _preset_credentials(
+    preset: HardwarePreset,
+    settings,
+    request: Request,
+    stored_key_counts: Optional[Dict[str, int]] = None,
+) -> List[str]:
+    """Return the names of credentials the given preset still lacks.
+
+    An empty list means the preset is usable ("present and not known-invalid";
+    no live validation, so no quota is spent). Only key *names* are returned,
+    never values.
+
+    - ``shared_base_url`` / ``shared_api_key``: admin-set remote config value
+      or server environment variable.
+    - ``api_key`` (personal): the requesting admin's header, a server env var,
+      or at least one stored non-invalid auto-index embedding key with that
+      name (what the auto-index job needs; it also satisfies an LLM-side
+      requirement of the same key name, since that is the same provider key).
+
+    Args:
+        preset: Preset to check (embedding and LLM sides).
+        settings: Application settings (``data_path``, key-store config).
+        request: Current request, for the personal-key header.
+        stored_key_counts: Precomputed ``_stored_embedding_key_counts`` result.
+    """
+    if stored_key_counts is None:
+        stored_key_counts = _stored_embedding_key_counts(settings)
+    missing: List[str] = []
+
+    def _check(fields: List[dict]) -> None:
+        for field in fields:
+            name = field["key_name"]
+            if field["kind"] in ("shared_base_url", "shared_api_key"):
+                ok = bool(get_remote_config_value(settings.data_path, name) or os.environ.get(name))
+            else:
+                ok = bool(
+                    request.headers.get(field["header_name"])
+                    or os.environ.get(name)
+                    or stored_key_counts.get(name, 0) > 0
+                )
+            if not ok and name not in missing:
+                missing.append(name)
+
+    _check(RemoteEmbeddingService.required_client_fields(preset.embedding))
+    _check(RemoteLLMService.required_client_fields_for_config(preset.llm))
+    return missing
+
+
+def _switchable_presets(
+    current: HardwarePreset, compatible: List[str], settings, request: Request,
+) -> List["SwitchablePreset"]:
+    """Compatible presets that have usable credentials; the active one is always listed."""
+    counts = _stored_embedding_key_counts(settings)
+    result: List[SwitchablePreset] = []
+    for name in compatible:
+        is_active = name == current.name
+        try:
+            preset = current if is_active else get_preset(name, settings.data_path)
+        except ValueError as exc:
+            logger.warning("Skipping preset %r while computing switchable_presets: %s", name, exc)
+            continue
+        missing = _preset_credentials(preset, settings, request, counts)
+        if missing and not is_active:
+            continue
+        result.append(SwitchablePreset(
+            name=name, active=is_active, credentials="missing" if missing else "ok",
+        ))
+    return result
+
+
+class SwitchablePreset(BaseModel):
+    """A preset the admin may switch to at runtime."""
+    name: str
+    active: bool
+    credentials: str  # "ok" | "missing"
+
+
 class ConfigResponse(BaseModel):
     """Current configuration response."""
     preset_name: str
@@ -73,6 +166,7 @@ class ConfigResponse(BaseModel):
     model_cache_dir: str
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
+    switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials
     # RAG configuration
     default_top_k: int
     default_min_score: float
@@ -153,6 +247,7 @@ def get_config(request: Request):
                     )
 
     available = list_presets(settings.data_path, platform=current_platform())
+    compatible = _compatible_presets(preset, settings.data_path, available)
     return ConfigResponse(
         preset_name=preset.name,
         preset_description=preset.description,
@@ -164,7 +259,8 @@ def get_config(request: Request):
         vector_db_path=str(settings.vector_db_path),
         model_cache_dir=str(settings.model_weights_path),
         available_presets=available,
-        compatible_presets=_compatible_presets(preset, settings.data_path, available),
+        compatible_presets=compatible,
+        switchable_presets=_switchable_presets(preset, compatible, settings, request),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
@@ -197,7 +293,8 @@ async def update_config(
         HTTPException: 400 if `preset_name` is missing, unknown, not in the
             current `compatible_presets` list, or hidden on this host's
             platform (a preset whose own `platform` field names a different
-            OS than `current_platform()` — see backend.config.presets).
+            OS than `current_platform()` — see backend.config.presets), or
+            the target preset lacks credentials (key names only in the message).
     """
     settings = get_settings()
 
@@ -221,7 +318,24 @@ async def update_config(
                    f"local-model preset, set MODEL_PRESET and restart the backend instead.",
         )
 
+    target = get_preset(update.preset_name, settings.data_path)
+    missing = await asyncio.to_thread(_preset_credentials, target, settings, request)
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{update.preset_name}' cannot be activated: missing credentials "
+                   f"for {sorted(missing)}.",
+        )
+
     set_active_preset_override(settings.data_path, update.preset_name)
+    # Rate-limit headers and rate-limit skips belong to the previous provider.
+    reset_rate_limit_cache()
+    try:
+        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        if store.enabled:
+            await asyncio.to_thread(store.clear_rate_limits)
+    except Exception as exc:
+        logger.warning("Could not clear stored rate-limit skips after preset switch: %s", exc)
     return await asyncio.to_thread(get_config, request)
 
 

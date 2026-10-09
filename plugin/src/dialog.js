@@ -7,6 +7,7 @@
 /// Import global types from scripts 
 /// <reference path='./zotero-rag.js' />
 /// <reference path='./remote_indexer.js' />
+/// <reference path='./rate-limit-widget.js' />
 
 /**
  * @typedef {Object} ModelStatusEntry
@@ -246,6 +247,13 @@ var ZoteroRAGDialog = {
 			});
 		}
 
+		const autoindexStatusButton = document.getElementById('autoindex-status-button');
+		if (autoindexStatusButton) {
+			autoindexStatusButton.addEventListener('click', () => {
+				if (this.plugin) this.plugin.openAutoindexStatusDialog(window);
+			});
+		}
+
 		const resultSubmitButton = document.getElementById('result-submit-button');
 		if (resultSubmitButton) {
 			resultSubmitButton.addEventListener('click', () => {
@@ -348,6 +356,7 @@ var ZoteroRAGDialog = {
 		this.isConnecting = false;
 		this.hideProgress();
 		this.loadPresetConfig();
+		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
 
@@ -814,42 +823,16 @@ var ZoteroRAGDialog = {
 	/** @returns {Promise<void>} */
 	async fetchRateLimitHeaders() {
 		if (!this.plugin) return;
-		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/rate-limits`, {
-				headers: this.plugin.getAuthHeaders(),
-			});
-			if (response.ok) {
-				const data = /** @type {{available?: boolean, limits?: Record<string, string>}} */ (await response.json());
-				if (data.available && data.limits) {
-					this.rateLimitHeaders = data.limits;
-					this.updateRateLimitDisplay();
-				}
-			}
-		} catch (_) {
-			// non-fatal — display stays empty
+		const headers = await ZoteroRAGRateLimitWidget.fetch(this.plugin);
+		if (headers) {
+			this.rateLimitHeaders = headers;
+			this.updateRateLimitDisplay();
 		}
 	},
 
 	updateRateLimitDisplay() {
-		const section = document.getElementById('rate-limit-section');
-		if (!section) return;
 		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
-		section.style.display = show ? '' : 'none';
-		if (!show || !this.rateLimitHeaders) return;
-
-		for (const [period, label] of /** @type {[string, string][]} */ ([['hour', 'hour'], ['day', 'day']])) {
-			const limit = parseInt(this.rateLimitHeaders[`x-ratelimit-limit-${period}`] || '0', 10);
-			const remaining = parseInt(this.rateLimitHeaders[`x-ratelimit-remaining-${period}`] || '0', 10);
-			const bar = /** @type {HTMLElement|null} */ (document.getElementById(`rate-limit-bar-${period}`));
-			const text = document.getElementById(`rate-limit-text-${period}`);
-			if (!limit || !bar || !text) {
-				continue;
-			}
-			const usedPct = Math.round((limit - remaining) / limit * 100);
-			bar.style.width = `${usedPct}%`;
-			bar.style.backgroundColor = usedPct >= 95 ? '#cc3300' : usedPct >= 75 ? '#e6a817' : '#2e9e4f';
-			text.textContent = `${remaining} requests left/${label}`;
-		}
+		ZoteroRAGRateLimitWidget.render(document, this.rateLimitHeaders, { visible: show });
 	},
 
 	/**
@@ -1311,22 +1294,47 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Fetch `GET /api/autoindex/status`. Resolves null on any network/HTTP/parse
+	 * error so callers can fail open.
+	 * @returns {Promise<{enabled?: boolean, running?: boolean, keys_registered?: number, scheduler?: {active?: boolean}}|null>}
+	 */
+	async fetchAutoindexStatus() {
+		try {
+			if (!this.plugin || !this.plugin.backendURL) return null;
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) return null;
+			return await response.json();
+		} catch (e) {
+			return null;
+		}
+	},
+
+	/**
 	 * Check whether a server-side auto-indexing run is currently active.
 	 * Fails open (returns false) on any network/parse error — a backend
 	 * hiccup should not block the user's own client-side indexing.
 	 * @returns {Promise<boolean>}
 	 */
 	async isServerIndexingRunning() {
-		try {
-			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
-				headers: this.plugin.getAuthHeaders(),
-			});
-			if (!response.ok) return false;
-			const data = await response.json();
-			return data.running === true;
-		} catch (e) {
-			return false;
-		}
+		const data = await this.fetchAutoindexStatus();
+		return !!data && data.running === true;
+	},
+
+	/**
+	 * Show the footer "Indexing status" button iff server-side auto-indexing is
+	 * configured: enabled and (scheduler active or keys registered). Hidden on
+	 * any fetch error or when no backend URL is set.
+	 * @returns {Promise<void>}
+	 */
+	async refreshAutoindexButton() {
+		const button = document.getElementById('autoindex-status-button');
+		if (!button) return;
+		const data = await this.fetchAutoindexStatus();
+		const visible = !!data && data.enabled === true
+			&& ((data.scheduler && data.scheduler.active === true) || (data.keys_registered || 0) > 0);
+		button.style.display = visible ? '' : 'none';
 	},
 
 	/**

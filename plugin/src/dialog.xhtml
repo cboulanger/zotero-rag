@@ -8,6 +8,7 @@
 <head>
   <title>Ask Question - Zotero RAG</title>
   <meta charset="utf-8"/>
+  <link rel="stylesheet" href="chrome://zotero-rag/content/rate-limit.css"/>
   <script>
     document.addEventListener("DOMContentLoaded", (ev) => {
       try {
@@ -27,6 +28,16 @@
         );
       } catch (e) {
         console.error("Failed to load remote_indexer.js:", e);
+      }
+
+      // Load shared rate-limit bars (must load before dialog.js)
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/rate-limit-widget.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load rate-limit-widget.js:", e);
       }
 
       // Load mention/citation search (must load before dialog.js)
@@ -88,10 +99,6 @@
     .dialog-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background-color: #0066cc; }
     .dialog-button.primary:disabled:hover { background-color: #0066cc; }
     #rate-limit-section { display: flex; flex-direction: column; justify-content: center; gap: 5px; width: 33%; flex-shrink: 0; align-self: stretch; border-right: 1px solid #ddd; padding-right: 10px; margin-right: 10px; }
-    .rate-limit-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-    .rate-limit-bar-track { flex: 1; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; min-width: 0; }
-    .rate-limit-bar { height: 100%; border-radius: 3px; width: 0%; transition: width 0.3s, background-color 0.3s; }
-    .rate-limit-text { width: 9em; flex-shrink: 0; color: #555; white-space: nowrap; }
     .advanced-options { margin-bottom: 15px; }
     .advanced-options > summary { cursor: pointer; font-weight: 500; margin-bottom: 8px; list-style: none; }
     .advanced-options > summary::before { content: '\25B6  '; font-size: 10px; }
@@ -243,6 +250,7 @@
           <span id="rate-limit-text-day" class="rate-limit-text">— requests left/day</span>
         </div>
       </div>
+      <button id="autoindex-status-button" type="button" class="dialog-button" style="display: none;" title="Show server-side automatic indexing status">Indexing status</button>
       <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>
       <button id="submit-button" type="button" class="dialog-button primary">Submit</button>
     </div>
