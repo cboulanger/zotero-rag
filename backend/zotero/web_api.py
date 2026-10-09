@@ -148,6 +148,37 @@ class ZoteroWebAPI:
         logger.info("Retrieved %d items from library %s", len(all_items), library_id)
         return all_items
 
+    async def iter_attachment_pages(
+        self,
+        library_id: str,
+        library_type: str = "user",
+        page_size: int = _PAGE_SIZE,
+    ):
+        """Yield pages (lists) of every attachment item in a library, tags included.
+
+        A generator rather than a list so callers can reconcile each page against
+        fresh state before fetching the next, instead of holding a snapshot of a
+        large library. Raises RuntimeError on a non-200 response — unlike the
+        bulk readers above, a silently truncated listing here would make a tag
+        sync look like it had un-indexed everything past the failure.
+        """
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/items"
+        start = 0
+        while True:
+            params = {"format": "json", "itemType": "attachment", "limit": page_size, "start": start}
+            async with self.session.get(url, params=params) as resp:
+                await self._handle_rate_limit(resp)
+                if resp.status != 200:
+                    raise RuntimeError(f"Zotero attachment listing failed: HTTP {resp.status}")
+                items = await resp.json()
+            if not isinstance(items, list) or not items:
+                return
+            yield items
+            if len(items) < page_size:
+                return
+            start += len(items)
+
     async def get_items_by_keys(
         self,
         library_id: str,
