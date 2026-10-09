@@ -336,6 +336,7 @@ class ZoteroRAGPlugin {
 			return { succeededKeys, failed };
 		});
 		TaskQueue.start();
+		IndexedTags.init(this);
 	}
 
 	/**
@@ -572,6 +573,7 @@ class ZoteroRAGPlugin {
 			this._notifierID = null;
 		}
 		TaskQueue.stop();
+		IndexedTags.shutdown();
 	}
 
 	/**
