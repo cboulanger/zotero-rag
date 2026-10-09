@@ -82,7 +82,9 @@ def _request(
     json_body: Optional[dict] = None,
 ) -> object:
     """Make an authenticated request against the RunPod REST API and return
-    the parsed JSON body. Raises ProvisionError on a non-2xx response."""
+    the parsed JSON body (``None`` for a body-less response, e.g. the 204
+    DELETE /endpoints/{id} returns). Raises ProvisionError on a non-2xx
+    response."""
     response = client.request(
         method,
         f"{REST_BASE_URL}{path}",
@@ -94,6 +96,8 @@ def _request(
         raise ProvisionError(
             f"RunPod API {method} {path} failed: {response.status_code} {response.text}"
         )
+    if response.status_code == 204 or not response.text:
+        return None
     return response.json()
 
 

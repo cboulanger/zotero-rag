@@ -1,6 +1,7 @@
 """Unit tests for scripts/provision_runpod_endpoints.py."""
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,13 +72,21 @@ class ResolveApiKeyTest(unittest.TestCase):
             provision._resolve_api_key(None, env={})
 
 
+class _EmptyBody:
+    """Sentinel json_body for FakeResponse: simulates a real httpx response
+    with no content (e.g. a 204), whose .json() raises JSONDecodeError
+    rather than returning a Python value."""
+
+
 class FakeResponse:
     def __init__(self, status_code, json_body):
         self.status_code = status_code
         self._json_body = json_body
-        self.text = str(json_body)
+        self.text = "" if isinstance(json_body, _EmptyBody) else str(json_body)
 
     def json(self):
+        if isinstance(self._json_body, _EmptyBody):
+            raise json.JSONDecodeError("Expecting value", "", 0)
         return self._json_body
 
 
@@ -114,6 +123,15 @@ class RequestTest(unittest.TestCase):
         with self.assertRaises(provision.ProvisionError) as ctx:
             provision._request(client, "rp_bad_key", "GET", "/templates")
         self.assertIn("401", str(ctx.exception))
+
+    def test_204_no_content_returns_none_without_parsing_json(self):
+        """Observed live: RunPod's DELETE /endpoints/{id} returns 204 with an
+        empty body. Calling .json() on it unconditionally crashed the script
+        with a JSONDecodeError mid-recreate, right after the old endpoint had
+        already been deleted but before the replacement was created."""
+        client = FakeClient([(204, _EmptyBody())])
+        result = provision._request(client, "rp_key", "DELETE", "/endpoints/abc123")
+        self.assertIsNone(result)
 
     def test_post_sends_json_body(self):
         client = FakeClient([(200, {"id": "new123"})])
