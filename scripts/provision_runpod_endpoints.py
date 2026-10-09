@@ -326,6 +326,76 @@ def _confirm_teardown(*, resource_names: list, yes: bool, interactive: bool) -> 
     return answer == "y"
 
 
+def _endpoint_base_url(endpoint_id: str) -> str:
+    return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+
+
+def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> int:
+    if args.teardown:
+        if not _confirm_teardown(
+            resource_names=[EMBEDDING_ENDPOINT_NAME, LLM_ENDPOINT_NAME],
+            yes=args.yes, interactive=sys.stdin.isatty(),
+        ):
+            return 1
+        _teardown_resource(client, api_key, name=EMBEDDING_ENDPOINT_NAME)
+        _teardown_resource(client, api_key, name=LLM_ENDPOINT_NAME)
+        print("Teardown complete.")
+        return 0
+
+    data_center_ids = args.data_centers.split(",") if args.data_centers else None
+
+    embedding_template = _ensure_template(
+        client, api_key,
+        name=EMBEDDING_TEMPLATE_NAME, image=EMBEDDING_IMAGE,
+        env={"MODEL_NAMES": EMBEDDING_MODEL},
+        container_disk_gb=EMBEDDING_CONTAINER_DISK_GB, recreate=args.recreate,
+    )
+    embedding_endpoint = _ensure_endpoint(
+        client, api_key,
+        name=EMBEDDING_ENDPOINT_NAME, template_id=embedding_template["id"],
+        gpu_type_ids=[args.embedding_gpu], workers_max=args.workers_max,
+        idle_timeout=args.idle_timeout, data_center_ids=data_center_ids,
+        recreate=args.recreate,
+    )
+    embedding_base_url = _endpoint_base_url(embedding_endpoint["id"])
+    if not args.skip_warmup:
+        _warm_up_embedding(client, api_key, embedding_base_url)
+    print(f"Embedding endpoint ready: {embedding_base_url}")
+
+    llm_template = _ensure_template(
+        client, api_key,
+        name=LLM_TEMPLATE_NAME, image=LLM_IMAGE,
+        env={"MODEL_NAME": args.llm_model},
+        container_disk_gb=LLM_CONTAINER_DISK_GB, recreate=args.recreate,
+    )
+    llm_endpoint = _ensure_endpoint(
+        client, api_key,
+        name=LLM_ENDPOINT_NAME, template_id=llm_template["id"],
+        gpu_type_ids=[args.llm_gpu], workers_max=args.workers_max,
+        idle_timeout=args.idle_timeout, data_center_ids=data_center_ids,
+        recreate=args.recreate,
+    )
+    llm_base_url = _endpoint_base_url(llm_endpoint["id"])
+    if not args.skip_warmup:
+        _warm_up_llm(client, api_key, llm_base_url, args.llm_model)
+    print(f"LLM endpoint ready: {llm_base_url}")
+
+    _update_env_file(ENV_PATH, {
+        "RUNPOD_API_KEY": api_key,
+        "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
+        "RUNPOD_LLM_BASE_URL": llm_base_url,
+    })
+    print(f"\nWrote RUNPOD_API_KEY / RUNPOD_EMBEDDING_BASE_URL / RUNPOD_LLM_BASE_URL to {ENV_PATH}")
+    print("\nTo apply these to an already-running backend without a restart:")
+    print(f"""
+curl -X POST https://<host>/api/config/remote-fields \\
+  -H "X-Zotero-API-Key: <admin-key>" \\
+  -H "Content-Type: application/json" \\
+  -d '{{"values": {{"RUNPOD_EMBEDDING_BASE_URL": "{embedding_base_url}", "RUNPOD_LLM_BASE_URL": "{llm_base_url}", "RUNPOD_API_KEY": "{api_key}"}}}}'
+""")
+    return 0
+
+
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Provision or wake the RunPod embedding+LLM endpoints for the `runpod` preset."
@@ -392,10 +462,19 @@ def _resolve_api_key(cli_value: Optional[str], env: Optional[dict] = None) -> st
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     load_dotenv(ENV_PATH)
     args = _parse_args()
     try:
-        api_key = _resolve_api_key(args.api_key)
+        resolved_api_key = _resolve_api_key(args.api_key)
     except ProvisionError as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
         sys.exit(1)
+
+    with httpx.Client() as http_client:
+        try:
+            exit_code = _run(args, api_key=resolved_api_key, client=http_client)
+        except ProvisionError as exc:
+            print(f"[FAIL] {exc}", file=sys.stderr)
+            sys.exit(1)
+    sys.exit(exit_code)

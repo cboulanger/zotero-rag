@@ -427,5 +427,52 @@ class ConfirmTeardownTest(unittest.TestCase):
         self.assertFalse(result)
 
 
+class RunTest(unittest.TestCase):
+    def test_teardown_path_calls_teardown_for_both_resources(self):
+        client = FakeClient([
+            (200, []), (200, []),  # embedding: GET endpoints, GET templates (nothing to delete)
+            (200, []), (200, []),  # llm: GET endpoints, GET templates (nothing to delete)
+        ])
+        args = provision._parse_args(["--teardown", "--yes"])
+        exit_code = provision._run(args, api_key="rp_key", client=client)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(client.calls), 4)
+
+    def test_teardown_path_aborts_without_confirmation(self):
+        client = FakeClient([])
+        args = provision._parse_args(["--teardown"])
+        with patch("builtins.input", side_effect=AssertionError("should not prompt in this test")), \
+             patch.object(provision.sys.stdin, "isatty", return_value=False):
+            exit_code = provision._run(args, api_key="rp_key", client=client)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(client.calls), 0)  # nothing was even looked up
+
+    def test_provision_path_creates_both_and_writes_env(self):
+        client = FakeClient([
+            (200, []),  # embedding: GET templates -> none
+            (200, {"id": "t_emb", "name": provision.EMBEDDING_TEMPLATE_NAME,
+                   "imageName": provision.EMBEDDING_IMAGE, "env": {"MODEL_NAMES": provision.EMBEDDING_MODEL}}),  # POST template
+            (200, []),  # embedding: GET endpoints -> none
+            (200, {"id": "e_emb", "name": provision.EMBEDDING_ENDPOINT_NAME}),  # POST endpoint
+            (200, {"data": [{"embedding": [0.1]}]}),  # embedding warm-up
+            (200, []),  # llm: GET templates -> none
+            (200, {"id": "t_llm", "name": provision.LLM_TEMPLATE_NAME,
+                   "imageName": provision.LLM_IMAGE, "env": {"MODEL_NAME": "Qwen/Qwen2.5-7B-Instruct"}}),  # POST template
+            (200, []),  # llm: GET endpoints -> none
+            (200, {"id": "e_llm", "name": provision.LLM_ENDPOINT_NAME}),  # POST endpoint
+            (200, {"choices": [{"message": {"content": "hi"}}]}),  # llm warm-up
+        ])
+        args = provision._parse_args([])
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            with patch.object(provision, "ENV_PATH", env_path):
+                exit_code = provision._run(args, api_key="rp_key", client=client)
+            env_content = env_path.read_text()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RUNPOD_API_KEY=rp_key", env_content)
+        self.assertIn("RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/e_emb/openai/v1", env_content)
+        self.assertIn("RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/e_llm/openai/v1", env_content)
+
+
 if __name__ == "__main__":
     unittest.main()
