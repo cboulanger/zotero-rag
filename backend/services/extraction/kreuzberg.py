@@ -31,14 +31,17 @@ _TIMEOUT_CAP_DEFAULT = 1800    # seconds (30 min) — overridable via Settings.k
 _BYTES_PER_SECOND_PDF = 3_000    # OCR-heavy; slow per byte
 _BYTES_PER_SECOND_OTHER = 10_000
 
-# A connection failure (sidecar not accepting connections at all) gets a
-# generous retry budget before giving up — the sidecar restarting after a
-# crash/OOM/deploy is a known, recoverable condition (see docs/ci-cd.md's
-# deploy notes), unlike a request the sidecar actively rejected. Once the
-# budget is exhausted, every subsequent attachment would fail identically
-# until the sidecar comes back, so KreuzbergUnavailableError is treated as
-# fatal by the indexing loop (see document_processor._FATAL_PROCESSING_ERRORS)
-# rather than retried fresh for each attachment.
+# A connection failure — the sidecar not accepting connections at all
+# (ConnectError), or accepting one and then dropping it mid-request without
+# ever sending a response (RemoteProtocolError, e.g. "Server disconnected
+# without sending a response") — gets a generous retry budget before giving
+# up. The sidecar restarting after a crash/OOM/deploy is a known, recoverable
+# condition (see docs/ci-cd.md's deploy notes), unlike a request the sidecar
+# actively rejected. Once the budget is exhausted, every subsequent
+# attachment would fail identically until the sidecar comes back, so
+# KreuzbergUnavailableError is treated as fatal by the indexing loop (see
+# document_processor._FATAL_PROCESSING_ERRORS) rather than retried fresh for
+# each attachment.
 _CONNECT_RETRY_BUDGET_SECONDS = 600  # 10 minutes
 _CONNECT_RETRY_INTERVAL_SECONDS = 15
 
@@ -196,11 +199,13 @@ class KreuzbergExtractor(DocumentExtractor):
     ) -> list[ExtractionChunk]:
         """POST to the sidecar and parse chunks; records HTTP status/body on ``kb_stage``.
 
-        A connection failure (sidecar not accepting connections at all) is
-        retried for up to self._connect_retry_budget_seconds before raising
+        A connection failure — the sidecar refusing connections outright, or
+        dropping one mid-request without sending a response — is retried for
+        up to self._connect_retry_budget_seconds before raising
         KreuzbergUnavailableError — see that class's docstring. Any other
-        failure (HTTP error status, timeout, dropped connection) is not
-        retried here; those aren't "sidecar is down" conditions.
+        failure (HTTP error status, timeout, a dropped connection with partial
+        data already received) is not retried here; those aren't "sidecar is
+        down" conditions.
         """
         deadline = time.monotonic() + self._connect_retry_budget_seconds
         attempt = 0
@@ -216,7 +221,7 @@ class KreuzbergExtractor(DocumentExtractor):
                     kb_stage.set(http_status=response.status_code)
                     response.raise_for_status()
                 break
-            except httpx.ConnectError as exc:
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     kb_stage.set(failure="connect_unavailable", exception=type(exc).__name__)
@@ -226,7 +231,7 @@ class KreuzbergExtractor(DocumentExtractor):
                     ) from exc
                 wait = min(_CONNECT_RETRY_INTERVAL_SECONDS, remaining)
                 logger.warning(
-                    f"Cannot connect to kreuzberg sidecar at {self._kreuzberg_url} "
+                    f"Cannot reach kreuzberg sidecar at {self._kreuzberg_url} "
                     f"(attempt {attempt}, {remaining:.0f}s left in retry budget): {exc}. "
                     f"Retrying in {wait:.0f}s."
                 )
