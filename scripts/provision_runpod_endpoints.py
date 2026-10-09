@@ -111,11 +111,17 @@ def _ensure_template(
         if not mismatched:
             return existing
         if not recreate:
+            # Deleting an in-use template is destructive and costs real money
+            # to respin; default to a loud warning, not silent destruction.
+            diffs = []
+            if existing.get("imageName") != image:
+                diffs.append(f"image={existing.get('imageName')!r} vs {image!r}")
+            if existing.get("env") != env:
+                diffs.append(f"env={existing.get('env')!r} vs {env!r}")
             logger.warning(
-                "Template '%s' exists but its config differs from requested "
-                "(image=%s vs %s). Keeping existing template — pass --recreate "
-                "to replace it.",
-                name, existing.get("imageName"), image,
+                "Template '%s' exists but its config differs from requested (%s). "
+                "Keeping existing template — pass --recreate to replace it.",
+                name, "; ".join(diffs),
             )
             return existing
         _request(client, api_key, "DELETE", f"/templates/{existing['id']}")
@@ -153,9 +159,11 @@ def _ensure_endpoint(
         if not mismatched:
             return existing
         if not recreate:
+            # Deleting an in-use endpoint is destructive and costs real money
+            # to respin; default to a loud warning, not silent destruction.
             logger.warning(
-                "Endpoint '%s' exists but points at a different template "
-                "(templateId=%s vs %s). Keeping existing endpoint — pass "
+                "Endpoint '%s' exists but its config differs from requested "
+                "(template_id=%r vs %r). Keeping existing endpoint — pass "
                 "--recreate to replace it.",
                 name, existing.get("templateId"), template_id,
             )

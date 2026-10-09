@@ -236,6 +236,36 @@ class EnsureEndpointTest(unittest.TestCase):
         self.assertEqual(result["id"], "e_existing")
         self.assertEqual(len(client.calls), 1)
 
+    def test_warns_but_keeps_existing_on_template_mismatch_without_recreate(self):
+        existing = {"id": "e_existing", "name": "zotero-rag-embedding", "templateId": "t_old"}
+        client = FakeClient([(200, [existing])])
+        with self.assertLogs(provision.logger, level="WARNING") as ctx:
+            result = provision._ensure_endpoint(
+                client, "rp_key", name="zotero-rag-embedding", template_id="t_new",
+                gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+                data_center_ids=None, recreate=False,
+            )
+        self.assertEqual(result["id"], "e_existing")
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(any("differs" in msg for msg in ctx.output))
+
+    def test_recreates_on_template_mismatch_with_recreate_flag(self):
+        existing = {"id": "e_old", "name": "zotero-rag-embedding", "templateId": "t_old"}
+        client = FakeClient([
+            (200, [existing]),  # GET -> found, mismatched
+            (200, {}),  # DELETE /endpoints/e_old
+            (200, {"id": "e_new", "name": "zotero-rag-embedding", "templateId": "t_new"}),  # POST
+        ])
+        result = provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-embedding", template_id="t_new",
+            gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+            data_center_ids=None, recreate=True,
+        )
+        self.assertEqual(result["id"], "e_new")
+        delete_call = client.calls[1]
+        self.assertEqual(delete_call[0], "DELETE")
+        self.assertEqual(delete_call[1], "https://rest.runpod.io/v1/endpoints/e_old")
+
 
 if __name__ == "__main__":
     unittest.main()
