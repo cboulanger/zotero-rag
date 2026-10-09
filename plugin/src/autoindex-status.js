@@ -59,6 +59,12 @@
  * @property {{kreuzberg: SidecarHealth, qdrant: SidecarHealth}} sidecars
  */
 
+// How long a freshly-triggered run is trusted to be "about to start" before
+// its pending UI state is dropped even without server confirmation — covers
+// a request that fails fast server-side before ever flipping the server's
+// running flag (e.g. a race lost to another trigger). See _advancePendingFlag.
+const PENDING_RUN_GRACE_MS = 15000;
+
 var ZoteroRAGAutoIndexStatus = {
 	/** @type {ZoteroRAGPlugin|null} */
 	plugin: null,
@@ -75,6 +81,19 @@ var ZoteroRAGAutoIndexStatus = {
 	 * @type {Map<string, {since: number, confirmedStarted: boolean}>}
 	 */
 	pendingRunSlugs: new Map(),
+
+	/**
+	 * Set while a user-triggered "Run now" (own libraries) request is in
+	 * flight/unconfirmed — see _advancePendingFlag and runNow.
+	 * @type {{since: number, confirmedStarted: boolean}|null}
+	 */
+	pendingOwnRun: null,
+
+	/**
+	 * Same as pendingOwnRun, for the admin "Run full index now" button.
+	 * @type {{since: number, confirmedStarted: boolean}|null}
+	 */
+	pendingAdminRun: null,
 
 	/**
 	 * Initialize the dialog.
@@ -209,7 +228,25 @@ var ZoteroRAGAutoIndexStatus = {
 		}
 		const ownSlugCount = Object.keys(data.slugs || {}).length;
 		const scheduler = data.scheduler || {};
-		if (data.aborted) {
+
+		// A just-triggered run (runNow/runNowAdmin) hasn't necessarily updated
+		// the server's on-disk status yet — the subprocess that does so starts
+		// asynchronously and can take a second or more (interpreter startup,
+		// imports). Until it's confirmed via data.running, or the grace window
+		// lapses, suppress the *previous* run's leftover state (crashed,
+		// rate-limited, idle, etc.) so it doesn't flash before being replaced
+		// by real progress. See _advancePendingFlag.
+		const confirmedRunning = data.running === true;
+		const ownRunInPlay = this._advancePendingFlag(this.pendingOwnRun, confirmedRunning);
+		if (!ownRunInPlay) this.pendingOwnRun = null;
+		const ownRunUnconfirmed = ownRunInPlay && !this.pendingOwnRun.confirmedStarted;
+		const adminRunInPlay = this._advancePendingFlag(this.pendingAdminRun, confirmedRunning);
+		if (!adminRunInPlay) this.pendingAdminRun = null;
+		const adminRunUnconfirmed = adminRunInPlay && !this.pendingAdminRun.confirmedStarted;
+
+		if (ownRunUnconfirmed || adminRunUnconfirmed) {
+			this.renderBanner('Starting indexing…', 'running');
+		} else if (data.aborted) {
 			this.renderBanner('The last automatic indexing run was stopped by an admin.', 'idle');
 		} else if (data.crashed) {
 			this.renderBanner('The last automatic indexing run crashed unexpectedly.', 'crashed');
@@ -231,10 +268,14 @@ var ZoteroRAGAutoIndexStatus = {
 			this.renderBanner('Idle. No automatic indexing run has happened yet.', 'idle');
 		}
 
-		this.renderLibraries(data.slugs || {}, data.is_admin === true, data.running === true);
+		// Only override the per-row display during the unconfirmed race window
+		// (not for the run's full duration) — once confirmed, the live
+		// per-slug status from the server is accurate and should be shown.
+		const pendingStart = adminRunUnconfirmed || (ownRunUnconfirmed && this.adminScope === 'own');
+		this.renderLibraries(data.slugs || {}, data.is_admin === true, data.running === true, pendingStart);
 		this.renderProblems(data.key_issues || []);
 		this.renderSystemHealth(data.system_health);
-		this.updateRunNowButtonState(data);
+		this.updateRunNowButtonState(data, ownRunInPlay, adminRunInPlay);
 		this.updateAdminControlsVisibility(data);
 	},
 
@@ -242,10 +283,13 @@ var ZoteroRAGAutoIndexStatus = {
 	 * Enable/disable the "Run now" button based on server- and client-side
 	 * indexing state.
 	 * @param {AutoIndexStatusResponse} data
+	 * @param {boolean} [ownRunPending] - a user-triggered own-run is in flight/unconfirmed
+	 * @param {boolean} [adminRunPending] - a user-triggered full run is in flight/unconfirmed
 	 * @returns {void}
 	 */
-	updateRunNowButtonState(data) {
-		const busy = data.running === true || (this.plugin && this.plugin.isClientIndexingActive());
+	updateRunNowButtonState(data, ownRunPending = false, adminRunPending = false) {
+		const busy = data.running === true || ownRunPending || adminRunPending
+			|| (this.plugin && this.plugin.isClientIndexingActive());
 
 		const button = /** @type {HTMLButtonElement} */ (document.getElementById('run-now-button'));
 		if (button) {
@@ -317,6 +361,11 @@ var ZoteroRAGAutoIndexStatus = {
 			this.setButtonLabel(button, 'Starting…');
 		}
 		this.renderBanner('Starting full index…', 'running');
+		// Mark pending before the request even lands, so a 5s poll tick firing
+		// mid-request (or the fetchAndRender below) can't see the previous
+		// run's stale status and flash it / re-enable the button — see
+		// _advancePendingFlag.
+		this.pendingAdminRun = { since: Date.now(), confirmedStarted: false };
 		try {
 			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/scheduler/run-now`, {
 				method: 'POST',
@@ -324,6 +373,7 @@ var ZoteroRAGAutoIndexStatus = {
 			});
 			if (!response.ok) {
 				const body = await response.json().catch(() => ({}));
+				this.pendingAdminRun = null;
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
@@ -333,6 +383,7 @@ var ZoteroRAGAutoIndexStatus = {
 			}
 			await this.fetchAndRender();
 		} catch (e) {
+			this.pendingAdminRun = null;
 			this.renderBanner(`Error: ${e}`, 'crashed');
 			if (button) {
 				button.disabled = false;
@@ -501,21 +552,42 @@ var ZoteroRAGAutoIndexStatus = {
 	 * @returns {boolean} true if the Index button for this slug should stay disabled
 	 */
 	_updatePendingRunState(slug, info) {
-		const pending = this.pendingRunSlugs.get(slug);
-		if (!pending) return false;
 		const isActive = !!info && (info.status === 'pending' || info.status === 'indexing');
-		if (isActive) {
+		const pending = this.pendingRunSlugs.get(slug);
+		const stillPending = this._advancePendingFlag(pending, isActive);
+		if (!stillPending) {
+			this.pendingRunSlugs.delete(slug);
+		}
+		return stillPending;
+	},
+
+	/**
+	 * Advance a single pending-trigger marker given the latest confirmation
+	 * signal from the server, expiring it once either it's been confirmed
+	 * and then gone terminal again, or the grace window elapses without ever
+	 * being confirmed (e.g. a request that failed fast server-side before
+	 * flipping any status). Shared by the per-slug admin run tracking
+	 * (pendingRunSlugs) and the global own-run/admin-run-all tracking
+	 * (pendingOwnRun/pendingAdminRun) — see the race described in
+	 * _updatePendingRunState's and runNow's docs: the server accepts a
+	 * trigger and spawns a subprocess asynchronously, and there's a real gap
+	 * before that subprocess updates on-disk status, during which a poll
+	 * would otherwise see the *previous* run's stale result.
+	 * @param {{since: number, confirmedStarted: boolean}|null|undefined} pending
+	 * @param {boolean} isActiveNow - true if the latest server data confirms this trigger has started
+	 * @returns {boolean} true if the pending marker is still (or newly) in effect
+	 */
+	_advancePendingFlag(pending, isActiveNow) {
+		if (!pending) return false;
+		if (isActiveNow) {
 			pending.confirmedStarted = true;
 			return true;
 		}
 		if (pending.confirmedStarted) {
 			// Was confirmed running, now back to a terminal status — finished.
-			this.pendingRunSlugs.delete(slug);
 			return false;
 		}
-		const PENDING_GRACE_MS = 15000;
-		if (Date.now() - pending.since > PENDING_GRACE_MS) {
-			this.pendingRunSlugs.delete(slug);
+		if (Date.now() - pending.since > PENDING_RUN_GRACE_MS) {
 			return false;
 		}
 		return true;
@@ -534,6 +606,11 @@ var ZoteroRAGAutoIndexStatus = {
 			this.setButtonLabel(button, 'Indexing in progress…');
 		}
 		this.renderBanner('Starting indexing…', 'running');
+		// Mark pending before the request even lands, so a 5s poll tick firing
+		// mid-request (or the fetchAndRender below) can't see the previous
+		// run's stale status and flash it / re-enable the button — see
+		// _advancePendingFlag.
+		this.pendingOwnRun = { since: Date.now(), confirmedStarted: false };
 		try {
 			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/run`, {
 				method: 'POST',
@@ -541,6 +618,7 @@ var ZoteroRAGAutoIndexStatus = {
 			});
 			if (!response.ok) {
 				const body = await response.json().catch(() => ({}));
+				this.pendingOwnRun = null;
 				this.renderBanner(body.detail || `Could not start indexing (HTTP ${response.status}).`, 'crashed');
 				if (button) {
 					button.disabled = false;
@@ -552,6 +630,7 @@ var ZoteroRAGAutoIndexStatus = {
 			// for the next 5s poll tick.
 			await this.fetchAndRender();
 		} catch (e) {
+			this.pendingOwnRun = null;
 			this.renderBanner(`Error: ${e}`, 'crashed');
 			if (button) {
 				button.disabled = false;
@@ -601,9 +680,12 @@ var ZoteroRAGAutoIndexStatus = {
 	 * @param {Record<string, AutoIndexSlugStatus>} slugs
 	 * @param {boolean} [isAdmin]
 	 * @param {boolean} [running] - whether any run (own or another's) is currently active server-side
+	 * @param {boolean} [pendingStart] - a just-triggered run hasn't updated per-slug
+	 *   status yet; show "pending" for every row instead of each slug's stale
+	 *   leftover status (e.g. a rate-limit skip message) from the previous run
 	 * @returns {void}
 	 */
-	renderLibraries(slugs, isAdmin = false, running = false) {
+	renderLibraries(slugs, isAdmin = false, running = false, pendingStart = false) {
 		const container = document.getElementById('libraries-container');
 		const emptyState = document.getElementById('empty-state');
 		if (!container || !emptyState) return;
@@ -617,7 +699,9 @@ var ZoteroRAGAutoIndexStatus = {
 		emptyState.style.display = 'none';
 
 		for (const slug of slugNames.sort()) {
-			const info = slugs[slug];
+			const info = pendingStart
+				? { status: 'pending', library_name: slugs[slug].library_name }
+				: slugs[slug];
 			const row = document.createElement('div');
 			row.className = 'library-row';
 

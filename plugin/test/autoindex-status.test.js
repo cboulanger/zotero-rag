@@ -33,6 +33,20 @@ function loadDialog(elements = {}) {
 	const context = {
 		document: {
 			getElementById: (id) => elements[id] || { addEventListener: () => {}, style: {} },
+			// Minimal stand-in so renderLibraries/renderProblems/etc. (which
+			// build rows via document.createElement) can run against non-empty
+			// data without a real DOM — just enough surface (className,
+			// textContent, dataset, appendChild, querySelector/addEventListener
+			// no-ops) for those methods to not throw.
+			createElement: () => ({
+				style: {},
+				dataset: {},
+				children: [],
+				appendChild(child) { this.children.push(child); },
+				addEventListener: () => {},
+				querySelector: () => null,
+				removeAttribute: () => {},
+			}),
 		},
 		console,
 	};
@@ -211,4 +225,146 @@ test('_formatSkipOrErrorReason prefers error and skip_reason over items_failed',
 test('_formatSkipOrErrorReason returns empty string when nothing failed', () => {
 	const dialog = loadDialog({});
 	assert.strictEqual(dialog._formatSkipOrErrorReason({ status: 'done', items_processed: 1, chunks_added: 1 }), '');
+});
+
+test('_advancePendingFlag returns false when there is no pending marker', () => {
+	const dialog = loadDialog({});
+	assert.strictEqual(dialog._advancePendingFlag(null, false), false);
+});
+
+test('_advancePendingFlag stays true and marks confirmedStarted once the signal confirms it started', () => {
+	const dialog = loadDialog({});
+	const pending = { since: Date.now(), confirmedStarted: false };
+	assert.strictEqual(dialog._advancePendingFlag(pending, true), true);
+	assert.strictEqual(pending.confirmedStarted, true);
+});
+
+test('_advancePendingFlag goes false once a confirmed-started marker sees the signal go terminal again', () => {
+	const dialog = loadDialog({});
+	const pending = { since: Date.now(), confirmedStarted: true };
+	assert.strictEqual(dialog._advancePendingFlag(pending, false), false);
+});
+
+test('_advancePendingFlag stays true within the grace window even if the signal still reads not-started', () => {
+	const dialog = loadDialog({});
+	const pending = { since: Date.now(), confirmedStarted: false };
+	assert.strictEqual(dialog._advancePendingFlag(pending, false), true);
+});
+
+test('_advancePendingFlag gives up after the grace window if never confirmed started', () => {
+	const dialog = loadDialog({});
+	const pending = { since: Date.now() - 20000, confirmedStarted: false };
+	assert.strictEqual(dialog._advancePendingFlag(pending, false), false);
+});
+
+/**
+ * Minimal element stubs so render() can run end-to-end: it touches several
+ * ids via document.getElementById, but with empty slugs/issues/health the
+ * only ones that need more than the default `{ style: {} }` fallback (see
+ * loadDialog's doc comment) are the banner and the two run-now buttons,
+ * whose methods (setButtonLabel's querySelector) the fallback doesn't have.
+ * @returns {Record<string, any>}
+ */
+function renderTestElements() {
+	return {
+		'run-banner': {},
+		'run-now-button': { disabled: false, querySelector: () => null, textContent: '' },
+		'admin-run-now-button': { disabled: false, querySelector: () => null, textContent: '' },
+		'libraries-container': { innerHTML: '', appendChild: () => {} },
+	};
+}
+
+test('render shows a "starting" banner instead of the previous run\'s stale result while a just-triggered own run is unconfirmed', () => {
+	// Regression: POST /api/autoindex/run returns before the spawned
+	// subprocess updates on-disk status, so the very next status poll can
+	// still carry the *previous* run's result (e.g. a rate-limit skip). That
+	// must not clobber the "starting" feedback or re-enable the button.
+	const elements = renderTestElements();
+	const dialog = loadDialog(elements);
+	dialog.pendingOwnRun = { since: Date.now(), confirmedStarted: false };
+
+	dialog.render({
+		enabled: true,
+		running: false,
+		crashed: true,
+		slugs: {},
+	});
+
+	assert.match(elements['run-banner'].textContent, /Starting indexing/);
+	assert.strictEqual(elements['run-banner'].className, 'running');
+	assert.strictEqual(elements['run-now-button'].disabled, true);
+	assert.strictEqual(elements['admin-run-now-button'].disabled, true);
+});
+
+test('render keeps suppressing the stale result for a just-triggered full admin run too', () => {
+	const elements = renderTestElements();
+	const dialog = loadDialog(elements);
+	dialog.pendingAdminRun = { since: Date.now(), confirmedStarted: false };
+
+	dialog.render({
+		enabled: true,
+		running: false,
+		finished_at: new Date(Date.now() - 3600000).toISOString(),
+		slugs: {},
+	});
+
+	assert.match(elements['run-banner'].textContent, /Starting indexing/);
+	assert.strictEqual(elements['run-now-button'].disabled, true);
+});
+
+test('render drops the pending override once the server confirms the run is actually running', () => {
+	const elements = renderTestElements();
+	const dialog = loadDialog(elements);
+	dialog.pendingOwnRun = { since: Date.now(), confirmedStarted: false };
+
+	dialog.render({
+		enabled: true,
+		running: true,
+		started_at: new Date().toISOString(),
+		slugs: { 'users/1': { status: 'indexing' } },
+	});
+
+	assert.match(elements['run-banner'].textContent, /Running since/);
+	assert.strictEqual(dialog.pendingOwnRun.confirmedStarted, true);
+});
+
+test('render clears pendingOwnRun once a confirmed run goes back to a terminal (not-running) state', () => {
+	const elements = renderTestElements();
+	const dialog = loadDialog(elements);
+	dialog.pendingOwnRun = { since: Date.now(), confirmedStarted: true };
+
+	dialog.render({
+		enabled: true,
+		running: false,
+		finished_at: new Date().toISOString(),
+		slugs: {},
+	});
+
+	assert.strictEqual(dialog.pendingOwnRun, null);
+	assert.ok(!elements['run-now-button'].disabled);
+});
+
+test('render leaves per-slug status untouched once the pending run is confirmed running', () => {
+	// Once confirmed, the live per-slug status is accurate and must be shown
+	// as-is — the stale-result override only applies during the unconfirmed
+	// race window, not for the run's full duration.
+	const elements = renderTestElements();
+	const dialog = loadDialog(elements);
+	dialog.pendingOwnRun = { since: Date.now(), confirmedStarted: false };
+
+	const renderLibrariesCalls = [];
+	dialog.renderLibraries = (slugs, isAdmin, running, pendingStart) => {
+		renderLibrariesCalls.push({ slugs, pendingStart });
+	};
+
+	dialog.render({
+		enabled: true,
+		running: true,
+		started_at: new Date().toISOString(),
+		slugs: { 'users/1': { status: 'indexing', items_processed: 2, items_total: 10 } },
+	});
+
+	assert.strictEqual(renderLibrariesCalls.length, 1);
+	assert.strictEqual(renderLibrariesCalls[0].pendingStart, false);
+	assert.strictEqual(renderLibrariesCalls[0].slugs['users/1'].status, 'indexing');
 });
