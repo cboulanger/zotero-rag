@@ -506,6 +506,17 @@ class TestConfigApi(unittest.TestCase):
         self.assertEqual("windows-test" in compatible, host == "windows")
         self.assertEqual("apple-silicon-kisski" in compatible, host == "darwin")
 
+    def test_get_config_lists_compatible_presets_includes_runpod_despite_hf_prefix(self):
+        """runpod.json stores its embedding model as the full HuggingFace repo
+        id ("intfloat/multilingual-e5-large-instruct", required by the RunPod
+        worker image's API), while remote-kisski/remote-mpcdf store the short
+        served-model alias ("multilingual-e5-large-instruct") — same
+        underlying model and vector space, different literal string. The
+        compatibility check must treat these as the same model (comparing by
+        basename) rather than rejecting runpod via a literal string mismatch."""
+        r = self.client.get("/api/config")
+        self.assertIn("runpod", set(r.json()["compatible_presets"]))
+
     def test_get_config_hides_other_platforms_presets(self):
         """available_presets/compatible_presets never include a preset whose
         `platform` field names a different OS than current_platform()."""

@@ -27,11 +27,31 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _embedding_model_identity(model_name: str) -> str:
+    """Normalize an embedding model name for cross-preset compatibility
+    comparison: the basename after any "org/" prefix.
+
+    Different providers serve the same underlying model under different
+    literal API model-name strings — e.g. KISSKI/MPCDF serve
+    "multilingual-e5-large-instruct" while RunPod's worker-infinity-embedding
+    requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
+    (it's what the worker was launched with, and what must be sent as the
+    "model" field in every embeddings API call — see
+    scripts/provision_runpod_endpoints.py's MODEL_NAMES env var). Comparing
+    basenames treats these as the same model without changing either
+    preset's actual on-the-wire model_name.
+    """
+    return model_name.rsplit("/", 1)[-1]
+
+
 def _compatible_presets(current: HardwarePreset, data_path: Path, available: List[str]) -> List[str]:
     """Presets safe to switch to at runtime without a restart: both the
     embedding and LLM must be remote (no local model to load/unload), and
-    the embedding model must match exactly — same model means the same
-    vector space, so the already-open VectorStore singleton stays valid.
+    the embedding model must match — same model means the same vector
+    space, so the already-open VectorStore singleton stays valid. Matched
+    by normalized identity (see _embedding_model_identity), not literal
+    string equality, since providers can serve the same model under
+    different API model-name strings.
 
     `available` is the already-computed, platform-filtered preset name
     list (see list_presets(..., platform=...)) — passed in rather than
@@ -40,6 +60,7 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
     """
     if current.embedding.model_type != "remote" or current.llm.model_type != "remote":
         return [current.name]
+    current_identity = _embedding_model_identity(current.embedding.model_name)
     compatible = []
     for name in available:
         try:
@@ -54,7 +75,7 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
         if (
             preset.embedding.model_type == "remote"
             and preset.llm.model_type == "remote"
-            and preset.embedding.model_name == current.embedding.model_name
+            and _embedding_model_identity(preset.embedding.model_name) == current_identity
         ):
             compatible.append(name)
     return compatible
