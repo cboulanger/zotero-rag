@@ -314,7 +314,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				}
 				if (info.status !== 'ready') allReady = false;
 				if (NEEDS_PROVISIONING.has(info.status)) needsProvisioning = true;
-				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}`;
+				// Show the reason inline for anything not ready — a tooltip alone is easy to miss.
+				const detail = info.status !== 'ready' && info.detail ? ` (${info.detail})` : '';
+				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}${detail}`;
 				row.style.color = HEALTH_COLORS[info.status] || '';
 				row.title = info.detail || '';
 			}
