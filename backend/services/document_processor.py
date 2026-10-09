@@ -38,6 +38,8 @@ from backend.services.extraction.kreuzberg import (
 )
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
+from backend.services.failed_attachments import REASON_TOO_COSTLY, REASON_TOO_LARGE, get_failed_store
+from backend.utils.pdf_splitter import inspect_pdf
 from backend.services import diagnostics_collector as diag
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -1250,6 +1252,15 @@ class DocumentProcessor:
         item_key = doc_metadata.item_key
         attachment_key = doc_metadata.attachment_key
 
+        # A previously refused attachment (tagged rag-failed) stays refused until the
+        # user removes the tag, which clears this record.
+        failed_store = get_failed_store()
+        if await asyncio.to_thread(failed_store.is_failed, library_id, attachment_key):
+            return AttachmentProcessingResult(
+                chunks_written=0, status="skipped_failed",
+                error_detail="Attachment is marked rag-failed; remove the tag in Zotero to retry.",
+            )
+
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
         # Step 1: same-library dedup
@@ -1318,15 +1329,43 @@ class DocumentProcessor:
         # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
         settings = get_settings()
         t_extract_start = time.monotonic()
+        # Byte size is a poor proxy for OCR memory cost: an image-only scan needs OCR
+        # on every page. Profile PDFs (cheap, no OCR) to cap and split such scans by pages.
+        scan_max_pages: Optional[int] = None
+        if mime_type == "application/pdf":
+            try:
+                profile = await asyncio.to_thread(inspect_pdf, file_bytes)
+            except ValueError:
+                profile = None  # unparseable: fall through to the byte-based handling
+            if profile is not None and not profile.has_text_layer:
+                if profile.page_count > settings.pdf_scan_max_pages:
+                    detail = (
+                        f"Scanned PDF without a text layer has {profile.page_count} pages "
+                        f"(limit {settings.pdf_scan_max_pages}); split it into smaller files."
+                    )
+                    logger.warning(f"Skipping attachment {attachment_key}: {detail}")
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key,
+                        REASON_TOO_COSTLY, detail,
+                    )
+                    return AttachmentProcessingResult(
+                        chunks_written=0, status="skipped_too_costly", error_detail=detail
+                    )
+                if profile.page_count > settings.pdf_scan_max_pages_per_part:
+                    scan_max_pages = settings.pdf_scan_max_pages_per_part
+        split_pdf = mime_type == "application/pdf" and (
+            len(file_bytes) > settings.pdf_split_threshold or scan_max_pages is not None
+        )
         with diag.stage("extraction") as ex_stage:
             ex_stage.set(mime_type=mime_type, size_bytes=len(file_bytes), timeout_multiplier=timeout_multiplier,
-                         split_pdf=mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold)
-            if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
+                         split_pdf=split_pdf)
+            if split_pdf:
                 try:
                     chunks = await self._extract_pdf_in_parts(
                         file_bytes, attachment_key, settings.pdf_split_target_part_size,
                         on_progress=on_progress,
                         timeout_multiplier=timeout_multiplier,
+                        max_pages_per_part=scan_max_pages,
                     )
                 except KreuzbergTimeoutError as e:
                     logger.warning(f"Skipping attachment {attachment_key}: {e}")
@@ -1344,6 +1383,9 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
                     ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
                     self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key, REASON_TOO_LARGE, str(e)
+                    )
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
             else:
                 if on_progress:
@@ -1364,6 +1406,9 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
                     ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
                     self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key, REASON_TOO_LARGE, str(e)
+                    )
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
                 except KreuzbergUnavailableError:
                     # Fatal, not per-attachment: the sidecar is down and every
@@ -1476,8 +1521,9 @@ class DocumentProcessor:
         target_part_bytes: int,
         on_progress: Optional[Callable[[str], None]] = None,
         timeout_multiplier: float = 1.0,
+        max_pages_per_part: Optional[int] = None,
     ) -> list[ExtractionChunk]:
-        """Split a large PDF by target byte size and extract each part via kreuzberg.
+        """Split a large PDF by target byte size (and optional page cap) and extract each part via kreuzberg.
 
         Page numbers returned by kreuzberg are 1-based within each part; adding
         page_offset (0-based pages before the part) converts them back to the
@@ -1501,7 +1547,7 @@ class DocumentProcessor:
             on_progress(f"Splitting PDF ({size_mb:.0f} MB)...")
         t_split_start = time.monotonic()
         try:
-            parts = await asyncio.to_thread(split_pdf_bytes, pdf_bytes, target_part_bytes)
+            parts = await asyncio.to_thread(split_pdf_bytes, pdf_bytes, target_part_bytes, max_pages_per_part)
         except ValueError as e:
             logger.warning(f"Could not split {attachment_key}: {e} — sending whole file.")
             parts = [(pdf_bytes, 0)]

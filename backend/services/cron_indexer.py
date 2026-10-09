@@ -78,6 +78,9 @@ _FATAL_UPLOAD_ERROR_TYPES = {
 }
 
 
+_SYSTEMIC_EMBEDDING_ERROR_TYPES = _FATAL_UPLOAD_ERROR_TYPES - {"KreuzbergUnavailableError"}
+
+
 @dataclass
 class SlugInfo:
     """Parsed Zotero library slug with all ID representations."""
@@ -649,11 +652,21 @@ class CronIndexer:
                     # Either way, one bad entry must not abort the rest of this library's
                     # queue or any other library in the run.
                     self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), str(exc),
+                    )
                     failed += 1
                     continue
                 if result.status == "error":
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
+                    # Embedding auth/quota/endpoint failures say nothing about this file,
+                    # so they must not count toward quarantining it; a Kreuzberg outage
+                    # does (the file may be what crashed the sidecar).
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), result.message,
+                        result.error_type not in _SYSTEMIC_EMBEDDING_ERROR_TYPES,
+                    )
                     failed += 1
                     if result.error_type in _FATAL_UPLOAD_ERROR_TYPES:
                         # A systemic failure — bad/rate-limited credentials, or

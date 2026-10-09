@@ -118,6 +118,23 @@ class Settings(BaseSettings):
         description="Target byte size of each part when splitting a large PDF. "
                     "Accepts '30MB', '500KB', or a raw byte count.",
     )
+    pdf_scan_max_pages_per_part: int = Field(
+        default=50,
+        description="PDFs without a text layer (image-only scans, every page needs OCR) are split "
+                    "into parts of at most this many pages before being sent to kreuzberg. "
+                    "Byte size is a poor proxy for OCR memory cost, so this applies regardless "
+                    "of pdf_split_threshold.",
+    )
+    pdf_scan_max_pages: int = Field(
+        default=2000,
+        description="Hard cap on the page count of a PDF without a text layer. Larger scans are "
+                    "refused (skipped_too_costly, tagged rag-failed) and must be split manually.",
+    )
+    pending_upload_max_attempts: int = Field(
+        default=5,
+        description="A deferred upload that fails this many times is quarantined: it is no longer "
+                    "retried and its attachment is tagged rag-failed until the user removes the tag.",
+    )
     kreuzberg_max_content_bytes: int = Field(
         default=200 * 1024 ** 2,
         description="Hard cap on the bytes sent to the kreuzberg sidecar in a single request. "
@@ -315,6 +332,11 @@ class Settings(BaseSettings):
     def index_events_path(self) -> Path:
         """Append-only log of attachment indexed/un-indexed transitions (see IndexEventLog)."""
         return self.data_path / "system" / "index_events.jsonl"
+
+    @property
+    def failed_attachments_path(self) -> Path:
+        """Attachments refused for processing, tagged ``rag-failed`` (see FailedAttachmentStore)."""
+        return self.data_path / "system" / "failed_attachments.json"
 
     @property
     def indexed_tag_runs_path(self) -> Path:

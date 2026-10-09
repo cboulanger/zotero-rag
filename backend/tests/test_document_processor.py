@@ -1304,6 +1304,8 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         with patch("backend.services.document_processor.get_settings") as mock_get_settings:
             mock_get_settings.return_value.pdf_split_threshold = 100  # force the split branch
             mock_get_settings.return_value.pdf_split_target_part_size = 50
+            mock_get_settings.return_value.pdf_scan_max_pages = 2000
+            mock_get_settings.return_value.pdf_scan_max_pages_per_part = 50
 
             with patch("backend.utils.pdf_splitter.split_pdf_bytes", side_effect=ValueError("cannot split")):
                 self.mock_extractor.extract_and_chunk.side_effect = AttachmentTooLargeError("too big")

@@ -358,3 +358,18 @@ def pytest_sessionfinish(session, exitstatus):
     except (ImportError, RuntimeError, Exception):
         # Ignore any errors during cleanup
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolated_failed_store(tmp_path, monkeypatch):
+    """Keep rag-failed records (and their events) out of the real data directory."""
+    from backend.services import failed_attachments
+    from backend.services.index_event_log import IndexEventLog
+
+    def _store():
+        return failed_attachments.FailedAttachmentStore(
+            tmp_path / "failed_attachments.json", IndexEventLog(tmp_path / "index_events.jsonl")
+        )
+
+    monkeypatch.setattr(failed_attachments, "get_failed_store", _store)
+    monkeypatch.setattr("backend.services.document_processor.get_failed_store", _store)
