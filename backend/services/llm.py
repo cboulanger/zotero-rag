@@ -271,7 +271,12 @@ class RemoteLLMService(LLMService):
         """Return the fields required by this remote LLM service (see
         RemoteEmbeddingService.required_client_fields for the api_key/shared_*
         kinds, and for what the optional ``pattern`` entry means)."""
-        config = settings.get_hardware_preset().llm
+        return RemoteLLMService.required_client_fields_for_config(settings.get_hardware_preset().llm)
+
+    @staticmethod
+    def required_client_fields_for_config(config: Any) -> list[dict]:
+        """Like ``required_client_fields`` but for an explicit LLMConfig (any preset,
+        not just the active one)."""
         if config.model_type != "remote":
             return []
         fields: list[dict] = []

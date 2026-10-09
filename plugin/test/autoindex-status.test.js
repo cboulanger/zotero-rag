@@ -7,6 +7,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const SOURCE_PATH = path.join(__dirname, '..', 'src', 'autoindex-status.js');
+const WIDGET_PATH = path.join(__dirname, '..', 'src', 'rate-limit-widget.js');
 
 /**
  * autoindex-status.js references `window` and `fetch` as bare ambient
@@ -65,6 +66,8 @@ function loadDialog(elements = {}) {
 		},
 	});
 	vm.createContext(context);
+	// The real dialog loads rate-limit-widget.js into the same window first.
+	vm.runInContext(fs.readFileSync(WIDGET_PATH, 'utf8'), context, { filename: 'rate-limit-widget.js' });
 	vm.runInContext(src, context, { filename: 'autoindex-status.js' });
 	return context.ZoteroRAGAutoIndexStatus;
 }
@@ -367,4 +370,152 @@ test('render leaves per-slug status untouched once the pending run is confirmed 
 	assert.strictEqual(renderLibrariesCalls.length, 1);
 	assert.strictEqual(renderLibrariesCalls[0].pendingStart, false);
 	assert.strictEqual(renderLibrariesCalls[0].slugs['users/1'].status, 'indexing');
+});
+
+// --- Rate-limit widget in the Status section ---------------------------------
+
+const HEADERS = {
+	'x-ratelimit-limit-hour': '100', 'x-ratelimit-remaining-hour': '40',
+	'x-ratelimit-limit-day': '1000', 'x-ratelimit-remaining-day': '10',
+};
+
+/** Fake element with a style bag; id-keyed registry for the rate-limit/preset markup. */
+function fakeEl(extra = {}) {
+	return { style: {}, textContent: '', addEventListener() {}, appendChild() {}, querySelector: () => null, ...extra };
+}
+
+function statusElements() {
+	const ids = ['ai-rate-limit-section', 'ai-rate-limit-bar-hour', 'ai-rate-limit-text-hour',
+		'ai-rate-limit-bar-day', 'ai-rate-limit-text-day', 'ai-rate-limit-asof', 'rate-limit-banner',
+		'admin-preset-row', 'admin-preset-status', 'run-banner', 'admin-controls', 'run-now-button', 'admin-run-now-button'];
+	const els = Object.fromEntries(ids.map((id) => [id, fakeEl()]));
+	els['admin-preset-select'] = fakeEl({ value: '', disabled: false, title: '', innerHTML: '', options: [] });
+	return els;
+}
+
+function widgetDialog(els) {
+	const dialog = loadDialog(els);
+	dialog.plugin = { backendURL: 'http://x', getAuthHeaders: () => ({}), isClientIndexingActive: () => false };
+	dialog.renderLibraries = () => {};
+	dialog.renderProblems = () => {};
+	dialog.renderSystemHealth = () => {};
+	return dialog;
+}
+
+test('rate-limit widget stays hidden when rate_limits.available is false', () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.rateLimitFallbackTried = true; // skip the open-time fallback fetch
+	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: false } });
+	assert.strictEqual(els['ai-rate-limit-section'].style.display, 'none');
+});
+
+test('rate-limit widget shows bars from data.rate_limits', () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: true, limits: HEADERS, source: 'run' } });
+	assert.strictEqual(els['ai-rate-limit-section'].style.display, '');
+	assert.strictEqual(els['ai-rate-limit-bar-hour'].style.width, '60%');
+	assert.strictEqual(els['ai-rate-limit-text-hour'].textContent, '40 requests left/hour');
+	assert.strictEqual(els['ai-rate-limit-bar-day'].style.backgroundColor, '#cc3300');
+});
+
+test('rate-limit widget falls back once to GET /api/rate-limits when status has no limits', async () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	const urls = [];
+	global.fetch = async (url) => {
+		urls.push(url);
+		return { ok: true, json: async () => ({ available: true, limits: HEADERS }) };
+	};
+	const data = { enabled: true, keys_registered: 1, rate_limits: { available: false } };
+	dialog.render(data);
+	dialog.render(data);
+	await new Promise((r) => setImmediate(r));
+	assert.deepStrictEqual(urls, ['http://x/api/rate-limits']);
+	assert.strictEqual(els['ai-rate-limit-section'].style.display, '');
+});
+
+test('rate-limit banner shows the earliest rate_limit_until among rate-limited slugs', () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.rateLimitFallbackTried = true;
+	const early = '2026-10-09T10:00:00Z';
+	assert.strictEqual(dialog.earliestRateLimitUntil({
+		a: { status: 'skipped', skip_reason: 'embedding_rate_limit', rate_limit_until: '2026-10-09T12:00:00Z' },
+		b: { status: 'skipped', skip_reason: 'embedding_rate_limit', rate_limit_until: early },
+		c: { status: 'skipped', skip_reason: 'other', rate_limit_until: '2026-10-09T08:00:00Z' },
+	}), early);
+	dialog.render({ enabled: true, keys_registered: 1, slugs: {
+		b: { status: 'skipped', skip_reason: 'embedding_rate_limit', rate_limit_until: early },
+	} });
+	assert.match(els['rate-limit-banner'].textContent, /Embedding rate limit reached; resumes at/);
+	assert.strictEqual(els['rate-limit-banner'].style.display, '');
+	dialog.render({ enabled: true, keys_registered: 1, slugs: {} });
+	assert.strictEqual(els['rate-limit-banner'].style.display, 'none');
+});
+
+// --- Admin preset row --------------------------------------------------------
+
+const PRESETS = [
+	{ name: 'remote-kisski', active: true, credentials: 'ok' },
+	{ name: 'remote-mpcdf', active: false, credentials: 'ok' },
+];
+
+test('preset row is hidden for non-admins and with fewer than 2 options', () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.rateLimitFallbackTried = true;
+	dialog.switchablePresets = PRESETS;
+	dialog.render({ enabled: true, keys_registered: 1, is_admin: false });
+	assert.strictEqual(els['admin-preset-row'].style.display, 'none');
+	dialog.switchablePresets = [PRESETS[0]];
+	dialog.render({ enabled: true, keys_registered: 1, is_admin: true });
+	assert.strictEqual(els['admin-preset-row'].style.display, 'none');
+	dialog.switchablePresets = PRESETS;
+	dialog.render({ enabled: true, keys_registered: 1, is_admin: true });
+	assert.strictEqual(els['admin-preset-row'].style.display, '');
+});
+
+test('preset select is disabled while a run is in progress', () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.rateLimitFallbackTried = true;
+	dialog.switchablePresets = PRESETS;
+	dialog.render({ enabled: true, keys_registered: 1, is_admin: true, running: true, started_at: new Date().toISOString() });
+	assert.strictEqual(els['admin-preset-select'].disabled, true);
+	dialog.render({ enabled: true, keys_registered: 1, is_admin: true, running: false });
+	assert.strictEqual(els['admin-preset-select'].disabled, false);
+});
+
+test('switchPreset reverts the select and shows detail on a 400', async () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	dialog.switchablePresets = PRESETS;
+	let populated = 0;
+	dialog.populatePresetSelect = () => { populated++; };
+	global.fetch = async () => ({ ok: false, status: 400, json: async () => ({ detail: 'missing credentials: KEY' }) });
+	await dialog.switchPreset('remote-mpcdf');
+	assert.strictEqual(els['admin-preset-status'].textContent, 'Error: missing credentials: KEY');
+	assert.strictEqual(populated, 1);
+	assert.strictEqual(dialog.presetSwitching, false);
+});
+
+test('switchPreset POSTs, then refreshes presets and status on success', async () => {
+	const els = statusElements();
+	const dialog = widgetDialog(els);
+	const calls = [];
+	global.fetch = async (url, opts = {}) => {
+		calls.push({ url, method: opts.method || 'GET', body: opts.body });
+		if (url.endsWith('/api/config') && opts.method === 'POST') return { ok: true, json: async () => ({}) };
+		if (url.endsWith('/api/config')) return { ok: true, json: async () => ({ switchable_presets: PRESETS }) };
+		return { ok: true, json: async () => ({ enabled: true, keys_registered: 1, rate_limits: { available: false } }) };
+	};
+	dialog.rateLimitHeaders = HEADERS;
+	await dialog.switchPreset('remote-mpcdf');
+	assert.deepStrictEqual(JSON.parse(calls[0].body), { preset_name: 'remote-mpcdf' });
+	assert.strictEqual(els['admin-preset-status'].textContent, 'Switched.');
+	assert.ok(calls.some((c) => c.url.endsWith('/api/autoindex/status')));
+	assert.ok(calls.filter((c) => c.url.endsWith('/api/config') && c.method === 'GET').length === 1);
+	assert.strictEqual(dialog.rateLimitHeaders, null);
 });

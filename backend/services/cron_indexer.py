@@ -463,6 +463,8 @@ class CronIndexer:
                 rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:
                     status["last_rate_limit_headers"] = rate_limit_headers
+                    status["last_rate_limit_headers_at"] = datetime.now(timezone.utc).isoformat()
+                    status["last_rate_limit_preset"] = get_settings().get_hardware_preset().name
                 status["slugs"][slug_info.slug].update({
                     "status": "done",
                     "finished_at": datetime.now(timezone.utc).isoformat(),

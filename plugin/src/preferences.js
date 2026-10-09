@@ -676,6 +676,59 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		});
 	}
 
+	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a
+	// manual full reconciliation that reuses the key stored for automatic indexing.
+	const indexedTagsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-toggle'));
+	const indexedTagsRefresh = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-refresh'));
+	const indexedTagsStatus = doc.getElementById('zotero-rag-indexed-tags-status');
+
+	/**
+	 * @param {string} message
+	 * @param {'ok'|'warn'|'error'} [level='ok']
+	 * @returns {void}
+	 */
+	const setIndexedTagsStatus = (message, level = 'ok') => {
+		if (!indexedTagsStatus) return;
+		indexedTagsStatus.textContent = message;
+		indexedTagsStatus.className = `setting-description status-${level}`;
+	};
+
+	if (indexedTagsToggle && indexedTagsRefresh) {
+		indexedTagsToggle.checked = IndexedTags.isEnabled();
+		indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+		indexedTagsToggle.addEventListener('change', () => {
+			Zotero.Prefs.set(IndexedTags.PREF_ENABLED, indexedTagsToggle.checked, true);
+			indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			// Re-follow from "now" when re-enabled rather than replaying stale events.
+			if (indexedTagsToggle.checked) IndexedTags.cursor = null;
+		});
+
+		indexedTagsRefresh.addEventListener('click', async () => {
+			indexedTagsRefresh.disabled = true;
+			setIndexedTagsStatus('Starting...');
+			try {
+				const stats = await IndexedTags.refresh({
+					onProgress: (s) => {
+						const lib = s.currentLibrary ? ` (${s.currentLibrary})` : '';
+						setIndexedTagsStatus(
+							`Library ${Math.min(s.librariesDone + 1, s.librariesTotal || 1)} of ${s.librariesTotal || '?'}${lib}: ` +
+							`${s.attachmentsChecked} attachments checked, ${s.added} tagged, ${s.removed} untagged...`
+						);
+					},
+				});
+				const failed = stats.errors.length ? ` ${stats.errors.length} librar${stats.errors.length === 1 ? 'y' : 'ies'} failed: ${stats.errors.join('; ')}` : '';
+				setIndexedTagsStatus(
+					`Done: ${stats.attachmentsChecked} attachments checked, ${stats.added} tagged, ${stats.removed} untagged, ${stats.skipped} skipped.${failed}`,
+					stats.errors.length ? 'warn' : 'ok'
+				);
+			} catch (e) {
+				setIndexedTagsStatus(`Error: ${e instanceof Error ? e.message : e}`, 'error');
+			} finally {
+				indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			}
+		});
+	}
+
 	// "Indexed Content" section: admin-only "Index Snapshots of webpages"
 	// setting + purge action. This controls what gets indexed at all,
 	// independent of how indexing was triggered (scheduled auto-indexing or

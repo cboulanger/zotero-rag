@@ -359,6 +359,23 @@ job in the run (not just their own), with each job labeled
 `library_name`/`owner_id` joined from `registrations.json` rather than a raw
 slug. A slug with no matching registration falls back to the raw slug string.
 
+Admins can also switch the active model preset at runtime with
+`POST /api/config` (the status dialog's preset dropdown uses it); only presets
+returned in `GET /api/config`'s `switchable_presets` (same embedding model,
+usable credentials) are accepted. The next scheduler tick, `run-now` or manual
+run uses the new preset; a run already in progress keeps the preset it started
+with. A successful switch clears the stored embedding-key rate-limit skips so
+libraries skipped with `embedding_rate_limit` are retried. See
+[presets.md](presets.md#admin-runtime-preset-switching--shared-remote-config).
+
+`GET /api/autoindex/status` includes `rate_limits`:
+`{"available": true, "limits": {...}, "as_of": "<ISO time>", "source": "run" | "cache"}`,
+or `{"available": false}`. It is read from cached headers only (in-process, or
+`last_rate_limit_headers` in `cron_status.json`, which is ignored when written
+under a different preset than the active one) and never probes the embedding
+API. The cron indexer records `last_rate_limit_headers_at` and
+`last_rate_limit_preset` next to the headers.
+
 `abort` vs. `skip-slug`: `abort` kills the whole subprocess and relies on the
 existing crash-recovery path (the next run detects the dead PID and forces a
 full re-index of whatever was mid-flight). `skip-slug` only ever affects the
