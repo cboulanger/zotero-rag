@@ -1,6 +1,6 @@
 // Indexed-status tags for Zotero RAG.
 //
-// Keeps a plain emoji tag ("📇 rag-indexed") on every attachment the backend has
+// Keeps a plain emoji tag ("✅ rag-indexed") on every attachment the backend has
 // indexed; Zotero's item list renders any emoji tag as an icon before the title, so
 // no custom column is needed. Two paths feed the same tag state:
 //   - real time: poll /api/indexed-tags/events and apply each transition;
@@ -43,7 +43,7 @@
  */
 
 var IndexedTags = {
-	DEFAULT_TAG: '\u{1F4C7} rag-indexed',
+	DEFAULT_TAG: '\u2705 rag-indexed',
 	PREF_ENABLED: 'extensions.zotero-rag.indexedTags.enabled',
 	PREF_CURSOR: 'extensions.zotero-rag.indexedTags.cursor',
 	POLL_INTERVAL_MS: 15000,
@@ -55,7 +55,7 @@ var IndexedTags = {
 	REFRESH_POLL_MS: 1000,
 
 	/** @type {any} */ plugin: null,
-	tag: '\u{1F4C7} rag-indexed',
+	tag: '\u2705 rag-indexed',
 	/** @type {number|null} */ cursor: null,
 	/** @type {ReturnType<typeof setTimeout>|null} */ timer: null,
 	running: false,

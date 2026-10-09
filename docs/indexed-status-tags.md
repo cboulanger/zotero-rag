@@ -1,6 +1,6 @@
 # Indexed-status tags
 
-Attachments that are indexed in the backend carry the Zotero tag `📇 rag-indexed`.
+Attachments that are indexed in the backend carry the Zotero tag `✅ rag-indexed`.
 Zotero's item list renders any tag containing an emoji as a small icon before the
 item title (this works on attachment rows too), so no custom column is needed and the
 tree re-renders through Zotero's normal notifier flow when the tag changes.

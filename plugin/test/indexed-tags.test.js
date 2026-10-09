@@ -10,7 +10,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const SOURCE_PATH = path.join(__dirname, '..', 'src', 'indexed-tags.js');
-const TAG = '\u{1F4C7} rag-indexed';
+const TAG = '\u2705 rag-indexed';
 
 // Objects created inside the vm context have a different Object.prototype, so
 // compare through a JSON round trip instead of deepStrictEqual's prototype check.

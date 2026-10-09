@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Tag the plugin attaches to indexed attachments. Defined here (not in the
 # plugin) so the backend, the sync script and the plugin cannot drift apart:
 # the plugin receives it with every events/refresh response.
-INDEXED_TAG_NAME = "\U0001F4C7 rag-indexed"
+INDEXED_TAG_NAME = "\u2705 rag-indexed"
 
 EVENT_INDEXED = "indexed"
 EVENT_UNINDEXED = "unindexed"
