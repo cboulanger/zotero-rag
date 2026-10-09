@@ -308,7 +308,7 @@ class EnsureEndpointTest(unittest.TestCase):
 class WarmUpTest(unittest.TestCase):
     def test_embedding_warmup_posts_to_openai_embeddings_path(self):
         client = FakeClient([(200, {"data": [{"embedding": [0.1, 0.2]}]})])
-        provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
         method, url, headers, body = client.calls[0]
         self.assertEqual(method, "POST")
         self.assertEqual(url, "https://api.runpod.ai/v2/e1/openai/v1/embeddings")
@@ -318,7 +318,7 @@ class WarmUpTest(unittest.TestCase):
 
     def test_llm_warmup_posts_to_chat_completions_path(self):
         client = FakeClient([(200, {"choices": [{"message": {"content": "hi"}}]})])
-        provision._warm_up_llm(client, "rp_key", "https://api.runpod.ai/v2/l1/openai/v1", "Qwen/Qwen2.5-7B-Instruct")
+        provision._warm_up_llm(client, "rp_key", "https://api.runpod.ai/v2/l1/openai/v1", "Qwen/Qwen2.5-7B-Instruct", "l1")
         method, url, headers, body = client.calls[0]
         self.assertEqual(method, "POST")
         self.assertEqual(url, "https://api.runpod.ai/v2/l1/openai/v1/chat/completions")
@@ -326,40 +326,66 @@ class WarmUpTest(unittest.TestCase):
         self.assertEqual(body["max_tokens"], 1)
 
     def test_retries_on_failure_then_succeeds(self):
-        client = FakeClient([(503, {"error": "cold starting"}), (200, {"data": [{"embedding": [0.1]}]})])
+        client = FakeClient([
+            (503, {"error": "cold starting"}),
+            (200, {}),  # purge-queue between retries
+            (200, {"data": [{"embedding": [0.1]}]}),
+        ])
         with patch.object(provision.time, "sleep"):
-            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
-        self.assertEqual(len(client.calls), 2)
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
+        self.assertEqual(len(client.calls), 3)
+        purge_call = client.calls[1]
+        self.assertEqual(purge_call[0], "POST")
+        self.assertEqual(purge_call[1], "https://api.runpod.ai/v2/e1/purge-queue")
 
     def test_gives_up_after_max_seconds_and_warns(self):
         # Every call fails; the retry loop must stop instead of looping forever.
-        responses = [(503, {"error": "cold starting"})] * 50
+        # Each retry cycle is (warm-up attempt, purge-queue call), so alternate.
+        responses = [(503, {"error": "cold starting"}), (200, {})] * 25
         client = FakeClient(responses)
         fake_times = iter([0, 10, 50, 100, 200])  # exceeds WARMUP_MAX_SECONDS=180 on the 4th deadline check
         with patch.object(provision.time, "sleep"), \
              patch.object(provision.time, "monotonic", side_effect=lambda: next(fake_times)), \
              self.assertLogs(provision.logger, level="WARNING") as ctx:
-            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
         self.assertTrue(any("did not warm up" in msg for msg in ctx.output))
 
     def test_retries_on_connection_error_then_succeeds(self):
-        client = FakeClient([httpx.ReadTimeout("timed out"), (200, {"data": [{"embedding": [0.1]}]})])
+        client = FakeClient([
+            httpx.ReadTimeout("timed out"),
+            (200, {}),  # purge-queue between retries
+            (200, {"data": [{"embedding": [0.1]}]}),
+        ])
         with patch.object(provision.time, "sleep"):
-            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
-        self.assertEqual(len(client.calls), 2)
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
+        self.assertEqual(len(client.calls), 3)
 
     def test_short_circuits_on_non_retryable_4xx(self):
         client = FakeClient([(400, {"error": "bad model name"})])
         with patch.object(provision.time, "sleep") as mock_sleep:
-            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
-        self.assertEqual(len(client.calls), 1)  # no retry attempted
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
+        self.assertEqual(len(client.calls), 1)  # no retry attempted, no purge needed
         mock_sleep.assert_not_called()
 
     def test_retries_429_as_transient_not_as_non_retryable(self):
-        client = FakeClient([(429, {"error": "rate limited"}), (200, {"data": [{"embedding": [0.1]}]})])
+        client = FakeClient([
+            (429, {"error": "rate limited"}),
+            (200, {}),  # purge-queue between retries
+            (200, {"data": [{"embedding": [0.1]}]}),
+        ])
         with patch.object(provision.time, "sleep"):
-            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
-        self.assertEqual(len(client.calls), 2)
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
+        self.assertEqual(len(client.calls), 3)
+
+    def test_purge_queue_failure_does_not_crash_the_retry_loop(self):
+        client = FakeClient([
+            (503, {"error": "cold starting"}),
+            httpx.ConnectError("purge endpoint unreachable"),  # purge-queue call fails
+            (200, {"data": [{"embedding": [0.1]}]}),
+        ])
+        with patch.object(provision.time, "sleep"):
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1", "e1")
+        self.assertEqual(len(client.calls), 3)
 
 
 class UpdateEnvFileTest(unittest.TestCase):

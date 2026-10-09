@@ -199,23 +199,23 @@ def _ensure_endpoint(
     return _request(client, api_key, "POST", "/endpoints", json_body=body)
 
 
-def _warm_up_embedding(client: "httpx.Client", api_key: str, base_url: str) -> None:
+def _warm_up_embedding(client: "httpx.Client", api_key: str, base_url: str, endpoint_id: str) -> None:
     """Send one lightweight embedding request to trigger a cold start,
     retrying at a fixed interval while the worker spins up. Logs a warning
     (does not raise) if it never succeeds within WARMUP_MAX_SECONDS — the
     endpoint still exists and will warm up on the next real request
     regardless."""
     _warm_up_with_retry(
-        client, api_key, f"{base_url}/embeddings",
+        client, api_key, f"{base_url}/embeddings", endpoint_id=endpoint_id,
         json_body={"model": EMBEDDING_MODEL, "input": "ping"},
     )
 
 
-def _warm_up_llm(client: "httpx.Client", api_key: str, base_url: str, model: str) -> None:
+def _warm_up_llm(client: "httpx.Client", api_key: str, base_url: str, model: str, endpoint_id: str) -> None:
     """Send one 1-token chat completion to trigger a cold start, same retry
     behavior as _warm_up_embedding."""
     _warm_up_with_retry(
-        client, api_key, f"{base_url}/chat/completions",
+        client, api_key, f"{base_url}/chat/completions", endpoint_id=endpoint_id,
         json_body={
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
@@ -224,7 +224,28 @@ def _warm_up_llm(client: "httpx.Client", api_key: str, base_url: str, model: str
     )
 
 
-def _warm_up_with_retry(client: "httpx.Client", api_key: str, url: str, json_body: dict) -> None:
+def _purge_queue(client: "httpx.Client", api_key: str, endpoint_id: str) -> None:
+    """Best-effort: clear any jobs still queued for this endpoint. A warm-up
+    request our client gave up on (timeout/error) is not cancelled server
+    side — RunPod still processes it once a worker is ready. Called between
+    retries so a slow cold start doesn't accumulate a backlog of duplicate
+    pings (observed live: 6+ duplicate jobs queued during one warm-up),
+    each of which still burns GPU time once picked up. Failure here is
+    swallowed — this is cleanup, not the warm-up itself, and shouldn't mask
+    the real retry loop's own error handling."""
+    try:
+        client.request(
+            "POST", f"https://api.runpod.ai/v2/{endpoint_id}/purge-queue",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10.0,
+        )
+    except httpx.TransportError:
+        pass
+
+
+def _warm_up_with_retry(
+    client: "httpx.Client", api_key: str, url: str, json_body: dict, endpoint_id: str,
+) -> None:
     """Retry the warm-up request at a fixed interval until it succeeds or
     WARMUP_MAX_SECONDS elapses. Never raises: a persistently failing warm-up
     is logged as a warning, since the endpoint still exists and will warm up
@@ -266,6 +287,7 @@ def _warm_up_with_retry(client: "httpx.Client", api_key: str, url: str, json_bod
                 url, WARMUP_MAX_SECONDS, status_desc,
             )
             return
+        _purge_queue(client, api_key, endpoint_id)
         time.sleep(WARMUP_RETRY_INTERVAL_SECONDS)
 
 
@@ -378,7 +400,7 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
         )
         embedding_base_url = _endpoint_base_url(embedding_endpoint["id"])
         if not args.skip_warmup:
-            _warm_up_embedding(client, api_key, embedding_base_url)
+            _warm_up_embedding(client, api_key, embedding_base_url, embedding_endpoint["id"])
         print(f"Embedding endpoint ready: {embedding_base_url}")
 
         llm_template = _ensure_template(
@@ -396,7 +418,7 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
         )
         llm_base_url = _endpoint_base_url(llm_endpoint["id"])
         if not args.skip_warmup:
-            _warm_up_llm(client, api_key, llm_base_url, args.llm_model)
+            _warm_up_llm(client, api_key, llm_base_url, args.llm_model, llm_endpoint["id"])
         print(f"LLM endpoint ready: {llm_base_url}")
 
         _update_env_file(ENV_PATH, {
