@@ -10,18 +10,27 @@ endpoint by name, leaves a matching one alone, and sends a lightweight
 warm-up request to trigger a cold start proactively.
 
 Usage:
-    uv run python scripts/provision_runpod_endpoints.py
-    uv run python scripts/provision_runpod_endpoints.py --llm-model Qwen/Qwen2.5-14B-Instruct
-    uv run python scripts/provision_runpod_endpoints.py --teardown
-    uv run python scripts/provision_runpod_endpoints.py --backend-url http://localhost:8119
+    uv run python bin/provision_runpod_endpoints.py
+    uv run python bin/provision_runpod_endpoints.py --llm-model Qwen/Qwen2.5-14B-Instruct
+    uv run python bin/provision_runpod_endpoints.py --teardown
+    uv run python bin/provision_runpod_endpoints.py --backend-url http://localhost:8119
 
-Requires RUNPOD_API_KEY in .env (or pass --api-key).
+Requires RUNPOD_API_KEY in the environment or .env (or pass --api-key).
 
-With --backend-url (or ZOTERO_RAG_BACKEND_URL in .env), the new endpoint
-URLs are also applied to that running backend via
-POST /api/config/remote-fields. A backend with AUTHORIZED_GROUP_ID set
-requires an admin's Zotero API key in ZOTERO_RAG_ADMIN_KEY (read from the
-environment/.env only, never a CLI flag, so it can't leak via `ps`).
+The resulting endpoint URLs are written to the backend's shared store
+(<data_path>/system/admin_settings.json, `remote_config`), which the backend
+re-reads on every request: a running backend picks them up without a restart,
+and .env is never modified. The data directory comes from the same settings
+(DATA_PATH) as the backend, so run this where that data lives -- in a
+container: `podman exec <container> python bin/provision_runpod_endpoints.py`.
+A RUNPOD_API_KEY the backend can't already see (passed via --api-key) is
+stored there too, encrypted with AUTOINDEX_SECRET.
+
+With --backend-url (or ZOTERO_RAG_BACKEND_URL), the URLs are instead pushed
+to a backend running on another machine via POST /api/config/remote-fields.
+A backend with AUTHORIZED_GROUP_ID set requires an admin's Zotero API key in
+ZOTERO_RAG_ADMIN_KEY (read from the environment/.env only, never a CLI flag,
+so it can't leak via `ps`).
 """
 
 import argparse
@@ -29,13 +38,16 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 REST_BASE_URL = "https://rest.runpod.io/v1"
 
@@ -71,7 +83,7 @@ DEFAULT_LLM_GPU = "NVIDIA RTX A5000"
 DEFAULT_WORKERS_MAX = 1
 DEFAULT_IDLE_TIMEOUT = 60
 
-ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+ENV_PATH = _PROJECT_ROOT / ".env"
 
 BACKEND_URL_ENV = "ZOTERO_RAG_BACKEND_URL"
 BACKEND_ADMIN_KEY_ENV = "ZOTERO_RAG_ADMIN_KEY"
@@ -324,44 +336,6 @@ def _warm_up_with_retry(
         time.sleep(WARMUP_RETRY_INTERVAL_SECONDS)
 
 
-def _update_env_file(env_path: Path, values: dict) -> None:
-    """Insert or replace KEY=value lines in env_path, preserving every other
-    line exactly. Never a blind `>>` append — reads the whole file (if it
-    exists), replaces lines for keys already present, and appends lines for
-    keys that aren't, so a source file missing a trailing newline can't get
-    silently concatenated onto (see this project's documented worktree .env
-    hazard in CLAUDE.md)."""
-    lines = []
-    if env_path.exists():
-        content = env_path.read_text(encoding="utf-8")
-        if content:
-            lines = content.splitlines()
-
-    remaining = dict(values)
-    for i, line in enumerate(lines):
-        if "=" not in line or line.strip().startswith("#"):
-            continue
-        key = line.split("=", 1)[0]
-        if key in remaining:
-            lines[i] = f"{key}={remaining.pop(key)}"
-
-    for key, value in remaining.items():
-        lines.append(f"{key}={value}")
-
-    new_content = "\n".join(lines) + "\n"
-    fd, tmp_path = tempfile.mkstemp(dir=env_path.parent, suffix=".tmp", prefix=".env_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(new_content)
-        os.replace(tmp_path, env_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 def _teardown_resource(client: "httpx.Client", api_key: str, *, name: str) -> None:
     """Delete the endpoint and template matching `name`, if they exist.
     A name that doesn't exist for either resource is a no-op, not an error —
@@ -435,6 +409,25 @@ def _endpoint_base_url(endpoint_id: str) -> str:
     return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 
 
+def _store_locally(api_key: str, values: dict) -> None:
+    """Write the endpoint URLs (and, if the backend can't see it already, the
+    API key) to the shared store under the backend's data directory."""
+    from backend.services.admin_settings_store import resolve_shared_value, update_remote_config
+    from backend.services.secret_store import SecretsUnavailableError
+
+    to_store = dict(values)
+    if not resolve_shared_value("RUNPOD_API_KEY"):
+        to_store["RUNPOD_API_KEY"] = api_key
+    try:
+        update_remote_config(to_store)
+    except SecretsUnavailableError as exc:
+        # URLs are not secret; keep them even though the key can't be stored.
+        if "RUNPOD_API_KEY" not in to_store:
+            raise ProvisionError(str(exc)) from exc
+        update_remote_config(values)
+        logger.warning("RUNPOD_API_KEY not stored: %s", exc)
+
+
 def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> int:
     try:
         if args.teardown:
@@ -499,27 +492,17 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
             # stray copy of the key in the server's checkout.
             print("PROVISION_RESULT: " + json.dumps(backend_values))
             return 0
-        _update_env_file(ENV_PATH, {"RUNPOD_API_KEY": api_key, **backend_values})
-        print(f"\nWrote RUNPOD_API_KEY / RUNPOD_EMBEDDING_BASE_URL / RUNPOD_LLM_BASE_URL to {ENV_PATH}")
-
         backend_url = args.backend_url or os.environ.get(BACKEND_URL_ENV)
         if backend_url:
-            if _push_to_backend(
+            if not _push_to_backend(
                 client, backend_url, os.environ.get(BACKEND_ADMIN_KEY_ENV), backend_values,
             ):
-                print(f"Applied the new endpoint URLs to the backend at {backend_url}.")
-                return 0
+                raise ProvisionError(f"Could not apply the endpoint URLs to the backend at {backend_url}.")
+            print(f"Applied the new endpoint URLs to the backend at {backend_url}.")
+            return 0
 
-        print("\nTo apply these to an already-running backend without a restart:")
-        print(f"""
-curl -X POST https://<host>/api/config/remote-fields \\
-  -H "X-Zotero-API-Key: <admin-key>" \\
-  -H "Content-Type: application/json" \\
-  -d '{{"values": {{"RUNPOD_EMBEDDING_BASE_URL": "{embedding_base_url}", "RUNPOD_LLM_BASE_URL": "{llm_base_url}"}}}}'
-
-(RUNPOD_API_KEY is not shown here; if the backend doesn't already have it in its
-environment, add "RUNPOD_API_KEY": "<your key>" to "values" yourself.)
-""")
+        _store_locally(api_key, backend_values)
+        print("\nStored the endpoint URLs in the backend's shared store; a running backend uses them immediately.")
         return 0
     except (ProvisionError, httpx.HTTPError, OSError) as exc:
         print(f"[FAIL] {exc}", file=sys.stderr)
@@ -575,12 +558,13 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--json", action="store_true",
         help="Backend mode: print one machine-readable 'PROVISION_RESULT: {...}' "
              "line (the preset's shared base-URL env vars) on success instead of "
-             "writing .env or applying them to a backend",
+             "storing them (the launching backend stores them itself)",
     )
     parser.add_argument(
         "--backend-url", default=None,
-        help=f"Also apply the new endpoint URLs to this running backend "
-             f"(e.g. http://localhost:8119; default: {BACKEND_URL_ENV} from .env). "
+        help=f"Only for a backend on another machine: push the new endpoint URLs to it "
+             f"(e.g. https://rag.example.com; default: {BACKEND_URL_ENV} from .env) "
+             f"instead of writing the local shared store. "
              f"An admin key, if required, is read from {BACKEND_ADMIN_KEY_ENV}.",
     )
     parser.add_argument(

@@ -21,8 +21,11 @@ from backend.services.admin_settings_store import (
     resolve_shared_value,
 )
 from backend.services import provisioning
+from backend.services.secret_store import (
+    SecretsUnavailableError, is_secret_name, require_secrets_enabled,
+)
 from backend.utils.endpoint_health import HEALTH_CHECKS
-from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.secret_store import get_key_store
 from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header, reset_rate_limit_cache
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
@@ -42,7 +45,7 @@ def _embedding_model_identity(model_name: str) -> str:
     requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
     (it's what the worker was launched with, and what must be sent as the
     "model" field in every embeddings API call — see
-    scripts/provision_runpod_endpoints.py's MODEL_NAME env var). Comparing
+    bin/provision_runpod_endpoints.py's MODEL_NAME env var). Comparing
     basenames treats these as the same model without changing either
     preset's actual on-the-wire model_name.
     """
@@ -92,7 +95,7 @@ def _stored_embedding_key_counts(settings) -> Dict[str, int]:
     Returns an empty dict when the key store is disabled or unreadable.
     """
     try:
-        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        store = get_key_store()
         if not store.enabled:
             return {}
         return store.count_embedding_keys_by_name()
@@ -137,7 +140,7 @@ def _preset_credentials(
             if field["kind"] in ("shared_base_url", "shared_api_key"):
                 if preset.provisioning_script:
                     continue
-                ok = bool(get_remote_config_value(settings.data_path, name) or os.environ.get(name))
+                ok = bool(get_remote_config_value(name) or os.environ.get(name))
             else:
                 ok = bool(
                     request.headers.get(field["header_name"])
@@ -362,7 +365,7 @@ async def update_config(
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     reset_rate_limit_cache()
     try:
-        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        store = get_key_store()
         if store.enabled:
             await asyncio.to_thread(store.clear_rate_limits)
     except Exception as exc:
@@ -382,7 +385,7 @@ class EndpointHealthResponse(BaseModel):
     llm: Optional[EndpointHealth] = None
 
 
-def _check_side(provider: Optional[str], model_kwargs: dict, data_path: Path) -> Optional[EndpointHealth]:
+def _check_side(provider: Optional[str], model_kwargs: dict) -> Optional[EndpointHealth]:
     if not provider:
         return None
     check = HEALTH_CHECKS.get(provider)
@@ -390,8 +393,8 @@ def _check_side(provider: Optional[str], model_kwargs: dict, data_path: Path) ->
         return EndpointHealth(status="unreachable", detail=f"Unknown health check provider: {provider}")
     url_env = model_kwargs.get("shared_base_url_env")
     key_env = model_kwargs.get("shared_api_key_env")
-    base_url = resolve_shared_value(data_path, url_env) if url_env else None
-    api_key = resolve_shared_value(data_path, key_env) if key_env else None
+    base_url = resolve_shared_value(url_env) if url_env else None
+    api_key = resolve_shared_value(key_env) if key_env else None
     if not base_url or not api_key:
         return EndpointHealth(status="unreachable", detail="not configured")
     return EndpointHealth(**check(base_url, api_key))
@@ -409,9 +412,9 @@ def get_endpoint_health() -> EndpointHealthResponse:
     preset = settings.get_hardware_preset()
     return EndpointHealthResponse(
         embedding=_check_side(
-            preset.embedding.health_check_provider, preset.embedding.model_kwargs, settings.data_path
+            preset.embedding.health_check_provider, preset.embedding.model_kwargs
         ),
-        llm=_check_side(preset.llm.health_check_provider, preset.llm.model_kwargs, settings.data_path),
+        llm=_check_side(preset.llm.health_check_provider, preset.llm.model_kwargs),
     )
 
 
@@ -421,7 +424,7 @@ class ProvisionRequest(BaseModel):
 
 
 def _provisioning_key(
-    preset: HardwarePreset, data_path: Path, supplied: Optional[str]
+    preset: HardwarePreset, supplied: Optional[str]
 ) -> Tuple[Optional[str], Dict[str, str]]:
     """The key to hand the provisioning script, plus extra remote-config
     values to store if the run succeeds.
@@ -439,7 +442,7 @@ def _provisioning_key(
     """
     kwargs = {**preset.llm.model_kwargs, **preset.embedding.model_kwargs}
     key_env = kwargs.get("shared_api_key_env")
-    stored = resolve_shared_value(data_path, key_env) if key_env else None
+    stored = resolve_shared_value(key_env) if key_env else None
     if not supplied:
         return stored, {}
     pattern = kwargs.get("shared_api_key_pattern")
@@ -479,8 +482,13 @@ async def start_provisioning(
             detail=f"Preset '{preset.name}' does not declare a provisioning_script.",
         )
     api_key, keep_on_success = _provisioning_key(
-        preset, settings.data_path, request.api_key if request else None
+        preset, request.api_key if request else None
     )
+    if any(is_secret_name(name) for name in keep_on_success):
+        try:
+            require_secrets_enabled()
+        except SecretsUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
     if provisioning.is_running():
         raise HTTPException(status_code=409, detail="A provisioning job is already running.")
     provisioning.mark_running()
@@ -489,7 +497,7 @@ async def start_provisioning(
     except Exception as exc:
         provisioning._finish("failed", f"Could not start provisioning script: {exc}")
         return provisioning.get_job_state()
-    task = asyncio.create_task(provisioning.await_job(proc, settings.data_path, keep_on_success))
+    task = asyncio.create_task(provisioning.await_job(proc, keep_on_success))
     _provision_tasks.add(task)  # keep a strong reference until done
     task.add_done_callback(_provision_tasks.discard)
     return provisioning.get_job_state()
@@ -557,7 +565,10 @@ async def set_remote_fields(
             detail=f"Value does not match the expected format for: {'; '.join(invalid)}",
         )
 
-    merged = update_remote_config(settings.data_path, update.values)
+    try:
+        merged = update_remote_config(update.values)
+    except SecretsUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     return RemoteFieldsResponse(is_set={k: bool(v) for k, v in merged.items()})
 
 
@@ -596,7 +607,7 @@ async def get_required_api_keys():
         is_set = None
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
             is_set = bool(
-                get_remote_config_value(settings.data_path, key_name) or os.environ.get(key_name)
+                get_remote_config_value(key_name) or os.environ.get(key_name)
             )
         seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
 

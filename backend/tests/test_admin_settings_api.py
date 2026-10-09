@@ -91,7 +91,7 @@ class AdminSettingsApiTest(unittest.TestCase):
             set_active_preset_override, update_remote_config, read_admin_settings,
         )
         set_active_preset_override(get_settings().data_path, "remote-mpcdf")
-        update_remote_config(get_settings().data_path, {"MPCDF_LLM_BASE_URL": "https://x/v1"})
+        update_remote_config({"MPCDF_LLM_BASE_URL": "https://x/v1"}, data_path=get_settings().data_path)
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
 
         r = self.client.put("/api/admin/settings", json={"index_snapshots": True})

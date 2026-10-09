@@ -350,13 +350,11 @@ class RemoteLLMService(LLMService):
 
                 shared_url_env = self.llm_config.model_kwargs.get("shared_base_url_env")
                 shared_key_env = self.llm_config.model_kwargs.get("shared_api_key_env")
-                data_path = None
                 if shared_url_env or shared_key_env:
                     from backend.services.admin_settings_store import resolve_shared_value
-                    data_path = self.settings.data_path
 
                 if shared_key_env:
-                    api_key = self.api_key or resolve_shared_value(data_path, shared_key_env)
+                    api_key = self.api_key or resolve_shared_value(shared_key_env, self.settings.data_path)
                     if not api_key:
                         raise LLMConfigurationError(
                             f"API key not configured. POST it to /api/config/remote-fields as "
@@ -370,7 +368,7 @@ class RemoteLLMService(LLMService):
                         raise LLMConfigurationError(f"API key not found in environment variable: {api_key_env}")
 
                 if shared_url_env:
-                    base_url = resolve_shared_value(data_path, shared_url_env)
+                    base_url = resolve_shared_value(shared_url_env, self.settings.data_path)
                     if not base_url:
                         raise LLMConfigurationError(
                             f"Base URL not configured. POST it to /api/config/remote-fields as "

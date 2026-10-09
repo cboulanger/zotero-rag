@@ -26,13 +26,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from backend.utils.cpu_affinity import restrict_current_process_cpus  # noqa: E402
 from backend.utils.disk_space import check_disk_space  # noqa: E402
+from backend.utils.log_rotation import RotatingLogHandler  # noqa: E402
 
 
 def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    # Short-lived cron process: no startup rotation (would rotate hourly);
+    # the handler still rolls over once the file predates midnight.
+    file_handler = RotatingLogHandler(log_file, rotate_on_startup=False)
     file_handler.setFormatter(fmt)
 
     root_logger = logging.getLogger()
@@ -138,10 +141,10 @@ async def _main(argv: list[str] | None = None) -> int:
 
     restrict_current_process_cpus(settings.autoindex_reserved_cpus)
 
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_resolver import resolve_targets
 
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         log.error("AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index.")
         return 1

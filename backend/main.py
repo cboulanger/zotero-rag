@@ -17,6 +17,7 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store, resolve_zotero_identity
 from backend.services.access_gate import assert_safe_to_start
+from backend.utils.log_rotation import RotatingLogHandler
 from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex, auth, migration, admin_settings, indexed_tags
 from backend.api.document_upload import load_item_cache, save_item_cache
 
@@ -45,7 +46,7 @@ handlers = [console_handler]
 # Note: Path("") becomes Path(".") so we need to check for that too
 log_file_str = str(settings.log_file).strip() if settings.log_file else ""
 if log_file_str and log_file_str != ".":
-    file_handler = logging.FileHandler(settings.log_file, encoding='utf-8')
+    file_handler = RotatingLogHandler(settings.log_file)  # rotates on startup + daily
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ))
@@ -87,6 +88,15 @@ async def lifespan(app: FastAPI):
     logger.info(f"Using preset: {settings.model_preset}")
     if settings.log_file:
         logger.info(f"Logging to file: {settings.log_file}")
+
+    # Encrypt any plaintext shared API keys left over in admin_settings.json.
+    try:
+        from backend.services.admin_settings_store import migrate_plaintext_secrets
+        migrated = migrate_plaintext_secrets()
+        if migrated:
+            logger.info(f"Encrypted {migrated} plaintext shared API key(s) in admin_settings.json")
+    except Exception as e:
+        logger.warning(f"Could not migrate plaintext shared API keys: {e}")
 
     _cache_path = settings.data_path / "system" / "check_indexed_cache.json"
     load_item_cache(_cache_path)
@@ -280,7 +290,7 @@ def root(request: Request):
     # this unauthenticated endpoint. `enabled` is False when AUTOINDEX_SECRET is
     # unset (the feature is disabled and no keys can be decrypted). Key counts and
     # live per-run progress live on the authenticated GET /api/autoindex/status.
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_scheduler import read_scheduler_state
     # Re-fetch settings here rather than reusing the module-level `settings`
     # captured once at import time (line 24): that snapshot never reflects
@@ -289,7 +299,7 @@ def root(request: Request):
     # would silently report stale enabled/scheduler state.
     current_settings = get_settings()
     try:
-        store = AutoIndexKeyStore(current_settings.autoindex_keys_path, current_settings.autoindex_secret)
+        store = get_key_store()
         enabled = store.enabled
     except Exception as exc:
         logger.warning("Failed to read auto-index key store: %s", exc)

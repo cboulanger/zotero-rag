@@ -88,32 +88,32 @@ class TestAdminSettingsStore(unittest.TestCase):
         self.assertEqual(state["active_preset_override"], "remote-mpcdf")
 
     def test_get_remote_config_value_defaults_to_none(self):
-        self.assertIsNone(get_remote_config_value(self.data_path, "MPCDF_LLM_BASE_URL"))
+        self.assertIsNone(get_remote_config_value("MPCDF_LLM_BASE_URL", data_path=self.data_path))
 
     def test_update_remote_config_then_get_round_trips(self):
-        update_remote_config(self.data_path, {"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1"})
+        update_remote_config({"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1"}, data_path=self.data_path)
         self.assertEqual(
-            get_remote_config_value(self.data_path, "MPCDF_LLM_BASE_URL"),
+            get_remote_config_value("MPCDF_LLM_BASE_URL", data_path=self.data_path),
             "https://llm.mpcdf.mpg.de/abc123/v1",
         )
 
     def test_update_remote_config_merges_without_dropping_other_keys(self):
-        update_remote_config(self.data_path, {"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1"})
-        update_remote_config(self.data_path, {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/def456/v1"})
+        update_remote_config({"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1"}, data_path=self.data_path)
+        update_remote_config({"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/def456/v1"}, data_path=self.data_path)
         self.assertEqual(
-            get_remote_config_value(self.data_path, "MPCDF_LLM_BASE_URL"),
+            get_remote_config_value("MPCDF_LLM_BASE_URL", data_path=self.data_path),
             "https://llm.mpcdf.mpg.de/abc123/v1",
         )
         self.assertEqual(
-            get_remote_config_value(self.data_path, "MPCDF_EMBEDDING_BASE_URL"),
+            get_remote_config_value("MPCDF_EMBEDDING_BASE_URL", data_path=self.data_path),
             "https://llm.mpcdf.mpg.de/def456/v1",
         )
 
     def test_update_remote_config_overwrites_same_key(self):
-        update_remote_config(self.data_path, {"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/old/v1"})
-        update_remote_config(self.data_path, {"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/new/v1"})
+        update_remote_config({"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/old/v1"}, data_path=self.data_path)
+        update_remote_config({"MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/new/v1"}, data_path=self.data_path)
         self.assertEqual(
-            get_remote_config_value(self.data_path, "MPCDF_LLM_BASE_URL"),
+            get_remote_config_value("MPCDF_LLM_BASE_URL", data_path=self.data_path),
             "https://llm.mpcdf.mpg.de/new/v1",
         )
 
@@ -125,7 +125,7 @@ class TestAdminSettingsStore(unittest.TestCase):
         data_path's defaults."""
         with tempfile.TemporaryDirectory() as other_tmp:
             other_data_path = Path(other_tmp)
-            update_remote_config(self.data_path, {"LEAKED_KEY": "leaked_value"})
+            update_remote_config({"LEAKED_KEY": "leaked_value"}, data_path=self.data_path)
             other_state = read_admin_settings(other_data_path)
             self.assertEqual(other_state["remote_config"], {})
 

@@ -112,8 +112,9 @@ class TestMaxContentBytes(unittest.IsolatedAsyncioTestCase):
 
 
 class TestKreuzbergConnectRetry(unittest.IsolatedAsyncioTestCase):
-    """A connection failure (sidecar not accepting connections) is retried for
-    up to 10 minutes before giving up — see kreuzberg.py's module-level
+    """A connection failure — the sidecar refusing connections outright, or
+    dropping one mid-request without sending a response — is retried for up
+    to 10 minutes before giving up — see kreuzberg.py's module-level
     _CONNECT_RETRY_BUDGET_SECONDS.
 
     Regression: a bare ConnectError used to raise immediately on the first
@@ -144,6 +145,25 @@ class TestKreuzbergConnectRetry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(chunks, [])
         self.assertEqual(mock_client.post.await_count, 3)
         self.assertEqual(mock_sleep.await_count, 2)
+
+    async def test_remote_protocol_error_retries_then_succeeds(self):
+        """"Server disconnected without sending a response" (e.g. the sidecar
+        crashed/restarted mid-request) gets the same retry treatment as a
+        bare ConnectError, not an immediate failure."""
+        extractor = KreuzbergExtractor()
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        disconnect_exc = httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        mock_client.post = AsyncMock(side_effect=[disconnect_exc, self._make_response()])
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client), \
+             patch("backend.services.extraction.kreuzberg.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            chunks = await extractor.extract_and_chunk(b"content", "application/pdf")
+
+        self.assertEqual(chunks, [])
+        self.assertEqual(mock_client.post.await_count, 2)
+        self.assertEqual(mock_sleep.await_count, 1)
 
     async def test_connect_error_raises_unavailable_once_budget_exhausted(self):
         extractor = KreuzbergExtractor()
