@@ -731,8 +731,8 @@ class ZoteroRAGPlugin {
 	 * @param {Document} doc - Document to create elements in (the Preferences pane document, or a dialog document)
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
-	 * @param {Array<{key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null}>} requiredKeys
-	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields.
+	 * @param {Array<{key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}>} requiredKeys
+	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields.
 	 * @returns {void}
 	 */
 	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
@@ -766,6 +766,14 @@ class ZoteroRAGPlugin {
 			input.placeholder = isShared
 				? (keyInfo.is_set ? 'Configured — enter a new value to replace it' : 'Not yet configured')
 				: 'Enter API key';
+			// Preset-declared format check (e.g. RunPod's base URL/key shape) — gives
+			// immediate feedback via the browser's native validation UI. The backend
+			// enforces the same pattern server-side regardless (POST /api/config/remote-fields),
+			// so this is a convenience, not the actual security/correctness boundary.
+			if (keyInfo.pattern) {
+				input.pattern = keyInfo.pattern;
+				input.title = `Must match: ${keyInfo.pattern}`;
+			}
 
 			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
 			status.className = 'service-key-status';

@@ -588,7 +588,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus('', 'ok');
 			} else {
 				const own = data.keys[0];
-				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 				if (embeddingKeyInfo) {
 					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
 				}
@@ -614,7 +614,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		autoindexToggle.addEventListener('change', async () => {
 			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
-			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
 				/** @type {{api_key: string, embedding_api_key?: string}} */
