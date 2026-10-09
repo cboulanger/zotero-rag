@@ -13,6 +13,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from backend.main import app
 from backend.db.vector_store import VectorStoreError, VectorStoreTimeoutError
 from backend.dependencies import get_vector_store
+from backend.services.embeddings import EmbeddingEndpointUnavailableError
+from backend.services.llm import LLMEndpointUnavailableError
 
 
 class TestConfigAPI(unittest.TestCase):
@@ -181,6 +183,49 @@ class TestQueryAPI(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 503)
         self.assertIn("No space left on device", response.json()["detail"])
+
+    def test_query_embedding_endpoint_unavailable_surfaces_as_503_not_500(self):
+        """Regression: a cold/unreachable remote embedding endpoint (e.g. a
+        RunPod serverless worker scaled to zero) previously fell through to
+        the generic `except Exception` handler as a 500 "Query failed: ..."
+        — indistinguishable from an actual code bug. This is an upstream
+        service being unavailable, not an internal error, so it must be a
+        503 with the real, actionable detail preserved."""
+        self._mock_vector_store_for_query()
+        with patch(
+            "backend.services.query_orchestrator.QueryOrchestrator.query",
+            new_callable=AsyncMock,
+            side_effect=EmbeddingEndpointUnavailableError(
+                "Could not connect to the embedding API: Connection error. If this preset uses a "
+                "self-provisioned serverless endpoint (e.g. RunPod), it may be cold or not yet "
+                "provisioned — check its status and provision/wake it from Preferences."
+            ),
+        ):
+            response = self.client.post(
+                "/api/query",
+                json={"question": "What is RAG?", "library_ids": ["1"]},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("provision/wake it from Preferences", response.json()["detail"])
+
+    def test_query_llm_endpoint_unavailable_surfaces_as_503_not_500(self):
+        """Symmetrical case for the LLM side (backend.services.llm.LLMEndpointUnavailableError)."""
+        self._mock_vector_store_for_query()
+        with patch(
+            "backend.services.query_orchestrator.QueryOrchestrator.query",
+            new_callable=AsyncMock,
+            side_effect=LLMEndpointUnavailableError(
+                "Could not connect to the LLM API: Connection error. If this preset uses a "
+                "self-provisioned serverless endpoint (e.g. RunPod), it may be cold or not yet "
+                "provisioned — check its status and provision/wake it from Preferences."
+            ),
+        ):
+            response = self.client.post(
+                "/api/query",
+                json={"question": "What is RAG?", "library_ids": ["1"]},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("provision/wake it from Preferences", response.json()["detail"])
 
 
 class TestRootEndpoints(unittest.TestCase):

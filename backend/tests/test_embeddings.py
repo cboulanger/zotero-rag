@@ -9,6 +9,7 @@ import httpx
 import numpy as np
 
 from openai import (
+    APIConnectionError as OpenAIAPIConnectionError,
     APIStatusError as OpenAIAPIStatusError,
     AuthenticationError as OpenAIAuthenticationError,
     BadRequestError as OpenAIBadRequestError,
@@ -885,6 +886,27 @@ class TestEmbeddingEndpointUnavailableError(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(EmbeddingEndpointUnavailableError):
                 await service._create_embeddings_with_backoff(["hello"])
+
+    async def test_connection_error_raises_endpoint_unavailable_error(self):
+        """A transport-level failure (e.g. a cold/unreachable RunPod serverless
+        endpoint) raises openai.APIConnectionError, not an APIStatusError — a
+        distinct exception type with no status_code, uncaught by any existing
+        except clause. Regression: this previously propagated all the way to
+        a live /api/query request as a raw "Connection error." traceback
+        instead of the same fatal, clearly-worded error the 404/405 case
+        already gets."""
+        service = self._make_service()
+        exc = OpenAIAPIConnectionError(request=httpx.Request("POST", "https://example.com/v1/embeddings"))
+
+        with patch.object(service, "_get_client") as mock_client_fn:
+            mock_client = MagicMock()
+            mock_client_fn.return_value = mock_client
+            mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
+
+            with self.assertRaises(EmbeddingEndpointUnavailableError) as ctx:
+                await service._create_embeddings_with_backoff(["hello"])
+
+        self.assertIn("Connection error", str(ctx.exception))
 
 
 if __name__ == "__main__":

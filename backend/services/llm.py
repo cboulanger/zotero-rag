@@ -16,6 +16,19 @@ from backend.services.embeddings import env_var_to_header, docs_url_for_key
 logger = logging.getLogger(__name__)
 
 
+class LLMEndpointUnavailableError(Exception):
+    """Raised when the remote LLM endpoint can't be reached at all — a
+    transport-level ``openai.APIConnectionError``, no HTTP status involved.
+
+    Mirrors backend.services.embeddings.EmbeddingEndpointUnavailableError:
+    most commonly means a self-provisioned serverless endpoint (e.g.
+    RunPod) is cold or was never provisioned. Not retryable here — a cold
+    worker can take minutes to spin up, so the caller should abort and
+    point the admin at GET /api/config/health / the "Provision endpoints"
+    button rather than block the request retrying.
+    """
+
+
 class LLMService(ABC):
     """Abstract base class for LLM services."""
 
@@ -406,7 +419,26 @@ class RemoteLLMService(LLMService):
             else:
                 raise ValueError(f"Unsupported remote model: {self._model_name}")
 
+        except LLMEndpointUnavailableError:
+            raise
         except Exception as e:
+            connection_error_types: tuple = ()
+            try:
+                from openai import APIConnectionError as OpenAIAPIConnectionError
+                connection_error_types += (OpenAIAPIConnectionError,)
+            except ImportError:
+                pass
+            try:
+                from anthropic import APIConnectionError as AnthropicAPIConnectionError
+                connection_error_types += (AnthropicAPIConnectionError,)
+            except ImportError:
+                pass
+            if connection_error_types and isinstance(e, connection_error_types):
+                raise LLMEndpointUnavailableError(
+                    f"Could not connect to the LLM API ({self._model_name}): {e}. If this preset "
+                    "uses a self-provisioned serverless endpoint (e.g. RunPod), it may be cold or "
+                    "not yet provisioned — check its status and provision/wake it from Preferences."
+                ) from e
             logger.error(f"Error during remote generation: {e}", exc_info=True)
             raise RuntimeError(f"Remote LLM generation failed: {e}") from e
 

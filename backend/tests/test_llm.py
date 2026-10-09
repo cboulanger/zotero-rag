@@ -6,7 +6,11 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import os
 
+import httpx
+from openai import APIConnectionError as OpenAIAPIConnectionError
+
 from backend.services.llm import (
+    LLMEndpointUnavailableError,
     LLMService,
     LocalLLMService,
     RemoteLLMService,
@@ -391,6 +395,26 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "Generated answer from Claude")
         mock_client.messages.create.assert_called_once()
+
+    async def test_generate_openai_raises_endpoint_unavailable_on_connection_error(self):
+        """A transport-level failure (e.g. a cold/unreachable RunPod serverless
+        LLM endpoint) raises openai.APIConnectionError — must become a clear,
+        typed LLMEndpointUnavailableError, not the generic
+        "Remote LLM generation failed: Connection error." RuntimeError that
+        gives the caller (backend.api.query) no way to distinguish this from
+        an actual code bug."""
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = OpenAIAPIConnectionError(
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions")
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMEndpointUnavailableError) as ctx:
+                await service.generate("Test prompt")
+
+        self.assertIn("Connection error", str(ctx.exception))
 
     async def test_generate_unsupported_model(self):
         """Test error handling for unsupported model."""

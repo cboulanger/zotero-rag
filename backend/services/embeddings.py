@@ -77,13 +77,18 @@ class EmbeddingAuthenticationError(Exception):
 class EmbeddingEndpointUnavailableError(Exception):
     """Raised when the embedding API returns a status code that isn't one of
     the other recognized cases (not a per-item 400, not 401/403, not 429, not
-    a retryable 5xx) — e.g. HTTP 404/405. This most commonly means the route
-    itself no longer exists, such as an ephemeral job's endpoint (MPCDF's
-    <=8h Slurm jobs) having expired mid-run.
+    a retryable 5xx) — e.g. HTTP 404/405 — or when the endpoint can't be
+    reached at all (a transport-level ``openai.APIConnectionError``, no HTTP
+    status involved). The 404/405 case most commonly means the route itself
+    no longer exists, such as an ephemeral job's endpoint (MPCDF's <=8h Slurm
+    jobs) having expired mid-run; the connection-error case most commonly
+    means a self-provisioned serverless endpoint (e.g. RunPod) is cold or was
+    never provisioned.
 
     Fatal like EmbeddingAuthenticationError: every subsequent item would fail
-    identically until an admin configures a fresh endpoint, so the whole run
-    must abort rather than churn through every remaining item one at a time.
+    identically until an admin configures or wakes a working endpoint, so the
+    whole run must abort rather than churn through every remaining item one
+    at a time.
     """
 
 
@@ -558,6 +563,7 @@ class RemoteEmbeddingService(EmbeddingService):
         (max ``max_attempts`` attempts, base delay ``base_delay`` s).
         """
         from openai import (
+            APIConnectionError,
             APIStatusError,
             AuthenticationError,
             BadRequestError,
@@ -707,6 +713,21 @@ class RemoteEmbeddingService(EmbeddingService):
                 raise EmbeddingEndpointUnavailableError(
                     f"Embedding API returned an unexpected error "
                     f"(HTTP {status_code}): {_extract_error_detail(exc)}"
+                ) from exc
+            except APIConnectionError as exc:
+                # A transport-level failure — no HTTP response at all, so no
+                # status_code to inspect (not an APIStatusError). Most
+                # commonly a self-provisioned serverless endpoint (e.g.
+                # RunPod) that's cold-started-to-zero or was never
+                # provisioned. Not retryable here: a cold worker can take
+                # minutes to spin up, far longer than this request should
+                # block for — the caller should abort and point the admin at
+                # GET /api/config/health / the "Provision endpoints" button
+                # instead of silently retrying.
+                raise EmbeddingEndpointUnavailableError(
+                    f"Could not connect to the embedding API: {exc}. If this preset uses a "
+                    "self-provisioned serverless endpoint (e.g. RunPod), it may be cold or not "
+                    "yet provisioned — check its status and provision/wake it from Preferences."
                 ) from exc
 
     async def embed_text(self, text: str) -> list[float]:
