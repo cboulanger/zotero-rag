@@ -293,6 +293,37 @@ def _update_env_file(env_path: Path, values: dict) -> None:
         raise
 
 
+def _teardown_resource(client: "httpx.Client", api_key: str, *, name: str) -> None:
+    """Delete the endpoint and template matching `name`, if they exist.
+    A name that doesn't exist for either resource is a no-op, not an error —
+    a previous partial teardown can be safely re-run."""
+    endpoint = _find_by_name(client, api_key, "endpoints", name)
+    if endpoint is not None:
+        _request(client, api_key, "DELETE", f"/endpoints/{endpoint['id']}")
+        logger.info("Deleted endpoint '%s' (%s)", name, endpoint["id"])
+
+    template = _find_by_name(client, api_key, "templates", name)
+    if template is not None:
+        _request(client, api_key, "DELETE", f"/templates/{template['id']}")
+        logger.info("Deleted template '%s' (%s)", name, template["id"])
+
+
+def _confirm_teardown(*, yes: bool, interactive: bool) -> bool:
+    """Returns True if teardown should proceed. --yes always proceeds without
+    prompting. Without --yes, a non-interactive session (no tty) refuses
+    rather than silently deleting infrastructure; an interactive session asks."""
+    if yes:
+        return True
+    if not interactive:
+        logger.error(
+            "Refusing to tear down non-interactively without --yes. "
+            "Pass --yes to confirm."
+        )
+        return False
+    answer = input("Delete both RunPod endpoints and templates? [y/N] ").strip().lower()
+    return answer == "y"
+
+
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Provision or wake the RunPod embedding+LLM endpoints for the `runpod` preset."

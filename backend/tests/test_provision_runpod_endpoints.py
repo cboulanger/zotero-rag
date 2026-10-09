@@ -373,5 +373,48 @@ class UpdateEnvFileTest(unittest.TestCase):
         self.assertEqual(len(lines), 2)
 
 
+class TeardownTest(unittest.TestCase):
+    def test_deletes_existing_endpoint_and_template(self):
+        client = FakeClient([
+            (200, [{"id": "e1", "name": "zotero-rag-embedding"}]),  # GET endpoints
+            (200, {}),  # DELETE endpoint
+            (200, [{"id": "t1", "name": "zotero-rag-embedding"}]),  # GET templates
+            (200, {}),  # DELETE template
+        ])
+        provision._teardown_resource(client, "rp_key", name="zotero-rag-embedding")
+        methods = [c[0] for c in client.calls]
+        self.assertEqual(methods, ["GET", "DELETE", "GET", "DELETE"])
+        self.assertEqual(client.calls[1][1], "https://rest.runpod.io/v1/endpoints/e1")
+        self.assertEqual(client.calls[3][1], "https://rest.runpod.io/v1/templates/t1")
+
+    def test_noop_when_nothing_exists(self):
+        client = FakeClient([(200, []), (200, [])])  # GET endpoints, GET templates — both empty
+        provision._teardown_resource(client, "rp_key", name="zotero-rag-embedding")
+        methods = [c[0] for c in client.calls]
+        self.assertEqual(methods, ["GET", "GET"])  # no DELETE calls made
+
+
+class ConfirmTeardownTest(unittest.TestCase):
+    def test_skips_prompt_when_yes_flag_set(self):
+        # Should not touch stdin/input() at all when yes=True.
+        with patch("builtins.input", side_effect=AssertionError("should not prompt")):
+            result = provision._confirm_teardown(yes=True, interactive=True)
+        self.assertTrue(result)
+
+    def test_refuses_when_noninteractive_without_yes(self):
+        result = provision._confirm_teardown(yes=False, interactive=False)
+        self.assertFalse(result)
+
+    def test_prompts_and_honors_yes_answer(self):
+        with patch("builtins.input", return_value="y"):
+            result = provision._confirm_teardown(yes=False, interactive=True)
+        self.assertTrue(result)
+
+    def test_prompts_and_honors_no_answer(self):
+        with patch("builtins.input", return_value="n"):
+            result = provision._confirm_teardown(yes=False, interactive=True)
+        self.assertFalse(result)
+
+
 if __name__ == "__main__":
     unittest.main()
