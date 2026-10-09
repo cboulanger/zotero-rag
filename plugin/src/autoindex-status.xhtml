@@ -8,6 +8,7 @@
 <head>
   <title>Automatic Indexing Status - Zotero RAG</title>
   <meta charset="utf-8"/>
+  <link rel="stylesheet" href="chrome://zotero-rag/content/rate-limit.css"/>
   <script>
     document.addEventListener("DOMContentLoaded", (ev) => {
       try {
@@ -17,6 +18,14 @@
         );
       } catch (e) {
         console.error("Failed to load include.js:", e);
+      }
+      try {
+        Services.scriptloader.loadSubScript(
+          "chrome://zotero-rag/content/rate-limit-widget.js",
+          window
+        );
+      } catch (e) {
+        console.error("Failed to load rate-limit-widget.js:", e);
       }
       try {
         Services.scriptloader.loadSubScript(
@@ -33,6 +42,12 @@
     #run-banner { font-size: 12px; color: #333; }
     #run-banner.running { color: #0052a3; }
     #run-banner.crashed { color: #cc0000; }
+    #ai-rate-limit-section { display: flex; flex-direction: column; gap: 5px; max-width: 360px; margin-top: 8px; }
+    #ai-rate-limit-asof { font-size: 11px; color: #888; }
+    #rate-limit-banner { font-size: 12px; color: #8a6400; margin-top: 6px; }
+    #admin-preset-row { align-items: center; }
+    #admin-preset-row label { font-size: 12px; color: #333; }
+    #admin-preset-status { font-size: 12px; color: #666; }
     .library-row { border: 1px solid #ddd; border-radius: 4px; padding: 8px 10px; margin-bottom: 8px; }
     .library-row-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
     .library-row-spacer { flex: 1 1 auto; }
@@ -75,6 +90,19 @@
   <div id="status-section" class="actions-section">
     <h3 class="section-heading">Status</h3>
     <div id="run-banner">Loading status…</div>
+    <div id="rate-limit-banner" style="display:none;"></div>
+    <!-- Embedding rate-limit bars (shown when the active embedding service reports limits) -->
+    <div id="ai-rate-limit-section" style="display: none;">
+      <div class="rate-limit-row">
+        <div class="rate-limit-bar-track"><div id="ai-rate-limit-bar-hour" class="rate-limit-bar"></div></div>
+        <span id="ai-rate-limit-text-hour" class="rate-limit-text">— requests left/hour</span>
+      </div>
+      <div class="rate-limit-row">
+        <div class="rate-limit-bar-track"><div id="ai-rate-limit-bar-day" class="rate-limit-bar"></div></div>
+        <span id="ai-rate-limit-text-day" class="rate-limit-text">— requests left/day</span>
+      </div>
+      <div id="ai-rate-limit-asof"></div>
+    </div>
   </div>
   <div id="user-actions" class="actions-section">
     <h3 class="section-heading">Your indexing</h3>
@@ -98,6 +126,11 @@
       <button id="admin-pause-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9208;&#65038;</span>Pause scheduler</button>
       <button id="admin-resume-button" type="button" class="dialog-button icon-button" style="display:none;"><span class="button-icon" aria-hidden="true">&#9654;&#65038;</span>Resume scheduler</button>
       <button id="admin-abort-button" type="button" class="dialog-button icon-button"><span class="button-icon" aria-hidden="true">&#9209;&#65038;</span>Abort running index</button>
+    </div>
+    <div id="admin-preset-row" class="actions-row" style="display:none;">
+      <label for="admin-preset-select">Embedding/LLM preset:</label>
+      <select id="admin-preset-select"></select>
+      <span id="admin-preset-status"></span>
     </div>
     <div class="actions-row">
       <label id="admin-scope-toggle-label" class="admin-scope-toggle">
