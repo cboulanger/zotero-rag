@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Provision (or wake) the two RunPod serverless endpoints used by the `runpod`
-hardware preset: multilingual-e5-large-instruct embeddings
-(runpod/worker-infinity-embedding) and a chat LLM (runpod/worker-vllm).
+hardware preset: multilingual-e5-large-instruct embeddings and a chat LLM,
+both served by the same vLLM worker image (runpod/worker-v1-vllm).
 
 Re-running this script against already-provisioned endpoints is the normal
 way to wake them from scale-to-zero before a work session — it finds each
@@ -34,14 +34,17 @@ REST_BASE_URL = "https://rest.runpod.io/v1"
 
 EMBEDDING_TEMPLATE_NAME = "zotero-rag-embedding"
 EMBEDDING_ENDPOINT_NAME = "zotero-rag-embedding"
-# This image's bundled PyTorch only supports CUDA capabilities sm_50..sm_90,
-# so it crashes at startup ("CUDA error: no kernel image is available") if
-# RunPod schedules a worker on a Blackwell GPU (sm_120, e.g. RTX PRO 6000).
-# The embedding endpoint must therefore stay pinned to older-generation GPU
-# types (see DEFAULT_EMBEDDING_GPU) — _ensure_endpoint detects an existing
-# endpoint whose gpuTypeIds drifted from the requested ones.
-EMBEDDING_IMAGE = "runpod/worker-infinity-embedding:stable-cuda12.1.0"
+# runpod/worker-infinity-embedding (every tag, incl. 1.1.4) bundles a PyTorch
+# that only supports CUDA capabilities up to sm_90, so it crashes at startup
+# ("CUDA error: no kernel image is available") on a Blackwell GPU (sm_120).
+# GPU pinning can't prevent that: RunPod maps gpuTypeIds to a VRAM-size pool
+# (e.g. "AMPERE_24"), which also hands out Blackwell "MIG 1g.24gb" slices.
+# The vLLM worker supports current GPU generations and serves
+# /openai/v1/embeddings for this (XLM-RoBERTa) model in pooling mode.
+EMBEDDING_IMAGE = "runpod/worker-v1-vllm:v2.28.0"
 EMBEDDING_MODEL = "intfloat/multilingual-e5-large-instruct"
+# MAX_MODEL_LEN: the model's own position-embedding limit.
+EMBEDDING_ENV = {"MODEL_NAME": EMBEDDING_MODEL, "MAX_MODEL_LEN": "512"}
 EMBEDDING_CONTAINER_DISK_GB = 20
 
 LLM_TEMPLATE_NAME = "zotero-rag-llm"
@@ -56,7 +59,7 @@ LLM_IMAGE = "runpod/worker-v1-vllm:v2.28.0"
 LLM_CONTAINER_DISK_GB = 40
 
 DEFAULT_LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_EMBEDDING_GPU = "NVIDIA RTX A4000"
+DEFAULT_EMBEDDING_GPU = "NVIDIA RTX A5000"
 DEFAULT_LLM_GPU = "NVIDIA RTX A5000"
 DEFAULT_WORKERS_MAX = 1
 DEFAULT_IDLE_TIMEOUT = 60
@@ -408,7 +411,7 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
         embedding_template = _ensure_template(
             client, api_key,
             name=EMBEDDING_TEMPLATE_NAME, image=EMBEDDING_IMAGE,
-            env={"MODEL_NAMES": EMBEDDING_MODEL},
+            env=EMBEDDING_ENV,
             container_disk_gb=EMBEDDING_CONTAINER_DISK_GB, recreate=args.recreate,
         )
         embedding_endpoint = _ensure_endpoint(

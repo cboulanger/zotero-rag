@@ -20,7 +20,7 @@ class ParseArgsTest(unittest.TestCase):
         args = provision._parse_args([])
         self.assertIsNone(args.api_key)
         self.assertEqual(args.llm_model, "Qwen/Qwen2.5-7B-Instruct")
-        self.assertEqual(args.embedding_gpu, "NVIDIA RTX A4000")
+        self.assertEqual(args.embedding_gpu, "NVIDIA RTX A5000")
         self.assertEqual(args.llm_gpu, "NVIDIA RTX A5000")
         self.assertEqual(args.workers_max, 1)
         self.assertEqual(args.idle_timeout, 60)
@@ -571,7 +571,7 @@ class RunTest(unittest.TestCase):
         client = FakeClient([
             (200, []),  # embedding: GET templates -> none
             (200, {"id": "t_emb", "name": provision.EMBEDDING_TEMPLATE_NAME,
-                   "imageName": provision.EMBEDDING_IMAGE, "env": {"MODEL_NAMES": provision.EMBEDDING_MODEL}}),  # POST template
+                   "imageName": provision.EMBEDDING_IMAGE, "env": provision.EMBEDDING_ENV}),  # POST template
             (200, []),  # embedding: GET endpoints -> none
             (200, {"id": "e_emb", "name": provision.EMBEDDING_ENDPOINT_NAME}),  # POST endpoint
             (200, {"data": [{"embedding": [0.1]}]}),  # embedding warm-up
@@ -597,7 +597,7 @@ class RunTest(unittest.TestCase):
         return [
             (200, []),
             (200, {"id": "t_emb", "name": provision.EMBEDDING_TEMPLATE_NAME,
-                   "imageName": provision.EMBEDDING_IMAGE, "env": {"MODEL_NAMES": provision.EMBEDDING_MODEL}}),
+                   "imageName": provision.EMBEDDING_IMAGE, "env": provision.EMBEDDING_ENV}),
             (200, []),
             (200, {"id": "e_emb", "name": provision.EMBEDDING_ENDPOINT_NAME}),
             (200, {"data": [{"embedding": [0.1]}]}),

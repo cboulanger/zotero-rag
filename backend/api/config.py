@@ -37,11 +37,11 @@ def _embedding_model_identity(model_name: str) -> str:
 
     Different providers serve the same underlying model under different
     literal API model-name strings — e.g. KISSKI/MPCDF serve
-    "multilingual-e5-large-instruct" while RunPod's worker-infinity-embedding
+    "multilingual-e5-large-instruct" while RunPod's vLLM worker
     requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
     (it's what the worker was launched with, and what must be sent as the
     "model" field in every embeddings API call — see
-    scripts/provision_runpod_endpoints.py's MODEL_NAMES env var). Comparing
+    scripts/provision_runpod_endpoints.py's MODEL_NAME env var). Comparing
     basenames treats these as the same model without changing either
     preset's actual on-the-wire model_name.
     """

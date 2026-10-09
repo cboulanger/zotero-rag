@@ -224,8 +224,8 @@ to reduce peak RSS during indexing.
 
 **Configuration:**
 
-- Embedding: `intfloat/multilingual-e5-large-instruct` (RunPod remote, `runpod/worker-infinity-embedding`, 1024-dim)
-- LLM: `Qwen/Qwen2.5-7B-Instruct` (RunPod remote, `runpod/worker-vllm`, 32k context)
+- Embedding: `intfloat/multilingual-e5-large-instruct` (RunPod remote, `runpod/worker-v1-vllm` in pooling mode, 1024-dim)
+- LLM: `Qwen/Qwen2.5-7B-Instruct` (RunPod remote, `runpod/worker-v1-vllm`, 32k context)
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 800 tokens
 
