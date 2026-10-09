@@ -39,7 +39,13 @@ EMBEDDING_CONTAINER_DISK_GB = 20
 
 LLM_TEMPLATE_NAME = "zotero-rag-llm"
 LLM_ENDPOINT_NAME = "zotero-rag-llm"
-LLM_IMAGE = "runpod/worker-vllm:stable-cuda12.1.0"
+# runpod/worker-vllm (no tag newer than mid-2024, bundles vLLM v0.4.2) is
+# effectively abandoned and its bundled PyTorch doesn't support current-
+# generation GPUs (observed: "CUDA error: no kernel image is available"
+# on an RTX PRO 6000 Blackwell MIG slice, sm_120, during a live smoke
+# test). runpod/worker-v1-vllm is the actively maintained successor
+# (versioned releases, no floating "latest"/"stable" tag — pin a version).
+LLM_IMAGE = "runpod/worker-v1-vllm:v2.28.0"
 LLM_CONTAINER_DISK_GB = 40
 
 DEFAULT_LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
