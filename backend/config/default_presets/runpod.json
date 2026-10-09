@@ -7,7 +7,9 @@
     "health_check_provider": "runpod",
     "model_kwargs": {
       "shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL",
-      "shared_api_key_env": "RUNPOD_API_KEY"
+      "shared_base_url_pattern": "^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$",
+      "shared_api_key_env": "RUNPOD_API_KEY",
+      "shared_api_key_pattern": "^rpa_[A-Za-z0-9]+$"
     }
   },
   "llm": {
@@ -19,7 +21,9 @@
     "health_check_provider": "runpod",
     "model_kwargs": {
       "shared_base_url_env": "RUNPOD_LLM_BASE_URL",
-      "shared_api_key_env": "RUNPOD_API_KEY"
+      "shared_base_url_pattern": "^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$",
+      "shared_api_key_env": "RUNPOD_API_KEY",
+      "shared_api_key_pattern": "^rpa_[A-Za-z0-9]+$"
     }
   },
   "rag": {

@@ -622,6 +622,57 @@ class TestConfigApi(unittest.TestCase):
         )
         self.assertEqual(r.status_code, 400)
 
+    def test_remote_fields_rejects_value_not_matching_declared_pattern(self):
+        """runpod.json declares shared_base_url_pattern/shared_api_key_pattern
+        for its RunPod fields. A pasted-wrong-thing value (e.g. the dashboard
+        URL instead of the API base URL) must be rejected immediately with a
+        400, not silently stored and only surface as a connection error on
+        the next real query."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "runpod"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"RUNPOD_EMBEDDING_BASE_URL": "https://www.runpod.io/console/serverless"}},
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("RUNPOD_EMBEDDING_BASE_URL", r.json()["detail"])
+
+    def test_remote_fields_accepts_value_matching_declared_pattern(self):
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "runpod"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1"}},
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["is_set"]["RUNPOD_EMBEDDING_BASE_URL"])
+
+    def test_required_keys_lists_the_shared_api_key_before_the_shared_base_urls_for_runpod(self):
+        """RUNPOD_API_KEY is shared by both the embedding and LLM config, so
+        it should appear first in the Preferences pane — entering it once is
+        easier than entering it in between the two URL fields."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "runpod"})
+        r = self.client.get("/api/required-keys")
+        key_names = [k["key_name"] for k in r.json()["keys"]]
+        self.assertEqual(
+            key_names, ["RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"]
+        )
+
+    def test_remote_fields_without_declared_pattern_accepts_any_value(self):
+        """mpcdf fields declare no pattern — no regression in the unconstrained case."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.post(
+            "/api/config/remote-fields",
+            json={"values": {"MPCDF_EMBEDDING_BASE_URL": "anything-goes"}},
+        )
+        self.assertEqual(r.status_code, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

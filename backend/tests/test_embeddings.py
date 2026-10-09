@@ -279,6 +279,60 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_key["MPCDF_EMBEDDING_BASE_URL"]["kind"], "shared_base_url")
         self.assertEqual(by_key["MPCDF_EMBEDDING_API_KEY"]["kind"], "shared_api_key")
 
+    def test_required_client_fields_reports_declared_pattern_when_present(self):
+        """A preset may declare shared_base_url_pattern/shared_api_key_pattern
+        (and api_key_pattern for the personal-key case) in model_kwargs so
+        POST /api/config/remote-fields can reject a malformed value outright
+        instead of accepting a typo that only surfaces as a connection error
+        on the next real query."""
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="intfloat/multilingual-e5-large-instruct",
+            model_kwargs={
+                "shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL",
+                "shared_base_url_pattern": r"^https://api\.runpod\.ai/v2/[A-Za-z0-9]+/openai/v1$",
+                "shared_api_key_env": "RUNPOD_API_KEY",
+                "shared_api_key_pattern": r"^rpa_[A-Za-z0-9]+$",
+            },
+        )
+        fields = RemoteEmbeddingService.required_client_fields(config)
+        by_key = {f["key_name"]: f for f in fields}
+        self.assertEqual(
+            by_key["RUNPOD_EMBEDDING_BASE_URL"]["pattern"],
+            r"^https://api\.runpod\.ai/v2/[A-Za-z0-9]+/openai/v1$",
+        )
+        self.assertEqual(by_key["RUNPOD_API_KEY"]["pattern"], r"^rpa_[A-Za-z0-9]+$")
+
+    def test_required_client_fields_lists_shared_api_key_before_shared_base_url(self):
+        """The API key is the one value every setup needs regardless of which
+        endpoint it's paired with, so it belongs first in the Preferences
+        pane — entering it once before tabbing through the URL field(s) is
+        easier than the reverse order."""
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="intfloat/multilingual-e5-large-instruct",
+            model_kwargs={
+                "shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL",
+                "shared_api_key_env": "RUNPOD_API_KEY",
+            },
+        )
+        fields = RemoteEmbeddingService.required_client_fields(config)
+        key_names = [f["key_name"] for f in fields]
+        self.assertEqual(key_names, ["RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL"])
+
+    def test_required_client_fields_pattern_defaults_to_none(self):
+        config = EmbeddingConfig(
+            model_type="remote",
+            model_name="multilingual-e5-large-instruct",
+            model_kwargs={
+                "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+            },
+        )
+        fields = RemoteEmbeddingService.required_client_fields(config)
+        for field in fields:
+            self.assertIsNone(field["pattern"])
+
     @patch("openai.AsyncOpenAI")
     async def test_get_client_resolves_shared_fields_from_store_over_env(self, mock_openai_cls):
         import os

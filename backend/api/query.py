@@ -28,7 +28,7 @@ from backend.services.zotero_identity import ZoteroIdentity
 from backend.services.embeddings import (
     EmbeddingAuthenticationError, EmbeddingEndpointUnavailableError, EmbeddingRateLimitExhaustedError,
 )
-from backend.services.llm import LLMEndpointUnavailableError
+from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
@@ -335,7 +335,7 @@ async def query_libraries(
             detail=f"The search backend returned an error: {e}",
         )
 
-    except (EmbeddingEndpointUnavailableError, LLMEndpointUnavailableError,
+    except (EmbeddingEndpointUnavailableError, LLMEndpointUnavailableError, LLMConfigurationError,
             EmbeddingAuthenticationError, EmbeddingRateLimitExhaustedError) as e:
         # The configured remote embedding/LLM provider itself is the problem
         # (unreachable, cold, misconfigured credentials, or rate-limited) —

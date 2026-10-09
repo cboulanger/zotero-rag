@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 import asyncio
 import logging
 import os
+import re
 
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
@@ -113,6 +114,7 @@ class ApiKeyRequirement(BaseModel):
     docs_url: Optional[str] = None
     required_for: List[str]
     is_set: Optional[bool] = None  # only meaningful for shared_* kinds — never exposes the value itself
+    pattern: Optional[str] = None  # optional regex the value must fullmatch — see required_client_fields
 
 
 class RequiredKeysResponse(BaseModel):
@@ -353,18 +355,25 @@ async def set_remote_fields(
 
     Raises:
         HTTPException: 400 if any key in `values` isn't declared by the
-            active preset's embedding/LLM config.
+            active preset's embedding/LLM config, or if a value doesn't
+            match that key's declared `pattern` (see
+            RemoteEmbeddingService.required_client_fields) — e.g. a RunPod
+            base URL that isn't shaped like
+            `https://api.runpod.ai/v2/<id>/openai/v1`. Caught here rather
+            than left to surface as a confusing connection error on the
+            next real query.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
 
-    allowed_keys: set = set()
+    patterns: Dict[str, Optional[str]] = {}
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            allowed_keys.add(key_info["key_name"])
+            patterns[key_info["key_name"]] = key_info["pattern"]
     for key_info in RemoteLLMService.required_client_fields(settings):
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            allowed_keys.add(key_info["key_name"])
+            patterns[key_info["key_name"]] = key_info["pattern"]
+    allowed_keys = set(patterns.keys())
 
     unknown = set(update.values.keys()) - allowed_keys
     if unknown:
@@ -372,6 +381,17 @@ async def set_remote_fields(
             status_code=400,
             detail=f"Unknown remote-config key(s) for preset '{preset.name}': {sorted(unknown)}. "
                    f"Allowed: {sorted(allowed_keys)}",
+        )
+
+    invalid = []
+    for key_name, value in update.values.items():
+        pattern = patterns.get(key_name)
+        if pattern and not re.fullmatch(pattern, value):
+            invalid.append(f"{key_name} (expected to match: {pattern})")
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Value does not match the expected format for: {'; '.join(invalid)}",
         )
 
     merged = update_remote_config(settings.data_path, update.values)

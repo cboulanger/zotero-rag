@@ -422,7 +422,19 @@ class RemoteEmbeddingService(EmbeddingService):
         """Return the fields required by this remote embedding service: a
         personal API key (``api_key_env``, per-request header, unchanged), and/or
         a shared admin-set base_url/API key (``shared_base_url_env``/
-        ``shared_api_key_env`` — see backend.services.admin_settings_store)."""
+        ``shared_api_key_env`` — see backend.services.admin_settings_store).
+
+        Each entry's ``pattern`` is an optional regex (from the matching
+        ``api_key_pattern``/``shared_base_url_pattern``/``shared_api_key_pattern``
+        model_kwargs entry) a preset can declare to validate a value's
+        format — e.g. RunPod's base URL always looks like
+        ``https://api.runpod.ai/v2/<id>/openai/v1``. ``None`` when the preset
+        declares no pattern for that field. POST /api/config/remote-fields
+        enforces this for the shared_* kinds; the personal api_key kind has
+        no backend "set" endpoint to enforce against (it's sent as a
+        per-request header), so its pattern is informational only, for the
+        plugin UI to validate client-side.
+        """
         if config.model_type != "remote":
             return []
         fields: list[dict] = []
@@ -432,6 +444,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote embeddings ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "pattern": config.model_kwargs.get("api_key_pattern"),
             })
         elif "shared_api_key_env" not in config.model_kwargs:
             env_var = "OPENAI_API_KEY"
@@ -439,6 +452,20 @@ class RemoteEmbeddingService(EmbeddingService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote embeddings ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "pattern": config.model_kwargs.get("api_key_pattern"),
+            })
+        # Listed before shared_base_url: the key is the one value every setup
+        # needs regardless of which endpoint it's paired with, so it belongs
+        # first in the Preferences pane's field order (GET /api/required-keys
+        # preserves this insertion order) — enter it once, then tab through
+        # the URL field(s).
+        if "shared_api_key_env" in config.model_kwargs:
+            env_var = config.model_kwargs["shared_api_key_env"]
+            fields.append({
+                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
+                "description": f"Shared API key for remote embeddings ({config.model_name})",
+                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "pattern": config.model_kwargs.get("shared_api_key_pattern"),
             })
         if "shared_base_url_env" in config.model_kwargs:
             env_var = config.model_kwargs["shared_base_url_env"]
@@ -446,13 +473,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
                 "description": f"Shared endpoint URL for remote embeddings ({config.model_name})",
                 "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
-            })
-        if "shared_api_key_env" in config.model_kwargs:
-            env_var = config.model_kwargs["shared_api_key_env"]
-            fields.append({
-                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
-                "description": f"Shared API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "pattern": config.model_kwargs.get("shared_base_url_pattern"),
             })
         return fields
 

@@ -10,6 +10,7 @@ import httpx
 from openai import APIConnectionError as OpenAIAPIConnectionError
 
 from backend.services.llm import (
+    LLMConfigurationError,
     LLMEndpointUnavailableError,
     LLMService,
     LocalLLMService,
@@ -358,7 +359,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             mock_settings.data_path = Path(tmp)
 
             service = RemoteLLMService(mock_settings)
-            with self.assertRaises(ValueError) as ctx:
+            with self.assertRaises(LLMConfigurationError) as ctx:
                 service._get_openai_client()
         self.assertIn("MPCDF_LLM_API_KEY", str(ctx.exception))
 
@@ -445,38 +446,28 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Unsupported remote model", str(context.exception))
 
     async def test_openai_missing_api_key(self):
-        """Test error handling when OpenAI API key is missing."""
+        """A missing API key is a classified configuration problem
+        (LLMConfigurationError, handled as a 503 by backend.api.query), not
+        a generic RuntimeError indistinguishable from an actual code bug."""
         service = RemoteLLMService(self.mock_openai_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing openai package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("API key not found in environment variable", str(context.exception))
 
     async def test_anthropic_missing_api_key(self):
-        """Test error handling when Anthropic API key is missing."""
+        """Symmetrical case for Anthropic (see test_openai_missing_api_key)."""
         service = RemoteLLMService(self.mock_anthropic_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing anthropic package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("Anthropic API key not provided", str(context.exception))
 
     async def test_generate_with_defaults(self):
         """Test generation uses config defaults when parameters not specified."""

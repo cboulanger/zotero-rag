@@ -14,7 +14,7 @@ from backend.main import app
 from backend.db.vector_store import VectorStoreError, VectorStoreTimeoutError
 from backend.dependencies import get_vector_store
 from backend.services.embeddings import EmbeddingEndpointUnavailableError
-from backend.services.llm import LLMEndpointUnavailableError
+from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError
 
 
 class TestConfigAPI(unittest.TestCase):
@@ -207,6 +207,23 @@ class TestQueryAPI(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 503)
         self.assertIn("provision/wake it from Preferences", response.json()["detail"])
+
+    def test_query_llm_configuration_error_surfaces_as_503_not_500(self):
+        """A missing/unconfigured API key (LLMConfigurationError) is a known,
+        classified configuration problem — not an internal bug — so it must
+        be a 503 with the real, actionable detail, not a generic 500."""
+        self._mock_vector_store_for_query()
+        with patch(
+            "backend.services.query_orchestrator.QueryOrchestrator.query",
+            new_callable=AsyncMock,
+            side_effect=LLMConfigurationError("API key not found in environment variable: OPENAI_API_KEY"),
+        ):
+            response = self.client.post(
+                "/api/query",
+                json={"question": "What is RAG?", "library_ids": ["1"]},
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("OPENAI_API_KEY", response.json()["detail"])
 
     def test_query_llm_endpoint_unavailable_surfaces_as_503_not_500(self):
         """Symmetrical case for the LLM side (backend.services.llm.LLMEndpointUnavailableError)."""
