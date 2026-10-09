@@ -25,5 +25,6 @@
     "score_threshold": 0.35,
     "max_chunk_size": 800
   },
-  "memory_budget_gb": 0.5
+  "memory_budget_gb": 0.5,
+  "platform": "any"
 }
