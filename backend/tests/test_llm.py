@@ -262,10 +262,10 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_path = Path(tmp)
-            update_remote_config(data_path, {
+            update_remote_config({
                 "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1",
                 "MPCDF_LLM_API_KEY": "store-key",
-            })
+            }, data_path=data_path)
             mpcdf_preset = HardwarePreset(
                 name="test-mpcdf",
                 description="Test MPCDF preset",
@@ -302,10 +302,10 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_path = Path(tmp)
-            update_remote_config(data_path, {
+            update_remote_config({
                 "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123",
                 "MPCDF_LLM_API_KEY": "store-key",
-            })
+            }, data_path=data_path)
             mpcdf_preset = HardwarePreset(
                 name="test-mpcdf",
                 description="Test MPCDF preset",

@@ -138,10 +138,10 @@ async def _main(argv: list[str] | None = None) -> int:
 
     restrict_current_process_cpus(settings.autoindex_reserved_cpus)
 
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_resolver import resolve_targets
 
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         log.error("AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index.")
         return 1

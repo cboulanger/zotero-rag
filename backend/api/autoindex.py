@@ -29,6 +29,7 @@ from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
+from backend.services.secret_store import get_key_store
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
@@ -58,8 +59,7 @@ class RunSlugRequest(BaseModel):
 
 
 def _store() -> AutoIndexKeyStore:
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         raise HTTPException(
             status_code=503,
@@ -170,7 +170,7 @@ async def status(
     settings = get_settings()
     result: dict = {}
     try:
-        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        store = get_key_store()
         result["enabled"] = store.enabled
         if store.enabled:
             result["keys_registered"] = len(await asyncio.to_thread(store.list_metadata))

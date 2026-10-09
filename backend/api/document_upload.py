@@ -39,7 +39,7 @@ from backend.models.diagnostics import DiagnosticsPayload
 from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
-from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.secret_store import get_key_store
 from backend.services.embeddings import EmbeddingRateLimitExhaustedError
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
@@ -646,7 +646,7 @@ async def check_indexed(
     cached_entries = await asyncio.to_thread(pending_upload_cache.list_entries, settings.data_path, library_id)
     cached_keys = {entry["attachment_key"] for entry in cached_entries}
     if cached_keys:
-        key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        key_store = get_key_store()
         queue_status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
         for s in statuses:
             if s.attachment_key in cached_keys:
@@ -941,7 +941,7 @@ async def upload_document_to_cache(
     )
     logger.info(f"Cached deferred upload: library={library_id} attachment={attachment_key}")
 
-    key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    key_store = get_key_store()
     status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
     return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
 

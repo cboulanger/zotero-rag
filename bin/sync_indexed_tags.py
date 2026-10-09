@@ -62,10 +62,10 @@ async def _resolve_slugs(args: argparse.Namespace, settings) -> tuple[list[str],
             raise RuntimeError(validation.reason or "Key is not read-only.")
         return list(validation.targets), {s: args.api_key for s in validation.targets}
 
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_resolver import resolve_targets
 
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         raise RuntimeError("AUTOINDEX_SECRET is not set; stored keys cannot be decrypted.")
     targets, _issues = await resolve_targets(

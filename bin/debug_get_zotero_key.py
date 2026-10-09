@@ -46,11 +46,9 @@ def _main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
-    from backend.config.settings import get_settings
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
 
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         print("[FAIL] AUTOINDEX_SECRET is not set; no keys can be decrypted.", file=sys.stderr)
         return 1

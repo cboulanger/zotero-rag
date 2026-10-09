@@ -90,7 +90,7 @@ from backend.services.embeddings import (  # noqa: E402
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
 )
-from backend.services.autoindex_key_store import AutoIndexKeyStore  # noqa: E402
+from backend.services.secret_store import get_key_store  # noqa: E402
 from backend.services.autoindex_resolver import resolve_targets  # noqa: E402
 from backend.services.document_processor import DocumentProcessor, merge_download_failures  # noqa: E402
 from backend.zotero.web_api import ZoteroWebAPI  # noqa: E402
@@ -158,7 +158,7 @@ async def _reprocess_items(
     """
     results: dict[tuple[str, str], str] = {}
     settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         print("[ERROR] AUTOINDEX_SECRET is not set; cannot decrypt stored Zotero keys.")
         sys.exit(1)
