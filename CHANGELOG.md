@@ -1,3 +1,20 @@
+# [1.58.0](https://github.com/cboulanger/zotero-rag/compare/v1.57.0...v1.58.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **backend:** abort indexing run on an unrecognized embedding API error ([44c8887](https://github.com/cboulanger/zotero-rag/commit/44c8887186120478798e7aa6febacc0e0d63976f))
+* **backend:** retry a downed kreuzberg sidecar for 10min before failing the run ([661fe3e](https://github.com/cboulanger/zotero-rag/commit/661fe3ecb254a25826ea5d0b93f4e99751a29427))
+* **backend:** truncate oversized embedding inputs by character, not word ([9a9c384](https://github.com/cboulanger/zotero-rag/commit/9a9c3845dc326e093ec0465d6c2875fe8b11a070))
+* **plugin:** don't flash the previous run's stale result on "Run now" ([9a42044](https://github.com/cboulanger/zotero-rag/commit/9a4204482fc296a226099dca421bb55372cc3843))
+
+
+### Features
+
+* Add rate limits, preset switching, and status dialog button to auto-index UI ([#61](https://github.com/cboulanger/zotero-rag/issues/61)) ([11b1061](https://github.com/cboulanger/zotero-rag/commit/11b10613d971259d25c79d21ea55e8d5fe1493e4))
+* add runpod preset and endpoint provisioning script ([#62](https://github.com/cboulanger/zotero-rag/issues/62)) ([51f8d17](https://github.com/cboulanger/zotero-rag/commit/51f8d17b9ff10beeb93aa8fbec5be2d7096e8426)), closes [#63](https://github.com/cboulanger/zotero-rag/issues/63)
+* **indexed-tags:** Add indexed-status tags: real-time and refresh sync for attachments ([#60](https://github.com/cboulanger/zotero-rag/issues/60)) ([3503cf7](https://github.com/cboulanger/zotero-rag/commit/3503cf7b4dedeba3816ba5af3fa2b019e0d2a703))
+
 # [1.57.0](https://github.com/cboulanger/zotero-rag/compare/v1.56.0...v1.57.0) (2026-10-08)
 
 
