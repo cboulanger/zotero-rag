@@ -17,7 +17,10 @@ from backend.services.admin_settings_store import (
     set_active_preset_override,
     update_remote_config,
     get_remote_config_value,
+    resolve_shared_value,
 )
+from backend.services import provisioning
+from backend.utils.endpoint_health import HEALTH_CHECKS
 from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
@@ -94,6 +97,7 @@ class ConfigResponse(BaseModel):
     model_cache_dir: str
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
+    provisionable: bool = False  # active preset declares a provisioning_script
     # RAG configuration
     default_top_k: int
     default_min_score: float
@@ -186,6 +190,7 @@ def get_config(request: Request):
         model_cache_dir=str(settings.model_weights_path),
         available_presets=available,
         compatible_presets=_compatible_presets(preset, settings.data_path, available),
+        provisionable=bool(preset.provisioning_script),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
@@ -244,6 +249,94 @@ async def update_config(
 
     set_active_preset_override(settings.data_path, update.preset_name)
     return await asyncio.to_thread(get_config, request)
+
+
+class EndpointHealth(BaseModel):
+    """Readiness of one remote endpoint."""
+    status: str  # "ready" | "cold" | "unreachable"
+    detail: str
+
+
+class EndpointHealthResponse(BaseModel):
+    """Per-side health; ``None`` means the active preset declares no health check."""
+    embedding: Optional[EndpointHealth] = None
+    llm: Optional[EndpointHealth] = None
+
+
+def _check_side(provider: Optional[str], model_kwargs: dict, data_path: Path) -> Optional[EndpointHealth]:
+    if not provider:
+        return None
+    check = HEALTH_CHECKS.get(provider)
+    if check is None:
+        return EndpointHealth(status="unreachable", detail=f"Unknown health check provider: {provider}")
+    url_env = model_kwargs.get("shared_base_url_env")
+    key_env = model_kwargs.get("shared_api_key_env")
+    base_url = resolve_shared_value(data_path, url_env) if url_env else None
+    api_key = resolve_shared_value(data_path, key_env) if key_env else None
+    if not base_url or not api_key:
+        return EndpointHealth(status="unreachable", detail="not configured")
+    return EndpointHealth(**check(base_url, api_key))
+
+
+@router.get("/config/health", response_model=EndpointHealthResponse)
+def get_endpoint_health() -> EndpointHealthResponse:
+    """
+    Readiness (ready / cold / unreachable) of the active preset's remote
+    embedding and LLM endpoints. A side whose config declares no
+    ``health_check_provider`` is ``null``. Plain ``def``: the provider checks
+    do blocking HTTP, so FastAPI runs this in a thread pool.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    return EndpointHealthResponse(
+        embedding=_check_side(
+            preset.embedding.health_check_provider, preset.embedding.model_kwargs, settings.data_path
+        ),
+        llm=_check_side(preset.llm.health_check_provider, preset.llm.model_kwargs, settings.data_path),
+    )
+
+
+@router.post("/config/provision", status_code=202)
+async def start_provisioning(
+    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+):
+    """
+    Run the active preset's ``provisioning_script`` as a background job
+    (admin only). On success the script's reported base URLs are applied via
+    the shared remote-config store. Poll GET /api/config/provision/status.
+
+    Raises:
+        HTTPException: 400 if the active preset has no provisioning_script;
+            409 if a job is already running.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    if not preset.provisioning_script:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{preset.name}' does not declare a provisioning_script.",
+        )
+    if provisioning.is_running():
+        raise HTTPException(status_code=409, detail="A provisioning job is already running.")
+    provisioning.mark_running()
+    try:
+        proc = await provisioning.start_job(preset.provisioning_script)
+    except Exception as exc:
+        provisioning._finish("failed", f"Could not start provisioning script: {exc}")
+        return provisioning.get_job_state()
+    task = asyncio.create_task(provisioning.await_job(proc, settings.data_path))
+    _provision_tasks.add(task)  # keep a strong reference until done
+    task.add_done_callback(_provision_tasks.discard)
+    return provisioning.get_job_state()
+
+
+_provision_tasks: set = set()
+
+
+@router.get("/config/provision/status")
+def get_provisioning_status() -> dict:
+    """Current provisioning job state: status idle|running|succeeded|failed."""
+    return provisioning.get_job_state()
 
 
 @router.post("/config/remote-fields", response_model=RemoteFieldsResponse)

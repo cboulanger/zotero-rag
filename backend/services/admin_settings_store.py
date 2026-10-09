@@ -93,6 +93,12 @@ def get_remote_config_value(data_path: Path, key_name: str) -> Optional[str]:
     return read_admin_settings(data_path).get("remote_config", {}).get(key_name)
 
 
+def resolve_shared_value(data_path: Path, env_var_name: str) -> Optional[str]:
+    """Resolve a preset's shared base_url/api_key: the admin-set remote_config
+    override first, then the process environment."""
+    return get_remote_config_value(data_path, env_var_name) or os.getenv(env_var_name)
+
+
 def normalize_base_url(base_url: str) -> str:
     """Append '/v1' to a base URL that's missing it, leaving one that already
     ends with '/v1' untouched.

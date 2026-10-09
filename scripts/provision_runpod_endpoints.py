@@ -18,6 +18,7 @@ Requires RUNPOD_API_KEY in .env (or pass --api-key).
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -426,6 +427,11 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
             "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
             "RUNPOD_LLM_BASE_URL": llm_base_url,
         })
+        if getattr(args, "json", False):
+            print("PROVISION_RESULT: " + json.dumps({
+                "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
+                "RUNPOD_LLM_BASE_URL": llm_base_url,
+            }))
         print(f"\nWrote RUNPOD_API_KEY / RUNPOD_EMBEDDING_BASE_URL / RUNPOD_LLM_BASE_URL to {ENV_PATH}")
         print("\nTo apply these to an already-running backend without a restart:")
         print(f"""
@@ -484,6 +490,11 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument(
         "--yes", "-y", action="store_true",
         help="Skip the --teardown confirmation prompt (required when running non-interactively)",
+    )
+    parser.add_argument(
+        "--json", action="store_true",
+        help="Also print one machine-readable 'PROVISION_RESULT: {...}' line "
+             "(the preset's shared base-URL env vars) on success",
     )
     parser.add_argument(
         "--skip-warmup", action="store_true",

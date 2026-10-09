@@ -273,10 +273,95 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const presetSelect = doc.getElementById('zotero-rag-preset-select');
 	const presetDescription = doc.getElementById('zotero-rag-preset-description');
 	const presetStatus = doc.getElementById('zotero-rag-preset-status');
+	const healthRows = {
+		embedding: doc.getElementById('zotero-rag-endpoint-health-embedding'),
+		llm: doc.getElementById('zotero-rag-endpoint-health-llm'),
+	};
+	const provisionButton = /** @type {HTMLButtonElement | null} */ (doc.getElementById('zotero-rag-provision-endpoints'));
+	const provisionStatus = doc.getElementById('zotero-rag-provision-status');
+	/** Whether the active preset declares a provisioning script (from GET /api/config). */
+	let provisionable = false;
+	let provisioning = false;
+	const HEALTH_COLORS = { ready: 'green', cold: 'orange', unreachable: 'red' };
+
+	/**
+	 * Fetch GET /api/config/health and render one status row per non-null side;
+	 * show the "Provision endpoints" button when the preset is provisionable and
+	 * a side is not ready. Failures degrade to showing no rows.
+	 * @returns {Promise<boolean>} true if every reported side is ready
+	 */
+	const refreshEndpointHealth = async () => {
+		let allReady = true;
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/health`, { headers: this.getAuthHeaders() });
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			/** @type {Record<'embedding'|'llm', {status: 'ready'|'cold'|'unreachable', detail: string}|null>} */
+			const data = await response.json();
+			for (const side of /** @type {const} */ (['embedding', 'llm'])) {
+				const row = healthRows[side];
+				const info = data[side];
+				if (!row) continue;
+				if (!info) {
+					row.textContent = '';
+					continue;
+				}
+				if (info.status !== 'ready') allReady = false;
+				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}`;
+				row.style.color = HEALTH_COLORS[info.status] || '';
+				row.title = info.detail || '';
+			}
+		} catch (e) {
+			this.log('Could not fetch endpoint health: ' + e);
+			for (const row of Object.values(healthRows)) if (row) row.textContent = '';
+		}
+		if (provisionButton) {
+			provisionButton.hidden = !provisionable;
+			provisionButton.disabled = provisioning || allReady;
+		}
+		return allReady;
+	};
+
+	if (provisionButton) {
+		provisionButton.addEventListener('click', async () => {
+			provisioning = true;
+			provisionButton.disabled = true;
+			if (provisionStatus) provisionStatus.textContent = 'Provisioning\u2026';
+			try {
+				const start = await fetch(`${this.backendURL}/api/config/provision`, {
+					method: 'POST',
+					headers: this.getAuthHeaders(),
+				});
+				if (!start.ok) {
+					const err = await start.json().catch(() => ({}));
+					throw new Error(err.detail || `HTTP ${start.status}`);
+				}
+				/** @type {{status: string, message: string|null}} */
+				let job = await start.json();
+				while (job.status === 'running') {
+					await new Promise((resolve) => setTimeout(resolve, 5000));
+					const poll = await fetch(`${this.backendURL}/api/config/provision/status`, { headers: this.getAuthHeaders() });
+					if (!poll.ok) throw new Error(`HTTP ${poll.status}`);
+					job = await poll.json();
+					await refreshEndpointHealth();
+				}
+				if (provisionStatus) {
+					provisionStatus.textContent = job.status === 'succeeded'
+						? 'Provisioning finished.'
+						: `Provisioning failed: ${job.message || 'unknown error'}`;
+				}
+			} catch (e) {
+				if (provisionStatus) provisionStatus.textContent = `Provisioning failed: ${e}`;
+			} finally {
+				provisioning = false;
+				await refreshEndpointHealth();
+			}
+		});
+	}
 
 	/**
 	 * Re-fetch GET /api/config and repopulate the preset dropdown from
 	 * `compatible_presets`, selecting the currently active one.
+	 * Also refreshes the endpoint health rows and provision button.
 	 * @returns {Promise<void>}
 	 */
 	const refreshPresetState = async () => {
@@ -284,7 +369,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		try {
 			const response = await fetch(`${this.backendURL}/api/config`, { headers: this.getAuthHeaders() });
 			if (!response.ok) return;
-			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[]}} */
+			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[], provisionable?: boolean}} */
 			const data = await response.json();
 			presetSelect.innerHTML = '';
 			for (const name of data.compatible_presets) {
@@ -295,9 +380,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			}
 			presetSelect.value = data.preset_name;
 			if (presetDescription) presetDescription.textContent = data.preset_description || '';
+			provisionable = !!data.provisionable;
 		} catch (e) {
 			this.log('Could not fetch preset config: ' + e);
+			return;
 		}
+		await refreshEndpointHealth();
 	};
 
 	if (presetSelect) {

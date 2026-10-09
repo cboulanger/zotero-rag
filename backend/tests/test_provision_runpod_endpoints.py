@@ -530,6 +530,51 @@ class RunTest(unittest.TestCase):
         self.assertIn("RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/e_emb/openai/v1", env_content)
         self.assertIn("RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/e_llm/openai/v1", env_content)
 
+    def _success_responses(self):
+        return [
+            (200, []),
+            (200, {"id": "t_emb", "name": provision.EMBEDDING_TEMPLATE_NAME,
+                   "imageName": provision.EMBEDDING_IMAGE, "env": {"MODEL_NAMES": provision.EMBEDDING_MODEL}}),
+            (200, []),
+            (200, {"id": "e_emb", "name": provision.EMBEDDING_ENDPOINT_NAME}),
+            (200, {"data": [{"embedding": [0.1]}]}),
+            (200, []),
+            (200, {"id": "t_llm", "name": provision.LLM_TEMPLATE_NAME,
+                   "imageName": provision.LLM_IMAGE, "env": {"MODEL_NAME": "Qwen/Qwen2.5-7B-Instruct"}}),
+            (200, []),
+            (200, {"id": "e_llm", "name": provision.LLM_ENDPOINT_NAME}),
+            (200, {"choices": [{"message": {"content": "hi"}}]}),
+        ]
+
+    def _run_capturing(self, argv):
+        import contextlib
+        import io
+        client = FakeClient(self._success_responses())
+        args = provision._parse_args(argv)
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
+                contextlib.redirect_stdout(buf):
+            exit_code = provision._run(args, api_key="rp_key", client=client)
+        return exit_code, buf.getvalue()
+
+    def test_json_flag_prints_provision_result_line(self):
+        import json
+        exit_code, out = self._run_capturing(["--json"])
+        self.assertEqual(exit_code, 0)
+        lines = [l for l in out.splitlines() if l.startswith("PROVISION_RESULT:")]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0][len("PROVISION_RESULT:"):]), {
+            "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/e_emb/openai/v1",
+            "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/e_llm/openai/v1",
+        })
+        self.assertIn("Embedding endpoint ready", out)  # human-readable output unchanged
+
+    def test_no_json_flag_prints_no_result_line(self):
+        exit_code, out = self._run_capturing([])
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn("PROVISION_RESULT:", out)
+
     def test_provision_path_returns_1_on_http_error_instead_of_raising(self):
         client = FakeClient([
             (200, []),  # embedding: GET templates -> none

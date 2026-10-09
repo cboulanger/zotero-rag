@@ -466,14 +466,14 @@ class RemoteEmbeddingService(EmbeddingService):
             shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
             data_path = None
             if shared_url_env or shared_key_env:
-                from backend.services.admin_settings_store import get_remote_config_value
+                from backend.services.admin_settings_store import resolve_shared_value
                 data_path = self.data_path
                 if data_path is None:
                     from backend.config.settings import get_settings
                     data_path = get_settings().data_path
 
             if shared_key_env:
-                api_key = self._api_key or get_remote_config_value(data_path, shared_key_env) or os.getenv(shared_key_env)
+                api_key = self._api_key or resolve_shared_value(data_path, shared_key_env)
                 if not api_key:
                     raise ValueError(
                         f"API key not configured. POST it to /api/config/remote-fields as "
@@ -489,7 +489,7 @@ class RemoteEmbeddingService(EmbeddingService):
                     )
 
             if shared_url_env:
-                base_url = get_remote_config_value(data_path, shared_url_env) or os.getenv(shared_url_env)
+                base_url = resolve_shared_value(data_path, shared_url_env)
                 if not base_url:
                     raise ValueError(
                         f"Base URL not configured. POST it to /api/config/remote-fields as "
