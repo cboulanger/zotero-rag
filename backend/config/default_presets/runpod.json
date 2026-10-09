@@ -1,5 +1,5 @@
 {
-  "description": "Fully remote via self-hosted RunPod serverless endpoints (embedding + LLM, pay-per-use, scale-to-zero). Provision/wake both endpoints with scripts/provision_runpod_endpoints.py before use.",
+  "description": "Fully remote via your own RunPod serverless endpoints (embedding + LLM, pay-per-use, scale-to-zero). Enter your RunPod API key, then click \"Provision endpoints\" to create or wake both endpoints.",
   "embedding": {
     "model_type": "remote",
     "model_name": "intfloat/multilingual-e5-large-instruct",
