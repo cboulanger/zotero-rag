@@ -186,9 +186,10 @@ def _ensure_endpoint(
 
 def _warm_up_embedding(client: "httpx.Client", api_key: str, base_url: str) -> None:
     """Send one lightweight embedding request to trigger a cold start,
-    retrying with backoff while the worker spins up. Logs a warning (does not
-    raise) if it never succeeds within WARMUP_MAX_SECONDS — the endpoint still
-    exists and will warm up on the next real request regardless."""
+    retrying at a fixed interval while the worker spins up. Logs a warning
+    (does not raise) if it never succeeds within WARMUP_MAX_SECONDS — the
+    endpoint still exists and will warm up on the next real request
+    regardless."""
     _warm_up_with_retry(
         client, api_key, f"{base_url}/embeddings",
         json_body={"model": EMBEDDING_MODEL, "input": "ping"},
@@ -209,21 +210,45 @@ def _warm_up_llm(client: "httpx.Client", api_key: str, base_url: str, model: str
 
 
 def _warm_up_with_retry(client: "httpx.Client", api_key: str, url: str, json_body: dict) -> None:
+    """Retry the warm-up request at a fixed interval until it succeeds or
+    WARMUP_MAX_SECONDS elapses. Never raises: a persistently failing warm-up
+    is logged as a warning, since the endpoint still exists and will warm up
+    on the next real request regardless. A connection-level failure (e.g. a
+    cold-starting worker not yet accepting connections) is treated the same
+    as a non-2xx response. A non-retryable 4xx (anything but 429, which can
+    mean rate-limited-but-fine) short-circuits immediately instead of
+    burning the full time budget on an error retrying can't fix."""
     start = time.monotonic()
     while True:
-        response = client.request(
-            "POST", url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=json_body,
-            timeout=30.0,
-        )
-        if 200 <= response.status_code < 300:
+        try:
+            response = client.request(
+                "POST", url,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=json_body,
+                timeout=30.0,
+            )
+        except httpx.TransportError as exc:
+            status_desc = f"connection error ({exc})"
+            non_retryable = False
+        else:
+            if 200 <= response.status_code < 300:
+                return
+            status_desc = f"{response.status_code} {response.text[:200]}"
+            non_retryable = 400 <= response.status_code < 500 and response.status_code != 429
+
+        if non_retryable:
+            logger.warning(
+                "Endpoint at %s returned a non-retryable error: %s. "
+                "It still exists and will warm up on the next real request.",
+                url, status_desc,
+            )
             return
+
         if time.monotonic() - start >= WARMUP_MAX_SECONDS:
             logger.warning(
                 "Endpoint at %s did not warm up within %ds (last status: %s). "
                 "It still exists and will warm up on the next real request.",
-                url, WARMUP_MAX_SECONDS, response.status_code,
+                url, WARMUP_MAX_SECONDS, status_desc,
             )
             return
         time.sleep(WARMUP_RETRY_INTERVAL_SECONDS)

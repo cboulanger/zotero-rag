@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "provision_runpod_endpoints.py"
 _SPEC = importlib.util.spec_from_file_location("provision_runpod_endpoints_script", _SCRIPT_PATH)
 provision = importlib.util.module_from_spec(_SPEC)
@@ -80,7 +82,8 @@ class FakeResponse:
 
 class FakeClient:
     """Minimal stand-in for httpx.Client. `responses` is a list of (status_code,
-    json_body) tuples, consumed in order, one per .request() call."""
+    json_body) tuples or Exception instances, consumed in order, one per
+    .request() call."""
 
     def __init__(self, responses):
         self._responses = list(responses)
@@ -88,7 +91,10 @@ class FakeClient:
 
     def request(self, method, url, headers=None, json=None, timeout=None):
         self.calls.append((method, url, headers, json))
-        status_code, body = self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        status_code, body = item
         return FakeResponse(status_code, body)
 
 
@@ -297,12 +303,31 @@ class WarmUpTest(unittest.TestCase):
         # Every call fails; the retry loop must stop instead of looping forever.
         responses = [(503, {"error": "cold starting"})] * 50
         client = FakeClient(responses)
-        fake_times = iter([0, 10, 50, 100, 200])  # exceeds WARMUP_MAX_SECONDS=180 on the 5th check
+        fake_times = iter([0, 10, 50, 100, 200])  # exceeds WARMUP_MAX_SECONDS=180 on the 4th deadline check
         with patch.object(provision.time, "sleep"), \
              patch.object(provision.time, "monotonic", side_effect=lambda: next(fake_times)), \
              self.assertLogs(provision.logger, level="WARNING") as ctx:
             provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
         self.assertTrue(any("did not warm up" in msg for msg in ctx.output))
+
+    def test_retries_on_connection_error_then_succeeds(self):
+        client = FakeClient([httpx.ReadTimeout("timed out"), (200, {"data": [{"embedding": [0.1]}]})])
+        with patch.object(provision.time, "sleep"):
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        self.assertEqual(len(client.calls), 2)
+
+    def test_short_circuits_on_non_retryable_4xx(self):
+        client = FakeClient([(400, {"error": "bad model name"})])
+        with patch.object(provision.time, "sleep") as mock_sleep:
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        self.assertEqual(len(client.calls), 1)  # no retry attempted
+        mock_sleep.assert_not_called()
+
+    def test_retries_429_as_transient_not_as_non_retryable(self):
+        client = FakeClient([(429, {"error": "rate limited"}), (200, {"data": [{"embedding": [0.1]}]})])
+        with patch.object(provision.time, "sleep"):
+            provision._warm_up_embedding(client, "rp_key", "https://api.runpod.ai/v2/e1/openai/v1")
+        self.assertEqual(len(client.calls), 2)
 
 
 if __name__ == "__main__":
