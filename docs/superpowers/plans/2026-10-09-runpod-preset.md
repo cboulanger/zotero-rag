@@ -1185,7 +1185,10 @@ def _endpoint_base_url(endpoint_id: str) -> str:
 
 def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> int:
     if args.teardown:
-        if not _confirm_teardown(yes=args.yes, interactive=sys.stdin.isatty()):
+        if not _confirm_teardown(
+            resource_names=[EMBEDDING_ENDPOINT_NAME, LLM_ENDPOINT_NAME],
+            yes=args.yes, interactive=sys.stdin.isatty(),
+        ):
             return 1
         _teardown_resource(client, api_key, name=EMBEDDING_ENDPOINT_NAME)
         _teardown_resource(client, api_key, name=LLM_ENDPOINT_NAME)
