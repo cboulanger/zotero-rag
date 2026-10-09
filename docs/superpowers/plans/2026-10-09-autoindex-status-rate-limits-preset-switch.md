@@ -37,3 +37,13 @@ Branch: `claude/quirky-feynman-8wy83q` (work in `/home/user/zotero-rag`; do NOT 
 2. After both finish: run backend + plugin test suites, then a review pass of the combined diff against the spec; fix findings.
 3. Commit in atomic commits (backend, plugin, docs) and push to the designated branch.
 4. Add a short implementation-progress note at the end of this file.
+
+## Implementation progress
+
+Implemented on `claude/quirky-feynman-8wy83q`. Backend: 1096 passed (the `TestKreuzbergExtractorTimeoutWiring` class was deselected because it hangs in the sandbox). Plugin: 260 passed. The dialogs were not exercised in a live Zotero instance (manual check on the `test-rag-plugin` library is still to do).
+
+Deviations from the spec:
+- The "N of M users have a key for this preset" hint is not implemented. `AutoIndexKeyStore.count_embedding_keys_by_name()` exists, but no endpoint exposes it, so adding it needs a new field on the `switchable_presets` entries.
+- A stored non-invalid embedding key also satisfies an LLM-side personal key of the same name, so `remote-kisski` is not reported as missing credentials on deployments that rely on stored keys.
+- `get_cached_rate_limits` returns None for non-remote embeddings. `source` is `"run"` for the in-process cache and `"cache"` for the `cron_status.json` fallback.
+- The widget is loaded with `loadSubScript` from both xhtml files; `bootstrap.js` and `manifest.json` are unchanged.

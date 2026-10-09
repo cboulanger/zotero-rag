@@ -1,4 +1,3 @@
-import json
 import logging
 
 from fastapi import APIRouter, Request
@@ -6,6 +5,7 @@ from pydantic import BaseModel
 
 from backend.config.settings import get_settings
 from backend.dependencies import get_client_api_keys, make_embedding_service
+from backend.services.rate_limit_info import get_cached_rate_limits
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -31,14 +31,8 @@ async def get_rate_limits(http_request: Request):
 
     if info is None:
         # Fall back to headers persisted by the cron indexer (separate process).
-        try:
-            settings = get_settings()
-            cron_status_path = settings.data_path / "system" / "cron_status.json"
-            if cron_status_path.exists():
-                cron_data = json.loads(cron_status_path.read_text(encoding="utf-8"))
-                info = cron_data.get("last_rate_limit_headers") or None
-        except Exception as exc:
-            logger.debug("Could not read rate-limit headers from cron status: %s", exc)
+        cached = get_cached_rate_limits(get_settings())
+        info = cached["limits"] if cached else None
 
     if info is None:
         # Last resort: make a live probe call to the embedding API.

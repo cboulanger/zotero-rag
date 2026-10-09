@@ -240,3 +240,39 @@ class AutoIndexKeyStore:
                 data[fp]["embedding_key_status"] = status
                 data[fp]["embedding_key_rate_limit_until"] = rate_limit_until
                 self._save(data)
+
+    def clear_rate_limits(self) -> int:
+        """Clear stored embedding-key rate-limit skips.
+
+        Resets ``embedding_key_rate_limit_until`` on every entry and turns
+        status ``"rate_limited"`` back into ``"ok"``. ``"invalid"`` keys are
+        left untouched. Returns the number of entries changed.
+        """
+        with self._lock:
+            data = self._load()
+            changed = 0
+            for entry in data.values():
+                touched = False
+                if entry.get("embedding_key_rate_limit_until"):
+                    entry["embedding_key_rate_limit_until"] = None
+                    touched = True
+                if entry.get("embedding_key_status") == "rate_limited":
+                    entry["embedding_key_status"] = "ok"
+                    touched = True
+                if touched:
+                    changed += 1
+            if changed:
+                self._save(data)
+            return changed
+
+    def count_embedding_keys_by_name(self) -> dict[str, int]:
+        """Count stored, non-invalid embedding keys grouped by ``embedding_key_name``."""
+        counts: dict[str, int] = {}
+        for entry in self._load().values():
+            name = entry.get("embedding_key_name")
+            if not name or not entry.get("embedding_key_ciphertext"):
+                continue
+            if entry.get("embedding_key_status") == "invalid":
+                continue
+            counts[name] = counts.get(name, 0) + 1
+        return counts
