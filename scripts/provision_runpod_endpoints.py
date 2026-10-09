@@ -453,7 +453,10 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
 curl -X POST https://<host>/api/config/remote-fields \\
   -H "X-Zotero-API-Key: <admin-key>" \\
   -H "Content-Type: application/json" \\
-  -d '{{"values": {{"RUNPOD_EMBEDDING_BASE_URL": "{embedding_base_url}", "RUNPOD_LLM_BASE_URL": "{llm_base_url}", "RUNPOD_API_KEY": "{api_key}"}}}}'
+  -d '{{"values": {{"RUNPOD_EMBEDDING_BASE_URL": "{embedding_base_url}", "RUNPOD_LLM_BASE_URL": "{llm_base_url}"}}}}'
+
+(RUNPOD_API_KEY is not shown here; if the backend doesn't already have it in its
+environment, add "RUNPOD_API_KEY": "<your key>" to "values" yourself.)
 """)
         return 0
     except (ProvisionError, httpx.HTTPError, OSError) as exc:
