@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import httpx
 from dotenv import load_dotenv
 
 REST_BASE_URL = "https://rest.runpod.io/v1"
@@ -53,6 +54,39 @@ WARMUP_RETRY_INTERVAL_SECONDS = 5
 class ProvisionError(RuntimeError):
     """Raised for any unrecoverable failure while provisioning or tearing down
     the RunPod endpoints (a missing credential, a failed API call, etc.)."""
+
+
+def _request(
+    client: "httpx.Client",
+    api_key: str,
+    method: str,
+    path: str,
+    json_body: Optional[dict] = None,
+) -> object:
+    """Make an authenticated request against the RunPod REST API and return
+    the parsed JSON body. Raises ProvisionError on a non-2xx response."""
+    response = client.request(
+        method,
+        f"{REST_BASE_URL}{path}",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=json_body,
+        timeout=30.0,
+    )
+    if not (200 <= response.status_code < 300):
+        raise ProvisionError(
+            f"RunPod API {method} {path} failed: {response.status_code} {response.text}"
+        )
+    return response.json()
+
+
+def _find_by_name(client: "httpx.Client", api_key: str, resource: str, name: str) -> Optional[dict]:
+    """Find a RunPod resource (templates or endpoints) by its `name` field.
+    Returns None if no item with that name exists."""
+    items = _request(client, api_key, "GET", f"/{resource}")
+    for item in items:
+        if item.get("name") == name:
+            return item
+    return None
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:

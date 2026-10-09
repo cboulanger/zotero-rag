@@ -3,6 +3,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "provision_runpod_endpoints.py"
 _SPEC = importlib.util.spec_from_file_location("provision_runpod_endpoints_script", _SCRIPT_PATH)
@@ -65,6 +66,75 @@ class ResolveApiKeyTest(unittest.TestCase):
     def test_raises_when_neither_set(self):
         with self.assertRaises(provision.ProvisionError):
             provision._resolve_api_key(None, env={})
+
+
+class FakeResponse:
+    def __init__(self, status_code, json_body):
+        self.status_code = status_code
+        self._json_body = json_body
+        self.text = str(json_body)
+
+    def json(self):
+        return self._json_body
+
+
+class FakeClient:
+    """Minimal stand-in for httpx.Client. `responses` is a list of (status_code,
+    json_body) tuples, consumed in order, one per .request() call."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    def request(self, method, url, headers=None, json=None, timeout=None):
+        self.calls.append((method, url, headers, json))
+        status_code, body = self._responses.pop(0)
+        return FakeResponse(status_code, body)
+
+
+class RequestTest(unittest.TestCase):
+    def test_get_returns_parsed_json_on_200(self):
+        client = FakeClient([(200, {"id": "abc123", "name": "zotero-rag-embedding"})])
+        result = provision._request(client, "rp_key", "GET", "/templates")
+        self.assertEqual(result, {"id": "abc123", "name": "zotero-rag-embedding"})
+        method, url, headers, body = client.calls[0]
+        self.assertEqual(method, "GET")
+        self.assertEqual(url, "https://rest.runpod.io/v1/templates")
+        self.assertEqual(headers["Authorization"], "Bearer rp_key")
+
+    def test_raises_provision_error_on_non_2xx(self):
+        client = FakeClient([(401, {"error": "invalid API key"})])
+        with self.assertRaises(provision.ProvisionError) as ctx:
+            provision._request(client, "rp_bad_key", "GET", "/templates")
+        self.assertIn("401", str(ctx.exception))
+
+    def test_post_sends_json_body(self):
+        client = FakeClient([(200, {"id": "new123"})])
+        result = provision._request(
+            client, "rp_key", "POST", "/templates", json_body={"name": "zotero-rag-embedding"}
+        )
+        self.assertEqual(result, {"id": "new123"})
+        _, _, _, body = client.calls[0]
+        self.assertEqual(body, {"name": "zotero-rag-embedding"})
+
+
+class FindByNameTest(unittest.TestCase):
+    def test_finds_matching_item(self):
+        client = FakeClient([
+            (200, [{"id": "t1", "name": "other-template"}, {"id": "t2", "name": "zotero-rag-embedding"}]),
+        ])
+        result = provision._find_by_name(client, "rp_key", "templates", "zotero-rag-embedding")
+        self.assertEqual(result["id"], "t2")
+
+    def test_returns_none_when_not_found(self):
+        client = FakeClient([(200, [{"id": "t1", "name": "other-template"}])])
+        result = provision._find_by_name(client, "rp_key", "templates", "zotero-rag-embedding")
+        self.assertIsNone(result)
+
+    def test_returns_none_on_empty_list(self):
+        client = FakeClient([(200, [])])
+        result = provision._find_by_name(client, "rp_key", "endpoints", "zotero-rag-llm")
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
