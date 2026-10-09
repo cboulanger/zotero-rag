@@ -17,6 +17,7 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store, resolve_zotero_identity
 from backend.services.access_gate import assert_safe_to_start
+from backend.utils.log_rotation import RotatingLogHandler
 from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex, auth, migration, admin_settings, indexed_tags
 from backend.api.document_upload import load_item_cache, save_item_cache
 
@@ -45,7 +46,7 @@ handlers = [console_handler]
 # Note: Path("") becomes Path(".") so we need to check for that too
 log_file_str = str(settings.log_file).strip() if settings.log_file else ""
 if log_file_str and log_file_str != ".":
-    file_handler = logging.FileHandler(settings.log_file, encoding='utf-8')
+    file_handler = RotatingLogHandler(settings.log_file)  # rotates on startup + daily
     file_handler.setFormatter(logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ))
