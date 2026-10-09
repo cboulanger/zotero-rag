@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
-from backend.services.embeddings import env_var_to_header, docs_url_for_key
+from backend.services.embeddings import env_var_to_header, docs_url_for_key, _extract_error_detail
 
 logger = logging.getLogger(__name__)
 
@@ -461,8 +461,16 @@ class RemoteLLMService(LLMService):
                     "uses a self-provisioned serverless endpoint (e.g. RunPod), it may be cold or "
                     "not yet provisioned — check its status and provision/wake it from Preferences."
                 ) from e
+            # _extract_error_detail also handles an HTML error page from an
+            # upstream gateway (e.g. RunPod's openresty edge) — the openai/
+            # anthropic SDKs use that raw markup verbatim as both exc.body
+            # and str(exc) when a response isn't JSON, which would otherwise
+            # leak straight into this message. hasattr-gated since it's only
+            # meaningful for an APIStatusError-shaped exception (one with a
+            # .body attribute); anything else falls back to plain str(e).
+            detail = _extract_error_detail(e) if hasattr(e, "body") else str(e)
             logger.error(f"Error during remote generation: {e}", exc_info=True)
-            raise RuntimeError(f"Remote LLM generation failed: {e}") from e
+            raise RuntimeError(f"Remote LLM generation failed: {detail}") from e
 
     async def _generate_openai(
         self,

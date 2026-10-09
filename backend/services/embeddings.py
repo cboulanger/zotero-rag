@@ -92,6 +92,11 @@ class EmbeddingEndpointUnavailableError(Exception):
     """
 
 
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MAX_ERROR_DETAIL_LENGTH = 200
+
+
 def _extract_error_detail(exc: Exception) -> str:
     """Pull a short human-readable message out of an OpenAI SDK error's response
     body, instead of the SDK's default str(exc) — which is literally
@@ -99,6 +104,14 @@ def _extract_error_detail(exc: Exception) -> str:
     the JSON error body (e.g. "{'message': 'Unauthorized', 'request_id': '...'}"),
     not something meant for end users. Falls back to str(exc) if the body isn't
     in a recognized shape.
+
+    A body that isn't JSON at all (an HTML error page from an upstream
+    gateway/proxy — e.g. RunPod's openresty edge returning a raw 405 page
+    instead of a JSON error) is a case the openai SDK itself doesn't handle:
+    it uses the raw response text verbatim as both `exc.body` and `str(exc)`
+    (see `_make_status_error_from_response` in openai/_base_client.py, which
+    only tries `json.loads` and falls back to the literal text). Without this
+    check, that raw HTML markup would reach the end user as the error detail.
     """
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
@@ -107,6 +120,14 @@ def _extract_error_detail(exc: Exception) -> str:
             return str(error["message"])
         if body.get("message"):
             return str(body["message"])
+    if isinstance(body, str) and "<" in body and ">" in body:
+        title_match = _HTML_TITLE_RE.search(body)
+        if title_match:
+            return title_match.group(1).strip()
+        stripped = _HTML_TAG_RE.sub(" ", body)
+        stripped = " ".join(stripped.split())
+        if stripped:
+            return stripped[:_MAX_ERROR_DETAIL_LENGTH]
     return str(exc)
 
 

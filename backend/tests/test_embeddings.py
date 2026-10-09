@@ -93,6 +93,37 @@ class TestExtractErrorDetail(unittest.TestCase):
         exc.body = {"code": "boom"}
         self.assertEqual(_extract_error_detail(exc), str(exc))
 
+    def test_extracts_title_from_an_html_gateway_error_page(self):
+        """Observed live: RunPod's edge gateway (openresty) returned a 405
+        with an HTML body, not JSON. The openai SDK then uses the raw HTML
+        text itself as both exc.body and str(exc) (see
+        _make_status_error_from_response in openai/_base_client.py — it only
+        tries json.loads, falling back to the raw response text verbatim).
+        Regression: this raw HTML page was shown to the end user as the
+        query's error detail. Pull just the <title> instead."""
+        html = (
+            "<html>\n<head><title>405 Not Allowed</title></head>\n<body>\n"
+            "<center><h1>405 Not Allowed</h1></center>\n<hr><center>openresty</center>\n"
+            "</body>\n</html>"
+        )
+        exc = Exception(html)
+        exc.body = html
+        self.assertEqual(_extract_error_detail(exc), "405 Not Allowed")
+
+    def test_strips_tags_from_html_body_with_no_title(self):
+        html = "<html><body><h1>502 Bad Gateway</h1></body></html>"
+        exc = Exception(html)
+        exc.body = html
+        self.assertEqual(_extract_error_detail(exc), "502 Bad Gateway")
+
+    def test_truncates_a_very_long_html_body_with_no_title_or_recognizable_text(self):
+        html = "<html><body>" + ("x" * 500) + "</body></html>"
+        exc = Exception(html)
+        exc.body = html
+        result = _extract_error_detail(exc)
+        self.assertLessEqual(len(result), 220)
+        self.assertTrue(result.startswith("xxx"))
+
 
 @unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")
 class TestLocalEmbeddingService(unittest.IsolatedAsyncioTestCase):

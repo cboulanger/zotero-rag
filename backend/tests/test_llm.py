@@ -417,6 +417,37 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Connection error", str(ctx.exception))
 
+    async def test_generate_openai_strips_html_from_a_gateway_error_page(self):
+        """Observed live: RunPod's edge gateway (openresty) returned a 405
+        with an HTML body, not JSON — the openai SDK uses that raw HTML text
+        verbatim as both exc.body and str(exc) (see
+        backend.services.embeddings._extract_error_detail's docstring for
+        why). The raw markup must not reach the end user as the error
+        message raised from generate()."""
+        import httpx
+        from openai import APIStatusError
+
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+        html = (
+            "<html>\n<head><title>405 Not Allowed</title></head>\n<body>\n"
+            "<center><h1>405 Not Allowed</h1></center>\n<hr><center>openresty</center>\n"
+            "</body>\n</html>"
+        )
+        response = httpx.Response(
+            status_code=405, request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+        exc = APIStatusError(html, response=response, body=html)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = exc
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(RuntimeError) as ctx:
+                await service.generate("Test prompt")
+
+        self.assertIn("405 Not Allowed", str(ctx.exception))
+        self.assertNotIn("<html>", str(ctx.exception))
+
     async def test_generate_unsupported_model(self):
         """Test error handling for unsupported model."""
         unsupported_preset = HardwarePreset(
