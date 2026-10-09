@@ -93,6 +93,7 @@ the next Refresh; the plugin's apply step is idempotent, so that is a no-op.
 | --- | --- |
 | `start` | `run_id`, `pid`, `pid_create_time`, `tag`, `started_at` |
 | `libraries` | `libraries` (slugs) |
+| `applied` | `library`, `written` (keys), `failed` ({key: message}); only with `--write-api-key` and no `--dry-run` |
 | `library_start` | `library` |
 | `ops` | `library`, `as_of_seq`, `ops: [{op: "add"\|"remove", attachment_key, item_key}]` |
 | `progress` | `library`, `attachments_checked`, `to_add`, `to_remove`, `already_correct` |
@@ -118,8 +119,23 @@ uv run python bin/sync_indexed_tags.py --api-key <read-only-key> [--library-ids 
 
 Prints the JSON lines to stdout (`--output-file` appends to a file instead). With
 `--api-key` the key is visible in `ps`; on servers prefer `--fingerprint <fp>` for a
-key already in the auto-index store. The CLI only plans — tags are applied by the
-plugin.
+key already in the auto-index store.
+
+By default the script only plans (the client-only path: the plugin applies the tags).
+For a manual run, add a separate write-scoped key to apply the plan to zotero.org
+directly:
+
+```bash
+uv run python bin/sync_indexed_tags.py --api-key <read-only-key> --write-api-key <write-key>
+```
+
+The read-only key still enumerates libraries; the write key is used only for tag
+writes (batches of 50, each with the item version it was planned against, so an item
+edited in the meantime is reported in `applied.failed` rather than overwritten; other
+tags on the item are preserved). Add `--dry-run` to plan and report without writing,
+even with a write key. Tags written this way reach the plugin through normal Zotero
+sync. The server never holds a write key, so the Refresh button always uses the
+client-only path.
 
 ## Known cost: standalone attachments
 

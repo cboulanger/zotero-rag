@@ -98,12 +98,30 @@ class IndexedTagSync:
         emit: Callable[[dict], None],
         web_api_factory: Callable[[str], Any],
         tag: str = INDEXED_TAG_NAME,
+        writer_factory: Optional[Callable[[str], Any]] = None,
+        dry_run: bool = False,
     ) -> None:
         self.vector_store = vector_store
         self.event_log = event_log
         self.emit = emit
         self.web_api_factory = web_api_factory
         self.tag = tag
+        # With a write-scoped key the planned operations are applied to zotero.org
+        # directly; without one (the server/plugin path) they are only emitted.
+        self.writer_factory = writer_factory
+        self.dry_run = dry_run
+
+    def _build_updates(self, page: list[dict], ops: list[dict]) -> list[dict]:
+        """Full tag lists (Zotero replaces, not merges) with the tag added/removed."""
+        by_key = {i["data"]["key"]: i["data"] for i in page}
+        updates = []
+        for op in ops:
+            data = by_key[op["attachment_key"]]
+            tags = [t for t in data.get("tags", []) if t.get("tag") != self.tag]
+            if op["op"] == OP_ADD:
+                tags.append({"tag": self.tag, "type": 1})
+            updates.append({"key": data["key"], "version": data["version"], "tags": tags})
+        return updates
 
     async def run_library(self, slug: str) -> dict:
         """Reconcile one library; returns its counters. Raises on listing errors."""
@@ -113,6 +131,8 @@ class IndexedTagSync:
         library_type = "user" if slug.startswith("users/") else "group"
         self.emit({"type": "library_start", "library": slug})
         counts = {"attachments_checked": 0, "to_add": 0, "to_remove": 0, "already_correct": 0}
+        if self.writer_factory is not None and not self.dry_run:
+            counts.update(written=0, write_failed=0)
 
         async with self.web_api_factory(slug) as web_api:
             async for page in web_api.iter_attachment_pages(backend_id, library_type):
@@ -131,6 +151,14 @@ class IndexedTagSync:
                 counts["already_correct"] += len(page) - len(ops)
                 if ops:
                     self.emit({"type": "ops", "library": slug, "as_of_seq": as_of_seq, "ops": ops})
+                    if self.writer_factory is not None and not self.dry_run:
+                        async with self.writer_factory(slug) as writer:
+                            outcome = await writer.update_item_tags(
+                                backend_id, self._build_updates(page, ops), library_type
+                            )
+                        counts["written"] += len(outcome["written"])
+                        counts["write_failed"] += len(outcome["failed"])
+                        self.emit({"type": "applied", "library": slug, **outcome})
                 self.emit({"type": "progress", "library": slug, **counts})
 
         self.emit({"type": "library_done", "library": slug, **counts})
@@ -139,6 +167,8 @@ class IndexedTagSync:
     async def run(self, slugs: list[str]) -> dict:
         """Reconcile each library; a failing library is reported, not fatal."""
         totals = {"attachments_checked": 0, "to_add": 0, "to_remove": 0, "already_correct": 0, "libraries_failed": 0}
+        if self.writer_factory is not None and not self.dry_run:
+            totals.update(written=0, write_failed=0)
         for slug in slugs:
             try:
                 counts = await self.run_library(slug)
@@ -148,5 +178,5 @@ class IndexedTagSync:
                 totals["libraries_failed"] += 1
                 continue
             for k, v in counts.items():
-                totals[k] += v
+                totals[k] = totals.get(k, 0) + v
         return totals

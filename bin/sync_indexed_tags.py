@@ -10,11 +10,16 @@ Usage:
     uv run python bin/sync_indexed_tags.py --api-key <read-only-key> [--library-ids users/1 groups/2]
 
 Output is JSON lines (one record per line, flushed per record), on stdout by
-default or appended to --output-file. Record types: start, library_start, ops,
+default or appended to --output-file. Record types: start, library_start, ops, applied,
 progress, library_done, library_error, done, error. The backend runs it with
 --fingerprint (key looked up in the encrypted auto-index store, never passed on
 the command line) and --output-file, and relays the file to the plugin.
 Re-running with nothing changed emits no ``ops`` records.
+
+Manual runs can add --write-api-key <write-scoped-key> to apply the plan to zotero.org
+directly (an ``applied`` record follows each ``ops`` record; the plugin then picks the tags
+up through normal Zotero sync). --dry-run keeps the plan-only behavior even with a write key.
+Without a write key the script only plans, which is what the server/plugin path uses.
 """
 
 import argparse
@@ -35,6 +40,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--api-key", metavar="KEY", help="Read-only Zotero API key (visible in `ps`; prefer --fingerprint on servers).")
     source.add_argument("--fingerprint", metavar="FP", help="Use the stored auto-index key with this fingerprint.")
+    parser.add_argument("--write-api-key", metavar="KEY", default=None,
+                        help="Separate write-scoped Zotero key: apply the planned tag changes to zotero.org directly "
+                             "(manual use; the server path never has one). The read key above still enumerates libraries.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Plan and report only, even if --write-api-key is given.")
     parser.add_argument("--library-ids", nargs="+", metavar="SLUG", help="Restrict to these library slugs (users/<id>, groups/<id>).")
     parser.add_argument("--output-file", metavar="PATH", default=None, help="Append JSON lines here instead of stdout.")
     parser.add_argument("--run-id", default=None, help="Identifier echoed in the start record.")
@@ -105,6 +115,8 @@ async def _main(argv: list[str] | None = None) -> int:
             event_log=IndexEventLog(settings.index_events_path),
             emit=emit,
             web_api_factory=lambda slug: ZoteroWebAPI(api_key=keys[slug]),
+            writer_factory=(lambda slug: ZoteroWebAPI(api_key=args.write_api_key)) if args.write_api_key else None,
+            dry_run=args.dry_run,
         )
         totals = await sync.run(slugs)
         emit({"type": "done", "finished_at": datetime.now(timezone.utc).isoformat(), **totals})

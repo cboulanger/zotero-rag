@@ -42,7 +42,8 @@ def _chunk(lib="1", item="ITEM1", att="ATT1", idx=0, has_content=True) -> Docume
 
 
 def _att(key, tagged=False, parent="PARENT"):
-    return {"data": {"key": key, "parentItem": parent, "tags": [{"tag": INDEXED_TAG_NAME, "type": 1}] if tagged else []}}
+    tags = [{"tag": "user-tag", "type": 0}] + ([{"tag": INDEXED_TAG_NAME, "type": 1}] if tagged else [])
+    return {"data": {"key": key, "version": 3, "parentItem": parent, "tags": tags}}
 
 
 class IndexEventLogTest(unittest.TestCase):
@@ -208,6 +209,60 @@ class IndexedTagSyncTest(unittest.TestCase):
         self.assertEqual([r["library"] for r in records if r["type"] == "library_error"], ["users/1"])
         self.assertEqual(totals["libraries_failed"], 1)
         self.assertEqual(totals["to_add"], 1)
+
+
+class FakeWriter:
+    calls: list = []
+
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return None
+
+    async def update_item_tags(self, library_id, updates, library_type="user"):
+        FakeWriter.calls.append((library_id, library_type, updates))
+        return {"written": [u["key"] for u in updates if u["key"] not in self.fail],
+                "failed": {k: "412" for k in self.fail}}
+
+
+class WriteModeTest(unittest.TestCase):
+    def _sync(self, dry_run=False, fail=()):
+        FakeWriter.calls = []
+        records = []
+        store = MagicMock()
+        store.get_indexed_attachment_keys.side_effect = lambda lib, keys: {"A"} & set(keys)
+        sync = IndexedTagSync(
+            store, MagicMock(last_seq=MagicMock(return_value=1)), records.append,
+            lambda s: FakeWebAPI([[_att("A"), _att("B", tagged=True)]]),
+            writer_factory=lambda s: FakeWriter(fail), dry_run=dry_run,
+        )
+        totals = asyncio.run(sync.run(["users/1"]))
+        return records, totals
+
+    def test_write_key_applies_full_tag_lists_with_versions(self):
+        records, totals = self._sync()
+        (lib, kind, updates), = FakeWriter.calls
+        self.assertEqual((lib, kind), ("u1", "user"))
+        by_key = {u["key"]: u for u in updates}
+        self.assertEqual(by_key["A"]["version"], 3)
+        self.assertEqual([t["tag"] for t in by_key["A"]["tags"]], ["user-tag", INDEXED_TAG_NAME])
+        self.assertEqual(by_key["B"]["tags"], [{"tag": "user-tag", "type": 0}])  # user's own tag kept
+        self.assertEqual((totals["written"], totals["write_failed"]), (2, 0))
+        self.assertIn("applied", [r["type"] for r in records])
+
+    def test_dry_run_plans_but_never_writes(self):
+        records, totals = self._sync(dry_run=True)
+        self.assertEqual(FakeWriter.calls, [])
+        self.assertIn("ops", [r["type"] for r in records])
+        self.assertNotIn("written", totals)
+
+    def test_failed_writes_are_counted_not_fatal(self):
+        _, totals = self._sync(fail=["B"])
+        self.assertEqual((totals["written"], totals["write_failed"]), (1, 1))
 
 
 class LibraryEnumerationTest(unittest.TestCase):

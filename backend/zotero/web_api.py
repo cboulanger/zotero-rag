@@ -179,6 +179,38 @@ class ZoteroWebAPI:
                 return
             start += len(items)
 
+    async def update_item_tags(
+        self,
+        library_id: str,
+        updates: list[dict],
+        library_type: str = "user",
+    ) -> dict:
+        """Write full tag lists for items (needs a write-scoped key).
+
+        ``updates`` are ``{"key", "version", "tags"}`` dicts; the per-item
+        ``version`` makes Zotero reject (412) any item changed since it was read
+        instead of overwriting it. Batched at Zotero's 50-objects-per-write cap.
+        Returns ``{"written": [keys], "failed": {key: message}}``.
+        """
+        await self._ensure_session()
+        url = f"{self._base_url(library_id, library_type)}/items"
+        result: dict = {"written": [], "failed": {}}
+        for i in range(0, len(updates), 50):
+            batch = updates[i : i + 50]
+            async with self.session.post(url, json=batch) as resp:
+                await self._handle_rate_limit(resp)
+                if resp.status != 200:
+                    msg = f"HTTP {resp.status}"
+                    for u in batch:
+                        result["failed"][u["key"]] = msg
+                    continue
+                body = await resp.json()
+            for idx in body.get("successful", {}):
+                result["written"].append(batch[int(idx)]["key"])
+            for idx, err in body.get("failed", {}).items():
+                result["failed"][batch[int(idx)]["key"]] = err.get("message", "write failed")
+        return result
+
     async def get_items_by_keys(
         self,
         library_id: str,
