@@ -4,7 +4,7 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 
 ## How presets are stored
 
-Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The 9 presets documented below ship as bundled defaults in `backend/config/default_presets/`; the backend copies any of them that aren't already present in `<data_path>/presets/` on every startup, but **never overwrites an existing file** there. This means:
+Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The 10 presets documented below ship as bundled defaults in `backend/config/default_presets/`; the backend copies any of them that aren't already present in `<data_path>/presets/` on every startup, but **never overwrites an existing file** there. This means:
 
 - **Editing a preset is just editing its JSON file** — change `top_k`, swap a model name, tune `batch_size`, etc. in `data/presets/<name>.json`. No code change or rebuild needed. An already-running process picks up the edit after a restart (an in-memory cache keeps a loaded preset's *content* fast to re-read for the rest of that process's life — see `backend/config/presets.py`'s module docstring); adding a *new* preset file is picked up immediately, no restart required.
 - **Adding a custom preset** means creating a new `<data_path>/presets/<your-name>.json` matching the schema below. It shows up in `GET /api/config`'s `available_presets` (and the Zotero plugin's preset dropdown) right away.
@@ -29,6 +29,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
+| `runpod` | **No** | `RUNPOD_API_KEY` (shared, admin-set — see below) | any |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -217,6 +218,31 @@ to reduce peak RSS during indexing.
 
 ---
 
+### `runpod` (self-hosted RunPod serverless endpoints)
+
+**Best for:** Self-hosting embedding + LLM inference on pay-per-use, scale-to-zero GPU endpoints you control, as an alternative to depending on KISSKI/MPCDF
+
+**Configuration:**
+
+- Embedding: `intfloat/multilingual-e5-large-instruct` (RunPod remote, `runpod/worker-infinity-embedding`, 1024-dim)
+- LLM: `Qwen/Qwen2.5-7B-Instruct` (RunPod remote, `runpod/worker-vllm`, 32k context)
+- Memory: ~0.5 GB (fully remote)
+- Top-k: 10 chunks / Max chunk: 800 tokens
+
+**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints you provision yourself with `scripts/provision_runpod_endpoints.py <api-key>`. The script is idempotent — re-running it finds existing endpoints by name and sends a lightweight warm-up request to wake them from scale-to-zero, rather than creating duplicates. Endpoint URLs are only known after provisioning, so (like `remote-mpcdf`) they're set at runtime through the admin API rather than being a fixed literal in the preset file — see "Admin: runtime preset switching & shared remote config" below.
+
+**Advantages:**
+
+- Full control over cost and data residency — no dependency on an external academic gateway's rate limits or availability.
+- Pay only for active GPU-seconds; scales to zero between uses.
+- No local GPU or large Python dependencies on the host running zotero-rag itself.
+
+**Trade-offs:** Requires a RunPod account and the provisioning script to be run (and re-run to wake idle endpoints) before use; a cold start after idle time adds latency to the first request. Uses a smaller, self-hosted 7B LLM rather than KISSKI's 70B model — lower answer quality in exchange for independence from KISSKI. Not hot-swappable at runtime with `remote-kisski`/`remote-mpcdf` despite using the same underlying embedding model — this preset's `embedding.model_name` is the full HuggingFace repo id (`intfloat/multilingual-e5-large-instruct`, required by the RunPod worker image) rather than KISSKI's short served-model alias (`multilingual-e5-large-instruct`), so the runtime compatibility check (exact string match) doesn't recognize them as interchangeable even though the vectors are compatible — verify with `scripts/check_embedding_compat.py` before switching.
+
+**Requires:** `RUNPOD_API_KEY`, `RUNPOD_EMBEDDING_BASE_URL`, `RUNPOD_LLM_BASE_URL` — set automatically in `.env` by `scripts/provision_runpod_endpoints.py`, or via `POST /api/config/remote-fields` (admin only, no restart) to apply to an already-running backend.
+
+---
+
 ## Admin: runtime preset switching & shared remote config
 
 Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires a restart to change):
@@ -243,6 +269,7 @@ Both endpoints require an admin — an owner/admin of the server's `AUTHORIZED_G
 | High-memory GPU system (>24 GB), offline | `high-memory` |
 | CPU-only or low memory, offline | `cpu-only` |
 | Cloud server (no GPU) + KISSKI access | `cloud-server-kisski` |
+| Want full cost/data control, willing to self-host on RunPod | `runpod` |
 
 ---
 
@@ -377,6 +404,12 @@ MPCDF_EMBEDDING_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
 MPCDF_EMBEDDING_API_KEY=...
 MPCDF_LLM_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
 MPCDF_LLM_API_KEY=...
+
+# RunPod (runpod) — set automatically by scripts/provision_runpod_endpoints.py;
+# shown here only for the env-var fallback path / manual editing.
+RUNPOD_API_KEY=...
+RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/<embedding-endpoint-id>/openai/v1
+RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/<llm-endpoint-id>/openai/v1
 ```
 
 See `data/presets/*.json` for each preset's actual configuration (or `backend/config/default_presets/*.json` for the bundled defaults before they're copied), and [backend/config/presets.py](../backend/config/presets.py) for the schema (`HardwarePreset`/`EmbeddingConfig`/`LLMConfig`/`RAGConfig`) and loader these files are validated against.
