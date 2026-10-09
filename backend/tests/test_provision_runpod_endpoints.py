@@ -137,5 +137,105 @@ class FindByNameTest(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class EnsureTemplateTest(unittest.TestCase):
+    def test_creates_when_missing(self):
+        client = FakeClient([
+            (200, []),  # GET /templates -> not found
+            (200, {"id": "t_new", "name": "zotero-rag-embedding", "imageName": "img:tag", "env": {"A": "1"}}),  # POST
+        ])
+        result = provision._ensure_template(
+            client, "rp_key", name="zotero-rag-embedding", image="img:tag",
+            env={"A": "1"}, container_disk_gb=20, recreate=False,
+        )
+        self.assertEqual(result["id"], "t_new")
+        method, url, _, body = client.calls[1]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "https://rest.runpod.io/v1/templates")
+        self.assertEqual(body["name"], "zotero-rag-embedding")
+        self.assertEqual(body["imageName"], "img:tag")
+        self.assertEqual(body["env"], {"A": "1"})
+        self.assertTrue(body["isServerless"])
+
+    def test_reuses_matching_existing_template(self):
+        existing = {"id": "t_existing", "name": "zotero-rag-embedding", "imageName": "img:tag", "env": {"A": "1"}}
+        client = FakeClient([(200, [existing])])  # GET /templates -> found
+        result = provision._ensure_template(
+            client, "rp_key", name="zotero-rag-embedding", image="img:tag",
+            env={"A": "1"}, container_disk_gb=20, recreate=False,
+        )
+        self.assertEqual(result["id"], "t_existing")
+        self.assertEqual(len(client.calls), 1)  # only the GET, no create
+
+    def test_warns_but_keeps_existing_on_mismatch_without_recreate(self):
+        existing = {"id": "t_existing", "name": "zotero-rag-embedding", "imageName": "img:OLD", "env": {"A": "1"}}
+        client = FakeClient([(200, [existing])])
+        with self.assertLogs(provision.logger, level="WARNING") as ctx:
+            result = provision._ensure_template(
+                client, "rp_key", name="zotero-rag-embedding", image="img:NEW",
+                env={"A": "1"}, container_disk_gb=20, recreate=False,
+            )
+        self.assertEqual(result["id"], "t_existing")
+        self.assertTrue(any("differs" in msg for msg in ctx.output))
+
+    def test_recreates_on_mismatch_with_recreate_flag(self):
+        existing = {"id": "t_old", "name": "zotero-rag-embedding", "imageName": "img:OLD", "env": {"A": "1"}}
+        client = FakeClient([
+            (200, [existing]),  # GET -> found, mismatched
+            (200, {}),  # DELETE /templates/t_old
+            (200, {"id": "t_new", "name": "zotero-rag-embedding", "imageName": "img:NEW", "env": {"A": "1"}}),  # POST
+        ])
+        result = provision._ensure_template(
+            client, "rp_key", name="zotero-rag-embedding", image="img:NEW",
+            env={"A": "1"}, container_disk_gb=20, recreate=True,
+        )
+        self.assertEqual(result["id"], "t_new")
+        delete_call = client.calls[1]
+        self.assertEqual(delete_call[0], "DELETE")
+        self.assertEqual(delete_call[1], "https://rest.runpod.io/v1/templates/t_old")
+
+
+class EnsureEndpointTest(unittest.TestCase):
+    def test_creates_when_missing(self):
+        client = FakeClient([
+            (200, []),  # GET /endpoints -> not found
+            (200, {"id": "e_new", "name": "zotero-rag-embedding"}),  # POST
+        ])
+        result = provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-embedding", template_id="t1",
+            gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+            data_center_ids=None, recreate=False,
+        )
+        self.assertEqual(result["id"], "e_new")
+        method, url, _, body = client.calls[1]
+        self.assertEqual(method, "POST")
+        self.assertEqual(body["templateId"], "t1")
+        self.assertEqual(body["gpuTypeIds"], ["NVIDIA RTX A4000"])
+        self.assertEqual(body["workersMin"], 0)
+        self.assertEqual(body["workersMax"], 1)
+        self.assertEqual(body["idleTimeout"], 60)
+        self.assertNotIn("dataCenterIds", body)
+
+    def test_includes_data_centers_when_given(self):
+        client = FakeClient([(200, []), (200, {"id": "e_new", "name": "zotero-rag-llm"})])
+        provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-llm", template_id="t1",
+            gpu_type_ids=["NVIDIA RTX A5000"], workers_max=1, idle_timeout=60,
+            data_center_ids=["EU-RO-1", "EU-SE-1"], recreate=False,
+        )
+        _, _, _, body = client.calls[1]
+        self.assertEqual(body["dataCenterIds"], ["EU-RO-1", "EU-SE-1"])
+
+    def test_reuses_existing_endpoint(self):
+        existing = {"id": "e_existing", "name": "zotero-rag-embedding", "templateId": "t1"}
+        client = FakeClient([(200, [existing])])
+        result = provision._ensure_endpoint(
+            client, "rp_key", name="zotero-rag-embedding", template_id="t1",
+            gpu_type_ids=["NVIDIA RTX A4000"], workers_max=1, idle_timeout=60,
+            data_center_ids=None, recreate=False,
+        )
+        self.assertEqual(result["id"], "e_existing")
+        self.assertEqual(len(client.calls), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

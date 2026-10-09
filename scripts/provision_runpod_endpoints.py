@@ -18,6 +18,7 @@ Requires RUNPOD_API_KEY in .env (or pass --api-key).
 """
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
@@ -49,6 +50,8 @@ ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 WARMUP_MAX_SECONDS = 180
 WARMUP_RETRY_INTERVAL_SECONDS = 5
+
+logger = logging.getLogger(__name__)
 
 
 class ProvisionError(RuntimeError):
@@ -87,6 +90,89 @@ def _find_by_name(client: "httpx.Client", api_key: str, resource: str, name: str
         if item.get("name") == name:
             return item
     return None
+
+
+def _ensure_template(
+    client: "httpx.Client",
+    api_key: str,
+    *,
+    name: str,
+    image: str,
+    env: dict,
+    container_disk_gb: int,
+    recreate: bool,
+) -> dict:
+    """Find a template by name, or create it. If one exists with a different
+    image/env and `recreate` is set, delete and recreate it; otherwise warn
+    and keep using the existing one unchanged."""
+    existing = _find_by_name(client, api_key, "templates", name)
+    if existing is not None:
+        mismatched = existing.get("imageName") != image or existing.get("env") != env
+        if not mismatched:
+            return existing
+        if not recreate:
+            logger.warning(
+                "Template '%s' exists but its config differs from requested "
+                "(image=%s vs %s). Keeping existing template — pass --recreate "
+                "to replace it.",
+                name, existing.get("imageName"), image,
+            )
+            return existing
+        _request(client, api_key, "DELETE", f"/templates/{existing['id']}")
+
+    return _request(
+        client, api_key, "POST", "/templates",
+        json_body={
+            "name": name,
+            "imageName": image,
+            "env": env,
+            "containerDiskInGb": container_disk_gb,
+            "isServerless": True,
+        },
+    )
+
+
+def _ensure_endpoint(
+    client: "httpx.Client",
+    api_key: str,
+    *,
+    name: str,
+    template_id: str,
+    gpu_type_ids: list,
+    workers_max: int,
+    idle_timeout: int,
+    data_center_ids: Optional[list],
+    recreate: bool,
+) -> dict:
+    """Find an endpoint by name, or create it referencing template_id. If one
+    exists pointing at a different template and `recreate` is set, delete and
+    recreate it; otherwise warn and keep using the existing one unchanged."""
+    existing = _find_by_name(client, api_key, "endpoints", name)
+    if existing is not None:
+        mismatched = existing.get("templateId") != template_id
+        if not mismatched:
+            return existing
+        if not recreate:
+            logger.warning(
+                "Endpoint '%s' exists but points at a different template "
+                "(templateId=%s vs %s). Keeping existing endpoint — pass "
+                "--recreate to replace it.",
+                name, existing.get("templateId"), template_id,
+            )
+            return existing
+        _request(client, api_key, "DELETE", f"/endpoints/{existing['id']}")
+
+    body = {
+        "name": name,
+        "templateId": template_id,
+        "gpuTypeIds": gpu_type_ids,
+        "workersMin": 0,
+        "workersMax": workers_max,
+        "idleTimeout": idle_timeout,
+    }
+    if data_center_ids:
+        body["dataCenterIds"] = data_center_ids
+    return _request(client, api_key, "POST", "/endpoints", json_body=body)
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
