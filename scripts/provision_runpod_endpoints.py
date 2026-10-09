@@ -21,6 +21,7 @@ import argparse
 import logging
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -278,7 +279,18 @@ def _update_env_file(env_path: Path, values: dict) -> None:
     for key, value in remaining.items():
         lines.append(f"{key}={value}")
 
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    new_content = "\n".join(lines) + "\n"
+    fd, tmp_path = tempfile.mkstemp(dir=env_path.parent, suffix=".tmp", prefix=".env_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(new_content)
+        os.replace(tmp_path, env_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
