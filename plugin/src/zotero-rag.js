@@ -734,7 +734,7 @@ class ZoteroRAGPlugin {
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
 	 * @param {Array<{key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}>} requiredKeys
-	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields.
+	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields; a saved shared field instead dispatches a bubbling `zotero-rag-shared-field-saved` event (detail: `{keyName}`) on `container`.
 	 * @returns {void}
 	 */
 	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
@@ -793,6 +793,11 @@ class ZoteroRAGPlugin {
 					if (result.ok) {
 						/** @type {HTMLInputElement} */ (e.target).value = '';
 						/** @type {HTMLInputElement} */ (e.target).placeholder = 'Configured — enter a new value to replace it';
+						// Let the host pane react (e.g. re-check endpoint health with the new value).
+						container.dispatchEvent(new doc.defaultView.CustomEvent('zotero-rag-shared-field-saved', {
+							bubbles: true,
+							detail: { keyName: keyInfo.key_name },
+						}));
 					}
 				} else {
 					Zotero.Prefs.set(prefKey, value, true);
