@@ -255,7 +255,7 @@ async def update_config(
 
 class EndpointHealth(BaseModel):
     """Readiness of one remote endpoint."""
-    status: str  # "ready" | "cold" | "unreachable"
+    status: str  # "ready" | "cold" | "throttled" | "unreachable" — see backend.utils.endpoint_health
     detail: str
 
 
@@ -283,8 +283,8 @@ def _check_side(provider: Optional[str], model_kwargs: dict, data_path: Path) ->
 @router.get("/config/health", response_model=EndpointHealthResponse)
 def get_endpoint_health() -> EndpointHealthResponse:
     """
-    Readiness (ready / cold / unreachable) of the active preset's remote
-    embedding and LLM endpoints. A side whose config declares no
+    Readiness (ready / cold / throttled / unreachable) of the active
+    preset's remote embedding and LLM endpoints. A side whose config declares no
     ``health_check_provider`` is ``null``. Plain ``def``: the provider checks
     do blocking HTTP, so FastAPI runs this in a thread pool.
     """

@@ -26,7 +26,8 @@ from backend.services.rag_engine import (
 from backend.services.trace_collector import TraceCollector
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.services.embeddings import (
-    EmbeddingAuthenticationError, EmbeddingEndpointUnavailableError, EmbeddingRateLimitExhaustedError,
+    EmbeddingAuthenticationError, EmbeddingConfigurationError, EmbeddingEndpointUnavailableError,
+    EmbeddingRateLimitExhaustedError,
 )
 from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
@@ -336,7 +337,7 @@ async def query_libraries(
         )
 
     except (EmbeddingEndpointUnavailableError, LLMEndpointUnavailableError, LLMConfigurationError,
-            EmbeddingAuthenticationError, EmbeddingRateLimitExhaustedError) as e:
+            EmbeddingAuthenticationError, EmbeddingConfigurationError, EmbeddingRateLimitExhaustedError) as e:
         # The configured remote embedding/LLM provider itself is the problem
         # (unreachable, cold, misconfigured credentials, or rate-limited) —
         # not a bug in this backend, so 503 rather than 500. Each of these

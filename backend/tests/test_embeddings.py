@@ -2,6 +2,7 @@
 Unit tests for embedding service.
 """
 
+import os
 import unittest
 from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
@@ -21,6 +22,7 @@ from openai import (
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
+    EmbeddingConfigurationError,
     EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
@@ -460,9 +462,60 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
                 },
             )
             service = RemoteEmbeddingService(config, api_key="explicit-key", data_path=data_path)
-            with self.assertRaises(ValueError) as ctx:
+            with self.assertRaises(EmbeddingConfigurationError) as ctx:
                 service._get_client()
         self.assertIn("MPCDF_EMBEDDING_BASE_URL", str(ctx.exception))
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_passes_a_bounded_timeout(self, mock_openai_cls):
+        """Without an explicit timeout the openai SDK defaults to a 600s read
+        timeout — observed live: a query against a cold/stuck RunPod
+        embedding endpoint hung with zero feedback for minutes because of
+        this. Mirrors RemoteLLMService._get_openai_client's same default."""
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
+            service = RemoteEmbeddingService(config)
+            service._get_client()
+        self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 120.0)
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_timeout_is_configurable_via_model_kwargs(self, mock_openai_cls):
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai",
+            model_kwargs={"api_key_env": "OPENAI_API_KEY", "timeout": 30},
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
+            service = RemoteEmbeddingService(config)
+            service._get_client()
+        self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 30.0)
+
+    async def test_get_client_raises_configuration_error_when_shared_api_key_unset(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = EmbeddingConfig(
+                model_type="remote",
+                model_name="multilingual-e5-large-instruct",
+                model_kwargs={
+                    "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
+                    "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
+                },
+            )
+            service = RemoteEmbeddingService(config, data_path=Path(tmp))
+            with self.assertRaises(EmbeddingConfigurationError) as ctx:
+                service._get_client()
+        self.assertIn("MPCDF_EMBEDDING_API_KEY", str(ctx.exception))
+
+    async def test_get_client_raises_configuration_error_when_default_api_key_unset(self):
+        config = EmbeddingConfig(model_type="remote", model_name="openai")
+        with patch.dict(os.environ, {}, clear=True):
+            service = RemoteEmbeddingService(config)
+            with self.assertRaises(EmbeddingConfigurationError) as ctx:
+                service._get_client()
+        self.assertIn("OPENAI_API_KEY", str(ctx.exception))
 
     @patch("openai.AsyncOpenAI")
     async def test_embed_text_returns_correct_dimension(self, mock_openai_cls):

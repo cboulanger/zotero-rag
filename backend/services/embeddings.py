@@ -74,6 +74,22 @@ class EmbeddingAuthenticationError(Exception):
     """
 
 
+class EmbeddingConfigurationError(Exception):
+    """Raised when the remote embedding client can't even be constructed
+    because a required API key or base URL isn't configured — e.g. a
+    preset's ``shared_api_key_env``/``shared_base_url_env`` value was never
+    set via POST /api/config/remote-fields, or the default ``api_key_env``
+    is unset.
+
+    Mirrors backend.services.llm.LLMConfigurationError. Distinct from
+    EmbeddingEndpointUnavailableError (which means a working config
+    couldn't *reach* the endpoint): this means the config itself is
+    incomplete. Still a known, classified upstream-provider problem rather
+    than an internal bug, so it gets the same 503 treatment in
+    backend.api.query.
+    """
+
+
 class EmbeddingEndpointUnavailableError(Exception):
     """Raised when the embedding API returns a status code that isn't one of
     the other recognized cases (not a per-item 400, not 401/403, not 429, not
@@ -522,7 +538,7 @@ class RemoteEmbeddingService(EmbeddingService):
             if shared_key_env:
                 api_key = self._api_key or resolve_shared_value(data_path, shared_key_env)
                 if not api_key:
-                    raise ValueError(
+                    raise EmbeddingConfigurationError(
                         f"API key not configured. POST it to /api/config/remote-fields as "
                         f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
                         f"environment variable."
@@ -531,14 +547,14 @@ class RemoteEmbeddingService(EmbeddingService):
                 api_key_env = self.config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
                 api_key = self._api_key or os.getenv(api_key_env)
                 if not api_key:
-                    raise ValueError(
+                    raise EmbeddingConfigurationError(
                         f"API key not found. Set the {api_key_env} environment variable."
                     )
 
             if shared_url_env:
                 base_url = resolve_shared_value(data_path, shared_url_env)
                 if not base_url:
-                    raise ValueError(
+                    raise EmbeddingConfigurationError(
                         f"Base URL not configured. POST it to /api/config/remote-fields as "
                         f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
                         f"environment variable."
@@ -548,12 +564,19 @@ class RemoteEmbeddingService(EmbeddingService):
             else:
                 base_url = self.config.model_kwargs.get("base_url")
 
+            # Explicit, bounded timeout — without this the openai SDK's
+            # default (600s read timeout) applies, so a cold/stuck serverless
+            # endpoint (e.g. RunPod scaled to zero) leaves a live query
+            # hanging with no feedback for up to 10 minutes before the
+            # EmbeddingEndpointUnavailableError handling even kicks in.
+            # Mirrors RemoteLLMService._get_openai_client's same pattern/default.
+            timeout = float(self.config.model_kwargs.get("timeout", 120))
             if base_url:
-                self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-                logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}")
+                self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
+                logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}, timeout={timeout}s")
             else:
-                self._client = AsyncOpenAI(api_key=api_key)
-                logger.debug("OpenAI embeddings client initialised")
+                self._client = AsyncOpenAI(api_key=api_key, timeout=timeout)
+                logger.debug(f"OpenAI embeddings client initialised, timeout={timeout}s")
         return self._client
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:

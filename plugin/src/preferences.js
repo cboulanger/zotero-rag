@@ -282,7 +282,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	/** Whether the active preset declares a provisioning script (from GET /api/config). */
 	let provisionable = false;
 	let provisioning = false;
-	const HEALTH_COLORS = { ready: 'green', cold: 'orange', unreachable: 'red' };
+	const HEALTH_COLORS = { ready: 'green', cold: 'orange', throttled: 'red', unreachable: 'red' };
 
 	/**
 	 * Fetch GET /api/config/health and render one status row per non-null side;
@@ -295,7 +295,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		try {
 			const response = await fetch(`${this.backendURL}/api/config/health`, { headers: this.getAuthHeaders() });
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			/** @type {Record<'embedding'|'llm', {status: 'ready'|'cold'|'unreachable', detail: string}|null>} */
+			/** @type {Record<'embedding'|'llm', {status: 'ready'|'cold'|'throttled'|'unreachable', detail: string}|null>} */
 			const data = await response.json();
 			for (const side of /** @type {const} */ (['embedding', 'llm'])) {
 				const row = healthRows[side];
