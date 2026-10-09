@@ -1,3 +1,18 @@
+# [1.59.0](https://github.com/cboulanger/zotero-rag/compare/v1.58.0...v1.59.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **extraction:** retry kreuzberg RemoteProtocolError like a connect failure ([b5121c5](https://github.com/cboulanger/zotero-rag/commit/b5121c53520595ea2577710a5cace4599c217941))
+* **provisioning:** move provisioning script into bin/, drop uv dependency ([d51c9eb](https://github.com/cboulanger/zotero-rag/commit/d51c9eb2c0959b16028ef2aa0606014534c8b31f))
+
+
+### Features
+
+* Add log rotation on startup and daily for server and cron indexer logs ([#67](https://github.com/cboulanger/zotero-rag/issues/67)) ([352027b](https://github.com/cboulanger/zotero-rag/commit/352027b57163c57edb7da13d78d7378b1c2548fc)), closes [#59](https://github.com/cboulanger/zotero-rag/issues/59)
+* **scripts:** add embedding throughput analyzer with log-rotation support ([b9ddaad](https://github.com/cboulanger/zotero-rag/commit/b9ddaade1f502ca62a11075338054337a2046921)), closes [#67](https://github.com/cboulanger/zotero-rag/issues/67)
+* **security:** Encrypt API keys at rest in admin_settings.json ([#66](https://github.com/cboulanger/zotero-rag/issues/66)) ([2b0f7a6](https://github.com/cboulanger/zotero-rag/commit/2b0f7a603945780c9aa1e366990fead15a6c987c)), closes [#65](https://github.com/cboulanger/zotero-rag/issues/65)
+
 # [1.58.0](https://github.com/cboulanger/zotero-rag/compare/v1.57.0...v1.58.0) (2026-10-09)
 
 
