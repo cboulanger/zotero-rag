@@ -37,6 +37,7 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "cloud-server-kisski",
     "windows-test",
     "remote-mpcdf",
+    "runpod",
 }
 
 
@@ -119,6 +120,28 @@ class TestPresets(unittest.TestCase):
             preset.embedding.model_name,
             get_preset("remote-kisski", self.data_path).embedding.model_name,
         )
+
+    def test_get_preset_runpod_uses_shared_dynamic_fields(self):
+        """runpod has no static base_url — both the embedding and LLM endpoint
+        URLs are only known after scripts/provision_runpod_endpoints.py creates
+        them, so (like remote-mpcdf) they're resolved at request time from the
+        shared admin-set store rather than baked into the preset."""
+        preset = get_preset("runpod", self.data_path)
+
+        self.assertEqual(preset.name, "runpod")
+        self.assertEqual(preset.embedding.model_type, "remote")
+        self.assertEqual(preset.embedding.model_name, "intfloat/multilingual-e5-large-instruct")
+        self.assertNotIn("base_url", preset.embedding.model_kwargs)
+        self.assertEqual(preset.embedding.model_kwargs["shared_base_url_env"], "RUNPOD_EMBEDDING_BASE_URL")
+        self.assertEqual(preset.embedding.model_kwargs["shared_api_key_env"], "RUNPOD_API_KEY")
+        self.assertEqual(preset.llm.model_type, "remote")
+        self.assertEqual(preset.llm.model_name, "Qwen/Qwen2.5-7B-Instruct")
+        self.assertNotIn("base_url", preset.llm.model_kwargs)
+        self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "RUNPOD_LLM_BASE_URL")
+        # Same env var for both — a RunPod account has one stable API key used
+        # by every endpoint it owns (unlike MPCDF's two independent Slurm jobs,
+        # each with its own distinct generated key).
+        self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "RUNPOD_API_KEY")
 
     def test_get_preset_invalid(self):
         """Test getting invalid preset raises error."""

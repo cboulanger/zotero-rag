@@ -1,0 +1,29 @@
+{
+  "description": "Fully remote via self-hosted RunPod serverless endpoints (embedding + LLM, pay-per-use, scale-to-zero). Provision/wake both endpoints with scripts/provision_runpod_endpoints.py before use.",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "intfloat/multilingual-e5-large-instruct",
+    "batch_size": 64,
+    "model_kwargs": {
+      "shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL",
+      "shared_api_key_env": "RUNPOD_API_KEY"
+    }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": ["Qwen/Qwen2.5-7B-Instruct"],
+    "max_context_length": 32768,
+    "max_answer_tokens": 2048,
+    "temperature": 0.7,
+    "model_kwargs": {
+      "shared_base_url_env": "RUNPOD_LLM_BASE_URL",
+      "shared_api_key_env": "RUNPOD_API_KEY"
+    }
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5
+}
