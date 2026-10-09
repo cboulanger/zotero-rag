@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from cryptography.fernet import Fernet
 
 from backend.config.presets import (
     DEFAULT_PRESETS_DIR,
@@ -651,11 +652,11 @@ class TestConfigApi(unittest.TestCase):
         """Switch the active preset to runpod; devel's POST /api/config rejects a
         target preset that has no credentials, so provide them first."""
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(get_settings().data_path, {
+        update_remote_config({
             "RUNPOD_API_KEY": "rp_test",
             "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1",
             "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/def456/openai/v1",
-        })
+        }, data_path=get_settings().data_path)
         r = self.client.post("/api/config", json={"preset_name": "runpod"})
         self.assertEqual(r.status_code, 200, r.text)
 
@@ -697,10 +698,10 @@ class TestConfigApi(unittest.TestCase):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(get_settings().data_path, {
+        update_remote_config({
             "MPCDF_EMBEDDING_BASE_URL": "https://e/v1", "MPCDF_EMBEDDING_API_KEY": "k",
             "MPCDF_LLM_BASE_URL": "https://l/v1", "MPCDF_LLM_API_KEY": "k",
-        })
+        }, data_path=get_settings().data_path)
         r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(
@@ -727,7 +728,8 @@ class TestSwitchablePresets(unittest.TestCase):
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
         s.model_preset = "remote-kisski"
-        s.autoindex_secret = None
+        s.autoindex_secret = Fernet.generate_key().decode()  # shared API keys are stored encrypted
+        s.autoindex_keys_path = Path(self.tmp.name) / "system" / "autoindex_keys.json"
         self.app = app
         from fastapi.testclient import TestClient
         self.client = TestClient(app)
@@ -767,7 +769,7 @@ class TestSwitchablePresets(unittest.TestCase):
 
     def test_shared_creds_via_store(self):
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(get_settings().data_path, MPCDF_ENV)
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
         by = self._names(self.client.get("/api/config").json())
         self.assertIn("remote-mpcdf", by)
 

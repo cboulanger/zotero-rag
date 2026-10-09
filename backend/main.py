@@ -88,6 +88,15 @@ async def lifespan(app: FastAPI):
     if settings.log_file:
         logger.info(f"Logging to file: {settings.log_file}")
 
+    # Encrypt any plaintext shared API keys left over in admin_settings.json.
+    try:
+        from backend.services.admin_settings_store import migrate_plaintext_secrets
+        migrated = migrate_plaintext_secrets()
+        if migrated:
+            logger.info(f"Encrypted {migrated} plaintext shared API key(s) in admin_settings.json")
+    except Exception as e:
+        logger.warning(f"Could not migrate plaintext shared API keys: {e}")
+
     _cache_path = settings.data_path / "system" / "check_indexed_cache.json"
     load_item_cache(_cache_path)
 
@@ -280,7 +289,7 @@ def root(request: Request):
     # this unauthenticated endpoint. `enabled` is False when AUTOINDEX_SECRET is
     # unset (the feature is disabled and no keys can be decrypted). Key counts and
     # live per-run progress live on the authenticated GET /api/autoindex/status.
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_scheduler import read_scheduler_state
     # Re-fetch settings here rather than reusing the module-level `settings`
     # captured once at import time (line 24): that snapshot never reflects
@@ -289,7 +298,7 @@ def root(request: Request):
     # would silently report stale enabled/scheduler state.
     current_settings = get_settings()
     try:
-        store = AutoIndexKeyStore(current_settings.autoindex_keys_path, current_settings.autoindex_secret)
+        store = get_key_store()
         enabled = store.enabled
     except Exception as exc:
         logger.warning("Failed to read auto-index key store: %s", exc)

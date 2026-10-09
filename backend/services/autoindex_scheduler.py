@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from backend.config.settings import Settings
-from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.secret_store import get_key_store
 from backend.services.cron_indexer import read_live_status
 
 logger = logging.getLogger(__name__)
@@ -66,7 +66,7 @@ async def trigger_index_run(
     (interpreter startup, imports), so a second call arriving in that window
     would still see the stale "not running" status without the claim check.
     """
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store(settings)
     if not store.enabled:
         return "disabled"
     async with _trigger_lock:

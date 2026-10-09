@@ -181,7 +181,7 @@ class TestCheckIndexedQueuedStatus(unittest.TestCase):
         self.key_store.enabled = True
         self.key_store.list_metadata.return_value = [{"targets": ["users/1"]}]
         self._key_store_patch = patch(
-            "backend.api.document_upload.AutoIndexKeyStore", return_value=self.key_store
+            "backend.api.document_upload.get_key_store", return_value=self.key_store
         )
         self._key_store_patch.start()
 

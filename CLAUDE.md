@@ -260,6 +260,27 @@ sudo dmesg --since "1 hour ago" | grep -i "oom\|killed process"
 
 **Host swap:** An 8 GB swapfile lives at `/swapfile` (persistent via `/etc/fstab`). It must be set up manually on each new server — it is intentionally not in the deploy scripts because disk capacity varies per host.
 
+## Secrets and Credentials
+
+All encrypted-at-rest secrets go through one module, `backend/services/secret_store.py`.
+Never build a `Fernet`/`AutoIndexKeyStore` or resolve `DATA_PATH` in a call site:
+the module takes `AUTOINDEX_SECRET` and the data directory (`<data_path>/system`) from
+the process settings (environment / `.env`), identically for the backend, the indexer
+and CLI scripts.
+
+- `get_key_store()` -> the encrypted Zotero/embedding key store (`autoindex_keys.json`).
+- `encrypt()`/`decrypt()`, `seal()`/`unseal()` -> Fernet helpers; sealed values are stored as `{"enc": "<token>"}`.
+- Shared remote-config values (`admin_settings.json`, `remote_config`) are read/written with
+  `admin_settings_store.resolve_shared_value(name)` / `update_remote_config({...})`. Every `*_API_KEY`
+  value is encrypted, URLs stay plaintext, and saving a key without `AUTOINDEX_SECRET` raises
+  `SecretsUnavailableError` (HTTP 503 from the API). Plaintext keys from older files are still read and
+  are encrypted at the next write or backend startup.
+
+`bin/provision_runpod_endpoints.py` stores its endpoint URLs this way instead of in `.env`. In a
+container run it inside the container (`podman exec <container> python bin/provision_runpod_endpoints.py`)
+so the data volume is shared. To copy provisioned credentials to another instance, `POST` the values to
+`/api/config/remote-fields` on it (it encrypts them with its own `AUTOINDEX_SECRET`).
+
 ## Migrating Library RAG Data Between Instances
 
 `bin/migrate_library.py` copies one Zotero library's indexed RAG data

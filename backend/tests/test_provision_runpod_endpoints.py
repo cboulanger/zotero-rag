@@ -1,7 +1,9 @@
 """Unit tests for bin/provision_runpod_endpoints.py."""
 
+import contextlib
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,26 @@ _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "bin" / "provision_runpod_e
 _SPEC = importlib.util.spec_from_file_location("provision_runpod_endpoints_script", _SCRIPT_PATH)
 provision = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(provision)
+
+
+@contextlib.contextmanager
+def _isolated_store(secret="auto"):
+    """Point the backend settings (DATA_PATH, AUTOINDEX_SECRET) at a temp dir."""
+    from cryptography.fernet import Fernet
+    from backend.config.settings import reset_settings
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {"DATA_PATH": tmp}
+        if secret == "auto":
+            env["AUTOINDEX_SECRET"] = Fernet.generate_key().decode()
+        with patch.dict("os.environ", env):
+            if secret is None:
+                os.environ.pop("AUTOINDEX_SECRET", None)
+            os.environ.pop("RUNPOD_API_KEY", None)
+            reset_settings()
+            try:
+                yield Path(tmp)
+            finally:
+                reset_settings()
 
 
 class ParseArgsTest(unittest.TestCase):
@@ -451,48 +473,6 @@ class WarmUpTest(unittest.TestCase):
         self.assertEqual(len(client.calls), 3)
 
 
-class UpdateEnvFileTest(unittest.TestCase):
-    def test_creates_file_when_missing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
-            content = env_path.read_text()
-        self.assertIn("RUNPOD_API_KEY=rp_key\n", content)
-
-    def test_appends_new_keys_to_existing_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            env_path.write_text("EXISTING_VAR=value\n")
-            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
-            content = env_path.read_text()
-        self.assertIn("EXISTING_VAR=value\n", content)
-        self.assertIn("RUNPOD_API_KEY=rp_key\n", content)
-
-    def test_replaces_existing_key_in_place(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            env_path.write_text("RUNPOD_API_KEY=old_key\nOTHER_VAR=keep_me\n")
-            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "new_key"})
-            lines = env_path.read_text().splitlines()
-        self.assertIn("RUNPOD_API_KEY=new_key", lines)
-        self.assertIn("OTHER_VAR=keep_me", lines)
-        self.assertNotIn("RUNPOD_API_KEY=old_key", lines)
-        self.assertEqual(len(lines), 2)  # no duplicate line added
-
-    def test_handles_file_without_trailing_newline(self):
-        """Regression guard: a blind `>>` append onto a file with no trailing
-        newline would concatenate onto the last line instead of starting a
-        new one — see this project's documented worktree .env hazard."""
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            env_path.write_text("EXISTING_VAR=value")  # no trailing newline
-            provision._update_env_file(env_path, {"RUNPOD_API_KEY": "rp_key"})
-            lines = env_path.read_text().splitlines()
-        self.assertIn("EXISTING_VAR=value", lines)
-        self.assertIn("RUNPOD_API_KEY=rp_key", lines)
-        self.assertEqual(len(lines), 2)
-
-
 class TeardownTest(unittest.TestCase):
     def test_deletes_existing_endpoint_and_template(self):
         client = FakeClient([
@@ -567,7 +547,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(len(client.calls), 0)  # nothing was even looked up
 
-    def test_provision_path_creates_both_and_writes_env(self):
+    def test_provision_path_creates_both_and_writes_store(self):
         client = FakeClient([
             (200, []),  # embedding: GET templates -> none
             (200, {"id": "t_emb", "name": provision.EMBEDDING_TEMPLATE_NAME,
@@ -583,15 +563,51 @@ class RunTest(unittest.TestCase):
             (200, {"choices": [{"message": {"content": "hi"}}]}),  # llm warm-up
         ])
         args = provision._parse_args([])
-        with tempfile.TemporaryDirectory() as tmp:
-            env_path = Path(tmp) / ".env"
-            with patch.object(provision, "ENV_PATH", env_path):
-                exit_code = provision._run(args, api_key="rp_key", client=client)
-            env_content = env_path.read_text()
+        with _isolated_store() as data_path:
+            exit_code = provision._run(args, api_key="rp_key", client=client)
+            from backend.services.admin_settings_store import get_remote_config_value, read_admin_settings
+            self.assertEqual(
+                get_remote_config_value("RUNPOD_EMBEDDING_BASE_URL"),
+                "https://api.runpod.ai/v2/e_emb/openai/v1",
+            )
+            self.assertEqual(
+                get_remote_config_value("RUNPOD_LLM_BASE_URL"),
+                "https://api.runpod.ai/v2/e_llm/openai/v1",
+            )
+            self.assertEqual(get_remote_config_value("RUNPOD_API_KEY"), "rp_key")
+            raw = (data_path / "system" / "admin_settings.json").read_text()
+            self.assertNotIn("rp_key", raw)  # key is encrypted at rest
+            self.assertIn("api.runpod.ai/v2/e_emb", raw)  # URLs stay readable
         self.assertEqual(exit_code, 0)
-        self.assertIn("RUNPOD_API_KEY=rp_key", env_content)
-        self.assertIn("RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/e_emb/openai/v1", env_content)
-        self.assertIn("RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/e_llm/openai/v1", env_content)
+
+    def test_provision_path_does_not_touch_env_file(self):
+        client = FakeClient(self._success_responses())
+        args = provision._parse_args([])
+        with _isolated_store(), tempfile.TemporaryDirectory() as tmp, \
+                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"):
+            provision._run(args, api_key="rp_key", client=client)
+            self.assertFalse((Path(tmp) / ".env").exists())
+
+    def test_key_already_visible_to_backend_is_not_stored(self):
+        client = FakeClient(self._success_responses())
+        args = provision._parse_args([])
+        with _isolated_store() as data_path:
+            with patch.dict("os.environ", {"RUNPOD_API_KEY": "rp_key"}):
+                provision._run(args, api_key="rp_key", client=client)
+            from backend.services.admin_settings_store import read_admin_settings
+            self.assertNotIn("RUNPOD_API_KEY", read_admin_settings(data_path)["remote_config"])
+
+    def test_missing_secret_still_stores_urls_but_not_key(self):
+        client = FakeClient(self._success_responses())
+        args = provision._parse_args([])
+        with _isolated_store(secret=None) as data_path:
+            with self.assertLogs(provision.logger, level="WARNING"):
+                exit_code = provision._run(args, api_key="rp_key", client=client)
+            from backend.services.admin_settings_store import read_admin_settings
+            cfg = read_admin_settings(data_path)["remote_config"]
+        self.assertEqual(exit_code, 0)
+        self.assertIn("RUNPOD_LLM_BASE_URL", cfg)
+        self.assertNotIn("RUNPOD_API_KEY", cfg)
 
     def _success_responses(self):
         return [
@@ -615,9 +631,7 @@ class RunTest(unittest.TestCase):
         client = FakeClient(self._success_responses())
         args = provision._parse_args(argv)
         buf = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
-                contextlib.redirect_stdout(buf):
+        with _isolated_store(), contextlib.redirect_stdout(buf):
             exit_code = provision._run(args, api_key="rp_key", client=client)
         return exit_code, buf.getvalue()
 
@@ -698,14 +712,14 @@ class RunBackendPushTest(unittest.TestCase):
         client = FakeClient(self._success_responses() + [backend_response])
         args = provision._parse_args(argv)
         buf = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
+        with _isolated_store() as data_path, \
                 patch.dict(provision.os.environ, env or {}, clear=False), \
                 contextlib.redirect_stdout(buf):
             exit_code = provision._run(args, api_key="rp_key", client=client)
+            self.local_store_written = (data_path / "system" / "admin_settings.json").exists()
         return exit_code, buf.getvalue(), client
 
-    def test_backend_url_applies_values_and_skips_curl_hint(self):
+    def test_backend_url_applies_values_and_skips_local_store(self):
         exit_code, out, client = self._run_with_backend(
             ["--backend-url", "http://localhost:8119"], (200, {}),
             env={provision.BACKEND_ADMIN_KEY_ENV: "zk"},
@@ -716,15 +730,15 @@ class RunBackendPushTest(unittest.TestCase):
         self.assertEqual(headers["X-Zotero-API-Key"], "zk")
         self.assertEqual(body["values"]["RUNPOD_LLM_BASE_URL"], "https://api.runpod.ai/v2/e_llm/openai/v1")
         self.assertIn("Applied the new endpoint URLs", out)
-        self.assertNotIn("curl -X POST", out)
+        self.assertFalse(self.local_store_written)
 
-    def test_backend_rejection_falls_back_to_curl_hint_but_still_succeeds(self):
+    def test_backend_rejection_fails_the_run(self):
         with self.assertLogs(provision.logger, level="WARNING"):
             exit_code, out, _ = self._run_with_backend(
                 ["--backend-url", "http://b"], (400, {"detail": "Unknown remote-config key(s)"}),
             )
-        self.assertEqual(exit_code, 0)
-        self.assertIn("curl -X POST", out)
+        self.assertEqual(exit_code, 1)
+        self.assertFalse(self.local_store_written)
 
     def test_backend_url_from_env(self):
         exit_code, out, client = self._run_with_backend(
@@ -737,9 +751,7 @@ class RunBackendPushTest(unittest.TestCase):
         args = provision._parse_args(["--json", "--backend-url", "http://b"])
         import contextlib
         import io
-        with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
-                contextlib.redirect_stdout(io.StringIO()):
+        with _isolated_store(), contextlib.redirect_stdout(io.StringIO()):
             exit_code = provision._run(args, api_key="rp_key", client=client)
         self.assertEqual(exit_code, 0)
         self.assertFalse(any("remote-fields" in c[1] for c in client.calls))
@@ -750,15 +762,16 @@ class ProvisioningKeyAndJsonModeTest(unittest.TestCase):
         env = {"PROVISIONING_API_KEY": "rpa_ONCE", "RUNPOD_API_KEY": "rpa_STORED"}
         self.assertEqual(provision._resolve_api_key(None, env=env), "rpa_ONCE")
 
-    def test_json_mode_does_not_write_env_file(self):
+    def test_json_mode_does_not_write_env_file_or_store(self):
         import contextlib
         import io
         client = FakeClient(RunTest._success_responses(None))
         args = provision._parse_args(["--json"])
-        with tempfile.TemporaryDirectory() as tmp:
+        with _isolated_store() as data_path, tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
             with patch.object(provision, "ENV_PATH", env_path), \
                     contextlib.redirect_stdout(io.StringIO()):
                 exit_code = provision._run(args, api_key="rp_key", client=client)
             self.assertEqual(exit_code, 0)
             self.assertFalse(env_path.exists())
+            self.assertFalse((data_path / "system" / "admin_settings.json").exists())

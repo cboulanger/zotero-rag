@@ -51,12 +51,10 @@ _TEST_GROUP_LIBRARY_ID = "6297749"  # test-rag-plugin — see CLAUDE.md
 
 def _get_keys() -> tuple[str, dict[str, str]]:
     """Return (zotero_api_key, {header_name: value}) without ever printing them."""
-    from backend.config.settings import get_settings
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.embeddings import env_var_to_header
 
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         raise SystemExit("[FAIL] AUTOINDEX_SECRET is not set; cannot decrypt stored keys.")
 

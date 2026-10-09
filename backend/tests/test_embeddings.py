@@ -375,10 +375,10 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_path = Path(tmp)
-            update_remote_config(data_path, {
+            update_remote_config({
                 "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1",
                 "MPCDF_EMBEDDING_API_KEY": "store-key",
-            })
+            }, data_path=data_path)
             with patch.dict(os.environ, {"MPCDF_EMBEDDING_BASE_URL": "https://should-not-be-used/v1"}):
                 config = EmbeddingConfig(
                     model_type="remote",
@@ -403,10 +403,10 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             data_path = Path(tmp)
-            update_remote_config(data_path, {
+            update_remote_config({
                 "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc123",
                 "MPCDF_EMBEDDING_API_KEY": "store-key",
-            })
+            }, data_path=data_path)
             config = EmbeddingConfig(
                 model_type="remote",
                 model_name="multilingual-e5-large-instruct",

@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 # would consume 10+ GB RAM and crash the host.
 os.environ.setdefault("TESTING", "true")
 
+# Shared API keys in admin_settings.json are encrypted with AUTOINDEX_SECRET and
+# cannot be stored without it; give the test process a throwaway one.
+if "AUTOINDEX_SECRET" not in os.environ:
+    from cryptography.fernet import Fernet as _Fernet
+    os.environ["AUTOINDEX_SECRET"] = _Fernet.generate_key().decode()
+
 # Add backend to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 

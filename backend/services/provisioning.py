@@ -84,7 +84,9 @@ async def start_job(script: str, api_key: Optional[str] = None) -> asyncio.subpr
 
 
 async def await_job(
-    proc: asyncio.subprocess.Process, data_path: Path, extra_config: Optional[dict] = None,
+    proc: asyncio.subprocess.Process,
+    extra_config: Optional[dict] = None,
+    data_path: Optional[Path] = None,
 ) -> None:
     """Wait for the subprocess and record the outcome; never leaves state 'running'.
 
@@ -102,7 +104,7 @@ async def await_job(
         if values is None:
             _finish("failed", "Provisioning script did not report a result.")
             return
-        update_remote_config(data_path, {**values, **(extra_config or {})})
+        update_remote_config({**values, **(extra_config or {})}, data_path=data_path)
         _finish("succeeded", None)
     except Exception as exc:
         logger.exception("Provisioning job failed")
