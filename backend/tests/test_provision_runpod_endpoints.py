@@ -743,3 +743,22 @@ class RunBackendPushTest(unittest.TestCase):
             exit_code = provision._run(args, api_key="rp_key", client=client)
         self.assertEqual(exit_code, 0)
         self.assertFalse(any("remote-fields" in c[1] for c in client.calls))
+
+
+class ProvisioningKeyAndJsonModeTest(unittest.TestCase):
+    def test_provisioning_key_takes_priority_over_runpod_api_key(self):
+        env = {"PROVISIONING_API_KEY": "rpa_ONCE", "RUNPOD_API_KEY": "rpa_STORED"}
+        self.assertEqual(provision._resolve_api_key(None, env=env), "rpa_ONCE")
+
+    def test_json_mode_does_not_write_env_file(self):
+        import contextlib
+        import io
+        client = FakeClient(RunTest._success_responses(None))
+        args = provision._parse_args(["--json"])
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            with patch.object(provision, "ENV_PATH", env_path), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                exit_code = provision._run(args, api_key="rp_key", client=client)
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(env_path.exists())

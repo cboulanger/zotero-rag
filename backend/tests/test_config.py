@@ -670,18 +670,27 @@ class TestConfigApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertTrue(r.json()["is_set"]["RUNPOD_EMBEDDING_BASE_URL"])
 
-    def test_required_keys_lists_the_shared_api_key_before_the_shared_base_urls_for_runpod(self):
-        """RUNPOD_API_KEY is shared by both the embedding and LLM config, so
-        it should appear first in the Preferences pane — entering it once is
-        easier than entering it in between the two URL fields."""
+    def test_required_keys_omits_provisioned_base_urls_for_runpod(self):
+        """runpod's endpoint URLs come from POST /api/config/provision, so the
+        Preferences pane only asks for the shared API key."""
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         self._switch_to_runpod()
         r = self.client.get("/api/required-keys")
         key_names = [k["key_name"] for k in r.json()["keys"]]
-        self.assertEqual(
-            key_names, ["RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"]
-        )
+        self.assertEqual(key_names, ["RUNPOD_API_KEY"])
+
+    def test_provisionable_preset_is_switchable_without_shared_values(self):
+        """A fresh runpod setup has no stored URLs/key yet; the switch must
+        still be allowed, since provisioning (only offered once runpod is
+        active) is what supplies them."""
+        from backend.services.zotero_identity import ZoteroIdentity
+        self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
+        with patch.dict(os.environ, {}, clear=False):
+            for name in ("RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"):
+                os.environ.pop(name, None)
+            r = self.client.post("/api/config", json={"preset_name": "runpod"})
+        self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_without_declared_pattern_accepts_any_value(self):
         """mpcdf fields declare no pattern — no regression in the unconstrained case."""

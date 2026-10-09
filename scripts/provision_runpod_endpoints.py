@@ -489,23 +489,21 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
             _warm_up_llm(client, api_key, llm_base_url, args.llm_model, llm_endpoint["id"])
         print(f"LLM endpoint ready: {llm_base_url}")
 
-        _update_env_file(ENV_PATH, {
-            "RUNPOD_API_KEY": api_key,
-            "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
-            "RUNPOD_LLM_BASE_URL": llm_base_url,
-        })
         backend_values = {
             "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
             "RUNPOD_LLM_BASE_URL": llm_base_url,
         }
         if getattr(args, "json", False):
+            # The backend launched this script and stores the URLs itself;
+            # writing .env (incl. a possibly one-time key) would only leave a
+            # stray copy of the key in the server's checkout.
             print("PROVISION_RESULT: " + json.dumps(backend_values))
+            return 0
+        _update_env_file(ENV_PATH, {"RUNPOD_API_KEY": api_key, **backend_values})
         print(f"\nWrote RUNPOD_API_KEY / RUNPOD_EMBEDDING_BASE_URL / RUNPOD_LLM_BASE_URL to {ENV_PATH}")
 
-        # In --json mode the backend itself launched this script and applies
-        # PROVISION_RESULT on its own; pushing back to it would be redundant.
         backend_url = args.backend_url or os.environ.get(BACKEND_URL_ENV)
-        if backend_url and not getattr(args, "json", False):
+        if backend_url:
             if _push_to_backend(
                 client, backend_url, os.environ.get(BACKEND_ADMIN_KEY_ENV), backend_values,
             ):
@@ -575,8 +573,9 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--json", action="store_true",
-        help="Also print one machine-readable 'PROVISION_RESULT: {...}' line "
-             "(the preset's shared base-URL env vars) on success",
+        help="Backend mode: print one machine-readable 'PROVISION_RESULT: {...}' "
+             "line (the preset's shared base-URL env vars) on success instead of "
+             "writing .env or applying them to a backend",
     )
     parser.add_argument(
         "--backend-url", default=None,
@@ -592,11 +591,13 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
 
 
 def _resolve_api_key(cli_value: Optional[str], env: Optional[dict] = None) -> str:
-    """Resolve the RunPod API key: --api-key flag, then RUNPOD_API_KEY env var."""
+    """Resolve the RunPod API key: --api-key flag, then PROVISIONING_API_KEY
+    (a one-time key the backend's "Provision endpoints" button passes in),
+    then RUNPOD_API_KEY."""
     if cli_value:
         return cli_value
     source = env if env is not None else os.environ
-    key = source.get("RUNPOD_API_KEY")
+    key = source.get("PROVISIONING_API_KEY") or source.get("RUNPOD_API_KEY")
     if not key:
         raise ProvisionError(
             "No RunPod API key found. Pass --api-key or set RUNPOD_API_KEY in .env."

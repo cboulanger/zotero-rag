@@ -278,20 +278,27 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		llm: doc.getElementById('zotero-rag-endpoint-health-llm'),
 	};
 	const provisionButton = /** @type {HTMLButtonElement | null} */ (doc.getElementById('zotero-rag-provision-endpoints'));
+	const provisionRow = doc.getElementById('zotero-rag-provision-row');
+	const provisionHelp = doc.getElementById('zotero-rag-provision-help');
+	const provisionKeyInput = /** @type {HTMLInputElement | null} */ (doc.getElementById('zotero-rag-provision-key'));
 	const provisionStatus = doc.getElementById('zotero-rag-provision-status');
 	/** Whether the active preset declares a provisioning script (from GET /api/config). */
 	let provisionable = false;
 	let provisioning = false;
 	const HEALTH_COLORS = { ready: 'green', cold: 'orange', throttled: 'red', unreachable: 'red' };
+	/** Statuses provisioning can fix; a "cold" endpoint wakes on the next request by itself. */
+	const NEEDS_PROVISIONING = new Set(['unreachable', 'throttled']);
 
 	/**
 	 * Fetch GET /api/config/health and render one status row per non-null side;
-	 * show the "Provision endpoints" button when the preset is provisionable and
-	 * a side is not ready. Failures degrade to showing no rows.
+	 * show the "Provision endpoints" row when the preset is provisionable and
+	 * a side needs provisioning (see NEEDS_PROVISIONING). Failures degrade to
+	 * showing no rows.
 	 * @returns {Promise<boolean>} true if every reported side is ready
 	 */
 	const refreshEndpointHealth = async () => {
 		let allReady = true;
+		let needsProvisioning = false;
 		try {
 			const response = await fetch(`${this.backendURL}/api/config/health`, { headers: this.getAuthHeaders() });
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -306,6 +313,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					continue;
 				}
 				if (info.status !== 'ready') allReady = false;
+				if (NEEDS_PROVISIONING.has(info.status)) needsProvisioning = true;
 				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}`;
 				row.style.color = HEALTH_COLORS[info.status] || '';
 				row.title = info.detail || '';
@@ -314,10 +322,11 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			this.log('Could not fetch endpoint health: ' + e);
 			for (const row of Object.values(healthRows)) if (row) row.textContent = '';
 		}
-		if (provisionButton) {
-			provisionButton.hidden = !provisionable;
-			provisionButton.disabled = provisioning || allReady;
-		}
+		// Stay visible while a job runs, so its progress isn't yanked away mid-run.
+		const showProvisioning = provisionable && (needsProvisioning || provisioning);
+		if (provisionRow) provisionRow.hidden = !showProvisioning;
+		if (provisionHelp) provisionHelp.hidden = !showProvisioning;
+		if (provisionButton) provisionButton.disabled = provisioning;
 		return allReady;
 	};
 
@@ -327,9 +336,14 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			provisionButton.disabled = true;
 			if (provisionStatus) provisionStatus.textContent = 'Provisioning\u2026';
 			try {
+				// A one-time key, sent with this request only: the backend hands it to
+				// the provisioning script and never stores it.
+				const provisioningKey = provisionKeyInput ? provisionKeyInput.value.trim() : '';
+				if (provisionKeyInput) provisionKeyInput.value = '';
 				const start = await fetch(`${this.backendURL}/api/config/provision`, {
 					method: 'POST',
-					headers: this.getAuthHeaders(),
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify(provisioningKey ? { api_key: provisioningKey } : {}),
 				});
 				if (!start.ok) {
 					const err = await start.json().catch(() => ({}));

@@ -60,8 +60,15 @@
     <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
     <html:div class="setting-description" id="zotero-rag-endpoint-health-embedding"></html:div>
     <html:div class="setting-description" id="zotero-rag-endpoint-health-llm"></html:div>
-    <html:div class="setting-row">
-      <html:button id="zotero-rag-provision-endpoints" hidden="hidden">Provision endpoints</html:button>
+    <html:div class="setting-row" id="zotero-rag-provision-row" hidden="hidden">
+      <html:label for="zotero-rag-provision-key">Provisioning key:</html:label>
+      <html:input type="password" id="zotero-rag-provision-key" class="setting-input"
+                  placeholder="Optional — used once, never stored"/>
+      <html:button id="zotero-rag-provision-endpoints">Provision endpoints</html:button>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-provision-help" hidden="hidden">
+      Creating endpoints may need a key with broader rights than the one used for queries.
+      Leave empty to use the stored API key.
     </html:div>
     <html:div class="setting-description" id="zotero-rag-provision-status"></html:div>
   </html:fieldset>
