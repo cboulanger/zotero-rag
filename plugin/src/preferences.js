@@ -404,7 +404,24 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		await refreshEndpointHealth();
 	};
 
+	/**
+	 * Refresh everything that depends on the active preset after a switch
+	 * (made here or in another window).
+	 * @returns {Promise<void>}
+	 */
+	const applyPresetSwitch = async () => {
+		await refreshPresetState();
+		// The new preset likely needs different dynamic fields filled in right away.
+		await this.fetchRequiredApiKeys();
+		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
+	};
+
 	if (presetSelect) {
+		// A switch from the auto-index status dialog must show up here too.
+		this.observePresetChanged(_window, 'preferences', () => {
+			if (presetStatus) presetStatus.textContent = '';
+			applyPresetSwitch();
+		});
 		presetSelect.addEventListener('change', async (e) => {
 			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
 			if (presetStatus) presetStatus.textContent = 'Switching…';
@@ -421,10 +438,8 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					return;
 				}
 				if (presetStatus) presetStatus.textContent = 'Switched.';
-				await refreshPresetState();
-				// The new preset likely needs different dynamic fields filled in right away.
-				await this.fetchRequiredApiKeys();
-				this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
+				this.notifyPresetChanged('preferences');
+				await applyPresetSwitch();
 			} catch (e) {
 				if (presetStatus) presetStatus.textContent = `Error: ${e}`;
 			}

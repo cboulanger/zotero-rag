@@ -395,7 +395,15 @@ function statusElements() {
 
 function widgetDialog(els) {
 	const dialog = loadDialog(els);
-	dialog.plugin = { backendURL: 'http://x', getAuthHeaders: () => ({}), isClientIndexingActive: () => false };
+	dialog.plugin = {
+		backendURL: 'http://x',
+		getAuthHeaders: () => ({}),
+		isClientIndexingActive: () => false,
+		/** @type {string[]} */
+		presetNotifications: [],
+		/** @param {string} source */
+		notifyPresetChanged(source) { this.presetNotifications.push(source); },
+	};
 	dialog.renderLibraries = () => {};
 	dialog.renderProblems = () => {};
 	dialog.renderSystemHealth = () => {};
@@ -518,4 +526,6 @@ test('switchPreset POSTs, then refreshes presets and status on success', async (
 	assert.ok(calls.some((c) => c.url.endsWith('/api/autoindex/status')));
 	assert.ok(calls.filter((c) => c.url.endsWith('/api/config') && c.method === 'GET').length === 1);
 	assert.strictEqual(dialog.rateLimitHeaders, null);
+	// Other open windows (the Preferences pane) are told to refresh.
+	assert.deepStrictEqual([...dialog.plugin.presetNotifications], ['autoindex-status']);
 });

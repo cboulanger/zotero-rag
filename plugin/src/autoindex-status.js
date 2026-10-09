@@ -183,6 +183,15 @@ var ZoteroRAGAutoIndexStatus = {
 		if (presetSelect) {
 			presetSelect.addEventListener('change', () => this.switchPreset(presetSelect.value));
 		}
+		// A switch made in the Preferences pane must show up here too.
+		if (this.plugin) {
+			this.plugin.observePresetChanged(window, 'autoindex-status', () => {
+				this.rateLimitHeaders = null;
+				this.rateLimitFallbackTried = false;
+				this.loadSwitchablePresets();
+				this.fetchAndRender();
+			});
+		}
 
 		window.addEventListener('unload', () => {
 			if (this.refreshTimer !== null) {
@@ -496,6 +505,7 @@ var ZoteroRAGAutoIndexStatus = {
 				return;
 			}
 			if (status) status.textContent = 'Switched.';
+			this.plugin.notifyPresetChanged('autoindex-status');
 			// Cached limits belong to the previous preset.
 			this.rateLimitHeaders = null;
 			this.rateLimitFallbackTried = false;

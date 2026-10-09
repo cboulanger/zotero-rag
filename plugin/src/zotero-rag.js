@@ -150,6 +150,9 @@ function errorDiag(err, includeDiagnostics) {
 	return { backendDiag: (err && err.diagnostics) ?? null, pluginDiag: (err && err.pluginDiag) ?? null };
 }
 
+/** Observer topic for cross-window preset-switch notifications. */
+const PRESET_CHANGED_TOPIC = 'zotero-rag:preset-changed';
+
 class ZoteroRAGPlugin {
 	constructor() {
 		/** @type {string|null} */
@@ -660,6 +663,37 @@ class ZoteroRAGPlugin {
 		this.log(`LLM: [${llm.model_type}] ${llm.model_name}${llm.base_url ? ` @ ${llm.base_url}` : ''} (ctx ${llm.max_context_length}, temp ${llm.temperature})`);
 		this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
 		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
+	}
+
+	/**
+	 * Tell every open plugin window (Preferences pane, auto-index status
+	 * dialog) that the backend's active preset changed, so each can refresh
+	 * its own view. `source` identifies the sender, which ignores its own
+	 * notification (see observePresetChanged).
+	 * @param {string} source
+	 * @returns {void}
+	 */
+	notifyPresetChanged(source) {
+		Services.obs.notifyObservers(null, PRESET_CHANGED_TOPIC, source);
+	}
+
+	/**
+	 * Call `callback` whenever another window reports a preset switch via
+	 * notifyPresetChanged. The observer is removed when `win` unloads.
+	 * @param {Window} win - Window whose lifetime bounds the subscription
+	 * @param {string} source - This window's sender id; its own notifications are ignored
+	 * @param {() => void} callback
+	 * @returns {void}
+	 */
+	observePresetChanged(win, source, callback) {
+		const observer = {
+			/** @param {unknown} _subject @param {string} _topic @param {string} data */
+			observe: (_subject, _topic, data) => {
+				if (data !== source) callback();
+			},
+		};
+		Services.obs.addObserver(observer, PRESET_CHANGED_TOPIC);
+		win.addEventListener('unload', () => Services.obs.removeObserver(observer, PRESET_CHANGED_TOPIC), { once: true });
 	}
 
 	/**
