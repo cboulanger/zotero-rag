@@ -13,8 +13,15 @@ Usage:
     uv run python scripts/provision_runpod_endpoints.py
     uv run python scripts/provision_runpod_endpoints.py --llm-model Qwen/Qwen2.5-14B-Instruct
     uv run python scripts/provision_runpod_endpoints.py --teardown
+    uv run python scripts/provision_runpod_endpoints.py --backend-url http://localhost:8119
 
 Requires RUNPOD_API_KEY in .env (or pass --api-key).
+
+With --backend-url (or ZOTERO_RAG_BACKEND_URL in .env), the new endpoint
+URLs are also applied to that running backend via
+POST /api/config/remote-fields. A backend with AUTHORIZED_GROUP_ID set
+requires an admin's Zotero API key in ZOTERO_RAG_ADMIN_KEY (read from the
+environment/.env only, never a CLI flag, so it can't leak via `ps`).
 """
 
 import argparse
@@ -65,6 +72,9 @@ DEFAULT_WORKERS_MAX = 1
 DEFAULT_IDLE_TIMEOUT = 60
 
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+BACKEND_URL_ENV = "ZOTERO_RAG_BACKEND_URL"
+BACKEND_ADMIN_KEY_ENV = "ZOTERO_RAG_ADMIN_KEY"
 
 WARMUP_MAX_SECONDS = 180
 WARMUP_RETRY_INTERVAL_SECONDS = 5
@@ -385,6 +395,41 @@ def _confirm_teardown(*, resource_names: list, yes: bool, interactive: bool) -> 
     return answer == "y"
 
 
+def _push_to_backend(
+    client: "httpx.Client", backend_url: str, admin_key: Optional[str], values: dict,
+) -> bool:
+    """Apply the shared base URLs to a running backend via
+    POST /api/config/remote-fields. Returns True on success. Never raises:
+    the endpoints are already provisioned at this point, so a failure here
+    is logged as a warning and the caller falls back to printing the manual
+    curl command."""
+    url = f"{backend_url.rstrip('/')}/api/config/remote-fields"
+    headers = {"Content-Type": "application/json"}
+    if admin_key:
+        headers["X-Zotero-API-Key"] = admin_key
+    try:
+        response = client.request(
+            "POST", url, headers=headers, json={"values": values}, timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Could not reach backend at %s: %s", url, exc)
+        return False
+    if 200 <= response.status_code < 300:
+        return True
+    hint = ""
+    if response.status_code in (401, 403) and not admin_key:
+        hint = f" (set {BACKEND_ADMIN_KEY_ENV} to an admin's Zotero API key)"
+    elif response.status_code == 400:
+        # The endpoint only accepts keys declared by the backend's *active*
+        # preset, so this is expected while it isn't `runpod` yet.
+        hint = " (is the backend's active preset 'runpod'?)"
+    logger.warning(
+        "Backend rejected the update: %s %s%s",
+        response.status_code, response.text[:300], hint,
+    )
+    return False
+
+
 def _endpoint_base_url(endpoint_id: str) -> str:
     """Build the OpenAI-compatible base URL for a RunPod serverless endpoint."""
     return f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
@@ -449,12 +494,24 @@ def _run(args: argparse.Namespace, *, api_key: str, client: "httpx.Client") -> i
             "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
             "RUNPOD_LLM_BASE_URL": llm_base_url,
         })
+        backend_values = {
+            "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
+            "RUNPOD_LLM_BASE_URL": llm_base_url,
+        }
         if getattr(args, "json", False):
-            print("PROVISION_RESULT: " + json.dumps({
-                "RUNPOD_EMBEDDING_BASE_URL": embedding_base_url,
-                "RUNPOD_LLM_BASE_URL": llm_base_url,
-            }))
+            print("PROVISION_RESULT: " + json.dumps(backend_values))
         print(f"\nWrote RUNPOD_API_KEY / RUNPOD_EMBEDDING_BASE_URL / RUNPOD_LLM_BASE_URL to {ENV_PATH}")
+
+        # In --json mode the backend itself launched this script and applies
+        # PROVISION_RESULT on its own; pushing back to it would be redundant.
+        backend_url = args.backend_url or os.environ.get(BACKEND_URL_ENV)
+        if backend_url and not getattr(args, "json", False):
+            if _push_to_backend(
+                client, backend_url, os.environ.get(BACKEND_ADMIN_KEY_ENV), backend_values,
+            ):
+                print(f"Applied the new endpoint URLs to the backend at {backend_url}.")
+                return 0
+
         print("\nTo apply these to an already-running backend without a restart:")
         print(f"""
 curl -X POST https://<host>/api/config/remote-fields \\
@@ -520,6 +577,12 @@ def _parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         "--json", action="store_true",
         help="Also print one machine-readable 'PROVISION_RESULT: {...}' line "
              "(the preset's shared base-URL env vars) on success",
+    )
+    parser.add_argument(
+        "--backend-url", default=None,
+        help=f"Also apply the new endpoint URLs to this running backend "
+             f"(e.g. http://localhost:8119; default: {BACKEND_URL_ENV} from .env). "
+             f"An admin key, if required, is read from {BACKEND_ADMIN_KEY_ENV}.",
     )
     parser.add_argument(
         "--skip-warmup", action="store_true",

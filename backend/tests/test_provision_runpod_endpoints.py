@@ -656,3 +656,90 @@ class RunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushToBackendTest(unittest.TestCase):
+    VALUES = {"RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/e/openai/v1"}
+
+    def test_posts_values_with_admin_key_header(self):
+        client = FakeClient([(200, {"is_set": {}})])
+        ok = provision._push_to_backend(client, "http://localhost:8119/", "zk", self.VALUES)
+        self.assertTrue(ok)
+        method, url, headers, body = client.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(url, "http://localhost:8119/api/config/remote-fields")
+        self.assertEqual(headers["X-Zotero-API-Key"], "zk")
+        self.assertEqual(body, {"values": self.VALUES})
+
+    def test_omits_key_header_without_admin_key(self):
+        client = FakeClient([(200, {})])
+        self.assertTrue(provision._push_to_backend(client, "http://b", None, self.VALUES))
+        self.assertNotIn("X-Zotero-API-Key", client.calls[0][2])
+
+    def test_returns_false_on_rejection_and_hints_at_admin_key(self):
+        client = FakeClient([(401, {"detail": "unauthorized"})])
+        with self.assertLogs(provision.logger, level="WARNING") as logs:
+            ok = provision._push_to_backend(client, "http://b", None, self.VALUES)
+        self.assertFalse(ok)
+        self.assertIn(provision.BACKEND_ADMIN_KEY_ENV, logs.output[0])
+
+    def test_returns_false_on_connection_error(self):
+        client = FakeClient([httpx.ConnectError("refused")])
+        with self.assertLogs(provision.logger, level="WARNING"):
+            self.assertFalse(provision._push_to_backend(client, "http://b", "zk", self.VALUES))
+
+
+class RunBackendPushTest(unittest.TestCase):
+    _success_responses = RunTest._success_responses
+
+    def _run_with_backend(self, argv, backend_response, env=None):
+        import contextlib
+        import io
+        client = FakeClient(self._success_responses() + [backend_response])
+        args = provision._parse_args(argv)
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
+                patch.dict(provision.os.environ, env or {}, clear=False), \
+                contextlib.redirect_stdout(buf):
+            exit_code = provision._run(args, api_key="rp_key", client=client)
+        return exit_code, buf.getvalue(), client
+
+    def test_backend_url_applies_values_and_skips_curl_hint(self):
+        exit_code, out, client = self._run_with_backend(
+            ["--backend-url", "http://localhost:8119"], (200, {}),
+            env={provision.BACKEND_ADMIN_KEY_ENV: "zk"},
+        )
+        self.assertEqual(exit_code, 0)
+        method, url, headers, body = client.calls[-1]
+        self.assertEqual(url, "http://localhost:8119/api/config/remote-fields")
+        self.assertEqual(headers["X-Zotero-API-Key"], "zk")
+        self.assertEqual(body["values"]["RUNPOD_LLM_BASE_URL"], "https://api.runpod.ai/v2/e_llm/openai/v1")
+        self.assertIn("Applied the new endpoint URLs", out)
+        self.assertNotIn("curl -X POST", out)
+
+    def test_backend_rejection_falls_back_to_curl_hint_but_still_succeeds(self):
+        with self.assertLogs(provision.logger, level="WARNING"):
+            exit_code, out, _ = self._run_with_backend(
+                ["--backend-url", "http://b"], (400, {"detail": "Unknown remote-config key(s)"}),
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertIn("curl -X POST", out)
+
+    def test_backend_url_from_env(self):
+        exit_code, out, client = self._run_with_backend(
+            [], (200, {}), env={provision.BACKEND_URL_ENV: "http://envhost"},
+        )
+        self.assertEqual(client.calls[-1][1], "http://envhost/api/config/remote-fields")
+
+    def test_json_mode_never_pushes_to_backend(self):
+        client = FakeClient(self._success_responses())  # no extra response queued
+        args = provision._parse_args(["--json", "--backend-url", "http://b"])
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(provision, "ENV_PATH", Path(tmp) / ".env"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            exit_code = provision._run(args, api_key="rp_key", client=client)
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(any("remote-fields" in c[1] for c in client.calls))
