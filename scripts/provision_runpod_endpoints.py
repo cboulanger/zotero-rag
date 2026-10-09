@@ -132,6 +132,14 @@ def _ensure_template(
                 name, "; ".join(diffs),
             )
             return existing
+        # RunPod refuses to delete a template that's still associated with an
+        # endpoint ("Template is associated with AI API <id>", observed live).
+        # This project always names a resource's template and endpoint
+        # identically, so the endpoint (if any) referencing this template is
+        # the one sharing this same `name` — delete it first.
+        referencing_endpoint = _find_by_name(client, api_key, "endpoints", name)
+        if referencing_endpoint is not None:
+            _request(client, api_key, "DELETE", f"/endpoints/{referencing_endpoint['id']}")
         _request(client, api_key, "DELETE", f"/templates/{existing['id']}")
 
     return _request(

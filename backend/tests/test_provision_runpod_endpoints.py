@@ -187,7 +187,8 @@ class EnsureTemplateTest(unittest.TestCase):
     def test_recreates_on_mismatch_with_recreate_flag(self):
         existing = {"id": "t_old", "name": "zotero-rag-embedding", "imageName": "img:OLD", "env": {"A": "1"}}
         client = FakeClient([
-            (200, [existing]),  # GET -> found, mismatched
+            (200, [existing]),  # GET templates -> found, mismatched
+            (200, []),  # GET endpoints -> no referencing endpoint
             (200, {}),  # DELETE /templates/t_old
             (200, {"id": "t_new", "name": "zotero-rag-embedding", "imageName": "img:NEW", "env": {"A": "1"}}),  # POST
         ])
@@ -196,9 +197,39 @@ class EnsureTemplateTest(unittest.TestCase):
             env={"A": "1"}, container_disk_gb=20, recreate=True,
         )
         self.assertEqual(result["id"], "t_new")
-        delete_call = client.calls[1]
+        delete_call = client.calls[2]
         self.assertEqual(delete_call[0], "DELETE")
         self.assertEqual(delete_call[1], "https://rest.runpod.io/v1/templates/t_old")
+
+    def test_recreate_deletes_referencing_endpoint_before_the_template(self):
+        """RunPod refuses to delete a template that's still associated with an
+        endpoint ("Template is associated with AI API <id>") — observed live
+        when recreating a template whose endpoint hadn't been removed first.
+        Since this project always names a resource's template and endpoint
+        identically, _ensure_template can look up and delete that endpoint
+        itself before deleting the template."""
+        existing_template = {"id": "t_old", "name": "zotero-rag-llm", "imageName": "img:OLD", "env": {"A": "1"}}
+        existing_endpoint = {"id": "e_old", "name": "zotero-rag-llm", "templateId": "t_old"}
+        client = FakeClient([
+            (200, [existing_template]),  # GET templates -> found, mismatched
+            (200, [existing_endpoint]),  # GET endpoints -> found, references t_old
+            (200, {}),  # DELETE /endpoints/e_old
+            (200, {}),  # DELETE /templates/t_old
+            (200, {"id": "t_new", "name": "zotero-rag-llm", "imageName": "img:NEW", "env": {"A": "1"}}),  # POST
+        ])
+        result = provision._ensure_template(
+            client, "rp_key", name="zotero-rag-llm", image="img:NEW",
+            env={"A": "1"}, container_disk_gb=40, recreate=True,
+        )
+        self.assertEqual(result["id"], "t_new")
+        methods_and_urls = [(c[0], c[1]) for c in client.calls]
+        self.assertEqual(methods_and_urls, [
+            ("GET", "https://rest.runpod.io/v1/templates"),
+            ("GET", "https://rest.runpod.io/v1/endpoints"),
+            ("DELETE", "https://rest.runpod.io/v1/endpoints/e_old"),
+            ("DELETE", "https://rest.runpod.io/v1/templates/t_old"),
+            ("POST", "https://rest.runpod.io/v1/templates"),
+        ])
 
 
 class EnsureEndpointTest(unittest.TestCase):
