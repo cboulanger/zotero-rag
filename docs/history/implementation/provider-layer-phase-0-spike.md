@@ -18,7 +18,9 @@ them were deleted, and the account was re-listed afterwards (the two existing en
 | Can an endpoint be created with `workersMax=0`? | **No.** `POST /v1/endpoints` with `workersMax:0` returns HTTP 500 with an empty body. Create with at least 1, then PATCH |
 | Restore | `PATCH {"workersMax":1}` returns 200 (not re-tested against a live request, to avoid starting a worker) |
 | RunPod: can an endpoint-restricted key list endpoints? | **Not tested.** Needs a restricted key from the user (see "Needs you") |
-| Hugging Face (TEI batching and model echo, vLLM model name, scale-to-zero default and minimum, error of a paused endpoint, `huggingface_hub` versus REST) | **Not tested.** No HF credentials in this environment, and `huggingface.co` / `api.endpoints.huggingface.cloud` are blocked by the session's network policy (CONNECT returns 403) |
+| Hugging Face: can an endpoint be created? | **Not with this account.** `POST /v2/endpoint/cmboulanger` returns `403 {"error":"Forbidden: Payment method required for namespace: cmboulanger","code":"FORBIDDEN"}`; `whoami` shows `canPay: false`. The token itself is fine (fine-grained, includes `inference.endpoints.write`). The three organisations the account belongs to answer 403 on the endpoints API (the token is scoped to the user entity), and creating endpoints there would bill someone else, so nothing was created |
+| Hugging Face: `huggingface_hub` versus plain REST | **Decision: plain `httpx` REST.** See "Hugging Face findings" |
+| Hugging Face: TEI batching and echoed model name, vLLM served model name, data-plane error of a paused endpoint, scale-to-zero minimum, "stuck in Initializing" | **Not tested.** Needs a running endpoint (blocked by the payment method) and `*.endpoints.huggingface.cloud` is not unblocked, so the data plane is unreachable from this session anyway |
 | MPCDF `GET {base}/models` | **Not tested.** No job available, and `llm.mpcdf.mpg.de` is blocked by the session's network policy |
 
 ## Other facts recorded
@@ -38,6 +40,53 @@ them were deleted, and the account was re-listed afterwards (the two existing en
 - Every create and update call succeeded on the first try apart from the `workersMax:0`
   creation.
 
+## Hugging Face findings (read-only, plus SDK source)
+
+Management API base `https://api.endpoints.huggingface.cloud/v2`; the session proxy injects the
+token for that host and for `huggingface.co`. Everything below was read from the live API or from
+the `huggingface_hub` 2.2.0 source (installed in a scratch venv outside the repo).
+
+- **REST routes** (all under `/endpoint/{namespace}`): `POST` create; `GET` list; `GET /{name}`
+  fetch; `PUT /{name}` update; `DELETE /{name}`; `POST /{name}/pause`; `POST /{name}/resume`;
+  `POST /{name}/scale-to-zero`. Also `GET /provider` for the instance catalog.
+- **Create payload:** `{"name", "type", "provider":{"vendor","region"}, "compute":{"accelerator",
+  "instanceType","instanceSize","scaling":{"minReplica","maxReplica","scaleToZeroTimeout"}},
+  "model":{"repository","revision","framework","task","image":{...},"env","secrets"}}`.
+  `scaleToZeroTimeout` is in minutes. Image is a variant dict forwarded as-is: `{"tei":{...}}`,
+  `{"tgi":{...}}`, `{"vLLM":{"url","port"}}`, `sGLang`, `llamacpp`, `hfServe`, or a flat custom image.
+- **Endpoint `type`** is now `authenticated` (default), `public` or `private`; the old `protected`
+  is rejected by the SDK.
+- **Scale to zero is opt-in:** `min_replica` defaults to 1 and `scale_to_zero_timeout` to none, so
+  the provider must set `minReplica: 0` and a timeout explicitly. There is also a manual
+  `scale-to-zero` call, distinct from `pause`: a scaled-to-zero endpoint restarts on the next request,
+  a paused one needs an explicit resume and is not billed.
+- **Statuses (SDK enum):** `pending`, `initializing`, `updating`, `updateFailed`, `running`,
+  `paused`, `failed`, `scaledToZero`. The spec's mapping lacked `updating` and `updateFailed`.
+- **Status object** (read from the account's two old paused endpoints): `state`, `message`, `url`,
+  `readyReplica`, `targetReplica`, `lastUsedAt`, `createdAt/By`, `updatedAt/By`. A paused endpoint
+  keeps its `url`, so `endpoint_url()` also works while paused.
+- **Catalog and prices** (`GET /provider`, hourly): `eu-west-1` offers only GPUs `nvidia-t4` x1
+  (16 GB, US$0.50) and `nvidia-a10g` x1 (24 GB, US$1.00), plus Intel Sapphire Rapids CPU instances
+  from US$0.033/h. **`nvidia-l4` is not available in `eu-west-1`** (it exists in `us-east-1`, US$0.80,
+  and GCP `us-east4`, US$0.70). Other: `us-east-1` L40S US$1.80, A100 US$2.50; GCP `us-east4` A100
+  US$3.60, H100 US$10. Every instance reports `quota.maxAccelerators: 0`; whether that is an enforced
+  quota or just "not set" could not be told without a payment method.
+- **Why REST, not the SDK:** the repo's lockfile pins `huggingface-hub` 0.36.0 only transitively via
+  the optional local-model extras (transformers requires `<1.0`), so adopting the 2.x SDK would add a
+  direct dependency that conflicts with them; the API has already changed under the SDK (`protected`
+  removed, image variants added); the SDK needs a locally available token even to resolve the namespace
+  (`whoami`); and the REST surface needed is eight routes. `httpx` is already a dependency.
+- **Token permissions:** a fine-grained token distinguishes `inference.endpoints.write` (manage
+  endpoints) from `inference.endpoints.infer.write` (call them). A token with only the second may be
+  unable to look an endpoint up by name, which is the same restricted-key question as for RunPod and
+  could not be tested without a second token.
+- **Not reachable from the session:** `*.endpoints.huggingface.cloud` (the data plane) is blocked by
+  the network policy, so no request could be sent to an endpoint, even a paused one.
+
+Other idea noted, not pursued: the catalog lists cheap Sapphire Rapids CPU instances; the original
+problem was slow CPU embedding on a no-AVX-512 host, so TEI on a CPU endpoint is worth measuring later
+as a very cheap embedding option.
+
 ## Consequences for the design
 
 1. **RunPod keeps Pause** (`supports_suspend = True`), implemented as `PATCH workersMax=0`.
@@ -52,14 +101,23 @@ them were deleted, and the account was re-listed afterwards (the two existing en
 4. **`provision()` for RunPod must create with `workersMax >= 1` and then PATCH**, and its
    resume path restores `workersMax` from the options with a PATCH.
 
+5. **Hugging Face creation needs a payment method** on the namespace (HTTP 403 with that text).
+   The provider must turn this into a clear message ("add a payment method to your Hugging Face
+   account"), and the descriptor help already tells users billing is required.
+6. **The spec's preset placeholders were wrong for the EU:** `nvidia-l4` does not exist in
+   `eu-west-1`. The embedding side should use `nvidia-t4` and the 7B LLM side `nvidia-a10g`.
+
 ## Needs you (cannot be done from this environment)
 
 1. **Restricted-key listing.** Create a RunPod API key restricted to one endpoint, then run
    `curl -sS -H "Authorization: Bearer $RESTRICTED_KEY" https://rest.runpod.io/v1/endpoints`
    and report: HTTP status and whether the list contains that endpoint only, all endpoints,
    or nothing. This decides whether `endpoint_url()` can work for restricted keys.
-2. **Hugging Face.** With a token and billing enabled (or after allowing the HF hosts in the
-   environment's network policy and providing a token), run the checks in plan Task 0.2
-   Step 1 and Step 2 against the smallest GPU, and delete everything afterwards.
+2. **Hugging Face live checks.** Add a payment method to the account (or provide a token for a
+   namespace that has one) and unblock `*.endpoints.huggingface.cloud`; then the remaining checks
+   (TEI batching and echoed model name, the model name a vLLM image serves, the data-plane error of
+   a paused endpoint, the scale-to-zero minimum, cold-start behaviour) take about ten minutes on a
+   US$0.50/h T4 and cost cents. A token restricted to `inference.endpoints.infer.write` would also
+   settle the lookup question.
 3. **MPCDF.** With a live job, `curl -H "Authorization: Bearer $KEY" "$BASE/models"` for a
    valid key, a wrong key, and after the job has expired.

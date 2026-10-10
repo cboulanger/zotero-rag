@@ -155,7 +155,7 @@ Illustrative mixed presets (not bundled by this spec):
 { "version": 2, "description": "Hugging Face embeddings, Anthropic answers",
   "embedding": { "model_type": "remote", "model_name": "intfloat/multilingual-e5-large-instruct",
                  "model_kwargs": { "api_key_env": "HF_TOKEN" },
-                 "provider": { "id": "huggingface", "options": { "instance": "nvidia-l4" } } },
+                 "provider": { "id": "huggingface", "options": { "instance": "nvidia-t4" } } },
   "llm": { "model_type": "remote", "model_names": ["claude-sonnet-5-5"],
            "provider": { "id": "anthropic" } },
   "...": "rag, memory_budget_gb, platform as usual" }
@@ -1103,19 +1103,28 @@ instance and owns one endpoint.
   Existing with a differing config: warn, or recreate with `--recreate`. Then wait
   with a bound, send a warm-up request, and return `{}` (the URL is derived).
   Emits progress steps for each phase (creating, initializing, warming up).
-- **`health()`:** one management-API call. `running` maps to `ready`;
-  `scaledToZero`, `pending`, `initializing` map to `cold`; `paused` maps to
-  `paused`; `failed` or an API error maps to `unreachable`; an absent endpoint is
-  `unreachable` with "not provisioned". No data-plane probe is needed, unlike
-  RunPod.
+- **`health()`:** one management-API call (`GET /endpoint/{ns}/{name}`).
+  `running` maps to `ready`; `scaledToZero`, `pending`, `initializing`, `updating`
+  map to `cold`; `paused` maps to `paused`; `failed`, `updateFailed` or an API error
+  maps to `unreachable`; an absent endpoint is `unreachable` with "not
+  provisioned". No data-plane probe is needed, unlike RunPod.
 - **`classify_http_error()`:** treats the 502 observed during scale-from-zero as
   `cold`, and the error a paused endpoint returns (to be confirmed) as `paused`.
 - **`suspend()`:** `supports_suspend = True`; calls `.pause()` on the endpoint.
   Idempotent. `provision()` resumes a paused endpoint, so Resume needs no extra code.
 - **`teardown()`:** deletes the endpoint; an absent endpoint is a no-op. CLI only.
-- **Dependency:** use `huggingface_hub` if its endpoint API is stable enough to
-  justify it, imported lazily inside this module only. Otherwise plain `httpx`
-  REST, as RunPod does. Decide in the spike.
+- **Dependency (decided in the Phase 0 spike): plain `httpx` REST**, as RunPod does,
+  against `https://api.endpoints.huggingface.cloud/v2`. The routes, all under
+  `/endpoint/{namespace}`, are `POST` create, `GET` list, `GET|PUT|DELETE /{name}`
+  and `POST /{name}/pause|resume|scale-to-zero`. `huggingface_hub` is not used: it
+  is only a transitive dependency of the optional local-model extras (locked at
+  0.36, which transformers constrains below 1.0), the endpoint API has already
+  changed under it, and it needs a local token even to resolve the namespace.
+- **Scale to zero is opt-in on the API:** the provider must send `minReplica: 0`
+  and an explicit `scaleToZeroTimeout` (minutes); the API default is no scaling to
+  zero. Endpoints are created with `type: "authenticated"`.
+- **Creation errors:** a namespace without a payment method gets HTTP 403 "Payment
+  method required for namespace"; `provision()` turns it into a clear message.
 
 ### C3. Preset (`backend/config/default_presets/huggingface.json`)
 
@@ -1130,7 +1139,7 @@ instance and owns one endpoint.
     "model_kwargs": { "api_key_env": "HF_TOKEN" },
     "provider": { "id": "huggingface", "options": {
       "vendor": "aws", "region": "eu-west-1", "engine": "tei",
-      "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 } }
+      "instance": "nvidia-t4", "scale_to_zero_timeout_min": 15 } }
   },
   "llm": {
     "model_type": "remote",
@@ -1141,7 +1150,7 @@ instance and owns one endpoint.
     "model_kwargs": { "api_key_env": "HF_TOKEN" },
     "provider": { "id": "huggingface", "options": {
       "vendor": "aws", "region": "eu-west-1", "engine": "vllm",
-      "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 } }
+      "instance": "nvidia-a10g", "scale_to_zero_timeout_min": 15 } }
   },
   "rag": { "top_k": 10, "score_threshold": 0.35, "max_chunk_size": 800 },
   "memory_budget_gb": 0.5,
@@ -1149,14 +1158,18 @@ instance and owns one endpoint.
 }
 ```
 
-Region, instance names and the scale-to-zero timeout are placeholders to confirm
-against the live service. Both sides use the user's one `HF_TOKEN`, so the plugin
+Region and instance names come from the live catalog (Phase 0 spike): `eu-west-1`
+offers only `nvidia-t4` (16 GB, US$0.50/h) and `nvidia-a10g` (24 GB, US$1.00/h) as
+GPUs, so the 560M-parameter embedding model uses the T4 and the 7B LLM the A10G;
+`nvidia-l4` is not offered in that region. The scale-to-zero timeout value is still
+a placeholder to confirm. Both sides use the user's one `HF_TOKEN`, so the plugin
 shows a single credential field.
 
 ### C4. Cost note for the preset description
 
-HF bills per instance-hour; indicative AWS single-GPU rates are L4 $0.80/h, A10G
-$1.00/h, L40S $1.80/h, A100-80G $2.50/h. RunPod serverless bills per second, so
+HF bills per instance-hour. Live catalog rates (Phase 0 spike): in `eu-west-1`
+T4 $0.50/h and A10G $1.00/h; in `us-east-1` L4 $0.80/h, L40S $1.80/h, A100-80G
+$2.50/h; Intel CPU instances from $0.033/h. RunPod serverless bills per second, so
 for bursty use (a few queries a day) it is likely cheaper, and HF's longer idle
 tail is the main cost risk. For sustained indexing runs HF's hourly rates are
 competitive. These figures come from third-party summaries and must be
@@ -1205,11 +1218,13 @@ presets, and one-time provisioning keys that are never saved).
 - What served model name does vLLM on HF Endpoints report (the container loads from
   `/repository`)? The provider may need to supply the on-the-wire model name
   separately from the preset's `model_names`.
-- Real default and minimum for HF's scale-to-zero timeout, whether the idle tail is
-  really 15 minutes, and whether the reported "stuck in Initializing after wake-up"
-  issue needs a resume-and-recheck loop in `provision()`.
-- EU region and GPU availability, and whether GDPR hosting should be the default.
-- `huggingface_hub` versus plain REST for the HF provider (C2).
+- The minimum `scaleToZeroTimeout` HF accepts and whether the idle tail equals it
+  (the API default is no scale to zero), and whether the reported "stuck in
+  Initializing after wake-up" issue needs a resume-and-recheck loop in
+  `provision()`.
+- Whether GDPR hosting should be the default (`eu-west-1` is available but offers
+  only T4 and A10G), and whether the CPU instances (Sapphire Rapids, from $0.033/h)
+  are worth measuring for embeddings.
 - MPCDF (B2d): does a live job answer an authenticated `GET {base}/models`, and does
   a rejected key return 401 or 403? Is there any job API worth building
   provisioning on?
