@@ -69,6 +69,15 @@ var ZoteroRAGDialog = {
 	/** True while the initial backend connectivity check is in flight. */
 	isConnecting: false,
 
+	/** @type {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null} Last GET /api/config/health */
+	endpointHealth: null,
+	/** @type {any} Pending health re-check timer */
+	_healthTimer: null,
+	_healthClosed: false,
+	/** Whether a warm-up was already requested for the current cold spell. */
+	_warmupSent: false,
+
+
 	/** Whether the active embedding service supports rate limits (remote model). */
 	rateLimitAvailable: false,
 
@@ -223,6 +232,8 @@ var ZoteroRAGDialog = {
 			this.plugin = window.arguments[0].plugin;
 			this.plugin._dialogInstance = this;
 			window.addEventListener('unload', () => {
+				this._healthClosed = true;
+				clearTimeout(this._healthTimer);
 				if (this.plugin._dialogInstance === this) {
 					this.plugin._dialogInstance = null;
 				}
@@ -356,6 +367,7 @@ var ZoteroRAGDialog = {
 		this.isConnecting = false;
 		this.hideProgress();
 		this.loadPresetConfig();
+		this.refreshEndpointHealth();
 		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
@@ -757,6 +769,81 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * What keeps the current action from running because a remote endpoint it needs is
+	 * not ready (pure). Indexing needs the embedding side; a question needs both.
+	 * @param {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null|undefined} health - GET /api/config/health
+	 * @param {boolean} indexOnly - Whether the action is indexing (no answering model needed)
+	 * @returns {{message: string, retryMs: number}|null} null when nothing blocks
+	 */
+	describeEndpointBlock(health, indexOnly) {
+		if (!health) return null;
+		/** @type {Array<['embedding'|'llm', string]>} */
+		const sides = [['embedding', 'embedding model']];
+		if (!indexOnly) sides.push(['llm', 'answering model']);
+		for (const [side, label] of sides) {
+			const h = health[side];
+			if (!h) continue;
+			if (h.status === 'cold') {
+				return { message: `Starting the ${label} - this can take a minute or two...`, retryMs: 5000 };
+			}
+			if (h.status === 'paused') {
+				return { message: `The ${label} endpoint is paused. Resume it in the Zotero RAG preferences.`, retryMs: 15000 };
+			}
+			if (h.status === 'unreachable') {
+				return { message: `The ${label} is not available${h.detail ? `: ${h.detail}` : ''}`, retryMs: 15000 };
+			}
+		}
+		return null;
+	},
+
+	/**
+	 * Check the remote endpoints and keep the footer status and Submit/Index button in step
+	 * with them; polls until they are ready. The first time an endpoint is found cold, asks
+	 * the backend to wake it, so it is up by the time the user has typed the question.
+	 * @returns {Promise<void>}
+	 */
+	async refreshEndpointHealth() {
+		if (!this.plugin || this._healthClosed) return;
+		clearTimeout(this._healthTimer);
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config/health`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			this.endpointHealth = response.ok ? await response.json() : null;
+		} catch (_) {
+			this.endpointHealth = null; // an unreachable backend is reported elsewhere
+		}
+		const anyCold = !!this.endpointHealth && ['embedding', 'llm'].some((s) => this.endpointHealth[s]?.status === 'cold');
+		if (anyCold && !this._warmupSent) {
+			this._warmupSent = true;
+			fetch(`${this.plugin.backendURL}/api/config/warmup`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			}).catch(() => {});
+		}
+		if (!anyCold) this._warmupSent = false; // a later cold start is woken again
+		this.updateSubmitButtonState();
+		// Poll while either side is not ready, whichever action is selected: the user may switch.
+		const pending = this.describeEndpointBlock(this.endpointHealth, false);
+		if (pending && !this._healthClosed) {
+			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending.retryMs);
+		}
+	},
+
+	/**
+	 * Show the endpoint status left of the buttons and report whether it blocks the action.
+	 * @returns {boolean} True when the action must stay disabled
+	 */
+	applyEndpointBlock() {
+		const el = document.getElementById('endpoint-status');
+		const block = this.describeEndpointBlock(this.endpointHealth, this.isIndexOnlyMode());
+		if (el) {
+			el.textContent = block ? block.message : '';
+		}
+		return !!block;
+	},
+
+	/**
 	 * Sync submit button label and question input state to current selection.
 	 * - All selected libraries unindexed → button = "Index", question disabled
 	 * - Otherwise                         → button = "Submit", question enabled
@@ -812,6 +899,7 @@ var ZoteroRAGDialog = {
 			}
 			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
 		}
+		if (this.applyEndpointBlock()) submitButton.disabled = true;
 		this.updateRateLimitDisplay();
 	},
 
@@ -2227,7 +2315,7 @@ var ZoteroRAGDialog = {
 			document.getElementById('submit-button')
 		);
 		if (submitButton) {
-			submitButton.disabled = !enabled;
+			submitButton.disabled = !enabled || (enabled && this.applyEndpointBlock());
 		}
 	},
 

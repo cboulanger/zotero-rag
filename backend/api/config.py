@@ -13,7 +13,7 @@ import re
 
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
-from backend.dependencies import get_zotero_identity, require_authorized_group_admin
+from backend.dependencies import get_client_api_keys, get_zotero_identity, require_authorized_group_admin
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.effective_preset import is_compatible
@@ -555,6 +555,56 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
         embedding=_check_side(preset, "embedding", request),
         llm=_check_side(preset, "llm", request),
     )
+
+
+_warmup_tasks: set = set()
+#: (side, caller) -> time of the last warm-up request, so reopening the dialog does not repeat it.
+_last_warmup: Dict[Tuple[str, str], float] = {}
+WARMUP_MIN_INTERVAL_SECONDS = 120.0
+
+
+async def _send_warmup(side: str, client_keys: Dict[str, str]) -> None:
+    """One minimal real request, through the same service a query uses; the outcome is ignored."""
+    from backend.dependencies import make_embedding_service, make_llm_service
+
+    try:
+        if side == "embedding":
+            await make_embedding_service(client_keys).embed_text("ping")
+        else:
+            await make_llm_service(client_keys).generate("hi", max_tokens=1)
+    except Exception as exc:  # the request only has to reach the endpoint to wake it
+        logger.info("Warm-up of the %s endpoint ended with %s: %s", side, type(exc).__name__, exc)
+
+
+@router.post("/config/warmup", status_code=202)
+async def warm_up_endpoints(request: Request, client_keys: Dict[str, str] = Depends(get_client_api_keys)) -> dict:
+    """Wake the caller's cold (scaled-to-zero) endpoints in the background.
+
+    Meant for the moment a user opens the question dialog: the first query then
+    finds a running endpoint. Only sides reported ``cold`` are touched (a paused
+    or unprovisioned endpoint is not woken by a request, and a ready one needs
+    nothing), each at most once per ``WARMUP_MIN_INTERVAL_SECONDS`` and caller.
+    Returns the sides being warmed.
+    """
+    import time
+
+    preset = get_settings().get_hardware_preset()
+    identity = get_zotero_identity(request)
+    caller = str(identity.user_id) if identity else "local"
+    warming: List[str] = []
+    for side in ("embedding", "llm"):
+        health = await asyncio.to_thread(_check_side, preset, side, request)
+        if health is None or health.status != "cold":
+            continue
+        now = time.monotonic()
+        if now - _last_warmup.get((side, caller), -WARMUP_MIN_INTERVAL_SECONDS) < WARMUP_MIN_INTERVAL_SECONDS:
+            continue
+        _last_warmup[(side, caller)] = now
+        task = asyncio.create_task(_send_warmup(side, dict(client_keys)))
+        _warmup_tasks.add(task)  # keep a strong reference until done
+        task.add_done_callback(_warmup_tasks.discard)
+        warming.append(side)
+    return {"warming": warming}
 
 
 async def _caller_may_operate(request: Request, provider: Provider) -> bool:

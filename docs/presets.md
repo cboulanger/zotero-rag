@@ -286,6 +286,8 @@ Each side names its own provider, so a preset can combine them, for example Hugg
 
 A provider that can pause an endpoint (`runpod`, `huggingface`) gets a **Pause** button in its section of the Preferences pane while the endpoint is ready or cold, and **Resume** once it is paused. Pausing stops the billing and the wake-ups and keeps the URL; `POST /api/config/suspend` (same gating, job slots and body as `POST /api/config/provision`) pauses, and provisioning resumes. A paused embedding side makes automatic indexing skip that owner's libraries (reason `embedding_paused`, shown in the indexing status dialog) and makes queries fail at once with a "paused" message instead of calling the endpoint; this never counts toward quarantining an upload. One user's pause does not affect anyone else's libraries. `bin/provision.py --preset <name> --pause` does the same from the command line.
 
+**Question dialog.** When the dialog opens it checks the endpoints (`GET /api/config/health`). While an endpoint it needs is cold, paused or unreachable, Submit/Index is disabled and a status message is shown left of the buttons (indexing needs the embedding side, a question needs both); the check repeats every few seconds until the endpoint is ready. The first time a cold endpoint is seen the plugin calls `POST /api/config/warmup`, which sends one minimal request to each cold side of the caller's preset (at most once every two minutes per user and side) so the endpoint is starting while the user types. A paused or unprovisioned endpoint is never woken this way; it needs Resume or Provision in Preferences.
+
 ---
 
 ## Admin: runtime preset switching & shared remote config
