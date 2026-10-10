@@ -23,7 +23,7 @@ from backend.config.settings import Settings, get_settings, reset_settings
 from backend.services.zotero_identity import reset_identity_cache
 from backend.zotero.group_roles import reset_admin_role_cache
 
-# The 9 preset names this project ships as bundled defaults. Hardcoded (not
+# The preset names this project ships as bundled defaults. Hardcoded (not
 # derived from DEFAULT_PRESETS_DIR.glob(...)) so an accidental deletion of
 # one of these files is actually caught — a count/name comparison against
 # the same glob the code under test reads would be circular and could never
@@ -38,6 +38,7 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "cloud-server-kisski",
     "windows-test",
     "remote-mpcdf",
+    "huggingface",
     "runpod",
 }
 

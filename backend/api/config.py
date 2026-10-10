@@ -539,9 +539,7 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
     base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
     if not base_url and api_key and provider.derives_endpoint_url:
-        base_url = endpoint_cache.resolve(provider, side, api_key)
-        if base_url is None:
-            return EndpointHealth(status="unreachable", detail="not provisioned")
+        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
     health = provider.health(Credentials(api_key=api_key, base_url=base_url))
     if health is None:
         return None

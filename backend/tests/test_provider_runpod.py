@@ -363,7 +363,8 @@ class TestHealth(unittest.TestCase):
     def test_malformed_or_missing_base_url_is_unreachable(self):
         p = provider(http=FakeHTTP())
         self.assertIn("Not a RunPod endpoint URL", p.health(Credentials(api_key="k", base_url="https://x.example")).detail)
-        self.assertEqual(p.health(Credentials(api_key="k")).detail, "not configured")
+        self.assertEqual(p.health(Credentials(api_key="k")).detail, "not provisioned")  # a key but no endpoint
+        self.assertEqual(p.health(Credentials()).detail, "not configured")
 
 
 class TestDefaultsAndErrors(unittest.TestCase):
