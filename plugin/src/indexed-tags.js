@@ -11,6 +11,11 @@
 // (POST /api/indexed-tags/check): a stale refresh operation or a transient re-index must
 // not strip the tag from an attachment that is indexed again.
 //
+// A second tag, "⚠️ rag-failed", marks attachments the backend refuses to process (scan
+// too big/costly, or quarantined after repeated failures). It is applied from `failed`
+// events / `kind: "failed"` refresh ops, and removing it is how the user asks for a retry:
+// a Zotero notifier observer reports the removal to POST /api/indexed-tags/failed/clear.
+//
 // Plugin-lifetime script, loaded eagerly by bootstrap.js.
 
 // @ts-check
@@ -18,7 +23,7 @@
 /**
  * @typedef {Object} IndexEvent
  * @property {number} seq
- * @property {'indexed'|'unindexed'|'library_unindexed'} type
+ * @property {'indexed'|'unindexed'|'library_unindexed'|'failed'|'unfailed'} type
  * @property {string} library_id - backend library id ("u123" personal, "456" group)
  * @property {string} [attachment_key]
  */
@@ -26,6 +31,7 @@
 /**
  * @typedef {Object} TagOp
  * @property {'add'|'remove'} op
+ * @property {'failed'} [kind] - set for operations on the rag-failed tag
  * @property {string} attachment_key
  * @property {string} [item_key]
  */
@@ -56,6 +62,8 @@ var IndexedTags = {
 
 	/** @type {any} */ plugin: null,
 	tag: '\u2705 rag-indexed',
+	failedTag: '\u26a0\ufe0f rag-failed',
+	/** @type {string|null} */ notifierID: null,
 	/** @type {number|null} */ cursor: null,
 	/** @type {ReturnType<typeof setTimeout>|null} */ timer: null,
 	running: false,
@@ -73,6 +81,7 @@ var IndexedTags = {
 		this.running = true;
 		this.cursor = this._loadCursor();
 		this._schedule(2000);
+		this._registerFailedTagObserver();
 	},
 
 	/** @returns {void} */
@@ -81,6 +90,8 @@ var IndexedTags = {
 		if (this.timer) clearTimeout(this.timer);
 		this.timer = null;
 		this.pendingRemovals.clear();
+		if (this.notifierID) Zotero.Notifier.unregisterObserver(this.notifierID);
+		this.notifierID = null;
 	},
 
 	/** @returns {boolean} */
@@ -169,15 +180,16 @@ var IndexedTags = {
 	 * saveTx) when the item already has the desired state.
 	 * @param {any} item
 	 * @param {boolean} tagged
+	 * @param {string} [tag] - defaults to the indexed tag
 	 * @returns {Promise<'changed'|'unchanged'|'skipped'>}
 	 */
-	async setTagged(item, tagged) {
+	async setTagged(item, tagged, tag = this.tag) {
 		if (!item || !item.isAttachment || !item.isAttachment()) return 'skipped';
 		if (!Zotero.Libraries.get(item.libraryID)?.editable) return 'skipped';
-		const has = item.hasTag(this.tag);
+		const has = item.hasTag(tag);
 		if (has === tagged) return 'unchanged';
-		if (tagged) item.addTag(this.tag, 1);
-		else item.removeTag(this.tag);
+		if (tagged) item.addTag(tag, 1);
+		else item.removeTag(tag);
 		// The tag is bookkeeping, not an edit by the user: don't bump dateModified.
 		await item.saveTx({ skipDateModifiedUpdate: true });
 		return 'changed';
@@ -241,11 +253,17 @@ var IndexedTags = {
 			}
 			const libraryID = this.backendIdToLibraryID(ev.library_id);
 			if (libraryID === null || !ev.attachment_key) continue;
-			latest.set(`${libraryID}/${ev.attachment_key}`, ev);
+			const group = ev.type === 'failed' || ev.type === 'unfailed' ? 'failed:' : '';
+			latest.set(`${group}${libraryID}/${ev.attachment_key}`, ev);
 		}
 		for (const [id, ev] of latest) {
 			const libraryID = /** @type {number} */ (this.backendIdToLibraryID(ev.library_id));
 			const key = /** @type {string} */ (ev.attachment_key);
+			if (ev.type === 'failed' || ev.type === 'unfailed') {
+				this.appliedSeq.set(id, ev.seq);
+				await this.setTagged(/** @type {any} */ (Zotero.Items.getByLibraryAndKey(libraryID, key)), ev.type === 'failed', this.failedTag);
+				continue;
+			}
 			this.appliedSeq.set(id, ev.seq);
 			if (ev.type === 'indexed') {
 				this.pendingRemovals.delete(id);
@@ -302,15 +320,67 @@ var IndexedTags = {
 			// First contact: follow from "now"; Refresh covers existing history.
 			const head = await this._api('/api/indexed-tags/events');
 			this.tag = head.tag || this.tag;
+		this.failedTag = head.failed_tag || this.failedTag;
 			this._saveCursor(head.last_seq);
 			return;
 		}
 		const data = await this._api(`/api/indexed-tags/events?since=${this.cursor}`);
 		this.tag = data.tag || this.tag;
+		this.failedTag = data.failed_tag || this.failedTag;
 		if (data.gap) this._log('missed some index events while offline; run "Refresh indexed-status tags" to reconcile');
 		if (data.events.length) await this.applyEvents(data.events);
 		await this.flushDueRemovals();
 		if (data.last_seq > this.cursor) this._saveCursor(data.last_seq);
+	},
+
+	/**
+	 * Watch for the user removing the rag-failed tag from an attachment; that is the
+	 * request to retry it. Our own removals (on an `unfailed` event) also arrive here,
+	 * which is harmless: the backend ignores attachments without a failure record.
+	 * @returns {void}
+	 */
+	_registerFailedTagObserver() {
+		const observer = {
+			/**
+			 * @param {string} event
+			 * @param {string} type
+			 * @param {string[]} ids - "itemID-tagID"
+			 * @param {Object<string, any>} extraData
+			 */
+			notify: async (event, type, ids, extraData) => {
+				if (event !== 'remove' || type !== 'item-tag' || !this.isEnabled()) return;
+				try {
+					await this._reportRemovedFailedTags(ids, extraData);
+				} catch (e) {
+					this._log(`failed-tag removal report failed: ${e}`);
+				}
+			},
+		};
+		this.notifierID = Zotero.Notifier.registerObserver(observer, ['item-tag'], 'zotero-rag-failed-tag');
+	},
+
+	/**
+	 * @param {string[]} ids
+	 * @param {Object<string, any>} extraData
+	 * @returns {Promise<void>}
+	 */
+	async _reportRemovedFailedTags(ids, extraData) {
+		/** @type {Map<number, string[]>} */
+		const byLibrary = new Map();
+		for (const id of ids) {
+			const [itemID, tagID] = id.split('-').map(Number);
+			const name = extraData?.[id]?.tag ?? Zotero.Tags.getName(tagID);
+			if (name !== this.failedTag) continue;
+			const item = Zotero.Items.get(itemID);
+			if (!item) continue;
+			byLibrary.set(item.libraryID, [...(byLibrary.get(item.libraryID) || []), item.key]);
+		}
+		for (const [libraryID, keys] of byLibrary) {
+			await this._api('/api/indexed-tags/failed/clear', {
+				method: 'POST',
+				body: { library_id: this.plugin.getBackendLibraryId(libraryID), attachment_keys: keys },
+			});
+		}
 	},
 
 	/**
@@ -331,9 +401,17 @@ var IndexedTags = {
 		/** @type {string[]} */
 		const removals = [];
 		for (const op of ops) {
-			const id = `${libraryID}/${op.attachment_key}`;
+			const isFailed = op.kind === 'failed';
+			const id = `${isFailed ? 'failed:' : ''}${libraryID}/${op.attachment_key}`;
 			if ((this.appliedSeq.get(id) ?? -1) > asOfSeq) {
 				result.skipped++;
+				continue;
+			}
+			if (isFailed) {
+				const item = Zotero.Items.getByLibraryAndKey(libraryID, op.attachment_key);
+				const outcome = await this.setTagged(/** @type {any} */ (item), op.op === 'add', this.failedTag);
+				if (outcome === 'changed') result[op.op === 'add' ? 'added' : 'removed']++;
+				else if (outcome === 'skipped') result.skipped++;
 				continue;
 			}
 			if (op.op === 'remove') {
@@ -363,6 +441,7 @@ var IndexedTags = {
 		const stats = { librariesTotal: 0, librariesDone: 0, attachmentsChecked: 0, added: 0, removed: 0, skipped: 0, errors: [] };
 		const started = await this._api('/api/indexed-tags/refresh', { method: 'POST' });
 		this.tag = started.tag || this.tag;
+		this.failedTag = started.failed_tag || this.failedTag;
 		let offset = 0;
 		// Attachments checked in libraries that already finished, so the running
 		// total doesn't reset when the next library's own counter starts at 0.

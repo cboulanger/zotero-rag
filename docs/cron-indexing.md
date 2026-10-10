@@ -524,3 +524,10 @@ uv run python bin/autoindex_add_key.py <read-only-key>
 ```
 If keys were recently pruned, check `key_issues` in `cron_status.json` for the
 reason (revoked, expired, or downgraded to write scope).
+
+## Per-user keys, presets and paused endpoints
+
+Each user's provider keys are stored per key name in the encrypted key store (`<data_path>/system/autoindex_keys.json`), so a user can hold, say, a KISSKI key and a Hugging Face token and switch presets without re-entering either. Every run indexes each owner's libraries on that owner's preset (their own choice, else the server default) with that owner's key for it; a preset with an admin-set key (`managed`/`shared` scope) needs no personal key. Keys are only pruned when they are permanently invalid.
+
+When the owner has paused their embedding endpoint (see [presets.md](presets.md), "Pause and resume"), their libraries are skipped with the reason `embedding_paused` and no call is made to the endpoint, no queued upload's attempt count advances and their key's status is left alone. Other owners' libraries are indexed as usual, and a paused LLM does not affect indexing.
+

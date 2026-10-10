@@ -69,11 +69,20 @@ var ZoteroRAGDialog = {
 	/** True while the initial backend connectivity check is in flight. */
 	isConnecting: false,
 
+	/** @type {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null} Last GET /api/config/health */
+	endpointHealth: null,
+	/** @type {any} Pending health re-check timer */
+	_healthTimer: null,
+	_healthClosed: false,
+	/** Whether a warm-up was already requested for the current cold spell. */
+	_warmupSent: false,
+
+
 	/** Whether the active embedding service supports rate limits (remote model). */
 	rateLimitAvailable: false,
 
 	/** @type {Record<string,string>|null} */
-	rateLimitHeaders: null,
+	rateLimitMeters: null,
 
 	/** @type {AbortController|null} */
 	abortController: null,
@@ -223,6 +232,8 @@ var ZoteroRAGDialog = {
 			this.plugin = window.arguments[0].plugin;
 			this.plugin._dialogInstance = this;
 			window.addEventListener('unload', () => {
+				this._healthClosed = true;
+				clearTimeout(this._healthTimer);
 				if (this.plugin._dialogInstance === this) {
 					this.plugin._dialogInstance = null;
 				}
@@ -356,6 +367,7 @@ var ZoteroRAGDialog = {
 		this.isConnecting = false;
 		this.hideProgress();
 		this.loadPresetConfig();
+		this.refreshEndpointHealth();
 		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
@@ -458,7 +470,7 @@ var ZoteroRAGDialog = {
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
-					this.fetchRateLimitHeaders();
+					this.fetchRateLimitMeters();
 				}
 			}
 		} catch (error) {
@@ -757,6 +769,82 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * What keeps the current action from running because a remote endpoint it needs is
+	 * not ready (pure). Indexing needs the embedding side; a question needs both.
+	 * @param {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null|undefined} health - GET /api/config/health
+	 * @param {boolean} indexOnly - Whether the action is indexing (no answering model needed)
+	 * @returns {{message: string, retryMs: number}|null} null when nothing blocks
+	 */
+	describeEndpointBlock(health, indexOnly) {
+		if (!health) return null;
+		/** @type {Array<['embedding'|'llm', string]>} */
+		const sides = [['embedding', 'embedding'], ['llm', 'answering']];
+		const needed = indexOnly ? sides.slice(0, 1) : sides;
+		// A paused or unreachable endpoint will not start by itself, so it is reported before a cold one.
+		for (const [side, name] of needed) {
+			const h = health[side];
+			if (h && h.status === 'paused') {
+				return { message: `The ${name} model endpoint is paused. Resume it in the Zotero RAG preferences.`, retryMs: 15000 };
+			}
+			if (h && h.status === 'unreachable') {
+				return { message: `The ${name} model is not available${h.detail ? `: ${h.detail}` : ''}`, retryMs: 15000 };
+			}
+		}
+		const cold = needed.filter(([side]) => health[side] && health[side].status === 'cold').map(([, name]) => name);
+		if (cold.length) {
+			return { message: `Starting the ${cold.join(' and ')} model${cold.length > 1 ? 's' : ''} - this can take a minute or two...`, retryMs: 5000 };
+		}
+		return null;
+	},
+
+	/**
+	 * Check the remote endpoints and keep the footer status and Submit/Index button in step
+	 * with them; polls until they are ready. The first time an endpoint is found cold, asks
+	 * the backend to wake it, so it is up by the time the user has typed the question.
+	 * @returns {Promise<void>}
+	 */
+	async refreshEndpointHealth() {
+		if (!this.plugin || this._healthClosed) return;
+		clearTimeout(this._healthTimer);
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config/health`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			this.endpointHealth = response.ok ? await response.json() : null;
+		} catch (_) {
+			this.endpointHealth = null; // an unreachable backend is reported elsewhere
+		}
+		const anyCold = !!this.endpointHealth && ['embedding', 'llm'].some((s) => this.endpointHealth[s]?.status === 'cold');
+		if (anyCold && !this._warmupSent) {
+			this._warmupSent = true;
+			fetch(`${this.plugin.backendURL}/api/config/warmup`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders(),
+			}).catch(() => {});
+		}
+		if (!anyCold) this._warmupSent = false; // a later cold start is woken again
+		this.updateSubmitButtonState();
+		// Poll while either side is not ready, whichever action is selected: the user may switch.
+		const pending = this.describeEndpointBlock(this.endpointHealth, false);
+		if (pending && !this._healthClosed) {
+			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending.retryMs);
+		}
+	},
+
+	/**
+	 * Show the endpoint status left of the buttons and report whether it blocks the action.
+	 * @returns {boolean} True when the action must stay disabled
+	 */
+	applyEndpointBlock() {
+		const el = document.getElementById('endpoint-status');
+		const block = this.describeEndpointBlock(this.endpointHealth, this.isIndexOnlyMode());
+		if (el) {
+			el.textContent = block ? block.message : '';
+		}
+		return !!block;
+	},
+
+	/**
 	 * Sync submit button label and question input state to current selection.
 	 * - All selected libraries unindexed → button = "Index", question disabled
 	 * - Otherwise                         → button = "Submit", question enabled
@@ -812,6 +900,7 @@ var ZoteroRAGDialog = {
 			}
 			if (questionLabel) /** @type {HTMLElement} */ (questionLabel).style.opacity = '';
 		}
+		if (this.applyEndpointBlock()) submitButton.disabled = true;
 		this.updateRateLimitDisplay();
 	},
 
@@ -821,18 +910,18 @@ var ZoteroRAGDialog = {
 	 * @returns {void}
 	 */
 	/** @returns {Promise<void>} */
-	async fetchRateLimitHeaders() {
+	async fetchRateLimitMeters() {
 		if (!this.plugin) return;
-		const headers = await ZoteroRAGRateLimitWidget.fetch(this.plugin);
-		if (headers) {
-			this.rateLimitHeaders = headers;
+		const meters = await ZoteroRAGRateLimitWidget.fetch(this.plugin);
+		if (meters) {
+			this.rateLimitMeters = meters;
 			this.updateRateLimitDisplay();
 		}
 	},
 
 	updateRateLimitDisplay() {
 		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
-		ZoteroRAGRateLimitWidget.render(document, this.rateLimitHeaders, { visible: show });
+		ZoteroRAGRateLimitWidget.render(document, this.rateLimitMeters, { visible: show });
 	},
 
 	/**
@@ -1906,8 +1995,8 @@ var ZoteroRAGDialog = {
 							return null;
 						}
 					},
-					onRateLimitUpdate: (headers) => {
-						this.rateLimitHeaders = headers;
+					onRateLimitUpdate: (meters) => {
+						this.rateLimitMeters = meters;
 						this.updateRateLimitDisplay();
 					},
 				});
@@ -1959,8 +2048,8 @@ var ZoteroRAGDialog = {
 				}
 
 				// Update rate limit display from headers returned by this indexing run
-				if (indexResult.rateLimitHeaders) {
-					this.rateLimitHeaders = indexResult.rateLimitHeaders;
+				if (indexResult.rateLimitMeters) {
+					this.rateLimitMeters = indexResult.rateLimitMeters;
 					this.updateRateLimitDisplay();
 				}
 
@@ -2067,7 +2156,7 @@ var ZoteroRAGDialog = {
 		}
 
 		if (this.rateLimitAvailable) {
-			this.fetchRateLimitHeaders();
+			this.fetchRateLimitMeters();
 		}
 
 		if (indexingErrors.length > 0) {
@@ -2227,7 +2316,7 @@ var ZoteroRAGDialog = {
 			document.getElementById('submit-button')
 		);
 		if (submitButton) {
-			submitButton.disabled = !enabled;
+			submitButton.disabled = !enabled || (enabled && this.applyEndpointBlock());
 		}
 	},
 

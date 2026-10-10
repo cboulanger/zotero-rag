@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from backend.api.public_query import slug_to_backend_id
-from backend.services.index_event_log import INDEXED_TAG_NAME, IndexEventLog
+from backend.services.failed_attachments import FailedAttachmentStore
+from backend.services.index_event_log import FAILED_TAG_NAME, INDEXED_TAG_NAME, IndexEventLog
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def has_tag(item_data: dict, tag: str) -> bool:
 
 
 def plan_tag_ops(
-    attachments: list[dict], indexed_keys: set[str], tag: str = INDEXED_TAG_NAME
+    attachments: list[dict], indexed_keys: set[str], tag: str = INDEXED_TAG_NAME, kind: Optional[str] = None
 ) -> list[dict]:
     """Return the minimal tag operations that make Zotero agree with the backend.
 
@@ -84,7 +85,10 @@ def plan_tag_ops(
             op = OP_REMOVE
         else:
             continue
-        ops.append({"op": op, "attachment_key": key, "item_key": data.get("parentItem") or key})
+        planned = {"op": op, "attachment_key": key, "item_key": data.get("parentItem") or key}
+        if kind:
+            planned["kind"] = kind
+        ops.append(planned)
     return ops
 
 
@@ -100,6 +104,8 @@ class IndexedTagSync:
         tag: str = INDEXED_TAG_NAME,
         writer_factory: Optional[Callable[[str], Any]] = None,
         dry_run: bool = False,
+        failed_store: Optional[FailedAttachmentStore] = None,
+        failed_tag: str = FAILED_TAG_NAME,
     ) -> None:
         self.vector_store = vector_store
         self.event_log = event_log
@@ -110,6 +116,10 @@ class IndexedTagSync:
         # directly; without one (the server/plugin path) they are only emitted.
         self.writer_factory = writer_factory
         self.dry_run = dry_run
+        # Optional second tag: attachments the backend refuses to process. Its ops
+        # carry kind="failed" and are only emitted (the plugin applies them).
+        self.failed_store = failed_store
+        self.failed_tag = failed_tag
 
     def _build_updates(self, page: list[dict], ops: list[dict]) -> list[dict]:
         """Full tag lists (Zotero replaces, not merges) with the tag added/removed."""
@@ -159,6 +169,11 @@ class IndexedTagSync:
                         counts["written"] += len(outcome["written"])
                         counts["write_failed"] += len(outcome["failed"])
                         self.emit({"type": "applied", "library": slug, **outcome})
+                if self.failed_store is not None:
+                    failed_keys = await asyncio.to_thread(self.failed_store.failed_keys, backend_id, keys)
+                    failed_ops = plan_tag_ops(page, failed_keys, self.failed_tag, kind="failed")
+                    if failed_ops:
+                        self.emit({"type": "ops", "library": slug, "as_of_seq": as_of_seq, "ops": failed_ops})
                 self.emit({"type": "progress", "library": slug, **counts})
 
         self.emit({"type": "library_done", "library": slug, **counts})

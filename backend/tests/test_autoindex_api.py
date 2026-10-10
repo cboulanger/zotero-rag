@@ -146,6 +146,7 @@ class AutoIndexApiTest(unittest.TestCase):
     def _set_model_type(self, model_type: str) -> None:
         mock_preset = MagicMock()
         mock_preset.embedding.model_type = model_type
+        mock_preset.embedding.model_kwargs = {"api_key_env": "KISSKI_API_KEY"}
         # Settings is a pydantic v2 BaseSettings model, which blocks plain
         # `settings.get_hardware_preset = ...` assignment (raises ValueError:
         # not a declared field). object.__setattr__ bypasses pydantic's

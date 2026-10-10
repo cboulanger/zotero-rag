@@ -20,6 +20,8 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from backend.config.presets import EmbeddingConfig
+from backend.services.endpoint_errors import classify_status_error, unavailable_message
+from backend.services.usage_meters import key_fingerprint, recorder
 
 
 logger = logging.getLogger(__name__)
@@ -147,56 +149,23 @@ def _extract_error_detail(exc: Exception) -> str:
     return str(exc)
 
 
-# Module-level cache for rate-limit headers received from the last remote embedding call.
-# Updated by RemoteEmbeddingService after every API response (success or 429).
-_last_rate_limit_headers: dict[str, str] | None = None
-# UTC timestamp (ISO 8601) of when ``_last_rate_limit_headers`` was captured.
-_last_rate_limit_headers_at: str | None = None
-
-
-def get_last_rate_limit_snapshot() -> tuple[dict[str, str] | None, str | None]:
-    """Return the in-process rate-limit headers and their capture time (ISO UTC)."""
-    return _last_rate_limit_headers, _last_rate_limit_headers_at
-
-
-def reset_rate_limit_cache() -> None:
-    """Forget the cached rate-limit headers.
-
-    Called when the active preset changes: the cached numbers belong to the
-    previous provider and must not be shown for the new one.
-    """
-    global _last_rate_limit_headers, _last_rate_limit_headers_at
-    _last_rate_limit_headers = None
-    _last_rate_limit_headers_at = None
-
-_KNOWN_HEADERS: dict[str, str] = {
-    "OPENAI_API_KEY": "X-OpenAI-Api-Key",
-    "ANTHROPIC_API_KEY": "X-Anthropic-Api-Key",
-    "KISSKI_API_KEY": "X-Kisski-Api-Key",
-    "HF_TOKEN": "X-HF-Token",
-}
+#: The OpenAI SDK insists on a non-empty key; this is sent to servers that need none.
+KEYLESS_API_KEY = "not-needed"
 
 
 def env_var_to_header(env_var: str) -> str:
-    """Convert env var name to HTTP header: KISSKI_API_KEY -> X-Kisski-Api-Key."""
-    if env_var in _KNOWN_HEADERS:
-        return _KNOWN_HEADERS[env_var]
+    """Convert env var name to HTTP header: KISSKI_API_KEY -> X-Kisski-Api-Key.
+
+    HTTP header names are case-insensitive, so the computed name is all any
+    client needs; no per-vendor spelling table is kept.
+    """
     return "X-" + "-".join(p.capitalize() for p in env_var.split("_"))
 
 
-# Provider portal where users can create/manage the API key for a given env var.
-# Surfaced in the plugin preferences so users can reach the right dashboard.
-_KNOWN_DOCS_URLS: dict[str, str] = {
-    "KISSKI_API_KEY": "https://saia.gwdg.de/dashboard",
-    "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
-    "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
-    "HF_TOKEN": "https://huggingface.co/settings/tokens",
-}
-
-
-def docs_url_for_key(env_var: str) -> str | None:
-    """Return the provider portal URL for an API key env var, or None if unknown."""
-    return _KNOWN_DOCS_URLS.get(env_var)
+def docs_url_for(model_kwargs: dict, env_var: str) -> str | None:
+    """Key-portal link for ``env_var`` as filled into ``model_kwargs`` by the
+    side's provider (``key_docs_urls``, see ``Provider.apply_defaults``)."""
+    return (model_kwargs.get("key_docs_urls") or {}).get(env_var)
 
 
 # Known embedding dimensions for common remote models.
@@ -441,7 +410,8 @@ class RemoteEmbeddingService(EmbeddingService):
 
     Configuration via EmbeddingConfig.model_kwargs:
       - ``base_url``:    API base URL (default: OpenAI)
-      - ``api_key_env``: env-var name that holds the API key (default: OPENAI_API_KEY)
+      - ``api_key_env``: env-var name that holds the API key (a provider such as
+        ``openai`` fills in its default; none means the server needs no key)
     """
 
     def __init__(
@@ -449,8 +419,12 @@ class RemoteEmbeddingService(EmbeddingService):
         config: EmbeddingConfig,
         api_key: Optional[str] = None,
         data_path: Optional[Path] = None,
+        provider: Optional[Any] = None,
     ):
         self.config = config
+        #: The side's provider; only used to find an endpoint it derives from the key.
+        self._provider = provider
+        self._resolved_base_url: Optional[str] = None
         self._api_key = api_key  # explicit override; falls back to env-var lookup
         # Resolves shared-field admin settings (base_url/API key) in _get_client().
         # Falls back to the global settings singleton when not provided, so
@@ -462,6 +436,7 @@ class RemoteEmbeddingService(EmbeddingService):
         self._dim: Optional[int] = None
         self.rate_limit_retries: int = 0
         self.rate_limit_wait_seconds: float = 0.0
+        self._fingerprint: Optional[str] = key_fingerprint(api_key)
         logger.debug(
             f"Initialized RemoteEmbeddingService: model={config.model_name} "
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
@@ -498,15 +473,7 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
-                "pattern": config.model_kwargs.get("api_key_pattern"),
-            })
-        elif "shared_api_key_env" not in config.model_kwargs:
-            env_var = "OPENAI_API_KEY"
-            fields.append({
-                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
-                "description": f"API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("api_key_pattern"),
             })
         # Listed before shared_base_url: the key is the one value every setup
@@ -519,7 +486,7 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
                 "description": f"Shared API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("shared_api_key_pattern"),
             })
         if "shared_base_url_env" in config.model_kwargs:
@@ -527,10 +494,90 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
                 "description": f"Shared endpoint URL for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("shared_base_url_pattern"),
             })
         return fields
+
+    def _credential(self) -> str:
+        """The API key for this side (request key, admin-set shared key, or the keyless placeholder)."""
+        from backend.services.admin_settings_store import resolve_shared_value
+
+        shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
+        if shared_key_env:
+            api_key = self._api_key or resolve_shared_value(shared_key_env, self.data_path)
+            if not api_key:
+                raise EmbeddingConfigurationError(
+                    f"API key not configured. POST it to /api/config/remote-fields as "
+                    f'{{"values": {{"{shared_key_env}": ...}}}}.'
+                )
+            return api_key
+        api_key_env = self.config.model_kwargs.get("api_key_env")
+        if api_key_env:
+            if not self._api_key:
+                raise EmbeddingConfigurationError(
+                    f"No API key for {api_key_env}: enter it in the plugin's preferences "
+                    "(it is sent with each request, never read from the environment)."
+                )
+            return self._api_key
+        # No key declared: an OpenAI-compatible server that needs none.
+        return self._api_key or KEYLESS_API_KEY
+
+    def _derives_endpoint(self) -> bool:
+        """True when this side's URL is found from the key rather than set in the preset."""
+        kwargs = self.config.model_kwargs
+        return bool(
+            self._provider is not None
+            and getattr(self._provider, "derives_endpoint_url", False)
+            and not kwargs.get("base_url")
+            and not kwargs.get("shared_base_url_env")
+        )
+
+    def _forget_endpoint(self) -> None:
+        """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._resolved_base_url and self._provider is not None:
+            from backend.services.endpoint_cache import endpoint_cache
+
+            endpoint_cache.invalidate(self._provider.id, "embedding", self._api_key)
+            self._resolved_base_url = None
+            self._client = None
+
+    async def is_paused(self) -> bool:
+        """Whether this side's endpoint was paused on purpose (cached; False for providers that cannot pause)."""
+        if self._provider is None or not getattr(self._provider, "supports_suspend", False):
+            return False
+        try:
+            key = self._credential()
+        except EmbeddingConfigurationError:
+            return False
+        import asyncio
+
+        from backend.services.endpoint_cache import paused_cache
+
+        return await asyncio.to_thread(paused_cache.is_paused, self._provider, "embedding", key)
+
+    async def _ensure_not_paused(self) -> None:
+        """Fail fast, without calling the endpoint, when its owner paused it."""
+        if await self.is_paused():
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "The embedding endpoint is paused.", "paused")
+            )
+
+    async def _ensure_endpoint(self) -> None:
+        """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
+            return
+        import asyncio
+
+        from backend.services.endpoint_cache import endpoint_cache
+
+        key = self._credential()
+        url = await asyncio.to_thread(endpoint_cache.resolve, self._provider, "embedding", key)
+        if not url:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "The embedding endpoint is not provisioned.")
+            )
+        self._resolved_base_url = url
 
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""
@@ -543,39 +590,22 @@ class RemoteEmbeddingService(EmbeddingService):
                     "Install it with: uv add openai"
                 )
 
+            api_key = self._credential()
             shared_url_env = self.config.model_kwargs.get("shared_base_url_env")
-            shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
-            if shared_url_env or shared_key_env:
+            self._fingerprint = key_fingerprint(api_key)
+            if shared_url_env:
                 from backend.services.admin_settings_store import resolve_shared_value
 
-            if shared_key_env:
-                api_key = self._api_key or resolve_shared_value(shared_key_env, self.data_path)
-                if not api_key:
-                    raise EmbeddingConfigurationError(
-                        f"API key not configured. POST it to /api/config/remote-fields as "
-                        f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
-                        f"environment variable."
-                    )
-            else:
-                api_key_env = self.config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-                api_key = self._api_key or os.getenv(api_key_env)
-                if not api_key:
-                    raise EmbeddingConfigurationError(
-                        f"API key not found. Set the {api_key_env} environment variable."
-                    )
-
-            if shared_url_env:
                 base_url = resolve_shared_value(shared_url_env, self.data_path)
                 if not base_url:
                     raise EmbeddingConfigurationError(
                         f"Base URL not configured. POST it to /api/config/remote-fields as "
-                        f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
-                        f"environment variable."
+                        f'{{"values": {{"{shared_url_env}": ...}}}}.'
                     )
                 from backend.services.admin_settings_store import normalize_base_url
                 base_url = normalize_base_url(base_url)
             else:
-                base_url = self.config.model_kwargs.get("base_url")
+                base_url = self.config.model_kwargs.get("base_url") or self._resolved_base_url
 
             # Explicit, bounded timeout — without this the openai SDK's
             # default (600s read timeout) applies, so a cold/stuck serverless
@@ -584,6 +614,11 @@ class RemoteEmbeddingService(EmbeddingService):
             # EmbeddingEndpointUnavailableError handling even kicks in.
             # Mirrors RemoteLLMService._get_openai_client's same pattern/default.
             timeout = float(self.config.model_kwargs.get("timeout", 120))
+            if not base_url and self._derives_endpoint():
+                # Never fall through to the OpenAI default URL with a provider's key.
+                raise EmbeddingEndpointUnavailableError(
+                    unavailable_message("embedding", "The embedding endpoint is not provisioned.")
+                )
             if base_url:
                 self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
                 logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}, timeout={timeout}s")
@@ -594,20 +629,14 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:
         """Extract and cache rate-limit headers from an API response."""
-        global _last_rate_limit_headers, _last_rate_limit_headers_at
-        extracted = {
-            k: v for k, v in headers.items()
-            if k.lower().startswith("x-ratelimit") or k.lower().startswith("ratelimit")
-        }
-        if extracted:
-            _last_rate_limit_headers = extracted
-            _last_rate_limit_headers_at = datetime.now(timezone.utc).isoformat()
+        recorder.record("embedding", headers, self._fingerprint)
 
     async def get_rate_limit_info(self) -> dict[str, str] | None:
-        return _last_rate_limit_headers
+        return recorder.latest("embedding", self._fingerprint)[0]
 
     async def probe_rate_limits(self) -> dict[str, str] | None:
         """Embed a single short string to fetch fresh rate-limit headers from the API."""
+        await self._ensure_endpoint()
         client = self._get_client()
         model = self._resolve_model_name()
         try:
@@ -619,7 +648,7 @@ class RemoteEmbeddingService(EmbeddingService):
             self._capture_rate_limit_headers(raw.headers)
         except Exception:
             pass
-        return _last_rate_limit_headers
+        return recorder.latest("embedding", self._fingerprint)[0]
 
     def _resolve_model_name(self) -> str:
         """Return the actual API model name (maps 'openai' sentinel to a real name)."""
@@ -651,6 +680,8 @@ class RemoteEmbeddingService(EmbeddingService):
             RateLimitError,
         )
 
+        await self._ensure_not_paused()
+        await self._ensure_endpoint()
         client = self._get_client()
         model = self._resolve_model_name()
         max_attempts = 8
@@ -681,7 +712,23 @@ class RemoteEmbeddingService(EmbeddingService):
                 # succeeding immediately on retry, i.e. genuinely transient
                 # regardless of message phrasing.
                 if attempt == max_attempts - 1:
-                    raise
+                    # Still failing after every retry: this is the endpoint's
+                    # problem, not this request's — wrap it the same way
+                    # APIConnectionError/APIStatusError already are, so callers
+                    # that exempt EmbeddingEndpointUnavailableError from
+                    # per-attachment failure counts (e.g. CronIndexer's
+                    # pending-upload quarantine) treat it as systemic too,
+                    # instead of blaming whichever document happened to be
+                    # mid-request when the provider's gateway gave up.
+                    status_code = getattr(exc, "status_code", None)
+                    raise EmbeddingEndpointUnavailableError(
+                        unavailable_message(
+                            "embedding",
+                            f"Embedding API still failing after {max_attempts} attempts "
+                            f"(HTTP {status_code or '5xx'}): {_extract_error_detail(exc)}",
+                            classify_status_error("embedding", exc),
+                        )
+                    ) from exc
                 retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(
                     f"Embedding service not ready (attempt {attempt + 1}/{max_attempts}). "
@@ -732,6 +779,13 @@ class RemoteEmbeddingService(EmbeddingService):
                 self.rate_limit_wait_seconds += retry_after
                 await asyncio.sleep(retry_after)
             except BadRequestError as exc:
+                # A paused endpoint answers 400 on some providers: classify it
+                # before treating the 400 as a per-item content problem.
+                kind = classify_status_error("embedding", exc)
+                if kind:
+                    raise EmbeddingEndpointUnavailableError(
+                        unavailable_message("embedding", "Embedding API is not available.", kind)
+                    ) from exc
                 msg = str(exc)
                 msg_lower = msg.lower()
                 if "context length" not in msg_lower and "maximum context" not in msg_lower:
@@ -790,8 +844,12 @@ class RemoteEmbeddingService(EmbeddingService):
                 # remaining item in the library.
                 status_code = getattr(exc, "status_code", None)
                 raise EmbeddingEndpointUnavailableError(
-                    f"Embedding API returned an unexpected error "
-                    f"(HTTP {status_code}): {_extract_error_detail(exc)}"
+                    unavailable_message(
+                        "embedding",
+                        f"Embedding API returned an unexpected error "
+                        f"(HTTP {status_code}): {_extract_error_detail(exc)}",
+                        classify_status_error("embedding", exc),
+                    )
                 ) from exc
             except APIConnectionError as exc:
                 # A transport-level failure — no HTTP response at all, so no
@@ -803,10 +861,9 @@ class RemoteEmbeddingService(EmbeddingService):
                 # block for — the caller should abort and point the admin at
                 # GET /api/config/health / the "Provision endpoints" button
                 # instead of silently retrying.
+                self._forget_endpoint()
                 raise EmbeddingEndpointUnavailableError(
-                    f"Could not connect to the embedding API: {exc}. If this preset uses a "
-                    "self-provisioned serverless endpoint (e.g. RunPod), it may be cold or not "
-                    "yet provisioned — check its status and provision/wake it from Preferences."
+                    unavailable_message("embedding", f"Could not connect to the embedding API: {exc}.")
                 ) from exc
 
     async def embed_text(self, text: str) -> list[float]:
@@ -952,6 +1009,7 @@ def create_embedding_service(
     api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
     data_path: Optional[Path] = None,
+    provider: Optional[Any] = None,
 ) -> EmbeddingService:
     """
     Factory: create the appropriate EmbeddingService for the given config.
@@ -959,17 +1017,18 @@ def create_embedding_service(
     Args:
         config:    Embedding configuration (from a HardwarePreset).
         cache_dir: Model weights cache directory (local only).
-        api_key:   Unused — remote services read the key from the env var
-                   named in config.model_kwargs['api_key_env']. Kept for
-                   backwards-compatibility.
+        api_key:   The caller's API key (remote only). A shared key comes from
+                   the admin store; the environment is never consulted.
         hf_token:  HuggingFace token for gated models (local only).
         data_path: Resolves shared-field admin settings (remote only). When
                    omitted, RemoteEmbeddingService falls back to the global
                    settings singleton's data_path.
+        provider:  The side's provider (remote only); lets a provider that
+                   derives the endpoint from the key (RunPod) supply the URL.
     """
     if config.model_type == "local":
         return LocalEmbeddingService(config, cache_dir=cache_dir, hf_token=hf_token)
     elif config.model_type == "remote":
-        return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path)
+        return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path, provider=provider)
     else:
         raise ValueError(f"Invalid model_type: {config.model_type!r}")

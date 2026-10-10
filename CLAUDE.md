@@ -276,9 +276,9 @@ and CLI scripts.
   `SecretsUnavailableError` (HTTP 503 from the API). Plaintext keys from older files are still read and
   are encrypted at the next write or backend startup.
 
-`bin/provision_runpod_endpoints.py` stores its endpoint URLs this way instead of in `.env`. In a
-container run it inside the container (`podman exec <container> python bin/provision_runpod_endpoints.py`)
-so the data volume is shared. To copy provisioned credentials to another instance, `POST` the values to
+`bin/provision.py --preset <name>` stores provider-reported endpoint URLs this way instead of in `.env`. In a
+container run it inside the container (`podman exec <container> python bin/provision.py --preset runpod`)
+so the data volume is shared (`--pause` stops an endpoint's billing without deleting it, `--teardown` deletes it; resuming is provisioning again). To copy provisioned credentials to another instance, `POST` the values to
 `/api/config/remote-fields` on it (it encrypts them with its own `AUTOINDEX_SECRET`).
 
 ## Migrating Library RAG Data Between Instances
@@ -414,7 +414,8 @@ echoing it:
 ```bash
 ZOTERO_KEY=$(uv run python bin/debug_get_zotero_key.py)
 KISSKI_HEADER=$(uv run python bin/debug_get_zotero_key.py --embedding-key)  # prints "KISSKI_API_KEY=<value>"
-uv run python bin/debug_get_zotero_key.py --list   # see what's available first, no key values printed
+HF_HEADER=$(uv run python bin/debug_get_zotero_key.py --embedding-key --key-name HF_TOKEN)  # a user can store one key per provider key name
+uv run python bin/debug_get_zotero_key.py --list   # see what's available first (including the provider key names), no key values printed
 ```
 
 If no key is stored yet (e.g. a fresh dev profile), the plugin's own

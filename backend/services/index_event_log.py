@@ -29,10 +29,15 @@ logger = logging.getLogger(__name__)
 # plugin) so the backend, the sync script and the plugin cannot drift apart:
 # the plugin receives it with every events/refresh response.
 INDEXED_TAG_NAME = "\u2705 rag-indexed"
+# Tag for attachments the backend refuses to process (see failed_attachments.py).
+# Removing it is how the user asks for a retry.
+FAILED_TAG_NAME = "\u26a0\ufe0f rag-failed"
 
 EVENT_INDEXED = "indexed"
 EVENT_UNINDEXED = "unindexed"
 EVENT_LIBRARY_UNINDEXED = "library_unindexed"
+EVENT_FAILED = "failed"
+EVENT_UNFAILED = "unfailed"
 
 DEFAULT_MAX_EVENTS = 5000
 

@@ -7,8 +7,8 @@ from pathlib import Path
 from backend.services.admin_settings_store import (
     read_admin_settings,
     write_admin_settings,
-    get_active_preset_override,
-    set_active_preset_override,
+    get_default_preset,
+    set_default_preset,
     get_remote_config_value,
     update_remote_config,
     normalize_base_url,
@@ -27,7 +27,7 @@ class TestAdminSettingsStore(unittest.TestCase):
         settings = read_admin_settings(self.data_path)
         self.assertEqual(settings, {
             "index_snapshots": False,
-            "active_preset_override": None,
+            "default_preset": None,
             "remote_config": {},
         })
 
@@ -35,7 +35,7 @@ class TestAdminSettingsStore(unittest.TestCase):
         write_admin_settings(self.data_path, {"index_snapshots": True})
         self.assertEqual(read_admin_settings(self.data_path), {
             "index_snapshots": True,
-            "active_preset_override": None,
+            "default_preset": None,
             "remote_config": {},
         })
 
@@ -44,7 +44,7 @@ class TestAdminSettingsStore(unittest.TestCase):
         write_admin_settings(self.data_path, {"index_snapshots": False})
         self.assertEqual(read_admin_settings(self.data_path), {
             "index_snapshots": False,
-            "active_preset_override": None,
+            "default_preset": None,
             "remote_config": {},
         })
 
@@ -54,7 +54,7 @@ class TestAdminSettingsStore(unittest.TestCase):
         (system_dir / "admin_settings.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(read_admin_settings(self.data_path), {
             "index_snapshots": False,
-            "active_preset_override": None,
+            "default_preset": None,
             "remote_config": {},
         })
 
@@ -64,28 +64,28 @@ class TestAdminSettingsStore(unittest.TestCase):
         (system_dir / "admin_settings.json").write_text("[1, 2, 3]", encoding="utf-8")
         self.assertEqual(read_admin_settings(self.data_path), {
             "index_snapshots": False,
-            "active_preset_override": None,
+            "default_preset": None,
             "remote_config": {},
         })
 
-    def test_active_preset_override_defaults_to_none(self):
-        self.assertIsNone(get_active_preset_override(self.data_path))
+    def test_default_preset_defaults_to_none(self):
+        self.assertIsNone(get_default_preset(self.data_path))
 
-    def test_set_then_get_active_preset_override_round_trips(self):
-        set_active_preset_override(self.data_path, "remote-mpcdf")
-        self.assertEqual(get_active_preset_override(self.data_path), "remote-mpcdf")
+    def test_set_then_get_default_preset_round_trips(self):
+        set_default_preset(self.data_path, "remote-mpcdf")
+        self.assertEqual(get_default_preset(self.data_path), "remote-mpcdf")
 
-    def test_set_active_preset_override_none_clears_it(self):
-        set_active_preset_override(self.data_path, "remote-mpcdf")
-        set_active_preset_override(self.data_path, None)
-        self.assertIsNone(get_active_preset_override(self.data_path))
+    def test_set_default_preset_none_clears_it(self):
+        set_default_preset(self.data_path, "remote-mpcdf")
+        set_default_preset(self.data_path, None)
+        self.assertIsNone(get_default_preset(self.data_path))
 
-    def test_set_active_preset_override_preserves_index_snapshots(self):
+    def test_set_default_preset_preserves_index_snapshots(self):
         write_admin_settings(self.data_path, {"index_snapshots": True})
-        set_active_preset_override(self.data_path, "remote-mpcdf")
+        set_default_preset(self.data_path, "remote-mpcdf")
         state = read_admin_settings(self.data_path)
         self.assertTrue(state["index_snapshots"])
-        self.assertEqual(state["active_preset_override"], "remote-mpcdf")
+        self.assertEqual(state["default_preset"], "remote-mpcdf")
 
     def test_get_remote_config_value_defaults_to_none(self):
         self.assertIsNone(get_remote_config_value("MPCDF_LLM_BASE_URL", data_path=self.data_path))

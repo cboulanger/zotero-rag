@@ -106,8 +106,12 @@ def delete_entry(data_path: Path, library_id: str, attachment_key: str) -> None:
             pass
 
 
-def list_entries(data_path: Path, library_id: str) -> list[dict]:
-    """Metadata for every pending entry in a library, oldest-enqueued first.
+def list_entries(data_path: Path, library_id: str, include_quarantined: bool = False) -> list[dict]:
+    """Metadata for pending entries in a library, least-attempted first, then oldest-enqueued.
+
+    Ordering by attempts keeps a permanently failing entry from blocking the
+    never-tried ones queued behind it. Quarantined entries (see `quarantine_entry`)
+    are omitted unless `include_quarantined` is set.
 
     Each dict has an injected `attachment_key` (derived from the filename);
     file bytes are not read (use `read_entry` for that).
@@ -121,22 +125,79 @@ def list_entries(data_path: Path, library_id: str) -> list[dict]:
             entry = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if entry.get("quarantined") and not include_quarantined:
+            continue
         entry["attachment_key"] = meta_path.name[: -len(".meta.json")]
         out.append(entry)
-    out.sort(key=lambda e: e.get("enqueued_at", ""))
+    out.sort(key=lambda e: (e.get("attempts", 0), e.get("enqueued_at", "")))
     return out
 
 
-def record_failure(data_path: Path, library_id: str, attachment_key: str, error: str) -> None:
-    """Bump `attempts` and set `last_error` on an existing entry. No-op if it's gone."""
+def record_failure(
+    data_path: Path, library_id: str, attachment_key: str, error: str, count_attempt: bool = True
+) -> int:
+    """Bump `attempts` (unless `count_attempt` is False) and set `last_error`.
+
+    Returns the new attempt count; 0 if the entry is gone. Pass
+    `count_attempt=False` for systemic failures (embedding auth/quota) that say
+    nothing about this particular file.
+    """
     meta_path = _meta_path(data_path, library_id, attachment_key)
     try:
         entry = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
-    entry["attempts"] = entry.get("attempts", 0) + 1
+        return 0
+    if count_attempt:
+        entry["attempts"] = entry.get("attempts", 0) + 1
     entry["last_error"] = error
     _atomic_write_json(meta_path, entry)
+    return entry.get("attempts", 0)
+
+
+def _set_quarantined(data_path: Path, library_id: str, attachment_key: str, quarantined: bool) -> Optional[dict]:
+    meta_path = _meta_path(data_path, library_id, attachment_key)
+    try:
+        entry = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entry["quarantined"] = quarantined
+    if not quarantined:
+        entry["attempts"] = 0
+        entry["last_error"] = None
+    _atomic_write_json(meta_path, entry)
+    return entry
+
+
+def quarantine_entry(data_path: Path, library_id: str, attachment_key: str) -> Optional[dict]:
+    """Stop retrying an entry; it stays on disk. Returns its metadata (None if gone)."""
+    return _set_quarantined(data_path, library_id, attachment_key, True)
+
+
+def release_entry(data_path: Path, library_id: str, attachment_key: str) -> None:
+    """Undo `quarantine_entry` and reset attempts, so the next drain retries it."""
+    _set_quarantined(data_path, library_id, attachment_key, False)
+
+
+def note_failure(
+    settings, library_id: str, attachment_key: str, item_key: Optional[str], error: str,
+    count_attempt: bool = True,
+) -> bool:
+    """Record a failed attempt; quarantine and flag the attachment once the cap is hit.
+
+    Returns True when the entry was quarantined by this call. The attachment is
+    then marked failed (tagged `rag-failed` in Zotero) until the user removes the tag.
+    """
+    attempts = record_failure(settings.data_path, library_id, attachment_key, error, count_attempt)
+    if not attempts or attempts < settings.pending_upload_max_attempts:
+        return False
+    entry = quarantine_entry(settings.data_path, library_id, attachment_key)
+    from backend.services.failed_attachments import REASON_QUARANTINED, get_failed_store
+
+    get_failed_store().mark_failed(
+        library_id, attachment_key, item_key or (entry or {}).get("item_key", ""),
+        REASON_QUARANTINED, f"Failed {attempts} times: {error}",
+    )
+    return True
 
 
 def compute_queue_eta(settings) -> tuple[Optional[str], Optional[str]]:

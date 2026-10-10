@@ -53,3 +53,24 @@ class ValidateEmbeddingKeyTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DerivedEndpointTest(unittest.IsolatedAsyncioTestCase):
+    """A key whose endpoint is derived from it must never be sent to the OpenAI default URL."""
+
+    async def test_provider_is_passed_to_the_service(self):
+        sentinel = object()
+        with patch("backend.services.embedding_key_validator.create_embedding_service") as mock_create:
+            mock_create.return_value = AsyncMock(embed_text=AsyncMock(return_value=[0.1]))
+            await validate_embedding_key("KEY", _config(), sentinel)
+        self.assertIs(mock_create.call_args.kwargs["provider"], sentinel)
+
+    async def test_unprovisioned_endpoint_is_unverified_not_invalid(self):
+        from backend.providers import get_providers
+        from backend.config.presets import get_preset
+
+        preset = get_preset("huggingface")
+        provider = get_providers(preset)["embedding"]
+        with patch("backend.services.endpoint_cache.endpoint_cache.resolve", return_value=None):
+            result = await validate_embedding_key("hf_" + "a" * 34, preset.embedding, provider)
+        self.assertEqual(result.status, "unverified")

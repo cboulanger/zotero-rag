@@ -188,7 +188,7 @@ class TestProcessNowEndpoint(unittest.TestCase):
         # limit. A merged chunk sized against the 1500-char default can
         # exceed a small-context model's safe budget even though the active
         # preset's rag.max_chunk_size was hand-tuned for exactly that model
-        # (see e.g. the apple-silicon-kisski preset's comment) — this
+        # (see e.g. the remote-kisski preset's comment) — this
         # construction must use the preset's value for both parameters.
         mock_processor = mock_processor_cls.return_value
         proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)

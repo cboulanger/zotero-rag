@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "For systems with >24GB RAM (GPU or Apple Silicon)",
   "embedding": {
     "model_type": "local",
