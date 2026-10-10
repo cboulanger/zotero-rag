@@ -394,7 +394,7 @@ The system includes hardware presets optimized for different deployment scenario
 - **Embedding:** OpenAI Embeddings API (remote)
 - **LLM:** gpt-4o-mini or equivalent (remote)
 - **Total Memory:** ~1GB (minimal local requirements)
-- **API Key:** `OPENAI_API_KEY`
+- **API Key:** `OPENAI_API_KEY` (each user's own, entered in the plugin)
 
 #### 5. `apple-silicon-kisski`
 
@@ -433,10 +433,8 @@ MODEL_PRESET=cpu-only
 MODEL_CACHE_DIR=~/.cache/zotero-rag/models
 VECTOR_DB_PATH=~/.local/share/zotero-rag/qdrant
 
-# API keys (for remote presets)
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-KISSKI_API_KEY=your-kisski-key
+# Provider API keys are not set here: users enter them in the plugin's
+# Preferences, and admins set shared ones via POST /api/config/remote-fields.
 
 # Qdrant vector database (optional — omit for local embedded mode)
 QDRANT_URL=http://qdrant:6333    # Set when running Qdrant as a sidecar container

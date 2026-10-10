@@ -108,9 +108,10 @@ def get_remote_config_value(key_name: str, data_path: Optional[Path] = None) -> 
 
 
 def resolve_shared_value(env_var_name: str, data_path: Optional[Path] = None) -> Optional[str]:
-    """Resolve a preset's shared base_url/api_key: the admin-set remote_config
-    override first, then the process environment."""
-    return get_remote_config_value(env_var_name, data_path) or os.getenv(env_var_name)
+    """Resolve a preset's shared base_url/api_key from the admin-set remote_config.
+
+    Provider credentials are never read from the process environment."""
+    return get_remote_config_value(env_var_name, data_path)
 
 
 def normalize_base_url(base_url: str) -> str:

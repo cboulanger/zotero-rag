@@ -79,7 +79,7 @@ Copy `.env.dist` to `.env` and set `MODEL_PRESET`:
 
 ```bash
 # Recommended — fully remote, no local GPU or heavy dependencies
-MODEL_PRESET=remote-openai       # requires OPENAI_API_KEY
+MODEL_PRESET=remote-openai       # each user enters their OpenAI key in the plugin
 
 # Local inference (requires uv sync --extra local-models)
 MODEL_PRESET=apple-silicon-32gb  # Apple Silicon Mac, 32 GB RAM

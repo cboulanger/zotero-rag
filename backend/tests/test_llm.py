@@ -525,7 +525,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            self.assertIn("API key not found in environment variable", str(context.exception))
+            self.assertIn("No API key for", str(context.exception))
 
     async def test_anthropic_missing_api_key(self):
         """Symmetrical case for Anthropic (see test_openai_missing_api_key)."""

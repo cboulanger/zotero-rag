@@ -421,13 +421,12 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_openai_cls.call_args
         self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
 
-    async def test_get_client_falls_back_to_env_when_shared_store_empty(self):
+    async def test_get_client_ignores_shared_values_set_only_in_the_environment(self):
         import os
         import tempfile
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as tmp:
-            data_path = Path(tmp)
             with patch.dict(os.environ, {
                 "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/from-env/v1",
                 "MPCDF_EMBEDDING_API_KEY": "env-key",
@@ -440,12 +439,18 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
                         "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
                     },
                 )
-                service = RemoteEmbeddingService(config, data_path=data_path)
-                with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                service = RemoteEmbeddingService(config, data_path=Path(tmp))
+                with self.assertRaises(EmbeddingConfigurationError):
                     service._get_client()
-                    _, kwargs = mock_openai_cls.call_args
-        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/from-env/v1")
-        self.assertEqual(kwargs["api_key"], "env-key")
+
+    async def test_get_client_ignores_a_personal_key_set_only_in_the_environment(self):
+        import os
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}):
+            with self.assertRaises(EmbeddingConfigurationError):
+                RemoteEmbeddingService(config)._get_client()
 
     async def test_get_client_raises_clear_error_when_shared_base_url_unset(self):
         import tempfile
@@ -475,9 +480,8 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         config = EmbeddingConfig(
             model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
-            service = RemoteEmbeddingService(config)
-            service._get_client()
+        service = RemoteEmbeddingService(config, api_key="k")
+        service._get_client()
         self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 120.0)
 
     @patch("openai.AsyncOpenAI")
@@ -486,9 +490,8 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
             model_type="remote", model_name="openai",
             model_kwargs={"api_key_env": "OPENAI_API_KEY", "timeout": 30},
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
-            service = RemoteEmbeddingService(config)
-            service._get_client()
+        service = RemoteEmbeddingService(config, api_key="k")
+        service._get_client()
         self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 30.0)
 
     async def test_get_client_raises_configuration_error_when_shared_api_key_unset(self):

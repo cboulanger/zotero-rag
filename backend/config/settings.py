@@ -418,16 +418,15 @@ class Settings(BaseSettings):
         allowing for flexible configuration without hardcoding provider-specific fields.
 
         Args:
-            env_var_name: Name of the environment variable (e.g., "OPENAI_API_KEY", "KISSKI_API_KEY")
+            env_var_name: Name of the environment variable (e.g., "HF_TOKEN"). Not for
+                provider API keys, which are never read from the environment
 
         Returns:
             API key if available, None otherwise
 
         Examples:
-            >>> settings.get_api_key("OPENAI_API_KEY")
-            "sk-..."
-            >>> settings.get_api_key("KISSKI_API_KEY")
-            "your-kisski-key"
+            >>> settings.get_api_key("HF_TOKEN")
+            "hf_..."
         """
         return os.getenv(env_var_name)
 

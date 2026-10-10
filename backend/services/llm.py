@@ -350,15 +350,17 @@ class RemoteLLMService(LLMService):
                     if not api_key:
                         raise LLMConfigurationError(
                             f"API key not configured. POST it to /api/config/remote-fields as "
-                            f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
-                            f"environment variable."
+                            f'{{"values": {{"{shared_key_env}": ...}}}}.'
                         )
                 else:
                     api_key_env = self.llm_config.model_kwargs.get("api_key_env")
                     if api_key_env:
-                        api_key = self.api_key or os.getenv(api_key_env)
+                        api_key = self.api_key
                         if not api_key:
-                            raise LLMConfigurationError(f"API key not found in environment variable: {api_key_env}")
+                            raise LLMConfigurationError(
+                                f"No API key for {api_key_env}: enter it in the plugin's preferences "
+                                "(it is sent with each request, never read from the environment)."
+                            )
                     else:
                         # No key declared: an OpenAI-compatible server that needs none.
                         api_key = self.api_key or KEYLESS_API_KEY
@@ -368,8 +370,7 @@ class RemoteLLMService(LLMService):
                     if not base_url:
                         raise LLMConfigurationError(
                             f"Base URL not configured. POST it to /api/config/remote-fields as "
-                            f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
-                            f"environment variable."
+                            f'{{"values": {{"{shared_url_env}": ...}}}}.'
                         )
                     from backend.services.admin_settings_store import normalize_base_url
                     base_url = normalize_base_url(base_url)
@@ -392,16 +393,14 @@ class RemoteLLMService(LLMService):
         return self._openai_client
 
     def _resolve_api_key(self) -> Optional[str]:
-        """The key for this side: the request's key, else the shared store or
-        the environment variable the preset names."""
+        """The key for this side: the request's key, else the admin-set shared store."""
         kwargs = self.llm_config.model_kwargs
         shared_key_env = kwargs.get("shared_api_key_env")
         if shared_key_env:
             from backend.services.admin_settings_store import resolve_shared_value
 
             return self.api_key or resolve_shared_value(shared_key_env, self.settings.data_path)
-        api_key_env = kwargs.get("api_key_env")
-        return self.api_key or (os.getenv(api_key_env) if api_key_env else None)
+        return self.api_key
 
     def _record_usage(self, headers: Any) -> None:
         """Remember the response's rate-limit headers for the usage meters."""

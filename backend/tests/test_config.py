@@ -546,8 +546,9 @@ class TestConfigApi(unittest.TestCase):
     def test_post_config_switches_to_compatible_preset_as_admin(self):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        with patch.dict(os.environ, MPCDF_ENV):
-            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["preset_name"], "remote-mpcdf")
         r2 = self.client.get("/api/config")
@@ -745,9 +746,15 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertNotIn("remote-mpcdf", by)
         self.assertIn("remote-mpcdf", body["compatible_presets"])
 
-    def test_shared_creds_via_env_make_preset_switchable(self):
+    def test_shared_creds_only_in_the_environment_are_ignored(self):
         with patch.dict(os.environ, MPCDF_ENV):
             by = self._names(self.client.get("/api/config").json())
+        self.assertNotIn("remote-mpcdf", by)
+
+    def test_shared_creds_in_the_store_make_preset_switchable(self):
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        by = self._names(self.client.get("/api/config").json())
         self.assertEqual(by["remote-mpcdf"]["credentials"], "ok")
         self.assertFalse(by["remote-mpcdf"]["active"])
 
@@ -766,12 +773,13 @@ class TestSwitchablePresets(unittest.TestCase):
             def __init__(self, h): self.headers = h
         self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
         self.assertEqual(_preset_credentials(preset, s, Req({"X-Kisski-Api-Key": "v"})), [])
-        with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):
-            self.assertEqual(_preset_credentials(preset, s, Req({})), [])
+        with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):  # the environment is never a key source
+            self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
         mp = get_preset("remote-mpcdf", s.data_path)
-        with patch.dict(os.environ, {"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}):
-            # LLM-side shared values still missing
-            self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config({"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}, data_path=s.data_path)
+        # LLM-side shared values still missing
+        self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
 
     def test_personal_key_via_stored_key_but_not_invalid(self):
         from backend.api.config import _preset_credentials
@@ -812,8 +820,9 @@ class TestSwitchablePresets(unittest.TestCase):
         from backend.services.usage_meters import recorder
         recorder.record("embedding", {"x-ratelimit-limit-hour": "1"})
         self._admin()
-        with patch.dict(os.environ, MPCDF_ENV):
-            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(recorder.latest("embedding"), (None, None))
         meta = store.list_metadata()[0]

@@ -516,16 +516,16 @@ class RemoteEmbeddingService(EmbeddingService):
                 if not api_key:
                     raise EmbeddingConfigurationError(
                         f"API key not configured. POST it to /api/config/remote-fields as "
-                        f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
-                        f"environment variable."
+                        f'{{"values": {{"{shared_key_env}": ...}}}}.'
                     )
             else:
                 api_key_env = self.config.model_kwargs.get("api_key_env")
                 if api_key_env:
-                    api_key = self._api_key or os.getenv(api_key_env)
+                    api_key = self._api_key
                     if not api_key:
                         raise EmbeddingConfigurationError(
-                            f"API key not found. Set the {api_key_env} environment variable."
+                            f"No API key for {api_key_env}: enter it in the plugin's preferences "
+                            "(it is sent with each request, never read from the environment)."
                         )
                 else:
                     # No key declared: an OpenAI-compatible server that needs none.
@@ -537,8 +537,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 if not base_url:
                     raise EmbeddingConfigurationError(
                         f"Base URL not configured. POST it to /api/config/remote-fields as "
-                        f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
-                        f"environment variable."
+                        f'{{"values": {{"{shared_url_env}": ...}}}}.'
                     )
                 from backend.services.admin_settings_store import normalize_base_url
                 base_url = normalize_base_url(base_url)

@@ -147,13 +147,9 @@ def _preset_credentials(
             if field["kind"] in ("shared_base_url", "shared_api_key"):
                 if provisionable:
                     continue
-                ok = bool(get_remote_config_value(name) or os.environ.get(name))
+                ok = bool(get_remote_config_value(name))
             else:
-                ok = bool(
-                    request.headers.get(field["header_name"])
-                    or os.environ.get(name)
-                    or stored_key_counts.get(name, 0) > 0
-                )
+                ok = bool(request.headers.get(field["header_name"]) or stored_key_counts.get(name, 0) > 0)
             if not ok and name not in missing:
                 missing.append(name)
 
@@ -282,11 +278,7 @@ def _live_llm_models(
     if not base_url:
         return None
     header_name = env_var_to_header(api_key_env) if api_key_env else ""
-    api_key = (
-        (request.headers.get(header_name) if header_name else None)
-        or (os.environ.get(api_key_env) if api_key_env else None)
-        or ""
-    )
+    api_key = (request.headers.get(header_name) if header_name else None) or ""
     if require_key and not api_key:
         return None
     return provider.live_models(base_url, api_key)
@@ -675,9 +667,7 @@ async def get_required_api_keys():
             return
         is_set = None
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            is_set = bool(
-                get_remote_config_value(key_name) or os.environ.get(key_name)
-            )
+            is_set = bool(get_remote_config_value(key_name))
         seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
