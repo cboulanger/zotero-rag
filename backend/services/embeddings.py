@@ -542,6 +542,27 @@ class RemoteEmbeddingService(EmbeddingService):
             self._resolved_base_url = None
             self._client = None
 
+    async def is_paused(self) -> bool:
+        """Whether this side's endpoint was paused on purpose (cached; False for providers that cannot pause)."""
+        if self._provider is None or not getattr(self._provider, "supports_suspend", False):
+            return False
+        try:
+            key = self._credential()
+        except EmbeddingConfigurationError:
+            return False
+        import asyncio
+
+        from backend.services.endpoint_cache import paused_cache
+
+        return await asyncio.to_thread(paused_cache.is_paused, self._provider, "embedding", key)
+
+    async def _ensure_not_paused(self) -> None:
+        """Fail fast, without calling the endpoint, when its owner paused it."""
+        if await self.is_paused():
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "The embedding endpoint is paused.", "paused")
+            )
+
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
         if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
@@ -654,6 +675,7 @@ class RemoteEmbeddingService(EmbeddingService):
             RateLimitError,
         )
 
+        await self._ensure_not_paused()
         await self._ensure_endpoint()
         client = self._get_client()
         model = self._resolve_model_name()

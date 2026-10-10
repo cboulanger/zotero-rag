@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from backend.providers import Provider, ProvisionContext, ProvisionError, Side
-from backend.services.endpoint_cache import endpoint_cache
+from backend.services.endpoint_cache import endpoint_cache, paused_cache
 from backend.services.admin_settings_store import update_remote_config
 
 logger = logging.getLogger(__name__)
@@ -154,8 +154,10 @@ async def run_job(
                     update_remote_config(values, data_path=data_path)
                 # The side's endpoint may be new or recreated: forget any cached lookup.
                 endpoint_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
+                paused_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
                 _set_side(slot, job.side, "succeeded")
             except Exception as exc:
+                paused_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
                 logger.warning("Provisioning %s failed: %s", job.side, exc, exc_info=not isinstance(exc, ProvisionError))
                 message = str(exc) or type(exc).__name__
                 _set_side(slot, job.side, "failed", message)

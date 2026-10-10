@@ -60,3 +60,47 @@ class EndpointCache:
 
 
 endpoint_cache = EndpointCache()
+
+PAUSED_TTL_SECONDS = 30.0
+
+
+class PausedCache:
+    """Short-lived cache of "is this endpoint paused?" per ``(provider id, side, key fingerprint)``.
+
+    Only providers that can pause (``supports_suspend``) are asked. The answer is cached for
+    ``PAUSED_TTL_SECONDS`` so a burst of queries or a whole indexing run costs one
+    management-API call; pausing and resuming invalidate it.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._entries: dict[_Key, tuple[bool, float]] = {}
+
+    def is_paused(self, provider, side: str, api_key: str) -> bool:
+        if not getattr(provider, "supports_suspend", False):
+            return False
+        key: _Key = (provider.id, side, key_fingerprint(api_key))
+        now = self._clock()
+        with self._lock:
+            hit = self._entries.get(key)
+            if hit and hit[1] > now:
+                return hit[0]
+        try:
+            paused = bool(provider.is_paused(api_key))
+        except Exception:
+            paused = False
+        with self._lock:
+            self._entries[key] = (paused, now + PAUSED_TTL_SECONDS)
+        return paused
+
+    def invalidate(self, provider_id: str, side: str, api_key: Optional[str]) -> None:
+        with self._lock:
+            self._entries.pop((provider_id, side, key_fingerprint(api_key)), None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+paused_cache = PausedCache()

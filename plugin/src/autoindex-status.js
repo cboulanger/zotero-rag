@@ -896,7 +896,7 @@ var ZoteroRAGAutoIndexStatus = {
 
 	/**
 	 * Turn a per-library skip_reason/error into a human-readable message.
-	 * Known machine-readable reasons (currently just "embedding_rate_limit")
+	 * Known machine-readable reasons ("embedding_rate_limit", "embedding_paused")
 	 * get a friendly, actionable message; anything else (admin skip messages,
 	 * arbitrary exception text) is already human-written and passed through.
 	 * @param {AutoIndexSlugStatus} info
@@ -908,6 +908,9 @@ var ZoteroRAGAutoIndexStatus = {
 			return info.rate_limit_until
 				? `Embedding quota exhausted for today — resumes automatically at ${this.formatTime(info.rate_limit_until)}.`
 				: 'Embedding quota exhausted for today — indexing will resume automatically once the limit resets.';
+		}
+		if (info.skip_reason === 'embedding_paused') {
+			return 'The embedding endpoint is paused \u2014 resume it in Preferences and indexing continues on the next run.';
 		}
 		if (info.skip_reason) return info.skip_reason;
 		if (info.items_failed) {

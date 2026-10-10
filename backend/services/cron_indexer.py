@@ -43,6 +43,7 @@ from backend.services.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
+    RemoteEmbeddingService,
 )
 from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
 from backend.services import pending_upload_cache
@@ -756,6 +757,17 @@ class CronIndexer:
             preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
             provider=get_provider_or_none(preset, "embedding"),
         )
+
+        if isinstance(embedding_service, RemoteEmbeddingService) and await embedding_service.is_paused():
+            # The owner paused the endpoint on purpose: skip their libraries without calling it
+            # (and without touching their key's status or any pending upload's attempt count).
+            reason = "embedding_paused"
+            self.log.warning("Embedding endpoint is paused for %s; skipping.", slug_info.slug)
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = reason
+            status["slugs"][slug_info.slug]["skip_detail"] = "The embedding endpoint is paused; resume it in Preferences."
+            self._write_status(status)
+            return {"status": "skipped", "skip_reason": reason}
 
         try:
             # Inside the try (not before it): progress_callback can now raise
