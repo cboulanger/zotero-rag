@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Fully remote via GWDG KISSKI/SAIA Academic Cloud",
   "embedding": {
     "model_type": "remote",

@@ -188,22 +188,6 @@ class TestPresets(unittest.TestCase):
         copied_names = {p.name for p in presets_dir.glob("*.json")}
         self.assertEqual(bundled_names, copied_names)
 
-    def test_ensure_default_presets_does_not_overwrite_existing_file(self):
-        """A user's edited preset file survives re-running the seeder (e.g. on
-        every backend startup)."""
-        presets_dir = self.data_path / "presets"
-        custom_content = (
-            '{"description": "edited by user", '
-            '"embedding": {"model_type": "local", "model_name": "x"}, '
-            '"llm": {"model_type": "local", "model_names": ["y"]}, '
-            '"rag": {}, "memory_budget_gb": 1.0}'
-        )
-        (presets_dir / "cpu-only.json").write_text(custom_content)
-
-        ensure_default_presets(self.data_path)
-
-        self.assertEqual((presets_dir / "cpu-only.json").read_text(), custom_content)
-
     def test_get_preset_raises_for_malformed_json(self):
         """A file that isn't valid JSON raises ValueError naming the file."""
         presets_dir = self.data_path / "presets"

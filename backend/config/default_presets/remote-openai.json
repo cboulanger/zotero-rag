@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Using OpenAI/Anthropic remote inference endpoints",
   "embedding": {
     "model_type": "remote",

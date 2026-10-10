@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Fully remote via your own RunPod serverless endpoints (embedding + LLM, pay-per-use, scale-to-zero). Enter your RunPod API key, then click \"Provision endpoints\" to create or wake both endpoints.",
   "embedding": {
     "model_type": "remote",

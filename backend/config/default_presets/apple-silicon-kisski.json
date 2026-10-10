@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote)",
   "embedding": {
     "model_type": "remote",

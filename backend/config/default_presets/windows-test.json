@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Windows-compatible: fully remote via KISSKI (avoids PyTorch/CUDA setup)",
   "embedding": {
     "model_type": "remote",

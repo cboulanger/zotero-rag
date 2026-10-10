@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Cloud server (16GB RAM, 4 vCPU, no GPU): local multilingual embeddings + KISSKI LLM",
   "embedding": {
     "model_type": "local",

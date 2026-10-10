@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Fully remote via MPCDF LLM Inference Service (llm.mpcdf.mpg.de) — Each endpoint is an ephemeral (<=8h) Slurm job; the endpoint URL and the API key need to be set for each job individually for both the embedding and the inference endpoint.",
   "embedding": {
     "model_type": "remote",
