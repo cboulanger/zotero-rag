@@ -545,6 +545,58 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     )
 
 
+async def _caller_may_operate(request: Request, provider: Provider) -> bool:
+    """Whether the caller may provision / pause / resume this side (by credential scope).
+
+    ``user``: anyone signed in (or any caller of a loopback server). ``managed``: an
+    admin of the authorizing group (or loopback). ``shared``: nobody, there is
+    nothing to operate.
+    """
+    if not (provider.supports_provisioning or provider.supports_suspend):
+        return False
+    if provider.scope == "shared":
+        return False
+    try:
+        if provider.scope == "managed":
+            await require_authorized_group_admin(request)
+            return True
+        if is_loopback(get_settings()):
+            return True
+        return get_zotero_identity(request) is not None
+    except HTTPException:
+        return False
+
+
+@router.get("/config/providers")
+async def get_provider_descriptors(request: Request) -> dict:
+    """Per-side provider descriptors of the caller's effective preset, for the plugin's
+    per-side configuration sections.
+
+    ``{"preset": name, "sides": {"embedding"|"llm": {"model_type", "provider"}}}``;
+    ``provider`` is ``null`` for a local side. A descriptor carries the provider's id and
+    label, the effective credential scope, capability flags (provisioning, pause), the
+    credential the one-time provisioning key must match, an ``unavailable_hint`` and
+    ``operable_by_caller``. It never contains secrets and no vendor knowledge lives in
+    the plugin: everything it needs to render is here.
+    """
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    sides: Dict[str, dict] = {}
+    for side in ("embedding", "llm"):
+        cfg = preset.embedding if side == "embedding" else preset.llm
+        provider = providers[side]
+        if cfg.model_type != "remote":
+            sides[side] = {"model_type": cfg.model_type, "provider": None}
+            continue
+        descriptor = provider.describe()
+        descriptor.operable_by_caller = await _caller_may_operate(request, provider)
+        sides[side] = {"model_type": cfg.model_type, "provider": descriptor.model_dump()}
+    return {"preset": preset.name, "sides": sides}
+
+
 class ProvisionRequest(BaseModel):
     """Optional body for POST /api/config/provision."""
     #: One-time credential values by key name (for example ``{"RUNPOD_API_KEY": "..."}``).
