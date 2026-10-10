@@ -165,3 +165,10 @@ register_fixture(ContractFixture(
     invalid_options=[{"anything": 1}],
     usage_samples=[({"RateLimit-Limit": "100", "RateLimit-Remaining": "50"}, 1)],
 ))
+
+register_fixture(ContractFixture(
+    provider_id="runpod",
+    model_kwargs={"api_key_env": "RUNPOD_API_KEY"},
+    valid_options=[{}, {"gpu": "NVIDIA RTX A4000", "workers_max": 2, "idle_timeout": 30, "data_centers": ["EU-RO-1"]}],
+    invalid_options=[{"workers_max": 0}, {"gpus": "x"}],
+))
