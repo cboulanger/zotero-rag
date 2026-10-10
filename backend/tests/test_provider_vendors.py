@@ -34,6 +34,45 @@ class TestOpenAI(unittest.TestCase):
             get_providers(preset_with("openai", scope="shared", kwargs={"shared_api_key_env": "OPENAI_API_KEY"}))
 
 
+class TestBundledPresetsPickUpProviderDefaults(unittest.TestCase):
+    """get_preset() runs each provider's apply_defaults(), so the services read model_kwargs only."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_path = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_remote_openai_gets_its_key_name_and_portal_link_from_the_provider(self):
+        from backend.config.presets import get_preset
+        from backend.services.embeddings import RemoteEmbeddingService
+        from backend.services.llm import RemoteLLMService
+        preset = get_preset("remote-openai", self.data_path)
+        for side in (preset.embedding, preset.llm):
+            self.assertEqual(side.model_kwargs["api_key_env"], "OPENAI_API_KEY")
+        (emb_field,) = RemoteEmbeddingService.required_client_fields(preset.embedding)
+        (llm_field,) = RemoteLLMService.required_client_fields_for_config(preset.llm)
+        for field in (emb_field, llm_field):
+            self.assertEqual(field["key_name"], "OPENAI_API_KEY")
+            self.assertEqual(field["header_name"], "X-Openai-Api-Key")
+            self.assertEqual(field["docs_url"], "https://platform.openai.com/api-keys")
+
+    def test_remote_kisski_keeps_its_key_and_gets_the_portal_link(self):
+        from backend.config.presets import get_preset
+        from backend.services.llm import RemoteLLMService
+        preset = get_preset("remote-kisski", self.data_path)
+        (field,) = RemoteLLMService.required_client_fields_for_config(preset.llm)
+        self.assertEqual((field["key_name"], field["kind"]), ("KISSKI_API_KEY", "api_key"))
+        self.assertEqual(field["docs_url"], "https://saia.gwdg.de/dashboard")
+
+    def test_every_bundled_preset_has_valid_providers(self):
+        from backend.config.presets import DEFAULT_PRESETS_DIR, list_presets
+        self.assertEqual(
+            set(list_presets(self.data_path)), {p.stem for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+        )
+
+
 class TestAnthropic(unittest.TestCase):
     def test_protocol_and_key_metadata(self):
         provider = get_providers(preset_with("anthropic"))["llm"]

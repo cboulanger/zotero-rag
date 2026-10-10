@@ -282,6 +282,16 @@ def _check_custom_preset(path: Path, data: dict) -> None:
         for dotted, hint in entries:
             if _lookup_dotted(data, dotted):
                 problems.append(f"'{dotted}' was removed in version {removed_in} and is ignored ({hint})")
+    llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+    names = llm.get("model_names")
+    first_model = (names[0] if isinstance(names, list) and names else names) or ""
+    provider_id = (llm.get("provider") or {}).get("id", "generic") if isinstance(llm.get("provider"), dict) else "generic"
+    if isinstance(first_model, str) and "claude" in first_model.lower() and provider_id != "anthropic":
+        problems.append(
+            f"LLM model {first_model!r} looks like a Claude model but its provider is {provider_id!r}; "
+            "models are no longer routed to Anthropic by name - set "
+            '"provider": {"id": "anthropic"} on the llm section'
+        )
     if problems:
         logger.warning("Custom preset %s: %s.", path.name, "; ".join(problems))
 

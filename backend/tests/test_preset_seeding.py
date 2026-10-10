@@ -183,6 +183,22 @@ class TestCustomPresetVersionWarnings(_SeedingBase):
         self.assertIn("provisioning_script", joined)
         self.assertIn("llm.models_status_url", joined)
 
+    def test_claude_model_without_the_anthropic_provider_is_warned_about(self):
+        data = _minimal_preset(version=PRESET_SCHEMA_VERSION)
+        data["llm"] = {"model_type": "remote", "model_names": ["claude-sonnet-4-5"]}
+        self._write_custom("claude-old", data)
+        with self.assertLogs(presets_module.logger, level=logging.WARNING) as logs:
+            get_preset("claude-old", self.data_path)
+        self.assertTrue(any("claude-sonnet-4-5" in m and "anthropic" in m for m in logs.output))
+
+    def test_claude_model_with_the_anthropic_provider_is_not_warned_about(self):
+        data = _minimal_preset(version=PRESET_SCHEMA_VERSION)
+        data["llm"] = {"model_type": "remote", "model_names": ["claude-sonnet-4-5"],
+                       "provider": {"id": "anthropic"}}
+        self._write_custom("claude-new", data)
+        with self.assertNoLogs(presets_module.logger, level=logging.WARNING):
+            get_preset("claude-new", self.data_path)
+
     def test_list_presets_triggers_the_check_too(self):
         self._write_custom("mine", _minimal_preset())
         with self.assertLogs(presets_module.logger, level=logging.WARNING) as logs:

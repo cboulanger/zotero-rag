@@ -169,34 +169,23 @@ def reset_rate_limit_cache() -> None:
     _last_rate_limit_headers = None
     _last_rate_limit_headers_at = None
 
-_KNOWN_HEADERS: dict[str, str] = {
-    "OPENAI_API_KEY": "X-OpenAI-Api-Key",
-    "ANTHROPIC_API_KEY": "X-Anthropic-Api-Key",
-    "KISSKI_API_KEY": "X-Kisski-Api-Key",
-    "HF_TOKEN": "X-HF-Token",
-}
+#: The OpenAI SDK insists on a non-empty key; this is sent to servers that need none.
+KEYLESS_API_KEY = "not-needed"
 
 
 def env_var_to_header(env_var: str) -> str:
-    """Convert env var name to HTTP header: KISSKI_API_KEY -> X-Kisski-Api-Key."""
-    if env_var in _KNOWN_HEADERS:
-        return _KNOWN_HEADERS[env_var]
+    """Convert env var name to HTTP header: KISSKI_API_KEY -> X-Kisski-Api-Key.
+
+    HTTP header names are case-insensitive, so the computed name is all any
+    client needs; no per-vendor spelling table is kept.
+    """
     return "X-" + "-".join(p.capitalize() for p in env_var.split("_"))
 
 
-# Provider portal where users can create/manage the API key for a given env var.
-# Surfaced in the plugin preferences so users can reach the right dashboard.
-_KNOWN_DOCS_URLS: dict[str, str] = {
-    "KISSKI_API_KEY": "https://saia.gwdg.de/dashboard",
-    "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
-    "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
-    "HF_TOKEN": "https://huggingface.co/settings/tokens",
-}
-
-
-def docs_url_for_key(env_var: str) -> str | None:
-    """Return the provider portal URL for an API key env var, or None if unknown."""
-    return _KNOWN_DOCS_URLS.get(env_var)
+def docs_url_for(model_kwargs: dict, env_var: str) -> str | None:
+    """Key-portal link for ``env_var`` as filled into ``model_kwargs`` by the
+    side's provider (``key_docs_urls``, see ``Provider.apply_defaults``)."""
+    return (model_kwargs.get("key_docs_urls") or {}).get(env_var)
 
 
 # Known embedding dimensions for common remote models.
@@ -441,7 +430,8 @@ class RemoteEmbeddingService(EmbeddingService):
 
     Configuration via EmbeddingConfig.model_kwargs:
       - ``base_url``:    API base URL (default: OpenAI)
-      - ``api_key_env``: env-var name that holds the API key (default: OPENAI_API_KEY)
+      - ``api_key_env``: env-var name that holds the API key (a provider such as
+        ``openai`` fills in its default; none means the server needs no key)
     """
 
     def __init__(
@@ -498,15 +488,7 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
                 "description": f"API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
-                "pattern": config.model_kwargs.get("api_key_pattern"),
-            })
-        elif "shared_api_key_env" not in config.model_kwargs:
-            env_var = "OPENAI_API_KEY"
-            fields.append({
-                "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "api_key",
-                "description": f"API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("api_key_pattern"),
             })
         # Listed before shared_base_url: the key is the one value every setup
@@ -519,7 +501,7 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_api_key",
                 "description": f"Shared API key for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("shared_api_key_pattern"),
             })
         if "shared_base_url_env" in config.model_kwargs:
@@ -527,7 +509,7 @@ class RemoteEmbeddingService(EmbeddingService):
             fields.append({
                 "key_name": env_var, "header_name": env_var_to_header(env_var), "kind": "shared_base_url",
                 "description": f"Shared endpoint URL for remote embeddings ({config.model_name})",
-                "docs_url": docs_url_for_key(env_var), "required_for": ["indexing"],
+                "docs_url": docs_url_for(config.model_kwargs, env_var), "required_for": ["indexing"],
                 "pattern": config.model_kwargs.get("shared_base_url_pattern"),
             })
         return fields
@@ -557,12 +539,16 @@ class RemoteEmbeddingService(EmbeddingService):
                         f"environment variable."
                     )
             else:
-                api_key_env = self.config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-                api_key = self._api_key or os.getenv(api_key_env)
-                if not api_key:
-                    raise EmbeddingConfigurationError(
-                        f"API key not found. Set the {api_key_env} environment variable."
-                    )
+                api_key_env = self.config.model_kwargs.get("api_key_env")
+                if api_key_env:
+                    api_key = self._api_key or os.getenv(api_key_env)
+                    if not api_key:
+                        raise EmbeddingConfigurationError(
+                            f"API key not found. Set the {api_key_env} environment variable."
+                        )
+                else:
+                    # No key declared: an OpenAI-compatible server that needs none.
+                    api_key = self._api_key or KEYLESS_API_KEY
 
             if shared_url_env:
                 base_url = resolve_shared_value(shared_url_env, self.data_path)

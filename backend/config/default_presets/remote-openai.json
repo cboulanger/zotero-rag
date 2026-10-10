@@ -1,17 +1,19 @@
 {
   "version": 2,
-  "description": "Using OpenAI/Anthropic remote inference endpoints",
+  "description": "Using OpenAI remote inference endpoints",
   "embedding": {
     "model_type": "remote",
     "model_name": "openai",
-    "batch_size": 100
+    "batch_size": 100,
+    "provider": {"id": "openai"}
   },
   "llm": {
     "model_type": "remote",
     "model_names": ["gpt-4o-mini"],
     "max_context_length": 128000,
     "max_answer_tokens": 4096,
-    "temperature": 0.7
+    "temperature": 0.7,
+    "provider": {"id": "openai"}
   },
   "rag": {
     "top_k": 10,

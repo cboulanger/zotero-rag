@@ -509,13 +509,25 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
                 service._get_client()
         self.assertIn("MPCDF_EMBEDDING_API_KEY", str(ctx.exception))
 
-    async def test_get_client_raises_configuration_error_when_default_api_key_unset(self):
-        config = EmbeddingConfig(model_type="remote", model_name="openai")
+    async def test_get_client_raises_configuration_error_when_the_named_api_key_is_unset(self):
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+        )
         with patch.dict(os.environ, {}, clear=True):
             service = RemoteEmbeddingService(config)
             with self.assertRaises(EmbeddingConfigurationError) as ctx:
                 service._get_client()
         self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_without_a_declared_key_uses_a_placeholder(self, mock_openai_cls):
+        """A generic OpenAI-compatible server that declares no key needs none."""
+        config = EmbeddingConfig(
+            model_type="remote", model_name="local-embedder", model_kwargs={"base_url": "http://localhost:8000/v1"},
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            RemoteEmbeddingService(config)._get_client()
+        self.assertEqual(mock_openai_cls.call_args.kwargs["api_key"], "not-needed")
 
     @patch("openai.AsyncOpenAI")
     async def test_embed_text_returns_correct_dimension(self, mock_openai_cls):
