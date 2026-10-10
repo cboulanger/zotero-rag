@@ -8,7 +8,8 @@ Three parts, to be implemented in order:
 
 - **A. Provider abstraction layer.** A `Provider` base class bound to one side
   (embedding or LLM), an id-based registry, preset versioning, a credential-scope
-  model (per-user keys, no keys in `.env`), the core changes that make the backend
+  model (user, shared and managed scopes; no keys in `.env`), a server default
+  preset with per-user preset choice, the core changes that make the backend
   provider-blind, and a provider-agnostic provisioning UI in the plugin's settings.
 - **B. Migrate existing presets.** RunPod becomes `RunPodProvider`, the KISSKI
   behaviour becomes `KisskiProvider`, MPCDF becomes `MpcdfProvider`, `remote-openai`
@@ -35,11 +36,24 @@ So a preset can pair a local embedding model with a frontier LLM, or Hugging Fac
 embeddings with Anthropic answering. A side without a `provider` block uses
 `generic`.
 
-**Credentials follow cost.** Any key tied to cost or a rate limit is per user, as
-KISSKI keys are today. Only providers that cost nothing (local models,
-institutionally provided services) may be configured once by the admin for all
-users, and the provider class declares which case it is (A10). Provider keys are
-no longer read from `.env` or the process environment at all.
+**Credentials follow cost and funding.** A provider key is one of three kinds
+(A10), and the provider class declares which kinds it allows:
+
+- `user`: each user brings their own key and pays for and operates their own
+  resources (KISSKI today; a user's own HF or RunPod account).
+- `managed`: the admin holds one key for a resource that costs money but is funded
+  by an institution; only the admin provisions, pauses and resumes it, and all
+  users simply use it.
+- `shared`: the admin sets one key and URL once for a service that costs nothing
+  (institutionally provided, for example MPCDF); there is nothing to operate.
+
+Provider keys are no longer read from `.env` or the process environment by the
+main app or by the tools in `bin/`.
+
+**One preset is the server default.** A user who installs the plugin and connects
+gets it with no choice to make (out of the box: the rate-limited `remote-kisski`).
+They may then choose another preset with the same embedding model for themselves,
+for example one backed by their own paid provider to speed things up (A11).
 
 Rejected alternatives: presets-as-classes (undoes the file-based preset design in
 `2026-10-08-file-based-presets-design.md` and makes data-only presets awkward),
@@ -93,6 +107,7 @@ PRESET_SCHEMA_VERSION = 2          # bump on any breaking change to the file sch
 
 class ProviderConfig(BaseModel):
     id: str = "generic"            # registry key, e.g. "runpod"
+    scope: Optional[Literal["user", "shared", "managed"]] = None   # None == the class default
     options: dict = {}             # validated by the provider class, not by core
 
 class EmbeddingConfig(BaseModel):
@@ -123,9 +138,14 @@ fails backend startup or the other presets.
   LLM-only.
 - A side with `model_type: "local"` has no remote endpoint and needs no key; a
   non-generic provider on it is a configuration error.
-- The key kinds a side uses match its provider's key scope (A10): a `user` provider
-  uses `api_key_env`; a `shared` provider uses `shared_api_key_env` /
-  `shared_base_url_env`. Mixing them is rejected.
+- The effective scope (`provider.scope`, else the class default) is one of the
+  scopes the class allows (`key_scopes`, A2). KISSKI allows only `user`; MPCDF only
+  `shared`; RunPod, HF, OpenAI and Anthropic allow `user` and `managed`; generic
+  allows all three and defaults to `user`.
+- The key kinds a side uses match its effective scope (A10): `user` uses
+  `api_key_env`; `managed` and `shared` use `shared_api_key_env` (and
+  `shared_base_url_env` only for a provider that cannot derive its endpoint URL,
+  such as MPCDF). Mixing them is rejected.
 - Two sides that use the same key env var must use the same provider id. One
   header cannot carry two vendors' keys.
 
@@ -165,7 +185,8 @@ class Provider:
     label: ClassVar[str]                                  # human name for the UI
     Options: ClassVar[type[BaseModel]] = NoOptions        # validates the side's provider.options
     supported_sides: ClassVar[set[Side]] = {"embedding", "llm"}
-    key_scope: ClassVar[Literal["user", "shared"]] = "user"        # who supplies the key, see A10
+    key_scopes: ClassVar[set[Scope]] = {"user"}           # scopes a preset may select, see A10
+    default_scope: ClassVar[Scope] = "user"               # used when the preset names none
     supports_provisioning: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False              # cost-control pause, see A8
     llm_api: ClassVar[Literal["openai", "anthropic"]] = "openai"   # wire protocol of the LLM side
@@ -204,8 +225,9 @@ class Provider:
     def health(self, creds: Credentials) -> Health | None: ...
 
     # Create or wake this side's remote resources. Returns {shared_base_url_env: url}
-    # for shared-scope providers and {} for user-scope ones (the URL is derived by
-    # endpoint_url()). Must report steps through `progress` and respect ctx.deadline.
+    # only for a provider that cannot derive its URL from the key; {} otherwise (the
+    # URL comes from endpoint_url()). Must report steps through `progress` and
+    # respect ctx.deadline.
     def provision(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> dict[str, str]:
         raise NotImplementedError
 
@@ -229,9 +251,10 @@ class Provider:
   `unreachable` includes "nothing provisioned yet" and provider-side failure.
   Pause state is read from the provider through `health()`, never stored locally,
   so there is one source of truth and nothing to drift.
-- `Credentials` is `{api_key, base_url | None}`: the caller's key and, for shared
-  providers or fixed-URL vendors, the base URL; for provisioned user-scope
-  endpoints core fills `base_url` from `endpoint_url()`.
+- `Credentials` is `{api_key, base_url | None}`: the key of whoever owns the
+  resource (the caller for `user` scope, the admin-set key for `managed` and
+  `shared`) and the base URL, which core fills from the preset, the shared store or
+  `endpoint_url()`.
 - `ProvisionContext` carries the preset, the side, the caller's credential, the data
   path, flags (`recreate`, `skip_warmup`) and a `deadline`. Credentials arrive
   in-process, so the `PROVISIONING_API_KEY` env hand-off disappears.
@@ -239,7 +262,9 @@ class Provider:
   list entry is the preferred model, matching what `GET /api/config` does today.
 - The base class is `GenericProvider`, documented as "any OpenAI-compatible HTTP
   API" (`/v1/embeddings`, `/v1/chat/completions`, bearer-key auth). It contains no
-  vendor names: `key_scope` is `"user"`; `parse_usage()` understands the
+  vendor names: `key_scopes` allows all three scopes and `default_scope` is `"user"`
+  (cost is unknown, so a remote generic side is per-user unless the preset says
+  otherwise); `parse_usage()` understands the
   OpenAI-style `x-ratelimit-{limit,remaining,reset}-{requests,tokens}` headers and
   the IETF `RateLimit-*` headers (A9); `llm_api` is `"openai"`; `health()`,
   `endpoint_url()`, `live_models()`, `default_key_env()`, `key_docs_url()` and
@@ -269,14 +294,14 @@ the relevant side.
 
 | Today | After |
 |---|---|
-| `_check_side()` looks up `HEALTH_CHECKS[provider]` and reads shared values | `providers[side].health(creds)` with the **caller's** credentials (key from the request header, URL from the preset, `endpoint_url()` or the shared store); `None` stays `null` in the response, a missing key or endpoint reads "not configured" / "not provisioned" |
+| `_check_side()` looks up `HEALTH_CHECKS[provider]` and reads shared values | `providers[side].health(creds)` for the **caller's effective preset** (A11) with the key's owner's credentials (the caller's header key for `user`, the stored admin key for `managed` and `shared`); the URL comes from the preset, `endpoint_url()` or the shared store; `None` stays `null` in the response, a missing key or endpoint reads "not configured" / "not provisioned" |
 | `provisionable = bool(preset.provisioning_script)` | Removed; the plugin reads `supports_provisioning` per side from the descriptors (A7) |
-| `POST /api/config/provision` spawns `sys.executable script --json`, admin only, one global job | One job per caller runs `provision()` for each requested provisioning-capable side in turn (embedding, then LLM) via `asyncio.to_thread`; any authenticated user for `user`-scope providers, admin for `shared` scope; same job states (`idle`/`running`/`succeeded`/`failed`) and 409/400 behaviour, 409 being per caller; the job fails when `ctx.deadline` passes |
+| `POST /api/config/provision` spawns `sys.executable script --json`, admin only, one global job | One job runs `provision()` for each requested provisioning-capable side in turn (embedding, then LLM) via `asyncio.to_thread`. `user` scope: any authenticated user, one job slot per caller, on the caller's own account. `managed` scope: admin only (`require_authorized_group_admin`), one global job slot, on the admin's account. `shared` scope: nothing to provision. Same job states (`idle`/`running`/`succeeded`/`failed`) and 409/400 behaviour; the job fails when `ctx.deadline` passes |
 | Request body `{api_key}` | `{ "keys": { "<credential env>": "<one-time value>" }, "sides": ["llm"] }`; both fields optional. Without `keys` the caller's own service key is used; without `sides` every provisioning-capable side runs |
 | Job state is `{status, message, started_at, finished_at}` | Adds `progress: list[str]` (bounded, newest last, each line prefixed with its side) and `sides: {embedding?: {status, message}, llm?: {status, message}}`, so a failed side can be retried alone with `sides: [that side]` |
-| Result parsed from a `PROVISION_RESULT:` stdout line, then `update_remote_config()` | `user`-scope providers return nothing to store (the URL is derived from the key, A10) and the endpoint-URL cache entry is invalidated; `shared`-scope providers return `{shared_base_url_env: url}`, applied via `update_remote_config()` as soon as that side succeeds |
+| Result parsed from a `PROVISION_RESULT:` stdout line, then `update_remote_config()` | Providers that derive the URL from the key (RunPod, HF) return nothing to store, and the endpoint-URL cache entry is invalidated; a provider that cannot (a hypothetical one) returns `{shared_base_url_env: url}`, applied via `update_remote_config()` as soon as that side succeeds |
 | `_provisioning_key()` reads the key pattern from `model_kwargs`; a supplied key is kept as the shared key when none is stored | Pattern comes from `apply_defaults()`; a supplied key is used for this run only and never stored by the backend |
-| `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Shared-field requirements are reported only for `shared`-scope providers |
+| `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Shared URL and key fields are reported for `managed` and `shared` scopes; a `managed` side whose provider derives its URL reports only the key field |
 | `get_config()` and `get_models_status()` call `fetch_kisski_rag_models()` when `models_status_url` is set | Call `providers["llm"].live_models(base_url, api_key)`; `None` means use the preset's static `model_names` and return an empty status list, as today |
 | `query.py` accepts an unlisted `llm_model` only when `models_status_url` is set | Accepts it when the LLM provider supports `live_models` (the provider's list is authoritative) |
 | `GET /api/rate-limits` returns raw captured headers | Returns `meters` from each side's `parse_usage()` (A9) instead of raw headers |
@@ -294,10 +319,16 @@ a RunPod-specific response.
 
 A generic `bin/provision.py [--preset NAME] [--side embedding|llm|both] [--pause]
 [--teardown] [--recreate] [--yes] [--skip-warmup]` drives every side whose
-provider supports provisioning, with the key read from the stdin prompt or the
-auto-index key store, never from argv or `.env`. It replaces the per-provider
-script as the manual entry point and is subject to the same "run inside the
-container so the data volume is shared" rule from CLAUDE.md.
+provider supports provisioning. It replaces the per-provider script as the manual
+entry point and is subject to the same "run inside the container so the data
+volume is shared" rule from CLAUDE.md. Like every tool in `bin/` it does not let
+environment variables supply or override provider keys: the key comes from a stdin
+prompt or from the auto-index key store (user scope) or the shared store (managed
+scope), and never from argv, so it cannot leak through `ps`.
+
+The scripts in `scripts/` are developer and maintainer tooling and are not covered
+by this rule: they may keep taking keys from CLI parameters or environment
+variables, as they do today.
 
 ### A6. Provider contract tests
 
@@ -307,7 +338,7 @@ supports:
 - `Options` validation (valid, invalid, defaults).
 - `apply_defaults()` is idempotent and does not clobber explicit preset values.
 - `describe()` returns a well-formed descriptor with no secret material, including
-  `key_scope`.
+  its effective scope and allowed scopes.
 - `health()` classification against a fake client, never raising.
 - `endpoint_url()`, when supported, returns the URL of an existing endpoint, `None`
   for an absent one, and never raises.
@@ -325,7 +356,7 @@ supports:
 - Providers with `supports_provisioning = False` or `supports_suspend = False`
   raise `NotImplementedError` and are never offered the corresponding button.
 - Using a provider on a side outside its `supported_sides`, or with key kinds that
-  do not match its `key_scope`, is rejected at load.
+  do not match its effective scope, is rejected at load.
 
 A new provider must pass this suite. That is the definition of "easy to add".
 
@@ -353,6 +384,7 @@ active preset:
     "id": "huggingface",
     "label": "Hugging Face",
     "key_scope": "user",
+    "operable_by_caller": true,
     "supports_provisioning": true,
     "supports_suspend": true,
     "provisioning": {
@@ -371,6 +403,7 @@ active preset:
     "id": "anthropic",
     "label": "Anthropic",
     "key_scope": "user",
+    "operable_by_caller": false,
     "supports_provisioning": false,
     "supports_suspend": false,
     "provisioning": null,
@@ -378,6 +411,11 @@ active preset:
   }
 }
 ```
+
+`key_scope` is the effective scope, and `operable_by_caller` is computed by the
+backend for the requesting user: true for a `user` scope side, true for a
+`managed` side only when the caller is an admin, false for `shared`. The plugin
+never decides who may operate a resource; it renders what the backend says.
 
 `GET /api/config/provision/status` returns the caller's job: `status`, `message`,
 `progress`, and the per-side `sides` results (A4). There is no `provisionable` flag
@@ -398,12 +436,12 @@ Each section contains, top to bottom:
 | Element | Source | Notes |
 |---|---|---|
 | Heading and provider | side name and `descriptor.label` | "Embedding: Hugging Face"; for a local model "Embedding: local model" with no further controls |
-| Health row | `GET /api/config/health`, this side's entry | Unchanged colours and statuses; omitted when the side has no health concept; for `user`-scope providers it reflects the user's own endpoint |
+| Health row | `GET /api/config/health`, this side's entry | Unchanged colours and statuses; omitted when the side has no health concept; shown to every user, and for a `managed` side it is the only thing a non-admin sees, with the line "Managed by your administrator" |
 | Hint under a side that is not ready | `descriptor.unavailable_hint` | For providers that cannot provision (for example MPCDF: start a new job and paste its URL and key) |
-| Service key field(s) | `GET /api/required-keys`, entries for this side | The user's personal key for a `user`-scope provider (stored in the plugin's preferences, sent as a header, as `KISSKI_API_KEY` is today); the shared URL and key fields for a `shared`-scope provider, admin only. If both sides use the same key env var they show the same preference, so editing it in one section updates the other |
+| Service key field(s) | `GET /api/required-keys`, entries for this side | `user` scope: the user's personal key (stored in the plugin's preferences, sent as a header, as `KISSKI_API_KEY` is today). `managed` and `shared` scope: the shared key (and URL where needed), admin only; other users see no field. If both sides use the same key env var they show the same preference, so editing it in one section updates the other |
 | Provision credential | `descriptor.provisioning.credential` | Only when the side can provision. Label, help and placeholder from the descriptor; pattern checked client-side, enforced server-side regardless. Left empty, the user's saved service key is used; a value entered here is used for this run only |
-| Provision / Resume button | `supports_provisioning` and health | "Provision" when the side is `unreachable`/`throttled`, "Resume" when `paused`; shown to every user for `user`-scope providers, to admins only for `shared` scope. Posts `sides: [this side]` |
-| Pause button | `supports_suspend` and health | Shown whenever the side is `ready` or `cold`, not only when something is wrong; one click, no confirmation (reversible) |
+| Provision / Resume button | `operable_by_caller`, `supports_provisioning` and health | "Provision" when the side is `unreachable`/`throttled`, "Resume" when `paused`; shown only when `operable_by_caller`. Posts `sides: [this side]` |
+| Pause button | `operable_by_caller`, `supports_suspend` and health | Shown whenever the side is `ready` or `cold`, not only when something is wrong; one click, no confirmation (reversible) |
 | Retry button | this side's entry in `status.sides` | Appears after a failed job on this side and posts `sides: [this side]` again |
 | Hint line | `descriptor.provisioning.hint` | Shown while idle and while this side's job runs |
 | Progress and result | `status.progress` filtered to this side, `status.sides[side]` | Newest line shown live, whole list as a tooltip; the result or failure reason is shown inside the section it belongs to |
@@ -464,9 +502,10 @@ whether it can pause, and the API takes an optional list of sides (default: ever
 side that can). Resume is the existing idempotent `provision()`, which restores the
 configured scaling and wakes the endpoint. The paused state is not stored by the
 backend: `health()` derives it from the provider (A2), so a pause made from the CLI
-or the provider's own console is seen the same way. Because endpoints of
-`user`-scope providers belong to the user's own account (A10), pause and resume act
-on the caller's endpoints only.
+or the provider's own console is seen the same way. Under `user`
+scope the endpoints belong to the caller's own account (A10), so pause and resume
+act on the caller's endpoints only; under `managed` scope they act on the shared
+endpoints for everyone, and only an admin may do it.
 
 | Provider | Pause | Resume |
 |---|---|---|
@@ -495,8 +534,9 @@ the sides they use, and for the user whose key they use:
   (A7).
 
 **Access and concurrency.** `POST /api/config/suspend` follows the provisioning
-rules (A4): any authenticated user for `user`-scope providers, one job slot per
-caller, 409 while one of the caller's jobs runs. It returns 400 when none of the
+rules (A4): any authenticated user for `user` scope with one job slot per caller,
+an admin for `managed` scope with one global slot, and 409 while a job in the
+relevant slot runs. It returns 400 when none of the
 requested sides supports suspend.
 
 **Tests.** Contract tests (A6); API tests for authentication, 409 and 400;
@@ -557,56 +597,127 @@ class Meter:
 
 ### A10. Credential scope: who supplies a key, and where keys live
 
-**Rule.** Any credential tied to cost or a rate limit is per user. A provider that
-costs nothing may instead be configured once by the admin for everyone. The class
-says which, through `key_scope`; the preset JSON cannot override it, so a preset
-author cannot make a paid service shared by accident.
+**Rule.** The key behind any cost or rate limit belongs to whoever pays. There are
+three kinds, and a provider class declares which ones it allows (`key_scopes`,
+`default_scope`). The preset may pick one of the allowed kinds with
+`provider.scope`; the default is the class default, which is `user` for everything
+that costs money. Choosing `managed` or `shared` is therefore always a deliberate
+line in the preset, never an accident.
 
-| `key_scope` | Meaning | Where the key lives | Providers |
-|---|---|---|---|
-| `"user"` | Each user supplies their own key; cost and quota are theirs | The user's Zotero preferences (sent as a request header); for auto-indexing, the encrypted auto-index key store, as for KISSKI today | `generic` (default for remote sides, since cost is unknown), `kisski`, `openai`, `anthropic`, `runpod`, `huggingface` |
-| `"shared"` | The admin sets one key (and URL) for all users | `admin_settings.json`, Fernet-encrypted by `backend/services/secret_store.py`, set through `POST /api/config/remote-fields` | `mpcdf` (institutionally provided) |
+| `scope` | Who supplies the key | Costs | Who provisions, pauses, resumes | Where the key lives |
+|---|---|---|---|---|
+| `user` | Each user, their own | Theirs | The user, on their own account | The user's Zotero preferences (sent as a request header); for auto-indexing, the encrypted auto-index key store, as for KISSKI today |
+| `managed` | The admin, once | An institution pays | The admin only; users just use it | `admin_settings.json`, Fernet-encrypted by `backend/services/secret_store.py`, set through `POST /api/config/remote-fields` |
+| `shared` | The admin, once | Nothing (institutionally provided) | Nobody; the admin pastes a URL and key, as with MPCDF | Same as `managed` |
 
-Local sides need no key and have no scope. A new institutional or self-hosted
-service that should be admin-configured gets a small provider class like
-`MpcdfProvider`, rather than a preset-level switch.
+Allowed scopes per class: `kisski` `{user}`; `mpcdf` `{shared}`; `openai`,
+`anthropic`, `runpod` and `huggingface` `{user, managed}`; `generic` all three.
+Local sides need no key and have no scope. A self-hosted or institutional
+OpenAI-compatible server the admin wants to configure once uses `generic` with
+`"scope": "shared"`.
 
-**No keys in `.env` or the environment.** Provider credentials are never read from
-`.env` or from the process environment, for any provider. Every site that
-currently falls back to `os.environ` for an API key or endpoint URL loses that
-fallback: `admin_settings_store.resolve_shared_value`, the remote embedding and LLM
+**No keys in `.env` or the environment for the app.** The main app and the tools in
+`bin/` never read provider credentials from `.env` or from the process environment,
+for any provider and any scope. Every site that currently falls back to
+`os.environ` for an API key or endpoint URL loses that fallback:
+`admin_settings_store.resolve_shared_value`, the remote embedding and LLM
 services, `dependencies.get_client_api_keys`, `Settings.get_api_key`, the
 "is it set" checks in `api/config.py`, and the key-name defaults in `.env.dist`
 and the deploy env files. `.env` keeps non-credential settings and
 `AUTOINDEX_SECRET`, which is the encryption secret for the stores, not a provider
-key. Scripts and evaluation tooling that need a provider key read it from the
-auto-index key store (the `bin/debug_get_zotero_key.py` pattern) or prompt for it,
-never from argv or `.env`. `docs/presets.md`, `CLAUDE.md` and `.env.dist` are
-updated to say so.
+key. The scripts in `scripts/` are developer tooling and may keep using CLI
+parameters or environment variables for keys. `docs/presets.md`, `CLAUDE.md` and
+`.env.dist` are updated to say so.
 
-**Per-user endpoints.** For providers that provision (RunPod, HF), the endpoints
-live in the user's own provider account, named `zotero-rag-embedding` and
-`zotero-rag-llm`. Nothing stores the endpoint URL: `endpoint_url(api_key)` finds
-the endpoint by name with the user's key. Core caches the answer in memory, keyed
-by provider, side and key fingerprint, with a short TTL, and drops the entry on
-provision, suspend, teardown, or a connection failure. The preset therefore has no
-`*_BASE_URL` fields for these providers, only `api_key_env`. The embedding model is
-still fixed by the preset, so all users share one vector space and one vector
-database; only the compute behind it differs per user.
+**Endpoints and their URLs.** For providers that provision (RunPod, HF), the
+endpoints live in the key owner's own provider account (the user's under `user`, the
+admin's under `managed`), named `zotero-rag-embedding` and `zotero-rag-llm`. Nothing
+stores the endpoint URL: `endpoint_url(api_key)` finds the endpoint by name with the
+owner's key. Core caches the answer in memory, keyed by provider, side and key
+fingerprint, with a short TTL, and drops the entry on provision, suspend, teardown,
+or a connection failure. The preset therefore has no `*_BASE_URL` fields for these
+providers, only the key field. The embedding model is still fixed by the preset, so
+all users share one vector space and one vector database whichever scope or
+account serves them; only the compute behind it differs.
 
 **Consequences.**
 
-- Provisioning, health, pause and resume are per user and need only a valid user
-  identity, not admin rights. `shared`-scope configuration stays admin-only.
-- The job slot is per caller (A4).
-- Auto-indexing and the cron indexer resolve each user's endpoint from that user's
-  stored key and gate on that user's health (A8).
-- The admin no longer pays for, or holds a key to, anyone's compute. Each user's
-  spend is on their own provider account, which fits the decision to leave
-  billing to the provider dashboards.
+- Under `user`, provisioning, health, pause and resume are per user and need only a
+  valid user identity. Under `managed` they are admin-only and affect everyone, and
+  non-admins see health but no controls (A7). `shared` has nothing to operate.
+- Job slots follow the owner: per caller for `user`, one global slot for `managed`.
+- Auto-indexing and the cron indexer resolve the endpoint from the key that owns it
+  (each user's stored key, or the admin-set key) and gate on that owner's health
+  (A8).
+- Usage meters and rate-limit state are keyed by key fingerprint, so a `managed` or
+  `shared` key shows one pool for everyone and a `user` key shows that user's own.
+- Under `user` the admin pays for and holds no one's compute; under `managed` the
+  institution pays through the admin's account. Spend is inspected on the provider's
+  dashboard in both cases.
 - Many users each running their own GPU endpoints is more total infrastructure than
-  one shared pair. That is the intended cost model, but it makes Pause (A8) more
-  important.
+  one shared pair. That is the intended cost model for `user`, and it makes Pause
+  (A8) more important.
+
+### A11. Default preset and per-user preset choice
+
+Today the active preset is global: `POST /api/config` switches it for every caller
+and for the cron indexer, and only an admin may do that. With per-user credentials
+a user can reasonably want something different from the server's default (for
+example their own paid provider for speed) while sharing the same index.
+
+**Server default.** The admin designates one preset as the default. It is stored in
+`admin_settings.json` as `default_preset`, set through the existing admin-only
+`POST /api/config` (whose meaning becomes "set the server default"). Resolution
+order: the stored value, then the `MODEL_PRESET` setting, then the built-in
+`remote-kisski`, so a fresh install works with the rate-limited KISSKI service. A
+user who installs the plugin and connects is on the default with nothing to
+choose; the setup wizard asks only for the keys the default needs (for KISSKI, the
+user's own key).
+
+**Personal choice.** A user may select another preset for themselves, from the
+presets compatible with the default's embedding model (the existing
+`_compatible_presets` rule: same embedding model identity, so the one vector store
+stays valid), and whose credentials they can supply. It is stored server-side per
+user identity, not in a header, because the cron indexer and auto-index need it
+too: `GET` and `PUT /api/config/my-preset`, keyed by the Zotero identity
+fingerprint in a small `user_settings.json` (a preset name is not secret). A
+choice that later becomes invalid (the preset was removed, or it stopped being
+compatible after the default changed) falls back to the default, and
+`GET /api/config` says so.
+
+**Effective preset.** Every request path that today calls
+`settings.get_hardware_preset()` resolves `get_effective_preset(identity)`: the
+user's choice if valid, else the default. Consequences:
+
+- Health, provisioning, pause, usage meters and key requirements all describe the
+  caller's effective preset, so the two per-side Preferences sections (A7) show the
+  provider the user actually uses.
+- The vector store is untouched: compatibility guarantees the same embedding model.
+- The cron indexer and on-demand indexing use each user's effective preset, hence
+  that user's embedding provider and key. The auto-index key store therefore holds
+  keys per env var name per user (a map), rather than a single embedding key, so a
+  user can have a KISSKI key and an HF token at once.
+- `switchable_presets` becomes a per-user `selectable_presets` list (compatible,
+  and usable for that user: keys present or, for `managed`, an admin-provisioned
+  resource that is ready).
+
+**Typical journeys.**
+
+- *Free tier, then upgrade.* The default is `remote-kisski`. A user adds their HF
+  token under the `huggingface` preset (`user` scope), provisions their own
+  endpoints from their Embedding and LLM sections, and selects that preset for
+  themselves. Their queries and indexing now use their own endpoints; everyone else
+  is unaffected.
+- *Institution-funded GPUs.* The admin makes a `managed` preset the default,
+  provisions it once, and every user uses it with no key of their own.
+- *Mixed.* A preset with a `shared` or `managed` embedding side and a `user` LLM
+  side, for example institutional embeddings and each user's own Anthropic key.
+
+**UI.** The "Active Model Preset" group becomes "Model preset" with a dropdown for
+the user's own choice (the default is marked "(server default)"), and, for admins
+only, a second control "Server default preset". Loopback and single-user
+deployments show one control. Switching either triggers the same refresh of the
+per-side sections that a preset change triggers today.
 
 ---
 
@@ -618,12 +729,12 @@ Which provider each bundled preset's sides get (an omitted `provider` block mean
 | Preset | Embedding | LLM | Key scope |
 |---|---|---|---|
 | `cpu-only`, `high-memory`, `apple-silicon-32gb` | generic (local) | generic (local) | none |
-| `remote-kisski`, `apple-silicon-kisski`, `windows-test` | kisski | kisski | user |
+| `remote-kisski`, `apple-silicon-kisski`, `windows-test` | kisski | kisski | user (`remote-kisski` is the built-in server default, A11) |
 | `cloud-server-kisski` | generic (local) | kisski | user (LLM) |
 | `remote-mpcdf` | mpcdf | mpcdf | shared |
 | `remote-openai` | openai | openai | user |
-| `runpod` | runpod | runpod | user |
-| `huggingface` (new, Part C) | huggingface | huggingface | user |
+| `runpod` | runpod | runpod | user (a custom copy can set `"scope": "managed"`) |
+| `huggingface` (new, Part C) | huggingface | huggingface | user (a custom copy can set `"scope": "managed"`) |
 
 ### B1. `GenericProvider` (any OpenAI-compatible API)
 
@@ -645,7 +756,8 @@ side. The presets that use it everywhere only gain `"version": 2`.
 
 Applies per side to `remote-kisski`, `apple-silicon-kisski`, `windows-test`
 (both sides) and `cloud-server-kisski` (LLM side only; its local embedding side
-stays generic). `key_scope = "user"`, which is how KISSKI already works.
+stays generic). `key_scopes = {"user"}`, which is how KISSKI already works: rate
+limits and keys are per user.
 
 Everything KISSKI-specific moves here, and nothing is left behind in generic code:
 
@@ -672,7 +784,8 @@ sides concerned.
 
 #### B2b. `OpenAIProvider` (`backend/providers/openai.py`)
 
-Applies to both sides of `remote-openai`; `key_scope = "user"`. It subclasses
+Applies to both sides of `remote-openai`; `key_scopes = {"user", "managed"}`,
+default `user`. It subclasses
 `GenericProvider` and adds only `default_key_env()` (`OPENAI_API_KEY`) and
 `key_docs_url()` (the OpenAI key page). The OpenAI embedding sentinel
 `model_name: "openai"` and the matching entries in the known-dimensions table stay
@@ -682,7 +795,8 @@ description loses "Anthropic".
 #### B2c. `AnthropicProvider` (`backend/providers/anthropic.py`)
 
 `supported_sides = {"llm"}`: Anthropic has no embeddings API, so it is meant to be
-combined with another provider's embedding side. `key_scope = "user"`. Sets
+combined with another provider's embedding side. `key_scopes = {"user",
+"managed"}`, default `user`. Sets
 `llm_api = "anthropic"`, `default_key_env()` (`ANTHROPIC_API_KEY`) and
 `key_docs_url()`. This replaces sniffing "claude" or "anthropic" in the model
 name, so the LLM service no longer contains a vendor check, only the two
@@ -696,7 +810,7 @@ contains "claude" but whose LLM provider is not `anthropic`, naming the fix.
 
 #### B2d. `MpcdfProvider` (`backend/providers/mpcdf.py`)
 
-Applies to both sides of `remote-mpcdf`; **`key_scope = "shared"`**, because the
+Applies to both sides of `remote-mpcdf`; **`key_scopes = {"shared"}`**, because the
 service is institutionally provided and costs the users nothing, so the admin sets
 the job URL and key once for everyone (`shared_base_url_env`, `shared_api_key_env`,
 `POST /api/config/remote-fields`, encrypted storage, admin only). This is the one
@@ -727,7 +841,8 @@ against a live job.
 
 ### B3. `RunPodProvider` (`backend/providers/runpod.py`)
 
-Applies to both sides of `runpod`; `key_scope = "user"`. Each side is its own
+Applies to both sides of `runpod`; `key_scopes = {"user", "managed"}`, default
+`user`. Each side is its own
 provider instance and owns one template and one endpoint in the user's RunPod
 account, as the script already does per endpoint. Move, with no behaviour change
 apart from the credential model:
@@ -771,7 +886,10 @@ apart from the credential model:
 ```
 
 Both sides use `RUNPOD_API_KEY`, so the plugin shows one credential field for the
-pair (A7). `runpod.json` after migration: `"version": 2`; drops
+pair (A7). An institution-funded variant is a custom copy with
+`"scope": "managed"` in both `provider` blocks and `shared_api_key_env:
+"RUNPOD_API_KEY"` instead of `api_key_env`; the admin then provisions once from the
+Preferences sections and users see health only. `runpod.json` after migration: `"version": 2`; drops
 `health_check_provider` (x2), `provisioning_script`, all `shared_*` entries and the
 key patterns; gains `api_key_env` and the two `provider` blocks above.
 
@@ -832,22 +950,26 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
    `backend/utils/kisski.py`. Delete `HEALTH_CHECKS`, the `Literal` fields,
    `models_status_url`, and the subprocess job path. Keep
    `bin/provision_runpod_endpoints.py` as a thin shim over `bin/provision.py`.
-3. Credential model (A10): `key_scope`, removal of every `os.environ` / `.env`
-   credential fallback, `endpoint_url()` and the per-user endpoint cache, per-user
+3. Credential model (A10): the three scopes, removal of every `os.environ` / `.env`
+   credential fallback from the app and `bin/`, `endpoint_url()` and the per-user endpoint cache, per-user
    job slots and caller-credential health, plus the doc, `.env.dist` and
    `CLAUDE.md` updates. This touches the same call sites as step 1, so it can land
    with it or immediately after; it must land before RunPod and HF are used by more
    than one user.
-4. Backend descriptor endpoint, the multi-side provision job with per-side results
+4. Default preset and per-user choice (A11): `default_preset` setting,
+   `get_effective_preset(identity)` on the request paths, `my-preset` endpoints,
+   `user_settings.json`, the key store keyed by env var name, per-user cron
+   resolution, and the preset-group UI. Needs step 3 first.
+5. Backend descriptor endpoint, the multi-side provision job with per-side results
    and retry, and `progress` in job state (A4, A7).
-5. Plugin: one dynamic configuration section per side (health, key fields,
+6. Plugin: one dynamic configuration section per side (health, key fields,
    provision, pause, retry, usage bars), job resume, and the plugin tests from A7.
-6. Pause and Resume (A8): `suspend()` on the base class and `RunPodProvider`
+7. Pause and Resume (A8): `suspend()` on the base class and `RunPodProvider`
    (after verifying `workersMax=0`), the `paused` status, `POST /api/config/suspend`,
    the scheduler, indexing and query-path checks, and the two buttons. This can land
    after the HF provider if RunPod's `workersMax=0` check turns out negative, since
    HF alone already supports it.
-7. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
+8. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
    changelog, provider ids, key scopes and the per-side `provider` block), and mark
    the older RunPod/health specs as superseded where they describe the script
    contract.
@@ -887,15 +1009,25 @@ environment or `.env` is no longer used for any provider.
   embedding with an `anthropic` LLM.
 - Rejections, each with its rule named and other presets untouched: `anthropic` on
   the embedding side; `shared_*_env` fields with a `user`-scope provider and
-  `api_key_env` with a `shared`-scope provider; two sides using one key env var with
+  `api_key_env` with a `managed` or `shared` one; a scope the class does not allow
+  (for example `managed` on KISSKI, `user` on MPCDF); two sides using one key env var with
   different provider ids; a non-generic provider on a local side; an unknown
   provider id; invalid `options`.
 - A provision job on a mixed preset runs only the provisioning-capable side, keeps a
   succeeded side's result when the other fails, and a retry with `sides: [failed]`
   runs only that side.
+- Scopes: a `managed` preset can be provisioned, paused and resumed only by an
+  admin and reports `operable_by_caller` accordingly; a `user` preset by any
+  authenticated user, with separate job slots for two users; `shared` offers no
+  controls.
+- Default and per-user preset: a new user gets the default; choosing a compatible
+  preset changes only that user's requests, health and cron indexing; an
+  incompatible or removed choice falls back to the default; two users on different
+  presets query the same vector store concurrently; the default resolves from the
+  stored value, then `MODEL_PRESET`, then `remote-kisski`.
 - Credentials: a key set only in the environment or `.env` is ignored by the
-  embedding service, the LLM service, health, models status and the "is it set"
-  checks; `AUTOINDEX_SECRET` is still read.
+  embedding service, the LLM service, health, models status, the "is it set"
+  checks and the `bin/` tools; `AUTOINDEX_SECRET` is still read.
 
 ### B8. Vendor provider tests
 
@@ -939,8 +1071,10 @@ is the test that the abstraction holds.
 ### C2. `HuggingFaceProvider` (`backend/providers/huggingface.py`)
 
 Both sides are supported, and either side can be used on its own (for example HF
-embeddings with an Anthropic LLM). `key_scope = "user"`: each user provisions and
-pays for their own endpoints with their own token. Each side is its own provider
+embeddings with an Anthropic LLM). `key_scopes = {"user", "managed"}`, default
+`user`: each user provisions and pays for their own endpoints with their own token;
+with `"scope": "managed"` an admin provisions one shared pair funded by the
+institution. Each side is its own provider
 instance and owns one endpoint.
 
 - **Options (per side):** `namespace` (default: the token's own user), `vendor`,
@@ -1058,18 +1192,21 @@ on each user's own account.
   endpoints? The existing docs recommend swapping to such a key after provisioning.
   If it cannot list, `endpoint_url()` fails for those keys and the key needs list
   permission (or the URL would have to be stored per user).
-- Generic remote sides default to `key_scope = "user"` because their cost is unknown.
-  A self-hosted or institutional OpenAI-compatible server that the admin wants to
-  configure once needs its own small provider class (as MPCDF has). Is that
-  acceptable, or should such servers have a lighter way to be marked shared?
 - MPCDF (B2d): does a live job answer an authenticated `GET {base}/models`, and does
   a rejected key return 401 or 403? Is there any job API worth building
   provisioning on?
 - Should the plugin offer to save a key entered in the one-time provisioning field
   as the user's service key, or is "used for this run only" the right default?
-- Developer and evaluation scripts that today take keys from `.env`: is reading from
-  the auto-index key store (or a prompt) enough, or is a dedicated `bin/` helper for
-  setting a user's key from the shell needed?
+- Per-user preset choice (A11) is stored server-side per identity. In loopback or
+  public-query modes there is no identity; is "default preset only" the right
+  behaviour there?
+- The compatibility rule for personal choice currently requires both sides remote
+  and the same embedding model. Should it relax so a user can change only the LLM
+  provider while keeping a local embedding model?
+- The key store becomes a per-user map of env var name to key. Should keys for
+  presets the user no longer selects be kept, or pruned like invalid keys are today?
+- `managed` presets: should the plugin tell non-admins who the admin is, or is
+  "Managed by your administrator" enough?
 - Should an admin be able to schedule an automatic pause (for example after a
   period with no queries), or is a manual button enough? Scale-to-zero already
   covers idle time, so this is deferred unless the always-on cost shows up in
