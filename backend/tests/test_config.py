@@ -128,14 +128,24 @@ class TestPresets(unittest.TestCase):
             get_preset("remote-kisski", self.data_path).embedding.model_name,
         )
 
-    def test_get_preset_runpod_uses_shared_dynamic_fields(self):
-        """runpod has no static base_url — both the embedding and LLM endpoint
-        URLs are only known after bin/provision_runpod_endpoints.py creates
-        them, so (like remote-mpcdf) they're resolved at request time from the
-        shared admin-set store rather than baked into the preset."""
+    def test_get_preset_runpod_is_a_user_scope_preset_with_derived_urls(self):
+        """runpod has no static base_url: each user's endpoints live in their own
+        RunPod account and the URL is found from their key."""
         preset = get_preset("runpod", self.data_path)
+        self.assertEqual(preset.embedding.provider.scope, "user")
+        self.assertEqual(preset.embedding.model_kwargs["api_key_env"], "RUNPOD_API_KEY")
+        self.assertNotIn("shared_base_url_env", preset.embedding.model_kwargs)
+        self.assertNotIn("shared_base_url_env", preset.llm.model_kwargs)
+        self.assertEqual(preset.llm.model_kwargs["api_key_env"], "RUNPOD_API_KEY")
 
-        self.assertEqual(preset.name, "runpod")
+    def test_managed_variant_uses_shared_dynamic_fields(self):
+        """An institution-funded copy (scope managed) resolves URL and key at
+        request time from the shared admin-set store."""
+        from backend.tests.runpod_variants import write_managed_runpod_preset
+        write_managed_runpod_preset(self.data_path)
+        preset = get_preset("runpod-managed", self.data_path)
+
+        self.assertEqual(preset.name, "runpod-managed")
         self.assertEqual(preset.embedding.model_type, "remote")
         self.assertEqual(preset.embedding.model_name, "intfloat/multilingual-e5-large-instruct")
         self.assertNotIn("base_url", preset.embedding.model_kwargs)
@@ -642,7 +652,9 @@ class TestConfigApi(unittest.TestCase):
             "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1",
             "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/def456/openai/v1",
         }, data_path=get_settings().data_path)
-        r = self.client.post("/api/config", json={"preset_name": "runpod"})
+        from backend.tests.runpod_variants import write_managed_runpod_preset
+        name = write_managed_runpod_preset(get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": name})
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_accepts_value_matching_declared_pattern(self):
@@ -673,9 +685,9 @@ class TestConfigApi(unittest.TestCase):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         with patch.dict(os.environ, {}, clear=False):
-            for name in ("RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"):
-                os.environ.pop(name, None)
-            r = self.client.post("/api/config", json={"preset_name": "runpod"})
+            from backend.tests.runpod_variants import write_managed_runpod_preset
+            name = write_managed_runpod_preset(get_settings().data_path)
+            r = self.client.post("/api/config", json={"preset_name": name})
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_without_declared_pattern_accepts_any_value(self):

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from backend.config.presets import ensure_default_presets, get_preset
 from backend.config.settings import get_settings, reset_settings
 from backend.providers import Provider, ProvisionContext, ProvisionError
+from backend.tests.runpod_variants import write_managed_runpod_preset
 from backend.providers.runpod import RunPodProvider
 from backend.services import provisioning
 from backend.services.admin_settings_store import get_remote_config_value, update_remote_config
@@ -125,7 +126,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
-        s.model_preset = "runpod"
+        s.model_preset = write_managed_runpod_preset(s.data_path)
         self.app = app
         # Entered as a context manager so one event loop outlives the POST: the
         # provisioning task runs on it after the 202 response, as under uvicorn.
@@ -308,7 +309,7 @@ class HealthEndpointTest(unittest.TestCase):
         self.assertFalse(self.client.get("/api/config").json()["provisionable"])
 
     def test_runpod_reports_statuses(self):
-        get_settings().model_preset = "runpod"
+        get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
         update_remote_config({
             "RUNPOD_API_KEY": "k",
             "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/e1/openai/v1",
@@ -325,7 +326,7 @@ class HealthEndpointTest(unittest.TestCase):
         self.assertTrue(self.client.get("/api/config").json()["provisionable"])
 
     def test_unconfigured_side_is_unreachable_not_null(self):
-        get_settings().model_preset = "runpod"
+        get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
         with patch.dict("os.environ", {}, clear=True):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
@@ -354,3 +355,133 @@ class HealthEndpointTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UserScopeProvisionTest(unittest.TestCase):
+    """The bundled ``runpod`` preset (scope ``user``): the caller's own key, the caller's own job slot."""
+
+    KEY_HEADER = "X-Runpod-Api-Key"
+
+    def setUp(self):
+        from backend.main import app
+        from fastapi.testclient import TestClient
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+        provisioning.reset_job_state()
+        self.tmp = tempfile.TemporaryDirectory()
+        s = get_settings()
+        s.data_path = Path(self.tmp.name)
+        ensure_default_presets(s.data_path)
+        s.model_preset = "runpod"
+        s.api_host = "rag.example.com"  # not loopback: identities are required
+        s.authorized_group_id = 999
+        self.client = TestClient(app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+        self.calls = []
+
+        def fake_provision(this, ctx, progress):
+            self.calls.append((this.side, ctx.credential))
+            progress("working")
+            return {}
+
+        patcher = patch.object(RunPodProvider, "provision", fake_provision)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        provisioning.reset_job_state()
+        reset_settings()
+        reset_identity_cache()
+        reset_admin_role_cache()
+
+    def _as(self, user_id):
+        identity = ZoteroIdentity(user_id=user_id, username=f"u{user_id}", targets=[f"users/{user_id}"])
+        return patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity))
+
+    def _post(self, user_id, key="rpa_USER", body=None):
+        headers = {"X-Zotero-API-Key": "Z"}
+        if key:
+            headers[self.KEY_HEADER] = key
+        with self._as(user_id), patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
+            return self.client.post("/api/config/provision", headers=headers, json=body or {})
+
+    def _status(self, user_id):
+        with self._as(user_id):
+            return self.client.get("/api/config/provision/status", headers={"X-Zotero-API-Key": "Z"}).json()
+
+    def _wait(self, user_id):
+        for _ in range(600):
+            status = self._status(user_id)
+            if status["status"] != "running":
+                return status
+            time.sleep(0.05)
+        return status
+
+    def test_a_non_admin_user_can_provision_on_their_own_key(self):
+        r = self._post(7)
+        self.assertEqual(r.status_code, 202, r.text)
+        status = self._wait(7)
+        self.assertEqual(status["status"], "succeeded")
+        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
+
+    def test_without_the_users_key_it_is_a_400_naming_the_key(self):
+        r = self._post(7, key=None)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("RUNPOD_API_KEY", r.json()["detail"])
+
+    def test_a_one_time_key_in_the_body_wins_over_the_header(self):
+        self._post(7, key="rpa_HEADER", body={"keys": {"RUNPOD_API_KEY": "rpa_ONETIME"}})
+        self._wait(7)
+        self.assertEqual({c for _, c in self.calls}, {"rpa_ONETIME"})
+
+    def test_unauthenticated_callers_are_refused(self):
+        r = self.client.post("/api/config/provision", headers={self.KEY_HEADER: "rpa_X"})
+        self.assertIn(r.status_code, (401, 403))
+        self.assertEqual(self.calls, [])
+
+    def test_job_slots_are_per_user(self):
+        provisioning.mark_running(["embedding", "llm"], provisioning.user_slot(7))
+        self.assertEqual(self._post(7).status_code, 409)       # same user: already running
+        self.assertEqual(self._post(8).status_code, 202)       # another user is unaffected
+        self.assertEqual(self._wait(8)["status"], "succeeded")
+
+    def test_status_is_the_callers_own_job(self):
+        self._post(7)
+        self._wait(7)
+        self.assertEqual(self._status(7)["status"], "succeeded")
+        self.assertEqual(self._status(8)["status"], "idle")
+
+    def test_health_uses_the_callers_key_and_derived_endpoint(self):
+        from backend.providers import Health
+        seen = []
+
+        def endpoint_url(this, key):
+            seen.append(("lookup", key))
+            return f"https://api.runpod.ai/v2/{this.side}-{key}/openai/v1"
+
+        def health(this, creds):
+            seen.append(("health", creds.api_key, creds.base_url))
+            return Health(status="ready", detail="")
+
+        with patch.object(RunPodProvider, "endpoint_url", endpoint_url), \
+             patch.object(RunPodProvider, "health", health), self._as(7):
+            from backend.services.endpoint_cache import endpoint_cache
+            endpoint_cache.clear()
+            r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z", self.KEY_HEADER: "alice"})
+        self.assertEqual(r.json()["llm"]["status"], "ready")
+        self.assertIn(("health", "alice", "https://api.runpod.ai/v2/llm-alice/openai/v1"), seen)
+
+    def test_health_without_a_provisioned_endpoint_says_so(self):
+        with patch.object(RunPodProvider, "endpoint_url", lambda this, key: None), self._as(7):
+            from backend.services.endpoint_cache import endpoint_cache
+            endpoint_cache.clear()
+            r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z", self.KEY_HEADER: "bob"})
+        self.assertEqual(r.json()["llm"], {"status": "unreachable", "detail": "not provisioned"})
+
+    def test_health_without_any_key_is_not_configured(self):
+        with self._as(7):
+            r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z"})
+        self.assertEqual(r.json()["llm"]["status"], "unreachable")

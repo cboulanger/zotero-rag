@@ -13,7 +13,9 @@ import re
 
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
-from backend.dependencies import require_authorized_group_admin
+from backend.dependencies import get_zotero_identity, require_authorized_group_admin
+from backend.services.access_gate import is_loopback
+from backend.services.endpoint_cache import endpoint_cache
 from backend.services.admin_settings_store import (
     set_active_preset_override,
     update_remote_config,
@@ -413,43 +415,59 @@ class EndpointHealthResponse(BaseModel):
     llm: Optional[EndpointHealth] = None
 
 
-def _check_side(preset: HardwarePreset, side: str) -> Optional[EndpointHealth]:
+def _side_kwargs(preset: HardwarePreset, side: str) -> dict:
+    return (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+
+
+def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[str]:
+    """The caller's own key for ``key_env``, from its request header."""
+    if request is None or not key_env:
+        return None
+    return request.headers.get(env_var_to_header(key_env)) or None
+
+
+def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = None) -> Optional[EndpointHealth]:
     """Health of one side from its provider; None when the provider has no health concept.
 
-    The key and URL are the shared admin-set values for a side that declares
-    ``shared_*_env`` fields, else the preset's fixed ``base_url``.
+    Whose key is used follows the credential scope: ``user`` uses the caller's
+    own key (from the request header), ``managed``/``shared`` the admin-set key
+    in the shared store. The URL is the shared admin-set value, the preset's
+    fixed ``base_url``, or (for a provider that derives it) the one found from
+    the key.
     """
     try:
         provider = get_providers(preset)[side]
     except ProviderConfigError:
         return None
-    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    kwargs = _side_kwargs(preset, side)
     url_env = kwargs.get("shared_base_url_env")
     key_env = kwargs.get("shared_api_key_env")
-    creds = Credentials(
-        api_key=resolve_shared_value(key_env) if key_env else None,
-        base_url=resolve_shared_value(url_env) if url_env else kwargs.get("base_url"),
-    )
-    health = provider.health(creds)
+    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
+    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
+    if not base_url and api_key and provider.derives_endpoint_url:
+        base_url = endpoint_cache.resolve(provider, side, api_key)
+        if base_url is None:
+            return EndpointHealth(status="unreachable", detail="not provisioned")
+    health = provider.health(Credentials(api_key=api_key, base_url=base_url))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
 
 
 @router.get("/config/health", response_model=EndpointHealthResponse)
-def get_endpoint_health() -> EndpointHealthResponse:
+def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     """
     Readiness (ready / cold / throttled / unreachable) of the active
     preset's remote embedding and LLM endpoints, as reported by each side's
-    provider. A side whose provider has no health concept is ``null``. Plain
-    ``def``: the provider checks do blocking HTTP, so FastAPI runs this in a
-    thread pool.
+    provider, using the caller's own key for ``user``-scope sides. A side whose
+    provider has no health concept is ``null``. Plain ``def``: the provider
+    checks do blocking HTTP, so FastAPI runs this in a thread pool.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
     return EndpointHealthResponse(
-        embedding=_check_side(preset, "embedding"),
-        llm=_check_side(preset, "llm"),
+        embedding=_check_side(preset, "embedding", request),
+        llm=_check_side(preset, "llm", request),
     )
 
 
@@ -467,17 +485,20 @@ def _credential_env(kwargs: dict) -> Optional[str]:
     return kwargs.get("shared_api_key_env") or kwargs.get("api_key_env")
 
 
-def _side_credential(preset: HardwarePreset, side: str, supplied: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+def _side_credential(
+    preset: HardwarePreset, side: str, supplied: Dict[str, str], request: Optional[Request] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """The credential for provisioning one side, and the env name it belongs to.
 
     The one-time value supplied with the request (checked against the side's
-    declared key format) wins over the stored shared key. A supplied value is
-    used for this run only.
+    declared key format) wins; it is used for this run only. Otherwise a
+    ``user``-scope side uses the caller's own key from the request header and a
+    ``managed`` one the stored admin key.
 
     Raises:
         HTTPException: 400 if the supplied value does not match the declared format.
     """
-    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    kwargs = _side_kwargs(preset, side)
     env = _credential_env(kwargs)
     if not env:
         return None, None
@@ -490,29 +511,54 @@ def _side_credential(preset: HardwarePreset, side: str, supplied: Dict[str, str]
                 detail=f"The key for {env} does not match the expected format (expected to match: {pattern})",
             )
         return value, env
-    return (resolve_shared_value(env) if kwargs.get("shared_api_key_env") else None), env
+    if kwargs.get("shared_api_key_env"):
+        return resolve_shared_value(env), env
+    return _caller_key(request, env), env
+
+
+def _slot_for(providers: Dict[str, Provider], sides: List[str], identity: Optional[ZoteroIdentity]) -> str:
+    """Job slot: one global slot when any side is admin-operated, else the caller's own."""
+    if any(providers[s].scope != "user" for s in sides):
+        return provisioning.GLOBAL_SLOT
+    return provisioning.user_slot(identity.user_id if identity else None)
+
+
+async def _authorize_provisioning(request: Request, providers: Dict[str, Provider], sides: List[str]) -> Optional[ZoteroIdentity]:
+    """Gate by credential scope: any signed-in user for ``user`` sides, an admin for ``managed`` ones."""
+    if any(providers[s].scope != "user" for s in sides):
+        return await require_authorized_group_admin(request)
+    identity = get_zotero_identity(request)
+    if identity is None and not is_loopback(get_settings()):
+        raise HTTPException(status_code=401, detail="Missing or invalid Zotero API key.")
+    return identity
 
 
 @router.post("/config/provision", status_code=202)
 async def start_provisioning(
-    request: Optional[ProvisionRequest] = Body(default=None),
-    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+    request: Request,
+    body: Optional[ProvisionRequest] = Body(default=None),
 ):
     """
     Provision (create or wake) the active preset's remote endpoints as a
-    background job (admin only). Each requested side's provider does the work;
-    whatever URL it reports is applied via the shared remote-config store as
-    soon as that side succeeds. Poll GET /api/config/provision/status.
+    background job. Each requested side's provider does the work; whatever
+    URL it reports is applied via the shared remote-config store as soon as
+    that side succeeds. Poll GET /api/config/provision/status.
+
+    Who may run it follows the side's credential scope: any signed-in user for
+    ``user`` sides (it runs on the caller's own key, in the caller's own job
+    slot), an admin for ``managed`` ones (the admin's stored key, one global
+    slot).
 
     Provisioning (creating/updating endpoints) may need a broader key than
     day-to-day inference, which can use one restricted to the endpoints. A key
-    in ``keys`` is used for this run only; without it the stored key is used.
-    ``sides`` runs only those sides (for example to retry a failed one).
+    in ``keys`` is used for this run only. ``sides`` runs only those sides (for
+    example to retry a failed one).
 
     Raises:
         HTTPException: 400 if no requested side can be provisioned, a side
             has no key available, or a supplied key has the wrong format;
-            409 if a job is already running.
+            401 without a signed-in caller, 403 for a non-admin on a managed
+            side; 409 if this caller's job is already running.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
@@ -520,7 +566,7 @@ async def start_provisioning(
         providers = get_providers(preset)
     except ProviderConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    body = request or ProvisionRequest()
+    body = body or ProvisionRequest()
 
     if body.sides is None:
         sides = [s for s in ("embedding", "llm") if providers[s].supports_provisioning]
@@ -538,34 +584,44 @@ async def start_provisioning(
     if not sides:
         raise HTTPException(status_code=400, detail=f"Preset '{preset.name}' has no side that can be provisioned.")
 
+    identity = await _authorize_provisioning(request, providers, sides)
+    slot = _slot_for(providers, sides, identity)
+
     jobs = []
     for side in sides:
-        credential, env = _side_credential(preset, side, body.keys)
+        credential, env = _side_credential(preset, side, body.keys, request)
         if not credential:
             raise HTTPException(
                 status_code=400,
                 detail=f"No API key is available for the {side} side"
-                       + (f" ({env}); set it under Service API Keys or enter one for this run." if env else "."),
+                       + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
             )
         ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
         jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
 
-    if provisioning.is_running():
+    if provisioning.is_running(slot):
         raise HTTPException(status_code=409, detail="A provisioning job is already running.")
-    provisioning.mark_running(sides)
-    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path))
+    provisioning.mark_running(sides, slot)
+    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path, slot=slot))
     _provision_tasks.add(task)  # keep a strong reference until done
     task.add_done_callback(_provision_tasks.discard)
-    return provisioning.get_job_state()
+    return provisioning.get_job_state(slot)
 
 
 _provision_tasks: set = set()
 
 
 @router.get("/config/provision/status")
-def get_provisioning_status() -> dict:
-    """Current provisioning job state: status idle|running|succeeded|failed."""
-    return provisioning.get_job_state()
+def get_provisioning_status(request: Request) -> dict:
+    """The caller's provisioning job state (the global one for admin-operated presets):
+    status idle|running|succeeded|failed, per-side results and progress lines."""
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        return provisioning.get_job_state()
+    sides = [s for s in providers if providers[s].supports_provisioning]
+    return provisioning.get_job_state(_slot_for(providers, sides, get_zotero_identity(request)))
 
 
 @router.post("/config/remote-fields", response_model=RemoteFieldsResponse)

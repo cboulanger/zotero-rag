@@ -37,7 +37,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
-| `runpod` | **No** | `RUNPOD_API_KEY` (shared, admin-set — see below) | any |
+| `runpod` | **No** | `RUNPOD_API_KEY` (each user's own) | any |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -237,7 +237,9 @@ to reduce peak RSS during indexing.
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 800 tokens
 
-**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in your own RunPod account, handled by the `runpod` provider (credential scope `managed`: the admin's key, the institution pays, only admins operate it). Select `runpod` as the active preset, then click "Provision endpoints" in the Preferences pane: the backend creates (or wakes, or resumes) both endpoints and stores their URLs itself, so there are no URL fields to fill in. The optional "Provisioning key" next to the button is a RunPod API key used for that run only and never stored. Each side is its own job: if one fails the other still completes, and a failed side can be retried alone. After provisioning you can replace `RUNPOD_API_KEY` with a key restricted to the two endpoints (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision.
+**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in a RunPod account, handled by the `runpod` provider. The bundled preset uses credential scope `user`: every user enters their own RunPod API key in the plugin's Preferences, the endpoints live in that user's account (named `zotero-rag-embedding` and `zotero-rag-llm`) and the backend finds their URLs from the key, so there are no URL fields to fill in. "Provision endpoints" creates, wakes or resumes both endpoints on the caller's own key and any signed-in user may run it (one job at a time per user). The optional "Provisioning key" next to the button is a RunPod API key used for that run only and never stored. Each side is its own job: if one fails the other still completes, and a failed side can be retried alone. After provisioning you can use a key restricted to the two endpoints for day-to-day queries (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision.
+
+**Institution-funded variant (scope `managed`).** To let an institution pay for one shared RunPod account that only admins operate, copy `runpod.json` to a new file (for example `runpod-managed.json`), set `"scope": "managed"` on both sides and replace each side's `model_kwargs` with `{"shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL" (or `RUNPOD_LLM_BASE_URL`), "shared_api_key_env": "RUNPOD_API_KEY"}`. The admin then sets `RUNPOD_API_KEY` under "Service API Keys", only admins can provision, pause or resume, and there is one global job slot.
 
 Per-side tuning lives in the preset: `embedding.provider.options` / `llm.provider.options` accept `gpu`, `workers_max` (at least 1), `idle_timeout`, `data_centers`, `image` and `container_disk_gb`. A paused endpoint (`workersMax` 0, which RunPod answers with HTTP 409 `ENDPOINT_PAUSED`) stops all billing and wake-ups until it is provisioned again; provisioning resumes it.
 
@@ -253,7 +255,7 @@ Admins can also run `uv run python bin/provision.py --preset runpod` on the serv
 
 **Health and provisioning from the plugin:** a provider that can report readiness gives `GET /api/config/health` a status per side: `ready`, `cold` (scaled to zero, wakes normally on the next request), `throttled` (the provider has no GPU capacity for the endpoint right now — jobs sit queued until capacity frees up or the GPU type is changed) or `unreachable` (`null` for a side with no health check); the Preferences pane shows a status row per side. A provider that supports provisioning (`supports_provisioning`) gives an admin a "Provision endpoints" button for a side that is `unreachable` or `throttled`; it calls `POST /api/config/provision` (body `{"keys": {...}, "sides": [...]}`, both optional), which runs each side's provider in the background (poll `GET /api/config/provision/status`, which reports a status and progress lines per side) and applies any base URL the provider returns via the shared remote config. Design: `docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md`.
 
-**Requires:** `RUNPOD_API_KEY` (Preferences pane, or the one-time "Provisioning key"). `RUNPOD_EMBEDDING_BASE_URL`/`RUNPOD_LLM_BASE_URL` are set by provisioning and picked up by a running backend without a restart.
+**Requires:** your personal `RUNPOD_API_KEY` (Preferences pane, or the one-time "Provisioning key"). The endpoint URLs are looked up from the key and cached for a few minutes; provisioning refreshes them at once.
 
 ---
 
