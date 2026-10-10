@@ -451,8 +451,9 @@ async def update_config(
         HTTPException: 400 if `preset_name` is missing, unknown, not in the
             current `compatible_presets` list, or hidden on this host's
             platform (a preset whose own `platform` field names a different
-            OS than `current_platform()` — see backend.config.presets), or
-            the target preset lacks credentials (key names only in the message).
+            OS than `current_platform()` — see backend.config.presets).
+            A preset without credentials can be selected; it is not ready
+            until they are set.
     """
     settings = get_settings()
 
@@ -476,15 +477,8 @@ async def update_config(
                    f"local-model preset, set MODEL_PRESET and restart the backend instead.",
         )
 
-    target = get_preset(update.preset_name, settings.data_path)
-    missing = await asyncio.to_thread(_preset_credentials, target, settings, request)
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Preset '{update.preset_name}' cannot be activated: missing credentials "
-                   f"for {sorted(missing)}.",
-        )
-
+    # Credentials are deliberately not required here: the preset's own sections ask for
+    # the keys and endpoints, and its health shows "not ready" until they are set.
     set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()

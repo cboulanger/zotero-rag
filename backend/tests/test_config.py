@@ -812,12 +812,11 @@ class TestSwitchablePresets(unittest.TestCase):
         store.set_embedding_key_status(fp, "ok")
         self.assertEqual(_preset_credentials(preset, s, Req()), [])
 
-    def test_post_rejects_missing_credentials_names_only(self):
+    def test_post_allows_switch_without_credentials(self):
+        """The preset's own sections ask for the keys; until then it is just not ready."""
         self._admin()
         r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("MPCDF_EMBEDDING_BASE_URL", r.json()["detail"])
-        self.assertNotIn("http://x", r.json()["detail"])
+        self.assertEqual(r.status_code, 200, r.text)
 
     def test_post_success_resets_cache_and_clears_rate_limits(self):
         import backend.services.embeddings as emb
