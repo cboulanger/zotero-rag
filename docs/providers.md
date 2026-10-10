@@ -57,7 +57,7 @@ Providers never raise from display-only hooks (`health`, `parse_usage`).
 
 1. Create `backend/providers/<name>.py` with a `Provider` subclass and a unique `id`; importing it registers it (`__init_subclass__`), so add it to `backend/providers/__init__.py`.
 2. Override only what differs from a plain OpenAI-compatible API.
-3. Add a `ContractFixture` for it in `backend/tests/provider_fakes.py`. `test_provider_contract.py` then checks every registered provider against the same rules (descriptor shape, validation, display hooks never raising, scope handling). Add vendor tests next to `test_provider_runpod.py` using `FakeHTTP`.
+3. Register a `ContractFixture` for it with `register_fixture` in `backend/tests/provider_fakes.py`. `test_provider_contract.py` then checks every registered provider against the same rules (descriptor shape, validation, display hooks never raising, scope handling). Add vendor tests next to `test_provider_runpod.py` using `FakeHTTP`.
 4. Point a preset at it with `"provider": {"id": "<name>"}`.
 
 ## Invalid configurations
