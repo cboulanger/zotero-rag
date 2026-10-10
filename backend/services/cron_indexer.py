@@ -32,6 +32,8 @@ from filelock import FileLock, Timeout
 from backend.api.document_upload import _execute_upload_impl
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
+from backend.providers import get_provider_or_none
+from backend.services.effective_preset import preset_for_target
 from backend.db.vector_store import VectorStore
 from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
@@ -749,8 +751,11 @@ class CronIndexer:
                 if control.get("skip_slug") == slug_info.slug:
                     raise SlugSkipRequested(slug_info.slug)
 
-        preset = get_settings().get_hardware_preset()
-        embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
+        preset = preset_for_target(get_settings(), target)
+        embedding_service = create_embedding_service(
+            preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
+            provider=get_provider_or_none(preset, "embedding"),
+        )
 
         try:
             # Inside the try (not before it): progress_callback can now raise
@@ -806,7 +811,7 @@ class CronIndexer:
         except EmbeddingAuthenticationError as exc:
             fp = target.get("fingerprint")
             if fp and self.key_store:
-                self.key_store.set_embedding_key_status(fp, "invalid")
+                self.key_store.set_embedding_key_status(fp, "invalid", key_name=target.get("embedding_key_name"))
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
@@ -837,7 +842,8 @@ class CronIndexer:
             fp = target.get("fingerprint")
             if fp and self.key_store:
                 self.key_store.set_embedding_key_status(
-                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat()
+                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat(),
+                    key_name=target.get("embedding_key_name"),
                 )
             self.log.warning(
                 "Embedding quota exhausted for %s: available again at %s", slug_info.slug, exc.available_at

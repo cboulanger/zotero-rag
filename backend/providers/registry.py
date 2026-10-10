@@ -43,6 +43,22 @@ def _key_env_names(side_config) -> set[str]:
     return {kwargs[k] for k in ("api_key_env", "shared_api_key_env") if kwargs.get(k)}
 
 
+def _check_scope_matches_key_fields(side: Side, provider_id: str, scope: str, kwargs: dict) -> None:
+    """A ``user`` scope takes the caller's own key (``api_key_env``); ``managed`` and
+    ``shared`` use the admin-set one (``shared_api_key_env``). Declaring the other
+    kind contradicts the scope and would silently ask the wrong person for a key."""
+    if scope == "user" and kwargs.get("shared_api_key_env"):
+        raise ProviderConfigError(
+            f"{side}: scope 'user' of provider {provider_id!r} takes each user's own key, "
+            "but the side declares shared_api_key_env; use scope 'shared' or 'managed' or api_key_env"
+        )
+    if scope in ("shared", "managed") and kwargs.get("api_key_env"):
+        raise ProviderConfigError(
+            f"{side}: scope {scope!r} of provider {provider_id!r} uses an admin-set key, "
+            "but the side declares api_key_env; use shared_api_key_env or scope 'user'"
+        )
+
+
 def get_providers(preset) -> dict[Side, Provider]:
     """One validated provider instance per side of ``preset``.
 
@@ -79,6 +95,8 @@ def get_providers(preset) -> dict[Side, Provider]:
                 f"{side}: provider {provider_cfg.id!r} does not allow scope {scope!r} "
                 f"(allowed: {', '.join(sorted(cls.key_scopes))})"
             )
+        if cfg.model_type == "remote":
+            _check_scope_matches_key_fields(side, provider_cfg.id, scope, cfg.model_kwargs)
         try:
             options = cls.Options.model_validate(provider_cfg.options)
         except Exception as exc:
@@ -94,6 +112,14 @@ def get_providers(preset) -> dict[Side, Provider]:
                 f"({preset.embedding.provider.id!r} and {preset.llm.provider.id!r})"
             )
     return providers
+
+
+def get_provider_or_none(preset, side: Side) -> Optional[Provider]:
+    """The validated provider of one side, or None when the preset fails validation."""
+    try:
+        return get_providers(preset)[side]
+    except ProviderConfigError:
+        return None
 
 
 def get_provider(preset, side: Side) -> Provider:

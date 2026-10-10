@@ -28,15 +28,17 @@ _REAL_IDS = sorted(pid for pid in PROVIDERS if not pid.startswith("demo-test-onl
 
 def build_preset(provider_id: str, side: str, fixture, options: dict, scope=None) -> HardwarePreset:
     """A preset where ``side`` uses the provider and the other side is generic."""
-    def remote(env: str) -> dict:
-        kwargs = dict(fixture.model_kwargs)
-        for k in ("api_key_env", "shared_api_key_env"):
-            if k in kwargs:
-                kwargs[k] = env
+    def remote(env: str, side_scope: str) -> dict:
+        # The key kind must agree with the scope (user: own key; else admin-set).
+        kwargs = {k: v for k, v in fixture.model_kwargs.items() if k not in ("api_key_env", "shared_api_key_env")}
+        kwargs["api_key_env" if side_scope == "user" else "shared_api_key_env"] = env
         return kwargs
 
-    emb = {"model_type": "remote", "model_name": "m", "model_kwargs": remote("CONTRACT_EMB_KEY")}
-    llm = {"model_type": "remote", "model_names": ["m"], "model_kwargs": remote("CONTRACT_LLM_KEY")}
+    own_scope = scope or PROVIDERS[provider_id].default_scope
+    emb_scope = own_scope if side == "embedding" else "user"
+    llm_scope = own_scope if side == "llm" else "user"
+    emb = {"model_type": "remote", "model_name": "m", "model_kwargs": remote("CONTRACT_EMB_KEY", emb_scope)}
+    llm = {"model_type": "remote", "model_names": ["m"], "model_kwargs": remote("CONTRACT_LLM_KEY", llm_scope)}
     provider_block = {"id": provider_id, "options": options}
     if scope:
         provider_block["scope"] = scope

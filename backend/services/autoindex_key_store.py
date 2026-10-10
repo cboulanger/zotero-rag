@@ -65,14 +65,14 @@ class AutoIndexKeyStore:
         Re-adding an already-registered fingerprint (e.g. re-submitting the
         same Zotero key to refresh its validation) must not wipe an
         unrelated embedding key already stored on that entry — only the
-        Zotero-key fields are refreshed here; any embedding_key_* fields
-        already present are carried over unchanged.
+        Zotero-key fields are refreshed here; the ``embedding_keys`` already
+        present are carried over unchanged.
 
         A user may only have one registered Zotero key at a time: if this
         api_key rotates them onto a new fingerprint (a different key value —
         e.g. after regenerating their Zotero API key), any other entry
         already registered under the same user_id is removed, after carrying
-        its embedding_key_* fields forward — the embedding key isn't tied to
+        its ``embedding_keys`` forward — the embedding keys aren't tied to
         the Zotero key and shouldn't be lost just because the Zotero key changed.
         """
         self._require_enabled()
@@ -84,12 +84,9 @@ class AutoIndexKeyStore:
             for other_fp, other_entry in list(data.items()):
                 if other_fp == fp or other_entry.get("user_id") != validation.user_id:
                     continue
-                for key in (
-                    "embedding_key_ciphertext", "embedding_key_name",
-                    "embedding_key_status", "embedding_key_rate_limit_until",
-                ):
-                    if key in other_entry and key not in existing:
-                        existing[key] = other_entry[key]
+                carried = {**other_entry.get("embedding_keys", {}), **existing.get("embedding_keys", {})}
+                if carried:
+                    existing["embedding_keys"] = carried
                 del data[other_fp]
             entry = {
                 "ciphertext": self._fernet.encrypt(api_key.encode()).decode(),
@@ -101,12 +98,8 @@ class AutoIndexKeyStore:
                 "validated_at": now,
                 "last_status": "ok",
             }
-            for key in (
-                "embedding_key_ciphertext", "embedding_key_name",
-                "embedding_key_status", "embedding_key_rate_limit_until",
-            ):
-                if key in existing:
-                    entry[key] = existing[key]
+            if existing.get("embedding_keys"):
+                entry["embedding_keys"] = existing["embedding_keys"]
             data[fp] = entry
             self._save(data)
         return fp
@@ -134,10 +127,19 @@ class AutoIndexKeyStore:
     def remove_by_key(self, api_key: str) -> bool:
         return self.remove(fingerprint(api_key))
 
-    def list_metadata(self) -> list[dict]:
-        """Return entry metadata without ciphertext or plaintext."""
+    def list_metadata(self, key_name: Optional[str] = None) -> list[dict]:
+        """Return entry metadata without ciphertext or plaintext.
+
+        ``embedding_keys`` lists every stored provider key by name with its
+        status. The flat ``has_embedding_key`` / ``embedding_key_status`` /
+        ``embedding_key_rate_limit_until`` fields describe the key called
+        ``key_name`` (the active preset's personal key), or, with no name, the
+        entry's only key.
+        """
         out = []
         for fp, entry in self._load().items():
+            keys = entry.get("embedding_keys", {})
+            chosen = keys.get(key_name) if key_name else (next(iter(keys.values())) if len(keys) == 1 else None)
             out.append({
                 "fingerprint": fp,
                 "user_id": entry.get("user_id"),
@@ -145,9 +147,13 @@ class AutoIndexKeyStore:
                 "targets": entry.get("targets", []),
                 "last_status": entry.get("last_status"),
                 "validated_at": entry.get("validated_at"),
-                "has_embedding_key": bool(entry.get("embedding_key_ciphertext")),
-                "embedding_key_status": entry.get("embedding_key_status"),
-                "embedding_key_rate_limit_until": entry.get("embedding_key_rate_limit_until"),
+                "embedding_keys": {
+                    name: {"status": k.get("status"), "rate_limit_until": k.get("rate_limit_until")}
+                    for name, k in keys.items()
+                },
+                "has_embedding_key": bool(chosen and chosen.get("ciphertext")),
+                "embedding_key_status": chosen.get("status") if chosen else None,
+                "embedding_key_rate_limit_until": chosen.get("rate_limit_until") if chosen else None,
             })
         return out
 
@@ -182,30 +188,43 @@ class AutoIndexKeyStore:
             yield fp, key, entry
 
     def set_embedding_key(self, fp: str, api_key: str, key_name: str, status: str = "ok") -> None:
-        """Encrypt and store an embedding API key on an existing entry."""
+        """Encrypt and store a provider API key on an existing entry, under its name.
+
+        A user may hold several (a KISSKI key and a Hugging Face token, say);
+        storing one never touches the others, so switching presets and back
+        finds the earlier key still there.
+        """
         self._require_enabled()
         with self._lock:
             data = self._load()
             if fp not in data:
                 raise KeyError(f"No auto-index entry for fingerprint {fp}")
-            data[fp]["embedding_key_ciphertext"] = self._fernet.encrypt(api_key.encode()).decode()
-            data[fp]["embedding_key_name"] = key_name
-            data[fp]["embedding_key_status"] = status
-            data[fp]["embedding_key_rate_limit_until"] = None
+            data[fp].setdefault("embedding_keys", {})[key_name] = {
+                "ciphertext": self._fernet.encrypt(api_key.encode()).decode(),
+                "status": status,
+                "rate_limit_until": None,
+            }
             self._save(data)
 
-    def get_decrypted_embedding_key(self, fp: str) -> Optional[tuple[str, str]]:
-        """Return (key_name, plaintext_key) for the entry's embedding key, or None."""
+    def get_decrypted_embedding_key(self, fp: str, key_name: Optional[str] = None) -> Optional[tuple[str, str]]:
+        """Return (key_name, plaintext_key) for the entry's key called ``key_name``, or None.
+
+        With no ``key_name`` the entry's first key (by name) is returned; meant
+        for debugging tools, not the indexing path.
+        """
         self._require_enabled()
         entry = self._load().get(fp)
-        if not entry or not entry.get("embedding_key_ciphertext"):
+        keys = (entry or {}).get("embedding_keys", {})
+        name = key_name or (sorted(keys)[0] if keys else None)
+        stored = keys.get(name) if name else None
+        if not stored or not stored.get("ciphertext"):
             return None
         try:
-            key = self._fernet.decrypt(entry["embedding_key_ciphertext"].encode()).decode()
+            key = self._fernet.decrypt(stored["ciphertext"].encode()).decode()
         except InvalidToken:
-            logger.error("Could not decrypt embedding key for %s (wrong AUTOINDEX_SECRET?)", fp)
+            logger.error("Could not decrypt embedding key %s for %s (wrong AUTOINDEX_SECRET?)", name, fp)
             return None
-        return entry.get("embedding_key_name"), key
+        return name, key
 
     def set_status(
         self, fp: str, status: str,
@@ -233,46 +252,51 @@ class AutoIndexKeyStore:
                     data[fp]["target_owners"] = target_owners
                 self._save(data)
 
-    def set_embedding_key_status(self, fp: str, status: str, rate_limit_until: Optional[str] = None) -> None:
+    def set_embedding_key_status(
+        self, fp: str, status: str, rate_limit_until: Optional[str] = None, key_name: Optional[str] = None,
+    ) -> None:
+        """Set the status of one stored key (``key_name``), or of all of the entry's keys if omitted."""
         with self._lock:
             data = self._load()
-            if fp in data:
-                data[fp]["embedding_key_status"] = status
-                data[fp]["embedding_key_rate_limit_until"] = rate_limit_until
+            keys = data.get(fp, {}).get("embedding_keys", {})
+            for name, stored in keys.items():
+                if key_name is None or name == key_name:
+                    stored["status"] = status
+                    stored["rate_limit_until"] = rate_limit_until
+            if keys:
                 self._save(data)
 
     def clear_rate_limits(self) -> int:
         """Clear stored embedding-key rate-limit skips.
 
-        Resets ``embedding_key_rate_limit_until`` on every entry and turns
-        status ``"rate_limited"`` back into ``"ok"``. ``"invalid"`` keys are
-        left untouched. Returns the number of entries changed.
+        Resets ``rate_limit_until`` on every stored key and turns status
+        ``"rate_limited"`` back into ``"ok"``. ``"invalid"`` keys are left
+        untouched. Returns the number of keys changed.
         """
         with self._lock:
             data = self._load()
             changed = 0
             for entry in data.values():
-                touched = False
-                if entry.get("embedding_key_rate_limit_until"):
-                    entry["embedding_key_rate_limit_until"] = None
-                    touched = True
-                if entry.get("embedding_key_status") == "rate_limited":
-                    entry["embedding_key_status"] = "ok"
-                    touched = True
-                if touched:
-                    changed += 1
+                for stored in entry.get("embedding_keys", {}).values():
+                    touched = False
+                    if stored.get("rate_limit_until"):
+                        stored["rate_limit_until"] = None
+                        touched = True
+                    if stored.get("status") == "rate_limited":
+                        stored["status"] = "ok"
+                        touched = True
+                    if touched:
+                        changed += 1
             if changed:
                 self._save(data)
             return changed
 
     def count_embedding_keys_by_name(self) -> dict[str, int]:
-        """Count stored, non-invalid embedding keys grouped by ``embedding_key_name``."""
+        """Count stored, non-invalid embedding keys grouped by key name."""
         counts: dict[str, int] = {}
         for entry in self._load().values():
-            name = entry.get("embedding_key_name")
-            if not name or not entry.get("embedding_key_ciphertext"):
-                continue
-            if entry.get("embedding_key_status") == "invalid":
-                continue
-            counts[name] = counts.get(name, 0) + 1
+            for name, stored in entry.get("embedding_keys", {}).items():
+                if not stored.get("ciphertext") or stored.get("status") == "invalid":
+                    continue
+                counts[name] = counts.get(name, 0) + 1
         return counts

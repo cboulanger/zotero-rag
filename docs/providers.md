@@ -37,6 +37,8 @@ a preset picks one with `provider.scope`.
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
 - `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
 
+The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
+
 ## What a provider can define
 
 Class attributes: `id`, `label`, `Options` (a `ProviderOptions` model with
@@ -69,6 +71,8 @@ non-`generic` provider on a local side, and one key environment variable used by
 two different providers.
 
 ## Provisioning and cost control
+
+Who may provision follows the credential scope. For `user` any signed-in user may, on their own key and in their own job slot (two users can run at once, the same user gets HTTP 409). For `managed` only an admin may, with the stored admin key and one global slot. `GET /api/config/provision/status` and `GET /api/config/health` answer for the caller's own slot and key. A provider whose endpoints live in the key owner's account sets `derives_endpoint_url` and implements `endpoint_url(key)`; the services then need no URL in the preset (lookups are cached per key in `backend/services/endpoint_cache.py`).
 
 `POST /api/config/provision` runs each requested side's `provision()` as an
 independent job (a failure on one side does not stop the other; a failed side can

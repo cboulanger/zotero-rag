@@ -11,8 +11,10 @@ key rotate at runtime (e.g. the MPCDF LLM Inference Service's ephemeral <=8h
 job URLs — see
 docs/superpowers/specs/2026-10-08-dynamic-remote-preset-config-design.md):
 
-- ``active_preset_override``: overrides Settings.model_preset without a
-  restart, when set to a known preset name.
+- ``default_preset``: the server's default preset, the one every user gets
+  until they choose their own. Overrides Settings.model_preset (``MODEL_PRESET``,
+  itself defaulting to ``remote-kisski``) without a restart, when set to a
+  known preset name.
 - ``remote_config``: a flat {env_var_name: value} map for a preset's
   ``shared_base_url_env``/``shared_api_key_env`` fields (see
   backend.config.presets). Base URLs are plaintext; ``*_API_KEY`` values
@@ -35,7 +37,7 @@ from backend.services import secret_store
 
 DEFAULT_ADMIN_SETTINGS = {
     "index_snapshots": False,
-    "active_preset_override": None,
+    "default_preset": None,
     "remote_config": {},
 }
 
@@ -88,15 +90,15 @@ def write_admin_settings(data_path: Path, settings: dict) -> None:
     _atomic_write_json(data_path / "system" / "admin_settings.json", settings)
 
 
-def get_active_preset_override(data_path: Path) -> Optional[str]:
-    """The admin-set preset name overriding Settings.model_preset, or None."""
-    return read_admin_settings(data_path).get("active_preset_override")
+def get_default_preset(data_path: Path) -> Optional[str]:
+    """The admin-set default preset name, or None (then ``MODEL_PRESET`` applies)."""
+    return read_admin_settings(data_path).get("default_preset")
 
 
-def set_active_preset_override(data_path: Path, preset_name: Optional[str]) -> None:
-    """Set (or clear, with None) the runtime preset override."""
+def set_default_preset(data_path: Path, preset_name: Optional[str]) -> None:
+    """Set (or clear, with None) the server's default preset."""
     state = read_admin_settings(data_path)
-    state["active_preset_override"] = preset_name
+    state["default_preset"] = preset_name
     write_admin_settings(data_path, state)
 
 
@@ -108,9 +110,10 @@ def get_remote_config_value(key_name: str, data_path: Optional[Path] = None) -> 
 
 
 def resolve_shared_value(env_var_name: str, data_path: Optional[Path] = None) -> Optional[str]:
-    """Resolve a preset's shared base_url/api_key: the admin-set remote_config
-    override first, then the process environment."""
-    return get_remote_config_value(env_var_name, data_path) or os.getenv(env_var_name)
+    """Resolve a preset's shared base_url/api_key from the admin-set remote_config.
+
+    Provider credentials are never read from the process environment."""
+    return get_remote_config_value(env_var_name, data_path)
 
 
 def normalize_base_url(base_url: str) -> str:

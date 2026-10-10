@@ -136,11 +136,11 @@ class EncryptedRemoteConfigTest(_IsolatedSettings):
         self.assertIn("legacy_key", json.dumps(self._file()))
         self.assertEqual(get_remote_config_value("RUNPOD_API_KEY"), "legacy_key")
 
-    def test_undecryptable_key_falls_back_to_environment(self):
+    def test_undecryptable_key_resolves_to_nothing_and_never_to_the_environment(self):
         update_remote_config({"RUNPOD_API_KEY": "rpa_SECRET"})
         get_settings().autoindex_secret = Fernet.generate_key().decode()
         with patch.dict(os.environ, {"RUNPOD_API_KEY": "from_env"}):
-            self.assertEqual(resolve_shared_value("RUNPOD_API_KEY"), "from_env")
+            self.assertIsNone(resolve_shared_value("RUNPOD_API_KEY"))
 
 
 if __name__ == "__main__":

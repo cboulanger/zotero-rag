@@ -146,7 +146,7 @@ class TestGetProviders(unittest.TestCase):
         preset = make_preset()
         preset.llm.provider.id = "demo-test-only"
         preset.llm.provider.scope = "managed"
-        preset.llm.model_kwargs = {"api_key_env": "OTHER"}
+        preset.llm.model_kwargs = {"shared_api_key_env": "OTHER"}
         self.assertEqual(get_providers(preset)["llm"].scope, "managed")
 
     def test_non_generic_provider_on_a_local_side_is_rejected(self):
@@ -183,3 +183,24 @@ class TestGetProviders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScopeMatchesKeyFields(unittest.TestCase):
+    def test_user_scope_with_a_shared_key_field_is_rejected(self):
+        preset = make_preset()
+        preset.llm.model_kwargs = {"shared_api_key_env": "K"}  # generic defaults to scope user
+        with self.assertRaisesRegex(ProviderConfigError, "takes each user's own key"):
+            get_providers(preset)
+
+    def test_shared_or_managed_scope_with_a_personal_key_field_is_rejected(self):
+        for scope in ("shared", "managed"):
+            preset = make_preset()
+            preset.llm.provider.scope = scope
+            with self.assertRaisesRegex(ProviderConfigError, "admin-set key"):
+                get_providers(preset)
+
+    def test_matching_kinds_are_accepted(self):
+        preset = make_preset()
+        preset.llm.provider.scope = "shared"
+        preset.llm.model_kwargs = {"shared_api_key_env": "K"}
+        self.assertEqual(get_providers(preset)["llm"].scope, "shared")

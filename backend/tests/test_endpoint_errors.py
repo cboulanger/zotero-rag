@@ -95,6 +95,10 @@ class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
         service.preset = preset
         service.llm_config = preset.llm
         service._model_name = "m"
+        service._provider = None
+        service._resolved_base_url = None
+        service._openai_client = None
+        service.api_key = "k"
         service._llm_api = lambda: "openai"
         service._generate_openai = AsyncMock(
             side_effect=APIConnectionError(request=httpx.Request("POST", "https://x/v1/chat/completions"))

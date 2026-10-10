@@ -37,7 +37,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
-| `runpod` | **No** | `RUNPOD_API_KEY` (shared, admin-set — see below) | any |
+| `runpod` | **No** | `RUNPOD_API_KEY` (each user's own) | any |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -237,7 +237,9 @@ to reduce peak RSS during indexing.
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 800 tokens
 
-**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in your own RunPod account, handled by the `runpod` provider (credential scope `managed`: the admin's key, the institution pays, only admins operate it). Select `runpod` as the active preset, then click "Provision endpoints" in the Preferences pane: the backend creates (or wakes, or resumes) both endpoints and stores their URLs itself, so there are no URL fields to fill in. The optional "Provisioning key" next to the button is a RunPod API key used for that run only and never stored. Each side is its own job: if one fails the other still completes, and a failed side can be retried alone. After provisioning you can replace `RUNPOD_API_KEY` with a key restricted to the two endpoints (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision.
+**What's different about this preset:** unlike KISSKI's fixed shared gateway, these are two serverless endpoints in a RunPod account, handled by the `runpod` provider. The bundled preset uses credential scope `user`: every user enters their own RunPod API key in the plugin's Preferences, the endpoints live in that user's account (named `zotero-rag-embedding` and `zotero-rag-llm`) and the backend finds their URLs from the key, so there are no URL fields to fill in. "Provision endpoints" creates, wakes or resumes both endpoints on the caller's own key and any signed-in user may run it (one job at a time per user). The optional "Provisioning key" next to the button is a RunPod API key used for that run only and never stored. Each side is its own job: if one fails the other still completes, and a failed side can be retried alone. After provisioning you can use a key restricted to the two endpoints for day-to-day queries (a restricted key is tied to endpoint IDs, so update it if an endpoint is ever recreated — the health row then shows `HTTP 403: the API key has no access to endpoint <id>`); supply a full-access key again in the "Provisioning key" field whenever you provision.
+
+**Institution-funded variant (scope `managed`).** To let an institution pay for one shared RunPod account that only admins operate, copy `runpod.json` to a new file (for example `runpod-managed.json`), set `"scope": "managed"` on both sides and replace each side's `model_kwargs` with `{"shared_base_url_env": "RUNPOD_EMBEDDING_BASE_URL" (or `RUNPOD_LLM_BASE_URL`), "shared_api_key_env": "RUNPOD_API_KEY"}`. The admin then sets `RUNPOD_API_KEY` under "Service API Keys", only admins can provision, pause or resume, and there is one global job slot.
 
 Per-side tuning lives in the preset: `embedding.provider.options` / `llm.provider.options` accept `gpu`, `workers_max` (at least 1), `idle_timeout`, `data_centers`, `image` and `container_disk_gb`. A paused endpoint (`workersMax` 0, which RunPod answers with HTTP 409 `ENDPOINT_PAUSED`) stops all billing and wake-ups until it is provisioned again; provisioning resumes it.
 
@@ -253,7 +255,7 @@ Admins can also run `uv run python bin/provision.py --preset runpod` on the serv
 
 **Health and provisioning from the plugin:** a provider that can report readiness gives `GET /api/config/health` a status per side: `ready`, `cold` (scaled to zero, wakes normally on the next request), `throttled` (the provider has no GPU capacity for the endpoint right now — jobs sit queued until capacity frees up or the GPU type is changed) or `unreachable` (`null` for a side with no health check); the Preferences pane shows a status row per side. A provider that supports provisioning (`supports_provisioning`) gives an admin a "Provision endpoints" button for a side that is `unreachable` or `throttled`; it calls `POST /api/config/provision` (body `{"keys": {...}, "sides": [...]}`, both optional), which runs each side's provider in the background (poll `GET /api/config/provision/status`, which reports a status and progress lines per side) and applies any base URL the provider returns via the shared remote config. Design: `docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md`.
 
-**Requires:** `RUNPOD_API_KEY` (Preferences pane, or the one-time "Provisioning key"). `RUNPOD_EMBEDDING_BASE_URL`/`RUNPOD_LLM_BASE_URL` are set by provisioning and picked up by a running backend without a restart.
+**Requires:** your personal `RUNPOD_API_KEY` (Preferences pane, or the one-time "Provisioning key"). The endpoint URLs are looked up from the key and cached for a few minutes; provisioning refreshes them at once.
 
 ---
 
@@ -263,7 +265,9 @@ Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires
 
 **Switching the active preset without a restart.** `POST /api/config` with `{"preset_name": "..."}` switches immediately, for every caller and for the hourly cron auto-indexer — but only to a preset that shares the current one's embedding model (same vector space, so the already-open vector store stays valid). `GET /api/config`'s `compatible_presets` field lists which presets currently qualify; switching to anything else (a different embedding model, or a local-model preset) still requires `MODEL_PRESET` + a restart. The Zotero plugin's Preferences pane exposes this as the "Active Model Preset" dropdown.
 
-`GET /api/config` also returns `switchable_presets`: `[{"name", "active", "credentials"}]`, i.e. `compatible_presets` filtered to those with usable credentials (the active preset is always listed). A preset's credentials count as usable when every key its embedding and LLM sides require is present and not known to be invalid: a `shared_base_url`/`shared_api_key` value set via `POST /api/config/remote-fields` or an environment variable; a personal key (e.g. `KISSKI_API_KEY`) sent in the requesting admin's header, set as a server environment variable, or stored (non-invalid) in the auto-index key store. Keys are not live-validated, so listing never spends rate-limited quota. `POST /api/config` rejects (HTTP 400, naming the missing key names only) a preset that lacks credentials. A successful switch also discards the cached rate-limit headers of the previous provider and clears the stored embedding-key rate-limit skips, so the next auto-index run retries libraries that were skipped for `embedding_rate_limit`. The plugin's auto-index status dialog offers the same switch to admins.
+`GET /api/config` also returns `switchable_presets`: `[{"name", "active", "credentials"}]`, i.e. `compatible_presets` filtered to those with usable credentials (the active preset is always listed). A preset's credentials count as usable when every key its embedding and LLM sides require is present and not known to be invalid: a `shared_base_url`/`shared_api_key` value set via `POST /api/config/remote-fields`; a personal key (e.g. `KISSKI_API_KEY`) sent in the requesting admin's header or stored (non-invalid) in the auto-index key store. Keys are not live-validated, so listing never spends rate-limited quota. `POST /api/config` rejects (HTTP 400, naming the missing key names only) a preset that lacks credentials. A successful switch also discards the cached rate-limit headers of the previous provider and clears the stored embedding-key rate-limit skips, so the next auto-index run retries libraries that were skipped for `embedding_rate_limit`. The plugin's auto-index status dialog offers the same switch to admins.
+
+**Default preset and per-user choice.** The server has one *default* preset: the admin-stored one (set with `POST /api/config`), else `MODEL_PRESET`, else `remote-kisski`. Everyone runs on it until they choose their own. `PUT /api/config/my-preset` (`{"preset_name": "<name>"}` or `null` to return to the default) stores a signed-in user's choice server-side; `GET /api/config/my-preset` and `GET /api/config` report `default_preset`, the caller's effective `preset_name`, `selectable_presets` and, when a saved choice is no longer honoured, `preset_fell_back`. A choice is honoured only while the preset exists, passes validation and is compatible with the default (both sides remote and the same embedding model, since the vector store is shared); to select one the user must have usable credentials for it (their own key sent in its header for `user` scope, or the shared key set for `managed`/`shared`). Requests without an identity (a loopback server, the public query page) always run on the default, and the cron indexer indexes each owner's libraries on that owner's preset using that owner's key for it. Keys for presets a user is not currently on stay in their key store, so switching back needs no re-entry. `POST /api/config` changes only the default.
 
 **Setting shared remote endpoint/API-key values.** Presets like `remote-mpcdf`, whose endpoint URL and API key rotate with each short-lived job, declare this via `shared_base_url_env`/`shared_api_key_env` in their preset file (`data/presets/remote-mpcdf.json`) rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"MPCDF_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` and picked up immediately by interactive queries and the cron indexer alike, no restart needed. Base URLs are stored as plain text; every `*_API_KEY` value is Fernet-encrypted at rest (as `{"enc": "<token>"}`) with `AUTOINDEX_SECRET`, through the central module `backend/services/secret_store.py`. Without `AUTOINDEX_SECRET`, saving a key is refused (HTTP 503) while URLs can still be saved. A plaintext key already in the file keeps working and is encrypted on the next write or at backend startup. To move provisioned credentials between instances, re-send the values with `POST /api/config/remote-fields` (the target instance encrypts them with its own `AUTOINDEX_SECRET`). The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
 
@@ -397,36 +401,19 @@ Compatibility requires cosine similarity ≥ 0.999 across all probe texts. A mis
 
 ## Usage
 
-Set `MODEL_PRESET` in your `.env` file:
+Set `MODEL_PRESET` in your `.env` file to choose the preset the server starts with:
 
 ```bash
 MODEL_PRESET=remote-kisski
 ```
 
-For remote presets, also set the required API key:
+### Credentials
 
-```bash
-# KISSKI (remote-kisski, apple-silicon-kisski, windows-test)
-KISSKI_API_KEY=your_kisski_key_here
+Provider API keys are never read from `.env` or the server's environment. Where a key comes from depends on the provider's credential scope (see [providers.md](providers.md)):
 
-# OpenAI (remote-openai)
-OPENAI_API_KEY=sk-...
+- `user` (KISSKI, OpenAI, Anthropic, `runpod` with the default scope): each user enters their own key in the plugin's Preferences. It is sent with their requests, and for automatic indexing the user can opt in to storing it encrypted in the auto-index key store.
+- `managed` (for example `runpod` as configured in the bundled preset) and `shared` (MPCDF): the admin sets the key, and the endpoint URL where the provider cannot derive it, with `POST /api/config/remote-fields` or the Preferences pane's "Service API Keys" section. They are stored encrypted in `<data_path>/system/admin_settings.json` using `AUTOINDEX_SECRET`.
 
-# MPCDF (remote-mpcdf) — typically set at runtime via POST /api/config/remote-fields
-# instead (see "Admin: runtime preset switching & shared remote config" above), since
-# these rotate with each new MPCDF job; shown here only for the env-var fallback path.
-# The trailing /v1 is optional — it's appended automatically if omitted.
-MPCDF_EMBEDDING_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
-MPCDF_EMBEDDING_API_KEY=...
-MPCDF_LLM_BASE_URL=https://llm.mpcdf.mpg.de/<job-id>/v1
-MPCDF_LLM_API_KEY=...
-
-# RunPod (runpod) — the URLs are stored by provisioning (Preferences or
-# bin/provision.py) in data/system/admin_settings.json; shown here only for the
-# env-var fallback path.
-RUNPOD_API_KEY=...
-RUNPOD_EMBEDDING_BASE_URL=https://api.runpod.ai/v2/<embedding-endpoint-id>/openai/v1
-RUNPOD_LLM_BASE_URL=https://api.runpod.ai/v2/<llm-endpoint-id>/openai/v1
-```
+The Hugging Face token for downloading gated *local* model weights (`HF_TOKEN`) is not a provider credential and stays an environment setting.
 
 See `data/presets/*.json` for each preset's actual configuration (or `backend/config/default_presets/*.json` for the bundled defaults before they're copied), and [backend/config/presets.py](../backend/config/presets.py) for the schema (`HardwarePreset`/`EmbeddingConfig`/`LLMConfig`/`RAGConfig`) and loader these files are validated against.

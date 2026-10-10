@@ -256,6 +256,8 @@ class RemoteLLMService(LLMService):
         self.preset = settings.get_hardware_preset()
         self.llm_config = self.preset.llm
         self.api_key = api_key
+        self._provider = None
+        self._resolved_base_url: Optional[str] = None
         self._model_name = model_name_override or self.llm_config.model_name
 
         # Initialize API clients
@@ -334,6 +336,74 @@ class RemoteLLMService(LLMService):
         except Exception as e:
             logger.debug(f"Could not write last-inference-response.json: {e}")
 
+    def _credential(self) -> str:
+        """The API key for this side (request key, admin-set shared key, or the keyless placeholder)."""
+        from backend.services.admin_settings_store import resolve_shared_value
+
+        kwargs = self.llm_config.model_kwargs
+        shared_key_env = kwargs.get("shared_api_key_env")
+        if shared_key_env:
+            api_key = self.api_key or resolve_shared_value(shared_key_env, self.settings.data_path)
+            if not api_key:
+                raise LLMConfigurationError(
+                    f"API key not configured. POST it to /api/config/remote-fields as "
+                    f'{{"values": {{"{shared_key_env}": ...}}}}.'
+                )
+            return api_key
+        api_key_env = kwargs.get("api_key_env")
+        if api_key_env:
+            if not self.api_key:
+                raise LLMConfigurationError(
+                    f"No API key for {api_key_env}: enter it in the plugin's preferences "
+                    "(it is sent with each request, never read from the environment)."
+                )
+            return self.api_key
+        # No key declared: an OpenAI-compatible server that needs none.
+        return self.api_key or KEYLESS_API_KEY
+
+    def _llm_provider(self):
+        if self._provider is None:
+            from backend.providers import ProviderConfigError, get_providers
+
+            try:
+                self._provider = get_providers(self.preset)["llm"]
+            except ProviderConfigError:
+                return None
+        return self._provider
+
+    def _derives_endpoint(self) -> bool:
+        """True when this side's URL is found from the key rather than set in the preset."""
+        kwargs = self.llm_config.model_kwargs
+        provider = self._llm_provider()
+        return bool(
+            provider is not None
+            and getattr(provider, "derives_endpoint_url", False)
+            and not kwargs.get("base_url")
+            and not kwargs.get("shared_base_url_env")
+        )
+
+    def _forget_endpoint(self) -> None:
+        """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._resolved_base_url and self._provider is not None:
+            from backend.services.endpoint_cache import endpoint_cache
+
+            endpoint_cache.invalidate(self._provider.id, "llm", self.api_key)
+            self._resolved_base_url = None
+            self._openai_client = None
+
+    async def _ensure_endpoint(self) -> None:
+        """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._openai_client is not None or self._resolved_base_url or not self._derives_endpoint():
+            return
+        import asyncio
+
+        from backend.services.endpoint_cache import endpoint_cache
+
+        url = await asyncio.to_thread(endpoint_cache.resolve, self._provider, "llm", self._credential())
+        if not url:
+            raise LLMEndpointUnavailableError(unavailable_message("llm", "The LLM endpoint is not provisioned."))
+        self._resolved_base_url = url
+
     def _get_openai_client(self):
         """Lazy initialize OpenAI client."""
         if self._openai_client is None:
@@ -341,40 +411,21 @@ class RemoteLLMService(LLMService):
                 from openai import AsyncOpenAI
 
                 shared_url_env = self.llm_config.model_kwargs.get("shared_base_url_env")
-                shared_key_env = self.llm_config.model_kwargs.get("shared_api_key_env")
-                if shared_url_env or shared_key_env:
+                if shared_url_env:
                     from backend.services.admin_settings_store import resolve_shared_value
-
-                if shared_key_env:
-                    api_key = self.api_key or resolve_shared_value(shared_key_env, self.settings.data_path)
-                    if not api_key:
-                        raise LLMConfigurationError(
-                            f"API key not configured. POST it to /api/config/remote-fields as "
-                            f'{{"values": {{"{shared_key_env}": ...}}}}, or set the {shared_key_env} '
-                            f"environment variable."
-                        )
-                else:
-                    api_key_env = self.llm_config.model_kwargs.get("api_key_env")
-                    if api_key_env:
-                        api_key = self.api_key or os.getenv(api_key_env)
-                        if not api_key:
-                            raise LLMConfigurationError(f"API key not found in environment variable: {api_key_env}")
-                    else:
-                        # No key declared: an OpenAI-compatible server that needs none.
-                        api_key = self.api_key or KEYLESS_API_KEY
+                api_key = self._credential()
 
                 if shared_url_env:
                     base_url = resolve_shared_value(shared_url_env, self.settings.data_path)
                     if not base_url:
                         raise LLMConfigurationError(
                             f"Base URL not configured. POST it to /api/config/remote-fields as "
-                            f'{{"values": {{"{shared_url_env}": ...}}}}, or set the {shared_url_env} '
-                            f"environment variable."
+                            f'{{"values": {{"{shared_url_env}": ...}}}}.'
                         )
                     from backend.services.admin_settings_store import normalize_base_url
                     base_url = normalize_base_url(base_url)
                 else:
-                    base_url = self.llm_config.model_kwargs.get("base_url")
+                    base_url = self.llm_config.model_kwargs.get("base_url") or self._resolved_base_url
 
                 # Allow per-preset timeout override via model_kwargs; default 120 s
                 timeout = float(self.llm_config.model_kwargs.get("timeout", 120))
@@ -392,16 +443,14 @@ class RemoteLLMService(LLMService):
         return self._openai_client
 
     def _resolve_api_key(self) -> Optional[str]:
-        """The key for this side: the request's key, else the shared store or
-        the environment variable the preset names."""
+        """The key for this side: the request's key, else the admin-set shared store."""
         kwargs = self.llm_config.model_kwargs
         shared_key_env = kwargs.get("shared_api_key_env")
         if shared_key_env:
             from backend.services.admin_settings_store import resolve_shared_value
 
             return self.api_key or resolve_shared_value(shared_key_env, self.settings.data_path)
-        api_key_env = kwargs.get("api_key_env")
-        return self.api_key or (os.getenv(api_key_env) if api_key_env else None)
+        return self.api_key
 
     def _record_usage(self, headers: Any) -> None:
         """Remember the response's rate-limit headers for the usage meters."""
@@ -452,6 +501,7 @@ class RemoteLLMService(LLMService):
             temperature = self.llm_config.temperature
 
         try:
+            await self._ensure_endpoint()
             # The provider declares the wire protocol; core knows protocols, not vendors.
             if self._llm_api() == "anthropic":
                 return await self._generate_anthropic(prompt, max_tokens, temperature)
@@ -472,6 +522,7 @@ class RemoteLLMService(LLMService):
             except ImportError:
                 pass
             if connection_error_types and isinstance(e, connection_error_types):
+                self._forget_endpoint()
                 raise LLMEndpointUnavailableError(
                     unavailable_message("llm", f"Could not connect to the LLM API ({self._model_name}): {e}.")
                 ) from e

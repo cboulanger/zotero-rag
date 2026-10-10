@@ -120,8 +120,7 @@ cp .env.dist .env    # Create environment config
 
 # Configure .env
 MODEL_PRESET=apple-silicon-kisski  # Or: see presets below
-OPENAI_API_KEY=sk-...              # Optional: for remote-openai / windows-test
-KISSKI_API_KEY=...                 # Optional: for KISSKI presets
+# Provider API keys (OpenAI, KISSKI, ...) are entered in the plugin, not set here
 
 # Remote server deployments (required when API_HOST is not localhost/127.0.0.1)
 AUTHORIZED_GROUP_ID=998877         # Zotero group whose members may use this server

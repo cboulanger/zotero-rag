@@ -13,9 +13,13 @@ import re
 
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
-from backend.dependencies import require_authorized_group_admin
+from backend.dependencies import get_zotero_identity, require_authorized_group_admin
+from backend.services.access_gate import is_loopback
+from backend.services.endpoint_cache import endpoint_cache
+from backend.services.effective_preset import is_compatible
+from backend.services.user_settings import get_preferred_preset, set_preferred_preset
 from backend.services.admin_settings_store import (
-    set_active_preset_override,
+    set_default_preset,
     update_remote_config,
     get_remote_config_value,
     resolve_shared_value,
@@ -36,29 +40,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _embedding_model_identity(model_name: str) -> str:
-    """Normalize an embedding model name for cross-preset compatibility
-    comparison: the basename after any "org/" prefix.
-
-    Different providers serve the same underlying model under different
-    literal API model-name strings — e.g. KISSKI/MPCDF serve
-    "multilingual-e5-large-instruct" while RunPod's vLLM worker
-    requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
-    (it's what the worker was launched with, and what must be sent as the
-    "model" field in every embeddings API call — see
-    the provider's MODEL_NAME template env). Comparing
-    basenames treats these as the same model without changing either
-    preset's actual on-the-wire model_name.
-    """
-    return model_name.rsplit("/", 1)[-1]
-
-
 def _compatible_presets(current: HardwarePreset, data_path: Path, available: List[str]) -> List[str]:
     """Presets safe to switch to at runtime without a restart: both the
     embedding and LLM must be remote (no local model to load/unload), and
     the embedding model must match — same model means the same vector
     space, so the already-open VectorStore singleton stays valid. Matched
-    by normalized identity (see _embedding_model_identity), not literal
+    by normalized identity (see effective_preset.embedding_model_identity), not literal
     string equality, since providers can serve the same model under
     different API model-name strings.
 
@@ -69,7 +56,6 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
     """
     if current.embedding.model_type != "remote" or current.llm.model_type != "remote":
         return [current.name]
-    current_identity = _embedding_model_identity(current.embedding.model_name)
     compatible = []
     for name in available:
         try:
@@ -81,11 +67,7 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
             # does, rather than letting one bad file 500 the whole request.
             logger.warning("Skipping preset %r while computing compatible_presets: %s", name, exc)
             continue
-        if (
-            preset.embedding.model_type == "remote"
-            and preset.llm.model_type == "remote"
-            and _embedding_model_identity(preset.embedding.model_name) == current_identity
-        ):
+        if is_compatible(current, preset):
             compatible.append(name)
     return compatible
 
@@ -147,13 +129,9 @@ def _preset_credentials(
             if field["kind"] in ("shared_base_url", "shared_api_key"):
                 if provisionable:
                     continue
-                ok = bool(get_remote_config_value(name) or os.environ.get(name))
+                ok = bool(get_remote_config_value(name))
             else:
-                ok = bool(
-                    request.headers.get(field["header_name"])
-                    or os.environ.get(name)
-                    or stored_key_counts.get(name, 0) > 0
-                )
+                ok = bool(request.headers.get(field["header_name"]) or stored_key_counts.get(name, 0) > 0)
             if not ok and name not in missing:
                 missing.append(name)
 
@@ -184,6 +162,25 @@ def _switchable_presets(
     return result
 
 
+def _selectable_presets(
+    effective: HardwarePreset, compatible: List[str], settings, request: Request,
+) -> List["SwitchablePreset"]:
+    """Presets this caller may choose: compatible with the default, credentials usable.
+    The caller's current (effective) preset is always listed."""
+    names = list(compatible)
+    if effective.name not in names:
+        names.append(effective.name)
+    return _switchable_presets(effective, names, settings, request)
+
+
+def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: HardwarePreset) -> Optional[str]:
+    """The preset the caller saved but is not running on (removed, incompatible, ...), if any."""
+    if identity is None:
+        return None
+    chosen = get_preferred_preset(settings.data_path, identity.user_id)
+    return chosen if chosen and chosen != effective.name else None
+
+
 class SwitchablePreset(BaseModel):
     """A preset the admin may switch to at runtime."""
     name: str
@@ -205,7 +202,10 @@ class ConfigResponse(BaseModel):
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
     provisionable: bool = False  # at least one side's provider can provision
-    switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials
+    switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials (admin switch)
+    default_preset: str = ""  # the server default; ``preset_name`` is this caller's effective preset
+    selectable_presets: List[SwitchablePreset] = []  # presets this caller may choose for themselves
+    preset_fell_back: Optional[str] = None  # the caller's saved choice, when it is no longer honoured
     # RAG configuration
     default_top_k: int
     default_min_score: float
@@ -282,11 +282,7 @@ def _live_llm_models(
     if not base_url:
         return None
     header_name = env_var_to_header(api_key_env) if api_key_env else ""
-    api_key = (
-        (request.headers.get(header_name) if header_name else None)
-        or (os.environ.get(api_key_env) if api_key_env else None)
-        or ""
-    )
+    api_key = (request.headers.get(header_name) if header_name else None) or ""
     if require_key and not api_key:
         return None
     return provider.live_models(base_url, api_key)
@@ -316,7 +312,10 @@ def get_config(request: Request):
         llm_models = [m.id for m in live_models]
 
     available = list_presets(settings.data_path, platform=current_platform())
-    compatible = _compatible_presets(preset, settings.data_path, available)
+    default = settings.get_default_preset()
+    compatible = _compatible_presets(default, settings.data_path, available)
+    identity = get_zotero_identity(request)
+    selectable = _selectable_presets(preset, compatible, settings, request)
     return ConfigResponse(
         preset_name=preset.name,
         preset_description=preset.description,
@@ -330,12 +329,81 @@ def get_config(request: Request):
         available_presets=available,
         compatible_presets=compatible,
         provisionable=_is_provisionable(preset),
-        switchable_presets=_switchable_presets(preset, compatible, settings, request),
+        switchable_presets=_switchable_presets(default, compatible, settings, request),
+        default_preset=default.name,
+        selectable_presets=selectable,
+        preset_fell_back=_fell_back_choice(settings, identity, preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
         max_chunk_size=preset.rag.max_chunk_size
     )
+
+
+class MyPresetUpdate(BaseModel):
+    """Body of PUT /api/config/my-preset; ``null`` returns the caller to the server default."""
+    preset_name: Optional[str] = None
+
+
+@router.get("/config/my-preset")
+def get_my_preset(request: Request) -> dict:
+    """The caller's preset: the server default, the one they run on, their saved choice and
+    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``."""
+    return _my_preset_view(request, get_settings().get_hardware_preset())
+
+
+def _my_preset_view(request: Request, effective: HardwarePreset) -> dict:
+    settings = get_settings()
+    default = settings.get_default_preset()
+    available = list_presets(settings.data_path, platform=current_platform())
+    compatible = _compatible_presets(default, settings.data_path, available)
+    identity = get_zotero_identity(request)
+    return {
+        "default": default.name,
+        "effective": effective.name,
+        "fell_back": _fell_back_choice(settings, identity, effective),
+        "selectable": [p.model_dump() for p in _selectable_presets(effective, compatible, settings, request)],
+    }
+
+
+@router.put("/config/my-preset")
+def put_my_preset(update: MyPresetUpdate, request: Request) -> dict:
+    """Choose the preset this caller runs on (``null`` clears the choice).
+
+    Needs a signed-in identity (a loopback server with no identity always runs the
+    default). The choice must be compatible with the server default and the caller must
+    have usable credentials for it (their key sent in its header, or a shared one set).
+    """
+    settings = get_settings()
+    identity = get_zotero_identity(request)
+    if identity is None:
+        raise HTTPException(status_code=400, detail="Choosing a preset needs a signed-in Zotero identity.")
+    if update.preset_name is None:
+        set_preferred_preset(settings.data_path, identity.user_id, None)
+        return _my_preset_view(request, settings.get_default_preset())
+
+    default = settings.get_default_preset()
+    available = list_presets(settings.data_path, platform=current_platform())
+    if update.preset_name not in available:
+        raise HTTPException(status_code=400, detail=f"Unknown preset: {update.preset_name}.")
+    if update.preset_name not in _compatible_presets(default, settings.data_path, available):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{update.preset_name}' is not compatible with the server default '{default.name}' "
+                   "(both sides must be remote and use the same embedding model).",
+        )
+    try:
+        chosen = get_preset(update.preset_name, settings.data_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    missing = _preset_credentials(chosen, settings, request, _stored_embedding_key_counts(settings))
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{update.preset_name}' lacks credentials: {sorted(missing)}.",
+        )
+    set_preferred_preset(settings.data_path, identity.user_id, update.preset_name)
+    return _my_preset_view(request, chosen)
 
 
 @router.post("/config", response_model=ConfigResponse)
@@ -377,7 +445,7 @@ async def update_config(
             detail=f"Invalid preset: {update.preset_name}. Available: {available}",
         )
 
-    current = settings.get_hardware_preset()
+    current = settings.get_default_preset()
     compatible = _compatible_presets(current, settings.data_path, available)
     if update.preset_name not in compatible:
         raise HTTPException(
@@ -397,7 +465,7 @@ async def update_config(
                    f"for {sorted(missing)}.",
         )
 
-    set_active_preset_override(settings.data_path, update.preset_name)
+    set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
     try:
@@ -421,43 +489,59 @@ class EndpointHealthResponse(BaseModel):
     llm: Optional[EndpointHealth] = None
 
 
-def _check_side(preset: HardwarePreset, side: str) -> Optional[EndpointHealth]:
+def _side_kwargs(preset: HardwarePreset, side: str) -> dict:
+    return (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+
+
+def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[str]:
+    """The caller's own key for ``key_env``, from its request header."""
+    if request is None or not key_env:
+        return None
+    return request.headers.get(env_var_to_header(key_env)) or None
+
+
+def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = None) -> Optional[EndpointHealth]:
     """Health of one side from its provider; None when the provider has no health concept.
 
-    The key and URL are the shared admin-set values for a side that declares
-    ``shared_*_env`` fields, else the preset's fixed ``base_url``.
+    Whose key is used follows the credential scope: ``user`` uses the caller's
+    own key (from the request header), ``managed``/``shared`` the admin-set key
+    in the shared store. The URL is the shared admin-set value, the preset's
+    fixed ``base_url``, or (for a provider that derives it) the one found from
+    the key.
     """
     try:
         provider = get_providers(preset)[side]
     except ProviderConfigError:
         return None
-    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    kwargs = _side_kwargs(preset, side)
     url_env = kwargs.get("shared_base_url_env")
     key_env = kwargs.get("shared_api_key_env")
-    creds = Credentials(
-        api_key=resolve_shared_value(key_env) if key_env else None,
-        base_url=resolve_shared_value(url_env) if url_env else kwargs.get("base_url"),
-    )
-    health = provider.health(creds)
+    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
+    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
+    if not base_url and api_key and provider.derives_endpoint_url:
+        base_url = endpoint_cache.resolve(provider, side, api_key)
+        if base_url is None:
+            return EndpointHealth(status="unreachable", detail="not provisioned")
+    health = provider.health(Credentials(api_key=api_key, base_url=base_url))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
 
 
 @router.get("/config/health", response_model=EndpointHealthResponse)
-def get_endpoint_health() -> EndpointHealthResponse:
+def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     """
     Readiness (ready / cold / throttled / unreachable) of the active
     preset's remote embedding and LLM endpoints, as reported by each side's
-    provider. A side whose provider has no health concept is ``null``. Plain
-    ``def``: the provider checks do blocking HTTP, so FastAPI runs this in a
-    thread pool.
+    provider, using the caller's own key for ``user``-scope sides. A side whose
+    provider has no health concept is ``null``. Plain ``def``: the provider
+    checks do blocking HTTP, so FastAPI runs this in a thread pool.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
     return EndpointHealthResponse(
-        embedding=_check_side(preset, "embedding"),
-        llm=_check_side(preset, "llm"),
+        embedding=_check_side(preset, "embedding", request),
+        llm=_check_side(preset, "llm", request),
     )
 
 
@@ -475,17 +559,20 @@ def _credential_env(kwargs: dict) -> Optional[str]:
     return kwargs.get("shared_api_key_env") or kwargs.get("api_key_env")
 
 
-def _side_credential(preset: HardwarePreset, side: str, supplied: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+def _side_credential(
+    preset: HardwarePreset, side: str, supplied: Dict[str, str], request: Optional[Request] = None
+) -> Tuple[Optional[str], Optional[str]]:
     """The credential for provisioning one side, and the env name it belongs to.
 
     The one-time value supplied with the request (checked against the side's
-    declared key format) wins over the stored shared key. A supplied value is
-    used for this run only.
+    declared key format) wins; it is used for this run only. Otherwise a
+    ``user``-scope side uses the caller's own key from the request header and a
+    ``managed`` one the stored admin key.
 
     Raises:
         HTTPException: 400 if the supplied value does not match the declared format.
     """
-    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    kwargs = _side_kwargs(preset, side)
     env = _credential_env(kwargs)
     if not env:
         return None, None
@@ -498,29 +585,54 @@ def _side_credential(preset: HardwarePreset, side: str, supplied: Dict[str, str]
                 detail=f"The key for {env} does not match the expected format (expected to match: {pattern})",
             )
         return value, env
-    return (resolve_shared_value(env) if kwargs.get("shared_api_key_env") else None), env
+    if kwargs.get("shared_api_key_env"):
+        return resolve_shared_value(env), env
+    return _caller_key(request, env), env
+
+
+def _slot_for(providers: Dict[str, Provider], sides: List[str], identity: Optional[ZoteroIdentity]) -> str:
+    """Job slot: one global slot when any side is admin-operated, else the caller's own."""
+    if any(providers[s].scope != "user" for s in sides):
+        return provisioning.GLOBAL_SLOT
+    return provisioning.user_slot(identity.user_id if identity else None)
+
+
+async def _authorize_provisioning(request: Request, providers: Dict[str, Provider], sides: List[str]) -> Optional[ZoteroIdentity]:
+    """Gate by credential scope: any signed-in user for ``user`` sides, an admin for ``managed`` ones."""
+    if any(providers[s].scope != "user" for s in sides):
+        return await require_authorized_group_admin(request)
+    identity = get_zotero_identity(request)
+    if identity is None and not is_loopback(get_settings()):
+        raise HTTPException(status_code=401, detail="Missing or invalid Zotero API key.")
+    return identity
 
 
 @router.post("/config/provision", status_code=202)
 async def start_provisioning(
-    request: Optional[ProvisionRequest] = Body(default=None),
-    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+    request: Request,
+    body: Optional[ProvisionRequest] = Body(default=None),
 ):
     """
     Provision (create or wake) the active preset's remote endpoints as a
-    background job (admin only). Each requested side's provider does the work;
-    whatever URL it reports is applied via the shared remote-config store as
-    soon as that side succeeds. Poll GET /api/config/provision/status.
+    background job. Each requested side's provider does the work; whatever
+    URL it reports is applied via the shared remote-config store as soon as
+    that side succeeds. Poll GET /api/config/provision/status.
+
+    Who may run it follows the side's credential scope: any signed-in user for
+    ``user`` sides (it runs on the caller's own key, in the caller's own job
+    slot), an admin for ``managed`` ones (the admin's stored key, one global
+    slot).
 
     Provisioning (creating/updating endpoints) may need a broader key than
     day-to-day inference, which can use one restricted to the endpoints. A key
-    in ``keys`` is used for this run only; without it the stored key is used.
-    ``sides`` runs only those sides (for example to retry a failed one).
+    in ``keys`` is used for this run only. ``sides`` runs only those sides (for
+    example to retry a failed one).
 
     Raises:
         HTTPException: 400 if no requested side can be provisioned, a side
             has no key available, or a supplied key has the wrong format;
-            409 if a job is already running.
+            401 without a signed-in caller, 403 for a non-admin on a managed
+            side; 409 if this caller's job is already running.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
@@ -528,7 +640,7 @@ async def start_provisioning(
         providers = get_providers(preset)
     except ProviderConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    body = request or ProvisionRequest()
+    body = body or ProvisionRequest()
 
     if body.sides is None:
         sides = [s for s in ("embedding", "llm") if providers[s].supports_provisioning]
@@ -546,34 +658,64 @@ async def start_provisioning(
     if not sides:
         raise HTTPException(status_code=400, detail=f"Preset '{preset.name}' has no side that can be provisioned.")
 
+    identity = await _authorize_provisioning(request, providers, sides)
+    slot = _slot_for(providers, sides, identity)
+
     jobs = []
     for side in sides:
-        credential, env = _side_credential(preset, side, body.keys)
+        credential, env = _side_credential(preset, side, body.keys, request)
         if not credential:
             raise HTTPException(
                 status_code=400,
                 detail=f"No API key is available for the {side} side"
-                       + (f" ({env}); set it under Service API Keys or enter one for this run." if env else "."),
+                       + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
             )
         ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
         jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
 
-    if provisioning.is_running():
+    if provisioning.is_running(slot):
         raise HTTPException(status_code=409, detail="A provisioning job is already running.")
-    provisioning.mark_running(sides)
-    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path))
+    provisioning.mark_running(sides, slot)
+    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path, slot=slot))
     _provision_tasks.add(task)  # keep a strong reference until done
     task.add_done_callback(_provision_tasks.discard)
-    return provisioning.get_job_state()
+    return provisioning.get_job_state(slot)
 
 
 _provision_tasks: set = set()
 
 
 @router.get("/config/provision/status")
-def get_provisioning_status() -> dict:
-    """Current provisioning job state: status idle|running|succeeded|failed."""
-    return provisioning.get_job_state()
+def get_provisioning_status(request: Request) -> dict:
+    """The caller's provisioning job state (the global one for admin-operated presets):
+    status idle|running|succeeded|failed, per-side results and progress lines."""
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        return provisioning.get_job_state()
+    sides = [s for s in providers if providers[s].supports_provisioning]
+    return provisioning.get_job_state(_slot_for(providers, sides, get_zotero_identity(request)))
+
+
+def _shared_field_patterns(settings) -> Dict[str, Optional[str]]:
+    """Admin-set (shared) fields declared by any available preset, with their format patterns.
+
+    An admin sets these for the server, not for their own choice of preset, so
+    every preset a user could run counts, not just the default.
+    """
+    patterns: Dict[str, Optional[str]] = {}
+    for name in list_presets(settings.data_path, platform=current_platform()):
+        try:
+            preset = get_preset(name, settings.data_path)
+        except ValueError:
+            continue
+        fields = RemoteEmbeddingService.required_client_fields(preset.embedding)
+        fields += RemoteLLMService.required_client_fields_for_config(preset.llm)
+        for key_info in fields:
+            if key_info["kind"] in ("shared_base_url", "shared_api_key"):
+                patterns[key_info["key_name"]] = key_info["pattern"]
+    return patterns
 
 
 @router.post("/config/remote-fields", response_model=RemoteFieldsResponse)
@@ -599,22 +741,14 @@ async def set_remote_fields(
             next real query.
     """
     settings = get_settings()
-    preset = settings.get_hardware_preset()
-
-    patterns: Dict[str, Optional[str]] = {}
-    for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
-        if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            patterns[key_info["key_name"]] = key_info["pattern"]
-    for key_info in RemoteLLMService.required_client_fields(settings):
-        if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            patterns[key_info["key_name"]] = key_info["pattern"]
+    patterns = _shared_field_patterns(settings)
     allowed_keys = set(patterns.keys())
 
     unknown = set(update.values.keys()) - allowed_keys
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown remote-config key(s) for preset '{preset.name}': {sorted(unknown)}. "
+            detail=f"Unknown remote-config key(s): {sorted(unknown)}. "
                    f"Allowed: {sorted(allowed_keys)}",
         )
 
@@ -675,9 +809,7 @@ async def get_required_api_keys():
             return
         is_set = None
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            is_set = bool(
-                get_remote_config_value(key_name) or os.environ.get(key_name)
-            )
+            is_set = bool(get_remote_config_value(key_name))
         seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):

@@ -16,6 +16,7 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.services.access_gate import is_loopback, passes_gate
 from backend.services.index_event_log import IndexEventLog
+from backend.providers import get_provider_or_none
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
 from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
@@ -139,6 +140,7 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
         api_key=client_key,
         hf_token=settings.get_api_key("HF_TOKEN"),
         data_path=settings.data_path,
+        provider=get_provider_or_none(preset, "embedding"),
     )
 
 
