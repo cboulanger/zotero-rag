@@ -12,9 +12,10 @@ Three parts, to be implemented in order:
 - **B. Migrate existing presets.** RunPod becomes `RunPodProvider` and the four
   KISSKI presets become `KisskiProvider`, which takes over every KISSKI-specific
   behaviour (live model list, demand indicator, rate-limit meters, key portal).
-  Every other bundled preset runs on a minimal fallback `GenericProvider` that
-  contains no vendor-specific code and preserves the behaviour those presets have
-  today. Bundled presets are always re-seeded; custom presets are version-checked.
+  `remote-openai` becomes `OpenAIProvider`. Every other bundled preset runs on
+  `GenericProvider`, the documented fallback for any OpenAI-compatible API
+  (including the standard OpenAI and IETF rate-limit headers), which contains no
+  vendor-specific code. Bundled presets are always re-seeded; custom presets are version-checked.
 - **C. Hugging Face.** A new `HuggingFaceProvider` and a `huggingface` preset. This
   is the proof that a new provider is additive, with no core and no plugin change.
 
@@ -53,7 +54,9 @@ Backward compatibility is deliberately not handled at run time. Instead:
 | Cold-endpoint messages special-casing RunPod's gateway | `services/embeddings.py`, `services/llm.py` |
 | Provisioning panel is fixed markup: one optional "Provisioning key" field, fixed help text, progress shown only as "Provisioning…" | `plugin/src/preferences.xhtml`, `plugin/src/preferences.js` |
 | KISSKI model-list fetching, RAG-suitability filtering and demand labels, used by `GET /api/config` and `GET /api/models/status`, gated by the KISSKI-shaped `LLMConfig.models_status_url`; `query.py` also tests that field | `backend/utils/kisski.py`, `api/config.py`, `api/query.py`, `presets.py` |
-| KISSKI key-portal URL and header-name entries in tables shared with OpenAI, Anthropic and HF | `_KNOWN_HEADERS`, `_KNOWN_DOCS_URLS` in `services/embeddings.py` |
+| Vendor key-portal URLs for KISSKI, OpenAI, Anthropic and HF in a shared table, and a header-name table whose entries only differ from the computed name in letter case (HTTP header names are case-insensitive) | `_KNOWN_DOCS_URLS`, `_KNOWN_HEADERS` in `services/embeddings.py` |
+| Default key env var chosen by sniffing the model name for "claude"/"anthropic", and the LLM call routed to the Anthropic SDK the same way | `services/llm.py` (`_get_anthropic_client`, `generate`), `services/embeddings.py` (`OPENAI_API_KEY` default) |
+| User-facing "endpoint unavailable" messages that name RunPod | `services/embeddings.py`, `services/llm.py` |
 | Rate-limit bars understand only KISSKI's `x-ratelimit-{limit,remaining}-{hour,day}` headers and the label "requests left/hour"; a single global snapshot, embedding side only | `plugin/src/rate-limit-widget.js`, `services/embeddings.py`, `services/rate_limit_info.py` |
 | Seeding never overwrites, so a schema change cannot reach an existing deployment | `ensure_default_presets` in `presets.py` |
 | Pydantic ignores unknown keys, so an outdated custom preset silently loses fields | `HardwarePreset` (no `extra` policy, no version) |
@@ -121,8 +124,17 @@ class Provider:
     # provider has no such endpoint. Replaces the models_status_url preset field.
     def live_models(self, base_url: str, api_key: str) -> list[ModelInfo] | None: ...
 
-    # Where the user manages the personal key for this env var (shown in Preferences).
-    def key_docs_url(self, env_var: str) -> str | None: ...
+    # Personal-key metadata for Preferences. No vendor table lives in core.
+    def default_key_env(self, side: Side) -> str | None: ...      # e.g. "OPENAI_API_KEY"
+    def key_docs_url(self, env_var: str) -> str | None: ...       # where the user manages it
+
+    # Wire protocol the LLM side speaks. Core implements the protocols; providers
+    # pick one. Replaces sniffing the model name.
+    llm_api: ClassVar[Literal["openai", "anthropic"]] = "openai"
+
+    # Provider-specific advice appended to "endpoint unavailable" errors, e.g.
+    # "it may be cold, wake it from Preferences". Core text stays vendor-neutral.
+    def unavailable_hint(self, side: Side) -> str | None: ...
 
     # Turn captured response headers into display meters (quota only, see A9).
     def parse_usage(self, side: Side, headers: Mapping[str, str]) -> list[Meter]: ...
@@ -160,12 +172,17 @@ class Provider:
   in-process, so the `PROVISIONING_API_KEY` env hand-off disappears.
 - `ModelInfo` is `{id, demand: int | None, availability: str | None}`; the first
   list entry is the preferred model, matching what `GET /api/config` does today.
-- Defaults implement `GenericProvider`, which contains no vendor-specific code:
-  `health()` returns `None`, `live_models()` returns `None`, `key_docs_url()`
-  returns `None`, `parse_usage()` returns `[]`, `supports_provisioning` and
-  `supports_suspend` are `False`, `classify_http_error()` returns `None`,
-  `apply_defaults()` is a no-op, and `describe()` returns the provider id and label
-  with no provisioning section.
+- The base class is `GenericProvider`, documented as "any OpenAI-compatible HTTP
+  API" (`/v1/embeddings`, `/v1/chat/completions`, bearer-key auth). It contains no
+  vendor names: `parse_usage()` understands the OpenAI-style
+  `x-ratelimit-{limit,remaining,reset}-{requests,tokens}` headers and the IETF
+  `RateLimit-*` headers (A9); `llm_api` is `"openai"`; `health()`, `live_models()`,
+  `default_key_env()`, `key_docs_url()` and `unavailable_hint()` return `None`;
+  `supports_provisioning` and `supports_suspend` are `False`;
+  `classify_http_error()` returns `None`; `apply_defaults()` is a no-op; and
+  `describe()` returns the provider id and label with no provisioning section.
+  Vendor providers subclass it and override what differs, calling `super()` for the
+  rest.
 
 ### A3. Registry and discovery (`backend/providers/__init__.py`)
 
@@ -196,7 +213,9 @@ class Provider:
 | `get_config()` and `get_models_status()` call `fetch_kisski_rag_models()` when `models_status_url` is set | Call `provider.live_models(base_url, api_key)`; `None` means use the preset's static `model_names` and return an empty status list, as today |
 | `query.py` accepts an unlisted `llm_model` only when `models_status_url` is set | Accepts it when `provider.live_models` is supported (the provider's list is authoritative) |
 | `GET /api/rate-limits` returns raw captured headers | Also returns `meters` from `provider.parse_usage()` (A9); raw `limits` kept |
-| `docs_url_for_key()` reads a shared table | `provider.key_docs_url(env_var)`, falling back to a small table of the generic OpenAI and Anthropic entries |
+| `docs_url_for_key()` reads a shared table; `required_client_fields()` defaults to `OPENAI_API_KEY`, or `ANTHROPIC_API_KEY` by sniffing the model name | `provider.default_key_env(side)` and `provider.key_docs_url(env_var)`; the table, the model-name sniffing and `_KNOWN_HEADERS` are deleted (the computed header name is equivalent, since header names are case-insensitive) |
+| `LLMService` routes to the Anthropic SDK when the model name contains "claude" or "anthropic" | Routes on `provider.llm_api`; core implements the two wire protocols and knows no vendor |
+| "Endpoint unavailable" messages mention RunPod | Neutral core text plus `provider.unavailable_hint(side)` |
 | (new) | `POST /api/config/suspend`, admin-gated, runs `provider.suspend()` through the same single job slot (409 while another job runs); resume is `POST /api/config/provision` (A8) |
 
 `embeddings.py` and `llm.py` keep reading `shared_base_url_env` /
@@ -402,11 +421,17 @@ class Meter:
   amber and 95% red thresholds and the label "`remaining` `unit` left/`period`".
   Without `meters` (older backend) it shows nothing, as it does now for any
   provider whose headers it does not understand.
-- `GenericProvider.parse_usage()` returns `[]`: no vendor header names live in
-  the fallback. `KisskiProvider` is the only provider that parses meters today
-  (B2). A provider whose service emits the OpenAI-style `x-ratelimit-*-requests` /
-  `-tokens` headers or the IETF `RateLimit-*` headers adds its own parser; a shared
-  helper for those dialects can be factored out when a second provider needs it.
+- `GenericProvider.parse_usage()` understands the two standard dialects, so any
+  OpenAI-compatible service gets bars with no provider class:
+  - OpenAI-style: `x-ratelimit-limit-requests` / `-remaining-requests` /
+    `-reset-requests`, and the same with `-tokens`. The reset value is a duration
+    string such as `6m0s` or `1s`; it fills `resets_at`, and the period stays
+    unknown unless a header states it.
+  - IETF `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (seconds), and
+    the optional `RateLimit-Policy` window (`w=` seconds), which gives the period.
+  A header set that matches neither yields no meters, never an error.
+- `KisskiProvider` extends it with KISSKI's own `x-ratelimit-{limit,remaining}-
+  {hour,day}` names (B2), calling `super()` for the standard dialects.
 - The snapshot becomes per side and, where the quota is per key, per key
   fingerprint, and the LLM service uses the same capture helper. The cron status
   file persists the same per-side data. This also fixes the case where one user's
@@ -418,14 +443,12 @@ class Meter:
 
 ## B. Migrate existing presets
 
-### B1. `GenericProvider` (presets with no vendor integration)
+### B1. `GenericProvider` (any OpenAI-compatible API)
 
-Applies to `cpu-only`, `high-memory`, `apple-silicon-32gb`, `remote-mpcdf` and
-`remote-openai`. Their JSON gains only `"version": 2`; `provider` is omitted and
-resolves to `generic`.
-
-The base class contains no vendor-specific code, and for these presets it
-reproduces today's behaviour:
+`GenericProvider` is the base class and is documented in `docs/presets.md` as the
+provider for any OpenAI-compatible HTTP API. It applies to `cpu-only`,
+`high-memory`, `apple-silicon-32gb` and `remote-mpcdf`; their JSON gains only
+`"version": 2`, and `provider` is omitted.
 
 - `GET /api/config/health` returns `null` for both sides.
 - `provisionable` is `false`, and `POST /api/config/provision` returns 400.
@@ -433,15 +456,26 @@ reproduces today's behaviour:
   provisioning panel and no provider line.
 - URL and key handling is untouched: `required_client_fields()` still reads
   `base_url`/`api_key_env` or `shared_*_env` from `model_kwargs`.
-- No live model list, no demand indicator, and no rate-limit meters. None of these
-  presets has a KISSKI endpoint, so none of them shows these today.
-- `remote-mpcdf` keeps its manual `POST /api/config/remote-fields` workflow. An
-  MPCDF Slurm provider is a possible future provider and is out of scope here.
-- `remote-openai` stays generic. The OpenAI and Anthropic key-portal entries
-  remain in a small fallback table consulted when a provider returns no URL; an
-  `OpenAIProvider` could own them later.
+- No live model list and no demand indicator.
+- New for these presets, and additive: rate-limit meters appear whenever the
+  service sends OpenAI-style or IETF headers (A9). Nothing is removed.
+- `remote-mpcdf` keeps its manual `POST /api/config/remote-fields` workflow.
 
-### B2. `KisskiProvider` (`backend/providers/kisski.py`)
+**What is specific to the MPCDF LLM Inference Service?** Nothing in the code. The
+shared-field mechanism (`shared_base_url_env`, `shared_api_key_env`,
+`POST /api/config/remote-fields`, encrypted storage) is generic, `normalize_base_url`
+appending `/v1` is a generic OpenAI-compatible fix, and the handling of a vanished
+endpoint (HTTP 404/405) is generic. What remains is data and prose: the preset's
+env var names, model names and description, the example in a few code comments and
+docs, and the knowledge that endpoints are ephemeral (up to 8 hours). An
+`MpcdfProvider` is therefore optional. If wanted later it would add a health check
+(for example a cheap authenticated `GET {base}/models`, so an expired job shows as
+`unreachable` in Preferences instead of failing a run) and an `unavailable_hint()`
+saying to start a new job and paste its URL and key. It needs no core change.
+
+### B2. Vendor providers: KISSKI, OpenAI, Anthropic
+
+#### B2a. `KisskiProvider` (`backend/providers/kisski.py`)
 
 Applies to `remote-kisski`, `apple-silicon-kisski`, `cloud-server-kisski` and
 `windows-test`, which get `"provider": {"id": "kisski"}`. The provider is per
@@ -454,8 +488,8 @@ Everything KISSKI-specific moves here, and nothing is left behind in generic cod
 |---|---|---|
 | `backend/utils/kisski.py` (`fetch_kisski_rag_models`, RAG-suitability filter, `coder`/`devstral` exclusion, demand to availability labels) | `KisskiProvider.live_models()` | The file is deleted; its tests move with it |
 | `LLMConfig.models_status_url` in four preset files | `options.models_url` (optional, default `{llm base_url}/models`) | The schema field is removed (A1) |
-| `"KISSKI_API_KEY": "https://saia.gwdg.de/dashboard"` in `_KNOWN_DOCS_URLS` | `KisskiProvider.key_docs_url()` | The redundant `KISSKI_API_KEY` entry in `_KNOWN_HEADERS` is dropped; the default header derivation already yields `X-Kisski-Api-Key` |
-| KISSKI `hour`/`day` header parsing in `rate-limit-widget.js` | `KisskiProvider.parse_usage()` | The widget becomes provider-agnostic (A9) |
+| `"KISSKI_API_KEY": "https://saia.gwdg.de/dashboard"` in `_KNOWN_DOCS_URLS` | `KisskiProvider.key_docs_url()` and `default_key_env()` | The `KISSKI_API_KEY` entry in `_KNOWN_HEADERS` is dropped; the computed header name is equivalent |
+| KISSKI `hour`/`day` header parsing in `rate-limit-widget.js` | `KisskiProvider.parse_usage()` (extends the generic parser) | The widget becomes provider-agnostic (A9) |
 | `get_models_status()` demand labels (`available`, `busy`, `very busy`) | `KisskiProvider.live_models()` fills `demand` and `availability` | `GET /api/models/status` is a thin wrapper over the provider |
 
 What deliberately stays out of the provider: `extra_body` (for example
@@ -469,6 +503,30 @@ hour and day bars, and the Preferences key link.
 A custom preset copied from a KISSKI one and left without a `provider` block loses
 those four features. The version warning in B4 names the removed
 `models_status_url` key and says to add `"provider": {"id": "kisski"}`.
+
+#### B2b. `OpenAIProvider` (`backend/providers/openai.py`)
+
+Applies to `remote-openai`, which gets `"provider": {"id": "openai"}`. It
+subclasses `GenericProvider` and adds only `default_key_env()` (`OPENAI_API_KEY`)
+and `key_docs_url()` (the OpenAI key page). The OpenAI embedding sentinel
+`model_name: "openai"` and the matching entries in the known-dimensions table stay
+model data in core, keyed by model name, not by provider.
+
+#### B2c. `AnthropicProvider` (`backend/providers/anthropic.py`)
+
+Selected explicitly with `"provider": {"id": "anthropic"}`; no bundled preset uses
+it today. It sets `llm_api = "anthropic"`, `default_key_env()`
+(`ANTHROPIC_API_KEY`) and `key_docs_url()`. This replaces sniffing "claude" or
+"anthropic" in the model name, so the LLM service no longer contains a vendor
+check, only the two wire-protocol implementations. Anthropic has no embeddings
+API, and a preset has one provider for both sides, so such a preset cannot also
+use Anthropic for embeddings; whether the provider should be selectable per side
+is an open question. The `remote-openai` description loses "Anthropic".
+
+Consequence for existing files: a custom preset that relied on a Claude model name
+being auto-routed now goes through the OpenAI protocol and fails. The preset
+loader (B4) therefore logs a WARNING for a custom preset whose LLM model name
+contains "claude" but has no `anthropic` provider, naming the fix.
 
 ### B3. `RunPodProvider` (`backend/providers/runpod.py`)
 
@@ -542,6 +600,9 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
   per file per process: "Custom preset X declares version N, current is M; fields
   may be ignored or behave differently. See the preset changelog in
   docs/presets.md." The preset still loads.
+- If its LLM model name contains "claude" and its provider is not `anthropic`,
+  the same warning pass says so, because model-name routing to Anthropic was removed
+  (B2c).
 - If it contains keys removed in a later version (`health_check_provider`,
   `provisioning_script`, `models_status_url`), the warning names them and says they are ignored. The
   list of removed keys per version is a small table in `presets.py`, extended when
@@ -559,7 +620,7 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
    live model list, demand dots, rate-limit bars and key link (both are ported in
    step 2), so steps 1 and 2 must land together in one change set.
 2. Port RunPod into `RunPodProvider` and the KISSKI behaviour into
-   `KisskiProvider` (B2), including the generic rate-limit widget and `meters`
+   `KisskiProvider`, `OpenAIProvider` and `AnthropicProvider` (B2), including the generic rate-limit widget and `meters`
    (A9) and deleting `backend/utils/kisski.py`. Delete `HEALTH_CHECKS`, the
    `Literal` fields, `models_status_url`, and the subprocess job path. Keep
    `bin/provision_runpod_endpoints.py` as a thin shim over `bin/provision.py`.
@@ -583,7 +644,7 @@ code, and a preset switch. For the four KISSKI presets, additionally: the live
 ordered `llm_models` in `GET /api/config`, `GET /api/models/status` (demand and
 labels), `GET /api/rate-limits` (the hour and day bars render identically from
 `meters`), the Preferences key link, and a query that names a model missing from
-the static list. For `runpod`: health classification, provision
+the static list. For `remote-openai`: the key requirement and its portal link. For `runpod`: health classification, provision
 end-to-end against a fake client, and the plugin's provisioning flow (button,
 one-time key, polling, health refresh), unchanged apart from the new progress line
 and the descriptor-driven text.
@@ -599,13 +660,21 @@ and the descriptor-driven text.
 - A custom file containing removed keys names them in the warning and still loads.
 - A custom KISSKI-derived file with `models_status_url` and no `provider` warns,
   loads as generic, and does not call the KISSKI endpoint.
+- A custom file whose LLM model name contains "claude" and whose provider is not
+  `anthropic` warns once and names the fix.
 
-### B8. KISSKI provider tests
+### B8. Vendor provider tests
 
 - Existing `kisski.py` unit tests are ported to `KisskiProvider.live_models()`
   (filtering, ordering, demand labels, network failure returns `None`).
 - `parse_usage()` fixtures: the KISSKI hour and day headers, partial headers,
   non-numeric values, and unrelated headers.
+- `GenericProvider.parse_usage()` fixtures: OpenAI-style requests and tokens
+  headers with duration-string resets, IETF headers with and without
+  `RateLimit-Policy`, mixed and malformed values.
+- `AnthropicProvider` routes the LLM through the Anthropic protocol, and the LLM
+  service contains no model-name check (a test that a Claude-named model on an
+  `openai` provider stays on the OpenAI protocol).
 - The plugin widget test (`rate-limit-widget.test.js`) is rewritten to feed
   `meters`, with a case for a provider that supplies none.
 
@@ -745,12 +814,12 @@ re-verified before any number appears in user-facing text.
   period with no queries), or is a manual button enough? Scale-to-zero already
   covers idle time, so this is deferred unless the always-on cost shows up in
   practice.
-- Should `GenericProvider.parse_usage()` understand the standard OpenAI-style and
-  IETF `RateLimit-*` header dialects, so any compatible API gets bars without a
-  provider class? It is left empty for now to keep vendor-specific assumptions out
-  of the fallback.
-- Where should the OpenAI and Anthropic key-portal URLs live long term: the small
-  fallback table (current plan), or an `OpenAIProvider` for `remote-openai`?
+- Anthropic is LLM-only while embeddings come from elsewhere. Is a provider per
+  side (`embedding.provider` and `llm.provider`) worth adding, or is a single
+  preset-level provider enough because mixed setups are rare?
+- Should `MpcdfProvider` (health check plus job-expiry hint, B1) be built now, since
+  it is small and fixes a real pain point (an expired job only shows up as a failed
+  run), or deferred until the HF and RunPod work has landed?
 - Job deadline: what is a sane default (HF cold starts may take well over the RunPod
   3-minute warm-up bound), and should it be a provider option?
 - UI: is "newest progress line plus tooltip" enough, or should the full step list be
