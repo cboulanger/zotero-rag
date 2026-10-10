@@ -221,12 +221,14 @@ class HuggingFaceProvider(Provider):
         descriptor.provisioning = ProvisioningDescriptor(
             credential=CredentialDescriptor(
                 env=env,
-                label="Hugging Face token",
+                label="Provisioning token",
                 help=(
-                    "Creating endpoints needs a token with write access to Inference Endpoints, and a "
-                    "billing method on the account. A token that can only call endpoints is enough for "
-                    "queries. Leave empty to use the stored token; a value entered here is used for this "
-                    "run only."
+                    "Used once to create, resume or pause the endpoints; it is never stored. It needs more "
+                    "rights than the HF_TOKEN above: a fine-grained token with \"Manage Inference Endpoints\" "
+                    "(and \"Make calls to Inference Endpoints\") for your account, or a classic Write token, "
+                    "and the account needs a billing method. Keep the stored HF_TOKEN limited to calling "
+                    "endpoints (\"Make calls to Inference Endpoints\"). Leave this empty to use the stored "
+                    "token if it already has the management rights."
                 ),
                 pattern=TOKEN_PATTERN,
                 optional=True,

@@ -614,6 +614,11 @@ class RemoteEmbeddingService(EmbeddingService):
             # EmbeddingEndpointUnavailableError handling even kicks in.
             # Mirrors RemoteLLMService._get_openai_client's same pattern/default.
             timeout = float(self.config.model_kwargs.get("timeout", 120))
+            if not base_url and self._derives_endpoint():
+                # Never fall through to the OpenAI default URL with a provider's key.
+                raise EmbeddingEndpointUnavailableError(
+                    unavailable_message("embedding", "The embedding endpoint is not provisioned.")
+                )
             if base_url:
                 self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
                 logger.debug(f"OpenAI-compatible client initialised with base_url={base_url}, timeout={timeout}s")
