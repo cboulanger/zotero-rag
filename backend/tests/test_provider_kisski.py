@@ -1,4 +1,4 @@
-"""KisskiProvider: live model list, key metadata and the hour/day quota headers."""
+"""KisskiProvider: live model list, key metadata and the hour/day/month quota headers."""
 
 import unittest
 
@@ -104,6 +104,13 @@ class TestUsage(unittest.TestCase):
         self.assertEqual(by_period["day"].id, "requests/day")
         self.assertEqual(by_period["hour"].unit, "requests")
         self.assertEqual(by_period["hour"].side, "llm")
+
+    def test_month_quota_becomes_a_meter_so_an_exhausted_month_is_visible(self):
+        meters = llm_provider().parse_usage({
+            "x-ratelimit-limit-month": "10000", "x-ratelimit-remaining-month": "0",
+        }, as_of="2026-10-10T00:00:00+00:00")
+        (month,) = meters
+        self.assertEqual((month.id, month.limit, month.remaining), ("requests/month", 10000, 0))
 
     def test_partial_and_non_numeric_headers_are_skipped(self):
         provider = llm_provider()

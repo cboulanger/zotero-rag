@@ -2,7 +2,7 @@
 
 Everything KISSKI-specific lives here: the live, availability-ordered model
 list with its demand labels, the key portal link, and the service's own
-``x-ratelimit-{limit,remaining}-{hour,day}`` header names. Quotas and keys are
+``x-ratelimit-{limit,remaining}-{hour,day,month}`` header names. Quotas and keys are
 per user (``key_scopes = {"user"}``), which is how KISSKI has always worked.
 
 Generic OpenAI-compatible settings (``base_url``, ``api_key_env``,
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Model IDs containing these substrings are excluded from RAG model lists.
 _EXCLUDED_KEYWORDS = frozenset({"coder", "devstral"})
 
-_PERIODS = ("hour", "day")
+_PERIODS = ("hour", "day", "month")
 
 
 class KisskiOptions(ProviderOptions):
@@ -54,7 +54,7 @@ def _is_rag_suitable(entry: object) -> bool:
 
 
 class KisskiProvider(Provider):
-    """KISSKI Chat-AI (SAIA): per-user key, live model list, hour/day quotas."""
+    """KISSKI Chat-AI (SAIA): per-user key, live model list, hour/day/month quotas."""
 
     id = "kisski"
     label = "KISSKI"
@@ -115,7 +115,7 @@ class KisskiProvider(Provider):
         as_of: Optional[str] = None,
         source: Literal["run", "cache"] = "run",
     ) -> list[Meter]:
-        """Standard dialects plus KISSKI's ``x-ratelimit-{limit,remaining}-{hour,day}``."""
+        """Standard dialects plus KISSKI's ``x-ratelimit-{limit,remaining}-{hour,day,month}``."""
         stamp = as_of or _utc_now()
         meters = super().parse_usage(headers, as_of=stamp, source=source)
         h = lowercase_headers(headers or {})

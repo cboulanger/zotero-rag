@@ -22,7 +22,7 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | id | For | Credential scope | Notes |
 |---|---|---|---|
 | `generic` (default) | **Any OpenAI-compatible API** (OpenAI-style `base_url`, optional API key) | `user` | Usage meters from the OpenAI-style `x-ratelimit-*-{requests,tokens}` headers (Go-style reset durations such as `6m0s`) and the IETF `RateLimit-*` / `RateLimit-Policy` headers. |
-| `kisski` | KISSKI / SAIA gateway | `user` | Live model list with demand status; hour and day request meters. |
+| `kisski` | KISSKI / SAIA gateway | `user` | Live model list with demand status; hour, day and month request meters. |
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
 | `mpcdf` | MPCDF LLM Inference Service | `shared` | Ephemeral job URL and key set by the admin; health asks `/v1/models`. |
