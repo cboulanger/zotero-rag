@@ -15,7 +15,16 @@ const vm = require('node:vm');
 
 const SOURCE_PATH = path.join(__dirname, '..', 'src', 'fix-unavailable.js');
 
-/** @returns {any} a fresh ZoteroFixUnavailableDialog object */
+/**
+ * @returns {any} a fresh ZoteroFixUnavailableDialog object
+ *
+ * `fetch` is defined as an accessor forwarding to the outer Node `global`
+ * object (not a plain value) so a test can do `global.fetch = async () =>
+ * ...` *after* `loadDialog()` has already run — a plain property baked in at
+ * context-creation time would not pick up a later reassignment, since
+ * `vm.createContext` makes the passed object the global of a separate realm.
+ * Same pattern as autoindex-status.test.js's loadDialog.
+ */
 function loadDialog(extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	const context = {
@@ -33,6 +42,12 @@ function loadDialog(extra = {}) {
 		Ci: { nsIScriptError: {} },
 		...extra,
 	};
+	Object.defineProperty(context, 'fetch', {
+		get() { return global.fetch; },
+		set(v) { global.fetch = v; },
+		enumerable: true,
+		configurable: true,
+	});
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'fix-unavailable.js' });
 	return context.ZoteroFixUnavailableDialog;
@@ -852,4 +867,90 @@ test('populateTable shows and updates the progress meter while check-indexed sta
 		'update:2/2:attachments checked',
 		'hide',
 	]);
+});
+
+test('autoindex-status-button click opens the autoindex status dialog', () => {
+	const button = { addEventListener: (_type, handler) => { button._click = handler; }, style: {} };
+	const closeBtn = { addEventListener: () => {} };
+	const opened = [];
+	// No `.arguments` yet — the file's own auto-init-at-load (see header comment)
+	// must no-op during loadDialog(), before we've had a chance to stub
+	// _initTable/populateTable below. Same `mockWindow` object identity is
+	// what `init()` reads `window.arguments` from on our later, controlled call.
+	const mockWindow = {};
+	const dialog = loadDialog({
+		window: mockWindow,
+		document: {
+			getElementById: (id) => {
+				if (id === 'autoindex-status-button') return button;
+				if (id === 'close-btn') return closeBtn;
+				return { addEventListener: () => {}, style: {} };
+			},
+			addEventListener: () => {},
+		},
+	});
+	// init() ends by building the real VirtualizedTable and fetching data —
+	// irrelevant to this test and not safely stubbable at this DOM-mock level,
+	// so replace both with no-ops; init() looks them up on `this` at call time.
+	dialog._initTable = () => {};
+	dialog.populateTable = async () => {};
+	dialog.refreshAutoindexButton = async () => {};
+	mockWindow.arguments = [{
+		plugin: { openAutoindexStatusDialog: (win) => opened.push(win) },
+		libraryID: 1,
+	}];
+
+	dialog.init();
+	button._click();
+
+	assert.strictEqual(opened.length, 1);
+	assert.strictEqual(opened[0], mockWindow);
+});
+
+test('refreshAutoindexButton shows the button when autoindex is enabled and the scheduler is active', async () => {
+	const button = { style: {} };
+	const dialog = loadDialog({
+		document: { getElementById: (id) => (id === 'autoindex-status-button' ? button : { addEventListener: () => {}, style: {} }) },
+	});
+	dialog.plugin = {
+		backendURL: 'http://backend',
+		getAuthHeaders: () => ({}),
+	};
+	global.fetch = async () => ({ ok: true, json: async () => ({ enabled: true, scheduler: { active: true }, keys_registered: 0 }) });
+
+	await dialog.refreshAutoindexButton();
+
+	assert.strictEqual(button.style.display, '');
+});
+
+test('refreshAutoindexButton hides the button when autoindex is disabled', async () => {
+	const button = { style: {} };
+	const dialog = loadDialog({
+		document: { getElementById: (id) => (id === 'autoindex-status-button' ? button : { addEventListener: () => {}, style: {} }) },
+	});
+	dialog.plugin = {
+		backendURL: 'http://backend',
+		getAuthHeaders: () => ({}),
+	};
+	global.fetch = async () => ({ ok: true, json: async () => ({ enabled: false }) });
+
+	await dialog.refreshAutoindexButton();
+
+	assert.strictEqual(button.style.display, 'none');
+});
+
+test('refreshAutoindexButton hides the button on a fetch error (fails closed)', async () => {
+	const button = { style: {} };
+	const dialog = loadDialog({
+		document: { getElementById: (id) => (id === 'autoindex-status-button' ? button : { addEventListener: () => {}, style: {} }) },
+	});
+	dialog.plugin = {
+		backendURL: 'http://backend',
+		getAuthHeaders: () => ({}),
+	};
+	global.fetch = async () => { throw new Error('network down'); };
+
+	await dialog.refreshAutoindexButton();
+
+	assert.strictEqual(button.style.display, 'none');
 });

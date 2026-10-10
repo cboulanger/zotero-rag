@@ -95,6 +95,14 @@ var ZoteroFixUnavailableDialog = {
 		this.libraryID = args.libraryID;
 		this.backendLibraryId = args.backendLibraryId || String(args.libraryID);
 
+		const autoindexStatusButton = document.getElementById('autoindex-status-button');
+		if (autoindexStatusButton) {
+			autoindexStatusButton.addEventListener('click', () => {
+				if (this.plugin) this.plugin.openAutoindexStatusDialog(window);
+			});
+		}
+		this.refreshAutoindexButton();
+
 		document.getElementById('close-btn').addEventListener('click', () => {
 			// While a fix run is in progress, "Close" is repurposed as "Cancel"
 			// (see searchAndFix) — stop the run instead of closing the window.
@@ -314,6 +322,40 @@ var ZoteroFixUnavailableDialog = {
 		this.tableHelper.render(undefined, () => {
 			this.updateActionButtons();
 		});
+	},
+
+	/**
+	 * Fetch `GET /api/autoindex/status`. Resolves null on any network/HTTP/parse
+	 * error so callers can fail open.
+	 * @returns {Promise<{enabled?: boolean, running?: boolean, keys_registered?: number, scheduler?: {active?: boolean}}|null>}
+	 */
+	async fetchAutoindexStatus() {
+		try {
+			if (!this.plugin || !this.plugin.backendURL) return null;
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) return null;
+			return await response.json();
+		} catch (e) {
+			return null;
+		}
+	},
+
+	/**
+	 * Show the "Indexing status" button iff server-side auto-indexing is
+	 * configured: enabled and (scheduler active or keys registered). Hidden on
+	 * any fetch error or when no backend URL is set — same logic as the main
+	 * search dialog's identically-named button (see dialog.js).
+	 * @returns {Promise<void>}
+	 */
+	async refreshAutoindexButton() {
+		const button = document.getElementById('autoindex-status-button');
+		if (!button) return;
+		const data = await this.fetchAutoindexStatus();
+		const visible = !!data && data.enabled === true
+			&& ((data.scheduler && data.scheduler.active === true) || (data.keys_registered || 0) > 0);
+		button.style.display = visible ? '' : 'none';
 	},
 
 	/**
