@@ -79,6 +79,14 @@ test('_typeLabelFor returns "too large" for refused attachments (when no skipRea
 	assert.strictEqual(dialog._typeLabelFor({ tooLarge: true, serverDownloadFailed: true, isLinked: true }), 'too large');
 });
 
+test('_typeLabelFor returns "failed" for quarantined attachments (priority over tooLarge/serverDownloadFailed)', () => {
+	const dialog = loadDialog();
+	assert.strictEqual(
+		dialog._typeLabelFor({ quarantined: true, tooLarge: true, serverDownloadFailed: true, isLinked: true }),
+		'failed',
+	);
+});
+
 test('_typeLabelFor falls back to the file type label', () => {
 	const dialog = loadDialog();
 	dialog.getFileTypeLabel = () => 'PDF';
@@ -755,6 +763,27 @@ test('searchAndFix marks tooLarge rows "File too large" immediately, without cal
 	assert.strictEqual(status.cssClass, 'not-found');
 	assert.strictEqual(status.text, 'File too large');
 	assert.strictEqual(status.tooltip, '329 MB, which exceeds the 200 MB limit');
+});
+
+test('searchAndFix marks quarantined rows "Refused by server" immediately, without calling any plugin repair method', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1'; dialog.isRunning = false; dialog.rowStatus = new Map();
+	dialog.selected = new Set([0]);
+	dialog.items = [
+		{
+			attachmentItem: { key: 'SCAN1' }, isLinked: false,
+			quarantined: true, quarantineReason: 'too_costly', quarantineDetail: '1600 pages, no text layer',
+		},
+	];
+	// No dialog.plugin at all — if searchAndFix tried to call any repair method
+	// on it (as it would for a fixable bucket), this throws and fails the test.
+
+	await dialog.searchAndFix();
+
+	const status = dialog.rowStatus.get(0);
+	assert.strictEqual(status.cssClass, 'not-found');
+	assert.strictEqual(status.text, 'Refused by server');
+	assert.strictEqual(status.tooltip, '1600 pages, no text layer');
 });
 
 test('clicking Cancel (setting _cancelRequested) mid-run stops further processing and reports a cancelled summary', async () => {
