@@ -1,279 +1,365 @@
-# Hugging Face preset and a provisioner-adapter layer (high-level spec)
+# Provider abstraction layer, RunPod migration, and Hugging Face provider
 
 Status: proposal, not implemented. High level on purpose: it fixes the
-architecture and the decision points, not the code.
+architecture, the contracts between the parts, and the decision points, not the
+code.
 
-## Problem
+Three parts, to be implemented in order:
 
-The `runpod` preset (see `2026-10-09-runpod-preset-design.md` and
-`2026-10-09-endpoint-health-provisioning-design.md`) is pure JSON plus one
-provider script, but the provider is already hard-wired into core in four places:
+- **A. Provider abstraction layer.** A `Provider` base class, an id-based
+  registry, and the small core changes that make core provider-blind.
+- **B. Migrate existing presets.** RunPod becomes `RunPodProvider`. Every other
+  bundled preset runs on a fallback `GenericProvider` that preserves today's
+  behaviour exactly.
+- **C. Hugging Face.** A new `HuggingFaceProvider` and a `huggingface` preset.
+  This is the proof that a new provider is additive.
 
-| Coupling | Where | Effect |
-|---|---|---|
-| `health_check_provider: Literal["runpod"]` | `backend/config/presets.py` | adding a provider means editing the schema |
-| `HEALTH_CHECKS = {"runpod": ...}` | `backend/utils/endpoint_health.py`, imported by `backend/api/config.py` | adding a provider means editing core |
-| `provisioning_script` path + the `PROVISION_RESULT:` stdout contract | `backend/services/provisioning.py` | works for any provider, but is not typed or testable in-process |
-| RunPod URL and key shapes (`shared_*_pattern`), model-name basename hack | preset JSON, `_embedding_model_identity` in `api/config.py` | provider quirks repeated per preset |
+## Decision
 
-Hugging Face Inference Endpoints (dedicated) differ from RunPod in ways that make
-"copy `runpod.json`" insufficient:
-
-- One object per endpoint (image and env are inline), not template then endpoint.
-- Status is a first-class API value (`pending`, `initializing`, `running`,
-  `scaledToZero`, `paused`, `failed`), not a `/health` worker count.
-- Each endpoint gets its own hostname (`*.endpoints.huggingface.cloud`), not a
-  shared `api.runpod.ai/v2/<id>` host. Cold-start behaviour also differs (502
-  until a replica is up).
-- The control plane and data plane share one HF token, and creation needs a
-  namespace (user or org) and a billing method on the account.
-- Cost model is hourly with a longer idle tail, versus RunPod's per-second billing
-  with a 60s idle timeout.
-
-The task is therefore two things: a `huggingface` preset, and a decision on how
-provider-specific logic is isolated so that the next provider is additive.
-
-## Goals
-
-- A `huggingface` preset with embedding (TEI) and LLM (vLLM or TGI) endpoints.
-- Adding or swapping a provisioner touches no core file: no schema edit, no
-  registry edit in `api/config.py`, no change to `embeddings.py` or `llm.py`.
-- User-editable JSON presets under `data/presets/` stay as they are.
-- RunPod keeps working with unchanged user-visible behaviour.
-
-## Non-goals
-
-- Automatic provider selection or cost optimisation.
-- Third-party plugin distribution (out-of-tree packages). In-tree discovery is
-  enough now, and a later entry-points hook is not precluded.
-- Query-time cold-start retry policy. This stays as specified in the
-  health/provisioning spec, except for the small hook below.
-
-## Options for isolating provider logic
-
-### Option A: presets become classes
-
-A `Preset` subclass per provider (`RunPodPreset`, `HuggingFacePreset`) owns its
-config, health check, and provisioning.
-
-- (+) Maximal isolation, since everything for one provider lives in one class.
-- (+) Full type safety.
-- (-) Presets stop being data. `2026-10-08-file-based-presets-design.md` made
-  `data/presets/*.json` admin-editable and seeded from bundled defaults. Classes
-  would need a JSON-to-class factory anyway, which is Option B with extra steps.
-- (-) A pure-data preset (KISSKI, OpenAI, CPU-only) has nothing to put in a class,
-  so there would be two kinds of preset.
-- (-) Presets would mix concerns: model and RAG tuning (data) with provider
-  lifecycle (code), so the same code is re-instantiated per preset variant.
-- (-) Loading code from `data/presets/` is an execution risk. If classes live only
-  in-tree, admins lose the ability to define a preset.
-
-Verdict: rejected. The preset's job (what to run, which models, which RAG
-parameters) is data and should stay data. Provisioning is behaviour, but it is a
-property of the provider, not of the preset.
-
-### Option B: JSON presets plus in-process provisioner adapters (recommended)
-
-Presets stay JSON. They gain one optional block naming a provisioner and passing
-it opaque options. A small `Provisioner` protocol is implemented once per
-provider as a module under `backend/provisioners/`. Core talks only to the
-protocol, and adapters are discovered by scanning the package.
-
-- (+) Presets stay data and stay admin-editable.
-- (+) New provider = one file (plus tests and a preset JSON). Core is untouched.
-- (+) In-process, so unit-testable with the existing `FakeClient` convention, and
-  it can return structured results and progress instead of scraping stdout.
-- (+) Subsumes the `HEALTH_CHECKS` registry and the `Literal["runpod"]` schema
-  field, so those two core couplings go away.
-- (-) Needs a one-time refactor of the RunPod script and health module into an
-  adapter.
-- (-) Long-running work must not block the event loop. It runs via
-  `asyncio.to_thread`, as with other sync I/O in this codebase.
-
-### Option C: keep JSON, generalise the existing script contract (out-of-process)
-
-Keep `provisioning_script` and extend the stdout contract with
-`--health --json` and `--teardown`. Each provider is a standalone script.
-
-- (+) Zero core change for a new provider, language-agnostic, and already
-  half-built.
-- (+) Natural process isolation: a provider crash or a heavy SDK import cannot
-  affect the backend.
-- (-) Health is called on every Preferences refresh. A subprocess per poll is slow
-  and untestable without process mocking.
-- (-) Credentials must be passed through argv or env, which sits uneasily with the
-  "never leak secrets via `ps`" rule.
-- (-) Contract is stringly-typed (a stdout line), with no schema evolution.
-- (-) Still needs a core-side switch to know which health to call, so core is not
-  actually provider-blind.
-
-Verdict: good as the escape hatch, not as the main design.
-
-### Recommendation
-
-Option B, with C kept as a fallback. The adapter protocol has one built-in
-adapter, `external_script`, that wraps the existing
-`provisioning_script`/`PROVISION_RESULT:` contract. That means RunPod could stay a
-script, ad-hoc or private providers need no in-tree Python, and the migration of
-RunPod can be incremental. Core never needs to know which kind it is talking to.
-
-## Design (Option B)
-
-### 1. Preset JSON
-
-`health_check_provider` and `provisioning_script` are replaced by one block.
-Adapter-specific settings live under `options`, which core never interprets:
+Presets stay JSON (data, admin-editable under `data/presets/`). Provider-specific
+behaviour lives in Python classes, one per provider, and a preset selects its
+class by an id string in the JSON:
 
 ```json
-{
-  "description": "Fully remote via your own Hugging Face Inference Endpoints ...",
-  "embedding": {
-    "model_type": "remote",
-    "model_name": "intfloat/multilingual-e5-large-instruct",
-    "batch_size": 64,
-    "model_kwargs": {
-      "shared_base_url_env": "HF_EMBEDDING_BASE_URL",
-      "shared_api_key_env": "HF_TOKEN"
-    }
-  },
-  "llm": { "model_type": "remote", "model_names": ["Qwen/Qwen2.5-7B-Instruct"], "...": "...",
-    "model_kwargs": { "shared_base_url_env": "HF_LLM_BASE_URL", "shared_api_key_env": "HF_TOKEN" } },
-  "provisioner": {
-    "name": "huggingface",
-    "options": {
-      "namespace": null,
-      "vendor": "aws",
-      "region": "eu-west-1",
-      "embedding": { "engine": "tei", "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 },
-      "llm":       { "engine": "vllm", "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 }
-    }
+"provider": { "id": "runpod", "options": { "...": "provider-specific, opaque to core" } }
+```
+
+Rejected alternatives: presets-as-classes (undoes the file-based preset design in
+`2026-10-08-file-based-presets-design.md` and makes data-only presets awkward),
+and out-of-process provisioning scripts as the main mechanism (a subprocess per
+health poll, credentials via env/argv, core still has to know which health check
+to call). Both were weighed in the previous revision of this document.
+
+## Why this is needed (current coupling in core)
+
+| Coupling | Where |
+|---|---|
+| `health_check_provider: Literal["runpod"]` on both `EmbeddingConfig` and `LLMConfig` | `backend/config/presets.py` |
+| `HEALTH_CHECKS = {"runpod": ...}`, imported by `api/config.py` | `backend/utils/endpoint_health.py` |
+| `provisioning_script` path, the `PROVISION_RESULT:` stdout contract, and the `PROVISIONING_API_KEY` env hand-off | `presets.py`, `services/provisioning.py`, `api/config.py` |
+| Provider URL and key regexes repeated in each preset's `model_kwargs` | `runpod.json` |
+| Cold-endpoint messages special-casing RunPod's gateway | `services/embeddings.py`, `services/llm.py` |
+| Shared URL and key lookup pushed through `provisionable` in `_merge` | `api/config.py` |
+
+---
+
+## A. Provider abstraction layer
+
+### A1. Preset schema
+
+`HardwarePreset` gains one optional field and loses three:
+
+```python
+class ProviderConfig(BaseModel):
+    id: str                       # registry key, e.g. "runpod"
+    options: dict = {}            # validated by the provider class, not by core
+
+class HardwarePreset(BaseModel):
+    ...
+    provider: Optional[ProviderConfig] = None   # None == {"id": "generic"}
+```
+
+Removed from the schema: `EmbeddingConfig.health_check_provider`,
+`LLMConfig.health_check_provider`, `HardwarePreset.provisioning_script`.
+`LLMConfig.models_status_url` (the KISSKI demand indicator) is a different feature
+and is not touched.
+
+### A2. The `Provider` base class (`backend/providers/base.py`)
+
+The base class is concrete and implements the generic behaviour. Subclasses
+override only what their provider needs, so `GenericProvider` is simply the base
+class registered under id `generic`.
+
+```python
+class Provider:
+    id: ClassVar[str]
+    Options: ClassVar[type[BaseModel]] = NoOptions      # validates preset.provider.options
+    supports_provisioning: ClassVar[bool] = False
+
+    def __init__(self, preset: HardwarePreset, options: BaseModel): ...
+
+    # Load-time hook: fill provider defaults into the preset's model_kwargs
+    # (e.g. URL/key regexes) so embeddings.py / llm.py keep reading model_kwargs only.
+    def apply_defaults(self, preset: HardwarePreset) -> None: ...
+
+    # Readiness of one side. None means "this provider has no health concept".
+    def health(self, side: Side, base_url: str, api_key: str) -> Health | None: ...
+
+    # Create or wake the remote resources. Returns {shared_base_url_env: url}.
+    def provision(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> dict[str, str]:
+        raise NotImplementedError
+
+    def teardown(self, ctx: ProvisionContext) -> None:
+        raise NotImplementedError
+
+    # Optional: tell the query path that an HTTP error means "endpoint is cold".
+    def classify_http_error(self, status: int, body: str) -> Literal["cold"] | None: ...
+```
+
+- `Health` keeps the existing shape: `{"status": "ready"|"cold"|"throttled"|"unreachable", "detail": str}`.
+- `ProvisionContext` carries the preset, the resolved credentials, the data path,
+  and flags (`recreate`, `skip_warmup`). Credentials arrive in-process, so the
+  `PROVISIONING_API_KEY` env hand-off disappears.
+- Defaults implement `GenericProvider`: `health()` returns `None`,
+  `supports_provisioning` is `False`, `classify_http_error()` returns `None`, and
+  `apply_defaults()` is a no-op.
+
+### A3. Registry and discovery (`backend/providers/__init__.py`)
+
+- The package imports all of its submodules on first use. Each `Provider`
+  subclass registers itself by its `id` (via `__init_subclass__`). There is no
+  central list to edit, so adding a provider is adding a module.
+- `get_provider(preset) -> Provider` resolves `preset.provider.id` (default
+  `generic`), validates `options` with the class's `Options` model, and caches
+  the instance with the preset (presets are already cached per process; see the
+  `presets.py` module docstring).
+- An unknown id or invalid options marks that one preset unavailable with a
+  warning in the log and in `GET /api/config` listings. It never fails backend
+  startup or the other presets.
+- Heavy or optional dependencies (an SDK) are imported lazily inside the provider
+  module, so a deployment that does not use that provider never needs them.
+
+### A4. Core call sites become provider calls
+
+| Today | After |
+|---|---|
+| `_check_side()` looks up `HEALTH_CHECKS[provider]` | `get_provider(preset).health(side, url, key)`; `None` stays `null` in the response, unresolvable URL/key stays "not configured" |
+| `provisionable = bool(preset.provisioning_script)` | `provider.supports_provisioning` |
+| `POST /api/config/provision` spawns `sys.executable script --json` | `await asyncio.to_thread(provider.provision, ctx, progress)`; same job states (`idle`/`running`/`succeeded`/`failed`), same 409 and 400 behaviour |
+| Result parsed from a `PROVISION_RESULT:` stdout line | Returned dict goes straight to `update_remote_config()` |
+| `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Skips them when `provider.supports_provisioning` is set |
+
+`embeddings.py` and `llm.py` keep reading `shared_base_url_env` /
+`shared_api_key_env` via `resolve_shared_value()`. The only addition is that
+their cold-endpoint branches may also ask `provider.classify_http_error()`
+instead of matching a RunPod-specific response. The hook is optional, and the
+current RunPod detection stays in place until Part B moves it.
+
+### A5. CLI
+
+A generic `bin/provision.py [--preset NAME] [--teardown] [--recreate] [--yes]
+[--skip-warmup]` drives any provider that supports provisioning. It replaces the
+per-provider script as the manual entry point and is subject to the same
+"run inside the container so the data volume is shared" rule from CLAUDE.md.
+
+### A6. Provider contract tests
+
+One test module parametrised over every registered provider:
+
+- `Options` validation (valid, invalid, defaults).
+- `apply_defaults()` is idempotent and does not clobber explicit preset values.
+- `health()` classification against a fake client, never raising.
+- `provision()` idempotency against a fake client (second run creates nothing).
+- `teardown()` is a no-op for absent resources.
+- Providers with `supports_provisioning = False` raise `NotImplementedError` and
+  are never offered a provision button.
+
+A new provider must pass this suite. That is the definition of "easy to add".
+
+---
+
+## B. Migrate existing presets
+
+### B1. `GenericProvider` (every preset except `runpod`)
+
+Applies to `cpu-only`, `high-memory`, `windows-test`, `remote-kisski`,
+`remote-mpcdf`, and `remote-openai`. These presets need **no JSON change**:
+`provider` is omitted and resolves to `generic`.
+
+The base class defaults reproduce today's behaviour exactly:
+
+- `GET /api/config/health` returns `null` for both sides.
+- `provisionable` is `false`, and `POST /api/config/provision` returns 400.
+- URL and key handling is untouched: `required_client_fields()` still reads
+  `base_url`/`api_key_env` or `shared_*_env` from `model_kwargs`.
+- KISSKI's `models_status_url` demand indicator is unaffected.
+- `remote-mpcdf` keeps its manual `POST /api/config/remote-fields` workflow. An
+  MPCDF Slurm provider is a possible future provider and is out of scope here.
+
+### B2. `RunPodProvider` (`backend/providers/runpod.py`)
+
+Move, with no behaviour change:
+
+- `check_runpod_health()` from `backend/utils/endpoint_health.py` becomes
+  `RunPodProvider.health()`.
+- The ensure-template, ensure-endpoint, warm-up and teardown logic from
+  `bin/provision_runpod_endpoints.py` (~600 lines, `httpx` REST) becomes
+  `provision()` / `teardown()`.
+- The URL regex (`^https://api\.runpod\.ai/v2/[A-Za-z0-9]+/openai/v1$`) and key
+  regex (`^rpa_[A-Za-z0-9]+$`) move into `apply_defaults()`, which writes them
+  into `model_kwargs` as `shared_*_pattern`. `runpod.json` stops repeating them,
+  and the services still read them from `model_kwargs`.
+- RunPod's gateway cold response (the openresty 405 page the services special-case
+  today) becomes `classify_http_error()`.
+
+`Options` replaces the CLI flags (the CLI can still override them):
+
+```json
+"provider": {
+  "id": "runpod",
+  "options": {
+    "llm_model": "Qwen/Qwen2.5-7B-Instruct",
+    "embedding_gpu": "NVIDIA RTX A5000",
+    "llm_gpu": "NVIDIA RTX A5000",
+    "workers_max": 1,
+    "idle_timeout": 60,
+    "data_centers": null
   }
 }
 ```
 
-The service-facing interface is unchanged: `embeddings.py` and `llm.py` still read
-`shared_base_url_env` / `shared_api_key_env` through
-`admin_settings_store.resolve_shared_value()`. The provisioner's only job is to
-make those values exist and to report readiness.
+`runpod.json` after migration drops `health_check_provider` (x2),
+`provisioning_script`, and the four `shared_*_pattern` entries, and gains the
+`provider` block above.
 
-Backward compatibility inside 1.x: existing `runpod.json` files on disk that use
-`health_check_provider` / `provisioning_script` must still validate. The schema
-keeps both as deprecated optional fields and normalises them into an implicit
-`provisioner` (`{"name": "runpod"}` or `{"name": "external_script", ...}`) at load
-time. Remove them at 2.0.
+### B3. Compatibility for already-seeded files
 
-### 2. The protocol (`backend/provisioners/base.py`)
+`data/presets/runpod.json` is seeded once and never overwritten
+(`ensure_default_presets`), so admins' existing copies still carry the old fields.
+Load-time normalisation handles that:
 
-```python
-class Provisioner(Protocol):
-    name: ClassVar[str]
-    options_model: ClassVar[type[BaseModel]]       # validates preset.provisioner.options
-    credential_specs: ClassVar[list[CredentialSpec]]   # env name, regex, human label
-    output_specs: ClassVar[list[OutputSpec]]       # base-url env names it produces + regex
+- `health_check_provider == "runpod"` or `provisioning_script` ending in
+  `provision_runpod_endpoints.py` becomes `provider = {"id": "runpod"}`.
+- Any other `provisioning_script` value logs a warning and is ignored (no bundled
+  preset uses one, and `GenericProvider` does not run scripts).
+- The old keys are accepted on input and never written back. The shim is removed
+  at 2.0.
 
-    def validate_credentials(self, creds: Mapping[str, str]) -> None: ...
-    def health(self, side: Literal["embedding", "llm"], ctx: Ctx) -> Health: ...
-    def provision(self, ctx: Ctx, progress: Callable[[str], None]) -> dict[str, str]: ...
-    def teardown(self, ctx: Ctx) -> None: ...
-    def classify_http_error(self, status: int, body: str) -> ErrorKind | None: ...  # optional
+### B4. Implementation order (each step keeps the suite green)
+
+1. Add `backend/providers/` (base, registry, `GenericProvider`), the schema field,
+   and the B3 normalisation. Core call sites in A4 switch to the provider.
+   Behaviour is identical because only `generic` and the shimmed `runpod` exist.
+   Tests: existing `test_endpoint_health`, `test_provision_job`, `test_config`,
+   `test_embeddings`, `test_llm` pass with only their patch targets updated
+   (e.g. `HEALTH_CHECKS`).
+2. Port RunPod into `RunPodProvider`. Delete `HEALTH_CHECKS`, the `Literal`
+   fields, and the subprocess job path. Keep `bin/provision_runpod_endpoints.py`
+   as a thin shim over `bin/provision.py`.
+3. Rewrite `runpod.json`, update `docs/presets.md`, and mark the older
+   RunPod/health specs as superseded where they describe the script contract.
+
+### B5. Behaviour-preservation checklist
+
+For each bundled preset, before and after: `GET /api/config`, `GET
+/api/config/health`, `GET /api/config/api-keys` (the key requirements listing),
+`POST /api/config/provision` status code, and a preset switch. For `runpod`:
+health classification, provision end-to-end against a fake client, and the
+plugin's "Provision endpoints" button flow, unchanged.
+
+---
+
+## C. Hugging Face provider and preset
+
+### C1. Why it differs from RunPod
+
+| | RunPod | Hugging Face Inference Endpoints (dedicated) |
+|---|---|---|
+| Objects | template, then endpoint | one endpoint (image and env inline) |
+| Readiness | `/health` worker counts | status field: `pending`, `initializing`, `running`, `scaledToZero`, `paused`, `failed` |
+| URL | shared host, per-endpoint path | per-endpoint hostname (`*.endpoints.huggingface.cloud`) |
+| Credentials | one RunPod key | one HF token for both management and inference |
+| Billing | per second, 60s idle default | per instance-hour by the minute, billed while initializing or running, not while paused or scaled to zero |
+| Cold behaviour | gateway 405 page | reported 502 until a replica is up |
+
+These all fit behind the A2 interface, which is the point of the exercise. Nothing
+here requires a core change.
+
+### C2. `HuggingFaceProvider` (`backend/providers/huggingface.py`)
+
+- **Options:** `namespace` (default: the token's own user), `vendor`, `region`, and
+  per side `engine` (`tei` for embeddings, `vllm` or `tgi` for the LLM),
+  `instance`, `scale_to_zero_timeout_min`, `min_replica` (0), `max_replica` (1).
+- **`apply_defaults()`:** adds a key regex (`^hf_[A-Za-z0-9]+$`) and a base-URL
+  regex for the endpoint hostname shape to `model_kwargs`. Both patterns must be
+  verified against real endpoints.
+- **`provision()`:** idempotent by name (`zotero-rag-embedding`,
+  `zotero-rag-llm`). Absent: create. `scaledToZero` or `paused`: resume. Existing
+  with a differing config: warn, or recreate with `--recreate`. Then wait with a
+  bound, send a warm-up request, and return `{HF_EMBEDDING_BASE_URL: ..., HF_LLM_BASE_URL: ...}`
+  (endpoint URL plus `/v1`).
+- **`health()`:** one management-API call per side. `running` maps to `ready`;
+  `scaledToZero`, `paused`, `pending`, `initializing` map to `cold`; `failed` or an
+  API error maps to `unreachable`. No data-plane probe is needed, unlike RunPod.
+- **`classify_http_error()`:** treats the 502 observed during scale-from-zero as
+  `cold`.
+- **`teardown()`:** deletes both endpoints; absent endpoints are a no-op.
+- **Dependency:** use `huggingface_hub` if its endpoint API is stable enough to
+  justify it, imported lazily inside this module only. Otherwise plain `httpx`
+  REST, as RunPod does. Decide in the spike.
+
+### C3. Preset (`backend/config/default_presets/huggingface.json`)
+
+```json
+{
+  "description": "Fully remote via your own Hugging Face Inference Endpoints (embedding + LLM, pay-per-use, scale-to-zero). Enter your HF token, then click \"Provision endpoints\" to create or wake both endpoints.",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "intfloat/multilingual-e5-large-instruct",
+    "batch_size": 64,
+    "model_kwargs": { "shared_base_url_env": "HF_EMBEDDING_BASE_URL", "shared_api_key_env": "HF_TOKEN" }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": ["Qwen/Qwen2.5-7B-Instruct"],
+    "max_context_length": 32768,
+    "max_answer_tokens": 2048,
+    "temperature": 0.7,
+    "model_kwargs": { "shared_base_url_env": "HF_LLM_BASE_URL", "shared_api_key_env": "HF_TOKEN" }
+  },
+  "rag": { "top_k": 10, "score_threshold": 0.35, "max_chunk_size": 800 },
+  "provider": {
+    "id": "huggingface",
+    "options": {
+      "vendor": "aws",
+      "region": "eu-west-1",
+      "embedding": { "engine": "tei",  "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 },
+      "llm":       { "engine": "vllm", "instance": "nvidia-l4", "scale_to_zero_timeout_min": 15 }
+    }
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any"
+}
 ```
 
-- `Health` is `{"status": "ready"|"cold"|"unreachable", "detail": str}`, the shape
-  the plugin already renders.
-- `provision()` returns `{base_url_env_name: url}`. Core feeds it to the existing
-  `update_remote_config()`, exactly as `PROVISION_RESULT:` is consumed today.
-- `credential_specs` and `output_specs` replace the per-preset `shared_*_pattern`
-  copies in `runpod.json`. Core uses them for the same format validation, and
-  presets no longer repeat provider URL regexes.
-- `classify_http_error` is the one hook for the cold-endpoint messages currently
-  special-cased in `embeddings.py` and `llm.py` (RunPod's openresty 405 page, an
-  HF 502 while a replica starts). It lets an adapter say "this response means
-  cold, not broken" without a provider name check in the service.
-- Registry: `backend/provisioners/__init__.py` imports every module in the package
-  and builds `PROVISIONERS: dict[str, Provisioner]`. No central list to edit.
-  `external_script` is one of them.
+Region, instance names and the scale-to-zero timeout are placeholders to confirm
+against the live service. The shared `HF_TOKEN` is the same key for both sides, as
+`RUNPOD_API_KEY` is today.
 
-### 3. Core changes (done once, then provider-blind)
+### C4. Cost note for the preset description
 
-- `presets.py`: add `provisioner: Optional[ProvisionerConfig]` (`name`, opaque
-  `options`). Validate `options` lazily against the adapter's `options_model`, so
-  an unknown adapter is a clear error at preset load, not a schema edit.
-- `api/config.py`: `GET /api/config/health` and `POST /api/config/provision` call
-  the protocol via a registry lookup. `provisionable` becomes `provisioner is not
-  None`.
-- `services/provisioning.py`: run `provision()` through `asyncio.to_thread`,
-  keeping the same job state machine (`idle`/`running`/`succeeded`/`failed`) and
-  409/400 behaviour.
-- A generic `bin/provision.py [--teardown] [--preset NAME]` replaces
-  `bin/provision_runpod_endpoints.py`. The RunPod script stays as a thin shim for
-  existing docs and cron.
-- The model-name basename hack (`_embedding_model_identity`) is left as is. It is
-  provider-agnostic.
+HF bills per instance-hour; indicative AWS single-GPU rates are L4 $0.80/h, A10G
+$1.00/h, L40S $1.80/h, A100-80G $2.50/h. RunPod serverless bills per second, so
+for bursty use (a few queries a day) it is likely cheaper, and HF's longer idle
+tail is the main cost risk. For sustained indexing runs HF's hourly rates are
+competitive. These figures come from third-party summaries and must be
+re-verified before any number appears in user-facing text.
 
-### 4. The `huggingface` adapter
+### C5. Tests
 
-Behaviour, in the order the user sees it:
+- Provider contract suite (A6) with `HuggingFaceProvider` and a faked client. No
+  live calls (endpoints cost money).
+- Status-to-health mapping table test; idempotent `provision()` for the
+  absent / scaled-to-zero / running / failed starting states; 502 classification.
+- Manual smoke checklist, run once against a real account: provision from
+  scratch, re-run (reuse and wake), scale to zero and wake via a query, teardown.
 
-1. Credentials: one `HF_TOKEN` (fine-grained, "Inference Endpoints" scope). The
-   same token is the data-plane key, so `shared_api_key_env` points at it for both
-   sides, as in the RunPod preset.
-2. `provision()` is idempotent by endpoint name (`zotero-rag-embedding`,
-   `zotero-rag-llm`): `get_inference_endpoint(name)`; if absent, create it with
-   `min_replica=0`, `max_replica=1`, and the configured `scale_to_zero_timeout`;
-   if present and `scaledToZero`/`paused`, `.resume()`; then `.wait()` with a bound
-   and a warm-up request. Differing config warns unless `--recreate`, mirroring the
-   RunPod script.
-3. Embedding uses the TEI engine; LLM uses vLLM or TGI. Both expose an
-   OpenAI-compatible `/v1`. Base URL = the endpoint's `url` + `/v1`.
-4. `health()` maps the HF status: `running` is ready, `scaledToZero`/`paused`/
-   `pending`/`initializing` is cold, `failed` or an API error is unreachable.
-   Unlike RunPod this is one cheap management-API call, not a data-plane probe.
-5. `teardown()` deletes both endpoints.
-
-### 5. Cost framing for the user (shown in the preset description)
-
-- HF bills per instance-hour, by the minute, while initializing or running, and
-  not while paused or scaled to zero. Indicative AWS single-GPU rates: L4 $0.80/h,
-  A10G $1.00/h, L40S $1.80/h, A100-80G $2.50/h.
-- RunPod flex serverless bills per second from worker start to full stop. For
-  bursty use (a few queries a day), RunPod is probably cheaper because HF's idle
-  tail is longer. For sustained indexing runs, HF's hourly rates are competitive.
-- Figures are third-party-sourced and must be re-verified before the preset
-  description states numbers.
-
-## Migration plan
-
-1. Introduce `backend/provisioners/` with the protocol, registry, and
-   `external_script` adapter. Normalise the legacy fields. No behaviour change
-   (existing tests must pass untouched).
-2. Port RunPod into `runpod.py` (health and provisioning from the existing
-   modules), delete `HEALTH_CHECKS`, and drop the `Literal["runpod"]` field.
-3. Add `huggingface.py`, `huggingface.json`, an adapter contract test suite that
-   every adapter must pass, and docs in `docs/presets.md`.
-4. Only then consider entry-point discovery for out-of-tree adapters.
-
-## Testing
-
-- A shared contract test parametrised over every registered adapter: options
-  validation, credential regex validation, idempotent `provision()` against a
-  fake client, `health()` classification, `teardown()` no-op on absent resources.
-- Unit tests for the HF adapter with a faked `huggingface_hub` client (no live
-  calls; endpoints cost money).
-- One manual smoke checklist (provision, re-run, wake from `scaledToZero`,
-  teardown) run once against a real HF account.
+---
 
 ## Open questions
 
-- Does TEI's `/v1/embeddings` accept batched input and echo the model name in the
-  way `RemoteEmbeddingService` expects? (Same open item the RunPod spec had.)
-- What does vLLM on HF Endpoints report as the served model name? The vLLM
-  container loads from `/repository`, so the preset's `model_names` may not match
-  what must be sent in `model`. The adapter may need to supply the on-the-wire name.
-- Real default for `scale_to_zero_timeout` and its minimum, since the 15-minute
-  figure comes from one unverified source.
-- Which AWS/GCP regions offer the chosen GPU in the EU, and whether GDPR hosting
-  should be the default.
-- Do reports of endpoints stuck in "Initializing" after a scale-from-zero wake-up
-  (forum, unconfirmed) require the adapter to implement a resume-and-recheck loop?
-- Is the sunk cost of the stdout contract worth keeping in `external_script` once
-  both in-tree providers are native adapters, or should it be dropped (YAGNI)?
+- Does TEI's `/v1/embeddings` accept batched input and echo the model name the way
+  `RemoteEmbeddingService` expects?
+- What served model name does vLLM on HF Endpoints report (the container loads from
+  `/repository`)? The provider may need to supply the on-the-wire model name
+  separately from the preset's `model_names`.
+- Real default and minimum for HF's scale-to-zero timeout, and whether the reported
+  "stuck in Initializing after wake-up" issue needs a resume-and-recheck loop in
+  `provision()`.
+- EU region and GPU availability, and whether GDPR hosting should be the default.
+- `huggingface_hub` versus plain REST for the HF provider (C2).
+- Should a provider be able to declare extra Preferences-pane fields (for example
+  HF `namespace`) so the plugin can render them without plugin changes, or is
+  `options` in the preset JSON enough for now?
+- When to remove the B3 compatibility shim: at 2.0, per the repository's
+  documentation policy.
