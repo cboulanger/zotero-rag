@@ -27,7 +27,7 @@ setting.
 
 One section each for the **Embedding model** and the **Answering model (LLM)** of your preset, showing the provider, who operates it (your own account, the server admin, or your institution) and its live status (`ready`, `cold`, `paused`, `throttled` or `unreachable`). Each section holds the API key fields that side needs, each with a link to where you can obtain it and a status line confirming whether the backend accepted it; your own keys are sent to the backend on every request rather than stored there, so the backend operator never has to hold your provider credentials.
 
-For an endpoint that can be provisioned (created, woken or resumed), the section offers **Provision endpoint** / **Resume** when the endpoint is not reachable, runs it on your own account (or, for an institution-funded one, only for admins), shows its progress, and offers **Retry** for just the side that failed. An optional key field takes a broader key for that one run; it is used once and never stored. Only one job per user runs at a time.
+For an endpoint that can be provisioned (created, woken or resumed), the section offers **Provision endpoint** / **Resume** when the endpoint is not reachable, runs it on your own account (or, for an institution-funded one, only for admins), shows its progress, and offers **Retry** for just the side that failed. An optional key field takes a broader key for that one run; it is used once and never stored. The two sides run independently; only a side that already has a job running is disabled.
 
 ### Automatic indexing
 

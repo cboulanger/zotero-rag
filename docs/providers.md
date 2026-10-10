@@ -73,7 +73,7 @@ two different providers.
 
 ## Provisioning and cost control
 
-Who may provision follows the credential scope. For `user` any signed-in user may, on their own key and in their own job slot (two users can run at once, the same user gets HTTP 409). For `managed` only an admin may, with the stored admin key and one global slot. `GET /api/config/provision/status` and `GET /api/config/health` answer for the caller's own slot and key. A provider whose endpoints live in the key owner's account sets `derives_endpoint_url` and implements `endpoint_url(key)`; the services then need no URL in the preset (lookups are cached per key in `backend/services/endpoint_cache.py`).
+Who may provision follows the credential scope. For `user` any signed-in user may, on their own key and in their own job slot (two users can run at once, the same user gets HTTP 409 only for a side that already has a job running; the two sides are independent). For `managed` only an admin may, with the stored admin key and one global slot. `GET /api/config/provision/status` and `GET /api/config/health` answer for the caller's own slot and key. A provider whose endpoints live in the key owner's account sets `derives_endpoint_url` and implements `endpoint_url(key)`; the services then need no URL in the preset (lookups are cached per key in `backend/services/endpoint_cache.py`).
 
 `POST /api/config/provision` runs each requested side's `provision()` as an
 independent job (a failure on one side does not stop the other; a failed side can
