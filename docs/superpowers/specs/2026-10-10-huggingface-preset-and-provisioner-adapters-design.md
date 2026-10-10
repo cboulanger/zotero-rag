@@ -439,7 +439,7 @@ Each section contains, top to bottom:
 | Health row | `GET /api/config/health`, this side's entry | Unchanged colours and statuses; omitted when the side has no health concept; shown to every user, and for a `managed` side it is the only thing a non-admin sees, with the line "Managed by your administrator" |
 | Hint under a side that is not ready | `descriptor.unavailable_hint` | For providers that cannot provision (for example MPCDF: start a new job and paste its URL and key) |
 | Service key field(s) | `GET /api/required-keys`, entries for this side | `user` scope: the user's personal key (stored in the plugin's preferences, sent as a header, as `KISSKI_API_KEY` is today). `managed` and `shared` scope: the shared key (and URL where needed), admin only; other users see no field. If both sides use the same key env var they show the same preference, so editing it in one section updates the other |
-| Provision credential | `descriptor.provisioning.credential` | Only when the side can provision. Label, help and placeholder from the descriptor; pattern checked client-side, enforced server-side regardless. Left empty, the user's saved service key is used; a value entered here is used for this run only |
+| Provision credential | `descriptor.provisioning.credential` | Only when the side can provision. Label, help and placeholder from the descriptor; pattern checked client-side, enforced server-side regardless. Left empty, the user's saved service key is used; a value entered here is used for this run only, is never stored by the backend, and the plugin does not offer to save it as the service key |
 | Provision / Resume button | `operable_by_caller`, `supports_provisioning` and health | "Provision" when the side is `unreachable`/`throttled`, "Resume" when `paused`; shown only when `operable_by_caller`. Posts `sides: [this side]` |
 | Pause button | `operable_by_caller`, `supports_suspend` and health | Shown whenever the side is `ready` or `cold`, not only when something is wrong; one click, no confirmation (reversible) |
 | Retry button | this side's entry in `status.sides` | Appears after a failed job on this side and posts `sides: [this side]` again |
@@ -676,11 +676,15 @@ user's own key).
 
 **Personal choice.** A user may select another preset for themselves, from the
 presets compatible with the default's embedding model (the existing
-`_compatible_presets` rule: same embedding model identity, so the one vector store
-stays valid), and whose credentials they can supply. It is stored server-side per
+`_compatible_presets` rule, kept strict: both sides remote and the same embedding
+model identity, so the one vector store stays valid), and whose credentials they
+can supply. Relaxing the rule, for example to let a user change only the LLM
+provider while keeping a local embedding model, is deliberately left for later. It is stored server-side per
 user identity, not in a header, because the cron indexer and auto-index need it
 too: `GET` and `PUT /api/config/my-preset`, keyed by the Zotero identity
-fingerprint in a small `user_settings.json` (a preset name is not secret). A
+fingerprint in a small `user_settings.json` (a preset name is not secret). In
+loopback and public-query modes there is no identity, so only the default preset
+applies and the personal-choice control is not shown. A
 choice that later becomes invalid (the preset was removed, or it stopped being
 compatible after the default changed) falls back to the default, and
 `GET /api/config` says so.
@@ -696,7 +700,9 @@ user's choice if valid, else the default. Consequences:
 - The cron indexer and on-demand indexing use each user's effective preset, hence
   that user's embedding provider and key. The auto-index key store therefore holds
   keys per env var name per user (a map), rather than a single embedding key, so a
-  user can have a KISSKI key and an HF token at once.
+  user can have a KISSKI key and an HF token at once. Keys for presets the user no
+  longer selects are kept (the user may switch back); only keys found permanently
+  invalid are pruned, as today.
 - `switchable_presets` becomes a per-user `selectable_presets` list (compatible,
   and usable for that user: keys present or, for `managed`, an admin-provisioned
   resource that is ready).
@@ -1175,47 +1181,46 @@ on each user's own account.
 
 ## Open questions
 
+None of these needs a product decision; the decisions taken so far are in the
+sections above (including: the strict compatibility rule for personal preset
+choice, default-preset-only when there is no identity, keeping keys of unselected
+presets, and one-time provisioning keys that are never saved).
+
+### To verify in a spike before the implementation plan
+
+- Pause (A8): does RunPod's REST update accept `workersMax=0`? If not, RunPod
+  loses Pause (the spec's fallback). Does a paused HF endpoint answer requests with
+  a distinguishable error?
+- Per-user endpoint lookup (A10): can an endpoint-restricted RunPod key list
+  endpoints? If not, `endpoint_url()` fails for such keys and the key needs list
+  permission (or the URL would have to be stored per user).
+
+### To check during implementation
+
 - Does TEI's `/v1/embeddings` accept batched input and echo the model name the way
   `RemoteEmbeddingService` expects?
 - What served model name does vLLM on HF Endpoints report (the container loads from
   `/repository`)? The provider may need to supply the on-the-wire model name
   separately from the preset's `model_names`.
-- Real default and minimum for HF's scale-to-zero timeout, and whether the reported
-  "stuck in Initializing after wake-up" issue needs a resume-and-recheck loop in
-  `provision()`.
+- Real default and minimum for HF's scale-to-zero timeout, whether the idle tail is
+  really 15 minutes, and whether the reported "stuck in Initializing after wake-up"
+  issue needs a resume-and-recheck loop in `provision()`.
 - EU region and GPU availability, and whether GDPR hosting should be the default.
 - `huggingface_hub` versus plain REST for the HF provider (C2).
-- Pause (A8): does RunPod's REST update accept `workersMax=0`? Does a paused HF
-  endpoint answer requests with a distinguishable error? Is the HF idle tail
-  really 15 minutes and is it configurable down?
-- Per-user endpoint lookup (A10): can an endpoint-restricted RunPod key list
-  endpoints? The existing docs recommend swapping to such a key after provisioning.
-  If it cannot list, `endpoint_url()` fails for those keys and the key needs list
-  permission (or the URL would have to be stored per user).
 - MPCDF (B2d): does a live job answer an authenticated `GET {base}/models`, and does
   a rejected key return 401 or 403? Is there any job API worth building
   provisioning on?
-- Should the plugin offer to save a key entered in the one-time provisioning field
-  as the user's service key, or is "used for this run only" the right default?
-- Per-user preset choice (A11) is stored server-side per identity. In loopback or
-  public-query modes there is no identity; is "default preset only" the right
-  behaviour there?
-- The compatibility rule for personal choice currently requires both sides remote
-  and the same embedding model. Should it relax so a user can change only the LLM
-  provider while keeping a local embedding model?
-- The key store becomes a per-user map of env var name to key. Should keys for
-  presets the user no longer selects be kept, or pruned like invalid keys are today?
-- `managed` presets: should the plugin tell non-admins who the admin is, or is
-  "Managed by your administrator" enough?
-- Should an admin be able to schedule an automatic pause (for example after a
-  period with no queries), or is a manual button enough? Scale-to-zero already
-  covers idle time, so this is deferred unless the always-on cost shows up in
-  practice.
 - Job deadline: what is a sane default (HF cold starts may take well over the RunPod
   3-minute warm-up bound), and should it be a provider option?
-- UI: is "newest progress line plus tooltip" enough, or should the full step list be
-  visible? And when a provider later needs click-time parameters, is a descriptor
-  `fields` list the right extension?
-- Should a bundled-preset overwrite keep a one-generation backup (`<name>.json.bak`)
-  as a safety net, or is the WARNING log line enough? (The current decision is no
-  backup, since customising via a new file name is the supported path.)
+
+### Deferred unless a need shows up
+
+- Scheduled automatic pause: scale-to-zero already covers idle time.
+- Whether the plugin names the admin on `managed` presets, or "Managed by your
+  administrator" is enough.
+- Whether "newest progress line plus tooltip" is enough, and whether a descriptor
+  `fields` list is the right extension for click-time parameters.
+- A one-generation backup of an overwritten bundled preset; the WARNING log line is
+  the current decision.
+- Relaxing the personal-choice compatibility rule (for example LLM-only changes
+  with a local embedding model).
