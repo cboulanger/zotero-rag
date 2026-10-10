@@ -605,7 +605,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         # The other user's slug must still succeed, not be aborted.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
         self.assertEqual(result["libraries"], ["users/1", "users/2"])
-        key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid")
+        key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid", key_name="TEST_API_KEY")
 
     async def test_endpoint_unavailable_isolated_to_one_slug(self):
         """An EmbeddingEndpointUnavailableError for one slug only errors that
@@ -683,7 +683,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         # The other user's slug must still succeed, not be skipped.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
         key_store.set_embedding_key_status.assert_called_once_with(
-            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat(), key_name="TEST_API_KEY"
         )
 
     async def test_rate_limit_exhausted_during_drain_is_isolated_to_one_slug(self):
@@ -739,7 +739,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         # it entirely for users/1.
         mock_proc_instance.index_library.assert_awaited_once()
         key_store.set_embedding_key_status.assert_called_once_with(
-            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat(), key_name="TEST_API_KEY"
         )
 
     async def test_rate_limit_headers_persisted_per_slug(self):

@@ -280,3 +280,60 @@ class IsEmbeddingKeyUsableTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveByKeyNameTest(unittest.IsolatedAsyncioTestCase):
+    """The key used is the one the active preset names; others are kept, not pruned."""
+
+    def _store(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return AutoIndexKeyStore(Path(tmp.name) / "k.json", Fernet.generate_key().decode())
+
+    async def _resolve(self, store, key_env, v):
+        settings = _mock_settings("remote", {"api_key_env": key_env})
+        with patch("backend.services.autoindex_resolver.get_settings", return_value=settings), \
+             patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(return_value=v)):
+            return await resolve_targets(store)
+
+    async def test_picks_the_key_the_active_preset_names(self):
+        store = self._store()
+        v = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp = store.add("KA", v)
+        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY")
+        store.set_embedding_key(fp, "hf", "HF_API_TOKEN")
+        targets, issues = await self._resolve(store, "HF_API_TOKEN", v)
+        self.assertEqual(targets["users/1"]["embedding_key"], "hf")
+        self.assertEqual(targets["users/1"]["embedding_key_name"], "HF_API_TOKEN")
+        self.assertEqual(issues, [])
+
+    async def test_a_missing_key_for_the_active_preset_is_reported_and_other_keys_are_kept(self):
+        store = self._store()
+        v = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp = store.add("KA", v)
+        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY")
+        targets, issues = await self._resolve(store, "HF_API_TOKEN", v)
+        self.assertEqual(targets, {})
+        self.assertIn("HF_API_TOKEN", issues[0]["reason"])
+        self.assertEqual(store.get_decrypted_embedding_key(fp, "KISSKI_API_KEY")[1], "kisski")  # kept
+
+    async def test_status_of_another_key_does_not_block_this_one(self):
+        store = self._store()
+        v = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp = store.add("KA", v)
+        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY", status="invalid")
+        store.set_embedding_key(fp, "hf", "HF_API_TOKEN")
+        targets, _ = await self._resolve(store, "HF_API_TOKEN", v)
+        self.assertIn("users/1", targets)
+
+    async def test_a_shared_key_preset_needs_no_personal_key(self):
+        store = self._store()
+        v = KeyValidation(1, "a", ["users/1"], read_only=True)
+        store.add("KA", v)
+        settings = _mock_settings("remote", {"shared_api_key_env": "MPCDF_EMBEDDING_API_KEY"})
+        with patch("backend.services.autoindex_resolver.get_settings", return_value=settings), \
+             patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(return_value=v)):
+            targets, issues = await resolve_targets(store)
+        self.assertIn("users/1", targets)
+        self.assertIsNone(targets["users/1"]["embedding_key"])
+        self.assertEqual(issues, [])

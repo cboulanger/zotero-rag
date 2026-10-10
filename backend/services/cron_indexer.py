@@ -810,7 +810,7 @@ class CronIndexer:
         except EmbeddingAuthenticationError as exc:
             fp = target.get("fingerprint")
             if fp and self.key_store:
-                self.key_store.set_embedding_key_status(fp, "invalid")
+                self.key_store.set_embedding_key_status(fp, "invalid", key_name=target.get("embedding_key_name"))
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
@@ -841,7 +841,8 @@ class CronIndexer:
             fp = target.get("fingerprint")
             if fp and self.key_store:
                 self.key_store.set_embedding_key_status(
-                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat()
+                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat(),
+                    key_name=target.get("embedding_key_name"),
                 )
             self.log.warning(
                 "Embedding quota exhausted for %s: available again at %s", slug_info.slug, exc.available_at

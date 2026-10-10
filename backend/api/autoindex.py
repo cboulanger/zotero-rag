@@ -118,7 +118,7 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
     user_id to any caller who merely passed the instance-wide access gate.
     """
     store = _store()
-    all_keys = store.list_metadata()
+    all_keys = store.list_metadata(_active_key_name())
     if identity is None:
         return {"keys": all_keys}
     return {"keys": [k for k in all_keys if k.get("user_id") == identity.user_id]}
@@ -424,8 +424,13 @@ async def skip_slug(
     return {"skip_requested": True, "slug": body.slug}
 
 
+def _active_key_name() -> Optional[str]:
+    """Name of the personal provider key the active preset's embedding side uses, if any."""
+    return get_settings().get_hardware_preset().embedding.model_kwargs.get("api_key_env")
+
+
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
-    return next((k for k in store.list_metadata() if k["fingerprint"] == fp), None)
+    return next((k for k in store.list_metadata(_active_key_name()) if k["fingerprint"] == fp), None)
 
 
 def _embedding_key_block_reason(own: dict) -> Optional[str]:

@@ -89,11 +89,8 @@ async def resolve_targets(
     # incorrectly block it on a stale status left over from a previously
     # active personal-key preset (the actual bug this guards against).
     embedding_config = get_settings().get_hardware_preset().embedding
-    requires_embedding_key = (
-        embedding_config.model_type == "remote"
-        and "api_key_env" in embedding_config.model_kwargs
-        and require_embedding_key
-    )
+    key_name = embedding_config.model_kwargs.get("api_key_env")
+    requires_embedding_key = embedding_config.model_type == "remote" and bool(key_name) and require_embedding_key
 
     for fp, api_key, entry in list(store.iter_decrypted()):
         if only_fingerprint and fp != only_fingerprint:
@@ -143,13 +140,14 @@ async def resolve_targets(
                 })
             continue
 
-        embedding_info = store.get_decrypted_embedding_key(fp)
-        embedding_status = entry.get("embedding_key_status")
-        rate_limit_until_str = entry.get("embedding_key_rate_limit_until")
+        embedding_info = store.get_decrypted_embedding_key(fp, key_name)
+        stored_key = entry.get("embedding_keys", {}).get(key_name, {})
+        embedding_status = stored_key.get("status")
+        rate_limit_until_str = stored_key.get("rate_limit_until")
         usable = is_embedding_key_usable(embedding_status, rate_limit_until_str)
         if not embedding_info or not usable:
             if not embedding_info:
-                reason = "No embedding API key configured; auto-indexing skipped."
+                reason = f"No {key_name} configured; auto-indexing skipped."
             elif embedding_status == "invalid":
                 reason = "Embedding API key was rejected; auto-indexing skipped."
             elif embedding_status == "rate_limited":
