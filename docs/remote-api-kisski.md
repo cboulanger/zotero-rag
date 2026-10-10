@@ -16,7 +16,7 @@ https://chat-ai.academiccloud.de/v1
 ### Authentication
 - **Method:** Bearer token authentication
 - **Header:** `Authorization: Bearer <API_KEY>`
-- **API Key:** Obtain from KISSKI portal, store in environment variable `KISSKI_API_KEY`
+- **API Key:** Obtain from the KISSKI portal. In Zotero RAG each user enters their own key in the plugin (it is sent with their requests; the backend does not read it from the environment). The example scripts below read `KISSKI_API_KEY` from the environment only because they run outside the backend.
 
 ### Available Models
 
@@ -151,12 +151,9 @@ async def generate_text():
 
 ## Configuration in Zotero RAG
 
-### Environment Variables
+### API Key
 
-Add to your `.env` file:
-```bash
-KISSKI_API_KEY=your_api_key_here
-```
+Each user enters their own KISSKI key in the plugin (Preferences or the setup wizard); the backend never reads it from the environment. Select the preset with `MODEL_PRESET=remote-kisski` (or an admin switches the server default in the plugin).
 
 ### Hardware Presets
 
@@ -220,7 +217,7 @@ The following presets use KISSKI API:
 
 2. **401 Unauthorized**
    - **Cause:** Invalid or missing API key
-   - **Solution:** Verify `KISSKI_API_KEY` environment variable is set correctly
+   - **Solution:** Verify the key entered in the plugin's Preferences (or, for the example scripts, the `KISSKI_API_KEY` environment variable) is correct
 
 3. **Connection Timeout**
    - **Cause:** Network issues or service temporarily unavailable
