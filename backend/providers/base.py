@@ -49,6 +49,8 @@ class Provider:
     default_scope: ClassVar[Scope] = "user"
     supports_provisioning: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False
+    #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
+    has_live_models: ClassVar[bool] = False
     #: Wire protocol of the LLM side; core implements the protocols, not vendors.
     llm_api: ClassVar[Literal["openai", "anthropic"]] = "openai"
     #: Timeout (seconds) of the management-API client created by ``_http()``.

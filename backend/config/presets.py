@@ -326,7 +326,8 @@ def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
         override — without corrupting the in-memory cache).
 
     Raises:
-        ValueError: If preset name is not found, or its file is malformed/invalid.
+        ValueError: If preset name is not found, its file is malformed/invalid,
+            or its providers break a load-time rule (see backend.providers).
     """
     if name != Path(name).name:
         # Rejects anything with a path separator or a ".."/"." component
@@ -353,6 +354,14 @@ def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
         raise ValueError(f"Unknown preset '{name}'. Available: {available}")
 
     preset = _load_preset_file(path)
+    from backend.providers import apply_provider_defaults, provider_config_error
+
+    problem = provider_config_error(preset)
+    if problem:
+        raise ValueError(f"Preset '{name}' is unavailable: {problem}")
+    # Fill each provider's defaults (key patterns, default key names, key-portal
+    # links) into model_kwargs once, so the services keep reading model_kwargs only.
+    apply_provider_defaults(preset)
     _preset_cache[cache_key] = preset
     return preset.model_copy(deep=True)
 
@@ -387,12 +396,18 @@ def list_presets(data_path: Optional[Path] = None, *, platform: Optional[str] = 
     if not presets_dir.is_dir():
         return []
 
+    from backend.providers import provider_config_error
+
     names = []
     for path in sorted(presets_dir.glob("*.json")):
         try:
             preset = _load_preset_file(path)
         except ValueError as exc:
             logger.warning("Skipping invalid preset file: %s", exc)
+            continue
+        problem = provider_config_error(preset)
+        if problem:
+            logger.warning("Skipping unavailable preset %s: %s", path.name, problem)
             continue
         if platform is not None and preset.platform not in ("any", platform):
             continue

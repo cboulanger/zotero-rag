@@ -61,6 +61,7 @@ class KisskiProvider(Provider):
     Options = KisskiOptions
     key_scopes = frozenset({"user"})
     default_scope = "user"
+    has_live_models = True
     #: Timeout of the model-list request (seconds); the list is best-effort.
     http_timeout = 5.0
 

@@ -29,7 +29,8 @@ from backend.services.secret_store import get_key_store
 from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header, reset_rate_limit_cache
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.utils.kisski import fetch_kisski_rag_models
+from backend.providers import Provider, ProviderConfigError, get_providers
+from backend.providers.types import ModelInfo
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -241,6 +242,42 @@ class RemoteFieldsResponse(BaseModel):
     is_set: Dict[str, bool]
 
 
+def _llm_provider(preset: HardwarePreset) -> Optional[Provider]:
+    """The LLM side's provider, or None when the preset's providers are invalid."""
+    try:
+        return get_providers(preset)["llm"]
+    except ProviderConfigError as exc:
+        logger.warning("Preset '%s' has an invalid provider configuration: %s", preset.name, exc)
+        return None
+
+
+def _live_llm_models(
+    request: Request, preset: HardwarePreset, *, require_key: bool
+) -> Optional[List[ModelInfo]]:
+    """Live model list from the LLM provider, or None when it has none.
+
+    The key is the one in the request header for the preset's personal-key
+    field, else the process environment. ``require_key=False`` still queries
+    without a key (the model-status route does, as it always has).
+    """
+    provider = _llm_provider(preset)
+    if provider is None or not provider.has_live_models:
+        return None
+    api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
+    base_url = preset.llm.model_kwargs.get("base_url", "")
+    if not base_url:
+        return None
+    header_name = env_var_to_header(api_key_env) if api_key_env else ""
+    api_key = (
+        (request.headers.get(header_name) if header_name else None)
+        or (os.environ.get(api_key_env) if api_key_env else None)
+        or ""
+    )
+    if require_key and not api_key:
+        return None
+    return provider.live_models(base_url, api_key)
+
+
 @router.get("/config", response_model=ConfigResponse)
 def get_config(request: Request):
     """
@@ -256,28 +293,13 @@ def get_config(request: Request):
     settings = get_settings()
     preset = settings.get_hardware_preset()
 
-    # Try to fetch a live, ordered model list for presets that support it
+    # Presets whose LLM provider has a live model endpoint (e.g. KISSKI) get a
+    # dynamically fetched, availability-ordered list; any failure falls back
+    # to the preset's static model list.
     llm_models = preset.llm.model_names
-    if preset.llm.models_status_url:
-        api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
-        base_url = preset.llm.model_kwargs.get("base_url", "")
-        if api_key_env and base_url:
-            header_name = env_var_to_header(api_key_env)
-            api_key = (
-                request.headers.get(header_name)
-                or os.environ.get(api_key_env)
-                or ""
-            )
-            if api_key:
-                try:
-                    live_models = fetch_kisski_rag_models(base_url, api_key)
-                    if live_models:
-                        llm_models = [m.id for m in live_models]
-                except Exception as exc:
-                    logger.warning(
-                        "Could not fetch live models from %s: %s — using preset fallback",
-                        base_url, exc,
-                    )
+    live_models = _live_llm_models(request, preset, require_key=True)
+    if live_models:
+        llm_models = [m.id for m in live_models]
 
     available = list_presets(settings.data_path, platform=current_platform())
     compatible = _compatible_presets(preset, settings.data_path, available)
@@ -647,29 +669,12 @@ def get_models_status(request: Request):
     settings = get_settings()
     preset = settings.get_hardware_preset()
 
-    if not preset.llm.models_status_url:
-        return ModelsStatusResponse(models=[])
-
-    api_key_env = preset.llm.model_kwargs.get("api_key_env", "")
-    base_url = preset.llm.model_kwargs.get("base_url", "")
-    if not base_url:
-        return ModelsStatusResponse(models=[])
-
-    header_name = env_var_to_header(api_key_env) if api_key_env else ""
-    api_key = (
-        (request.headers.get(header_name) if header_name else None)
-        or (os.environ.get(api_key_env) if api_key_env else None)
-        or ""
-    )
-
-    try:
-        live_models = fetch_kisski_rag_models(base_url, api_key)
-    except Exception as exc:
-        logger.warning("Could not fetch model status from %s: %s", preset.llm.models_status_url, exc)
+    live_models = _live_llm_models(request, preset, require_key=False)
+    if not live_models:
         return ModelsStatusResponse(models=[])
 
     return ModelsStatusResponse(models=[
-        ModelStatus(model=m.id, demand=m.demand, status=m.availability)
+        ModelStatus(model=m.id, demand=m.demand or 0, status=m.availability or "available")
         for m in live_models
     ])
 
