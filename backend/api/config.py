@@ -24,12 +24,11 @@ from backend.services import provisioning
 from backend.services.secret_store import (
     SecretsUnavailableError, is_secret_name, require_secrets_enabled,
 )
-from backend.utils.endpoint_health import HEALTH_CHECKS
 from backend.services.secret_store import get_key_store
 from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header, reset_rate_limit_cache
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.providers import Provider, ProviderConfigError, get_providers
+from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers
 from backend.providers.types import ModelInfo
 
 router = APIRouter()
@@ -118,8 +117,8 @@ def _preset_credentials(
     never values.
 
     - ``shared_base_url`` / ``shared_api_key``: admin-set remote config value
-      or server environment variable. Not required for a preset with a
-      ``provisioning_script``: provisioning supplies them after the switch.
+      or server environment variable. Not required for a side whose provider
+      can provision: provisioning supplies them after the switch.
     - ``api_key`` (personal): the requesting admin's header, a server env var,
       or at least one stored non-invalid auto-index embedding key with that
       name (what the auto-index job needs; it also satisfies an LLM-side
@@ -135,11 +134,17 @@ def _preset_credentials(
         stored_key_counts = _stored_embedding_key_counts(settings)
     missing: List[str] = []
 
-    def _check(fields: List[dict]) -> None:
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        providers = {}
+
+    def _check(fields: List[dict], side: str) -> None:
+        provisionable = side in providers and providers[side].supports_provisioning
         for field in fields:
             name = field["key_name"]
             if field["kind"] in ("shared_base_url", "shared_api_key"):
-                if preset.provisioning_script:
+                if provisionable:
                     continue
                 ok = bool(get_remote_config_value(name) or os.environ.get(name))
             else:
@@ -151,8 +156,8 @@ def _preset_credentials(
             if not ok and name not in missing:
                 missing.append(name)
 
-    _check(RemoteEmbeddingService.required_client_fields(preset.embedding))
-    _check(RemoteLLMService.required_client_fields_for_config(preset.llm))
+    _check(RemoteEmbeddingService.required_client_fields(preset.embedding), "embedding")
+    _check(RemoteLLMService.required_client_fields_for_config(preset.llm), "llm")
     return missing
 
 
@@ -198,7 +203,7 @@ class ConfigResponse(BaseModel):
     model_cache_dir: str
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
-    provisionable: bool = False  # active preset declares a provisioning_script
+    provisionable: bool = False  # at least one side's provider can provision
     switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials
     # RAG configuration
     default_top_k: int
@@ -240,6 +245,14 @@ class RemoteFieldsUpdateRequest(BaseModel):
 class RemoteFieldsResponse(BaseModel):
     """Presence map after an update — never echoes the values themselves."""
     is_set: Dict[str, bool]
+
+
+def _is_provisionable(preset: HardwarePreset) -> bool:
+    """True when at least one side's provider can create or wake endpoints."""
+    try:
+        return any(p.supports_provisioning for p in get_providers(preset).values())
+    except ProviderConfigError:
+        return False
 
 
 def _llm_provider(preset: HardwarePreset) -> Optional[Provider]:
@@ -315,7 +328,7 @@ def get_config(request: Request):
         model_cache_dir=str(settings.model_weights_path),
         available_presets=available,
         compatible_presets=compatible,
-        provisionable=bool(preset.provisioning_script),
+        provisionable=_is_provisionable(preset),
         switchable_presets=_switchable_presets(preset, compatible, settings, request),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
@@ -397,7 +410,7 @@ async def update_config(
 
 class EndpointHealth(BaseModel):
     """Readiness of one remote endpoint."""
-    status: str  # "ready" | "cold" | "throttled" | "unreachable" — see backend.utils.endpoint_health
+    status: str  # "ready" | "cold" | "throttled" | "paused" | "unreachable" — see backend.providers.types.Health
     detail: str
 
 
@@ -407,73 +420,84 @@ class EndpointHealthResponse(BaseModel):
     llm: Optional[EndpointHealth] = None
 
 
-def _check_side(provider: Optional[str], model_kwargs: dict) -> Optional[EndpointHealth]:
-    if not provider:
+def _check_side(preset: HardwarePreset, side: str) -> Optional[EndpointHealth]:
+    """Health of one side from its provider; None when the provider has no health concept.
+
+    The key and URL are the shared admin-set values for a side that declares
+    ``shared_*_env`` fields, else the preset's fixed ``base_url``.
+    """
+    try:
+        provider = get_providers(preset)[side]
+    except ProviderConfigError:
         return None
-    check = HEALTH_CHECKS.get(provider)
-    if check is None:
-        return EndpointHealth(status="unreachable", detail=f"Unknown health check provider: {provider}")
-    url_env = model_kwargs.get("shared_base_url_env")
-    key_env = model_kwargs.get("shared_api_key_env")
-    base_url = resolve_shared_value(url_env) if url_env else None
-    api_key = resolve_shared_value(key_env) if key_env else None
-    if not base_url or not api_key:
-        return EndpointHealth(status="unreachable", detail="not configured")
-    return EndpointHealth(**check(base_url, api_key))
+    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    url_env = kwargs.get("shared_base_url_env")
+    key_env = kwargs.get("shared_api_key_env")
+    creds = Credentials(
+        api_key=resolve_shared_value(key_env) if key_env else None,
+        base_url=resolve_shared_value(url_env) if url_env else kwargs.get("base_url"),
+    )
+    health = provider.health(creds)
+    if health is None:
+        return None
+    return EndpointHealth(status=health.status, detail=health.detail)
 
 
 @router.get("/config/health", response_model=EndpointHealthResponse)
 def get_endpoint_health() -> EndpointHealthResponse:
     """
     Readiness (ready / cold / throttled / unreachable) of the active
-    preset's remote embedding and LLM endpoints. A side whose config declares no
-    ``health_check_provider`` is ``null``. Plain ``def``: the provider checks
-    do blocking HTTP, so FastAPI runs this in a thread pool.
+    preset's remote embedding and LLM endpoints, as reported by each side's
+    provider. A side whose provider has no health concept is ``null``. Plain
+    ``def``: the provider checks do blocking HTTP, so FastAPI runs this in a
+    thread pool.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
     return EndpointHealthResponse(
-        embedding=_check_side(
-            preset.embedding.health_check_provider, preset.embedding.model_kwargs
-        ),
-        llm=_check_side(preset.llm.health_check_provider, preset.llm.model_kwargs),
+        embedding=_check_side(preset, "embedding"),
+        llm=_check_side(preset, "llm"),
     )
 
 
 class ProvisionRequest(BaseModel):
     """Optional body for POST /api/config/provision."""
-    api_key: Optional[str] = None  # one-time provisioning key; used for this run only, never stored
+    #: One-time credential values by key name (for example ``{"RUNPOD_API_KEY": "..."}``).
+    #: Used for this run only and never stored.
+    keys: Dict[str, str] = {}
+    #: Sides to run; default every side whose provider can provision.
+    sides: Optional[List[str]] = None
 
 
-def _provisioning_key(
-    preset: HardwarePreset, supplied: Optional[str]
-) -> Tuple[Optional[str], Dict[str, str]]:
-    """The key to hand the provisioning script, plus extra remote-config
-    values to store if the run succeeds.
+def _credential_env(kwargs: dict) -> Optional[str]:
+    """Name of the key a side authenticates with (shared admin-set key, else personal)."""
+    return kwargs.get("shared_api_key_env") or kwargs.get("api_key_env")
 
-    The key is the one supplied with the request (checked against the
-    preset's declared key format), else the preset's stored shared API key;
-    None lets the script fall back to its own environment. A supplied key
-    is kept as the preset's shared API key only when none is stored yet, so
-    a first-time setup works with a single key while an existing (possibly
-    endpoint-restricted) key is never replaced.
+
+def _side_credential(preset: HardwarePreset, side: str, supplied: Dict[str, str]) -> Tuple[Optional[str], Optional[str]]:
+    """The credential for provisioning one side, and the env name it belongs to.
+
+    The one-time value supplied with the request (checked against the side's
+    declared key format) wins over the stored shared key. A supplied value is
+    used for this run only.
 
     Raises:
-        HTTPException: 400 if ``supplied`` doesn't match the preset's
-            ``shared_api_key_pattern``.
+        HTTPException: 400 if the supplied value does not match the declared format.
     """
-    kwargs = {**preset.llm.model_kwargs, **preset.embedding.model_kwargs}
-    key_env = kwargs.get("shared_api_key_env")
-    stored = resolve_shared_value(key_env) if key_env else None
-    if not supplied:
-        return stored, {}
-    pattern = kwargs.get("shared_api_key_pattern")
-    if pattern and not re.fullmatch(pattern, supplied):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Provisioning key does not match the expected format (expected to match: {pattern})",
-        )
-    return supplied, ({key_env: supplied} if key_env and not stored else {})
+    kwargs = (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    env = _credential_env(kwargs)
+    if not env:
+        return None, None
+    value = supplied.get(env)
+    if value:
+        pattern = kwargs.get("shared_api_key_pattern") or kwargs.get("api_key_pattern")
+        if pattern and not re.fullmatch(pattern, value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"The key for {env} does not match the expected format (expected to match: {pattern})",
+            )
+        return value, env
+    return (resolve_shared_value(env) if kwargs.get("shared_api_key_env") else None), env
 
 
 @router.post("/config/provision", status_code=202)
@@ -482,44 +506,61 @@ async def start_provisioning(
     identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
 ):
     """
-    Run the active preset's ``provisioning_script`` as a background job
-    (admin only). On success the script's reported base URLs are applied via
-    the shared remote-config store. Poll GET /api/config/provision/status.
+    Provision (create or wake) the active preset's remote endpoints as a
+    background job (admin only). Each requested side's provider does the work;
+    whatever URL it reports is applied via the shared remote-config store as
+    soon as that side succeeds. Poll GET /api/config/provision/status.
 
     Provisioning (creating/updating endpoints) may need a broader key than
-    day-to-day inference, which can use one restricted to the endpoints.
-    ``api_key`` in the body is used for this run, and kept only if no
-    shared API key is stored yet; without it the stored key is used.
+    day-to-day inference, which can use one restricted to the endpoints. A key
+    in ``keys`` is used for this run only; without it the stored key is used.
+    ``sides`` runs only those sides (for example to retry a failed one).
 
     Raises:
-        HTTPException: 400 if the active preset has no provisioning_script
-            or ``api_key`` has the wrong format; 409 if a job is already
-            running.
+        HTTPException: 400 if no requested side can be provisioned, a side
+            has no key available, or a supplied key has the wrong format;
+            409 if a job is already running.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
-    if not preset.provisioning_script:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Preset '{preset.name}' does not declare a provisioning_script.",
-        )
-    api_key, keep_on_success = _provisioning_key(
-        preset, request.api_key if request else None
-    )
-    if any(is_secret_name(name) for name in keep_on_success):
-        try:
-            require_secrets_enabled()
-        except SecretsUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc))
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    body = request or ProvisionRequest()
+
+    if body.sides is None:
+        sides = [s for s in ("embedding", "llm") if providers[s].supports_provisioning]
+    else:
+        unknown = [s for s in body.sides if s not in providers]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown side(s): {', '.join(unknown)}")
+        sides = [s for s in ("embedding", "llm") if s in body.sides]
+        unsupported = [s for s in sides if not providers[s].supports_provisioning]
+        if unsupported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The {', '.join(unsupported)} side of preset '{preset.name}' cannot be provisioned.",
+            )
+    if not sides:
+        raise HTTPException(status_code=400, detail=f"Preset '{preset.name}' has no side that can be provisioned.")
+
+    jobs = []
+    for side in sides:
+        credential, env = _side_credential(preset, side, body.keys)
+        if not credential:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No API key is available for the {side} side"
+                       + (f" ({env}); set it under Service API Keys or enter one for this run." if env else "."),
+            )
+        ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
+        jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
+
     if provisioning.is_running():
         raise HTTPException(status_code=409, detail="A provisioning job is already running.")
-    provisioning.mark_running()
-    try:
-        proc = await provisioning.start_job(preset.provisioning_script, api_key)
-    except Exception as exc:
-        provisioning._finish("failed", f"Could not start provisioning script: {exc}")
-        return provisioning.get_job_state()
-    task = asyncio.create_task(provisioning.await_job(proc, keep_on_success))
+    provisioning.mark_running(sides)
+    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path))
     _provision_tasks.add(task)  # keep a strong reference until done
     task.add_done_callback(_provision_tasks.discard)
     return provisioning.get_job_state()
@@ -609,16 +650,21 @@ async def get_required_api_keys():
     reports whether a value is already available (from the shared store or
     an environment variable), without ever exposing the value itself.
 
-    A preset with a ``provisioning_script`` gets its base URLs from
-    POST /api/config/provision, so its `shared_base_url` entries are omitted.
+    A side whose provider can provision gets its base URL from
+    POST /api/config/provision, so its `shared_base_url` entry is omitted.
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        providers = {}
 
     seen: Dict[str, ApiKeyRequirement] = {}
 
-    def _merge(key_info: dict) -> None:
-        if preset.provisioning_script and key_info["kind"] == "shared_base_url":
+    def _merge(key_info: dict, side: str) -> None:
+        provisionable = side in providers and providers[side].supports_provisioning
+        if provisionable and key_info["kind"] == "shared_base_url":
             return
         key_name = key_info["key_name"]
         if key_name in seen:
@@ -634,9 +680,9 @@ async def get_required_api_keys():
         seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
-        _merge(key_info)
+        _merge(key_info, "embedding")
     for key_info in RemoteLLMService.required_client_fields(settings):
-        _merge(key_info)
+        _merge(key_info, "llm")
 
     return RequiredKeysResponse(keys=list(seen.values()))
 

@@ -370,10 +370,10 @@ class RunPodProvider(Provider):
         next request); ``throttled`` means RunPod has no capacity for the GPU
         type right now. Never raises: this is a display-only signal.
         """
-        match = _ENDPOINT_ID_RE.search(creds.base_url or "")
+        if not creds.base_url or not creds.api_key:
+            return Health(status="unreachable", detail="not configured")
+        match = _ENDPOINT_ID_RE.search(creds.base_url)
         if not match:
-            if not creds.base_url:
-                return Health(status="unreachable", detail="not configured")
             return Health(status="unreachable", detail=f"Not a RunPod endpoint URL: {creds.base_url!r}")
         endpoint_id = match.group(1)
         try:
