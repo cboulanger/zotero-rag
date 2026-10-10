@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from backend.providers import Provider, ProvisionContext, ProvisionError, Side
+from backend.services.endpoint_cache import endpoint_cache
 from backend.services.admin_settings_store import update_remote_config
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,8 @@ async def run_job(
                     values = await asyncio.to_thread(action, job, progress)
                 if values:
                     update_remote_config(values, data_path=data_path)
+                # The side's endpoint may be new or recreated: forget any cached lookup.
+                endpoint_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
                 _set_side(job.side, "succeeded")
             except Exception as exc:
                 logger.warning("Provisioning %s failed: %s", job.side, exc, exc_info=not isinstance(exc, ProvisionError))

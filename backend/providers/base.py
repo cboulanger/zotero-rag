@@ -48,6 +48,8 @@ class Provider:
     #: Used when the preset names none. ``user`` for anything that may cost money.
     default_scope: ClassVar[Scope] = "user"
     supports_provisioning: ClassVar[bool] = False
+    #: True when ``endpoint_url()`` finds the side's URL from the key (no ``base_url`` in the preset).
+    derives_endpoint_url: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False
     #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
     has_live_models: ClassVar[bool] = False

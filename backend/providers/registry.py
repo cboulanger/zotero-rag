@@ -114,6 +114,14 @@ def get_providers(preset) -> dict[Side, Provider]:
     return providers
 
 
+def get_provider_or_none(preset, side: Side) -> Optional[Provider]:
+    """The validated provider of one side, or None when the preset fails validation."""
+    try:
+        return get_providers(preset)[side]
+    except ProviderConfigError:
+        return None
+
+
 def get_provider(preset, side: Side) -> Provider:
     """The validated provider for one side of ``preset``."""
     return get_providers(preset)[side]

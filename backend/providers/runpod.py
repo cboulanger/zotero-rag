@@ -81,6 +81,7 @@ class RunPodProvider(Provider):
     default_scope = "user"
     supports_provisioning = True
     supports_suspend = True
+    derives_endpoint_url = True
     http_timeout = 30.0
 
     # -- naming -----------------------------------------------------------------
@@ -353,6 +354,19 @@ class RunPodProvider(Provider):
         progress(f"{self.side.capitalize()} endpoint ready: {base_url}")
         url_env = self.side_config.model_kwargs.get("shared_base_url_env")
         return {url_env: base_url} if url_env else {}
+
+    def endpoint_url(self, api_key: str) -> Optional[str]:
+        """OpenAI-compatible base URL of this side's endpoint in the key owner's account.
+
+        Looked up by name (``zotero-rag-<side>``). None when there is no such
+        endpoint, the key cannot list endpoints, or RunPod cannot be reached.
+        """
+        try:
+            endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        except Exception as exc:
+            logger.warning("Could not look up the RunPod %s endpoint: %s", self.side, exc)
+            return None
+        return endpoint_base_url(endpoint["id"]) if endpoint else None
 
     def suspend(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> None:
         """Pause the endpoint by setting ``workersMax`` to 0 (requests then get 409)."""

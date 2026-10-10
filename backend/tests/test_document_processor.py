@@ -2468,7 +2468,7 @@ class TestSubprocessIndexBatchFunction(unittest.TestCase):
             async def __aexit__(self, *exc_info):
                 return False
 
-        def fake_create_embedding_service(config, cache_dir=None, api_key=None, hf_token=None):
+        def fake_create_embedding_service(config, cache_dir=None, api_key=None, hf_token=None, **_):
             captured["api_key"] = api_key
             return MagicMock()
 

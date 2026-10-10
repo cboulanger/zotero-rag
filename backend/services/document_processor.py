@@ -180,6 +180,7 @@ def _subprocess_index_batch(
     import asyncio as _asyncio
 
     from backend.dependencies import make_vector_store
+    from backend.providers import get_provider_or_none
     from backend.services.embeddings import create_embedding_service
     from backend.zotero.web_api import ZoteroWebAPI
 
@@ -194,6 +195,8 @@ def _subprocess_index_batch(
             cache_dir=str(settings.model_weights_path),
             api_key=embedding_api_key,
             hf_token=settings.get_api_key("HF_TOKEN"),
+            data_path=settings.data_path,
+            provider=get_provider_or_none(preset, "embedding"),
         )
         vector_store = make_vector_store()
         web_api = ZoteroWebAPI(api_key=zotero_api_key)

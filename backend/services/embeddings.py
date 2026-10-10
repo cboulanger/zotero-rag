@@ -419,8 +419,12 @@ class RemoteEmbeddingService(EmbeddingService):
         config: EmbeddingConfig,
         api_key: Optional[str] = None,
         data_path: Optional[Path] = None,
+        provider: Optional[Any] = None,
     ):
         self.config = config
+        #: The side's provider; only used to find an endpoint it derives from the key.
+        self._provider = provider
+        self._resolved_base_url: Optional[str] = None
         self._api_key = api_key  # explicit override; falls back to env-var lookup
         # Resolves shared-field admin settings (base_url/API key) in _get_client().
         # Falls back to the global settings singleton when not provided, so
@@ -495,6 +499,65 @@ class RemoteEmbeddingService(EmbeddingService):
             })
         return fields
 
+    def _credential(self) -> str:
+        """The API key for this side (request key, admin-set shared key, or the keyless placeholder)."""
+        from backend.services.admin_settings_store import resolve_shared_value
+
+        shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
+        if shared_key_env:
+            api_key = self._api_key or resolve_shared_value(shared_key_env, self.data_path)
+            if not api_key:
+                raise EmbeddingConfigurationError(
+                    f"API key not configured. POST it to /api/config/remote-fields as "
+                    f'{{"values": {{"{shared_key_env}": ...}}}}.'
+                )
+            return api_key
+        api_key_env = self.config.model_kwargs.get("api_key_env")
+        if api_key_env:
+            if not self._api_key:
+                raise EmbeddingConfigurationError(
+                    f"No API key for {api_key_env}: enter it in the plugin's preferences "
+                    "(it is sent with each request, never read from the environment)."
+                )
+            return self._api_key
+        # No key declared: an OpenAI-compatible server that needs none.
+        return self._api_key or KEYLESS_API_KEY
+
+    def _derives_endpoint(self) -> bool:
+        """True when this side's URL is found from the key rather than set in the preset."""
+        kwargs = self.config.model_kwargs
+        return bool(
+            self._provider is not None
+            and getattr(self._provider, "derives_endpoint_url", False)
+            and not kwargs.get("base_url")
+            and not kwargs.get("shared_base_url_env")
+        )
+
+    def _forget_endpoint(self) -> None:
+        """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._resolved_base_url and self._provider is not None:
+            from backend.services.endpoint_cache import endpoint_cache
+
+            endpoint_cache.invalidate(self._provider.id, "embedding", self._api_key)
+            self._resolved_base_url = None
+            self._client = None
+
+    async def _ensure_endpoint(self) -> None:
+        """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
+            return
+        import asyncio
+
+        from backend.services.endpoint_cache import endpoint_cache
+
+        key = self._credential()
+        url = await asyncio.to_thread(endpoint_cache.resolve, self._provider, "embedding", key)
+        if not url:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "The embedding endpoint is not provisioned.")
+            )
+        self._resolved_base_url = url
+
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""
         if self._client is None:
@@ -506,33 +569,12 @@ class RemoteEmbeddingService(EmbeddingService):
                     "Install it with: uv add openai"
                 )
 
+            api_key = self._credential()
             shared_url_env = self.config.model_kwargs.get("shared_base_url_env")
-            shared_key_env = self.config.model_kwargs.get("shared_api_key_env")
-            if shared_url_env or shared_key_env:
-                from backend.services.admin_settings_store import resolve_shared_value
-
-            if shared_key_env:
-                api_key = self._api_key or resolve_shared_value(shared_key_env, self.data_path)
-                if not api_key:
-                    raise EmbeddingConfigurationError(
-                        f"API key not configured. POST it to /api/config/remote-fields as "
-                        f'{{"values": {{"{shared_key_env}": ...}}}}.'
-                    )
-            else:
-                api_key_env = self.config.model_kwargs.get("api_key_env")
-                if api_key_env:
-                    api_key = self._api_key
-                    if not api_key:
-                        raise EmbeddingConfigurationError(
-                            f"No API key for {api_key_env}: enter it in the plugin's preferences "
-                            "(it is sent with each request, never read from the environment)."
-                        )
-                else:
-                    # No key declared: an OpenAI-compatible server that needs none.
-                    api_key = self._api_key or KEYLESS_API_KEY
-
             self._fingerprint = key_fingerprint(api_key)
             if shared_url_env:
+                from backend.services.admin_settings_store import resolve_shared_value
+
                 base_url = resolve_shared_value(shared_url_env, self.data_path)
                 if not base_url:
                     raise EmbeddingConfigurationError(
@@ -542,7 +584,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 from backend.services.admin_settings_store import normalize_base_url
                 base_url = normalize_base_url(base_url)
             else:
-                base_url = self.config.model_kwargs.get("base_url")
+                base_url = self.config.model_kwargs.get("base_url") or self._resolved_base_url
 
             # Explicit, bounded timeout — without this the openai SDK's
             # default (600s read timeout) applies, so a cold/stuck serverless
@@ -568,6 +610,7 @@ class RemoteEmbeddingService(EmbeddingService):
 
     async def probe_rate_limits(self) -> dict[str, str] | None:
         """Embed a single short string to fetch fresh rate-limit headers from the API."""
+        await self._ensure_endpoint()
         client = self._get_client()
         model = self._resolve_model_name()
         try:
@@ -611,6 +654,7 @@ class RemoteEmbeddingService(EmbeddingService):
             RateLimitError,
         )
 
+        await self._ensure_endpoint()
         client = self._get_client()
         model = self._resolve_model_name()
         max_attempts = 8
@@ -790,6 +834,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 # block for — the caller should abort and point the admin at
                 # GET /api/config/health / the "Provision endpoints" button
                 # instead of silently retrying.
+                self._forget_endpoint()
                 raise EmbeddingEndpointUnavailableError(
                     unavailable_message("embedding", f"Could not connect to the embedding API: {exc}.")
                 ) from exc
@@ -937,6 +982,7 @@ def create_embedding_service(
     api_key: Optional[str] = None,
     hf_token: Optional[str] = None,
     data_path: Optional[Path] = None,
+    provider: Optional[Any] = None,
 ) -> EmbeddingService:
     """
     Factory: create the appropriate EmbeddingService for the given config.
@@ -944,17 +990,18 @@ def create_embedding_service(
     Args:
         config:    Embedding configuration (from a HardwarePreset).
         cache_dir: Model weights cache directory (local only).
-        api_key:   Unused — remote services read the key from the env var
-                   named in config.model_kwargs['api_key_env']. Kept for
-                   backwards-compatibility.
+        api_key:   The caller's API key (remote only). A shared key comes from
+                   the admin store; the environment is never consulted.
         hf_token:  HuggingFace token for gated models (local only).
         data_path: Resolves shared-field admin settings (remote only). When
                    omitted, RemoteEmbeddingService falls back to the global
                    settings singleton's data_path.
+        provider:  The side's provider (remote only); lets a provider that
+                   derives the endpoint from the key (RunPod) supply the URL.
     """
     if config.model_type == "local":
         return LocalEmbeddingService(config, cache_dir=cache_dir, hf_token=hf_token)
     elif config.model_type == "remote":
-        return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path)
+        return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path, provider=provider)
     else:
         raise ValueError(f"Invalid model_type: {config.model_type!r}")

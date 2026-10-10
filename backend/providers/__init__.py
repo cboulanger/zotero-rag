@@ -10,6 +10,7 @@ from backend.providers.registry import (
     apply_provider_defaults,
     discover_providers,
     get_provider,
+    get_provider_or_none,
     get_providers,
     provider_config_error,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "apply_provider_defaults",
     "discover_providers",
     "get_provider",
+    "get_provider_or_none",
     "get_providers",
     "provider_config_error",
 ]
