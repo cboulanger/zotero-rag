@@ -165,12 +165,29 @@ def _switchable_presets(
 def _selectable_presets(
     effective: HardwarePreset, compatible: List[str], settings, request: Request,
 ) -> List["SwitchablePreset"]:
-    """Presets this caller may choose: compatible with the default, credentials usable.
-    The caller's current (effective) preset is always listed."""
+    """Presets this caller may choose: everything compatible with the default.
+
+    Each entry says whether the caller has credentials for it (``credentials``) and, if
+    not, which key names are missing (``missing_keys``), so the plugin can ask for them
+    before choosing it. Only the caller's own request counts as a source of personal keys
+    (never other users' stored keys). The caller's current preset is always listed.
+    """
     names = list(compatible)
     if effective.name not in names:
         names.append(effective.name)
-    return _switchable_presets(effective, names, settings, request)
+    result: List[SwitchablePreset] = []
+    for name in names:
+        try:
+            preset = effective if name == effective.name else get_preset(name, settings.data_path)
+        except ValueError as exc:
+            logger.warning("Skipping preset %r while computing selectable_presets: %s", name, exc)
+            continue
+        missing = _preset_credentials(preset, settings, request, {})
+        result.append(SwitchablePreset(
+            name=name, active=name == effective.name, credentials="missing" if missing else "ok",
+            missing_keys=sorted(missing), description=preset.description,
+        ))
+    return result
 
 
 def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: HardwarePreset) -> Optional[str]:
@@ -182,10 +199,12 @@ def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: H
 
 
 class SwitchablePreset(BaseModel):
-    """A preset the admin may switch to at runtime."""
+    """A preset the admin may switch the default to, or a user may choose for themselves."""
     name: str
     active: bool
     credentials: str  # "ok" | "missing"
+    missing_keys: List[str] = []  # key names still needed (never values); only set for user choices
+    description: str = ""
 
 
 class ConfigResponse(BaseModel):
@@ -222,6 +241,7 @@ class ApiKeyRequirement(BaseModel):
     required_for: List[str]
     is_set: Optional[bool] = None  # only meaningful for shared_* kinds — never exposes the value itself
     pattern: Optional[str] = None  # optional regex the value must fullmatch — see required_client_fields
+    sides: List[str] = []  # which sides of the preset use this field ("embedding" and/or "llm")
 
 
 class RequiredKeysResponse(BaseModel):
@@ -396,7 +416,7 @@ def put_my_preset(update: MyPresetUpdate, request: Request) -> dict:
         chosen = get_preset(update.preset_name, settings.data_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    missing = _preset_credentials(chosen, settings, request, _stored_embedding_key_counts(settings))
+    missing = _preset_credentials(chosen, settings, request, {})
     if missing:
         raise HTTPException(
             status_code=400,
@@ -858,11 +878,13 @@ async def get_required_api_keys():
             seen[key_name].required_for = list(
                 set(seen[key_name].required_for) | set(key_info["required_for"])
             )
+            if side not in seen[key_name].sides:
+                seen[key_name].sides.append(side)
             return
         is_set = None
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
             is_set = bool(get_remote_config_value(key_name))
-        seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
+        seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set, sides=[side])
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
         _merge(key_info, "embedding")

@@ -717,7 +717,7 @@ class ZoteroRAGPlugin {
 
 	/**
 	 * Persist one shared, admin-controlled remote-config value (a preset's
-	 * `shared_base_url_env`/`shared_api_key_env` field, e.g. for the MPCDF
+	 * `shared_base_url_env`/`shared_api_key_env` field, e.g. for a short-lived shared
 	 * preset's rotating job endpoint/key) to the backend. Unlike a personal
 	 * API key, this is never stored in a local pref or sent as a per-request
 	 * header — it's global state shared by every caller and the cron
@@ -753,7 +753,7 @@ class ZoteroRAGPlugin {
 	 * `kind: "api_key"` fields are personal: each binds to
 	 * `extensions.zotero-rag.serviceApiKey.<key_name>` and is sent as a
 	 * per-request header (unchanged behavior). `kind: "shared_base_url"`/
-	 * `"shared_api_key"` fields are global, admin-set values (e.g. the MPCDF
+	 * `"shared_api_key"` fields are global, admin-set values (e.g. a short-lived
 	 * preset's rotating job endpoint/key) — they are never stored in a local
 	 * pref; on change they POST to `/api/config/remote-fields` via
 	 * `setSharedRemoteField` instead, and the input is cleared back to a
@@ -802,7 +802,7 @@ class ZoteroRAGPlugin {
 			input.placeholder = isShared
 				? (keyInfo.is_set ? 'Configured — enter a new value to replace it' : 'Not yet configured')
 				: 'Enter API key';
-			// Preset-declared format check (e.g. RunPod's base URL/key shape) — gives
+			// Preset-declared format check (e.g. a provider's base URL/key shape) — gives
 			// immediate feedback via the browser's native validation UI. The backend
 			// enforces the same pattern server-side regardless (POST /api/config/remote-fields),
 			// so this is a convenience, not the actual security/correctness boundary.

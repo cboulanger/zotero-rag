@@ -445,7 +445,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			}
 		});
 		refreshPresetState();
-		// A saved shared value (e.g. a new RunPod API key) can change endpoint
+		// A saved shared value (e.g. a new provider API key) can change endpoint
 		// health and which presets have credentials — re-check right away.
 		if (serviceKeysContainer) {
 			serviceKeysContainer.addEventListener('zotero-rag-shared-field-saved', () => {

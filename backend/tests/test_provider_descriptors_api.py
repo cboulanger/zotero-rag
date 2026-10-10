@@ -93,5 +93,19 @@ class DescriptorsApiTest(unittest.TestCase):
             self.assertFalse({k for k in keys if "secret" in k or "token" in k or k in ("api_key", "key", "value")}, name)
 
 
+class RequiredKeysSidesTest(DescriptorsApiTest):
+    def test_each_key_lists_the_sides_that_use_it(self):
+        self.settings.model_preset = "remote-kisski"
+        keys = self.client.get("/api/required-keys").json()["keys"]
+        (kisski,) = [k for k in keys if k["key_name"] == "KISSKI_API_KEY"]
+        self.assertEqual(sorted(kisski["sides"]), ["embedding", "llm"])  # one key serves both sides
+
+    def test_a_side_with_its_own_key_is_listed_separately(self):
+        self.settings.model_preset = "remote-mpcdf"
+        keys = {k["key_name"]: k["sides"] for k in self.client.get("/api/required-keys").json()["keys"]}
+        self.assertEqual(keys["MPCDF_EMBEDDING_API_KEY"], ["embedding"])
+        self.assertEqual(keys["MPCDF_LLM_API_KEY"], ["llm"])
+
+
 if __name__ == "__main__":
     unittest.main()
