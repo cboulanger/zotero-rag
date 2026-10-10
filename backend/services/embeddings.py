@@ -681,7 +681,19 @@ class RemoteEmbeddingService(EmbeddingService):
                 # succeeding immediately on retry, i.e. genuinely transient
                 # regardless of message phrasing.
                 if attempt == max_attempts - 1:
-                    raise
+                    # Still failing after every retry: this is the endpoint's
+                    # problem, not this request's — wrap it the same way
+                    # APIConnectionError/APIStatusError already are, so callers
+                    # that exempt EmbeddingEndpointUnavailableError from
+                    # per-attachment failure counts (e.g. CronIndexer's
+                    # pending-upload quarantine) treat it as systemic too,
+                    # instead of blaming whichever document happened to be
+                    # mid-request when the provider's gateway gave up.
+                    status_code = getattr(exc, "status_code", None)
+                    raise EmbeddingEndpointUnavailableError(
+                        f"Embedding API still failing after {max_attempts} attempts "
+                        f"(HTTP {status_code or '5xx'}): {_extract_error_detail(exc)}"
+                    ) from exc
                 retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(
                     f"Embedding service not ready (attempt {attempt + 1}/{max_attempts}). "
