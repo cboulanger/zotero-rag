@@ -457,6 +457,9 @@ class HuggingFaceProvider(Provider):
             return Health(status="unreachable", detail="not provisioned")
         state = self._state(endpoint)
         status = _STATE_HEALTH.get(state, "unreachable")
+        # A rollout (``updating``/``pending``) keeps serving from its ready replicas.
+        if status == "cold" and state != "scaledToZero" and ((endpoint.get("status") or {}).get("readyReplica") or 0) >= 1:
+            status = "ready"
         detail = (endpoint.get("status") or {}).get("message") or "" if status != "ready" else ""
         if status == "cold" and state == "scaledToZero":
             detail = "scaled to zero; wakes on the next request"

@@ -73,6 +73,11 @@ class TestHealth(unittest.TestCase):
         self.assertIn("out of memory", self.check("failed", "unreachable", message="out of memory").detail)
         self.assertIn("scaled to zero", self.check("scaledToZero", "cold").detail)
 
+    def test_a_rollout_with_a_ready_replica_is_ready_but_scale_to_zero_is_not(self):
+        self.check("updating", "ready", readyReplica=1)
+        self.check("pending", "cold", readyReplica=0)
+        self.check("scaledToZero", "cold", readyReplica=1)
+
     def test_absent_endpoint_is_not_provisioned(self):
         http = FakeHTTP()
         http.add("GET", EP, FakeResponse(404, {"error": "not found"}))

@@ -402,3 +402,25 @@ test('the Pause button of a section calls the onPause handler and is disabled wh
 	refs.embedding.pause.click();
 	assert.deepStrictEqual(calls, ['embedding']);
 });
+
+test('the pane keeps polling while an endpoint is cold and stops once it is ready', async () => {
+	const cold = { embedding: { status: 'cold', detail: 'starting' }, llm: { status: 'ready', detail: '' } };
+	const ready = { embedding: { status: 'ready', detail: '' }, llm: { status: 'ready', detail: '' } };
+	const seq = [cold, cold, ready];
+	let sleeps = 0;
+	const { refs, controller } = setup(
+		{ providers: bothRemote, health: () => seq.length > 1 ? seq.shift() : seq[0], jobs: [idle] },
+		{ sleep: async () => { sleeps += 1; } },
+	);
+	await controller.poll();
+	assert.strictEqual(sleeps, 2);
+	assert.match(refs.embedding.health.textContent, /ready/);
+});
+
+test('polling a cold endpoint is bounded', async () => {
+	const cold = { embedding: { status: 'cold', detail: '' }, llm: { status: 'ready', detail: '' } };
+	let sleeps = 0;
+	const { controller } = setup({ providers: bothRemote, health: cold, jobs: [idle] }, { sleep: async () => { sleeps += 1; } });
+	await controller.poll();
+	assert.strictEqual(sleeps, 120);
+});

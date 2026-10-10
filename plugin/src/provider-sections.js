@@ -300,6 +300,8 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	const S = ZoteroRAGProviderSections;
 	const sleep = deps.sleep || ((/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	const pollMs = deps.pollMs === undefined ? 5000 : deps.pollMs;
+	/** Re-checks of a cold endpoint after which polling stops (about 10 minutes at the default rate). */
+	const MAX_COLD_POLLS = 120;
 	/** @type {{providers: any, health: any, job: any}} */
 	const state = { providers: null, health: null, job: null };
 	let polling = false;
@@ -332,9 +334,15 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		if (polling) return;
 		polling = true;
 		try {
-			for (;;) {
+			// Keep polling while a job runs, and while an endpoint is still starting (cold),
+			// so the status turns to ready without reopening the pane. Bounded: a cold
+			// endpoint that never comes up must not poll forever.
+			for (let coldRounds = 0; ; ) {
 				await refresh();
-				if (!state.job || state.job.status !== 'running') break;
+				const running = !!state.job && state.job.status === 'running';
+				const cold = S.SIDES.some((side) => state.health && state.health[side] && state.health[side].status === 'cold');
+				if (!running && !(cold && coldRounds < MAX_COLD_POLLS)) break;
+				coldRounds = running ? 0 : coldRounds + 1;
 				await sleep(pollMs);
 			}
 		} finally {
