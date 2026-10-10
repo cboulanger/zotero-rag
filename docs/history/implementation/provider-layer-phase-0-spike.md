@@ -18,9 +18,9 @@ them were deleted, and the account was re-listed afterwards (the two existing en
 | Can an endpoint be created with `workersMax=0`? | **No.** `POST /v1/endpoints` with `workersMax:0` returns HTTP 500 with an empty body. Create with at least 1, then PATCH |
 | Restore | `PATCH {"workersMax":1}` returns 200 (not re-tested against a live request, to avoid starting a worker) |
 | RunPod: can an endpoint-restricted key list endpoints? | **Not tested.** Needs a restricted key from the user (see "Needs you") |
-| Hugging Face: can an endpoint be created? | **Not with this account.** `POST /v2/endpoint/cmboulanger` returns `403 {"error":"Forbidden: Payment method required for namespace: cmboulanger","code":"FORBIDDEN"}`; `whoami` shows `canPay: false`. The token itself is fine (fine-grained, includes `inference.endpoints.write`). The three organisations the account belongs to answer 403 on the endpoints API (the token is scoped to the user entity), and creating endpoints there would bill someone else, so nothing was created |
+| Hugging Face: can an endpoint be created? | **Yes, after a payment method was added** (first attempt: `403 Payment method required for namespace`, with `canPay: false`). Live runs below. The three organisations the account belongs to answer 403 on the endpoints API (the token is scoped to the user entity) and were not used |
 | Hugging Face: `huggingface_hub` versus plain REST | **Decision: plain `httpx` REST.** See "Hugging Face findings" |
-| Hugging Face: TEI batching and echoed model name, vLLM served model name, data-plane error of a paused endpoint, scale-to-zero minimum, "stuck in Initializing" | **Not tested.** Needs a running endpoint (blocked by the payment method) and `*.endpoints.huggingface.cloud` is not unblocked, so the data plane is unreachable from this session anyway |
+| Hugging Face: TEI batching and echoed model name, vLLM served model name, data-plane error of a paused endpoint, scale-to-zero minimum, "stuck in Initializing" | **All answered live**, see "Hugging Face live results". No endpoint got stuck in `initializing` in six deploys/resumes (a small sample) |
 | MPCDF `GET {base}/models` | **Not tested.** No job available, and `llm.mpcdf.mpg.de` is blocked by the session's network policy |
 
 ## Other facts recorded
@@ -87,6 +87,41 @@ Other idea noted, not pursued: the catalog lists cheap Sapphire Rapids CPU insta
 problem was slow CPU embedding on a no-AVX-512 host, so TEI on a CPU endpoint is worth measuring later
 as a very cheap embedding option.
 
+## Hugging Face live results (2026-10-10, ~US$0.3 total)
+
+Endpoints were created through the REST contract above (plain `httpx`), on `aws/eu-west-1`,
+type `public` (the data-plane hosts do not get the session's injected token, so an
+`authenticated` endpoint cannot be called from the session), and deleted by the scripts'
+`finally` blocks; the account was re-listed afterwards and holds only the two old paused endpoints.
+
+**Embeddings: TEI 1.8.3 on `nvidia-t4`, image `ghcr.io/huggingface/text-embeddings-inference:turing-1.8`,
+repository `intfloat/multilingual-e5-large-instruct`, image variant `{"tei": {...}}`**
+
+| Check | Result |
+|---|---|
+| Deploy time (create to `running`) | 157 s first time, 51 to 62 s afterwards (model cached) |
+| `/info` | `model_id: "/repository"`, `max_input_length: 512`, dtype float16, mean pooling |
+| `POST /v1/embeddings` | HTTP 200; the request `model` is **ignored**; the response `model` is `"/repository"`; 1024 dimensions; `usage.prompt_tokens`/`total_tokens` present; duplicate inputs give identical vectors and `index` preserves order |
+| **Client batch limit** | Default **32**: a batch of 33 gets HTTP 413 `{"message":"batch size 33 > maximum allowed batch size 32","code":413,"type":"Validation"}`. The image-variant field `maxClientBatchSize` was ignored. Setting **`model.env: {"MAX_CLIENT_BATCH_SIZE": "128"}`** works (`/info` then reports 128; 128 is accepted, 129 gets 413). The preset batch size is 64, so the provider must set this |
+| Throughput (800-character passages) | about 106 passages/s at batch 128, about 64/s at batch 32, versus about 0.65/s measured on the production CPU host |
+| `scaleToZeroTimeout` | Accepted range is **15 to 2880 minutes** (`400 ... must be between 15 and 2880 minutes`); the minimum idle tail is therefore 15 minutes (about US$0.125 on a T4, US$0.25 on an A10G, per wake) |
+| `POST /scale-to-zero` | State becomes `scaledToZero` at once, but the replica keeps serving for a short moment |
+| **Cold start** (request to a scaled-to-zero endpoint) | The first request is answered immediately (0.05 s) with **HTTP 503** `{"error":"503 Service Unavailable","code":"SERVICE_UNAVAILABLE"}`, no `Retry-After`; the state moves to `initializing`; requests keep getting 503 (they do not hang) and the first 200 came after about 42 s |
+| **Paused endpoint** | `POST /pause` gives state `paused` at once. A data-plane request is answered with **HTTP 400** `{"error":"Bad Request: The endpoint is paused, ask a maintainer to restart it","code":"BAD_REQUEST"}`, repeatedly, and the endpoint stays paused (requests do not wake it). `POST /resume` took 84 s to `running` |
+| Authenticated endpoint | A request with no token or a wrong token gets HTTP 401 `{"error":"401 Unauthorized","code":"UNAUTHORIZED"}` on every route including `/health`, and **does not wake** a scaled-to-zero endpoint |
+| Management API after PUT with a too-small timeout | Validation error as above; the endpoint stayed `running` and unchanged |
+
+**LLM: vLLM on `nvidia-a10g`, image `{"vLLM": {"url": "vllm/vllm-openai:latest", "port": 8000, "healthRoute": "/health"}}`,
+repository `Qwen/Qwen2.5-7B-Instruct`, no env or args**
+
+| Check | Result |
+|---|---|
+| Deploy time | 458 s (about 3.5 minutes waiting for hardware, then model download and load) |
+| `GET /v1/models` | one model whose `id` is the **repository id** `Qwen/Qwen2.5-7B-Instruct` (`root: "/repository"`, `max_model_len: 32768`) |
+| `POST /v1/chat/completions` | With `model` = the repo id: HTTP 200, response `model` equal to it. With `"/repository"` or any other name: **HTTP 404** `{"error":{"message":"The model \`X\` does not exist.","type":"NotFoundError",...}}`. So the preset's model name must be the repo id, as it already is |
+| Rate-limit headers | none sent; `usage` present in the body |
+| Latency | 0.2 to 0.9 s for short completions |
+
 ## Consequences for the design
 
 1. **RunPod keeps Pause** (`supports_suspend = True`), implemented as `PATCH workersMax=0`.
@@ -107,17 +142,27 @@ as a very cheap embedding option.
 6. **The spec's preset placeholders were wrong for the EU:** `nvidia-l4` does not exist in
    `eu-west-1`. The embedding side should use `nvidia-t4` and the 7B LLM side `nvidia-a10g`.
 
+7. **Hugging Face provider rules from the live runs:** set `MAX_CLIENT_BATCH_SIZE` in `model.env`
+   to at least the preset batch size; the TEI image tag depends on the GPU architecture
+   (`turing-1.8` for the T4; other architectures need their own tags, to be confirmed when added);
+   `classify_http_error()` maps **HTTP 400 whose body contains "endpoint is paused"** to `paused`
+   and HTTP 503 `SERVICE_UNAVAILABLE` to `cold`; a 401 never wakes an endpoint.
+8. **The paused response is a 400.** The embedding service treats a `BadRequestError` as a
+   per-item content problem, so the paused (and any provider-classified) error must be classified
+   **before** that branch, otherwise a paused endpoint would be read as a bad document.
+9. **Cold starts return 503 for about 40 to 60 s.** The existing retry loop treats 5xx as transient and
+   gives up after its last attempt with `EmbeddingEndpointUnavailableError`, which is the right
+   class (systemic, never counts toward the #70 quarantine); the hint should say the endpoint is
+   starting.
+
 ## Needs you (cannot be done from this environment)
 
 1. **Restricted-key listing.** Create a RunPod API key restricted to one endpoint, then run
    `curl -sS -H "Authorization: Bearer $RESTRICTED_KEY" https://rest.runpod.io/v1/endpoints`
    and report: HTTP status and whether the list contains that endpoint only, all endpoints,
    or nothing. This decides whether `endpoint_url()` can work for restricted keys.
-2. **Hugging Face live checks.** Add a payment method to the account (or provide a token for a
-   namespace that has one) and unblock `*.endpoints.huggingface.cloud`; then the remaining checks
-   (TEI batching and echoed model name, the model name a vLLM image serves, the data-plane error of
-   a paused endpoint, the scale-to-zero minimum, cold-start behaviour) take about ten minutes on a
-   US$0.50/h T4 and cost cents. A token restricted to `inference.endpoints.infer.write` would also
-   settle the lookup question.
+2. **Hugging Face restricted-token lookup.** A token limited to `inference.endpoints.infer.write`
+   (call only) cannot be made from this session. Whether such a token can still `GET` an endpoint by
+   name decides if `endpoint_url()` works for it.
 3. **MPCDF.** With a live job, `curl -H "Authorization: Bearer $KEY" "$BASE/models"` for a
    valid key, a wrong key, and after the job has expired.

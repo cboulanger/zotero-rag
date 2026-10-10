@@ -59,7 +59,7 @@ Not affected by this plan: `failed_attachments.py`, `pending_upload_cache.py`, `
 
 ---
 
-## Phase 0: Verification spike (no production code) - RunPod done; HF partly done (account has no payment method); MPCDF and restricted-key checks pending
+## Phase 0: Verification spike (no production code) - done for RunPod and Hugging Face; MPCDF and restricted-key checks pending
 
 **Purpose:** answer the two questions that can change the design, plus the cheap factual ones, before PR 1. Output is a short results note; nothing here ships.
 
@@ -74,12 +74,12 @@ Not affected by this plan: `failed_attachments.py`, `pending_upload_cache.py`, `
 
 ### Task 0.2: Hugging Face and MPCDF facts (as access allows)
 
-- [ ] **Step 1: HF.** With a token and billing enabled: create a TEI endpoint for `intfloat/multilingual-e5-large-instruct` on the smallest GPU and check `/v1/embeddings` batching, echoed model name and vector size 1024; create a vLLM endpoint and record the model name it serves; record `scale_to_zero_timeout` default and minimum; pause one endpoint and record the error a request gets; delete everything.
+- [x] **Step 1: HF.** (Done live.) With a token and billing enabled: create a TEI endpoint for `intfloat/multilingual-e5-large-instruct` on the smallest GPU and check `/v1/embeddings` batching, echoed model name and vector size 1024; create a vLLM endpoint and record the model name it serves; record `scale_to_zero_timeout` default and minimum; pause one endpoint and record the error a request gets; delete everything.
 - [x] **Step 2: Decide `huggingface_hub` versus plain `httpx` REST** (spec C2): plain REST, recorded in the results note.
 - [ ] **Step 3: MPCDF.** If a job is available, check an authenticated `GET {base}/models` (200 with a valid key, status for a bad key, status after expiry). If none is available, mark `MpcdfProvider.health()` as "unverified" and keep the implementation behind its unit tests only.
 - [ ] **Step 4: Commit** the results note (`docs: provider layer spike results`).
 
-**Status (2026-10-10):** Task 0.1 Steps 1, 2 and 4 are done; results are in `docs/history/implementation/provider-layer-phase-0-spike.md`. `workersMax=0` is accepted by a `PATCH` and blocks requests with HTTP 409 `ENDPOINT_PAUSED` (creation with 0 fails with HTTP 500), so RunPod keeps Pause and Phase 8 needs no fallback. Hugging Face (same day, after the HF hosts were unblocked and a token added): the management API works and the catalog and REST contract are recorded, plain `httpx` REST is chosen over `huggingface_hub`, and the preset instance names were corrected (`eu-west-1` has only T4 and A10G, not L4); creating endpoints returned 403 "Payment method required for namespace", so no endpoint was created. Still open and needing the user: Task 0.1 Step 3 (restricted-key listing, RunPod and HF), the HF live checks (add a payment method and unblock `*.endpoints.huggingface.cloud`), and MPCDF.
+**Status (2026-10-10):** done except MPCDF and the restricted-key lookups. Results are in `docs/history/implementation/provider-layer-phase-0-spike.md`. RunPod: `workersMax=0` is accepted by a `PATCH` and blocks requests with HTTP 409 `ENDPOINT_PAUSED` (creation with 0 fails with HTTP 500). Hugging Face (live, after a payment method and the endpoint hosts were enabled): plain `httpx` REST chosen over `huggingface_hub`; TEI needs `MAX_CLIENT_BATCH_SIZE` set (default batch limit 32); a paused endpoint answers HTTP 400 "endpoint is paused", a cold one HTTP 503; the scale-to-zero minimum is 15 minutes; vLLM serves the repository id; `eu-west-1` has only T4 and A10G GPUs. Still needing the user: restricted-token lookup (RunPod and HF) and MPCDF.
 
 **Exit criteria:** every spec "To verify in a spike" item has an answer; Phase 7 and 8 scope is adjusted accordingly. The restricted-key answer gates Task 3.3's lookup-failure behaviour; the remaining HF answers (TEI batching and echoed model name, vLLM served model name, data-plane error of a paused endpoint, scale-to-zero minimum) gate Task 7.1 only and can be collected during Phase 7, once the account has a payment method and the endpoint host is reachable.
 

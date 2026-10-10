@@ -1108,8 +1108,19 @@ instance and owns one endpoint.
   map to `cold`; `paused` maps to `paused`; `failed`, `updateFailed` or an API error
   maps to `unreachable`; an absent endpoint is `unreachable` with "not
   provisioned". No data-plane probe is needed, unlike RunPod.
-- **`classify_http_error()`:** treats the 502 observed during scale-from-zero as
-  `cold`, and the error a paused endpoint returns (to be confirmed) as `paused`.
+- **`classify_http_error()`:** (verified live) HTTP 400 with a body containing
+  "endpoint is paused" is `paused`; HTTP 503 with code `SERVICE_UNAVAILABLE` is `cold`
+  (a scaled-to-zero or starting endpoint answers 503 at once for about 40 to 60 s); a
+  401 means a missing or wrong token and does not wake the endpoint. Because the paused
+  answer is a 400, it must be classified before the embedding service's per-item
+  `BadRequestError` handling.
+- **TEI batch size:** TEI rejects client batches above 32 (HTTP 413) by default, so
+  the provider sets `model.env.MAX_CLIENT_BATCH_SIZE` to at least the preset batch
+  size (the image-variant field `maxClientBatchSize` is ignored). The TEI image tag
+  depends on the GPU architecture (`turing-1.8` for the T4).
+- **Model names:** TEI ignores the request's `model` and answers `"/repository"`;
+  vLLM serves the repository id and answers 404 for any other name, so the preset's
+  model name must be the repository id (as it is).
 - **`suspend()`:** `supports_suspend = True`; calls `.pause()` on the endpoint.
   Idempotent. `provision()` resumes a paused endpoint, so Resume needs no extra code.
 - **`teardown()`:** deletes the endpoint; an absent endpoint is a no-op. CLI only.
@@ -1203,9 +1214,8 @@ presets, and one-time provisioning keys that are never saved).
 
 ### To verify in a spike before the implementation plan
 
-- Pause (A8): does a paused HF endpoint answer requests with a distinguishable
-  error? (RunPod's side is verified: `workersMax=0` is accepted by a `PATCH` and
-  requests get HTTP 409 `ENDPOINT_PAUSED`; see
+- (Pause is verified for both providers: RunPod `workersMax=0` gives HTTP 409
+  `ENDPOINT_PAUSED`, HF `pause` gives HTTP 400 "endpoint is paused"; see
   `docs/history/implementation/provider-layer-phase-0-spike.md`.)
 - Per-user endpoint lookup (A10): can an endpoint-restricted RunPod key list
   endpoints? If not, `endpoint_url()` fails for such keys and the key needs list
@@ -1213,15 +1223,10 @@ presets, and one-time provisioning keys that are never saved).
 
 ### To check during implementation
 
-- Does TEI's `/v1/embeddings` accept batched input and echo the model name the way
-  `RemoteEmbeddingService` expects?
-- What served model name does vLLM on HF Endpoints report (the container loads from
-  `/repository`)? The provider may need to supply the on-the-wire model name
-  separately from the preset's `model_names`.
-- The minimum `scaleToZeroTimeout` HF accepts and whether the idle tail equals it
-  (the API default is no scale to zero), and whether the reported "stuck in
-  Initializing after wake-up" issue needs a resume-and-recheck loop in
-  `provision()`.
+- (Answered by the spike: the minimum `scaleToZeroTimeout` is 15 minutes, TEI batches
+  above 32 need `MAX_CLIENT_BATCH_SIZE`, a paused endpoint answers 400, a cold one 503.)
+  A resume-and-recheck loop for the reported "stuck in Initializing" issue is probably
+  unnecessary: none of six deploys and resumes stuck, though that is a small sample.
 - Whether GDPR hosting should be the default (`eu-west-1` is available but offers
   only T4 and A10G), and whether the CPU instances (Sapphire Rapids, from $0.033/h)
   are worth measuring for embeddings.
