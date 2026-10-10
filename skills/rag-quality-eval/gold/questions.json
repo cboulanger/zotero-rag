@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "created": "2026-10-10",
+  "library": {
+    "slug": "groups/6297749",
+    "library_id": "6297749",
+    "name": "test-rag-plugin",
+    "url": "https://www.zotero.org/groups/6297749/test-rag-plugin"
+  },
+  "provenance": "Gold facts were taken from the PDF full text of the cited items (Zotero public full-text endpoint, i.e. the text extracted from the attached PDFs). Re-verify after any library change with: uv run python skills/rag-quality-eval/scripts/fetch_gold_corpus.py verify",
+  "schema": {
+    "fact": "{id, text, level (verbatim: literal figures/names; semantic: same meaning in other words/units/language; inference: must be derived by combining sources), weight (default 1), all_of (default false: any pattern matches), answer_patterns: regexes (case-insensitive) matched against the ANSWER - the automatic floor; empty = judge-only (inference facts), source_patterns: regexes matched against the source full text (default = answer_patterns), docs: document ids that contain the fact}",
+    "length": "{min_words, max_words} acceptable answer length for this question",
+    "min_sources": "minimum number of distinct sources the pipeline should return",
+    "min_distinct_cited": "minimum number of distinct [SN] sources the answer should cite",
+    "inference": "question-level description of the reasoning chain a correct answer needs; given to the judge (required for hard questions)"
+  },
+  "documents": {
+    "fulbright2024": {"citation": "Fulbright & Evans 2024, Finding full texts in bulk (EndNote 20 vs Zotero 6)", "title": "Finding full texts in bulk: a comparison of EndNote 20 versus Zotero 6 using the University of York's subscriptions", "item_keys": ["AM4H275E"], "attachment_keys": ["M27PMN5P"]},
+    "lorenzetti2013": {"citation": "Lorenzetti & Ghali 2013, Reference management software for systematic reviews (two library items hold the same article)", "title": "Reference management software for systematic reviews and meta-analyses: an exploration of usage and usability", "item_keys": ["6MC3G9EV", "GQMHNT7V"], "attachment_keys": ["H54LNVM3", "FYTSDGVU"]},
+    "li2012": {"citation": "Li, Thelwall & Giustini 2012, Validating online reference managers", "title": "Validating online reference managers for scholarly impact measurement", "item_keys": ["SQ5QZ5RK"], "attachment_keys": ["N8W4NCTK"]},
+    "basak2014": {"citation": "Basak 2014, Comparative analysis of Zotero and Mendeley", "title": "A Comparative Analysis Of Zotero And Mendeley Reference Management Software", "item_keys": ["K3KG6F2T"], "attachment_keys": ["9K252TW2"]},
+    "cai2021": {"citation": "Cai et al. 2021, What makes a good reference manager?", "title": "What Makes A Good Reference Manager? A Quantitative Analysis of Bibliography Management Applications", "item_keys": ["EL46CLRU"], "attachment_keys": ["XVVR5TDU"]},
+    "jin2026": {"citation": "Jin et al. 2026, Comparison of reference management software with new AI-based tools", "title": "Comparison of reference management software with new artificial intelligence-based tools", "item_keys": ["AL6IFPTM"], "attachment_keys": ["T6UG3UY4"]},
+    "sarkar2025": {"citation": "Sarkar 2025, Performance of reference management software", "title": "Performance of Reference Management Software: A comparative study between EndNote, Mendeley and Zotero", "item_keys": ["4V5FUTQH"], "attachment_keys": ["TAGHHDJI"]},
+    "chen2018": {"citation": "Chen et al. 2018, Social reference managers and their users", "title": "Social reference managers and their users: A survey of demographics and ideologies", "item_keys": ["UQQVBAU8"], "attachment_keys": ["R52EMYZC"]},
+    "pyzobot2025": {"citation": "Alshammari et al. 2025, PyZoBot (two library items hold the same preprint)", "title": "PyZoBot: A Platform for Conversational Information Extraction and Synthesis from Curated Zotero Reference Libraries through Advanced Retrieval-Augmented Generation", "item_keys": ["A343ZWWB", "TA7JLC2B"], "attachment_keys": ["7H3PU8PK", "TXG5F58J"]},
+    "hysemrag2025": {"citation": "Godinez 2025, HySemRAG", "title": "HySemRAG: A Hybrid Semantic Retrieval-Augmented Generation Framework for Automated Literature Synthesis and Methodological Gap Analysis", "item_keys": ["E6ZZZE85"], "attachment_keys": ["XLBAJGTR"]}
+  },
+  "questions": [
+    {
+      "id": "Q01",
+      "difficulty": 1,
+      "tier": "easy",
+      "language": "en",
+      "type": "verbatim, single document (abstract)",
+      "question": "In the comparison of EndNote 20 and Zotero 6 using the University of York's subscriptions, what percentage of the available full texts did each program retrieve, and which program was faster?",
+      "documents": ["fulbright2024"],
+      "minimum_answer": "EndNote retrieved 47% and Zotero 52% of the available full texts; Zotero was faster (by 2 minutes 15 seconds on average).",
+      "facts": [
+        {"id": "endnote_47", "text": "EndNote retrieved 47% of available full texts", "answer_patterns": ["47\\s?%"], "docs": ["fulbright2024"], "level": "verbatim"},
+        {"id": "zotero_52", "text": "Zotero retrieved 52% of available full texts", "answer_patterns": ["52\\s?%"], "docs": ["fulbright2024"], "level": "verbatim"},
+        {"id": "zotero_faster", "text": "Zotero was faster (2 min 15 s)", "answer_patterns": ["2\\s?(minutes?|min)[^.]{0,12}15", "Zotero[^.]{0,80}(faster|quicker)", "(faster|quicker)[^.]{0,80}Zotero"], "source_patterns": ["Zotero was faster by 2 minutes 15 seconds"], "docs": ["fulbright2024"], "level": "verbatim"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 25, "max_words": 200},
+      "judge_notes": "47% belongs to EndNote and 52% to Zotero - a swapped attribution is a factual error even though both numbers appear."
+    },
+    {
+      "id": "Q02",
+      "difficulty": 2,
+      "tier": "easy",
+      "language": "en",
+      "type": "verbatim, single document (results section)",
+      "question": "Which reference management programs did the surveyed authors of systematic reviews use most often, and what response rate did the survey achieve?",
+      "documents": ["lorenzetti2013"],
+      "minimum_answer": "EndNote (n=41, 52.6%) was used most, followed by Reference Manager (14) and RefWorks (6); survey response rate 70.27% (78 of 111).",
+      "facts": [
+        {"id": "endnote_top", "text": "EndNote was used most often (n=41)", "answer_patterns": ["\\b41\\b", "52[.,]6\\s?%"], "source_patterns": ["EndNote \\(n = 41\\)", "52\\.6%"], "docs": ["lorenzetti2013"], "level": "verbatim"},
+        {"id": "refmanager_refworks", "text": "followed by Reference Manager (14) and RefWorks (6)", "answer_patterns": ["Reference Manager[^.]{0,40}\\b14\\b", "RefWorks[^.]{0,40}\\b6\\b"], "source_patterns": ["Reference Manager \\(n = 14\\)", "RefWorks \\(n = 6\\)"], "docs": ["lorenzetti2013"], "level": "verbatim"},
+        {"id": "response_rate", "text": "response rate 70.27% (78 of 111)", "answer_patterns": ["70[.,]27", "\\b70\\s?%", "78\\s*(of|/|von|sur|de)\\s*111"], "source_patterns": ["70\\.27%", "78 surveys were returned"], "docs": ["lorenzetti2013"], "level": "verbatim"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 25, "max_words": 200},
+      "judge_notes": "Acceptable if EndNote is named as most used and the response rate is about 70%."
+    },
+    {
+      "id": "Q03",
+      "difficulty": 3,
+      "tier": "easy",
+      "language": "fr",
+      "type": "verbatim facts, French question over an English document (cross-lingual)",
+      "question": "Combien d'articles ont servi à tester si le nombre d'utilisateurs de Mendeley et de CiteULike est corrélé aux citations, et de quelles revues et de quelle année provenaient-ils ?",
+      "documents": ["li2012"],
+      "minimum_answer": "1 613 articles, publiés dans Nature et Science en 2007 (793 Nature, 820 Science). Answer must be in French.",
+      "facts": [
+        {"id": "n_papers", "text": "1,613 papers", "answer_patterns": ["1[.,\\s\\u202f\\u00a0]?613"], "source_patterns": ["1,613 papers"], "docs": ["li2012"], "level": "verbatim"},
+        {"id": "journals", "text": "Nature and Science", "all_of": true, "answer_patterns": ["Nature", "Science"], "docs": ["li2012"], "level": "verbatim"},
+        {"id": "year", "text": "published in 2007", "answer_patterns": ["2007"], "docs": ["li2012"], "level": "verbatim"},
+        {"id": "split", "text": "793 Nature and 820 Science articles", "weight": 0.5, "answer_patterns": ["793", "820"], "all_of": true, "docs": ["li2012"], "level": "verbatim"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 25, "max_words": 220},
+      "judge_notes": "The question is French; the answer must be French and must still be found in an English paper."
+    },
+    {
+      "id": "Q04",
+      "difficulty": 4,
+      "tier": "medium",
+      "language": "en",
+      "type": "single document, facts only in a table/results text",
+      "question": "When Zotero and Mendeley were each used to import the same Google Scholar record, which bibliographic fields did only Mendeley import?",
+      "documents": ["basak2014"],
+      "minimum_answer": "Mendeley additionally imported the URL and the DOI; both programs imported author, title, year, journal name, volume, issue and pages; neither imported publisher or ISSN.",
+      "facts": [
+        {"id": "url", "text": "URL imported only by Mendeley", "answer_patterns": ["\\bURL\\b"], "source_patterns": ["URL 0 1"], "docs": ["basak2014"], "level": "verbatim"},
+        {"id": "doi", "text": "DOI imported only by Mendeley", "answer_patterns": ["\\bDOI\\b"], "source_patterns": ["DOI 0 1"], "docs": ["basak2014"], "level": "verbatim"},
+        {"id": "neither", "text": "publisher and ISSN were imported by neither", "weight": 0.5, "answer_patterns": ["ISSN", "publisher"], "all_of": true, "docs": ["basak2014"], "level": "semantic"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 25, "max_words": 220},
+      "judge_notes": "Fail if URL/DOI are attributed to Zotero. Basak has a second library item (RefWorks/Mendeley/EndNote comparison); citing it for this fact is wrong."
+    },
+    {
+      "id": "Q05",
+      "difficulty": 5,
+      "tier": "medium",
+      "language": "en",
+      "type": "single document, numeric table + interpretation",
+      "question": "In the user study of four reference managers, which one demanded the least physical effort, which the most, why was the most demanding one so demanding, and did participants' favourite tool change after the study?",
+      "documents": ["cai2021"],
+      "minimum_answer": "Zotero needed least mouse distance and time (RefWorks the fewest clicks); EndNote needed the most because it does not automatically extract metadata from PDFs; 58% of participants changed their favourite (Zotero 12% -> 34%, RefWorks 0 -> 50%).",
+      "facts": [
+        {"id": "zotero_least", "text": "Zotero required the least effort (mouse distance/time)", "answer_patterns": ["Zotero[^.]{0,140}(least|lowest|fewest|shortest|less|best)", "(least|lowest|fewest|shortest)[^.]{0,140}Zotero"], "source_patterns": ["Zotero required substantially less mouse distance"], "docs": ["cai2021"], "level": "semantic"},
+        {"id": "endnote_most", "text": "EndNote required the most effort", "answer_patterns": ["EndNote[^.]{0,140}(most|highest|greatest|longest)", "(most|highest|greatest)[^.]{0,140}EndNote"], "source_patterns": ["EndNote required the most actions and time"], "docs": ["cai2021"], "level": "semantic"},
+        {"id": "reason_no_extraction", "text": "EndNote does not automatically extract information from PDFs", "answer_patterns": ["(not|no|n't|without|lacks?|kein|keine|pas|sin)[^.]{0,80}(extract|extra[ií]|extrah|automati)"], "source_patterns": ["does not automatically extract information from uploaded PDFs"], "docs": ["cai2021"], "level": "semantic"},
+        {"id": "preference_shift", "text": "58% changed their favourite; Zotero 12% -> 34%, RefWorks 0 -> 50%", "answer_patterns": ["58\\s?%", "34\\s?%", "50\\s?%"], "source_patterns": ["58%", "Zotero 12% 34%|Zotero\\s+12%\\s+34%", "RefWorks 0 50%"], "docs": ["cai2021"], "level": "verbatim"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 60, "max_words": 300},
+      "judge_notes": "All four parts of the question must be answered; RefWorks (fewest clicks) is a bonus. Check the favourite-tool change is described as moving toward Zotero and RefWorks."
+    },
+    {
+      "id": "Q06",
+      "difficulty": 6,
+      "tier": "medium",
+      "language": "de",
+      "type": "multi-document aggregation, German question over English documents",
+      "question": "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?",
+      "documents": ["jin2026", "fulbright2024", "sarkar2025"],
+      "minimum_answer": "Zotero: 300 MB kostenlos (Jin et al., Fulbright & Evans); Mendeley: 2 GB kostenlos (Jin et al., Sarkar). Answer must be in German and cite at least two different sources.",
+      "facts": [
+        {"id": "zotero_300mb", "text": "Zotero: 300 MB free cloud storage", "answer_patterns": ["300\\s?MB"], "source_patterns": ["300 MB"], "docs": ["jin2026", "fulbright2024"], "level": "verbatim"},
+        {"id": "mendeley_2gb", "text": "Mendeley: 2 GB free storage", "answer_patterns": ["\\b2\\s?GB"], "source_patterns": ["2 GB"], "docs": ["jin2026", "sarkar2025"], "level": "verbatim"}
+      ],
+      "min_sources": 2,
+      "min_distinct_cited": 2,
+      "length": {"min_words": 30, "max_words": 250},
+      "judge_notes": "300 MB belongs to Zotero and 2 GB to Mendeley (a swap is a fail). The answer should name at least two different documents; EndNote's paid model may be mentioned but is not required."
+    },
+    {
+      "id": "Q07",
+      "difficulty": 7,
+      "tier": "medium",
+      "language": "es",
+      "type": "paraphrased (no keyword overlap), single document, Spanish question",
+      "question": "¿Suelen los autores de revisiones sistemáticas indicar en sus artículos qué programa de gestión bibliográfica utilizaron? Compáralo con lo que ocurre con el software estadístico y explica la posible razón.",
+      "documents": ["lorenzetti2013"],
+      "minimum_answer": "Most (79.5%) used a reference manager but only 4.8% reported it, versus 76.9% reporting their statistical software; likely cause: guidelines (ICMJE, PRISMA) do not ask for it. Answer must be in Spanish.",
+      "facts": [
+        {"id": "used_79_5", "text": "79.5% had used reference management software", "answer_patterns": ["79[.,]5\\s?%", "62\\s*(de|/|of)\\s*78"], "source_patterns": ["79\\.5%"], "docs": ["lorenzetti2013"], "level": "verbatim"},
+        {"id": "reported_4_8", "text": "only 4.8% reported it in the published review", "answer_patterns": ["4[.,]8\\s?%", "\\b3\\s*(de|/|of)\\s*78"], "source_patterns": ["4\\.8%"], "docs": ["lorenzetti2013"], "level": "verbatim"},
+        {"id": "stats_76_9", "text": "76.9% reported their statistical software", "answer_patterns": ["76[.,]9\\s?%", "\\b60\\s*(de|/|of)\\s*78"], "source_patterns": ["76\\.9%"], "docs": ["lorenzetti2013"], "level": "verbatim"},
+        {"id": "reason_guidelines", "text": "reporting guidelines (ICMJE, PRISMA) do not mention reference software", "answer_patterns": ["ICMJE", "PRISMA", "directrices", "gu[ií]as", "normas", "recomendaciones"], "source_patterns": ["ICMJE|International Committee of Medical Journal Editors", "PRISMA"], "docs": ["lorenzetti2013"], "level": "semantic"}
+      ],
+      "min_sources": 1,
+      "min_distinct_cited": 1,
+      "length": {"min_words": 60, "max_words": 300},
+      "judge_notes": "The question avoids the words 'reference management software usage' / 'underreporting'; retrieval must work semantically. Credit the reason only if tied to missing reporting guidance, not to a speculation unsupported by the source.",
+      "inference": "Not stated as a fact: the authors only speculate that the discrepancy 'may be the result of an absence of guidelines'. A good answer presents this as the paper's tentative explanation (not as proven) and links it to ICMJE asking for statistical but not reference software, and PRISMA not requiring either."
+    },
+    {
+      "id": "Q08",
+      "difficulty": 8,
+      "tier": "hard",
+      "language": "en",
+      "type": "multi-document synthesis with conflicting evidence",
+      "question": "Do the sources in the library agree on how well Zotero handles importing PDFs and extracting their bibliographic metadata? Contrast what the different studies report.",
+      "documents": ["cai2021", "jin2026", "basak2014"],
+      "minimum_answer": "Disagreement: Cai et al. found Zotero good at importing/indexing PDFs with accurate entries (and Mendeley failing to extract accurately), whereas Jin et al. state Zotero's PDF import requires manual metadata updates and its imports can be incomplete or inconsistent. Must attribute each view to its source and cite at least two documents.",
+      "facts": [
+        {"id": "cai_positive", "text": "Cai et al.: Zotero is good at importing/indexing PDFs with accurate entries", "answer_patterns": ["Cai", "Asian CHI", "user study", "keystroke", "NASA"], "source_patterns": ["better at importing and indexing PDF inputs"], "docs": ["cai2021"], "level": "semantic"},
+        {"id": "jin_negative", "text": "Jin et al.: Zotero PDF import requires manual metadata updates / imports can be incomplete", "answer_patterns": ["manual(ly)?[^.]{0,40}(metadata|updat|correct)", "incomplete", "inconsistent", "Jin"], "source_patterns": ["PDF import requires manual metadata updates", "incomplete or inconsistent"], "docs": ["jin2026"], "level": "semantic"},
+        {"id": "mendeley_fails", "text": "Mendeley often failed to extract accurate information from PDFs", "answer_patterns": ["Mendeley[^.]{0,160}(fail|inaccura|incorrect|manual|errors?)"], "source_patterns": ["Mendeley constantly failed to extract accurate information"], "docs": ["cai2021"], "level": "semantic"},
+        {"id": "contrast_explicit", "text": "the answer explicitly says the sources point in different directions (inference: no source states the disagreement)", "weight": 0.5, "answer_patterns": ["however", "whereas", "in contrast", "by contrast", "disagree", "conflict", "differ", "while "], "docs": [], "level": "inference"}
+      ],
+      "min_sources": 2,
+      "min_distinct_cited": 2,
+      "length": {"min_words": 100, "max_words": 450},
+      "judge_notes": "Good answers state that the sources are not in full agreement, attribute each position to the right paper, and do not claim a consensus. Basak is only relevant for what Zotero imports from Google Scholar (it lacks DOI/URL), not for PDFs. Penalise an answer that merges the two views into one unattributed claim.",
+      "inference": "No source says the papers disagree. The answer must notice that Cai et al. (Zotero 'better at importing and indexing PDF inputs', accurate entries) and Jin et al. (Table 1: 'PDF import requires manual metadata updates'; metadata imports 'incomplete or inconsistent') point in opposite directions, attribute each view correctly, and may add the explanation that the studies differ in method (timed user study vs descriptive review) and date. Merging them into one consensus claim is wrong."
+    },
+    {
+      "id": "Q09",
+      "difficulty": 9,
+      "tier": "hard",
+      "language": "en",
+      "type": "multi-document reasoning, conceptual question with no verbatim phrase",
+      "question": "Why can Mendeley, but not Zotero, serve as a data source for readership-based indicators of scholarly impact, and what did validating such indicators against citation counts show?",
+      "documents": ["li2012", "chen2018"],
+      "minimum_answer": "Li et al.: RefWorks, EndNote and Zotero do not provide user-count data, so they cannot be used for research evaluation; Mendeley does, covers more articles than CiteULike, and its user counts correlate significantly with Web of Science citations (Spearman 0.559 Nature, 0.540 Science: 'high'). Chen et al.: Zotero never required registration and has no API to download data (so its users cannot be counted), while Mendeley's API exposes users' disciplines and academic status.",
+      "facts": [
+        {"id": "zotero_no_usercounts", "text": "Zotero/EndNote/RefWorks do not provide user-count data", "answer_patterns": ["(do(es)? not|don't|doesn't|no|cannot|can't|lack|without)[^.]{0,100}(user count|provide|API|data)"], "source_patterns": ["RefWorks, EndNote and Zotero do not provide this data"], "docs": ["li2012"], "level": "semantic"},
+        {"id": "zotero_no_api", "text": "Zotero has no API / never required registration (Chen et al.)", "answer_patterns": ["\\bAPI\\b", "regist"], "source_patterns": ["Zotero does not provide an API", "never required users to register"], "docs": ["chen2018"], "level": "semantic"},
+        {"id": "mendeley_api_metadata", "text": "Mendeley's API provides users' disciplines and academic status", "answer_patterns": ["disciplines?", "academic status", "occupations?", "status"], "source_patterns": ["Mendeley API provides users"], "docs": ["chen2018"], "level": "semantic"},
+        {"id": "correlation", "text": "Mendeley user counts correlate significantly/highly with citations", "answer_patterns": ["0[.,]5[0-9]", "(significant|high|strong|moderate)[^.]{0,60}correlat", "correlat[^.]{0,80}(significant|high|strong|moderate)"], "source_patterns": ["0\\.559", "0\\.540", "correlations between Mendeley user counts and WoS/Google Scholar citation counts are high"], "docs": ["li2012"], "level": "semantic"},
+        {"id": "inference_access_not_popularity", "text": "concludes Zotero is unusable for readership indicators because its data is not accessible (no counts, no API, no registration), not because it is unpopular", "level": "inference", "docs": ["li2012", "chen2018"], "answer_patterns": []}
+      ],
+      "min_sources": 2,
+      "min_distinct_cited": 2,
+      "length": {"min_words": 100, "max_words": 450},
+      "judge_notes": "Needs two independent papers: Li et al. (user counts, correlations) and Chen et al. (Zotero API/registration, Mendeley API metadata). An answer using only one paper is capped at partial credit. Penalise claims that Zotero is unpopular or small - the sources say its users cannot be counted, not that there are few.",
+      "inference": "Chain: (1) Li et al.: reader counts are the indicator; RefWorks, EndNote and Zotero do not provide user-count data, so they cannot be used. (2) Chen et al.: Zotero never required registration and offers no API to download data, so its users cannot be counted; Mendeley's API exposes each article's readers' discipline and status. (3) Conclusion the answer must draw: Zotero is excluded because the data is not accessible, not because it is small or unpopular. (4) Li's validation: Mendeley user counts correlate highly with citations (Spearman about 0.54-0.56) but are a different, readership-type signal. Credit the (3) conclusion only if it is reached from (1)+(2)."
+    },
+    {
+      "id": "Q10",
+      "difficulty": 10,
+      "tier": "hard",
+      "language": "de",
+      "type": "multi-document comparison, German question, technical RAG papers",
+      "question": "Vergleiche PyZoBot und HySemRAG: Wie machen beide Systeme ihre generierten Antworten überprüfbar, und welche Retrieval-Ansätze und Sprachmodelle setzen sie ein?",
+      "documents": ["pyzobot2025", "hysemrag2025"],
+      "minimum_answer": "PyZoBot: Zotero library via Streamlit UI, standard RAG and knowledge-graph RAG, OpenAI (GPT-3.5-Turbo/GPT-4o) or open-source models (LLaMA 3.1, Mistral via Ollama); shows the document chunks used plus automatic citations/references. HySemRAG: hybrid retrieval (semantic search + keyword filtering + knowledge-graph traversal) on Qdrant vectors and a Neo4j graph; agentic self-correction and a post-hoc citation audit (99.0% citation accuracy in validated responses). Answer must be in German and cover both systems.",
+      "facts": [
+        {"id": "both_named", "text": "both systems are discussed", "all_of": true, "answer_patterns": ["PyZoBot", "HySemRAG"], "docs": ["pyzobot2025", "hysemrag2025"], "level": "verbatim"},
+        {"id": "pyzobot_chunks_citations", "text": "PyZoBot displays the document chunks used and automatic citations", "answer_patterns": ["Chunks?", "Textabschnitt", "Passagen", "Textstellen", "Dokumentabschnitt", "Textsegment"], "source_patterns": ["displays the specific document chunks"], "docs": ["pyzobot2025"], "level": "semantic"},
+        {"id": "pyzobot_models", "text": "PyZoBot: OpenAI models or open-source LLaMA/Mistral via Ollama", "answer_patterns": ["LLaMA", "Llama", "Mistral", "Ollama", "GPT-4o", "OpenAI"], "source_patterns": ["LLaMA 3\\.1, Mistral", "Ollama"], "docs": ["pyzobot2025"], "level": "verbatim"},
+        {"id": "pyzobot_graph", "text": "PyZoBot offers standard and knowledge-graph RAG", "answer_patterns": ["Wissensgraph", "knowledge graph", "Knowledge-Graph", "Graph-RAG", "GraphRAG"], "source_patterns": ["knowledge graph enhanced RAG"], "docs": ["pyzobot2025"], "level": "semantic"},
+        {"id": "hysemrag_audit", "text": "HySemRAG: post-hoc citation verification (99.0% citation accuracy)", "answer_patterns": ["99[.,]0\\s?%", "post-?hoc", "nachträglich", "a posteriori", "Zitat(ions)?(prüfung|verifi|überprüf|audit)", "Audit"], "source_patterns": ["99\\.0%", "post-hoc"], "docs": ["hysemrag2025"], "level": "semantic"},
+        {"id": "hysemrag_hybrid", "text": "HySemRAG: hybrid retrieval (semantic + keyword + knowledge graph), Qdrant and Neo4j", "answer_patterns": ["Neo4j", "Qdrant", "hybrid"], "source_patterns": ["Neo4j", "Qdrant", "hybrid retrieval"], "docs": ["hysemrag2025"], "level": "semantic"},
+        {"id": "inference_verifiability_contrast", "text": "contrasts user-side transparency (PyZoBot shows chunks + citations) with system-side automatic audit (HySemRAG post-hoc citation verification)", "level": "inference", "docs": ["pyzobot2025", "hysemrag2025"], "answer_patterns": []}
+      ],
+      "min_sources": 2,
+      "min_distinct_cited": 2,
+      "length": {"min_words": 120, "max_words": 500},
+      "judge_notes": "Hardest item: two long preprints, German question, technical terms that stay English. Check each mechanism is attributed to the right system (the post-hoc citation audit and Neo4j/Qdrant belong to HySemRAG; Streamlit/Ollama/chunk display belong to PyZoBot). Mixing them up is a factual error.",
+      "inference": "Abstraction required: both systems pursue verifiability but differently. PyZoBot makes answers checkable by the human (shows the retrieved chunks with automatic citations/references); HySemRAG verifies automatically and systematically (agentic self-correction, then a post-hoc audit of every citation against the ground-truth database, 99.0% citation accuracy). The answer should draw this contrast (user-side transparency vs system-side audit) and keep the retrieval stacks apart (PyZoBot: standard or knowledge-graph RAG, OpenAI or LLaMA/Mistral via Ollama; HySemRAG: hybrid semantic+keyword+knowledge-graph retrieval over Qdrant and Neo4j)."
+    }
+  ]
+}
