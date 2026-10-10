@@ -843,3 +843,21 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertEqual(store.clear_rate_limits(), 0)
         self.assertEqual(store.list_metadata()[0]["embedding_key_status"], "invalid")
         self.assertEqual(store.count_embedding_keys_by_name(), {})
+
+
+class TestBundledRunpodPreset(unittest.TestCase):
+    def test_runpod_json_is_v2_with_per_side_providers_and_validates(self):
+        import json
+        from backend.providers import get_providers
+        from backend.config.presets import HardwarePreset
+        raw = json.loads((Path(__file__).resolve().parents[1] / "config" / "default_presets" / "runpod.json").read_text())
+        self.assertEqual(raw["version"], 2)
+        for side in ("embedding", "llm"):
+            self.assertEqual(raw[side]["provider"]["id"], "runpod")
+            self.assertIn("options", raw[side]["provider"])
+            self.assertNotIn("health_check_provider", raw[side])
+            for key in raw[side].get("model_kwargs", {}):
+                self.assertFalse(key.endswith("_pattern"), key)  # patterns come from apply_defaults
+        self.assertNotIn("provisioning_script", raw)
+        providers = get_providers(HardwarePreset(name="runpod", **raw))
+        self.assertTrue(all(p.supports_provisioning for p in providers.values()))

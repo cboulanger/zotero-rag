@@ -126,3 +126,24 @@ class TestLLMUsageRecording(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorder.latest("llm", key_fingerprint("k-1"))[0], OPENAI_HEADERS)
         self.assertEqual(recorder.latest("llm", key_fingerprint("other")), (None, None))
         recorder.reset()
+
+
+class TestRateLimitsEndpoint(unittest.TestCase):
+    def test_returns_meters_and_no_raw_limits(self):
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        from backend.config.settings import get_settings, reset_settings
+        reset_settings()
+        recorder.reset()
+        with tempfile.TemporaryDirectory() as tmp:
+            get_settings().data_path = Path(tmp)
+            preset = _settings(Path(tmp)).get_hardware_preset()
+            recorder.record("embedding", HEADERS)
+            c = TestClient(app)
+            with patch.object(type(get_settings()), "get_hardware_preset", return_value=preset):
+                body = c.get("/api/rate-limits").json()
+        recorder.reset()
+        reset_settings()
+        self.assertTrue(body["available"])
+        self.assertNotIn("limits", body)
+        self.assertEqual((body["meters"][0]["limit"], body["meters"][0]["remaining"]), (100, 40))

@@ -79,3 +79,28 @@ class TestEmbeddingPausedIs400(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_error_is_neutral_and_carries_the_provider_hint(self):
+        from openai import APIConnectionError
+        from backend.services.llm import LLMEndpointUnavailableError, RemoteLLMService
+        from backend.tests.test_llm import _raw  # noqa: F401  (shared fixtures module import check)
+        preset = runpod_preset()
+        settings = MagicMock()
+        settings.get_hardware_preset.return_value = preset
+        settings.get_hardware_preset().llm.model_type = "remote"
+        service = RemoteLLMService.__new__(RemoteLLMService)
+        service.settings = settings
+        service.preset = preset
+        service.llm_config = preset.llm
+        service._model_name = "m"
+        service._llm_api = lambda: "openai"
+        service._generate_openai = AsyncMock(
+            side_effect=APIConnectionError(request=httpx.Request("POST", "https://x/v1/chat/completions"))
+        )
+        with patch("backend.config.settings.get_settings", return_value=settings):
+            with self.assertRaises(LLMEndpointUnavailableError) as ctx:
+                await service.generate("hi")
+        self.assertNotIn("(e.g. RunPod)", str(ctx.exception))  # core text is vendor-neutral
+        self.assertIn("Preferences", str(ctx.exception))

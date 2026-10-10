@@ -705,10 +705,10 @@ def get_models_status(request: Request):
     """
     Return per-model demand/availability metrics for the active preset.
 
-    Fetches the live model list from the configured ``models_status_url``,
+    Fetches the live model list from the LLM provider (``has_live_models``),
     filters to RAG-suitable models, and returns them ordered by demand
-    (most available first).  Returns an empty list if the preset has no
-    ``models_status_url`` or if the upstream call fails.
+    (most available first).  Returns an empty list if the provider has no
+    live model list or if the upstream call fails.
 
     The ``status`` field contains a human-readable availability label:
     ``"available"`` (demand 0), ``"busy"`` (1–5), or ``"very busy"`` (6+).

@@ -7,11 +7,18 @@ Configuration presets optimized for different hardware scenarios. Each preset de
 Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/presets/remote-kisski.json` in a default local checkout) — not hardcoded in Python. The presets documented below ship as bundled defaults in `backend/config/default_presets/`. On every startup the backend **overwrites** the copy in `<data_path>/presets/` of each bundled preset whose content differs from the bundled file (logging a WARNING when it discards a local edit), and creates the ones that are missing. This means:
 
 - **Customise by copying.** To change `top_k`, swap a model name, tune `batch_size`, etc., copy a bundled preset to a new file name (`data/presets/my-kisski.json`) and edit the copy; edits to a bundled preset's own file are lost at the next start. The copy shows up in `GET /api/config`'s `available_presets` (and the Zotero plugin's preset dropdown) right away. An already-running process picks up an edit of an existing file after a restart (an in-memory cache keeps a loaded preset's *content* fast to re-read — see `backend/config/presets.py`'s module docstring).
-- **Every preset carries an integer `version`** (the current schema version is `PRESET_SCHEMA_VERSION` in `backend/config/presets.py`; the version history is listed there too). A custom preset with a missing or older version, one that still uses a removed key, or one that selects a Claude model without the `anthropic` provider is loaded as usual but logs a WARNING once per process saying what to change.
+- **Every preset carries an integer `version`** (the current schema version is `PRESET_SCHEMA_VERSION` in `backend/config/presets.py`; see the table below). A custom preset with a missing or older version, one that still uses a removed key, or one that selects a Claude model without the `anthropic` provider is loaded as usual but logs a WARNING once per process saying what to change.
 - **Each side names its provider.** `embedding.provider` and `llm.provider` select the provider class that handles that side's credentials, endpoint behaviour, usage meters and provisioning (`{"id": "kisski"}`, `{"id": "runpod", "scope": "managed", "options": {...}}`; the default is `generic`, any OpenAI-compatible API). The two sides may use different providers, e.g. a local embedding model with a frontier LLM. See [providers.md](providers.md).
 - **Invalid configurations are rejected**, not repaired: an unknown provider id, options the provider does not define, a provider on a side that cannot use it, a credential scope the provider does not allow, a non-`generic` provider on a local side, or one key environment variable shared by two different providers. A rejected preset is not listed and cannot be activated; the reason is logged.
 
 A preset file's fields mirror `backend.config.presets.HardwarePreset` and its nested `embedding`/`llm`/`rag` sections (see that module for the full Pydantic schema and field descriptions). The file's own `name` key, if present, is ignored — a preset's identity always comes from its filename.
+
+### Preset schema versions
+
+| Version | Change |
+|---|---|
+| 1 | Original schema (no `version` key means 1). |
+| 2 | Per-side `provider` blocks. Removed keys: `provisioning_script`, `embedding.health_check_provider`, `llm.health_check_provider`, `llm.models_status_url` (provider capabilities now). |
 
 ### The `platform` field
 
