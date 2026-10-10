@@ -308,3 +308,14 @@ class TestConfigAndDescription(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIsPaused(unittest.TestCase):
+    def test_paused_only_for_the_paused_state_and_never_raises(self):
+        for state, expected in (("paused", True), ("running", False), ("scaledToZero", False)):
+            http = FakeHTTP()
+            http.add("GET", EP, FakeResponse(200, endpoint(state)))
+            self.assertEqual(provider(http=http).is_paused(TOKEN), expected, state)
+        http = FakeHTTP()
+        http.add("GET", EP, FakeResponse(500, {}))
+        self.assertFalse(provider(http=http).is_paused(TOKEN))

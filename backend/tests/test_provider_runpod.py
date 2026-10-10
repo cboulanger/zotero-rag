@@ -337,7 +337,7 @@ class TestHealth(unittest.TestCase):
         for workers in ({"ready": 1}, {"running": 2}):
             h, http = self.check(FakeResponse(200, {"workers": workers, "jobs": {}}))
             self.assertEqual(h.status, "ready")
-        self.assertEqual(http.calls[0][1], "https://api.runpod.ai/v2/abc123/health")
+        self.assertEqual(http.calls[-1][1], "https://api.runpod.ai/v2/abc123/health")  # after the management check
 
     def test_cold_when_scaled_to_zero_or_initializing(self):
         self.assertEqual(self.check(FakeResponse(200, {"workers": {}, "jobs": {}}))[0].status, "cold")
@@ -405,3 +405,30 @@ def _user_preset():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPaused(unittest.TestCase):
+    BASE = "https://api.runpod.ai/v2/ep1/openai/v1"
+
+    def _http(self, workers_max):
+        http = FakeHTTP()
+        http.add("GET", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": workers_max}))
+        http.add("GET", r"/endpoints$", FakeResponse(200, [{"id": "ep1", "name": "zotero-rag-llm", "workersMax": workers_max}]))
+        http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"idle": 0, "ready": 1, "running": 0}, "jobs": {}}))
+        return http
+
+    def test_health_reports_paused_from_the_management_api_even_if_the_data_plane_looks_ready(self):
+        h = provider("llm", http=self._http(0)).health(Credentials(api_key="k", base_url=self.BASE))
+        self.assertEqual(h.status, "paused")
+        self.assertEqual(provider("llm", http=self._http(1)).health(Credentials(api_key="k", base_url=self.BASE)).status, "ready")
+
+    def test_a_key_that_cannot_read_the_management_api_falls_back_to_the_data_plane(self):
+        http = FakeHTTP()
+        http.add("GET", r"/endpoints/ep1$", FakeResponse(403, {"error": "forbidden"}))
+        http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"ready": 1}, "jobs": {}}))
+        self.assertEqual(provider("llm", http=http).health(Credentials(api_key="k", base_url=self.BASE)).status, "ready")
+
+    def test_is_paused_follows_workers_max(self):
+        self.assertTrue(provider("llm", http=self._http(0)).is_paused("k"))
+        self.assertFalse(provider("llm", http=self._http(1)).is_paused("k"))
+        self.assertFalse(provider("llm", http=FakeHTTP()).is_paused("k"))  # unreachable: not paused

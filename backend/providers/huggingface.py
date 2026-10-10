@@ -436,6 +436,13 @@ class HuggingFaceProvider(Provider):
             return None
         return self._base_url(endpoint) if endpoint else None
 
+    def is_paused(self, api_key: str) -> bool:
+        try:
+            endpoint = self._get_endpoint(api_key)
+        except Exception:
+            return False
+        return bool(endpoint) and self._state(endpoint) == "paused"
+
     def health(self, creds: Credentials) -> Optional[Health]:
         """Readiness from one management-API call; never raises (display-only)."""
         if not creds.api_key:

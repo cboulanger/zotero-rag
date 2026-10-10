@@ -393,8 +393,19 @@ class RunPodProvider(Provider):
             self._request(api_key, "DELETE", f"/templates/{template['id']}")
             logger.info("Deleted template '%s' (%s)", self.resource_name, template["id"])
 
+    def is_paused(self, api_key: str) -> bool:
+        """True when the endpoint's ``workersMax`` is 0 (read from the management API only)."""
+        try:
+            endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        except Exception:
+            return False
+        return bool(endpoint) and endpoint.get("workersMax") == 0
+
     def health(self, creds: Credentials) -> Optional[Health]:
         """Readiness from RunPod's data-plane ``/health`` (worker and job counts).
+
+        A paused endpoint (``workersMax`` 0) is invisible to ``/health``, so the management
+        API is asked first; if that is not allowed for the key, the data plane decides.
 
         ``cold`` means scaled to zero or a worker initializing (it wakes on the
         next request); ``throttled`` means RunPod has no capacity for the GPU
@@ -408,6 +419,12 @@ class RunPodProvider(Provider):
         if not match:
             return Health(status="unreachable", detail=f"Not a RunPod endpoint URL: {creds.base_url!r}")
         endpoint_id = match.group(1)
+        try:
+            managed = self._request(creds.api_key, "GET", f"/endpoints/{endpoint_id}")
+            if managed and managed.get("workersMax") == 0:
+                return Health(status="paused", detail="paused; resume it to use it again")
+        except Exception:
+            pass  # a restricted key may not read the management API: fall back to the data plane
         try:
             response = self._http().get(
                 f"{DATA_PLANE_URL}/{endpoint_id}/health",
