@@ -21,6 +21,9 @@ def _mock_settings(model_type: str = "remote", model_kwargs: Optional[dict] = No
     (api_key_env, e.g. KISSKI) when model_type="remote" and not overridden,
     matching the existing tests below that assume per-user key gating applies."""
     settings = MagicMock()
+    settings.data_path = Path(tempfile.mkdtemp())  # no user_settings.json: everyone is on the default
+    settings.get_default_preset.return_value = settings.get_hardware_preset.return_value
+    settings.get_hardware_preset.return_value.name = "default-preset"
     settings.get_hardware_preset.return_value.embedding.model_type = model_type
     if model_kwargs is None:
         model_kwargs = {"api_key_env": "KISSKI_API_KEY"} if model_type == "remote" else {}
@@ -337,3 +340,38 @@ class ResolveByKeyNameTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("users/1", targets)
         self.assertIsNone(targets["users/1"]["embedding_key"])
         self.assertEqual(issues, [])
+
+
+class ResolvePerUserPresetTest(unittest.IsolatedAsyncioTestCase):
+    """Each user is indexed on their own preset: their key name, recorded as the target's preset."""
+
+    async def test_users_on_different_presets_use_their_own_keys(self):
+        from backend.config.presets import ensure_default_presets
+        from backend.config.settings import get_settings, reset_settings
+        from backend.services.user_settings import set_preferred_preset
+
+        reset_settings()
+        self.addCleanup(reset_settings)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        settings = get_settings()
+        settings.data_path = Path(tmp.name)
+        settings.model_preset = "remote-kisski"
+        ensure_default_presets(settings.data_path)
+        set_preferred_preset(settings.data_path, 2, "runpod")
+
+        store = AutoIndexKeyStore(settings.data_path / "k.json", Fernet.generate_key().decode())
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        v2 = KeyValidation(2, "b", ["users/2"], read_only=True)
+        fp1, fp2 = store.add("KA", v1), store.add("KB", v2)
+        store.set_embedding_key(fp1, "kisski-key", "KISSKI_API_KEY")
+        store.set_embedding_key(fp2, "runpod-key", "RUNPOD_API_KEY")
+        store.set_embedding_key(fp2, "other-kisski", "KISSKI_API_KEY")  # kept, not used
+
+        with patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(side_effect=[v1, v2])):
+            targets, issues = await resolve_targets(store)
+
+        self.assertEqual(issues, [])
+        self.assertEqual((targets["users/1"]["preset_name"], targets["users/1"]["embedding_key"]), ("remote-kisski", "kisski-key"))
+        self.assertEqual((targets["users/2"]["preset_name"], targets["users/2"]["embedding_key"]), ("runpod", "runpod-key"))
+        self.assertEqual(targets["users/2"]["embedding_key_name"], "RUNPOD_API_KEY")

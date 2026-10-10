@@ -33,6 +33,7 @@ from backend.api.document_upload import _execute_upload_impl
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.providers import get_provider_or_none
+from backend.services.effective_preset import preset_for_target
 from backend.db.vector_store import VectorStore
 from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
@@ -750,7 +751,7 @@ class CronIndexer:
                 if control.get("skip_slug") == slug_info.slug:
                     raise SlugSkipRequested(slug_info.slug)
 
-        preset = get_settings().get_hardware_preset()
+        preset = preset_for_target(get_settings(), target)
         embedding_service = create_embedding_service(
             preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
             provider=get_provider_or_none(preset, "embedding"),

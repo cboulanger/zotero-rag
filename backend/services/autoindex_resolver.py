@@ -27,6 +27,8 @@ from typing import Optional
 
 from backend.config.settings import get_settings
 from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.effective_preset import get_effective_preset
+from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
 
 logger = logging.getLogger(__name__)
@@ -62,7 +64,7 @@ async def resolve_targets(
 ) -> tuple[dict[str, dict], list[dict]]:
     """Return (targets, issues).
 
-    targets: {slug: {"zotero_key", "embedding_key", "embedding_key_name", "fingerprint"}}
+    targets: {slug: {"zotero_key", "embedding_key", "embedding_key_name", "fingerprint", "preset_name"}}
              deduplicated across all valid keys.
     issues:  list of {fingerprint, user, reason, pruned, kind} — "kind" is
              "zotero_key" for Zotero-key problems (unchanged from before) or
@@ -88,13 +90,18 @@ async def resolve_targets(
     # would make auto-indexing a permanent no-op (no key configured) or
     # incorrectly block it on a stale status left over from a previously
     # active personal-key preset (the actual bug this guards against).
-    embedding_config = get_settings().get_hardware_preset().embedding
-    key_name = embedding_config.model_kwargs.get("api_key_env")
-    requires_embedding_key = embedding_config.model_type == "remote" and bool(key_name) and require_embedding_key
-
+    settings = get_settings()
     for fp, api_key, entry in list(store.iter_decrypted()):
         if only_fingerprint and fp != only_fingerprint:
             continue
+        # Each user is indexed on their own preset (their choice, else the default):
+        # their key name, and for key-derived endpoints their own endpoint.
+        user_preset = get_effective_preset(settings, ZoteroIdentity(
+            user_id=entry.get("user_id"), username=entry.get("username") or "", targets=entry.get("targets", []),
+        ))
+        embedding_config = user_preset.embedding
+        key_name = embedding_config.model_kwargs.get("api_key_env")
+        requires_embedding_key = embedding_config.model_type == "remote" and bool(key_name) and require_embedding_key
         validation = await validate_key(api_key)
         if validation.read_only:
             store.set_status(
@@ -137,6 +144,7 @@ async def resolve_targets(
                     "embedding_key": None,
                     "embedding_key_name": None,
                     "fingerprint": fp,
+                    "preset_name": user_preset.name,
                 })
             continue
 
@@ -170,6 +178,7 @@ async def resolve_targets(
                 "embedding_key": embedding_key,
                 "embedding_key_name": embedding_key_name,
                 "fingerprint": fp,
+                "preset_name": user_preset.name,
             })
 
     return targets, issues

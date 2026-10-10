@@ -16,6 +16,7 @@ from backend.config.presets import get_preset, list_presets, current_platform, H
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
+from backend.services.effective_preset import is_compatible
 from backend.services.admin_settings_store import (
     set_default_preset,
     update_remote_config,
@@ -38,29 +39,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _embedding_model_identity(model_name: str) -> str:
-    """Normalize an embedding model name for cross-preset compatibility
-    comparison: the basename after any "org/" prefix.
-
-    Different providers serve the same underlying model under different
-    literal API model-name strings — e.g. KISSKI/MPCDF serve
-    "multilingual-e5-large-instruct" while RunPod's vLLM worker
-    requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
-    (it's what the worker was launched with, and what must be sent as the
-    "model" field in every embeddings API call — see
-    the provider's MODEL_NAME template env). Comparing
-    basenames treats these as the same model without changing either
-    preset's actual on-the-wire model_name.
-    """
-    return model_name.rsplit("/", 1)[-1]
-
-
 def _compatible_presets(current: HardwarePreset, data_path: Path, available: List[str]) -> List[str]:
     """Presets safe to switch to at runtime without a restart: both the
     embedding and LLM must be remote (no local model to load/unload), and
     the embedding model must match — same model means the same vector
     space, so the already-open VectorStore singleton stays valid. Matched
-    by normalized identity (see _embedding_model_identity), not literal
+    by normalized identity (see effective_preset.embedding_model_identity), not literal
     string equality, since providers can serve the same model under
     different API model-name strings.
 
@@ -71,7 +55,6 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
     """
     if current.embedding.model_type != "remote" or current.llm.model_type != "remote":
         return [current.name]
-    current_identity = _embedding_model_identity(current.embedding.model_name)
     compatible = []
     for name in available:
         try:
@@ -83,11 +66,7 @@ def _compatible_presets(current: HardwarePreset, data_path: Path, available: Lis
             # does, rather than letting one bad file 500 the whole request.
             logger.warning("Skipping preset %r while computing compatible_presets: %s", name, exc)
             continue
-        if (
-            preset.embedding.model_type == "remote"
-            and preset.llm.model_type == "remote"
-            and _embedding_model_identity(preset.embedding.model_name) == current_identity
-        ):
+        if is_compatible(current, preset):
             compatible.append(name)
     return compatible
 
@@ -310,7 +289,8 @@ def get_config(request: Request):
         llm_models = [m.id for m in live_models]
 
     available = list_presets(settings.data_path, platform=current_platform())
-    compatible = _compatible_presets(preset, settings.data_path, available)
+    default = settings.get_default_preset()
+    compatible = _compatible_presets(default, settings.data_path, available)
     return ConfigResponse(
         preset_name=preset.name,
         preset_description=preset.description,
@@ -324,7 +304,7 @@ def get_config(request: Request):
         available_presets=available,
         compatible_presets=compatible,
         provisionable=_is_provisionable(preset),
-        switchable_presets=_switchable_presets(preset, compatible, settings, request),
+        switchable_presets=_switchable_presets(default, compatible, settings, request),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
@@ -371,7 +351,7 @@ async def update_config(
             detail=f"Invalid preset: {update.preset_name}. Available: {available}",
         )
 
-    current = settings.get_hardware_preset()
+    current = settings.get_default_preset()
     compatible = _compatible_presets(current, settings.data_path, available)
     if update.preset_name not in compatible:
         raise HTTPException(
@@ -624,6 +604,26 @@ def get_provisioning_status(request: Request) -> dict:
     return provisioning.get_job_state(_slot_for(providers, sides, get_zotero_identity(request)))
 
 
+def _shared_field_patterns(settings) -> Dict[str, Optional[str]]:
+    """Admin-set (shared) fields declared by any available preset, with their format patterns.
+
+    An admin sets these for the server, not for their own choice of preset, so
+    every preset a user could run counts, not just the default.
+    """
+    patterns: Dict[str, Optional[str]] = {}
+    for name in list_presets(settings.data_path, platform=current_platform()):
+        try:
+            preset = get_preset(name, settings.data_path)
+        except ValueError:
+            continue
+        fields = RemoteEmbeddingService.required_client_fields(preset.embedding)
+        fields += RemoteLLMService.required_client_fields_for_config(preset.llm)
+        for key_info in fields:
+            if key_info["kind"] in ("shared_base_url", "shared_api_key"):
+                patterns[key_info["key_name"]] = key_info["pattern"]
+    return patterns
+
+
 @router.post("/config/remote-fields", response_model=RemoteFieldsResponse)
 async def set_remote_fields(
     update: RemoteFieldsUpdateRequest,
@@ -647,22 +647,14 @@ async def set_remote_fields(
             next real query.
     """
     settings = get_settings()
-    preset = settings.get_hardware_preset()
-
-    patterns: Dict[str, Optional[str]] = {}
-    for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
-        if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            patterns[key_info["key_name"]] = key_info["pattern"]
-    for key_info in RemoteLLMService.required_client_fields(settings):
-        if key_info["kind"] in ("shared_base_url", "shared_api_key"):
-            patterns[key_info["key_name"]] = key_info["pattern"]
+    patterns = _shared_field_patterns(settings)
     allowed_keys = set(patterns.keys())
 
     unknown = set(update.values.keys()) - allowed_keys
     if unknown:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown remote-config key(s) for preset '{preset.name}': {sorted(unknown)}. "
+            detail=f"Unknown remote-config key(s): {sorted(unknown)}. "
                    f"Allowed: {sorted(allowed_keys)}",
         )
 

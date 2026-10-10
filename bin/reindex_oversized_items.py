@@ -85,6 +85,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.config.settings import get_settings  # noqa: E402
 from backend.dependencies import make_vector_store  # noqa: E402
 from backend.providers import get_provider_or_none  # noqa: E402
+from backend.services.effective_preset import preset_for_target  # noqa: E402
 from backend.db.vector_store import VectorStore  # noqa: E402
 from backend.services.embeddings import (  # noqa: E402
     EmbeddingAuthenticationError,
@@ -180,9 +181,10 @@ async def _reprocess_items(
 
         library_type = _library_type(library_id)
         web_api = ZoteroWebAPI(api_key=target["zotero_key"])
+        target_preset = preset_for_target(settings, target)
         embedding_service = create_embedding_service(
-            preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
-            provider=get_provider_or_none(preset, "embedding"),
+            target_preset.embedding, api_key=target["embedding_key"], data_path=settings.data_path,
+            provider=get_provider_or_none(target_preset, "embedding"),
         )
         processor = DocumentProcessor(
             zotero_client=web_api,
