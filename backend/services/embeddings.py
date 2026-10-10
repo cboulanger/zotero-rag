@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from backend.config.presets import EmbeddingConfig
+from backend.services.endpoint_errors import classify_status_error, unavailable_message
 from backend.services.usage_meters import key_fingerprint, recorder
 
 
@@ -651,8 +652,12 @@ class RemoteEmbeddingService(EmbeddingService):
                     # mid-request when the provider's gateway gave up.
                     status_code = getattr(exc, "status_code", None)
                     raise EmbeddingEndpointUnavailableError(
-                        f"Embedding API still failing after {max_attempts} attempts "
-                        f"(HTTP {status_code or '5xx'}): {_extract_error_detail(exc)}"
+                        unavailable_message(
+                            "embedding",
+                            f"Embedding API still failing after {max_attempts} attempts "
+                            f"(HTTP {status_code or '5xx'}): {_extract_error_detail(exc)}",
+                            classify_status_error("embedding", exc),
+                        )
                     ) from exc
                 retry_after = base_delay * (2 ** attempt) + random.uniform(0, 1)
                 logger.warning(
@@ -704,6 +709,13 @@ class RemoteEmbeddingService(EmbeddingService):
                 self.rate_limit_wait_seconds += retry_after
                 await asyncio.sleep(retry_after)
             except BadRequestError as exc:
+                # A paused endpoint answers 400 on some providers: classify it
+                # before treating the 400 as a per-item content problem.
+                kind = classify_status_error("embedding", exc)
+                if kind:
+                    raise EmbeddingEndpointUnavailableError(
+                        unavailable_message("embedding", "Embedding API is not available.", kind)
+                    ) from exc
                 msg = str(exc)
                 msg_lower = msg.lower()
                 if "context length" not in msg_lower and "maximum context" not in msg_lower:
@@ -762,8 +774,12 @@ class RemoteEmbeddingService(EmbeddingService):
                 # remaining item in the library.
                 status_code = getattr(exc, "status_code", None)
                 raise EmbeddingEndpointUnavailableError(
-                    f"Embedding API returned an unexpected error "
-                    f"(HTTP {status_code}): {_extract_error_detail(exc)}"
+                    unavailable_message(
+                        "embedding",
+                        f"Embedding API returned an unexpected error "
+                        f"(HTTP {status_code}): {_extract_error_detail(exc)}",
+                        classify_status_error("embedding", exc),
+                    )
                 ) from exc
             except APIConnectionError as exc:
                 # A transport-level failure — no HTTP response at all, so no
@@ -776,9 +792,7 @@ class RemoteEmbeddingService(EmbeddingService):
                 # GET /api/config/health / the "Provision endpoints" button
                 # instead of silently retrying.
                 raise EmbeddingEndpointUnavailableError(
-                    f"Could not connect to the embedding API: {exc}. If this preset uses a "
-                    "self-provisioned serverless endpoint (e.g. RunPod), it may be cold or not "
-                    "yet provisioned — check its status and provision/wake it from Preferences."
+                    unavailable_message("embedding", f"Could not connect to the embedding API: {exc}.")
                 ) from exc
 
     async def embed_text(self, text: str) -> list[float]:

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
 from backend.services.embeddings import KEYLESS_API_KEY, env_var_to_header, docs_url_for, _extract_error_detail
+from backend.services.endpoint_errors import classify_status_error, unavailable_message
 from backend.services.usage_meters import key_fingerprint, recorder as usage_recorder
 
 logger = logging.getLogger(__name__)
@@ -472,9 +473,12 @@ class RemoteLLMService(LLMService):
                 pass
             if connection_error_types and isinstance(e, connection_error_types):
                 raise LLMEndpointUnavailableError(
-                    f"Could not connect to the LLM API ({self._model_name}): {e}. If this preset "
-                    "uses a self-provisioned serverless endpoint (e.g. RunPod), it may be cold or "
-                    "not yet provisioned — check its status and provision/wake it from Preferences."
+                    unavailable_message("llm", f"Could not connect to the LLM API ({self._model_name}): {e}.")
+                ) from e
+            kind = classify_status_error("llm", e)
+            if kind:
+                raise LLMEndpointUnavailableError(
+                    unavailable_message("llm", f"The LLM API ({self._model_name}) is not available.", kind)
                 ) from e
             # _extract_error_detail also handles an HTML error page from an
             # upstream gateway (e.g. RunPod's openresty edge) — the openai/
