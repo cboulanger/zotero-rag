@@ -37,6 +37,8 @@ a preset picks one with `provider.scope`.
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
 - `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
 
+The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
+
 ## What a provider can define
 
 Class attributes: `id`, `label`, `Options` (a `ProviderOptions` model with
