@@ -38,6 +38,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
 | `runpod` | **No** | `RUNPOD_API_KEY` (each user's own) | any |
+| `huggingface` | **No** | `HF_TOKEN` (each user's own) | any |
 
 Presets marked **No** use only remote APIs for both embeddings and LLM inference. The Docker image can be built without Tesseract and without installing `sentence-transformers`/`torch` for these presets (see [container-deployment.md](container-deployment.md)).
 
@@ -256,6 +257,34 @@ Admins can also run `uv run python bin/provision.py --preset runpod` on the serv
 **Health and provisioning from the plugin:** a provider that can report readiness gives `GET /api/config/health` a status per side: `ready`, `cold` (scaled to zero, wakes normally on the next request), `paused`, `throttled` (the provider has no GPU capacity for the endpoint right now) or `unreachable` (`null` for a side with no health check). `GET /api/config/providers` describes each side's provider for the plugin (id, label, credential scope, capability flags, the one-time credential provisioning accepts, an `unavailable_hint` and `operable_by_caller`), and the Preferences pane renders one section per side from it, so the plugin contains no provider-specific code. A provider that supports provisioning (`supports_provisioning`) lets whoever may operate it run `POST /api/config/provision` (body `{"keys": {...}, "sides": [...]}`, both optional) as a background job per side (poll `GET /api/config/provision/status`, which reports a status and progress lines per side) and applies any base URL the provider returns via the shared remote config. Design: `docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md`.
 
 **Requires:** your personal `RUNPOD_API_KEY` (Preferences pane, or the one-time "Provisioning key"). The endpoint URLs are looked up from the key and cached for a few minutes; provisioning refreshes them at once.
+
+---
+
+### `huggingface` (your own Hugging Face Inference Endpoints)
+
+**Best for:** Pay-per-use, scale-to-zero GPU endpoints billed to your own Hugging Face account, as an alternative to RunPod.
+
+**Configuration:**
+
+- Embedding: `intfloat/multilingual-e5-large-instruct` on a text-embeddings-inference (`tei`) endpoint, `nvidia-t4` in `aws/eu-west-1`
+- LLM: `Qwen/Qwen2.5-7B-Instruct` on a `vllm` endpoint, `nvidia-a10g` in `aws/eu-west-1`
+- Memory: ~0.5 GB (fully remote); Top-k: 10 chunks / Max chunk: 800 tokens
+
+**What's different about this preset:** like `runpod`, credential scope `user`: every user enters their own Hugging Face token, the endpoints (`zotero-rag-embedding`, `zotero-rag-llm`) live in that user's namespace and the backend finds their URL from the token. Creating endpoints needs a token with write access to Inference Endpoints and a billing method on the account (without one Hugging Face answers "Payment method required", which the plugin shows as a clear message). Per-side options in the preset's `provider.options`: `namespace` (default: the token's own user), `vendor`, `region`, `engine` (`tei`, `vllm` or `tgi`), `instance`, `instance_size`, `scale_to_zero_timeout_min` (15 to 2880), `min_replica`, `max_replica` and `image`. The text-embeddings-inference image tag depends on the GPU architecture; only the T4 tag is known to the provider, so another instance needs an explicit `image`. A scaled-to-zero or starting endpoint answers with HTTP 503 for about a minute (shown as "cold"; the first query after idle time can fail with an "endpoint unavailable" message and succeeds when retried), and a paused one answers 400 "endpoint is paused".
+
+**Trade-offs:** Hugging Face bills per instance-hour with a 15-minute minimum idle tail, so for a few queries a day RunPod's per-second billing is likely cheaper; for sustained indexing the hourly rates are competitive. Costs are read on Hugging Face's own dashboard.
+
+**Requires:** your personal `HF_TOKEN` (Preferences pane, or the one-time token for provisioning). This is a provider credential and unrelated to the server-side `HF_TOKEN` environment setting that downloads gated *local* model weights.
+
+---
+
+### Mixed presets
+
+Each side names its own provider, so a preset can combine them, for example Hugging Face embeddings with an Anthropic LLM (`"llm": {"model_names": ["claude-sonnet-4"], "model_kwargs": {}, "provider": {"id": "anthropic"}}`), or a local embedding model with an Anthropic LLM. Only the sides whose provider can provision get provisioning controls, and each key is asked for once under the side that uses it (`HF_TOKEN` and `ANTHROPIC_API_KEY` in the first example). Copy a bundled preset to a new file name to build one.
+
+### Pause and resume
+
+A provider that can pause an endpoint (`runpod`, `huggingface`) gets a **Pause** button in its section of the Preferences pane while the endpoint is ready or cold, and **Resume** once it is paused. Pausing stops the billing and the wake-ups and keeps the URL; `POST /api/config/suspend` (same gating, job slots and body as `POST /api/config/provision`) pauses, and provisioning resumes. A paused embedding side makes automatic indexing skip that owner's libraries (reason `embedding_paused`, shown in the indexing status dialog) and makes queries fail at once with a "paused" message instead of calling the endpoint; this never counts toward quarantining an upload. One user's pause does not affect anyone else's libraries. `bin/provision.py --preset <name> --pause` does the same from the command line.
 
 ---
 

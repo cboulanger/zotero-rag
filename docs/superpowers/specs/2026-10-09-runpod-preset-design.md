@@ -1,3 +1,5 @@
+> **Status: superseded** by `2026-10-10-huggingface-preset-and-provisioner-adapters-design.md` (provider layer). Kept as a record of the original RunPod design.
+
 # RunPod preset + endpoint-provisioning script
 
 ## Problem

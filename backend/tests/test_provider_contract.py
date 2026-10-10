@@ -185,6 +185,27 @@ class TestProviderContract(unittest.TestCase):
                 with self.assertRaises(NotImplementedError):
                     provider.suspend(ctx, lambda msg: None)
 
+    def test_suspend_capable_providers_never_raise_from_is_paused_and_fail_cleanly_without_a_network(self):
+        from backend.providers import ProvisionError
+        for pid, side, fixture in self.each():
+            provider, preset = self.provider_for(pid, side, fixture)
+            fixture.break_network(provider)
+            with fixture.patch_http():
+                if not provider.supports_suspend:
+                    self.assertFalse(provider.is_paused("k"))  # the default: nothing to pause
+                    continue
+                self.assertFalse(provider.is_paused("k"))      # unknown state counts as not paused
+                ctx = ProvisionContext(side=side, preset=preset, credential="k", data_path=__import__("pathlib").Path("."))
+                with self.assertRaises(Exception) as caught:   # a clear failure, never a hang or NotImplementedError
+                    provider.suspend(ctx, lambda msg: None)
+                self.assertNotIsInstance(caught.exception, NotImplementedError)
+
+    def test_suspend_capable_providers_are_also_provisionable_so_resume_needs_no_extra_code(self):
+        for pid, side, fixture in self.each():
+            provider, _ = self.provider_for(pid, side, fixture)
+            if provider.supports_suspend:
+                self.assertTrue(provider.supports_provisioning, pid)
+
 
 if __name__ == "__main__":
     unittest.main()
