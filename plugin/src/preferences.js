@@ -265,6 +265,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		? Sections.ensureSections(doc, sectionsContainer, {
 			onProvision: (side, key) => controller && controller.provision(side, key),
 			onRetry: (side, key) => controller && controller.provision(side, key),
+			onPause: (side) => controller && controller.pause(side),
 		})
 		: null;
 	/**

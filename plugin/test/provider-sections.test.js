@@ -341,3 +341,63 @@ test('wizard intro names the starting preset, counts only the keys it needs and 
 	assert.match(S.keysIntro({ preset_name: 'main' }, []), /needs no key/);
 	assert.match(S.keysIntro({ preset_name: 'main' }, [{ key_name: 'A' }, { key_name: 'B' }]), /these keys/);
 });
+
+// --- Pause / Resume --------------------------------------------------------------
+
+test('Pause is offered for a ready or cold side the caller can operate, Resume for a paused one', () => {
+	const S = load();
+	const cases = [
+		// [status, operable, supportsSuspend, pauseVisible, provisionLabel, provisionVisible]
+		['ready', true, true, true, 'Provision endpoint', false],
+		['cold', true, true, true, 'Provision endpoint', false],
+		['paused', true, true, false, 'Resume', true],
+		['unreachable', true, true, false, 'Provision endpoint', true],
+		['ready', false, true, false, 'Provision endpoint', false],   // not operable by this caller
+		['ready', true, false, false, 'Provision endpoint', false],   // provider cannot pause
+		['throttled', true, true, false, 'Provision endpoint', true],
+	];
+	for (const [status, operable, canSuspend, pauseVisible, label, provisionVisible] of cases) {
+		const m = S.buildModel('llm', remote({ operable_by_caller: operable, supports_suspend: canSuspend }), { status, detail: '' }, idle);
+		assert.strictEqual(m.pause.visible, pauseVisible, JSON.stringify([status, operable, canSuspend]));
+		assert.strictEqual(m.provision.visible, provisionVisible, JSON.stringify([status, operable, canSuspend]));
+		assert.strictEqual(m.provision.label, label);
+	}
+});
+
+test('a paused side shows a neutral (non-error) status row', () => {
+	const S = load();
+	const m = S.buildModel('llm', remote(), { status: 'paused', detail: 'paused; resume it to use it again' }, idle);
+	assert.strictEqual(m.health.color, 'orange');
+	assert.match(m.health.text, /paused/);
+});
+
+test('Pause posts only that side to the suspend route, and Resume is the provision route', async () => {
+	const { backend, controller } = setup({ providers: bothRemote, health: { embedding: { status: 'ready', detail: '' }, llm: { status: 'paused', detail: '' } }, jobs: [idle] });
+	await controller.refresh();
+	await controller.pause('embedding');
+	await controller.provision('llm', '');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(backend.posts)), [
+		['/api/config/suspend', { sides: ['embedding'] }],
+		['/api/config/provision', { sides: ['llm'] }],
+	]);
+});
+
+test('pausing shows its failures inline too', async () => {
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle], postReply: { ok: false, status: 403, data: { detail: 'not an admin' } } });
+	await controller.refresh();
+	await controller.pause('llm');
+	assert.strictEqual(refs.llm.status.textContent, 'Pausing failed: not an admin');
+});
+
+test('the Pause button of a section calls the onPause handler and is disabled while a job runs', () => {
+	const S = load();
+	const calls = [];
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), { onProvision() {}, onRetry() {}, onPause: (side) => calls.push(side) });
+	const readyEverywhere = { status: 'ready', detail: '' };
+	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, idle), llm: S.buildModel('llm', local, undefined, idle) });
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, ['embedding']);
+	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, { status: 'running', progress: [], sides: {} }), llm: S.buildModel('llm', local, undefined, idle) });
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, ['embedding']);
+});

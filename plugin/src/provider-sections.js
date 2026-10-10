@@ -68,6 +68,7 @@
  * @property {string} hint - advice shown while the side is not ready, '' otherwise
  * @property {ActionView} provision
  * @property {ActionView} retry
+ * @property {ActionView} pause - stops billing and wake-ups; shown for a ready or cold side
  * @property {{visible: boolean, label: string, help: string, pattern: string}} credential
  * @property {string[]} progress - this side's progress lines
  * @property {string} status - outcome message of this side's last job, '' if none
@@ -112,7 +113,7 @@ var ZoteroRAGProviderSections = {
 				side, title, local: true,
 				providerText: '',
 				health: null, hint: '',
-				provision: hidden, retry: hidden,
+				provision: hidden, retry: hidden, pause: hidden,
 				credential: { visible: false, label: '', help: '', pattern: '' },
 				progress: [], status: '', readOnlyNote: false,
 			};
@@ -151,6 +152,12 @@ var ZoteroRAGProviderSections = {
 				disabled: running,
 				reason: busyReason,
 			},
+			pause: {
+				visible: provider.supports_suspend && provider.operable_by_caller && (status === 'ready' || status === 'cold'),
+				label: 'Pause',
+				disabled: running,
+				reason: busyReason,
+			},
 			credential: {
 				visible: canProvision,
 				label: credential ? credential.label : 'Key for this run',
@@ -168,7 +175,7 @@ var ZoteroRAGProviderSections = {
 	 * Build the skeleton of both sections once; returns references for `update`.
 	 * @param {Document} doc
 	 * @param {HTMLElement} container
-	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
+	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm') => void}} handlers
 	 * @returns {Record<'embedding'|'llm', Record<string, any>>}
 	 */
 	ensureSections(doc, container, handlers) {
@@ -207,7 +214,9 @@ var ZoteroRAGProviderSections = {
 			provision.id = `zotero-rag-side-${side}-provision`;
 			const retry = el('button');
 			retry.id = `zotero-rag-side-${side}-retry`;
-			actions.append(provision, retry);
+			const pause = el('button');
+			pause.id = `zotero-rag-side-${side}-pause`;
+			actions.append(provision, retry, pause);
 
 			const note = el('div', 'setting-description');
 			const progress = el('div', 'setting-description');
@@ -220,10 +229,11 @@ var ZoteroRAGProviderSections = {
 			};
 			provision.addEventListener('click', () => handlers.onProvision(side, oneTimeKey()));
 			retry.addEventListener('click', () => handlers.onRetry(side, oneTimeKey()));
+			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side));
 
 			section.append(title, provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
 			container.appendChild(section);
-			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, note, progress, status };
+			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, pause, note, progress, status };
 		}
 		return /** @type {any} */ (refs);
 	},
@@ -258,6 +268,10 @@ var ZoteroRAGProviderSections = {
 			r.retry.textContent = m.retry.label;
 			r.retry.disabled = m.retry.disabled;
 			r.retry.title = m.retry.reason;
+			r.pause.hidden = !m.pause.visible;
+			r.pause.textContent = m.pause.label;
+			r.pause.disabled = m.pause.disabled;
+			r.pause.title = m.pause.reason;
 			r.note.hidden = !m.readOnlyNote;
 			r.note.textContent = m.readOnlyNote ? 'This endpoint is not available. Ask the server admin to provision it.' : '';
 			r.progress.textContent = m.progress.join('\n');
@@ -332,7 +346,7 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	 * @param {'embedding'|'llm'} side
 	 * @param {string} oneTimeKey
 	 */
-	const provision = async (side, oneTimeKey) => {
+	const startJob = async (path, side, oneTimeKey, failure) => {
 		const status = deps.refs[side].status;
 		const show = (/** @type {string} */ text) => { status.textContent = text; status.hidden = !text; };
 		const provider = state.providers && state.providers.sides && state.providers.sides[side] && state.providers.sides[side].provider;
@@ -346,20 +360,25 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		if (oneTimeKey && credential) body.keys = { [credential.env]: oneTimeKey };
 		show('Starting\u2026');
 		try {
-			const result = await deps.post('/api/config/provision', body);
+			const result = await deps.post(path, body);
 			if (!result.ok) {
 				const detail = result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`;
-				show(`Provisioning failed: ${detail}`);
+				show(`${failure}: ${detail}`);
 				return;
 			}
 			show('');
 			await poll();
 		} catch (e) {
-			show(`Provisioning failed: ${e}`);
+			show(`${failure}: ${e}`);
 		}
 	};
 
-	return { state, refresh, poll, provision };
+	const provision = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey) =>
+		startJob('/api/config/provision', side, oneTimeKey, 'Provisioning failed');
+	/** Pause one side (stops billing and wake-ups; resuming is provisioning again). */
+	const pause = (/** @type {'embedding'|'llm'} */ side) => startJob('/api/config/suspend', side, '', 'Pausing failed');
+
+	return { state, refresh, poll, provision, pause };
 };
 
 /**
