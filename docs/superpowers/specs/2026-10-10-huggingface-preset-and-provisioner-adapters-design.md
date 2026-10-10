@@ -510,7 +510,7 @@ endpoints for everyone, and only an admin may do it.
 | Provider | Pause | Resume |
 |---|---|---|
 | HF | `endpoint.pause()` (not billed, does not auto-wake) | `provision()` calls `.resume()` |
-| RunPod | no native pause; set `workersMax` to 0 so no worker can start, and optionally purge queued jobs (whether the REST update accepts 0 must be verified) | `provision()` restores `workersMax` from `options` |
+| RunPod | no native pause; `PATCH` the endpoint's `workersMax` to 0, which RunPod treats as an explicit paused state: every request is rejected at once with HTTP 409 `ENDPOINT_PAUSED` and no worker starts (verified in the Phase 0 spike). An endpoint cannot be *created* with 0, so creation uses at least 1 | `provision()` restores `workersMax` from `options` with a `PATCH` |
 | Others | not supported | not applicable |
 
 **Who respects the paused state.** All of these must avoid waking a paused
@@ -526,10 +526,11 @@ the sides they use, and for the user whose key they use:
 - Interactive queries: `RemoteEmbeddingService` and the LLM service each consult a
   short-TTL cached `health()` (about 30 seconds) of their own side, for the
   requesting user, when that provider `supports_suspend`, and raise the existing
-  "endpoint unavailable" error with a paused-specific message. This matters on
-  RunPod, where a request to an endpoint with `workersMax=0` would otherwise queue
-  and time out. `classify_http_error()` may return `paused` for providers whose
-  paused endpoints answer with a recognisable error (HF).
+  "endpoint unavailable" error with a paused-specific message. RunPod needs no
+  such pre-check: an endpoint at `workersMax=0` answers at once with HTTP 409
+  `ENDPOINT_PAUSED`, which `classify_http_error()` maps to `paused`. The cached
+  `health()` lookup is for providers whose paused endpoints give no recognisable
+  error (HF, to be confirmed).
 - Health and the plugin: `paused` is shown in a neutral colour and offers Resume
   (A7).
 
@@ -869,14 +870,16 @@ apart from the credential model:
 - RunPod's gateway cold response (the openresty 405 page the services special-case
   today) becomes `classify_http_error()`, and the RunPod wording in the
   "endpoint unavailable" messages becomes `unavailable_hint()`.
-- New: `supports_suspend = True`. `suspend()` sets the endpoint's `workersMax` to 0
-  (and purges the queue); `health()` reports `paused` when `workersMax` is 0;
-  `provision()` restores `workersMax` from `options`. The `GET /v1/endpoints`
-  response already used for lookup carries `workersMax`, so no extra call is
-  needed. Whether the REST update accepts 0 is the one thing to verify first; if it
-  does not, the fallback is to lower `workersMax` to the minimum allowed and keep
-  `workersMin=0`, which stops idle cost but cannot block a wake-up, and the spec
-  then marks RunPod as `supports_suspend = False`.
+- New: `supports_suspend = True`. `suspend()` `PATCH`es the endpoint's `workersMax` to
+  0 (and may purge the queue); `health()` reports `paused` when `workersMax` is 0;
+  `provision()` restores `workersMax` from `options` with a `PATCH`. The
+  `GET /v1/endpoints` response already used for lookup carries `workersMax`, so no
+  extra call is needed. Verified in the Phase 0 spike: the update is accepted, and a
+  request to an endpoint at 0 is rejected immediately with HTTP 409 and body code
+  `ENDPOINT_PAUSED`, so `classify_http_error()` returns `paused` for exactly that
+  response. Creating an endpoint with `workersMax=0` fails with HTTP 500, so
+  `provision()` creates with at least 1 and patches afterwards. The data-plane
+  `/health` does not show the paused state; only the management API does.
 - The provisioning panel text that is RunPod-specific in effect today ("a key with
   broader rights than the one used for queries") moves into `describe()`.
 
@@ -970,11 +973,10 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
    and retry, and `progress` in job state (A4, A7).
 6. Plugin: one dynamic configuration section per side (health, key fields,
    provision, pause, retry, usage bars), job resume, and the plugin tests from A7.
-7. Pause and Resume (A8): `suspend()` on the base class and `RunPodProvider`
-   (after verifying `workersMax=0`), the `paused` status, `POST /api/config/suspend`,
-   the scheduler, indexing and query-path checks, and the two buttons. This can land
-   after the HF provider if RunPod's `workersMax=0` check turns out negative, since
-   HF alone already supports it.
+7. Pause and Resume (A8): `suspend()` on the base class, `RunPodProvider` (verified
+   in the Phase 0 spike) and the HF provider, the `paused` status,
+   `POST /api/config/suspend`, the scheduler, indexing and query-path checks, and the
+   two buttons.
 8. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
    changelog, provider ids, key scopes and the per-side `provider` block), and mark
    the older RunPod/health specs as superseded where they describe the script
@@ -1188,9 +1190,10 @@ presets, and one-time provisioning keys that are never saved).
 
 ### To verify in a spike before the implementation plan
 
-- Pause (A8): does RunPod's REST update accept `workersMax=0`? If not, RunPod
-  loses Pause (the spec's fallback). Does a paused HF endpoint answer requests with
-  a distinguishable error?
+- Pause (A8): does a paused HF endpoint answer requests with a distinguishable
+  error? (RunPod's side is verified: `workersMax=0` is accepted by a `PATCH` and
+  requests get HTTP 409 `ENDPOINT_PAUSED`; see
+  `docs/history/implementation/provider-layer-phase-0-spike.md`.)
 - Per-user endpoint lookup (A10): can an endpoint-restricted RunPod key list
   endpoints? If not, `endpoint_url()` fails for such keys and the key needs list
   permission (or the URL would have to be stored per user).

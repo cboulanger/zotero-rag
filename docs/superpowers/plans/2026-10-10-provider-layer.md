@@ -59,7 +59,7 @@ Not affected by this plan: `failed_attachments.py`, `pending_upload_cache.py`, `
 
 ---
 
-## Phase 0: Verification spike (no production code)
+## Phase 0: Verification spike (no production code) - RunPod done 2026-10-10; HF, MPCDF and restricted-key checks pending
 
 **Purpose:** answer the two questions that can change the design, plus the cheap factual ones, before PR 1. Output is a short results note; nothing here ships.
 
@@ -79,7 +79,9 @@ Not affected by this plan: `failed_attachments.py`, `pending_upload_cache.py`, `
 - [ ] **Step 3: MPCDF.** If a job is available, check an authenticated `GET {base}/models` (200 with a valid key, status for a bad key, status after expiry). If none is available, mark `MpcdfProvider.health()` as "unverified" and keep the implementation behind its unit tests only.
 - [ ] **Step 4: Commit** the results note (`docs: provider layer spike results`).
 
-**Exit criteria:** every spec "To verify in a spike" item has an answer; Phase 7 and 8 scope is adjusted accordingly.
+**Status (2026-10-10):** Task 0.1 Steps 1, 2 and 4 are done; results are in `docs/history/implementation/provider-layer-phase-0-spike.md`. `workersMax=0` is accepted by a `PATCH` and blocks requests with HTTP 409 `ENDPOINT_PAUSED` (creation with 0 fails with HTTP 500), so RunPod keeps Pause and Phase 8 needs no fallback. Still open and needing the user: Task 0.1 Step 3 (restricted-key listing), and all of Task 0.2 (the HF and MPCDF hosts are blocked by the cloud session's network policy and no credentials exist there).
+
+**Exit criteria:** every spec "To verify in a spike" item has an answer; Phase 7 and 8 scope is adjusted accordingly. The restricted-key answer gates Task 3.3's lookup-failure behaviour; the HF answers gate Task 7.1 only and can be collected during Phase 7.
 
 ---
 
@@ -376,7 +378,7 @@ def get_effective_preset(settings: Settings, identity: ZoteroIdentity | None) ->
 
 ## Phase 8: Pause and Resume (PR 4)
 
-Scope depends on Task 0.1: if `workersMax=0` was rejected, implement RunPod `supports_suspend = False` and ship HF only.
+Task 0.1 showed that `workersMax=0` works for RunPod, so both providers get Pause. RunPod specifics: create with `workersMax >= 1` and `PATCH` afterwards (creation with 0 returns 500), map HTTP 409 with body code `ENDPOINT_PAUSED` to `paused` in `classify_http_error()`, and read the paused state from the management API only (`/health` does not show it).
 
 ### Task 8.1: `suspend()` and the `paused` status
 
@@ -423,7 +425,7 @@ Scope depends on Task 0.1: if `workersMax=0` was rejected, implement RunPod `sup
 
 | Risk | Mitigation |
 |---|---|
-| `workersMax=0` rejected (RunPod Pause) | Phase 0 answers it; Phase 8 ships HF-only if needed |
+| ~~`workersMax=0` rejected (RunPod Pause)~~ | Resolved by the spike: accepted, and blocks with HTTP 409 `ENDPOINT_PAUSED` |
 | Restricted RunPod keys cannot list endpoints | Phase 0; document that the key needs list permission, or fall back to storing the URL (spec A10 open question) |
 | Large call-site sweep for `get_effective_preset` | Do it in grouped commits with the suite after each; pass the preset down instead of re-reading global state |
 | Rebase friction with #70 files | Keep edits to `settings.py`, `cron_indexer.py`, `embeddings.py`, `preferences.xhtml`, `zotero-rag.js` surgical; rebase onto `devel` before each PR |
