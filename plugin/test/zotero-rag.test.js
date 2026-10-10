@@ -1546,6 +1546,87 @@ test('_getTooLargeAttachments excludes a Snapshot-titled attachment when indexSn
 	assert.deepStrictEqual([...results], []);
 });
 
+test('_getQuarantinedAttachments resolves backend rag-failed records with quarantine fields set', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'ATT1',
+		getCreators: () => [{ lastName: 'Doe' }],
+		getField: (f) => (f === 'title' ? 'A Scanned Book' : f === 'date' ? '2020' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: fakeAttachment });
+	const fetchStub = async (url) => {
+		assert.ok(String(url).includes('/api/indexed-tags/failed'));
+		assert.ok(String(url).includes('library_id=u1'));
+		return {
+			ok: true,
+			json: async () => ({ items: [
+				{ attachment_key: 'ATT1', item_key: 'I1', reason: 'too_costly', detail: '1600 pages, no text layer' },
+			] }),
+		};
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1);
+
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].quarantined, true);
+	assert.strictEqual(results[0].quarantineReason, 'too_costly');
+	assert.strictEqual(results[0].quarantineDetail, '1600 pages, no text layer');
+	assert.strictEqual(results[0].isLinked, false);
+	assert.strictEqual(results[0].authors, 'Doe');
+	assert.strictEqual(results[0].year, '2020');
+	assert.strictEqual(results[0].title, 'A Scanned Book');
+});
+
+test('_getQuarantinedAttachments drops records whose Zotero item no longer exists locally', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs({}); // ATT1 resolves to null
+	const fetchStub = async () => ({
+		ok: true,
+		json: async () => ({ items: [{ attachment_key: 'ATT1', item_key: 'I1', reason: 'too_costly', detail: 'x' }] }),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getQuarantinedAttachments returns an empty array instead of throwing on a fetch error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const fetchStub = async () => { throw new Error('network down'); };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+
+	const results = await plugin._getQuarantinedAttachments(1);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getQuarantinedAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const fetchStub = async () => ({
+		ok: true,
+		json: async () => ({ items: [{ attachment_key: 'SNAP1', item_key: 'I1', reason: 'too_costly', detail: 'x' }] }),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+});
+
 test('_getDownloadFailedAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
 	const fakeAttachment = {
 		deleted: false, parentItemID: null, key: 'SNAP1',
@@ -1571,15 +1652,33 @@ test('_getUnavailableAttachments fetches indexSnapshotsEnabled once and threads 
 	plugin._getSkippedServerAttachments = async (...args) => { calls.push(['skippedServer', ...args]); return []; };
 	plugin._getTooLargeAttachments = async (...args) => { calls.push(['tooLarge', ...args]); return []; };
 	plugin._getDownloadFailedAttachments = async (...args) => { calls.push(['downloadFailed', ...args]); return []; };
+	plugin._getQuarantinedAttachments = async (...args) => { calls.push(['quarantined', ...args]); return []; };
 
-	await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+	await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true, includePermanentFailures: true });
 
 	assert.deepStrictEqual(calls, [
 		['parseError', 1, false],
 		['skippedServer', 1, false],
 		['tooLarge', 1, false],
 		['downloadFailed', 1, false],
+		['quarantined', 1, false],
 	]);
+});
+
+test('_getUnavailableAttachments does not call _getQuarantinedAttachments when includePermanentFailures is not set', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	let called = false;
+	plugin._getQuarantinedAttachments = async () => { called = true; return []; };
+
+	await plugin._getUnavailableAttachments(1);
+
+	assert.strictEqual(called, false);
 });
 
 test('_getUnavailableAttachments main scan excludes a Snapshot-titled attachment with a missing file when indexSnapshotsEnabled is false', async () => {

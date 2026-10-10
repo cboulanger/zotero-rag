@@ -18,13 +18,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from backend.api.document_upload import _update_item_cache
 from backend.api.autoindex import _find_own_entry, _store
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
+from backend.services import pending_upload_cache
 from backend.dependencies import get_vector_store, get_zotero_identity
 from backend.db.vector_store import VectorStore
 from backend.services.autoindex_key_store import fingerprint
-from backend.services.index_event_log import INDEXED_TAG_NAME, IndexEventLog
+from backend.services.failed_attachments import get_failed_store
+from backend.services.index_event_log import FAILED_TAG_NAME, INDEXED_TAG_NAME, IndexEventLog
 from backend.services.indexed_tag_runs import is_valid_run_id, read_run, trigger_tag_sync
 from backend.services.zotero_identity import ZoteroIdentity
 
@@ -46,12 +49,12 @@ async def get_events(
     log = IndexEventLog(get_settings().index_events_path)
     if since is None:
         head = await asyncio.to_thread(log.last_seq)
-        return {"tag": INDEXED_TAG_NAME, "events": [], "last_seq": head, "gap": False}
+        return {"tag": INDEXED_TAG_NAME, "failed_tag": FAILED_TAG_NAME, "events": [], "last_seq": head, "gap": False}
     result = await asyncio.to_thread(log.read_since, since)
     if identity is not None:
         visible = {slug_to_backend_id(t) for t in identity.targets}
         result["events"] = [e for e in result["events"] if e.get("library_id") in visible]
-    return {"tag": INDEXED_TAG_NAME, **result}
+    return {"tag": INDEXED_TAG_NAME, "failed_tag": FAILED_TAG_NAME, **result}
 
 
 class CheckRequest(BaseModel):
@@ -76,6 +79,54 @@ async def check_indexed(
     return {"indexed": sorted(indexed)}
 
 
+@router.get("/indexed-tags/failed", summary="List quarantined/refused attachments for a library, with reasons")
+async def list_failed(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+) -> dict:
+    """Full ``rag-failed`` records for ``library_id`` (attachment_key, item_key,
+    reason, detail, failed_at) — used by the Fix Unavailable Attachments dialog's
+    "Include permanent failures" option, which needs the reason/detail text, not
+    just the indexed/not-indexed boolean ``check`` gives."""
+    if identity is not None and library_id not in {slug_to_backend_id(t) for t in identity.targets}:
+        raise HTTPException(status_code=403, detail="No access to this library.")
+    store = get_failed_store()
+    items = await asyncio.to_thread(store.list_failed, library_id)
+    return {"items": items}
+
+
+@router.post("/indexed-tags/failed/clear", summary="Retry attachments whose rag-failed tag the user removed")
+async def clear_failed(
+    body: CheckRequest,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+) -> dict:
+    """Forget the failure record for each attachment so it is processed again.
+
+    Called by the plugin when the user removes the ``rag-failed`` tag. Also
+    releases a quarantined deferred upload (resetting its attempts) and drops the
+    item from the check-indexed cache so the next scan sees it as not indexed.
+    Idempotent: attachments without a record are ignored.
+    """
+    if identity is not None and body.library_id not in {slug_to_backend_id(t) for t in identity.targets}:
+        raise HTTPException(status_code=403, detail="No access to this library.")
+    settings = get_settings()
+    store = get_failed_store()
+
+    def _clear() -> list[str]:
+        cleared = []
+        for key in body.attachment_keys:
+            record = store.clear(body.library_id, key)
+            if record is None:
+                continue
+            pending_upload_cache.release_entry(settings.data_path, body.library_id, key)
+            if record.get("item_key"):
+                _update_item_cache(body.library_id, {record["item_key"]: None})
+            cleared.append(key)
+        return cleared
+
+    return {"cleared": await asyncio.to_thread(_clear)}
+
+
 @router.post("/indexed-tags/refresh", summary="Reconcile indexed-status tags across all accessible libraries")
 async def start_refresh(request: Request) -> dict:
     """Spawn the tag-sync script for the caller's stored auto-index key.
@@ -96,7 +147,7 @@ async def start_refresh(request: Request) -> dict:
             detail="Enable automatic indexing in Preferences first; the tag refresh reuses that key.",
         )
     run_id, already_running = await trigger_tag_sync(get_settings(), fp)
-    return {"run_id": run_id, "already_running": already_running, "tag": INDEXED_TAG_NAME}
+    return {"run_id": run_id, "already_running": already_running, "tag": INDEXED_TAG_NAME, "failed_tag": FAILED_TAG_NAME}
 
 
 @router.get("/indexed-tags/refresh/{run_id}", summary="Read new output of a tag-sync run")
