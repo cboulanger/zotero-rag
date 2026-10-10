@@ -7,12 +7,14 @@ code.
 Three parts, to be implemented in order:
 
 - **A. Provider abstraction layer.** A `Provider` base class, an id-based
-  registry, and the small core changes that make core provider-blind.
+  registry, preset versioning, the small core changes that make the backend
+  provider-blind, and a provider-agnostic provisioning UI in the plugin's settings.
 - **B. Migrate existing presets.** RunPod becomes `RunPodProvider`. Every other
   bundled preset runs on a fallback `GenericProvider` that preserves today's
-  behaviour exactly.
-- **C. Hugging Face.** A new `HuggingFaceProvider` and a `huggingface` preset.
-  This is the proof that a new provider is additive.
+  behaviour exactly. Bundled presets are always re-seeded; custom presets are
+  version-checked.
+- **C. Hugging Face.** A new `HuggingFaceProvider` and a `huggingface` preset. This
+  is the proof that a new provider is additive, with no core and no plugin change.
 
 ## Decision
 
@@ -28,9 +30,17 @@ Rejected alternatives: presets-as-classes (undoes the file-based preset design i
 `2026-10-08-file-based-presets-design.md` and makes data-only presets awkward),
 and out-of-process provisioning scripts as the main mechanism (a subprocess per
 health poll, credentials via env/argv, core still has to know which health check
-to call). Both were weighed in the previous revision of this document.
+to call).
 
-## Why this is needed (current coupling in core)
+Backward compatibility is deliberately not handled at run time. Instead:
+
+- Bundled presets are overwritten from the shipped copies on every start (B3), so
+  the old RunPod schema disappears from any deployment on its first start after
+  upgrade.
+- Custom presets carry an integer `version`; a mismatch is logged as a warning, not
+  repaired (B3).
+
+## Why this is needed (current coupling)
 
 | Coupling | Where |
 |---|---|
@@ -39,30 +49,43 @@ to call). Both were weighed in the previous revision of this document.
 | `provisioning_script` path, the `PROVISION_RESULT:` stdout contract, and the `PROVISIONING_API_KEY` env hand-off | `presets.py`, `services/provisioning.py`, `api/config.py` |
 | Provider URL and key regexes repeated in each preset's `model_kwargs` | `runpod.json` |
 | Cold-endpoint messages special-casing RunPod's gateway | `services/embeddings.py`, `services/llm.py` |
-| Shared URL and key lookup pushed through `provisionable` in `_merge` | `api/config.py` |
+| Provisioning panel is fixed markup: one optional "Provisioning key" field, fixed help text, progress shown only as "Provisioning…" | `plugin/src/preferences.xhtml`, `plugin/src/preferences.js` |
+| Seeding never overwrites, so a schema change cannot reach an existing deployment | `ensure_default_presets` in `presets.py` |
+| Pydantic ignores unknown keys, so an outdated custom preset silently loses fields | `HardwarePreset` (no `extra` policy, no version) |
 
 ---
 
 ## A. Provider abstraction layer
 
-### A1. Preset schema
+### A1. Preset schema and versioning
 
-`HardwarePreset` gains one optional field and loses three:
+`HardwarePreset` gains `provider` and `version`, and loses three fields:
 
 ```python
+PRESET_SCHEMA_VERSION = 2          # bump on any breaking change to the file schema
+
 class ProviderConfig(BaseModel):
-    id: str                       # registry key, e.g. "runpod"
-    options: dict = {}            # validated by the provider class, not by core
+    id: str                        # registry key, e.g. "runpod"
+    options: dict = {}             # validated by the provider class, not by core
 
 class HardwarePreset(BaseModel):
     ...
+    version: int = 1               # absent in a file means the pre-provider schema (1)
     provider: Optional[ProviderConfig] = None   # None == {"id": "generic"}
 ```
 
-Removed from the schema: `EmbeddingConfig.health_check_provider`,
-`LLMConfig.health_check_provider`, `HardwarePreset.provisioning_script`.
-`LLMConfig.models_status_url` (the KISSKI demand indicator) is a different feature
-and is not touched.
+Removed: `EmbeddingConfig.health_check_provider`, `LLMConfig.health_check_provider`,
+`HardwarePreset.provisioning_script`. `LLMConfig.models_status_url` (the KISSKI
+demand indicator) is a different feature and is untouched.
+
+Rules for `version`:
+
+- It is an integer, bumped only for a breaking change to the preset file format
+  (a key removed, renamed, or changed in meaning). Additive optional keys do not
+  bump it.
+- Every bundled preset ships `"version": 2`.
+- A short changelog table in `docs/presets.md` lists what each version changed, so
+  a warning can point at it.
 
 ### A2. The `Provider` base class (`backend/providers/base.py`)
 
@@ -73,7 +96,8 @@ class registered under id `generic`.
 ```python
 class Provider:
     id: ClassVar[str]
-    Options: ClassVar[type[BaseModel]] = NoOptions      # validates preset.provider.options
+    label: ClassVar[str]                                  # human name for the UI
+    Options: ClassVar[type[BaseModel]] = NoOptions        # validates preset.provider.options
     supports_provisioning: ClassVar[bool] = False
 
     def __init__(self, preset: HardwarePreset, options: BaseModel): ...
@@ -82,10 +106,14 @@ class Provider:
     # (e.g. URL/key regexes) so embeddings.py / llm.py keep reading model_kwargs only.
     def apply_defaults(self, preset: HardwarePreset) -> None: ...
 
+    # What the client needs to render provisioning UI. No secrets. See A7.
+    def describe(self) -> ProviderDescriptor: ...
+
     # Readiness of one side. None means "this provider has no health concept".
     def health(self, side: Side, base_url: str, api_key: str) -> Health | None: ...
 
     # Create or wake the remote resources. Returns {shared_base_url_env: url}.
+    # Must report steps through `progress` and respect ctx.deadline.
     def provision(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> dict[str, str]:
         raise NotImplementedError
 
@@ -97,12 +125,16 @@ class Provider:
 ```
 
 - `Health` keeps the existing shape: `{"status": "ready"|"cold"|"throttled"|"unreachable", "detail": str}`.
+  The four statuses are defined provider-neutrally: `cold` wakes on the next
+  request by itself, `throttled` means the provider has no capacity right now,
+  `unreachable` includes "nothing provisioned yet" and provider-side failure.
 - `ProvisionContext` carries the preset, the resolved credentials, the data path,
-  and flags (`recreate`, `skip_warmup`). Credentials arrive in-process, so the
-  `PROVISIONING_API_KEY` env hand-off disappears.
+  flags (`recreate`, `skip_warmup`) and a `deadline`. Credentials arrive
+  in-process, so the `PROVISIONING_API_KEY` env hand-off disappears.
 - Defaults implement `GenericProvider`: `health()` returns `None`,
-  `supports_provisioning` is `False`, `classify_http_error()` returns `None`, and
-  `apply_defaults()` is a no-op.
+  `supports_provisioning` is `False`, `classify_http_error()` returns `None`,
+  `apply_defaults()` is a no-op, and `describe()` returns the provider id and label
+  with no provisioning section.
 
 ### A3. Registry and discovery (`backend/providers/__init__.py`)
 
@@ -113,7 +145,7 @@ class Provider:
   `generic`), validates `options` with the class's `Options` model, and caches
   the instance with the preset (presets are already cached per process; see the
   `presets.py` module docstring).
-- An unknown id or invalid options marks that one preset unavailable with a
+- An unknown id or invalid options marks that one preset unavailable, with a
   warning in the log and in `GET /api/config` listings. It never fails backend
   startup or the other presets.
 - Heavy or optional dependencies (an SDK) are imported lazily inside the provider
@@ -125,15 +157,16 @@ class Provider:
 |---|---|
 | `_check_side()` looks up `HEALTH_CHECKS[provider]` | `get_provider(preset).health(side, url, key)`; `None` stays `null` in the response, unresolvable URL/key stays "not configured" |
 | `provisionable = bool(preset.provisioning_script)` | `provider.supports_provisioning` |
-| `POST /api/config/provision` spawns `sys.executable script --json` | `await asyncio.to_thread(provider.provision, ctx, progress)`; same job states (`idle`/`running`/`succeeded`/`failed`), same 409 and 400 behaviour |
+| `POST /api/config/provision` spawns `sys.executable script --json` | `await asyncio.to_thread(provider.provision, ctx, progress)`; same job states (`idle`/`running`/`succeeded`/`failed`), same 409 and 400 behaviour; the job fails when `ctx.deadline` passes |
 | Result parsed from a `PROVISION_RESULT:` stdout line | Returned dict goes straight to `update_remote_config()` |
+| `_provisioning_key()` reads the key pattern from `model_kwargs` | Unchanged in logic; the pattern now arrives via `apply_defaults()` |
 | `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Skips them when `provider.supports_provisioning` is set |
+| Job state is `{status, message, started_at, finished_at}` | Adds `progress: list[str]`, the provider's reported steps (bounded, newest last) |
 
 `embeddings.py` and `llm.py` keep reading `shared_base_url_env` /
-`shared_api_key_env` via `resolve_shared_value()`. The only addition is that
-their cold-endpoint branches may also ask `provider.classify_http_error()`
-instead of matching a RunPod-specific response. The hook is optional, and the
-current RunPod detection stays in place until Part B moves it.
+`shared_api_key_env` via `resolve_shared_value()`. Their cold-endpoint branches may
+also ask `provider.classify_http_error()` instead of matching a RunPod-specific
+response; until Part B moves it, the current RunPod detection stays in place.
 
 ### A5. CLI
 
@@ -148,13 +181,92 @@ One test module parametrised over every registered provider:
 
 - `Options` validation (valid, invalid, defaults).
 - `apply_defaults()` is idempotent and does not clobber explicit preset values.
+- `describe()` returns a well-formed descriptor with no secret material.
 - `health()` classification against a fake client, never raising.
-- `provision()` idempotency against a fake client (second run creates nothing).
+- `provision()` idempotency against a fake client (second run creates nothing),
+  and it reports at least one progress step.
 - `teardown()` is a no-op for absent resources.
 - Providers with `supports_provisioning = False` raise `NotImplementedError` and
   are never offered a provision button.
 
 A new provider must pass this suite. That is the definition of "easy to add".
+
+### A7. Client UI: provider-agnostic provisioning in Preferences
+
+Today the "Active Model Preset" group in `preferences.xhtml` has fixed markup for
+provisioning: a single optional one-time key field, one fixed help sentence, and a
+"Provisioning…" label with no detail while the job runs. `preferences.js` already
+does the generic parts correctly (health rows per side, colour by status, button
+shown only when a side is `unreachable`/`throttled` or a job runs, polling status
+every 5 s). What it cannot do is describe a provider: what credential to ask for,
+what that credential is for, how long it takes, or what step the job is on.
+
+**Principle:** the plugin never contains a provider name or provider-specific text.
+Everything provider-specific arrives as data from the backend.
+
+**Backend contract.** New read-only `GET /api/config/provider` (no admin gate, no
+secrets, same posture as `GET /api/config`), returning the active preset's
+`ProviderDescriptor`:
+
+```json
+{
+  "id": "huggingface",
+  "label": "Hugging Face",
+  "supports_provisioning": true,
+  "provisioning": {
+    "credential": {
+      "label": "Hugging Face token",
+      "help": "Creating endpoints needs a token with write access to Inference Endpoints. Used for this run only unless no token is stored yet.",
+      "pattern": "^hf_[A-Za-z0-9]+$",
+      "optional": true
+    },
+    "hint": "A first start can take several minutes while the model loads."
+  }
+}
+```
+
+`GET /api/config/provision/status` additionally returns `progress` (A4). `POST
+/api/config/provision` keeps its `{ "api_key": "..." }` body. `GET /api/config`
+keeps `provisionable`, now derived from the provider.
+
+**Plugin behaviour** (all in `plugin/src/preferences.js`, built dynamically like
+`renderServiceApiKeyFields`, replacing the fixed provisioning rows in the xhtml
+with one container):
+
+| Element | Source | Notes |
+|---|---|---|
+| Provider line ("Provider: Hugging Face") | `descriptor.label` | Under the preset description; hidden for `generic` |
+| Health rows per side | `GET /api/config/health` | Unchanged, same colours and statuses |
+| Provision panel visibility | `descriptor.supports_provisioning` and (a side is `unreachable`/`throttled`, or a job is running) | Same rule as today |
+| Credential field | `descriptor.provisioning.credential` | Label, help text and placeholder from the descriptor; pattern checked client-side, enforced server-side regardless; omitted if the descriptor has none |
+| Hint line | `descriptor.provisioning.hint` | Shown while idle and while running |
+| Progress | `status.progress` | Newest line shown live under the button; whole list available as a tooltip |
+| Result | `status.message` | Success or the failure reason, unchanged |
+| Resume after reopening Preferences | `GET /api/config/provision/status` on every refresh | If `running`, resume the polling loop. Today the in-memory `provisioning` flag is lost when the pane closes, so a long-running job (HF can take minutes) looks idle |
+| Non-admin | unchanged | `POST` returns 403, shown inline |
+
+**Old-backend tolerance.** If `GET /api/config/provider` is missing (older
+backend), the plugin falls back to a plain descriptor: generic labels, a single
+optional one-time key field, no progress. It never hard-fails, matching the
+existing "degrade to showing nothing" convention for health.
+
+**Shared service-key fields stay as they are.** The "Service API Keys" section
+still renders `HF_TOKEN` or `RUNPOD_API_KEY` from `GET /api/required-keys`
+(`kind: "shared_api_key"`). The provisioning credential is a separate, one-time
+override, exactly as today.
+
+**Out of scope for v1:** per-provider free-form provisioning parameters entered in
+the UI (for example choosing a region at click time), and a teardown or pause
+button. Provider-level settings stay in the preset JSON `options`; teardown stays
+on the CLI. The descriptor can grow a `fields` list later without changing the
+plugin's structure.
+
+**Tests.** Plugin tests render the panel from two fake descriptors (one RunPod-like
+with the existing broader-key help text, one HF-like with a token pattern and a
+hint) and from the old-backend fallback, and assert that no provider name appears
+in plugin code. A job-resume test starts the pane while status is `running`.
+Backend tests cover `GET /api/config/provider` for every registered provider via
+the contract suite.
 
 ---
 
@@ -163,13 +275,15 @@ A new provider must pass this suite. That is the definition of "easy to add".
 ### B1. `GenericProvider` (every preset except `runpod`)
 
 Applies to `cpu-only`, `high-memory`, `windows-test`, `remote-kisski`,
-`remote-mpcdf`, and `remote-openai`. These presets need **no JSON change**:
-`provider` is omitted and resolves to `generic`.
+`remote-mpcdf`, `remote-openai`, and the Apple Silicon presets. Their JSON gains
+only `"version": 2`; `provider` is omitted and resolves to `generic`.
 
 The base class defaults reproduce today's behaviour exactly:
 
 - `GET /api/config/health` returns `null` for both sides.
 - `provisionable` is `false`, and `POST /api/config/provision` returns 400.
+- `GET /api/config/provider` returns the generic descriptor, so the plugin shows no
+  provisioning panel and no provider line.
 - URL and key handling is untouched: `required_client_fields()` still reads
   `base_url`/`api_key_env` or `shared_*_env` from `model_kwargs`.
 - KISSKI's `models_status_url` demand indicator is unaffected.
@@ -184,13 +298,15 @@ Move, with no behaviour change:
   `RunPodProvider.health()`.
 - The ensure-template, ensure-endpoint, warm-up and teardown logic from
   `bin/provision_runpod_endpoints.py` (~600 lines, `httpx` REST) becomes
-  `provision()` / `teardown()`.
+  `provision()` / `teardown()`, with progress steps added ("Creating embedding
+  endpoint", "Waiting for warm-up", and so on).
 - The URL regex (`^https://api\.runpod\.ai/v2/[A-Za-z0-9]+/openai/v1$`) and key
   regex (`^rpa_[A-Za-z0-9]+$`) move into `apply_defaults()`, which writes them
-  into `model_kwargs` as `shared_*_pattern`. `runpod.json` stops repeating them,
-  and the services still read them from `model_kwargs`.
+  into `model_kwargs` as `shared_*_pattern`. `runpod.json` stops repeating them.
 - RunPod's gateway cold response (the openresty 405 page the services special-case
   today) becomes `classify_http_error()`.
+- The provisioning panel text that is RunPod-specific in effect today ("a key with
+  broader rights than the one used for queries") moves into `describe()`.
 
 `Options` replaces the CLI flags (the CLI can still override them):
 
@@ -208,44 +324,79 @@ Move, with no behaviour change:
 }
 ```
 
-`runpod.json` after migration drops `health_check_provider` (x2),
-`provisioning_script`, and the four `shared_*_pattern` entries, and gains the
+`runpod.json` after migration: `"version": 2`; drops `health_check_provider` (x2),
+`provisioning_script`, and the four `shared_*_pattern` entries; gains the
 `provider` block above.
 
-### B3. Compatibility for already-seeded files
+### B3. Seeding and versioning (replaces any run-time compatibility handling)
 
-`data/presets/runpod.json` is seeded once and never overwritten
-(`ensure_default_presets`), so admins' existing copies still carry the old fields.
-Load-time normalisation handles that:
+**Bundled presets are always overwritten.** `ensure_default_presets` is changed so
+that, once per process per data path (the existing cache), every file in
+`backend/config/default_presets/` is written to `<data_path>/presets/<name>.json`
+unless the on-disk bytes are already identical. The write keeps the existing
+atomic temp-file-and-rename pattern, so a concurrent reader (the cron indexer
+sharing the data path) never sees a partial file.
 
-- `health_check_provider == "runpod"` or `provisioning_script` ending in
-  `provision_runpod_endpoints.py` becomes `provider = {"id": "runpod"}`.
-- Any other `provisioning_script` value logs a warning and is ignored (no bundled
-  preset uses one, and `GenericProvider` does not run scripts).
-- The old keys are accepted on input and never written back. The shim is removed
-  at 2.0.
+- If the on-disk file differed, the overwrite is logged at WARNING with the file
+  name and a pointer: "Bundled preset X was modified locally; local changes were
+  replaced. To customise a preset, copy it to a new file name."
+- Consequences, to be documented in `docs/presets.md` in place of the current "never
+  overwritten, deletions stick" text: editing a bundled file in place does not
+  survive a restart; deleting a bundled file is undone at the next start; the way to
+  customise is a new file name.
+- The old RunPod schema therefore disappears from a deployment on its first start
+  after upgrade, with no detection logic and no migration code to remove later.
+
+**Custom presets are version-checked, not repaired.** A "custom" preset is any file
+in `<data_path>/presets/` whose name is not a bundled file name. When one is loaded:
+
+- If `version` is missing or differs from `PRESET_SCHEMA_VERSION`, log one WARNING
+  per file per process: "Custom preset X declares version N, current is M; fields
+  may be ignored or behave differently. See the preset changelog in
+  docs/presets.md." The preset still loads.
+- If it contains keys removed in a later version (`health_check_provider`,
+  `provisioning_script`), the warning names them and says they are ignored. The
+  list of removed keys per version is a small table in `presets.py`, extended when
+  a future version removes more.
+- A custom copy of the old RunPod preset keeps working as a plain, non-provisioning
+  remote preset, and the warning tells the admin to move to the `provider` block.
 
 ### B4. Implementation order (each step keeps the suite green)
 
-1. Add `backend/providers/` (base, registry, `GenericProvider`), the schema field,
-   and the B3 normalisation. Core call sites in A4 switch to the provider.
-   Behaviour is identical because only `generic` and the shimmed `runpod` exist.
-   Tests: existing `test_endpoint_health`, `test_provision_job`, `test_config`,
-   `test_embeddings`, `test_llm` pass with only their patch targets updated
-   (e.g. `HEALTH_CHECKS`).
+1. Add `backend/providers/` (base, registry, `GenericProvider`), `version` and
+   `provider` on the schema, the B3 seeding and version warnings, and bump every
+   bundled preset to `"version": 2`. Core call sites in A4 switch to the provider.
+   Behaviour is identical for every preset except that `runpod` temporarily loses
+   its health and provisioning (it is ported in step 2), so steps 1 and 2 should
+   land together in one change set.
 2. Port RunPod into `RunPodProvider`. Delete `HEALTH_CHECKS`, the `Literal`
    fields, and the subprocess job path. Keep `bin/provision_runpod_endpoints.py`
    as a thin shim over `bin/provision.py`.
-3. Rewrite `runpod.json`, update `docs/presets.md`, and mark the older
-   RunPod/health specs as superseded where they describe the script contract.
+3. Backend descriptor endpoint and `progress` in job state (A4, A7).
+4. Plugin: dynamic provisioning panel, job resume, old-backend fallback, and the
+   plugin tests from A7.
+5. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
+   changelog, provider ids), and mark the older RunPod/health specs as superseded
+   where they describe the script contract.
 
 ### B5. Behaviour-preservation checklist
 
 For each bundled preset, before and after: `GET /api/config`, `GET
-/api/config/health`, `GET /api/config/api-keys` (the key requirements listing),
-`POST /api/config/provision` status code, and a preset switch. For `runpod`:
-health classification, provision end-to-end against a fake client, and the
-plugin's "Provision endpoints" button flow, unchanged.
+/api/config/health`, `GET /api/required-keys`, `POST /api/config/provision` status
+code, and a preset switch. For `runpod`: health classification, provision
+end-to-end against a fake client, and the plugin's provisioning flow (button,
+one-time key, polling, health refresh), unchanged apart from the new progress line
+and the descriptor-driven text.
+
+### B6. Seeding and versioning tests
+
+- A modified bundled file is overwritten and a WARNING naming it is logged.
+- An identical bundled file is not rewritten (modification time unchanged).
+- A deleted bundled file is recreated.
+- A custom file is never touched.
+- A custom file with a missing or old `version` warns exactly once per process;
+  with the current version it does not warn.
+- A custom file containing removed keys names them in the warning and still loads.
 
 ---
 
@@ -262,8 +413,9 @@ plugin's "Provision endpoints" button flow, unchanged.
 | Billing | per second, 60s idle default | per instance-hour by the minute, billed while initializing or running, not while paused or scaled to zero |
 | Cold behaviour | gateway 405 page | reported 502 until a replica is up |
 
-These all fit behind the A2 interface, which is the point of the exercise. Nothing
-here requires a core change.
+All of this fits behind the A2 interface. Nothing requires a core change, and
+nothing requires a plugin change: the UI is driven by the descriptor (A7), which is
+the test that the abstraction holds.
 
 ### C2. `HuggingFaceProvider` (`backend/providers/huggingface.py`)
 
@@ -273,11 +425,16 @@ here requires a core change.
 - **`apply_defaults()`:** adds a key regex (`^hf_[A-Za-z0-9]+$`) and a base-URL
   regex for the endpoint hostname shape to `model_kwargs`. Both patterns must be
   verified against real endpoints.
+- **`describe()`:** label "Hugging Face"; a credential description saying that
+  creating endpoints needs a token with write access to Inference Endpoints and
+  that a billing method must be on the account; a hint that a first start can take
+  several minutes.
 - **`provision()`:** idempotent by name (`zotero-rag-embedding`,
   `zotero-rag-llm`). Absent: create. `scaledToZero` or `paused`: resume. Existing
   with a differing config: warn, or recreate with `--recreate`. Then wait with a
-  bound, send a warm-up request, and return `{HF_EMBEDDING_BASE_URL: ..., HF_LLM_BASE_URL: ...}`
-  (endpoint URL plus `/v1`).
+  bound, send a warm-up request, and return
+  `{HF_EMBEDDING_BASE_URL: ..., HF_LLM_BASE_URL: ...}` (endpoint URL plus `/v1`).
+  Emits progress steps for each phase (creating, initializing, warming up).
 - **`health()`:** one management-API call per side. `running` maps to `ready`;
   `scaledToZero`, `paused`, `pending`, `initializing` map to `cold`; `failed` or an
   API error maps to `unreachable`. No data-plane probe is needed, unlike RunPod.
@@ -292,6 +449,7 @@ here requires a core change.
 
 ```json
 {
+  "version": 2,
   "description": "Fully remote via your own Hugging Face Inference Endpoints (embedding + LLM, pay-per-use, scale-to-zero). Enter your HF token, then click \"Provision endpoints\" to create or wake both endpoints.",
   "embedding": {
     "model_type": "remote",
@@ -341,8 +499,12 @@ re-verified before any number appears in user-facing text.
   live calls (endpoints cost money).
 - Status-to-health mapping table test; idempotent `provision()` for the
   absent / scaled-to-zero / running / failed starting states; 502 classification.
+- Plugin: the existing descriptor-driven tests (A7) are extended with the real HF
+  descriptor, with no plugin code change.
 - Manual smoke checklist, run once against a real account: provision from
-  scratch, re-run (reuse and wake), scale to zero and wake via a query, teardown.
+  scratch via the Preferences pane (progress lines visible, closing and reopening
+  the pane mid-run resumes), re-run (reuse and wake), scale to zero and wake via a
+  query, teardown via the CLI.
 
 ---
 
@@ -358,8 +520,11 @@ re-verified before any number appears in user-facing text.
   `provision()`.
 - EU region and GPU availability, and whether GDPR hosting should be the default.
 - `huggingface_hub` versus plain REST for the HF provider (C2).
-- Should a provider be able to declare extra Preferences-pane fields (for example
-  HF `namespace`) so the plugin can render them without plugin changes, or is
-  `options` in the preset JSON enough for now?
-- When to remove the B3 compatibility shim: at 2.0, per the repository's
-  documentation policy.
+- Job deadline: what is a sane default (HF cold starts may take well over the RunPod
+  3-minute warm-up bound), and should it be a provider option?
+- UI: is "newest progress line plus tooltip" enough, or should the full step list be
+  visible? And when a provider later needs click-time parameters, is a descriptor
+  `fields` list the right extension?
+- Should a bundled-preset overwrite keep a one-generation backup (`<name>.json.bak`)
+  as a safety net, or is the WARNING log line enough? (The current decision is no
+  backup, since customising via a new file name is the supported path.)
