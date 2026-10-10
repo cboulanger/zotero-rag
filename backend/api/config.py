@@ -718,8 +718,8 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
         ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
         jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
 
-    if provisioning.is_running(slot):
-        raise HTTPException(status_code=409, detail="A provisioning job is already running.")
+    if provisioning.is_running(slot, sides):
+        raise HTTPException(status_code=409, detail="A job for this endpoint is already running.")
     provisioning.mark_running(sides, slot)
 
     action = None
@@ -744,6 +744,8 @@ async def start_provisioning(
     background job. Each requested side's provider does the work; whatever
     URL it reports is applied via the shared remote-config store as soon as
     that side succeeds. Poll GET /api/config/provision/status.
+
+    Sides are independent: one side's job does not block the other's.
 
     Who may run it follows the side's credential scope: any signed-in user for
     ``user`` sides (it runs on the caller's own key, in the caller's own job

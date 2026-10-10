@@ -164,7 +164,7 @@ test('a disabled provision button cannot be clicked', () => {
 	const doc = { createElementNS };
 	const calls = [];
 	const refs = S.ensureSections(doc, fakeNode(), { onProvision: (...a) => calls.push(a), onRetry: () => {} });
-	const running = { status: 'running', progress: [], sides: {} };
+	const running = { status: 'running', progress: [], sides: { embedding: { status: 'running', message: null } } };
 	S.update(refs, {
 		embedding: S.buildModel('embedding', remote(), { status: 'unreachable', detail: '' }, running),
 		llm: S.buildModel('llm', local, undefined, running),
@@ -264,12 +264,13 @@ test('opening the pane while a job is running resumes polling and shows its prog
 	assert.strictEqual(refs.embedding.progress.hidden, true);
 });
 
-test('buttons are disabled with a reason while the callers slot is busy', async () => {
-	const running = { status: 'running', progress: [], sides: {} };
+test('a side\'s buttons are disabled with a reason only while that side runs a job', async () => {
+	const running = { status: 'running', progress: [], sides: { llm: { status: 'running', message: null } } };
 	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [running, { status: 'succeeded', progress: [], sides: {} }] });
 	await controller.refresh();
 	assert.strictEqual(refs.llm.provision.disabled, true);
 	assert.match(refs.llm.provision.title, /already running/);
+	assert.strictEqual(refs.embedding.provision.disabled, false);
 });
 
 test('401 / 403 / 409 from the backend are shown inline in the section', async () => {
@@ -397,7 +398,7 @@ test('the Pause button of a section calls the onPause handler and is disabled wh
 	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, idle), llm: S.buildModel('llm', local, undefined, idle) });
 	refs.embedding.pause.click();
 	assert.deepStrictEqual(calls, ['embedding']);
-	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, { status: 'running', progress: [], sides: {} }), llm: S.buildModel('llm', local, undefined, idle) });
+	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, { status: 'running', progress: [], sides: { embedding: { status: 'running', message: null } } }), llm: S.buildModel('llm', local, undefined, idle) });
 	refs.embedding.pause.click();
 	assert.deepStrictEqual(calls, ['embedding']);
 });

@@ -119,13 +119,15 @@ var ZoteroRAGProviderSections = {
 			};
 		}
 
-		const running = !!job && job.status === 'running';
+		// Sides are independent: only this side's own job disables its buttons.
+		const sideState = job && job.sides ? job.sides[side] : undefined;
+		const running = !!sideState && (sideState.status === 'running' || sideState.status === 'pending');
 		const canProvision = provider.supports_provisioning && provider.operable_by_caller;
 		const status = health ? health.status : '';
 		const needsAction = this.NEEDS_PROVISIONING.has(status);
 		const sideJob = job && job.sides ? job.sides[side] : undefined;
 		const failed = !!sideJob && sideJob.status === 'failed';
-		const busyReason = running ? 'A provisioning job is already running.' : '';
+		const busyReason = running ? 'A job for this endpoint is already running.' : '';
 
 		const scope = this.SCOPE_NOTES[provider.key_scope] || '';
 		const credential = provider.provisioning && provider.provisioning.credential;

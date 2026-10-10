@@ -565,3 +565,33 @@ class SuspendApiTest(UserScopeProvisionTest):
         update_remote_config({"RUNPOD_API_KEY": "rpa_STORED"}, data_path=get_settings().data_path)
         self.assertEqual(self._suspend(21, key=None, admin=False).status_code, 403)
         self.assertEqual(self._suspend(22, key=None, admin=True).status_code, 202)
+
+
+class IndependentSidesTest(unittest.TestCase):
+    """One side's job must not block, or be overwritten by, the other side's."""
+
+    def setUp(self):
+        from backend.services import provisioning
+        self.p = provisioning
+        self.p.reset_job_state()
+
+    def test_other_side_can_start_while_one_runs(self):
+        self.p.mark_running(["embedding"], "user:1")
+        self.assertTrue(self.p.is_running("user:1", ["embedding"]))
+        self.assertFalse(self.p.is_running("user:1", ["llm"]))
+        self.p.mark_running(["llm"], "user:1")
+        state = self.p.get_job_state("user:1")
+        self.assertEqual(state["status"], "running")
+        self.assertEqual(set(state["sides"]), {"embedding", "llm"})
+
+    def test_slot_stays_running_until_the_last_side_finishes(self):
+        self.p.mark_running(["embedding"], "user:1")
+        self.p.mark_running(["llm"], "user:1")
+        self.p._set_side("user:1", "embedding", "succeeded")
+        self.p._finish("user:1", "succeeded", None, ["embedding"])
+        self.assertEqual(self.p.get_job_state("user:1")["status"], "running")
+        self.p._set_side("user:1", "llm", "failed", "boom")
+        self.p._finish("user:1", "failed", "boom", ["llm"])
+        state = self.p.get_job_state("user:1")
+        self.assertEqual((state["status"], state["message"]), ("failed", "llm: boom"))
+        self.assertEqual(state["sides"]["embedding"]["status"], "succeeded")
