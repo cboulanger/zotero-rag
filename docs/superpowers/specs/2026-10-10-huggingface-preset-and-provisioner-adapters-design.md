@@ -99,6 +99,7 @@ class Provider:
     label: ClassVar[str]                                  # human name for the UI
     Options: ClassVar[type[BaseModel]] = NoOptions        # validates preset.provider.options
     supports_provisioning: ClassVar[bool] = False
+    supports_suspend: ClassVar[bool] = False              # cost-control pause, see A8
 
     def __init__(self, preset: HardwarePreset, options: BaseModel): ...
 
@@ -117,17 +118,26 @@ class Provider:
     def provision(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> dict[str, str]:
         raise NotImplementedError
 
+    # Delete the remote resources (decommissioning). CLI only, never in the UI.
     def teardown(self, ctx: ProvisionContext) -> None:
         raise NotImplementedError
 
-    # Optional: tell the query path that an HTTP error means "endpoint is cold".
-    def classify_http_error(self, status: int, body: str) -> Literal["cold"] | None: ...
+    # Stop all billing and block any wake-up until resumed. Idempotent; keeps the
+    # resources and their URLs. Resume is provision(). See A8.
+    def suspend(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> None:
+        raise NotImplementedError
+
+    # Optional: tell the query path what an HTTP error means.
+    def classify_http_error(self, status: int, body: str) -> Literal["cold", "paused"] | None: ...
 ```
 
-- `Health` keeps the existing shape: `{"status": "ready"|"cold"|"throttled"|"unreachable", "detail": str}`.
-  The four statuses are defined provider-neutrally: `cold` wakes on the next
+- `Health` keeps the existing shape: `{"status": "ready"|"cold"|"throttled"|"paused"|"unreachable", "detail": str}`.
+  The five statuses are defined provider-neutrally: `cold` wakes on the next
   request by itself, `throttled` means the provider has no capacity right now,
+  `paused` was stopped on purpose and will not wake until resumed (A8),
   `unreachable` includes "nothing provisioned yet" and provider-side failure.
+  Pause state is read from the provider through `health()`, never stored locally,
+  so there is one source of truth and nothing to drift.
 - `ProvisionContext` carries the preset, the resolved credentials, the data path,
   flags (`recreate`, `skip_warmup`) and a `deadline`. Credentials arrive
   in-process, so the `PROVISIONING_API_KEY` env hand-off disappears.
@@ -162,6 +172,7 @@ class Provider:
 | `_provisioning_key()` reads the key pattern from `model_kwargs` | Unchanged in logic; the pattern now arrives via `apply_defaults()` |
 | `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Skips them when `provider.supports_provisioning` is set |
 | Job state is `{status, message, started_at, finished_at}` | Adds `progress: list[str]`, the provider's reported steps (bounded, newest last) |
+| (new) | `POST /api/config/suspend`, admin-gated, runs `provider.suspend()` through the same single job slot (409 while another job runs); resume is `POST /api/config/provision` (A8) |
 
 `embeddings.py` and `llm.py` keep reading `shared_base_url_env` /
 `shared_api_key_env` via `resolve_shared_value()`. Their cold-endpoint branches may
@@ -170,7 +181,7 @@ response; until Part B moves it, the current RunPod detection stays in place.
 
 ### A5. CLI
 
-A generic `bin/provision.py [--preset NAME] [--teardown] [--recreate] [--yes]
+A generic `bin/provision.py [--preset NAME] [--pause] [--teardown] [--recreate] [--yes]
 [--skip-warmup]` drives any provider that supports provisioning. It replaces the
 per-provider script as the manual entry point and is subject to the same
 "run inside the container so the data volume is shared" rule from CLAUDE.md.
@@ -186,8 +197,11 @@ One test module parametrised over every registered provider:
 - `provision()` idempotency against a fake client (second run creates nothing),
   and it reports at least one progress step.
 - `teardown()` is a no-op for absent resources.
-- Providers with `supports_provisioning = False` raise `NotImplementedError` and
-  are never offered a provision button.
+- If `supports_suspend`: `suspend()` is idempotent, `health()` then reports
+  `paused`, a following `provision()` reports `ready` or `cold` again, and the
+  endpoint URLs are unchanged across the cycle.
+- Providers with `supports_provisioning = False` or `supports_suspend = False`
+  raise `NotImplementedError` and are never offered the corresponding button.
 
 A new provider must pass this suite. That is the definition of "easy to add".
 
@@ -213,6 +227,7 @@ secrets, same posture as `GET /api/config`), returning the active preset's
   "id": "huggingface",
   "label": "Hugging Face",
   "supports_provisioning": true,
+  "supports_suspend": true,
   "provisioning": {
     "credential": {
       "label": "Hugging Face token",
@@ -237,7 +252,10 @@ with one container):
 |---|---|---|
 | Provider line ("Provider: Hugging Face") | `descriptor.label` | Under the preset description; hidden for `generic` |
 | Health rows per side | `GET /api/config/health` | Unchanged, same colours and statuses |
-| Provision panel visibility | `descriptor.supports_provisioning` and (a side is `unreachable`/`throttled`, or a job is running) | Same rule as today |
+| Provision panel visibility | `descriptor.supports_provisioning` and (a side is `unreachable`/`throttled`/`paused`, or a job is running) | Same rule as today, plus `paused` |
+| "Pause endpoints" button | `descriptor.supports_suspend` and no side `paused` | Shown next to the health rows whenever the endpoints are `ready` or `cold`, not only when something is wrong; one click, no confirmation (reversible) |
+| "Resume endpoints" button | `descriptor.supports_suspend` and a side `paused` | Same action and job path as Provision (`POST /api/config/provision`), different label, so there is one code path |
+| Paused notice | health `paused` | Row text "paused, no cost, will not wake on requests", in a neutral colour (not red) |
 | Credential field | `descriptor.provisioning.credential` | Label, help text and placeholder from the descriptor; pattern checked client-side, enforced server-side regardless; omitted if the descriptor has none |
 | Hint line | `descriptor.provisioning.hint` | Shown while idle and while running |
 | Progress | `status.progress` | Newest line shown live under the button; whole list available as a tooltip |
@@ -256,17 +274,70 @@ still renders `HF_TOKEN` or `RUNPOD_API_KEY` from `GET /api/required-keys`
 override, exactly as today.
 
 **Out of scope for v1:** per-provider free-form provisioning parameters entered in
-the UI (for example choosing a region at click time), and a teardown or pause
-button. Provider-level settings stay in the preset JSON `options`; teardown stays
-on the CLI. The descriptor can grow a `fields` list later without changing the
-plugin's structure.
+the UI (for example choosing a region at click time), and a teardown button.
+Provider-level settings stay in the preset JSON `options`. Teardown stays on the
+CLI: for both RunPod and HF an idle, scaled-to-zero endpoint already costs nothing,
+so deleting it saves no money, and on RunPod it changes the endpoint ID, which
+breaks endpoint-restricted keys. The cost-control action is Pause (A8). The
+descriptor can grow a `fields` list later without changing the plugin's structure.
 
 **Tests.** Plugin tests render the panel from two fake descriptors (one RunPod-like
 with the existing broader-key help text, one HF-like with a token pattern and a
 hint) and from the old-backend fallback, and assert that no provider name appears
 in plugin code. A job-resume test starts the pane while status is `running`.
 Backend tests cover `GET /api/config/provider` for every registered provider via
-the contract suite.
+the contract suite. Pause and Resume button visibility is tested for each
+combination of descriptor flag and health status.
+
+### A8. Pause and Resume (cost control)
+
+**Why not teardown.** Scale-to-zero already makes an idle endpoint free on both
+RunPod and HF, so deleting it saves nothing. What costs money is waking it: any
+request starts a worker and bills it for the run plus the idle tail (HF reportedly
+about 15 minutes, to be verified). The hourly auto-indexer would wake the
+endpoints every hour and keep them effectively always on, and a stray query, a
+retry loop, or a misconfigured minimum replica count does the same. Pause is a
+reversible switch that blocks every wake-up until an admin resumes.
+
+**Semantics.** `suspend()` stops all billing for both sides at once, keeps the
+resources and their URLs, and is idempotent. Resume is the existing idempotent
+`provision()`, which restores the configured scaling and wakes the endpoints. The
+paused state is not stored by the backend: `health()` derives it from the
+provider (A2), so a pause made from the CLI or the provider's own console is
+seen the same way.
+
+| Provider | Pause | Resume |
+|---|---|---|
+| HF | `endpoint.pause()` (not billed, does not auto-wake) | `provision()` calls `.resume()` |
+| RunPod | no native pause; set `workersMax` to 0 so no worker can start, and optionally purge queued jobs (whether the REST update accepts 0 must be verified) | `provision()` restores `workersMax` from `options` |
+| Generic | not supported | not applicable |
+
+**Who respects the paused state.** All of these must avoid waking a paused
+endpoint and report why, instead of failing obscurely or hanging:
+
+- The auto-index scheduler and `bin/index_libraries.py` (the cron path): skip the
+  run for a preset whose provider reports `paused`, with a reason such as
+  "Endpoints are paused; resume them in Preferences" surfaced through the existing
+  auto-index status reasons. This is the main reason the feature exists.
+- On-demand and deferred server-side indexing: same check, same reason.
+- Interactive queries: `RemoteEmbeddingService` and the LLM service consult a
+  short-TTL cached `health()` (about 30 seconds) for providers with
+  `supports_suspend`, and raise the existing "endpoint unavailable" error with a
+  paused-specific message. This matters on RunPod, where a request to an endpoint
+  with `workersMax=0` would otherwise queue and time out. `classify_http_error()`
+  may return `paused` for providers whose paused endpoints answer with a
+  recognisable error (HF).
+- Health and the plugin: `paused` is shown in a neutral colour and offers Resume
+  (A7).
+
+**Access and concurrency.** `POST /api/config/suspend` uses the same admin
+dependency as provisioning and the same single job slot, so pause cannot overlap a
+provision run (409). It returns 400 for a provider without `supports_suspend`.
+
+**Tests.** Contract tests (A6); API tests for admin gating, 409 and 400; scheduler
+tests that a paused preset is skipped with the reason and that nothing is called on
+the endpoint; query-path tests that a paused state yields the paused message
+without a network call to the inference URL.
 
 ---
 
@@ -305,6 +376,14 @@ Move, with no behaviour change:
   into `model_kwargs` as `shared_*_pattern`. `runpod.json` stops repeating them.
 - RunPod's gateway cold response (the openresty 405 page the services special-case
   today) becomes `classify_http_error()`.
+- New: `supports_suspend = True`. `suspend()` sets each endpoint's `workersMax` to 0
+  (and purges the queue); `health()` reports `paused` when `workersMax` is 0;
+  `provision()` restores `workersMax` from `options`. The `GET /v1/endpoints`
+  response already used for lookup carries `workersMax`, so no extra call is
+  needed. Whether the REST update accepts 0 is the one thing to verify first; if it
+  does not, the fallback is to lower `workersMax` to the minimum allowed and keep
+  `workersMin=0`, which stops idle cost but cannot block a wake-up, and the spec
+  then marks RunPod as `supports_suspend = False`.
 - The provisioning panel text that is RunPod-specific in effect today ("a key with
   broader rights than the one used for queries") moves into `describe()`.
 
@@ -375,7 +454,12 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
 3. Backend descriptor endpoint and `progress` in job state (A4, A7).
 4. Plugin: dynamic provisioning panel, job resume, old-backend fallback, and the
    plugin tests from A7.
-5. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
+5. Pause and Resume (A8): `suspend()` on the base class and `RunPodProvider`
+   (after verifying `workersMax=0`), the `paused` status, `POST /api/config/suspend`,
+   the scheduler, indexing and query-path checks, and the two buttons. This can land
+   after the HF provider if RunPod's `workersMax=0` check turns out negative, since
+   HF alone already supports it.
+6. Rewrite `runpod.json`, update `docs/presets.md` (storage rules, version
    changelog, provider ids), and mark the older RunPod/health specs as superseded
    where they describe the script contract.
 
@@ -436,11 +520,14 @@ the test that the abstraction holds.
   `{HF_EMBEDDING_BASE_URL: ..., HF_LLM_BASE_URL: ...}` (endpoint URL plus `/v1`).
   Emits progress steps for each phase (creating, initializing, warming up).
 - **`health()`:** one management-API call per side. `running` maps to `ready`;
-  `scaledToZero`, `paused`, `pending`, `initializing` map to `cold`; `failed` or an
-  API error maps to `unreachable`. No data-plane probe is needed, unlike RunPod.
+  `scaledToZero`, `pending`, `initializing` map to `cold`; `paused` maps to
+  `paused`; `failed` or an API error maps to `unreachable`. No data-plane probe is
+  needed, unlike RunPod.
 - **`classify_http_error()`:** treats the 502 observed during scale-from-zero as
-  `cold`.
-- **`teardown()`:** deletes both endpoints; absent endpoints are a no-op.
+  `cold`, and the error a paused endpoint returns (to be confirmed) as `paused`.
+- **`suspend()`:** `supports_suspend = True`; calls `.pause()` on both endpoints.
+  Idempotent. `provision()` resumes a paused endpoint, so Resume needs no extra code.
+- **`teardown()`:** deletes both endpoints; absent endpoints are a no-op. CLI only.
 - **Dependency:** use `huggingface_hub` if its endpoint API is stable enough to
   justify it, imported lazily inside this module only. Otherwise plain `httpx`
   REST, as RunPod does. Decide in the spike.
@@ -520,6 +607,15 @@ re-verified before any number appears in user-facing text.
   `provision()`.
 - EU region and GPU availability, and whether GDPR hosting should be the default.
 - `huggingface_hub` versus plain REST for the HF provider (C2).
+- Pause (A8): does RunPod's REST update accept `workersMax=0`? Does a paused HF
+  endpoint answer requests with a distinguishable error? Is the HF idle tail
+  really 15 minutes and is it configurable down?
+- Pause scope: both sides together is assumed. Is there a case for pausing the LLM
+  and keeping the embedding endpoint up (for example during indexing only)?
+- Should an admin be able to schedule an automatic pause (for example after a
+  period with no queries), or is a manual button enough? Scale-to-zero already
+  covers idle time, so this is deferred unless the always-on cost shows up in
+  practice.
 - Job deadline: what is a sane default (HF cold starts may take well over the RunPod
   3-minute warm-up bound), and should it be a provider option?
 - UI: is "newest progress line plus tooltip" enough, or should the full step list be
