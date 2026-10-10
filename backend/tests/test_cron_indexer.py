@@ -754,7 +754,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         await indexer.run()
 
         status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertEqual(status.get("last_rate_limit_headers"), headers)
+        self.assertEqual(status["last_usage"]["embedding"]["headers"], headers)
         # The synthetic key must not leak into the per-slug status entry.
         self.assertNotIn("rate_limit_headers", status["slugs"]["users/1"])
 
@@ -1173,6 +1173,32 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_FAIL"))
         _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_FAIL")
         self.assertEqual(meta["attempts"], 1)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_endpoint_unavailable_never_quarantines_an_entry(self, mock_execute):
+        """A paused/cold endpoint says nothing about the file: repeated drains stop the
+        run each time but never count toward PENDING_UPLOAD_MAX_ATTEMPTS quarantine."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+
+        async def fake_execute(**kwargs):
+            return MagicMock(status="error", message="Embedding API is not available. The endpoint is paused.",
+                             error_type="EmbeddingEndpointUnavailableError", chunks_added=0)
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+        for _ in range(8):  # more than pending_upload_max_attempts (5)
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
+                await indexer._drain_pending_uploads(indexer.parse_slug("users/1"), MagicMock(), web_api)
+        self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_OK"))
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_OK")
+        self.assertFalse(meta.get("quarantined"))
+        self.assertEqual(meta.get("attempts", 0), 0)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_threads_attachment_title_from_the_cached_entry_into_doc_metadata(self, mock_execute):

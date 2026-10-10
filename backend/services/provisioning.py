@@ -1,111 +1,150 @@
-"""Background job running a preset's ``provisioning_script``.
+"""Background job that provisions (creates or wakes) a preset's remote endpoints.
+
+A job runs ``Provider.provision()`` for each requested side in turn, in a
+worker thread (provider methods do blocking HTTP). Sides are independent: a
+failure on one side is recorded and the remaining sides still run, so a retry
+can target just the failed side. Whatever a provider returns to be stored in
+the shared remote config is applied as soon as its side succeeds.
 
 Single in-memory job state (not persisted): a run takes minutes at most, the
-scripts are idempotent, and a backend restart merely means the admin clicks
-the button again. See
-docs/superpowers/specs/2026-10-09-endpoint-health-provisioning-design.md for
-the script's ``PROVISION_RESULT:`` output contract.
+operations are idempotent, and a backend restart merely means the admin clicks
+the button again. Core knows nothing about any vendor; see backend.providers.
 """
 
 import asyncio
-import json
 import logging
-import os
-import sys
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
+from backend.providers import Provider, ProvisionContext, ProvisionError, Side
 from backend.services.admin_settings_store import update_remote_config
 
 logger = logging.getLogger(__name__)
 
-RESULT_PREFIX = "PROVISION_RESULT:"
-# Env var through which a one-time provisioning key reaches the script. Passed
-# via the subprocess environment (never argv, which `ps` would expose) and
-# never persisted by the backend.
-API_KEY_ENV = "PROVISIONING_API_KEY"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+#: A whole job (all requested sides) may run this long; cold starts of large
+#: models can take many minutes.
+DEFAULT_JOB_TIMEOUT_SECONDS = 20 * 60
+#: Newest progress lines kept in the state (oldest are dropped).
+MAX_PROGRESS_LINES = 100
 
-_job_state: dict = {"status": "idle", "message": None, "started_at": None, "finished_at": None}
+_lock = threading.Lock()
+_job_state: dict = {}
+
+
+def _fresh_state() -> dict:
+    return {
+        "status": "idle",
+        "message": None,
+        "started_at": None,
+        "finished_at": None,
+        "progress": [],
+        "sides": {},
+    }
+
+
+_job_state.update(_fresh_state())
 
 
 def get_job_state() -> dict:
     """Snapshot of the current job state."""
-    return dict(_job_state)
+    with _lock:
+        return {**_job_state, "progress": list(_job_state["progress"]),
+                "sides": {k: dict(v) for k, v in _job_state["sides"].items()}}
 
 
 def reset_job_state() -> None:
     """Reset to idle (used by tests)."""
-    _job_state.update(status="idle", message=None, started_at=None, finished_at=None)
+    with _lock:
+        _job_state.clear()
+        _job_state.update(_fresh_state())
 
 
 def is_running() -> bool:
     return _job_state["status"] == "running"
 
 
-def mark_running() -> None:
-    _job_state.update(status="running", message=None, started_at=time.time(), finished_at=None)
+def mark_running(sides: Optional[list] = None) -> None:
+    """Enter the running state; the caller must have checked ``is_running()``."""
+    with _lock:
+        _job_state.clear()
+        _job_state.update(_fresh_state())
+        _job_state.update(status="running", started_at=time.time())
+        for side in sides or []:
+            _job_state["sides"][side] = {"status": "pending", "message": None}
 
 
 def _finish(status: str, message: Optional[str]) -> None:
-    _job_state.update(status=status, message=message, finished_at=time.time())
+    with _lock:
+        _job_state.update(status=status, message=message, finished_at=time.time())
 
 
-def parse_result(stdout: str) -> Optional[dict]:
-    """The dict from the last ``PROVISION_RESULT:`` line, or None if absent/malformed."""
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(RESULT_PREFIX):
-            try:
-                parsed = json.loads(line[len(RESULT_PREFIX):].strip())
-            except json.JSONDecodeError:
-                return None
-            if isinstance(parsed, dict) and all(isinstance(v, str) for v in parsed.values()):
-                return parsed
-            return None
-    return None
+def _set_side(side: str, status: str, message: Optional[str] = None) -> None:
+    with _lock:
+        _job_state["sides"][side] = {"status": status, "message": message}
 
 
-async def start_job(script: str, api_key: Optional[str] = None) -> asyncio.subprocess.Process:
-    """Start the provisioning subprocess; the caller must have called mark_running().
-
-    ``api_key``, if given, is exposed to the script as ``PROVISIONING_API_KEY``.
-    """
-    env = dict(os.environ)
-    if api_key:
-        env[API_KEY_ENV] = api_key
-    return await asyncio.create_subprocess_exec(
-        sys.executable, str(REPO_ROOT / script), "--json",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(REPO_ROOT),
-        env=env,
-    )
+def _add_progress(side: str, message: str) -> None:
+    with _lock:
+        lines = _job_state["progress"]
+        lines.append(f"{side}: {message}")
+        del lines[:-MAX_PROGRESS_LINES]
 
 
-async def await_job(
-    proc: asyncio.subprocess.Process,
-    extra_config: Optional[dict] = None,
+@dataclass
+class SideJob:
+    """One side to provision: its provider and the context to run it with."""
+
+    side: Side
+    provider: Provider
+    ctx: ProvisionContext
+
+
+async def run_job(
+    jobs: list[SideJob],
     data_path: Optional[Path] = None,
+    timeout_seconds: float = DEFAULT_JOB_TIMEOUT_SECONDS,
+    action: Optional[Callable[[SideJob, Callable[[str], None]], dict]] = None,
 ) -> None:
-    """Wait for the subprocess and record the outcome; never leaves state 'running'.
+    """Run every side's job and record the outcome; never leaves the state 'running'.
 
-    On success, stores the script's reported values plus ``extra_config``
-    (e.g. a first-time API key) in the shared remote config.
+    Args:
+        jobs: Sides to run, in order (embedding before LLM).
+        data_path: Data directory for the shared remote config.
+        timeout_seconds: Budget for the whole job; each provider honours it
+            through ``ctx.deadline``.
+        action: What to run per side; defaults to ``provider.provision``. (Pause
+            reuses this runner with ``provider.suspend``.)
     """
+    deadline = time.monotonic() + timeout_seconds
+    failures: list[str] = []
     try:
-        stdout_b, stderr_b = await proc.communicate()
-        stdout = stdout_b.decode("utf-8", errors="replace")
-        stderr = stderr_b.decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            _finish("failed", stderr.strip()[-500:] or f"Script exited with code {proc.returncode}")
-            return
-        values = parse_result(stdout)
-        if values is None:
-            _finish("failed", "Provisioning script did not report a result.")
-            return
-        update_remote_config({**values, **(extra_config or {})}, data_path=data_path)
-        _finish("succeeded", None)
-    except Exception as exc:
-        logger.exception("Provisioning job failed")
+        for job in jobs:
+            job.ctx.deadline = deadline
+            _set_side(job.side, "running")
+
+            def progress(message: str, _side: str = job.side) -> None:
+                _add_progress(_side, message)
+
+            try:
+                if action is None:
+                    values = await asyncio.to_thread(job.provider.provision, job.ctx, progress)
+                else:
+                    values = await asyncio.to_thread(action, job, progress)
+                if values:
+                    update_remote_config(values, data_path=data_path)
+                _set_side(job.side, "succeeded")
+            except Exception as exc:
+                logger.warning("Provisioning %s failed: %s", job.side, exc, exc_info=not isinstance(exc, ProvisionError))
+                message = str(exc) or type(exc).__name__
+                _set_side(job.side, "failed", message)
+                failures.append(f"{job.side}: {message}")
+        if failures:
+            _finish("failed", "; ".join(failures))
+        else:
+            _finish("succeeded", None)
+    except Exception as exc:  # defensive: the state must never stay 'running'
+        logger.exception("Provisioning job crashed")
         _finish("failed", str(exc) or type(exc).__name__)

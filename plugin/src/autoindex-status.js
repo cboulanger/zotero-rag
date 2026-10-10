@@ -48,8 +48,8 @@
 /**
  * @typedef {Object} RateLimitsInfo
  * @property {boolean} available
- * @property {Record<string, string>} [limits] - x-ratelimit-{limit,remaining}-{hour,day} headers
- * @property {string} [as_of] - ISO timestamp the headers were captured, when known
+ * @property {UsageMeter[]} [meters] - quota meters parsed by each side's provider
+ * @property {string} [as_of] - ISO timestamp the numbers were captured, when known
  * @property {'run'|'cache'} [source]
  */
 
@@ -116,7 +116,7 @@ var ZoteroRAGAutoIndexStatus = {
 	rateLimitFallbackTried: false,
 
 	/** Last headers rendered into the Status-section widget. @type {Record<string, string>|null} */
-	rateLimitHeaders: null,
+	rateLimitMeters: null,
 
 	/** Presets the admin may switch to, from GET /api/config. @type {SwitchablePreset[]} */
 	switchablePresets: [],
@@ -186,7 +186,7 @@ var ZoteroRAGAutoIndexStatus = {
 		// A switch made in the Preferences pane must show up here too.
 		if (this.plugin) {
 			this.plugin.observePresetChanged(window, 'autoindex-status', () => {
-				this.rateLimitHeaders = null;
+				this.rateLimitMeters = null;
 				this.rateLimitFallbackTried = false;
 				this.loadSwitchablePresets();
 				this.fetchAndRender();
@@ -338,13 +338,13 @@ var ZoteroRAGAutoIndexStatus = {
 	 */
 	renderRateLimits(data) {
 		const info = data.rate_limits;
-		if (info && info.available && info.limits) {
-			this.rateLimitHeaders = info.limits;
+		if (info && info.available && info.meters) {
+			this.rateLimitMeters = info.meters;
 		} else if (!this.rateLimitFallbackTried) {
 			this.rateLimitFallbackTried = true;
-			ZoteroRAGRateLimitWidget.fetch(this.plugin).then((headers) => {
-				if (headers) {
-					this.rateLimitHeaders = headers;
+			ZoteroRAGRateLimitWidget.fetch(this.plugin).then((meters) => {
+				if (meters) {
+					this.rateLimitMeters = meters;
 					this.paintRateLimits(null);
 				}
 			});
@@ -370,11 +370,11 @@ var ZoteroRAGAutoIndexStatus = {
 	 * @returns {void}
 	 */
 	paintRateLimits(info) {
-		const headers = this.rateLimitHeaders;
-		ZoteroRAGRateLimitWidget.render(document, headers, { visible: !!headers, prefix: 'ai-' });
+		const meters = this.rateLimitMeters;
+		ZoteroRAGRateLimitWidget.render(document, meters, { visible: !!meters, prefix: 'ai-' });
 		const asOf = document.getElementById('ai-rate-limit-asof');
 		if (asOf) {
-			const ago = info && info.as_of && headers ? this._formatDurationFromNow(info.as_of) : null;
+			const ago = info && info.as_of && meters ? this._formatDurationFromNow(info.as_of) : null;
 			asOf.textContent = ago ? `as of ${ago} ago` : '';
 		}
 	},
@@ -507,7 +507,7 @@ var ZoteroRAGAutoIndexStatus = {
 			if (status) status.textContent = 'Switched.';
 			this.plugin.notifyPresetChanged('autoindex-status');
 			// Cached limits belong to the previous preset.
-			this.rateLimitHeaders = null;
+			this.rateLimitMeters = null;
 			this.rateLimitFallbackTried = false;
 			await this.loadSwitchablePresets();
 			await this.fetchAndRender();

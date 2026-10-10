@@ -1,32 +1,38 @@
-// Shared rate-limit bars used by the Ask dialog and the auto-indexing status dialog.
+// Shared usage meters (quota bars) used by the Ask dialog and the auto-indexing status dialog.
 
 // @ts-check
 
 /// <reference path='./zotero-rag.js' />
 
 /**
- * Raw `x-ratelimit-{limit,remaining}-{hour,day}` header values as returned by
- * the backend's `GET /api/rate-limits`.
- * @typedef {Record<string, string>} RateLimitHeaders
+ * One quota as reported by the backend (`meters` in `GET /api/rate-limits`),
+ * already parsed by the side's provider. Quota only: no billing figures.
+ * @typedef {Object} UsageMeter
+ * @property {string} id - Stable id such as "requests/hour"
+ * @property {'embedding'|'llm'} side
+ * @property {string} unit - "requests", "tokens", ...
+ * @property {string|null} [period] - "minute", "hour", "day", ... or null
+ * @property {number} limit - Total quota for the period
+ * @property {number} remaining - Left in the period
+ * @property {string|null} [resets_at] - ISO timestamp the quota refills, when known
+ * @property {string|null} [as_of] - ISO timestamp the numbers were captured
  */
 
 /**
- * @typedef {Object} RateLimitDescription
- * @property {number} limit - Total quota for the period
- * @property {number} remaining - Requests left in the period
+ * @typedef {Object} MeterDescription
  * @property {number} usedPct - Percentage used, rounded (0-100)
  * @property {string} color - CSS colour for the bar
  * @property {string} text - Label such as "123 requests left/hour"
  */
 
 var ZoteroRAGRateLimitWidget = {
-	/** Periods rendered, in display order. */
-	PERIODS: ['hour', 'day'],
+	/** @type {Record<string, string>} */
+	SIDE_LABELS: { embedding: 'Embedding', llm: 'Answering' },
 
 	/**
 	 * Fetch `GET /api/rate-limits`.
 	 * @param {{backendURL: string, getAuthHeaders: () => Record<string, string>}|null} plugin
-	 * @returns {Promise<RateLimitHeaders|null>} headers, or null if unavailable/failed
+	 * @returns {Promise<UsageMeter[]|null>} meters, or null if unavailable/failed
 	 */
 	async fetch(plugin) {
 		if (!plugin) return null;
@@ -35,8 +41,8 @@ var ZoteroRAGRateLimitWidget = {
 				headers: plugin.getAuthHeaders(),
 			});
 			if (!response.ok) return null;
-			const data = /** @type {{available?: boolean, limits?: RateLimitHeaders}} */ (await response.json());
-			return data.available && data.limits ? data.limits : null;
+			const data = /** @type {{available?: boolean, meters?: UsageMeter[]}} */ (await response.json());
+			return data.available && data.meters && data.meters.length ? data.meters : null;
 		} catch (_) {
 			// non-fatal — display stays empty
 			return null;
@@ -44,44 +50,53 @@ var ZoteroRAGRateLimitWidget = {
 	},
 
 	/**
-	 * Compute the bar width/colour/label for one period (pure).
+	 * Compute the bar width/colour/label for one meter (pure).
 	 * Thresholds: amber at >= 75 % used, red at >= 95 % used.
-	 * @param {RateLimitHeaders|null|undefined} headers
-	 * @param {string} period - 'hour' or 'day'
-	 * @returns {RateLimitDescription|null} null when the limit is missing or zero
+	 * @param {UsageMeter|null|undefined} meter
+	 * @returns {MeterDescription|null} null when the limit is missing or zero
 	 */
-	describe(headers, period) {
-		if (!headers) return null;
-		const limit = parseInt(headers[`x-ratelimit-limit-${period}`] || '0', 10);
-		const remaining = parseInt(headers[`x-ratelimit-remaining-${period}`] || '0', 10);
-		if (!limit) return null;
-		const usedPct = Math.round((limit - remaining) / limit * 100);
+	describe(meter) {
+		if (!meter || !meter.limit) return null;
+		const usedPct = Math.round((meter.limit - meter.remaining) / meter.limit * 100);
 		const color = usedPct >= 95 ? '#cc3300' : usedPct >= 75 ? '#e6a817' : '#2e9e4f';
-		return { limit, remaining, usedPct, color, text: `${remaining} requests left/${period}` };
+		const per = meter.period ? `/${meter.period}` : '';
+		return { usedPct, color, text: `${meter.remaining} ${meter.unit} left${per}` };
 	},
 
 	/**
-	 * Paint the bars into the standard rate-limit markup.
-	 * Element ids are `<prefix>rate-limit-section`, `<prefix>rate-limit-bar-<period>`
-	 * and `<prefix>rate-limit-text-<period>`.
+	 * Paint one bar per meter into `<prefix>rate-limit-bars`, replacing earlier rows.
+	 * A side label is added only when meters of both sides are shown.
 	 * @param {Document} doc
-	 * @param {RateLimitHeaders|null|undefined} headers
+	 * @param {UsageMeter[]|null|undefined} meters
 	 * @param {{visible: boolean, prefix?: string}} options
 	 * @returns {void}
 	 */
-	render(doc, headers, { visible, prefix = '' }) {
+	render(doc, meters, { visible, prefix = '' }) {
 		const section = doc.getElementById(`${prefix}rate-limit-section`);
 		if (!section) return;
 		section.style.display = visible ? '' : 'none';
-		if (!visible || !headers) return;
-		for (const period of this.PERIODS) {
-			const info = this.describe(headers, period);
-			const bar = /** @type {HTMLElement|null} */ (doc.getElementById(`${prefix}rate-limit-bar-${period}`));
-			const text = doc.getElementById(`${prefix}rate-limit-text-${period}`);
-			if (!info || !bar || !text) continue;
+		const container = doc.getElementById(`${prefix}rate-limit-bars`);
+		if (!container) return;
+		container.replaceChildren();
+		if (!visible || !meters) return;
+		const bothSides = new Set(meters.map((m) => m.side)).size > 1;
+		for (const meter of meters) {
+			const info = this.describe(meter);
+			if (!info) continue;
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'rate-limit-row';
+			const track = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			track.className = 'rate-limit-bar-track';
+			const bar = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			bar.className = 'rate-limit-bar';
 			bar.style.width = `${info.usedPct}%`;
 			bar.style.backgroundColor = info.color;
-			text.textContent = info.text;
+			track.appendChild(bar);
+			const text = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			text.className = 'rate-limit-text';
+			text.textContent = bothSides ? `${this.SIDE_LABELS[meter.side] || meter.side}: ${info.text}` : info.text;
+			row.append(track, text);
+			container.appendChild(row);
 		}
 	},
 };

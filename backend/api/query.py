@@ -32,7 +32,16 @@ from backend.services.embeddings import (
 from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
+from backend.providers import ProviderConfigError, get_providers
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
+
+def _llm_has_live_models(preset) -> bool:
+    """True when the LLM provider offers a live model list (so any listed model is allowed)."""
+    try:
+        return get_providers(preset)["llm"].has_live_models
+    except ProviderConfigError:
+        return False
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -172,8 +181,8 @@ async def query_libraries(
         client_keys = get_client_api_keys(http_request)
 
         embedding_service = make_embedding_service(client_keys)
-        # For presets with a live model endpoint the allowed set is dynamic; skip static validation.
-        if query.llm_model and not preset.llm.models_status_url and query.llm_model not in preset.llm.model_names:
+        # For a provider with a live model list the allowed set is dynamic; skip static validation.
+        if query.llm_model and not _llm_has_live_models(preset) and query.llm_model not in preset.llm.model_names:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model '{query.llm_model}' not in preset model list: {preset.llm.model_names}"

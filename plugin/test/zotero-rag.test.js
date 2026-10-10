@@ -322,7 +322,7 @@ test('retryDownloadFailedAttachment downloads then uploads to the backend, retur
 	zotero.Libraries.get = () => ({ libraryType: 'user' });
 	const uploadCalls = [];
 	const RemoteIndexer = {
-		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitHeaders: null }; },
+		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitMeters: null }; },
 	};
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
 	plugin.getBackendLibraryId = () => 'u1';

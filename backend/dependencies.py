@@ -131,8 +131,8 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
         dim = next((d for k, d in _KNOWN_DIMS.items() if k in model_name), 1024)
         return MockEmbeddingService(embedding_dim=dim)
     preset = settings.get_hardware_preset()
-    api_key_env = preset.embedding.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-    client_key = (client_api_keys or {}).get(api_key_env) or None
+    api_key_env = preset.embedding.model_kwargs.get("api_key_env")
+    client_key = (client_api_keys or {}).get(api_key_env) if api_key_env else None
     return create_embedding_service(
         preset.embedding,
         cache_dir=str(settings.model_weights_path),
@@ -149,8 +149,8 @@ def make_llm_service(client_api_keys: dict[str, str] | None = None, model_name_o
         from backend.services.llm import MockLLMService
         return MockLLMService()
     preset = settings.get_hardware_preset()
-    api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-    client_key = (client_api_keys or {}).get(api_key_env) or None
+    api_key_env = preset.llm.model_kwargs.get("api_key_env")
+    client_key = (client_api_keys or {}).get(api_key_env) if api_key_env else None
     return create_llm_service(settings, api_key=client_key, model_name_override=model_name_override)
 
 

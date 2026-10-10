@@ -241,14 +241,7 @@
       </label>
       <!-- Rate limit indicators (shown in Index mode when embedding has rate limits) -->
       <div id="rate-limit-section" style="display: none;">
-        <div class="rate-limit-row">
-          <div class="rate-limit-bar-track"><div id="rate-limit-bar-hour" class="rate-limit-bar"></div></div>
-          <span id="rate-limit-text-hour" class="rate-limit-text">— requests left/hour</span>
-        </div>
-        <div class="rate-limit-row">
-          <div class="rate-limit-bar-track"><div id="rate-limit-bar-day" class="rate-limit-bar"></div></div>
-          <span id="rate-limit-text-day" class="rate-limit-text">— requests left/day</span>
-        </div>
+        <div id="rate-limit-bars"></div>
       </div>
       <button id="autoindex-status-button" type="button" class="dialog-button" style="display: none;" title="Show server-side automatic indexing status">Indexing status</button>
       <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>

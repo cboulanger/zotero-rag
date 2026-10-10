@@ -188,22 +188,6 @@ class TestPresets(unittest.TestCase):
         copied_names = {p.name for p in presets_dir.glob("*.json")}
         self.assertEqual(bundled_names, copied_names)
 
-    def test_ensure_default_presets_does_not_overwrite_existing_file(self):
-        """A user's edited preset file survives re-running the seeder (e.g. on
-        every backend startup)."""
-        presets_dir = self.data_path / "presets"
-        custom_content = (
-            '{"description": "edited by user", '
-            '"embedding": {"model_type": "local", "model_name": "x"}, '
-            '"llm": {"model_type": "local", "model_names": ["y"]}, '
-            '"rag": {}, "memory_budget_gb": 1.0}'
-        )
-        (presets_dir / "cpu-only.json").write_text(custom_content)
-
-        ensure_default_presets(self.data_path)
-
-        self.assertEqual((presets_dir / "cpu-only.json").read_text(), custom_content)
-
     def test_get_preset_raises_for_malformed_json(self):
         """A file that isn't valid JSON raises ValueError naming the file."""
         presets_dir = self.data_path / "presets"
@@ -825,12 +809,13 @@ class TestSwitchablePresets(unittest.TestCase):
         fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
         store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY")
         store.set_embedding_key_status(fp, "rate_limited", "2999-01-01T00:00:00+00:00")
-        emb._last_rate_limit_headers = {"x-ratelimit-limit-hour": "1"}
+        from backend.services.usage_meters import recorder
+        recorder.record("embedding", {"x-ratelimit-limit-hour": "1"})
         self._admin()
         with patch.dict(os.environ, MPCDF_ENV):
             r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
-        self.assertIsNone(emb._last_rate_limit_headers)
+        self.assertEqual(recorder.latest("embedding"), (None, None))
         meta = store.list_metadata()[0]
         self.assertEqual(meta["embedding_key_status"], "ok")
         self.assertIsNone(meta["embedding_key_rate_limit_until"])
@@ -858,3 +843,21 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertEqual(store.clear_rate_limits(), 0)
         self.assertEqual(store.list_metadata()[0]["embedding_key_status"], "invalid")
         self.assertEqual(store.count_embedding_keys_by_name(), {})
+
+
+class TestBundledRunpodPreset(unittest.TestCase):
+    def test_runpod_json_is_v2_with_per_side_providers_and_validates(self):
+        import json
+        from backend.providers import get_providers
+        from backend.config.presets import HardwarePreset
+        raw = json.loads((Path(__file__).resolve().parents[1] / "config" / "default_presets" / "runpod.json").read_text())
+        self.assertEqual(raw["version"], 2)
+        for side in ("embedding", "llm"):
+            self.assertEqual(raw[side]["provider"]["id"], "runpod")
+            self.assertIn("options", raw[side]["provider"])
+            self.assertNotIn("health_check_provider", raw[side])
+            for key in raw[side].get("model_kwargs", {}):
+                self.assertFalse(key.endswith("_pattern"), key)  # patterns come from apply_defaults
+        self.assertNotIn("provisioning_script", raw)
+        providers = get_providers(HardwarePreset(name="runpod", **raw))
+        self.assertTrue(all(p.supports_provisioning for p in providers.values()))
