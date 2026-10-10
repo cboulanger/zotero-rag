@@ -65,8 +65,8 @@ class Settings(BaseSettings):
 
     # Model Configuration
     model_preset: str = Field(
-        default="cpu-only",
-        description="Hardware preset name"
+        default="remote-kisski",
+        description="Fallback default preset name, used until an admin sets the default via POST /api/config"
     )
 
     # Abstract fallback indexing
@@ -370,14 +370,14 @@ class Settings(BaseSettings):
         value is ignored with a warning rather than raising, since this is
         called from request-handling code, not just at startup.
         """
-        from backend.services.admin_settings_store import get_active_preset_override
-        override = get_active_preset_override(self.data_path)
+        from backend.services.admin_settings_store import get_default_preset
+        override = get_default_preset(self.data_path)
         if override:
             try:
                 preset = get_preset(override, self.data_path)
             except ValueError:
                 logger.warning(
-                    "active_preset_override=%r is not a known preset; falling back to MODEL_PRESET=%r",
+                    "default_preset=%r is not a known preset; falling back to MODEL_PRESET=%r",
                     override, self.model_preset,
                 )
                 preset = get_preset(self.model_preset, self.data_path)

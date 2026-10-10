@@ -17,7 +17,7 @@ from backend.dependencies import get_zotero_identity, require_authorized_group_a
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.admin_settings_store import (
-    set_active_preset_override,
+    set_default_preset,
     update_remote_config,
     get_remote_config_value,
     resolve_shared_value,
@@ -391,7 +391,7 @@ async def update_config(
                    f"for {sorted(missing)}.",
         )
 
-    set_active_preset_override(settings.data_path, update.preset_name)
+    set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
     try:

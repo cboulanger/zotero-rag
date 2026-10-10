@@ -325,7 +325,7 @@ class TestSettings(unittest.TestCase):
 
             self.assertEqual(settings.api_host, "localhost")
             self.assertEqual(settings.api_port, 8119)
-            self.assertEqual(settings.model_preset, "cpu-only")
+            self.assertEqual(settings.model_preset, "remote-kisski")
             self.assertEqual(settings.log_level, "INFO")
             self.assertIsInstance(settings.version, str)
             self.assertTrue(len(settings.version) > 0)
@@ -382,12 +382,12 @@ class TestSettings(unittest.TestCase):
 
             self.assertEqual(preset.name, "cpu-only")
 
-    def test_get_hardware_preset_uses_active_preset_override_when_set(self):
-        from backend.services.admin_settings_store import set_active_preset_override
+    def test_get_hardware_preset_uses_default_preset_when_set(self):
+        from backend.services.admin_settings_store import set_default_preset
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
             settings.ensure_directories()
-            set_active_preset_override(settings.data_path, "remote-mpcdf")
+            set_default_preset(settings.data_path, "remote-mpcdf")
             self.assertEqual(settings.get_hardware_preset().name, "remote-mpcdf")
 
     def test_get_hardware_preset_falls_back_to_model_preset_when_no_override_set(self):
@@ -397,11 +397,11 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
 
     def test_get_hardware_preset_ignores_unknown_override(self):
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
             settings.ensure_directories()
-            set_active_preset_override(settings.data_path, "no-such-preset")
+            set_default_preset(settings.data_path, "no-such-preset")
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
 
     def test_get_hardware_preset_applies_embedding_batch_size_env_override(self):
@@ -578,9 +578,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_required_keys_reports_shared_kind_and_is_set_for_mpcdf(self):
         from backend.services.zotero_identity import ZoteroIdentity
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "remote-mpcdf")
         r = self.client.get("/api/required-keys")
         self.assertEqual(r.status_code, 200)
         by_key = {k["key_name"]: k for k in r.json()["keys"]}
@@ -604,9 +604,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_remote_fields_as_admin_sets_value_and_is_reflected_in_required_keys(self):
         from backend.services.zotero_identity import ZoteroIdentity
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "remote-mpcdf")
         r = self.client.post(
             "/api/config/remote-fields",
             json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
