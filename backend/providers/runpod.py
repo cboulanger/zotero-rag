@@ -128,7 +128,7 @@ class RunPodProvider(Provider):
                 help=(
                     "Creating endpoints may need a key with broader rights than the one used for "
                     "queries (an endpoint-restricted key cannot create or replace endpoints). "
-                    "Leave empty to use the stored key; a value entered here is used for this run only."
+                    "Leave empty to use the stored key. A key entered here is kept in memory until Zotero closes and never saved."
                 ),
                 pattern=KEY_PATTERN,
                 optional=True,

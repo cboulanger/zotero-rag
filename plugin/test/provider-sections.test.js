@@ -443,3 +443,27 @@ test('the credential field shows while Pause is on offer and hides when no actio
 	const unknown = S.buildModel('embedding', remote(), undefined, idle);
 	assert.strictEqual(unknown.credential.visible, false);
 });
+
+test('a management token typed once is remembered in memory and reused without re-entry', async () => {
+	const mem = {};
+	const sessionKeys = { get: (e) => mem[e] || '', set: (e, v) => { mem[e] = v; }, forget: (e) => { delete mem[e]; } };
+	const { backend, refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle, idle, idle, idle] }, { sessionKeys });
+	await controller.refresh();
+	await controller.provision('llm', 'k_secret');
+	assert.strictEqual(mem.SOME_API_KEY, 'k_secret');
+	await controller.pause('llm', '');
+	await controller.provision('embedding', '');
+	const keys = backend.posts.map(([, b]) => b.keys && b.keys.SOME_API_KEY);
+	assert.deepStrictEqual(keys, ['k_secret', 'k_secret', 'k_secret']);
+	assert.match(refs.llm.credInput.placeholder, /Entered earlier this session/);
+});
+
+test('a token typed now replaces the remembered one, and a refused one is forgotten', async () => {
+	const mem = { SOME_API_KEY: 'k_old' };
+	const sessionKeys = { get: (e) => mem[e] || '', set: (e, v) => { mem[e] = v; }, forget: (e) => { delete mem[e]; } };
+	const { backend, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle, idle], postReply: { ok: false, status: 403, data: { detail: 'no' } } }, { sessionKeys });
+	await controller.refresh();
+	await controller.provision('llm', 'k_new');
+	assert.strictEqual(backend.posts[0][1].keys.SOME_API_KEY, 'k_new');
+	assert.strictEqual(mem.SOME_API_KEY, undefined);
+});

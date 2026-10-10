@@ -80,7 +80,7 @@ independent job (a failure on one side does not stop the other; a failed side ca
 be retried alone) and `bin/provision.py --preset <name>` does the same from the
 command line, including `--pause` and `--teardown`. Pausing keeps the resources
 and their URLs but stops billing and wake-ups; provisioning again resumes. A
-key typed for a run is used for that run only and never stored.
+key typed in the plugin is sent with each management request, kept only in memory in the running Zotero and never stored by the backend.
 
 ## Usage meters
 

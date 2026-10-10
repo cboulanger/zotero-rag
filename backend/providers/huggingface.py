@@ -223,7 +223,7 @@ class HuggingFaceProvider(Provider):
                 env=env,
                 label="Provisioning token",
                 help=(
-                    "Used once, never stored. Creating, resuming or pausing endpoints needs a token with the "
+                    "Kept in memory until Zotero closes, never saved. Creating, resuming or pausing endpoints needs a token with the "
                     "\"Manage Inference Endpoints\" permission (or a classic Write token) and a billing method on the "
                     "account; the stored token only needs \"Make calls to Inference Endpoints\". Leave empty to use "
                     "the stored token."

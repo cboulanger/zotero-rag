@@ -295,6 +295,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				});
 				return { ok: response.ok, status: response.status, data: await response.json().catch(() => ({})) };
 			},
+			// Management tokens live on the plugin object: kept while Zotero runs, never written anywhere.
+			sessionKeys: {
+				get: (env) => (this._sessionKeys && this._sessionKeys[env]) || '',
+				set: (env, value) => { this._sessionKeys = { ...(this._sessionKeys || {}), [env]: value }; },
+				forget: (env) => { if (this._sessionKeys) delete this._sessionKeys[env]; },
+			},
 		})
 		: null;
 	const pollJob = async () => { if (controller) await controller.poll(); };

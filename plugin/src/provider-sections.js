@@ -213,7 +213,7 @@ var ZoteroRAGProviderSections = {
 			const credInput = el('input', 'setting-input');
 			credInput.type = 'password';
 			credInput.id = `zotero-rag-side-${side}-credential`;
-			credInput.placeholder = 'Optional — used once, never stored';
+			credInput.placeholder = 'Optional \u2014 kept in memory until Zotero closes, never saved';
 			credLabel.setAttribute('for', credInput.id);
 			const credHelp = el('div', 'setting-description');
 			credRow.append(credLabel, credInput);
@@ -301,12 +301,16 @@ var ZoteroRAGProviderSections = {
  *   post: (path: string, body: any) => Promise<{ok: boolean, status: number, data: any}>,
  *   sleep?: (ms: number) => Promise<void>,
  *   pollMs?: number,
+ *   sessionKeys?: {get: (env: string) => string, set: (env: string, value: string) => void, forget: (env: string) => void},
  * }} deps
  */
 ZoteroRAGProviderSections.createController = function (deps) {
 	const S = ZoteroRAGProviderSections;
 	const sleep = deps.sleep || ((/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	const pollMs = deps.pollMs === undefined ? 5000 : deps.pollMs;
+	// Management tokens typed in this Zotero session, kept in memory only (never saved), so a
+	// later Resume/Retry/Pause needs no re-entry; gone when Zotero quits.
+	const remembered = deps.sessionKeys || { get: () => '', set: () => {}, forget: () => {} };
 	/** Re-checks of a cold endpoint after which polling stops (about 10 minutes at the default rate). */
 	const MAX_COLD_POLLS = 120;
 	/** @type {{providers: any, health: any, job: any}} */
@@ -334,6 +338,20 @@ ZoteroRAGProviderSections.createController = function (deps) {
 			);
 		}
 		S.update(deps.refs, models);
+		paintRemembered();
+	};
+
+	/** Tell the user that a token entered earlier this session will be used when the field is empty. */
+	const paintRemembered = () => {
+		for (const side of S.SIDES) {
+			const provider = state.providers && state.providers.sides && state.providers.sides[side] && state.providers.sides[side].provider;
+			const credential = provider && provider.provisioning && provider.provisioning.credential;
+			const input = deps.refs[side] && deps.refs[side].credInput;
+			if (!input) continue;
+			input.placeholder = credential && remembered.get(credential.env)
+				? 'Entered earlier this session (kept in memory only) \u2014 type to replace'
+				: 'Optional \u2014 kept in memory until Zotero closes, never saved';
+		}
 	};
 
 	/** Refresh now and, while the caller's job runs, every few seconds (this also resumes a job started earlier). */
@@ -372,17 +390,22 @@ ZoteroRAGProviderSections.createController = function (deps) {
 			show('The key does not look right.');
 			return;
 		}
+		// A token typed now wins over the one remembered from earlier in this session.
+		const key = oneTimeKey || (credential ? remembered.get(credential.env) : '');
 		/** @type {{sides: string[], keys?: Record<string,string>}} */
 		const body = { sides: [side] };
-		if (oneTimeKey && credential) body.keys = { [credential.env]: oneTimeKey };
+		if (key && credential) body.keys = { [credential.env]: key };
 		show('Starting\u2026');
 		try {
 			const result = await deps.post(path, body);
 			if (!result.ok) {
+				// A token the server refused is not worth keeping.
+				if (credential && (result.status === 401 || result.status === 403)) remembered.forget(credential.env);
 				const detail = result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`;
 				show(`${failure}: ${detail}`);
 				return;
 			}
+			if (oneTimeKey && credential) remembered.set(credential.env, oneTimeKey);
 			show('');
 			await poll();
 		} catch (e) {
