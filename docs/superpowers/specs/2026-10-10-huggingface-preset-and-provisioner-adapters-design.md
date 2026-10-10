@@ -9,10 +9,12 @@ Three parts, to be implemented in order:
 - **A. Provider abstraction layer.** A `Provider` base class, an id-based
   registry, preset versioning, the small core changes that make the backend
   provider-blind, and a provider-agnostic provisioning UI in the plugin's settings.
-- **B. Migrate existing presets.** RunPod becomes `RunPodProvider`. Every other
-  bundled preset runs on a fallback `GenericProvider` that preserves today's
-  behaviour exactly. Bundled presets are always re-seeded; custom presets are
-  version-checked.
+- **B. Migrate existing presets.** RunPod becomes `RunPodProvider` and the four
+  KISSKI presets become `KisskiProvider`, which takes over every KISSKI-specific
+  behaviour (live model list, demand indicator, rate-limit meters, key portal).
+  Every other bundled preset runs on a minimal fallback `GenericProvider` that
+  contains no vendor-specific code and preserves the behaviour those presets have
+  today. Bundled presets are always re-seeded; custom presets are version-checked.
 - **C. Hugging Face.** A new `HuggingFaceProvider` and a `huggingface` preset. This
   is the proof that a new provider is additive, with no core and no plugin change.
 
@@ -34,11 +36,11 @@ to call).
 
 Backward compatibility is deliberately not handled at run time. Instead:
 
-- Bundled presets are overwritten from the shipped copies on every start (B3), so
+- Bundled presets are overwritten from the shipped copies on every start (B4), so
   the old RunPod schema disappears from any deployment on its first start after
   upgrade.
 - Custom presets carry an integer `version`; a mismatch is logged as a warning, not
-  repaired (B3).
+  repaired (B4).
 
 ## Why this is needed (current coupling)
 
@@ -50,6 +52,9 @@ Backward compatibility is deliberately not handled at run time. Instead:
 | Provider URL and key regexes repeated in each preset's `model_kwargs` | `runpod.json` |
 | Cold-endpoint messages special-casing RunPod's gateway | `services/embeddings.py`, `services/llm.py` |
 | Provisioning panel is fixed markup: one optional "Provisioning key" field, fixed help text, progress shown only as "Provisioning…" | `plugin/src/preferences.xhtml`, `plugin/src/preferences.js` |
+| KISSKI model-list fetching, RAG-suitability filtering and demand labels, used by `GET /api/config` and `GET /api/models/status`, gated by the KISSKI-shaped `LLMConfig.models_status_url`; `query.py` also tests that field | `backend/utils/kisski.py`, `api/config.py`, `api/query.py`, `presets.py` |
+| KISSKI key-portal URL and header-name entries in tables shared with OpenAI, Anthropic and HF | `_KNOWN_HEADERS`, `_KNOWN_DOCS_URLS` in `services/embeddings.py` |
+| Rate-limit bars understand only KISSKI's `x-ratelimit-{limit,remaining}-{hour,day}` headers and the label "requests left/hour"; a single global snapshot, embedding side only | `plugin/src/rate-limit-widget.js`, `services/embeddings.py`, `services/rate_limit_info.py` |
 | Seeding never overwrites, so a schema change cannot reach an existing deployment | `ensure_default_presets` in `presets.py` |
 | Pydantic ignores unknown keys, so an outdated custom preset silently loses fields | `HardwarePreset` (no `extra` policy, no version) |
 
@@ -75,8 +80,10 @@ class HardwarePreset(BaseModel):
 ```
 
 Removed: `EmbeddingConfig.health_check_provider`, `LLMConfig.health_check_provider`,
-`HardwarePreset.provisioning_script`. `LLMConfig.models_status_url` (the KISSKI
-demand indicator) is a different feature and is untouched.
+`HardwarePreset.provisioning_script`, and `LLMConfig.models_status_url`. The live
+model list and demand indicator it switched on become a provider capability
+(`live_models()`, A2); `KisskiProvider` derives the URL from the LLM `base_url`,
+with an optional `models_url` override in its `options`.
 
 Rules for `version`:
 
@@ -110,6 +117,16 @@ class Provider:
     # What the client needs to render provisioning UI. No secrets. See A7.
     def describe(self) -> ProviderDescriptor: ...
 
+    # Live, availability-ordered model list for the LLM side, or None when the
+    # provider has no such endpoint. Replaces the models_status_url preset field.
+    def live_models(self, base_url: str, api_key: str) -> list[ModelInfo] | None: ...
+
+    # Where the user manages the personal key for this env var (shown in Preferences).
+    def key_docs_url(self, env_var: str) -> str | None: ...
+
+    # Turn captured response headers into display meters (quota only, see A9).
+    def parse_usage(self, side: Side, headers: Mapping[str, str]) -> list[Meter]: ...
+
     # Readiness of one side. None means "this provider has no health concept".
     def health(self, side: Side, base_url: str, api_key: str) -> Health | None: ...
 
@@ -141,8 +158,12 @@ class Provider:
 - `ProvisionContext` carries the preset, the resolved credentials, the data path,
   flags (`recreate`, `skip_warmup`) and a `deadline`. Credentials arrive
   in-process, so the `PROVISIONING_API_KEY` env hand-off disappears.
-- Defaults implement `GenericProvider`: `health()` returns `None`,
-  `supports_provisioning` is `False`, `classify_http_error()` returns `None`,
+- `ModelInfo` is `{id, demand: int | None, availability: str | None}`; the first
+  list entry is the preferred model, matching what `GET /api/config` does today.
+- Defaults implement `GenericProvider`, which contains no vendor-specific code:
+  `health()` returns `None`, `live_models()` returns `None`, `key_docs_url()`
+  returns `None`, `parse_usage()` returns `[]`, `supports_provisioning` and
+  `supports_suspend` are `False`, `classify_http_error()` returns `None`,
   `apply_defaults()` is a no-op, and `describe()` returns the provider id and label
   with no provisioning section.
 
@@ -172,6 +193,10 @@ class Provider:
 | `_provisioning_key()` reads the key pattern from `model_kwargs` | Unchanged in logic; the pattern now arrives via `apply_defaults()` |
 | `_merge` skips `shared_base_url` keys when `provisioning_script` is set | Skips them when `provider.supports_provisioning` is set |
 | Job state is `{status, message, started_at, finished_at}` | Adds `progress: list[str]`, the provider's reported steps (bounded, newest last) |
+| `get_config()` and `get_models_status()` call `fetch_kisski_rag_models()` when `models_status_url` is set | Call `provider.live_models(base_url, api_key)`; `None` means use the preset's static `model_names` and return an empty status list, as today |
+| `query.py` accepts an unlisted `llm_model` only when `models_status_url` is set | Accepts it when `provider.live_models` is supported (the provider's list is authoritative) |
+| `GET /api/rate-limits` returns raw captured headers | Also returns `meters` from `provider.parse_usage()` (A9); raw `limits` kept |
+| `docs_url_for_key()` reads a shared table | `provider.key_docs_url(env_var)`, falling back to a small table of the generic OpenAI and Anthropic entries |
 | (new) | `POST /api/config/suspend`, admin-gated, runs `provider.suspend()` through the same single job slot (409 while another job runs); resume is `POST /api/config/provision` (A8) |
 
 `embeddings.py` and `llm.py` keep reading `shared_base_url_env` /
@@ -197,6 +222,11 @@ One test module parametrised over every registered provider:
 - `provision()` idempotency against a fake client (second run creates nothing),
   and it reports at least one progress step.
 - `teardown()` is a no-op for absent resources.
+- `parse_usage()` never raises, returns `[]` for headers it does not recognise, and
+  returns well-formed meters (limit and remaining non-negative, `remaining` not
+  above `limit`) for sample headers supplied by the provider's test fixture.
+- `live_models()`, when supported, returns the preferred model first and never
+  raises (network failure returns `None`).
 - If `supports_suspend`: `suspend()` is idempotent, `health()` then reports
   `paused`, a following `provision()` reports `ready` or `cold` again, and the
   endpoint URLs are unchanged across the cycle.
@@ -339,17 +369,63 @@ tests that a paused preset is skipped with the reason and that nothing is called
 the endpoint; query-path tests that a paused state yields the paused message
 without a network call to the inference URL.
 
+### A9. Usage meters (rate limits) per provider
+
+Billing and spend are out of scope: cost stays a matter of inspecting the
+provider's own dashboard. This section only generalises the quota display that
+exists today for KISSKI's rate limits.
+
+**Today.** Capture is already header-driven and vendor-neutral (any
+`x-ratelimit*` / `ratelimit*` header from an embedding response, plus the
+`retry-after` handling and the per-key `rate_limited` status), but display is not:
+the plugin widget reads only KISSKI's `hour` and `day` header names. Capture also
+covers the embedding side only and is one process-wide snapshot.
+
+**Contract.** A provider turns captured headers into a list of meters. The plugin
+renders whatever it receives:
+
+```python
+class Meter:
+    id: str                      # e.g. "requests/hour"
+    side: Literal["embedding", "llm"]
+    unit: str                    # "requests", "tokens"
+    period: str | None           # "minute", "hour", "day"
+    limit: int
+    remaining: int
+    resets_at: str | None
+    as_of: str
+    source: Literal["run", "cache"]
+```
+
+- `GET /api/rate-limits` keeps its raw `limits` and gains `meters`. The plugin
+  uses `meters` when present and draws one bar per meter with the existing 75%
+  amber and 95% red thresholds and the label "`remaining` `unit` left/`period`".
+  Without `meters` (older backend) it shows nothing, as it does now for any
+  provider whose headers it does not understand.
+- `GenericProvider.parse_usage()` returns `[]`: no vendor header names live in
+  the fallback. `KisskiProvider` is the only provider that parses meters today
+  (B2). A provider whose service emits the OpenAI-style `x-ratelimit-*-requests` /
+  `-tokens` headers or the IETF `RateLimit-*` headers adds its own parser; a shared
+  helper for those dialects can be factored out when a second provider needs it.
+- The snapshot becomes per side and, where the quota is per key, per key
+  fingerprint, and the LLM service uses the same capture helper. The cron status
+  file persists the same per-side data. This also fixes the case where one user's
+  key quota would be shown to another user.
+- Retry-after handling and `EmbeddingRateLimitExhaustedError` stay as they are:
+  they key off the OpenAI client's `RateLimitError`, not a provider.
+
 ---
 
 ## B. Migrate existing presets
 
-### B1. `GenericProvider` (every preset except `runpod`)
+### B1. `GenericProvider` (presets with no vendor integration)
 
-Applies to `cpu-only`, `high-memory`, `windows-test`, `remote-kisski`,
-`remote-mpcdf`, `remote-openai`, and the Apple Silicon presets. Their JSON gains
-only `"version": 2`; `provider` is omitted and resolves to `generic`.
+Applies to `cpu-only`, `high-memory`, `apple-silicon-32gb`, `remote-mpcdf` and
+`remote-openai`. Their JSON gains only `"version": 2`; `provider` is omitted and
+resolves to `generic`.
 
-The base class defaults reproduce today's behaviour exactly:
+The base class contains no vendor-specific code, and for these presets it
+reproduces today's behaviour:
 
 - `GET /api/config/health` returns `null` for both sides.
 - `provisionable` is `false`, and `POST /api/config/provision` returns 400.
@@ -357,11 +433,44 @@ The base class defaults reproduce today's behaviour exactly:
   provisioning panel and no provider line.
 - URL and key handling is untouched: `required_client_fields()` still reads
   `base_url`/`api_key_env` or `shared_*_env` from `model_kwargs`.
-- KISSKI's `models_status_url` demand indicator is unaffected.
+- No live model list, no demand indicator, and no rate-limit meters. None of these
+  presets has a KISSKI endpoint, so none of them shows these today.
 - `remote-mpcdf` keeps its manual `POST /api/config/remote-fields` workflow. An
   MPCDF Slurm provider is a possible future provider and is out of scope here.
+- `remote-openai` stays generic. The OpenAI and Anthropic key-portal entries
+  remain in a small fallback table consulted when a provider returns no URL; an
+  `OpenAIProvider` could own them later.
 
-### B2. `RunPodProvider` (`backend/providers/runpod.py`)
+### B2. `KisskiProvider` (`backend/providers/kisski.py`)
+
+Applies to `remote-kisski`, `apple-silicon-kisski`, `cloud-server-kisski` and
+`windows-test`, which get `"provider": {"id": "kisski"}`. The provider is per
+preset, so for `cloud-server-kisski` (local embeddings, KISSKI LLM) the embedding
+side simply has no remote usage to report.
+
+Everything KISSKI-specific moves here, and nothing is left behind in generic code:
+
+| Moves from | To | Notes |
+|---|---|---|
+| `backend/utils/kisski.py` (`fetch_kisski_rag_models`, RAG-suitability filter, `coder`/`devstral` exclusion, demand to availability labels) | `KisskiProvider.live_models()` | The file is deleted; its tests move with it |
+| `LLMConfig.models_status_url` in four preset files | `options.models_url` (optional, default `{llm base_url}/models`) | The schema field is removed (A1) |
+| `"KISSKI_API_KEY": "https://saia.gwdg.de/dashboard"` in `_KNOWN_DOCS_URLS` | `KisskiProvider.key_docs_url()` | The redundant `KISSKI_API_KEY` entry in `_KNOWN_HEADERS` is dropped; the default header derivation already yields `X-Kisski-Api-Key` |
+| KISSKI `hour`/`day` header parsing in `rate-limit-widget.js` | `KisskiProvider.parse_usage()` | The widget becomes provider-agnostic (A9) |
+| `get_models_status()` demand labels (`available`, `busy`, `very busy`) | `KisskiProvider.live_models()` fills `demand` and `availability` | `GET /api/models/status` is a thin wrapper over the provider |
+
+What deliberately stays out of the provider: `extra_body` (for example
+`enable_thinking: false`) and `base_url`/`api_key_env` remain plain preset data in
+`model_kwargs`, because they are generic OpenAI-compatible-client settings.
+
+Behaviour preservation is checked for the four presets (B6): the live ordered model
+list in `GET /api/config`, the demand dots from `GET /api/models/status`, the
+hour and day bars, and the Preferences key link.
+
+A custom preset copied from a KISSKI one and left without a `provider` block loses
+those four features. The version warning in B4 names the removed
+`models_status_url` key and says to add `"provider": {"id": "kisski"}`.
+
+### B3. `RunPodProvider` (`backend/providers/runpod.py`)
 
 Move, with no behaviour change:
 
@@ -407,7 +516,7 @@ Move, with no behaviour change:
 `provisioning_script`, and the four `shared_*_pattern` entries; gains the
 `provider` block above.
 
-### B3. Seeding and versioning (replaces any run-time compatibility handling)
+### B4. Seeding and versioning (replaces any run-time compatibility handling)
 
 **Bundled presets are always overwritten.** `ensure_default_presets` is changed so
 that, once per process per data path (the existing cache), every file in
@@ -434,23 +543,26 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
   may be ignored or behave differently. See the preset changelog in
   docs/presets.md." The preset still loads.
 - If it contains keys removed in a later version (`health_check_provider`,
-  `provisioning_script`), the warning names them and says they are ignored. The
+  `provisioning_script`, `models_status_url`), the warning names them and says they are ignored. The
   list of removed keys per version is a small table in `presets.py`, extended when
   a future version removes more.
 - A custom copy of the old RunPod preset keeps working as a plain, non-provisioning
   remote preset, and the warning tells the admin to move to the `provider` block.
 
-### B4. Implementation order (each step keeps the suite green)
+### B5. Implementation order (each step keeps the suite green)
 
 1. Add `backend/providers/` (base, registry, `GenericProvider`), `version` and
-   `provider` on the schema, the B3 seeding and version warnings, and bump every
+   `provider` on the schema, the B4 seeding and version warnings, and bump every
    bundled preset to `"version": 2`. Core call sites in A4 switch to the provider.
    Behaviour is identical for every preset except that `runpod` temporarily loses
-   its health and provisioning (it is ported in step 2), so steps 1 and 2 should
-   land together in one change set.
-2. Port RunPod into `RunPodProvider`. Delete `HEALTH_CHECKS`, the `Literal`
-   fields, and the subprocess job path. Keep `bin/provision_runpod_endpoints.py`
-   as a thin shim over `bin/provision.py`.
+   its health and provisioning, and the four KISSKI presets temporarily lose the
+   live model list, demand dots, rate-limit bars and key link (both are ported in
+   step 2), so steps 1 and 2 must land together in one change set.
+2. Port RunPod into `RunPodProvider` and the KISSKI behaviour into
+   `KisskiProvider` (B2), including the generic rate-limit widget and `meters`
+   (A9) and deleting `backend/utils/kisski.py`. Delete `HEALTH_CHECKS`, the
+   `Literal` fields, `models_status_url`, and the subprocess job path. Keep
+   `bin/provision_runpod_endpoints.py` as a thin shim over `bin/provision.py`.
 3. Backend descriptor endpoint and `progress` in job state (A4, A7).
 4. Plugin: dynamic provisioning panel, job resume, old-backend fallback, and the
    plugin tests from A7.
@@ -463,16 +575,20 @@ in `<data_path>/presets/` whose name is not a bundled file name. When one is loa
    changelog, provider ids), and mark the older RunPod/health specs as superseded
    where they describe the script contract.
 
-### B5. Behaviour-preservation checklist
+### B6. Behaviour-preservation checklist
 
 For each bundled preset, before and after: `GET /api/config`, `GET
 /api/config/health`, `GET /api/required-keys`, `POST /api/config/provision` status
-code, and a preset switch. For `runpod`: health classification, provision
+code, and a preset switch. For the four KISSKI presets, additionally: the live
+ordered `llm_models` in `GET /api/config`, `GET /api/models/status` (demand and
+labels), `GET /api/rate-limits` (the hour and day bars render identically from
+`meters`), the Preferences key link, and a query that names a model missing from
+the static list. For `runpod`: health classification, provision
 end-to-end against a fake client, and the plugin's provisioning flow (button,
 one-time key, polling, health refresh), unchanged apart from the new progress line
 and the descriptor-driven text.
 
-### B6. Seeding and versioning tests
+### B7. Seeding and versioning tests
 
 - A modified bundled file is overwritten and a WARNING naming it is logged.
 - An identical bundled file is not rewritten (modification time unchanged).
@@ -481,6 +597,17 @@ and the descriptor-driven text.
 - A custom file with a missing or old `version` warns exactly once per process;
   with the current version it does not warn.
 - A custom file containing removed keys names them in the warning and still loads.
+- A custom KISSKI-derived file with `models_status_url` and no `provider` warns,
+  loads as generic, and does not call the KISSKI endpoint.
+
+### B8. KISSKI provider tests
+
+- Existing `kisski.py` unit tests are ported to `KisskiProvider.live_models()`
+  (filtering, ordering, demand labels, network failure returns `None`).
+- `parse_usage()` fixtures: the KISSKI hour and day headers, partial headers,
+  non-numeric values, and unrelated headers.
+- The plugin widget test (`rate-limit-widget.test.js`) is rewritten to feed
+  `meters`, with a case for a provider that supplies none.
 
 ---
 
@@ -616,6 +743,12 @@ re-verified before any number appears in user-facing text.
   period with no queries), or is a manual button enough? Scale-to-zero already
   covers idle time, so this is deferred unless the always-on cost shows up in
   practice.
+- Should `GenericProvider.parse_usage()` understand the standard OpenAI-style and
+  IETF `RateLimit-*` header dialects, so any compatible API gets bars without a
+  provider class? It is left empty for now to keep vendor-specific assumptions out
+  of the fallback.
+- Where should the OpenAI and Anthropic key-portal URLs live long term: the small
+  fallback table (current plan), or an `OpenAIProvider` for `remote-openai`?
 - Job deadline: what is a sane default (HF cold starts may take well over the RunPod
   3-minute warm-up bound), and should it be a provider option?
 - UI: is "newest progress line plus tooltip" enough, or should the full step list be
