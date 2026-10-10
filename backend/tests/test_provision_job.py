@@ -127,7 +127,13 @@ class ProvisionEndpointsTest(unittest.TestCase):
         ensure_default_presets(s.data_path)
         s.model_preset = "runpod"
         self.app = app
+        # Entered as a context manager so one event loop outlives the POST: the
+        # provisioning task runs on it after the 202 response, as under uvicorn.
+        # A bare TestClient tears the loop down per request and can cancel the
+        # task mid-run, which made this suite flaky.
         self.client = TestClient(app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
         self.calls = []
 
         def fake_provision(this, ctx, progress):
@@ -158,7 +164,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
 
     def _wait(self):
         status = {}
-        for _ in range(100):
+        for _ in range(600):  # 30 s: CI runners are slow to spin up the worker thread
             status = self.client.get("/api/config/provision/status").json()
             if status["status"] != "running":
                 return status
