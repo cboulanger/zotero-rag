@@ -640,6 +640,8 @@ the test that the abstraction holds.
   creating endpoints needs a token with write access to Inference Endpoints and
   that a billing method must be on the account; a hint that a first start can take
   several minutes.
+- **`key_docs_url()`:** returns the HF token page; the `HF_TOKEN` entries in the shared
+  header and key-portal tables in `embeddings.py` move here.
 - **`provision()`:** idempotent by name (`zotero-rag-embedding`,
   `zotero-rag-llm`). Absent: create. `scaledToZero` or `paused`: resume. Existing
   with a differing config: warn, or recreate with `--recreate`. Then wait with a
