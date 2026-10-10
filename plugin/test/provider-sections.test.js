@@ -180,3 +180,164 @@ test('the plugin sources name no provider (the backend descriptors carry all ven
 		assert.doesNotMatch(text, /runpod|kisski|mpcdf|hugging ?face|openai|anthropic/i, f);
 	}
 });
+
+// --- Controller: actions, polling, retry and job resume ------------------------
+
+/** A fake backend: GET answers from `routes`, POST is recorded and answered from `postReply`. */
+function fakeBackend({ providers, health, jobs, postReply }) {
+	const posts = [];
+	let jobIndex = 0;
+	return {
+		posts,
+		get: async (p) => {
+			if (p === '/api/config/providers') return providers;
+			if (p === '/api/config/health') return typeof health === 'function' ? health() : health;
+			if (p === '/api/config/provision/status') return jobs[Math.min(jobIndex++, jobs.length - 1)];
+			return null;
+		},
+		post: async (p, body) => { posts.push([p, body]); return postReply || { ok: true, status: 202, data: {} }; },
+	};
+}
+
+const bothRemote = { sides: { embedding: remote(), llm: remote() } };
+const sick = { embedding: { status: 'unreachable', detail: '' }, llm: { status: 'unreachable', detail: '' } };
+
+function setup(backendOpts, extra = {}) {
+	const S = load();
+	const doc = { createElementNS };
+	const refs = S.ensureSections(doc, fakeNode(), { onProvision() {}, onRetry() {} });
+	const backend = fakeBackend(backendOpts);
+	const controller = S.createController({ refs, get: backend.get, post: backend.post, sleep: async () => {}, ...extra });
+	return { S, refs, backend, controller };
+}
+
+test('Provision posts only that side, with the one-time key under the descriptor\'s credential name', async () => {
+	const { backend, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle] });
+	await controller.refresh();
+	await controller.provision('llm', 'k_secret');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(backend.posts[0])), ['/api/config/provision', { sides: ['llm'], keys: { SOME_API_KEY: 'k_secret' } }]);
+});
+
+test('without a one-time key no keys object is sent', async () => {
+	const { backend, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle] });
+	await controller.refresh();
+	await controller.provision('embedding', '');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(backend.posts[0][1])), { sides: ['embedding'] });
+});
+
+test('a malformed one-time key is rejected before anything is sent', async () => {
+	const { backend, refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle] });
+	await controller.refresh();
+	await controller.provision('llm', 'WRONG KEY');
+	assert.deepStrictEqual(backend.posts, []);
+	assert.match(refs.llm.status.textContent, /does not look right/);
+});
+
+test('Retry after a failed job sends only the failed side', async () => {
+	const failedJob = { status: 'failed', progress: [], sides: { embedding: { status: 'succeeded', message: null }, llm: { status: 'failed', message: 'boom' } } };
+	const { backend, refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [failedJob, idle] });
+	await controller.refresh();
+	assert.strictEqual(refs.llm.retry.hidden, false);
+	assert.strictEqual(refs.embedding.retry.hidden, true);
+	await controller.provision('llm', '');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(backend.posts.map(([, b]) => b.sides))), [['llm']]);
+});
+
+test('polling continues while the job runs and stops when it ends; progress lands in the right section', async () => {
+	const running = { status: 'running', progress: ['embedding: creating', 'llm: waiting'], sides: { embedding: { status: 'running', message: null } } };
+	const done = { status: 'succeeded', progress: ['embedding: ready'], sides: { embedding: { status: 'succeeded', message: null } } };
+	let sleeps = 0;
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [running, running, done] }, { sleep: async () => { sleeps += 1; } });
+	await controller.poll();
+	assert.strictEqual(sleeps, 2);
+	assert.strictEqual(controller.state.job.status, 'succeeded');
+	assert.strictEqual(refs.embedding.provision.disabled, false);
+});
+
+test('opening the pane while a job is running resumes polling and shows its progress', async () => {
+	const running = { status: 'running', progress: ['llm: warming up'], sides: { llm: { status: 'running', message: null } } };
+	const done = { status: 'succeeded', progress: ['llm: warming up'], sides: { llm: { status: 'succeeded', message: null } } };
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [running, done] });
+	const first = controller.poll();
+	await first;
+	assert.strictEqual(refs.llm.progress.textContent, 'warming up');
+	assert.strictEqual(refs.embedding.progress.hidden, true);
+});
+
+test('buttons are disabled with a reason while the callers slot is busy', async () => {
+	const running = { status: 'running', progress: [], sides: {} };
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [running, { status: 'succeeded', progress: [], sides: {} }] });
+	await controller.refresh();
+	assert.strictEqual(refs.llm.provision.disabled, true);
+	assert.match(refs.llm.provision.title, /already running/);
+});
+
+test('401 / 403 / 409 from the backend are shown inline in the section', async () => {
+	for (const [status, detail] of [[401, 'Missing or invalid Zotero API key.'], [403, 'not an admin'], [409, 'A provisioning job is already running.']]) {
+		const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle], postReply: { ok: false, status, data: { detail } } });
+		await controller.refresh();
+		await controller.provision('llm', '');
+		assert.strictEqual(refs.llm.status.textContent, `Provisioning failed: ${detail}`);
+		assert.strictEqual(refs.llm.status.hidden, false);
+	}
+});
+
+test('a network error while starting is shown inline', async () => {
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle] });
+	const S = load();
+	const failing = S.createController({ refs, get: async () => null, post: async () => { throw new Error('down'); }, sleep: async () => {} });
+	await failing.provision('llm', '');
+	assert.match(refs.llm.status.textContent, /down/);
+});
+
+// --- Preset controls ------------------------------------------------------------
+
+const cfg = { default_preset: 'main', preset_name: 'mine', compatible_presets: ['main', 'mine', 'other'], switchable_presets: [{ name: 'main' }, { name: 'other' }] };
+const my = {
+	loopback: false, is_admin: false, default: 'main', effective: 'mine', fell_back: null,
+	selectable: [
+		{ name: 'main', credentials: 'ok', missing_keys: [] },
+		{ name: 'mine', credentials: 'ok', missing_keys: [] },
+		{ name: 'other', credentials: 'missing', missing_keys: ['OTHER_KEY'] },
+	],
+};
+
+test('preset controls for a user: their own choice, default marked, presets needing a key flagged', () => {
+	const v = load().buildPresetControls(my, cfg);
+	assert.deepStrictEqual([v.mode, v.label, v.selected, v.showDefault], ['user', 'My preset:', 'mine', false]);
+	assert.deepStrictEqual(v.options.map((o) => o.text), ['main (server default)', 'mine', 'other — needs a key']);
+});
+
+test('admins also get the Server default control', () => {
+	const v = load().buildPresetControls({ ...my, is_admin: true }, cfg);
+	assert.strictEqual(v.showDefault, true);
+	assert.deepStrictEqual([...v.defaultOptions.map((o) => o.value)], ['main', 'other']);
+	assert.strictEqual(v.defaultSelected, 'main');
+});
+
+test('a loopback server shows one control that changes the default', () => {
+	const v = load().buildPresetControls({ ...my, loopback: true }, cfg);
+	assert.deepStrictEqual([v.mode, v.label, v.selected, v.showDefault], ['loopback', 'Preset:', 'main', false]);
+	assert.deepStrictEqual(v.options.map((o) => o.value), ['main', 'mine', 'other']);
+});
+
+test('a saved choice that is no longer honoured is explained', () => {
+	const v = load().buildPresetControls({ ...my, effective: 'main', fell_back: 'gone' }, cfg);
+	assert.match(v.note, /"gone" is not available any more/);
+});
+
+test('header names for key names match the backend rule', () => {
+	const S = load();
+	assert.strictEqual(S.headerForKey('KISSKI_API_KEY'), 'X-Kisski-Api-Key');
+	assert.strictEqual(S.headerForKey('SOME_API_KEY'), 'X-Some-Api-Key');
+});
+
+test('wizard intro names the starting preset, counts only the keys it needs and mentions the upgrade path', () => {
+	const S = load();
+	const text = S.keysIntro({ preset_name: 'main', preset_description: 'Shared gateway.' }, [{ key_name: 'A_KEY' }]);
+	assert.match(text, /"main" — Shared gateway\./);
+	assert.match(text, /this key/);
+	assert.match(text, /Model preset/);
+	assert.match(S.keysIntro({ preset_name: 'main' }, []), /needs no key/);
+	assert.match(S.keysIntro({ preset_name: 'main' }, [{ key_name: 'A' }, { key_name: 'B' }]), /these keys/);
+});

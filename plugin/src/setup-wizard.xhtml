@@ -15,6 +15,11 @@
         console.error("Failed to load include.js:", e);
       }
       try {
+        Services.scriptloader.loadSubScript("chrome://zotero-rag/content/provider-sections.js", window);
+      } catch (e) {
+        console.error("Failed to load provider-sections.js:", e);
+      }
+      try {
         Services.scriptloader.loadSubScript("chrome://zotero-rag/content/setup-wizard.js", window);
       } catch (e) {
         console.error("Failed to load setup-wizard.js:", e);

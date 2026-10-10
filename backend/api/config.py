@@ -366,10 +366,20 @@ class MyPresetUpdate(BaseModel):
 
 
 @router.get("/config/my-preset")
-def get_my_preset(request: Request) -> dict:
+async def get_my_preset(request: Request) -> dict:
     """The caller's preset: the server default, the one they run on, their saved choice and
-    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``."""
-    return _my_preset_view(request, get_settings().get_hardware_preset())
+    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``.
+    ``loopback`` and ``is_admin`` tell the plugin which controls to offer (a loopback
+    server has no per-user choice; only an admin may change the default)."""
+    settings = get_settings()
+    view = await asyncio.to_thread(_my_preset_view, request, settings.get_hardware_preset())
+    view["loopback"] = is_loopback(settings)
+    try:
+        await require_authorized_group_admin(request)
+        view["is_admin"] = True
+    except HTTPException:
+        view["is_admin"] = False
+    return view
 
 
 def _my_preset_view(request: Request, effective: HardwarePreset) -> dict:
