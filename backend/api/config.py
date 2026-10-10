@@ -165,12 +165,29 @@ def _switchable_presets(
 def _selectable_presets(
     effective: HardwarePreset, compatible: List[str], settings, request: Request,
 ) -> List["SwitchablePreset"]:
-    """Presets this caller may choose: compatible with the default, credentials usable.
-    The caller's current (effective) preset is always listed."""
+    """Presets this caller may choose: everything compatible with the default.
+
+    Each entry says whether the caller has credentials for it (``credentials``) and, if
+    not, which key names are missing (``missing_keys``), so the plugin can ask for them
+    before choosing it. Only the caller's own request counts as a source of personal keys
+    (never other users' stored keys). The caller's current preset is always listed.
+    """
     names = list(compatible)
     if effective.name not in names:
         names.append(effective.name)
-    return _switchable_presets(effective, names, settings, request)
+    result: List[SwitchablePreset] = []
+    for name in names:
+        try:
+            preset = effective if name == effective.name else get_preset(name, settings.data_path)
+        except ValueError as exc:
+            logger.warning("Skipping preset %r while computing selectable_presets: %s", name, exc)
+            continue
+        missing = _preset_credentials(preset, settings, request, {})
+        result.append(SwitchablePreset(
+            name=name, active=name == effective.name, credentials="missing" if missing else "ok",
+            missing_keys=sorted(missing), description=preset.description,
+        ))
+    return result
 
 
 def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: HardwarePreset) -> Optional[str]:
@@ -182,10 +199,12 @@ def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: H
 
 
 class SwitchablePreset(BaseModel):
-    """A preset the admin may switch to at runtime."""
+    """A preset the admin may switch the default to, or a user may choose for themselves."""
     name: str
     active: bool
     credentials: str  # "ok" | "missing"
+    missing_keys: List[str] = []  # key names still needed (never values); only set for user choices
+    description: str = ""
 
 
 class ConfigResponse(BaseModel):
@@ -201,7 +220,6 @@ class ConfigResponse(BaseModel):
     model_cache_dir: str
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
-    provisionable: bool = False  # at least one side's provider can provision
     switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials (admin switch)
     default_preset: str = ""  # the server default; ``preset_name`` is this caller's effective preset
     selectable_presets: List[SwitchablePreset] = []  # presets this caller may choose for themselves
@@ -222,6 +240,7 @@ class ApiKeyRequirement(BaseModel):
     required_for: List[str]
     is_set: Optional[bool] = None  # only meaningful for shared_* kinds — never exposes the value itself
     pattern: Optional[str] = None  # optional regex the value must fullmatch — see required_client_fields
+    sides: List[str] = []  # which sides of the preset use this field ("embedding" and/or "llm")
 
 
 class RequiredKeysResponse(BaseModel):
@@ -246,14 +265,6 @@ class RemoteFieldsUpdateRequest(BaseModel):
 class RemoteFieldsResponse(BaseModel):
     """Presence map after an update — never echoes the values themselves."""
     is_set: Dict[str, bool]
-
-
-def _is_provisionable(preset: HardwarePreset) -> bool:
-    """True when at least one side's provider can create or wake endpoints."""
-    try:
-        return any(p.supports_provisioning for p in get_providers(preset).values())
-    except ProviderConfigError:
-        return False
 
 
 def _llm_provider(preset: HardwarePreset) -> Optional[Provider]:
@@ -328,7 +339,6 @@ def get_config(request: Request):
         model_cache_dir=str(settings.model_weights_path),
         available_presets=available,
         compatible_presets=compatible,
-        provisionable=_is_provisionable(preset),
         switchable_presets=_switchable_presets(default, compatible, settings, request),
         default_preset=default.name,
         selectable_presets=selectable,
@@ -346,10 +356,20 @@ class MyPresetUpdate(BaseModel):
 
 
 @router.get("/config/my-preset")
-def get_my_preset(request: Request) -> dict:
+async def get_my_preset(request: Request) -> dict:
     """The caller's preset: the server default, the one they run on, their saved choice and
-    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``."""
-    return _my_preset_view(request, get_settings().get_hardware_preset())
+    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``.
+    ``loopback`` and ``is_admin`` tell the plugin which controls to offer (a loopback
+    server has no per-user choice; only an admin may change the default)."""
+    settings = get_settings()
+    view = await asyncio.to_thread(_my_preset_view, request, settings.get_hardware_preset())
+    view["loopback"] = is_loopback(settings)
+    try:
+        await require_authorized_group_admin(request)
+        view["is_admin"] = True
+    except HTTPException:
+        view["is_admin"] = False
+    return view
 
 
 def _my_preset_view(request: Request, effective: HardwarePreset) -> dict:
@@ -396,7 +416,7 @@ def put_my_preset(update: MyPresetUpdate, request: Request) -> dict:
         chosen = get_preset(update.preset_name, settings.data_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    missing = _preset_credentials(chosen, settings, request, _stored_embedding_key_counts(settings))
+    missing = _preset_credentials(chosen, settings, request, {})
     if missing:
         raise HTTPException(
             status_code=400,
@@ -543,6 +563,58 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
         embedding=_check_side(preset, "embedding", request),
         llm=_check_side(preset, "llm", request),
     )
+
+
+async def _caller_may_operate(request: Request, provider: Provider) -> bool:
+    """Whether the caller may provision / pause / resume this side (by credential scope).
+
+    ``user``: anyone signed in (or any caller of a loopback server). ``managed``: an
+    admin of the authorizing group (or loopback). ``shared``: nobody, there is
+    nothing to operate.
+    """
+    if not (provider.supports_provisioning or provider.supports_suspend):
+        return False
+    if provider.scope == "shared":
+        return False
+    try:
+        if provider.scope == "managed":
+            await require_authorized_group_admin(request)
+            return True
+        if is_loopback(get_settings()):
+            return True
+        return get_zotero_identity(request) is not None
+    except HTTPException:
+        return False
+
+
+@router.get("/config/providers")
+async def get_provider_descriptors(request: Request) -> dict:
+    """Per-side provider descriptors of the caller's effective preset, for the plugin's
+    per-side configuration sections.
+
+    ``{"preset": name, "sides": {"embedding"|"llm": {"model_type", "provider"}}}``;
+    ``provider`` is ``null`` for a local side. A descriptor carries the provider's id and
+    label, the effective credential scope, capability flags (provisioning, pause), the
+    credential the one-time provisioning key must match, an ``unavailable_hint`` and
+    ``operable_by_caller``. It never contains secrets and no vendor knowledge lives in
+    the plugin: everything it needs to render is here.
+    """
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    sides: Dict[str, dict] = {}
+    for side in ("embedding", "llm"):
+        cfg = preset.embedding if side == "embedding" else preset.llm
+        provider = providers[side]
+        if cfg.model_type != "remote":
+            sides[side] = {"model_type": cfg.model_type, "provider": None}
+            continue
+        descriptor = provider.describe()
+        descriptor.operable_by_caller = await _caller_may_operate(request, provider)
+        sides[side] = {"model_type": cfg.model_type, "provider": descriptor.model_dump()}
+    return {"preset": preset.name, "sides": sides}
 
 
 class ProvisionRequest(BaseModel):
@@ -806,11 +878,13 @@ async def get_required_api_keys():
             seen[key_name].required_for = list(
                 set(seen[key_name].required_for) | set(key_info["required_for"])
             )
+            if side not in seen[key_name].sides:
+                seen[key_name].sides.append(side)
             return
         is_set = None
         if key_info["kind"] in ("shared_base_url", "shared_api_key"):
             is_set = bool(get_remote_config_value(key_name))
-        seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set)
+        seen[key_name] = ApiKeyRequirement(**key_info, is_set=is_set, sides=[side])
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
         _merge(key_info, "embedding")

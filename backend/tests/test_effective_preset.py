@@ -162,6 +162,26 @@ class MyPresetApiTest(unittest.TestCase):
         other = self._call("GET", 2, path="/api/config").json()  # another user is unaffected
         self.assertEqual(other["preset_name"], "remote-kisski")
 
+    def test_selectable_lists_compatible_presets_with_the_keys_still_missing(self):
+        by_name = {p["name"]: p for p in self._call("GET", 1).json()["selectable"]}
+        self.assertEqual(by_name["runpod"]["credentials"], "missing")
+        self.assertEqual(by_name["runpod"]["missing_keys"], ["RUNPOD_API_KEY"])
+        self.assertNotIn("remote-openai", by_name)  # incompatible embedding model: not offered
+        with_key = {p["name"]: p for p in self._call("GET", 1, headers=self.RUNPOD_KEY).json()["selectable"]}
+        self.assertEqual((with_key["runpod"]["credentials"], with_key["runpod"]["missing_keys"]), ("ok", []))
+
+    def test_other_users_stored_keys_do_not_count_as_the_callers_credentials(self):
+        from backend.services.autoindex_key_store import AutoIndexKeyStore
+        from backend.zotero.key_validator import KeyValidation
+        from cryptography.fernet import Fernet
+        s = self.settings
+        s.autoindex_secret = Fernet.generate_key().decode()
+        store = AutoIndexKeyStore(s.autoindex_keys_path, s.autoindex_secret)
+        fp = store.add("zk", KeyValidation(user_id=2, username="u2", targets=["users/2"], read_only=True))
+        store.set_embedding_key(fp, "someone-elses", "RUNPOD_API_KEY")
+        r = self._call("PUT", 1, json={"preset_name": "runpod"})
+        self.assertEqual(r.status_code, 400)
+
     def test_choice_without_credentials_is_refused_and_names_the_key(self):
         r = self._call("PUT", 1, json={"preset_name": "runpod"})
         self.assertEqual(r.status_code, 400)

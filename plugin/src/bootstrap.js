@@ -73,6 +73,7 @@ async function startup({ id, version, rootURI }) {
 
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
+	Services.scriptloader.loadSubScript(rootURI + 'provider-sections.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;

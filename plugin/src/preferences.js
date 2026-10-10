@@ -183,7 +183,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
-	const serviceKeysContainer = doc.getElementById('zotero-rag-service-keys-container');
 	const serviceKeysPlaceholder = doc.getElementById('zotero-rag-service-keys-placeholder');
 
 	/**
@@ -257,201 +256,274 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	};
 
-	// Render from cache immediately so fields appear without needing a server round-trip
-	try {
-		const cached = Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]';
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, JSON.parse(cached), onServiceKeyChange);
-	} catch (_) {}
-
-	// Refresh from server in background and re-render if the list has changed
-	this.fetchRequiredApiKeys().then(() =>
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange)
-	);
-
-	// Active preset dropdown (admin only — a non-admin or non-loopback caller gets
-	// a 403/400 from POST /api/config and refreshPresetState() reverts the select).
-	const presetSelect = doc.getElementById('zotero-rag-preset-select');
-	const presetDescription = doc.getElementById('zotero-rag-preset-description');
-	const presetStatus = doc.getElementById('zotero-rag-preset-status');
-	const healthRows = {
-		embedding: doc.getElementById('zotero-rag-endpoint-health-embedding'),
-		llm: doc.getElementById('zotero-rag-endpoint-health-llm'),
-	};
-	const provisionButton = /** @type {HTMLButtonElement | null} */ (doc.getElementById('zotero-rag-provision-endpoints'));
-	const provisionRow = doc.getElementById('zotero-rag-provision-row');
-	const provisionHelp = doc.getElementById('zotero-rag-provision-help');
-	const provisionKeyInput = /** @type {HTMLInputElement | null} */ (doc.getElementById('zotero-rag-provision-key'));
-	const provisionStatus = doc.getElementById('zotero-rag-provision-status');
-	/** Whether the active preset declares a provisioning script (from GET /api/config). */
-	let provisionable = false;
-	let provisioning = false;
-	const HEALTH_COLORS = { ready: 'green', cold: 'orange', throttled: 'red', unreachable: 'red' };
-	/** Statuses provisioning can fix; a "cold" endpoint wakes on the next request by itself. */
-	const NEEDS_PROVISIONING = new Set(['unreachable', 'throttled']);
-
+	// --- Per-side model sections -------------------------------------------------
+	// Everything vendor-specific comes from the backend's provider descriptors
+	// (GET /api/config/providers); see provider-sections.js for the rendering.
+	const Sections = ZoteroRAGProviderSections;
+	const sectionsContainer = doc.getElementById('zotero-rag-provider-sections');
+	const sectionRefs = sectionsContainer
+		? Sections.ensureSections(doc, sectionsContainer, {
+			onProvision: (side, key) => controller && controller.provision(side, key),
+			onRetry: (side, key) => controller && controller.provision(side, key),
+		})
+		: null;
 	/**
-	 * Fetch GET /api/config/health and render one status row per non-null side;
-	 * show the "Provision endpoints" row when the preset is provisionable and
-	 * a side needs provisioning (see NEEDS_PROVISIONING). Failures degrade to
-	 * showing no rows.
-	 * @returns {Promise<boolean>} true if every reported side is ready
+	 * GET a backend JSON endpoint; null on any failure (the UI then keeps what it has).
+	 * @param {string} path
+	 * @returns {Promise<any>}
 	 */
-	const refreshEndpointHealth = async () => {
-		let allReady = true;
-		let needsProvisioning = false;
+	const fetchJson = async (path) => {
 		try {
-			const response = await fetch(`${this.backendURL}/api/config/health`, { headers: this.getAuthHeaders() });
-			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			/** @type {Record<'embedding'|'llm', {status: 'ready'|'cold'|'throttled'|'unreachable', detail: string}|null>} */
-			const data = await response.json();
-			for (const side of /** @type {const} */ (['embedding', 'llm'])) {
-				const row = healthRows[side];
-				const info = data[side];
-				if (!row) continue;
-				if (!info) {
-					row.textContent = '';
-					continue;
-				}
-				if (info.status !== 'ready') allReady = false;
-				if (NEEDS_PROVISIONING.has(info.status)) needsProvisioning = true;
-				// Show the reason inline for anything not ready — a tooltip alone is easy to miss.
-				const detail = info.status !== 'ready' && info.detail ? ` (${info.detail})` : '';
-				row.textContent = `${side === 'embedding' ? 'Embedding' : 'LLM'}: \u25CF ${info.status}${detail}`;
-				row.style.color = HEALTH_COLORS[info.status] || '';
-				row.title = info.detail || '';
-			}
+			const response = await fetch(`${this.backendURL}${path}`, { headers: this.getAuthHeaders() });
+			return response.ok ? await response.json() : null;
 		} catch (e) {
-			this.log('Could not fetch endpoint health: ' + e);
-			for (const row of Object.values(healthRows)) if (row) row.textContent = '';
+			this.log(`Could not fetch ${path}: ${e}`);
+			return null;
 		}
-		// Stay visible while a job runs, so its progress isn't yanked away mid-run.
-		const showProvisioning = provisionable && (needsProvisioning || provisioning);
-		if (provisionRow) provisionRow.hidden = !showProvisioning;
-		if (provisionHelp) provisionHelp.hidden = !showProvisioning;
-		if (provisionButton) provisionButton.disabled = provisioning;
-		return allReady;
 	};
-
-	if (provisionButton) {
-		provisionButton.addEventListener('click', async () => {
-			provisioning = true;
-			provisionButton.disabled = true;
-			if (provisionStatus) provisionStatus.textContent = 'Provisioning\u2026';
-			try {
-				// A one-time key, sent with this request only: the backend hands it to
-				// the provisioning script and never stores it.
-				const provisioningKey = provisionKeyInput ? provisionKeyInput.value.trim() : '';
-				if (provisionKeyInput) provisionKeyInput.value = '';
-				const start = await fetch(`${this.backendURL}/api/config/provision`, {
+	/** @type {ReturnType<typeof ZoteroRAGProviderSections.createController> | null} */
+	const controller = sectionRefs
+		? Sections.createController({
+			refs: sectionRefs,
+			get: fetchJson,
+			post: async (path, body) => {
+				const response = await fetch(`${this.backendURL}${path}`, {
 					method: 'POST',
 					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify(provisioningKey ? { api_key: provisioningKey } : {}),
+					body: JSON.stringify(body),
 				});
-				if (!start.ok) {
-					const err = await start.json().catch(() => ({}));
-					throw new Error(err.detail || `HTTP ${start.status}`);
-				}
-				/** @type {{status: string, message: string|null}} */
-				let job = await start.json();
-				while (job.status === 'running') {
-					await new Promise((resolve) => setTimeout(resolve, 5000));
-					const poll = await fetch(`${this.backendURL}/api/config/provision/status`, { headers: this.getAuthHeaders() });
-					if (!poll.ok) throw new Error(`HTTP ${poll.status}`);
-					job = await poll.json();
-					await refreshEndpointHealth();
-				}
-				if (provisionStatus) {
-					provisionStatus.textContent = job.status === 'succeeded'
-						? 'Provisioning finished.'
-						: `Provisioning failed: ${job.message || 'unknown error'}`;
-				}
-			} catch (e) {
-				if (provisionStatus) provisionStatus.textContent = `Provisioning failed: ${e}`;
-			} finally {
-				provisioning = false;
-				await refreshEndpointHealth();
-			}
-		});
-	}
+				return { ok: response.ok, status: response.status, data: await response.json().catch(() => ({})) };
+			},
+		})
+		: null;
+	const pollJob = async () => { if (controller) await controller.poll(); };
+	const headerForKey = Sections.headerForKey;
+
+	/** Render each required key under the first side that uses it. */
+	const renderSideKeys = () => {
+		if (!sectionRefs) return;
+		const keys = this.requiredApiKeys || [];
+		for (const side of Sections.SIDES) {
+			const forSide = keys.filter((k) => {
+				const sides = k.sides && k.sides.length ? k.sides : ['embedding'];
+				return Sections.SIDES.find((s) => sides.includes(s)) === side;
+			});
+			this.renderServiceApiKeyFields(doc, sectionRefs[side].keys, null, forSide, onServiceKeyChange);
+		}
+		if (serviceKeysPlaceholder) serviceKeysPlaceholder.style.display = keys.length ? 'none' : '';
+	};
+
+	// Render from cache immediately so fields appear without needing a server round-trip
+	try {
+		this.requiredApiKeys = JSON.parse(Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]');
+	} catch (_) {}
+	renderSideKeys();
+	// Refresh from server in background and re-render if the list has changed
+	this.fetchRequiredApiKeys().then(renderSideKeys);
+
+	// --- Model preset group -------------------------------------------------------
+	const presetSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-preset-select'));
+	const presetLabel = doc.getElementById('zotero-rag-preset-label');
+	const presetDescription = doc.getElementById('zotero-rag-preset-description');
+	const presetStatus = doc.getElementById('zotero-rag-preset-status');
+	const presetKeys = doc.getElementById('zotero-rag-preset-keys');
+	const defaultRow = doc.getElementById('zotero-rag-default-row');
+	const defaultHelp = doc.getElementById('zotero-rag-default-help');
+	const defaultSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-default-select'));
+	/** What the preset controls currently show: 'loopback' (one control, changes the default) or 'user'. */
+	let presetMode = 'user';
+	const setPresetStatus = (/** @type {string} */ text) => { if (presetStatus) presetStatus.textContent = text; };
 
 	/**
-	 * Re-fetch GET /api/config and repopulate the preset dropdown from
-	 * `compatible_presets`, selecting the currently active one.
-	 * Also refreshes the endpoint health rows and provision button.
+	 * @param {HTMLSelectElement} select
+	 * @param {Array<{value: string, text: string}>} options
+	 * @param {string} selected
+	 */
+	const fillSelect = (select, options, selected) => {
+		select.innerHTML = '';
+		for (const o of options) {
+			const option = doc.createElementNS('http://www.w3.org/1999/xhtml', 'option');
+			option.value = o.value;
+			option.textContent = o.text;
+			select.appendChild(option);
+		}
+		select.value = selected;
+	};
+
+	/**
+	 * Re-fetch the caller's preset state and repopulate both preset controls.
 	 * @returns {Promise<void>}
 	 */
 	const refreshPresetState = async () => {
-		if (!presetSelect) return;
-		try {
-			const response = await fetch(`${this.backendURL}/api/config`, { headers: this.getAuthHeaders() });
-			if (!response.ok) return;
-			/** @type {{preset_name: string, preset_description: string, compatible_presets: string[], provisionable?: boolean}} */
-			const data = await response.json();
-			presetSelect.innerHTML = '';
-			for (const name of data.compatible_presets) {
-				const option = doc.createElementNS('http://www.w3.org/1999/xhtml', 'option');
-				option.value = name;
-				option.textContent = name;
-				presetSelect.appendChild(option);
-			}
-			presetSelect.value = data.preset_name;
-			if (presetDescription) presetDescription.textContent = data.preset_description || '';
-			provisionable = !!data.provisionable;
-		} catch (e) {
-			this.log('Could not fetch preset config: ' + e);
-			return;
-		}
-		await refreshEndpointHealth();
+		const [my, cfg] = await Promise.all([fetchJson('/api/config/my-preset'), fetchJson('/api/config')]);
+		if (!my || !cfg) return;
+		const view = Sections.buildPresetControls(my, cfg);
+		presetMode = view.mode;
+		if (presetLabel) presetLabel.textContent = view.label;
+		if (presetSelect) fillSelect(presetSelect, view.options, view.selected);
+		if (presetDescription) presetDescription.textContent = cfg.preset_description || '';
+		if (defaultRow) defaultRow.hidden = !view.showDefault;
+		if (defaultHelp) defaultHelp.hidden = !view.showDefault;
+		if (defaultSelect && view.showDefault) fillSelect(defaultSelect, view.defaultOptions, view.defaultSelected);
+		if (view.note) setPresetStatus(view.note);
+	};
+
+	/** Refresh everything that depends on the preset after a change (made here or in another window). */
+	const applyPresetSwitch = async () => {
+		await refreshPresetState();
+		await this.fetchRequiredApiKeys();
+		renderSideKeys();
+		await pollJob();
 	};
 
 	/**
-	 * Refresh everything that depends on the active preset after a switch
-	 * (made here or in another window).
-	 * @returns {Promise<void>}
+	 * POST /api/config (changes the server default). Admins only.
+	 * @param {string} name
+	 * @returns {Promise<boolean>}
 	 */
-	const applyPresetSwitch = async () => {
-		await refreshPresetState();
-		// The new preset likely needs different dynamic fields filled in right away.
-		await this.fetchRequiredApiKeys();
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange);
+	const setServerDefault = async (name) => {
+		setPresetStatus('Switching\u2026');
+		try {
+			const response = await fetch(`${this.backendURL}/api/config`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ preset_name: name }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				setPresetStatus(`Error: ${err.detail || response.status}`);
+				return false;
+			}
+			setPresetStatus('Switched.');
+			this.notifyPresetChanged('preferences');
+			return true;
+		} catch (e) {
+			setPresetStatus(`Error: ${e}`);
+			return false;
+		}
+	};
+
+	/**
+	 * PUT /api/config/my-preset with any keys entered for it in this request's headers.
+	 * @param {string} name
+	 * @param {Record<string,string>} keys - key name -> value for credentials the preset still needs
+	 * @returns {Promise<boolean>}
+	 */
+	const chooseMyPreset = async (name, keys) => {
+		setPresetStatus('Switching\u2026');
+		/** @type {Record<string,string>} */
+		const extra = { 'Content-Type': 'application/json' };
+		for (const [keyName, value] of Object.entries(keys)) extra[headerForKey(keyName)] = value;
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/my-preset`, {
+				method: 'PUT',
+				headers: this.getAuthHeaders(extra),
+				body: JSON.stringify({ preset_name: name }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				setPresetStatus(`Error: ${err.detail || response.status}`);
+				return false;
+			}
+			// Keep the keys that made the choice possible, so later requests carry them.
+			for (const [keyName, value] of Object.entries(keys)) {
+				Zotero.Prefs.set(`extensions.zotero-rag.serviceApiKey.${keyName}`, value, true);
+			}
+			setPresetStatus('Switched.');
+			return true;
+		} catch (e) {
+			setPresetStatus(`Error: ${e}`);
+			return false;
+		}
+	};
+
+	/**
+	 * Ask for the keys a chosen preset still needs, then choose it.
+	 * @param {string} name
+	 * @param {string[]} missing
+	 */
+	const promptForMissingKeys = (name, missing) => {
+		if (!presetKeys) return;
+		presetKeys.innerHTML = '';
+		/** @type {Record<string, HTMLInputElement>} */
+		const inputs = {};
+		for (const keyName of missing) {
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'setting-row';
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.textContent = `${keyName}:`;
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.type = 'password';
+			input.className = 'setting-input';
+			input.placeholder = 'Enter your key to use this preset';
+			inputs[keyName] = input;
+			row.append(label, input);
+			presetKeys.appendChild(row);
+		}
+		const go = /** @type {HTMLButtonElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'button'));
+		go.textContent = `Use ${name}`;
+		go.addEventListener('click', async () => {
+			/** @type {Record<string,string>} */
+			const keys = {};
+			for (const [k, input] of Object.entries(inputs)) if (input.value.trim()) keys[k] = input.value.trim();
+			if (Object.keys(keys).length < missing.length) {
+				setPresetStatus('Enter all the keys listed above first.');
+				return;
+			}
+			if (await chooseMyPreset(name, keys)) {
+				presetKeys.innerHTML = '';
+				this.notifyPresetChanged('preferences');
+				await applyPresetSwitch();
+			}
+		});
+		presetKeys.appendChild(go);
+		setPresetStatus(`${name} needs ${missing.length === 1 ? 'a key' : 'keys'} you have not entered yet.`);
 	};
 
 	if (presetSelect) {
 		// A switch from the auto-index status dialog must show up here too.
 		this.observePresetChanged(_window, 'preferences', () => {
-			if (presetStatus) presetStatus.textContent = '';
+			setPresetStatus('');
 			applyPresetSwitch();
 		});
 		presetSelect.addEventListener('change', async (e) => {
 			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
-			if (presetStatus) presetStatus.textContent = 'Switching…';
-			try {
-				const response = await fetch(`${this.backendURL}/api/config`, {
-					method: 'POST',
-					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ preset_name: selected }),
-				});
-				if (!response.ok) {
-					const err = await response.json().catch(() => ({}));
-					if (presetStatus) presetStatus.textContent = `Error: ${err.detail || response.status}`;
-					await refreshPresetState(); // revert the select to the still-active preset
-					return;
-				}
-				if (presetStatus) presetStatus.textContent = 'Switched.';
+			if (presetKeys) presetKeys.innerHTML = '';
+			if (presetMode === 'loopback') {
+				if (await setServerDefault(selected)) await applyPresetSwitch();
+				else await refreshPresetState();
+				return;
+			}
+			const my = await fetchJson('/api/config/my-preset');
+			const entry = my && (my.selectable || []).find((p) => p.name === selected);
+			if (entry && entry.credentials === 'missing') {
+				promptForMissingKeys(selected, entry.missing_keys || []);
+				return;
+			}
+			if (await chooseMyPreset(selected, {})) {
 				this.notifyPresetChanged('preferences');
 				await applyPresetSwitch();
-			} catch (e) {
-				if (presetStatus) presetStatus.textContent = `Error: ${e}`;
+			} else {
+				await refreshPresetState(); // revert the select to the preset still in effect
 			}
 		});
-		refreshPresetState();
-		// A saved shared value (e.g. a new RunPod API key) can change endpoint
-		// health and which presets have credentials — re-check right away.
-		if (serviceKeysContainer) {
-			serviceKeysContainer.addEventListener('zotero-rag-shared-field-saved', () => {
-				refreshPresetState();
-			});
-		}
+	}
+	if (defaultSelect) {
+		defaultSelect.addEventListener('change', async (e) => {
+			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
+			if (await setServerDefault(selected)) await applyPresetSwitch();
+			else await refreshPresetState();
+		});
+	}
+	refreshPresetState();
+	pollJob();
+	// A saved shared value (e.g. a new provider API key) can change endpoint health and
+	// which presets have credentials: re-check right away.
+	if (sectionsContainer) {
+		sectionsContainer.addEventListener('zotero-rag-shared-field-saved', () => {
+			refreshPresetState();
+			pollJob();
+		});
 	}
 
 	// Library visibility section

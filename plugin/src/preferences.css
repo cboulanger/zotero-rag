@@ -181,3 +181,10 @@ body {
 .status-icon-error {
   color: #cc0000;
 }
+
+/* Per-side model sections (rendered by provider-sections.js) */
+.provider-section { margin: 8px 0; padding-bottom: 8px; border-bottom: 1px solid rgba(128, 128, 128, 0.3); }
+.provider-section:last-child { border-bottom: none; }
+.provider-section-title { font-weight: 600; margin-bottom: 2px; }
+.provider-section [hidden] { display: none; }
+.provider-section .setting-description { white-space: pre-wrap; }

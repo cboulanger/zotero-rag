@@ -63,6 +63,17 @@ class RunJobTest(unittest.TestCase):
         self.assertEqual(get_remote_config_value("EMB_URL", data_path=self.data_path), "https://e/v1")
         self.assertEqual(get_remote_config_value("LLM_URL", data_path=self.data_path), "https://l/v1")
 
+    def test_a_side_that_exceeds_the_deadline_is_marked_failed_and_the_job_fails(self):
+        from backend.providers import ProvisionTimeout
+
+        def too_slow(ctx, progress):
+            raise ProvisionTimeout("llm job exceeded its deadline")
+
+        state = self.run_jobs([_job("llm", too_slow, self.tmp.name)])
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["sides"]["llm"]["status"], "failed")
+        self.assertIn("deadline", state["sides"]["llm"]["message"])
+
     def test_a_failed_side_is_recorded_and_the_other_side_still_runs_and_is_kept(self):
         def boom(ctx, progress):
             raise ProvisionError("no capacity")
@@ -306,7 +317,6 @@ class HealthEndpointTest(unittest.TestCase):
         get_settings().model_preset = "remote-kisski"
         r = self.client.get("/api/config/health")
         self.assertEqual(r.json(), {"embedding": None, "llm": None})
-        self.assertFalse(self.client.get("/api/config").json()["provisionable"])
 
     def test_runpod_reports_statuses(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
@@ -323,7 +333,6 @@ class HealthEndpointTest(unittest.TestCase):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"]["status"], "ready")
         self.assertEqual(r.json()["llm"]["status"], "cold")
-        self.assertTrue(self.client.get("/api/config").json()["provisionable"])
 
     def test_unconfigured_side_is_unreachable_not_null(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)

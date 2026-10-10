@@ -8,6 +8,12 @@ function fakeNode(tag = 'div') {
 		appendChild(child) { this.children.push(child); return child; },
 		append(...nodes) { this.children.push(...nodes); },
 		replaceChildren(...nodes) { this.children = [...nodes]; },
+		attrs: {},
+		setAttribute(name, value) { this.attrs[name] = value; },
+		listeners: {},
+		addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+		/** Fire the click handlers (a disabled or hidden control does nothing, like a real one). */
+		click() { if (!this.disabled && !this.hidden) (this.listeners.click || []).forEach((fn) => fn({ target: this })); },
 	};
 }
 
