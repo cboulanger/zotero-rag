@@ -137,6 +137,34 @@ even with a write key. Tags written this way reach the plugin through normal Zot
 sync. The server never holds a write key, so the Refresh button always uses the
 client-only path.
 
+## Failed attachments: `⚠️ rag-failed`
+
+An attachment the backend refuses to process carries the tag `⚠️ rag-failed`
+(same opt-in preference as the indexed tag). Reasons, recorded in
+`<data>/system/failed_attachments.json` (`backend/services/failed_attachments.py`):
+
+- `too_costly`: a PDF without a text layer (image-only scan, every page needs OCR) with
+  more than `PDF_SCAN_MAX_PAGES` (default 2000) pages. Such scans must be split manually.
+  Smaller scans are processed, but split into parts of at most
+  `PDF_SCAN_MAX_PAGES_PER_PART` (default 50) pages regardless of byte size, so a single
+  Kreuzberg request cannot exhaust the sidecar's memory.
+- `too_large`: the file exceeds `KREUZBERG_MAX_CONTENT_BYTES`.
+- `quarantined`: a deferred upload failed `PENDING_UPLOAD_MAX_ATTEMPTS` (default 5) times.
+  Failures caused by the embedding service (credentials, quota, endpoint) do not count.
+
+While an attachment is recorded, `DocumentProcessor` skips it (`skipped_failed`), so it
+cannot crash the shared extraction sidecar again. The deferred-upload queue is drained
+least-attempted first, and quarantined entries are no longer drained, so one bad file
+cannot block the rest of a library's queue.
+
+**Retrying:** remove the tag in Zotero. The plugin observes the removal and calls
+`POST /api/indexed-tags/failed/clear`, which forgets the record, releases a quarantined
+queue entry and marks the item as not indexed, so the next scan or upload picks it up
+again. Transitions reach the plugin as `failed` / `unfailed` events (with the
+`failed_tag` name in every events/refresh response); Refresh also reconciles the tag
+(`ops` records with `kind: "failed"`). A removal that could not be reported to the
+backend (e.g. offline) is undone by the next Refresh.
+
 ## Known cost: standalone attachments
 
 Adding a tag changes the tagged item's Zotero version. The incremental indexer

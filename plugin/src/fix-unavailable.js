@@ -95,6 +95,14 @@ var ZoteroFixUnavailableDialog = {
 		this.libraryID = args.libraryID;
 		this.backendLibraryId = args.backendLibraryId || String(args.libraryID);
 
+		const autoindexStatusButton = document.getElementById('autoindex-status-button');
+		if (autoindexStatusButton) {
+			autoindexStatusButton.addEventListener('click', () => {
+				if (this.plugin) this.plugin.openAutoindexStatusDialog(window);
+			});
+		}
+		this.refreshAutoindexButton();
+
 		document.getElementById('close-btn').addEventListener('click', () => {
 			// While a fix run is in progress, "Close" is repurposed as "Cancel"
 			// (see searchAndFix) — stop the run instead of closing the window.
@@ -134,6 +142,7 @@ var ZoteroFixUnavailableDialog = {
 		document.getElementById('delete-btn').addEventListener('click', () => this.deleteSelected());
 		document.getElementById('refresh-btn').addEventListener('click', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('include-missing-cb')?.addEventListener('change', () => { if (!this.isRunning) this.populateTable(); });
+		document.getElementById('include-failed-cb')?.addEventListener('change', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('select-all-cb')?.addEventListener('change', (/** @type {Event} */ e) => {
 			if (/** @type {HTMLInputElement} */(e.target).checked) {
 				for (let i = 0; i < this.items.length; i++) this.selected.add(i);
@@ -161,6 +170,7 @@ var ZoteroFixUnavailableDialog = {
 		if (info.skipReason === 'no text') return 'empty';
 		if (info.skipReason === 'timeout') return 'timeout';
 		if (info.isParseError) return 'parse err';
+		if (info.quarantined) return 'failed';
 		if (info.tooLarge) return 'too large';
 		if (info.serverDownloadFailed) return 'srv fail';
 		if (info.isLinked) return 'linked';
@@ -317,6 +327,40 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
+	 * Fetch `GET /api/autoindex/status`. Resolves null on any network/HTTP/parse
+	 * error so callers can fail open.
+	 * @returns {Promise<{enabled?: boolean, running?: boolean, keys_registered?: number, scheduler?: {active?: boolean}}|null>}
+	 */
+	async fetchAutoindexStatus() {
+		try {
+			if (!this.plugin || !this.plugin.backendURL) return null;
+			const response = await fetch(`${this.plugin.backendURL}/api/autoindex/status`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			if (!response.ok) return null;
+			return await response.json();
+		} catch (e) {
+			return null;
+		}
+	},
+
+	/**
+	 * Show the "Indexing status" button iff server-side auto-indexing is
+	 * configured: enabled and (scheduler active or keys registered). Hidden on
+	 * any fetch error or when no backend URL is set — same logic as the main
+	 * search dialog's identically-named button (see dialog.js).
+	 * @returns {Promise<void>}
+	 */
+	async refreshAutoindexButton() {
+		const button = document.getElementById('autoindex-status-button');
+		if (!button) return;
+		const data = await this.fetchAutoindexStatus();
+		const visible = !!data && data.enabled === true
+			&& ((data.scheduler && data.scheduler.active === true) || (data.keys_registered || 0) > 0);
+		button.style.display = visible ? '' : 'none';
+	},
+
+	/**
 	 * Load unavailable attachments from the plugin and render the table.
 	 * @returns {Promise<void>}
 	 */
@@ -332,9 +376,11 @@ var ZoteroFixUnavailableDialog = {
 		/** @type {HTMLButtonElement} */ (document.getElementById('delete-btn')).disabled = true;
 
 		const includeMissingCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-missing-cb'));
+		const includeFailedCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-failed-cb'));
 		try {
 			this.items = await this.plugin._getUnavailableAttachments(this.libraryID, {
 				includeDownloadFailed: includeMissingCb?.checked ?? false,
+				includePermanentFailures: includeFailedCb?.checked ?? false,
 			});
 		} catch (e) {
 			this.setStatus(`Error loading items: ${e instanceof Error ? e.message : String(e)}`);
@@ -362,6 +408,15 @@ var ZoteroFixUnavailableDialog = {
 				this.rowStatus.set(i, { cssClass: 'not-found', text: 'no text', tooltip: 'No text could be extracted (scanned or protected PDF)' });
 			} else if (item.skipReason === 'timeout') {
 				this.rowStatus.set(i, { cssClass: 'not-found', text: 'timeout', tooltip: 'Text extraction timed out (file may be too large)' });
+			} else if (item.quarantined) {
+				// No automatic fix exists — the backend has permanently refused this
+				// attachment and tagged it rag-failed — so this is shown immediately,
+				// the same as the other definitive, server-verdict statuses here.
+				this.rowStatus.set(i, {
+					cssClass: 'not-found',
+					text: 'Refused by server',
+					tooltip: item.quarantineDetail || 'The backend has permanently refused to process this attachment — remove the rag-failed tag in Zotero to retry.',
+				});
 			} else if (item.serverDownloadFailed) {
 				this.rowStatus.set(i, {
 					cssClass: 'not-found',
@@ -715,16 +770,20 @@ var ZoteroFixUnavailableDialog = {
 		const parseErrorIndices  = indices.filter(i => this.items[i].isParseError);
 		const timeoutIndices     = indices.filter(i => this.items[i].skipReason === 'timeout');
 		const emptyTextIndices   = indices.filter(i => this.items[i].skipReason === 'no text');
+		// quarantined rows (backend-refused, tagged rag-failed) have nothing to
+		// search for or retry here either — same reasoning as tooLarge below,
+		// pulled out first so they don't fall into any fixable bucket.
+		const quarantinedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].quarantined);
 		// tooLarge rows have nothing to search for or retry — the file itself needs
 		// to be made smaller by the user — so they're pulled out before every other
 		// bucket below, the same way isParseError/skipReason already are.
-		const tooLargeIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && this.items[i].tooLarge);
-		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && this.items[i].isLinked);
+		const tooLargeIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].quarantined && this.items[i].tooLarge);
+		const linkedIndices      = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].quarantined && !this.items[i].tooLarge && this.items[i].isLinked);
 		// serverDownloadFailed rows need a download-then-upload round trip (see
 		// Phase 1b below), not just a plain sync download, so they're pulled out
 		// of importedIndices rather than sharing Phase 1 with it.
-		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
-		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].tooLarge && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
+		const serverFailedIndices = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].quarantined && !this.items[i].tooLarge && !this.items[i].isLinked && this.items[i].serverDownloadFailed);
+		const importedIndices    = indices.filter(i => !this.items[i].isParseError && !this.items[i].skipReason && !this.items[i].quarantined && !this.items[i].tooLarge && !this.items[i].isLinked && !this.items[i].serverDownloadFailed);
 
 		// Optional debug collection (observational only: never alters repair behaviour).
 		// Gated on the FULL selection (allSelectedIndices), not the narrowed
@@ -751,11 +810,13 @@ var ZoteroFixUnavailableDialog = {
 			}
 			for (const i of parseErrorIndices) itemHandles.get(i).skip('skipped_parse_error', 'file present but cannot be parsed (binary data)');
 			for (const i of linkedIndices)     itemHandles.get(i).skip('skipped_linked_file', 'linked file — cannot be auto-downloaded');
+			for (const i of quarantinedIndices) itemHandles.get(i).skip('skipped_failed', this.items[i].quarantineDetail || 'backend has permanently refused to process this attachment');
 			for (const i of tooLargeIndices)   itemHandles.get(i).skip('skipped_too_large', this.items[i].tooLargeDetail || 'file exceeds the size limit for automatic text extraction');
 		}
 
 		for (const i of parseErrorIndices)  { this.setRowStatus(i, 'not-found', 'Binary data — delete and replace'); markProcessed(i); }
 		for (const i of linkedIndices)      { this.setRowStatus(i, 'not-found', 'Linked file — fix path in Zotero'); markProcessed(i); }
+		for (const i of quarantinedIndices) { this.setRowStatus(i, 'not-found', 'Refused by server', this.items[i].quarantineDetail || 'The backend has permanently refused to process this attachment — remove the rag-failed tag in Zotero to retry.'); markProcessed(i); }
 		for (const i of tooLargeIndices)    { this.setRowStatus(i, 'not-found', 'File too large', this.items[i].tooLargeDetail || 'Exceeds the size limit for automatic text extraction'); markProcessed(i); }
 		for (const i of importedIndices)    this.setRowStatus(i, 'searching', 'Queued...');
 		for (const i of serverFailedIndices) this.setRowStatus(i, 'searching', 'Queued...');
@@ -1301,6 +1362,8 @@ var ZoteroFixUnavailableDialog = {
 		if (debugCb) debugCb.disabled = disabled;
 		const includeMissingCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-missing-cb'));
 		if (includeMissingCb) includeMissingCb.disabled = disabled;
+		const includeFailedCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-failed-cb'));
+		if (includeFailedCb) includeFailedCb.disabled = disabled;
 	},
 
 	/**

@@ -495,7 +495,7 @@ async def _execute_upload_impl(
     if proc_result.status in (
         "indexed_fresh", "copied_cross_library", "copied_same_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
-        "skipped_too_large",
+        "skipped_too_large", "skipped_too_costly", "skipped_failed",
     ):
         _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(
@@ -1025,7 +1025,8 @@ async def process_cached_upload_now(
 
     if result.status == "error":
         await asyncio.to_thread(
-            pending_upload_cache.record_failure, settings.data_path, library_id, attachment_key, result.message
+            pending_upload_cache.note_failure, settings, library_id, attachment_key,
+            meta.get("item_key"), result.message,
         )
     else:
         await asyncio.to_thread(pending_upload_cache.delete_entry, settings.data_path, library_id, attachment_key)

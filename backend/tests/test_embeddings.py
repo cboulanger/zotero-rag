@@ -708,11 +708,25 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
 
-    async def test_generic_500_exhausts_retries_then_raises(self):
+    async def test_generic_500_exhausts_retries_then_raises_endpoint_unavailable(self):
+        """A 5xx that never recovers is a systemic endpoint problem (e.g. a
+        provider's upstream gateway failing, not this request's content), so
+        it must be wrapped the same way APIConnectionError/APIStatusError
+        already are — not left as the raw SDK exception.
+
+        Regression: CronIndexer._drain_pending_uploads exempts
+        EmbeddingEndpointUnavailableError (and other systemic types) from
+        counting toward a pending-upload entry's quarantine threshold. A raw
+        OpenAIInternalServerError falls outside that exemption set, so a
+        perfectly good document could get permanently quarantined and tagged
+        rag-failed purely because the embedding provider was flaky — observed
+        in production with a RunPod/Cloudflare 502 recurring across several
+        cron cycles on an attachment that extracted identically every time.
+        """
         service = self._make_service()
         mock_response = MagicMock()
         mock_response.headers = {}
-        exc = OpenAIInternalServerError("Error code: 500", response=mock_response, body=None)
+        exc = OpenAIInternalServerError("Error code: 502 - Bad gateway", response=mock_response, body=None)
 
         with patch.object(service, "_get_client") as mock_client_fn, \
              patch("asyncio.sleep", new_callable=AsyncMock):
@@ -720,7 +734,7 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
             mock_client_fn.return_value = mock_client
             mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
 
-            with self.assertRaises(OpenAIInternalServerError):
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
                 await service._create_embeddings_with_backoff(["hello"])
 
 

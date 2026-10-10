@@ -719,6 +719,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute_upload_impl), \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             MockWebAPI.return_value.get_items_by_keys = AsyncMock(return_value=[])
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -964,6 +965,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -999,6 +1001,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -1042,6 +1045,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute_upload_impl), \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             MockWebAPI.return_value.get_items_by_keys = AsyncMock(return_value=[])
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -1073,6 +1077,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -1099,6 +1104,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -1120,7 +1126,7 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         (self.data_path / "system").mkdir(parents=True)
         self._settings_patch = patch(
             "backend.services.cron_indexer.get_settings",
-            return_value=MagicMock(data_path=self.data_path),
+            return_value=MagicMock(data_path=self.data_path, pending_upload_max_attempts=5),
         )
         self._settings_patch.start()
 
@@ -1380,9 +1386,11 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         # Only the first (oldest-enqueued) entry was ever attempted.
         mock_execute.assert_awaited_once()
         self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
-        # ATT_A's failure was recorded for retry next run...
+        # ATT_A's failure was recorded for retry next run, without counting toward
+        # quarantine (a quota outage says nothing about the file)...
         _, meta_a = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_A")
-        self.assertEqual(meta_a["attempts"], 1)
+        self.assertEqual(meta_a["attempts"], 0)
+        self.assertTrue(meta_a["last_error"])
         # ...but ATT_B was never even read — completely untouched, attempts still 0.
         _, meta_b = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_B")
         self.assertEqual(meta_b["attempts"], 0)

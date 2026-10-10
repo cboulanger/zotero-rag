@@ -2460,6 +2460,14 @@ class ZoteroRAGPlugin {
 	 *   smaller by the user. See _getTooLargeAttachments.
 	 * @property {string} [tooLargeDetail] - Human-readable reason (e.g. "329 MB, which exceeds
 	 *   the 200 MB limit...") for display/tooltip when tooLarge is set.
+	 * @property {boolean} [quarantined] - True when the backend has permanently refused to
+	 *   (re)process this attachment and tagged it rag-failed — too_costly (an OCR-requiring scan
+	 *   whose page count is out of proportion), too_large, or quarantined (repeated failures in
+	 *   the deferred-upload queue). Like tooLarge, nothing in this dialog can fix it automatically;
+	 *   unlike tooLarge, removing the rag-failed tag in Zotero (once the underlying cause is
+	 *   addressed) is what makes the backend retry it. See _getQuarantinedAttachments.
+	 * @property {string} [quarantineReason] - The backend's reason code: "too_costly" | "too_large" | "quarantined".
+	 * @property {string} [quarantineDetail] - Human-readable detail for quarantineReason.
 	 */
 
 	/**
@@ -3040,6 +3048,75 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Load the backend's live rag-failed records for a library (GET
+	 * /api/indexed-tags/failed) and resolve them to UnavailableAttachmentInfo
+	 * objects. Unlike the other _get*Attachments fetchers, there is no local
+	 * cache file: the backend is the sole source of truth for which
+	 * attachments it currently refuses to process, so this always asks live
+	 * rather than risking a stale local copy of a state the user may have
+	 * just cleared by removing the rag-failed tag.
+	 *
+	 * Never throws (same contract as getQueuedStatusMap): a network/HTTP/parse
+	 * failure yields an empty array rather than propagating, since this is an
+	 * opt-in display enhancement, not a required step. Silently drops records
+	 * whose Zotero item no longer exists locally.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s safe default).
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getQuarantinedAttachments(libraryID, indexSnapshotsEnabled = false) {
+		/** @type {Array<{attachment_key: string, item_key: string, reason: string, detail: string}>} */
+		let records = [];
+		try {
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+			const response = await fetch(
+				`${this.backendURL}/api/indexed-tags/failed?library_id=${encodeURIComponent(backendLibraryId)}`,
+				{ headers: this.getAuthHeaders() },
+			);
+			if (!response.ok) return [];
+			const data = /** @type {{items?: Array<any>}} */ (await response.json());
+			records = data.items || [];
+		} catch (e) {
+			this.log(`[ZoteroRAG] _getQuarantinedAttachments failed: ${e instanceof Error ? e.message : String(e)}`);
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		for (const record of records) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, record.attachment_key);
+			if (!attachment || attachment.deleted) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				quarantined: true,
+				quarantineReason: record.reason || '',
+				quarantineDetail: record.detail || '',
+			});
+		}
+		return result;
+	}
+
+	/**
 	 * Explain, in concrete terms, why the server's own download attempt for an
 	 * attachment failed — using only cheap, synchronous local Zotero state
 	 * (no network calls), so it's safe to compute for every row while
@@ -3172,14 +3249,18 @@ class ZoteroRAGPlugin {
 	/**
 	 * Return full detail records for all unavailable attachments in a library.
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDownloadFailed?: boolean}} [opts] - includeDownloadFailed: also include
-	 *   attachments the server merely couldn't download during indexing (see
-	 *   _getDownloadFailedAttachments) — off by default since these aren't actually broken (just
-	 *   not yet downloaded/uploaded), only sometimes worth fixing client-side. Driven by the Fix
-	 *   Unavailable dialog's "Include missing attachments" checkbox.
+	 * @param {{includeDownloadFailed?: boolean, includePermanentFailures?: boolean}} [opts] -
+	 *   includeDownloadFailed: also include attachments the server merely couldn't download
+	 *   during indexing (see _getDownloadFailedAttachments) — off by default since these aren't
+	 *   actually broken (just not yet downloaded/uploaded), only sometimes worth fixing
+	 *   client-side. Driven by the Fix Unavailable dialog's "Include missing attachments"
+	 *   checkbox. includePermanentFailures: also include attachments the backend has
+	 *   permanently refused and tagged rag-failed (see _getQuarantinedAttachments) — off by
+	 *   default since there is nothing to fix here either, only something to understand and
+	 *   possibly clear. Driven by the dialog's "Include permanent failures" checkbox.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false } = {}) {
+	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false, includePermanentFailures = false } = {}) {
 		const indexSnapshotsEnabled = await this.getIndexSnapshotsEnabled();
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
@@ -3262,6 +3343,17 @@ class ZoteroRAGPlugin {
 		if (includeDownloadFailed) {
 			const downloadFailedItems = await this._getDownloadFailedAttachments(libraryID, indexSnapshotsEnabled);
 			for (const item of downloadFailedItems) {
+				if (!missingKeys.has(item.attachmentItem.key)) {
+					missingKeys.add(item.attachmentItem.key);
+					result.push(item);
+				}
+			}
+		}
+		// Append backend-quarantined ("rag-failed") attachments, deduplicating by
+		// key. Opt-in only (see includePermanentFailures doc above).
+		if (includePermanentFailures) {
+			const quarantinedItems = await this._getQuarantinedAttachments(libraryID, indexSnapshotsEnabled);
+			for (const item of quarantinedItems) {
 				if (!missingKeys.has(item.attachmentItem.key)) {
 					missingKeys.add(item.attachmentItem.key);
 					result.push(item);
