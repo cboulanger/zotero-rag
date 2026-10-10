@@ -46,7 +46,7 @@ def _embedding_model_identity(model_name: str) -> str:
     requires the full HuggingFace repo id "intfloat/multilingual-e5-large-instruct"
     (it's what the worker was launched with, and what must be sent as the
     "model" field in every embeddings API call — see
-    bin/provision_runpod_endpoints.py's MODEL_NAME env var). Comparing
+    the provider's MODEL_NAME template env). Comparing
     basenames treats these as the same model without changing either
     preset's actual on-the-wire model_name.
     """
