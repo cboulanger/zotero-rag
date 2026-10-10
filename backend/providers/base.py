@@ -147,6 +147,14 @@ class Provider:
         """
         return None
 
+    def is_paused(self, api_key: str) -> bool:
+        """Whether this side's endpoint was paused on purpose (see ``suspend``).
+
+        Only providers with ``supports_suspend`` override it. Must not raise; an
+        unknown state counts as not paused.
+        """
+        return False
+
     def default_key_env(self) -> Optional[str]:
         """Env-var style name of the personal key for this side (e.g. ``OPENAI_API_KEY``)."""
         return None

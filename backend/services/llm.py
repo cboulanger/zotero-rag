@@ -391,6 +391,22 @@ class RemoteLLMService(LLMService):
             self._resolved_base_url = None
             self._openai_client = None
 
+    async def _ensure_not_paused(self) -> None:
+        """Fail fast, without calling the endpoint, when its owner paused it."""
+        provider = self._llm_provider()
+        if provider is None or not getattr(provider, "supports_suspend", False):
+            return
+        import asyncio
+
+        from backend.services.endpoint_cache import paused_cache
+
+        try:
+            key = self._credential()
+        except LLMConfigurationError:
+            return
+        if await asyncio.to_thread(paused_cache.is_paused, provider, "llm", key):
+            raise LLMEndpointUnavailableError(unavailable_message("llm", "The LLM endpoint is paused.", "paused"))
+
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
         if self._openai_client is not None or self._resolved_base_url or not self._derives_endpoint():
@@ -501,6 +517,7 @@ class RemoteLLMService(LLMService):
             temperature = self.llm_config.temperature
 
         try:
+            await self._ensure_not_paused()
             await self._ensure_endpoint()
             # The provider declares the wire protocol; core knows protocols, not vendors.
             if self._llm_api() == "anthropic":

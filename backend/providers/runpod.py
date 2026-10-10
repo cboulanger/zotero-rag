@@ -124,11 +124,11 @@ class RunPodProvider(Provider):
         descriptor.provisioning = ProvisioningDescriptor(
             credential=CredentialDescriptor(
                 env=env,
-                label="RunPod API key",
+                label="Provisioning API key",
                 help=(
-                    "Creating endpoints may need a key with broader rights than the one used for "
-                    "queries (an endpoint-restricted key cannot create or replace endpoints). "
-                    "Leave empty to use the stored key; a value entered here is used for this run only."
+                    "Kept in memory until Zotero closes, never saved. Creating, replacing, resuming or pausing "
+                    "endpoints needs a full-access RunPod API key; the stored key used for queries may be "
+                    "restricted to the endpoints, which cannot do this. Leave empty to use the stored key."
                 ),
                 pattern=KEY_PATTERN,
                 optional=True,
@@ -393,19 +393,38 @@ class RunPodProvider(Provider):
             self._request(api_key, "DELETE", f"/templates/{template['id']}")
             logger.info("Deleted template '%s' (%s)", self.resource_name, template["id"])
 
+    def is_paused(self, api_key: str) -> bool:
+        """True when the endpoint's ``workersMax`` is 0 (read from the management API only)."""
+        try:
+            endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        except Exception:
+            return False
+        return bool(endpoint) and endpoint.get("workersMax") == 0
+
     def health(self, creds: Credentials) -> Optional[Health]:
         """Readiness from RunPod's data-plane ``/health`` (worker and job counts).
+
+        A paused endpoint (``workersMax`` 0) is invisible to ``/health``, so the management
+        API is asked first; if that is not allowed for the key, the data plane decides.
 
         ``cold`` means scaled to zero or a worker initializing (it wakes on the
         next request); ``throttled`` means RunPod has no capacity for the GPU
         type right now. Never raises: this is a display-only signal.
         """
-        if not creds.base_url or not creds.api_key:
+        if not creds.api_key:
             return Health(status="unreachable", detail="not configured")
+        if not creds.base_url:
+            return Health(status="unreachable", detail="not provisioned")
         match = _ENDPOINT_ID_RE.search(creds.base_url)
         if not match:
             return Health(status="unreachable", detail=f"Not a RunPod endpoint URL: {creds.base_url!r}")
         endpoint_id = match.group(1)
+        try:
+            managed = self._request(creds.api_key, "GET", f"/endpoints/{endpoint_id}")
+            if managed and managed.get("workersMax") == 0:
+                return Health(status="paused", detail="paused; resume it to use it again")
+        except Exception:
+            pass  # a restricted key may not read the management API: fall back to the data plane
         try:
             response = self._http().get(
                 f"{DATA_PLANE_URL}/{endpoint_id}/health",
@@ -426,7 +445,16 @@ class RunPodProvider(Provider):
             jobs = payload.get("jobs") or {}
             ready = int(workers.get("ready") or 0)
             running = int(workers.get("running") or 0)
-            if ready > 0 or running > 0:
+            if ready > 0:
+                return Health(status="ready", detail=f"{ready} ready, {running} running workers")
+            if running > 0:
+                # A worker counts as "running" from the moment its container starts, while the
+                # model is still loading: queued jobs that no worker has picked up yet mean it
+                # is not serving. One that is busy with a job (or has an empty queue) is.
+                in_queue = int(jobs.get("inQueue") or 0)
+                in_progress = int(jobs.get("inProgress") or 0)
+                if in_queue > 0 and in_progress == 0:
+                    return Health(status="cold", detail=f"worker starting, {in_queue} job(s) waiting for it")
                 return Health(status="ready", detail=f"{ready} ready, {running} running workers")
             throttled = int(workers.get("throttled") or 0)
             if throttled > 0:

@@ -494,3 +494,104 @@ class UserScopeProvisionTest(unittest.TestCase):
         with self._as(7):
             r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z"})
         self.assertEqual(r.json()["llm"]["status"], "unreachable")
+
+
+class SuspendApiTest(UserScopeProvisionTest):
+    """POST /api/config/suspend: same gating, slots and credentials as provisioning (inherits its fixtures)."""
+
+    def setUp(self):
+        super().setUp()
+        self.suspended = []
+
+        def fake_suspend(this, ctx, progress):
+            self.suspended.append((this.side, ctx.credential))
+            progress("paused")
+
+        patcher = patch.object(RunPodProvider, "suspend", fake_suspend)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _suspend(self, user_id, key="rpa_USER", body=None, admin=False):
+        headers = {"X-Zotero-API-Key": "Z"}
+        if key:
+            headers[self.KEY_HEADER] = key
+        with self._as(user_id), patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=admin)):
+            return self.client.post("/api/config/suspend", headers=headers, json=body or {})
+
+    # The inherited provisioning tests are re-run against the same fixtures; only the new ones matter here.
+    def test_any_signed_in_user_can_pause_their_own_endpoints(self):
+        r = self._suspend(7)
+        self.assertEqual(r.status_code, 202, r.text)
+        status = self._wait(7)
+        self.assertEqual(status["status"], "succeeded")
+        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
+        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused"])
+
+    def test_sides_pauses_only_the_requested_side(self):
+        self._suspend(7, body={"sides": ["llm"]})
+        self._wait(7)
+        self.assertEqual(self.suspended, [("llm", "rpa_USER")])
+
+    def test_pausing_does_not_provision(self):
+        self._suspend(7)
+        self._wait(7)
+        self.assertEqual(self.calls, [])
+
+    def test_busy_slot_is_a_409_and_other_users_are_unaffected(self):
+        provisioning.mark_running(["embedding", "llm"], provisioning.user_slot(7))
+        self.assertEqual(self._suspend(7).status_code, 409)
+        self.assertEqual(self._suspend(8).status_code, 202)
+
+    def test_a_side_that_cannot_be_paused_is_a_400(self):
+        with patch.object(RunPodProvider, "supports_suspend", False):
+            r = self._suspend(7)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("be paused", r.json()["detail"])
+
+    def test_no_key_is_a_400(self):
+        self.assertEqual(self._suspend(7, key=None).status_code, 400)
+
+    def test_resume_is_provisioning_on_the_same_slot(self):
+        self._suspend(7)
+        self._wait(7)
+        r = self._post(7)
+        self.assertEqual(r.status_code, 202, r.text)
+        self.assertEqual(self._wait(7)["status"], "succeeded")
+        self.assertEqual(self.calls[0][0], "embedding")
+
+    def test_managed_presets_need_an_admin_to_pause(self):
+        name = write_managed_runpod_preset(get_settings().data_path)
+        get_settings().model_preset = name
+        update_remote_config({"RUNPOD_API_KEY": "rpa_STORED"}, data_path=get_settings().data_path)
+        self.assertEqual(self._suspend(21, key=None, admin=False).status_code, 403)
+        self.assertEqual(self._suspend(22, key=None, admin=True).status_code, 202)
+
+
+class IndependentSidesTest(unittest.TestCase):
+    """One side's job must not block, or be overwritten by, the other side's."""
+
+    def setUp(self):
+        from backend.services import provisioning
+        self.p = provisioning
+        self.p.reset_job_state()
+
+    def test_other_side_can_start_while_one_runs(self):
+        self.p.mark_running(["embedding"], "user:1")
+        self.assertTrue(self.p.is_running("user:1", ["embedding"]))
+        self.assertFalse(self.p.is_running("user:1", ["llm"]))
+        self.p.mark_running(["llm"], "user:1")
+        state = self.p.get_job_state("user:1")
+        self.assertEqual(state["status"], "running")
+        self.assertEqual(set(state["sides"]), {"embedding", "llm"})
+
+    def test_slot_stays_running_until_the_last_side_finishes(self):
+        self.p.mark_running(["embedding"], "user:1")
+        self.p.mark_running(["llm"], "user:1")
+        self.p._set_side("user:1", "embedding", "succeeded")
+        self.p._finish("user:1", "succeeded", None, ["embedding"])
+        self.assertEqual(self.p.get_job_state("user:1")["status"], "running")
+        self.p._set_side("user:1", "llm", "failed", "boom")
+        self.p._finish("user:1", "failed", "boom", ["llm"])
+        state = self.p.get_job_state("user:1")
+        self.assertEqual((state["status"], state["message"]), ("failed", "llm: boom"))
+        self.assertEqual(state["sides"]["embedding"]["status"], "succeeded")

@@ -13,7 +13,7 @@ import re
 
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
-from backend.dependencies import get_zotero_identity, require_authorized_group_admin
+from backend.dependencies import get_client_api_keys, get_zotero_identity, require_authorized_group_admin
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.effective_preset import is_compatible
@@ -451,8 +451,9 @@ async def update_config(
         HTTPException: 400 if `preset_name` is missing, unknown, not in the
             current `compatible_presets` list, or hidden on this host's
             platform (a preset whose own `platform` field names a different
-            OS than `current_platform()` — see backend.config.presets), or
-            the target preset lacks credentials (key names only in the message).
+            OS than `current_platform()` — see backend.config.presets).
+            A preset without credentials can be selected; it is not ready
+            until they are set.
     """
     settings = get_settings()
 
@@ -476,15 +477,8 @@ async def update_config(
                    f"local-model preset, set MODEL_PRESET and restart the backend instead.",
         )
 
-    target = get_preset(update.preset_name, settings.data_path)
-    missing = await asyncio.to_thread(_preset_credentials, target, settings, request)
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Preset '{update.preset_name}' cannot be activated: missing credentials "
-                   f"for {sorted(missing)}.",
-        )
-
+    # Credentials are deliberately not required here: the preset's own sections ask for
+    # the keys and endpoints, and its health shows "not ready" until they are set.
     set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
@@ -539,9 +533,7 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
     base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
     if not base_url and api_key and provider.derives_endpoint_url:
-        base_url = endpoint_cache.resolve(provider, side, api_key)
-        if base_url is None:
-            return EndpointHealth(status="unreachable", detail="not provisioned")
+        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
     health = provider.health(Credentials(api_key=api_key, base_url=base_url))
     if health is None:
         return None
@@ -563,6 +555,56 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
         embedding=_check_side(preset, "embedding", request),
         llm=_check_side(preset, "llm", request),
     )
+
+
+_warmup_tasks: set = set()
+#: (side, caller) -> time of the last warm-up request, so reopening the dialog does not repeat it.
+_last_warmup: Dict[Tuple[str, str], float] = {}
+WARMUP_MIN_INTERVAL_SECONDS = 120.0
+
+
+async def _send_warmup(side: str, client_keys: Dict[str, str]) -> None:
+    """One minimal real request, through the same service a query uses; the outcome is ignored."""
+    from backend.dependencies import make_embedding_service, make_llm_service
+
+    try:
+        if side == "embedding":
+            await make_embedding_service(client_keys).embed_text("ping")
+        else:
+            await make_llm_service(client_keys).generate("hi", max_tokens=1)
+    except Exception as exc:  # the request only has to reach the endpoint to wake it
+        logger.info("Warm-up of the %s endpoint ended with %s: %s", side, type(exc).__name__, exc)
+
+
+@router.post("/config/warmup", status_code=202)
+async def warm_up_endpoints(request: Request, client_keys: Dict[str, str] = Depends(get_client_api_keys)) -> dict:
+    """Wake the caller's cold (scaled-to-zero) endpoints in the background.
+
+    Meant for the moment a user opens the question dialog: the first query then
+    finds a running endpoint. Only sides reported ``cold`` are touched (a paused
+    or unprovisioned endpoint is not woken by a request, and a ready one needs
+    nothing), each at most once per ``WARMUP_MIN_INTERVAL_SECONDS`` and caller.
+    Returns the sides being warmed.
+    """
+    import time
+
+    preset = get_settings().get_hardware_preset()
+    identity = get_zotero_identity(request)
+    caller = str(identity.user_id) if identity else "local"
+    warming: List[str] = []
+    for side in ("embedding", "llm"):
+        health = await asyncio.to_thread(_check_side, preset, side, request)
+        if health is None or health.status != "cold":
+            continue
+        now = time.monotonic()
+        if now - _last_warmup.get((side, caller), -WARMUP_MIN_INTERVAL_SECONDS) < WARMUP_MIN_INTERVAL_SECONDS:
+            continue
+        _last_warmup[(side, caller)] = now
+        task = asyncio.create_task(_send_warmup(side, dict(client_keys)))
+        _warmup_tasks.add(task)  # keep a strong reference until done
+        task.add_done_callback(_warmup_tasks.discard)
+        warming.append(side)
+    return {"warming": warming}
 
 
 async def _caller_may_operate(request: Request, provider: Provider) -> bool:
@@ -679,16 +721,81 @@ async def _authorize_provisioning(request: Request, providers: Dict[str, Provide
     return identity
 
 
+async def _start_job(request: Request, body: ProvisionRequest, capability: str) -> dict:
+    """Start a background job for ``capability`` ("provision" or "suspend") on the requested sides.
+
+    Shared by provisioning and pausing: the same scope gating (any signed-in user for ``user``
+    sides on their own key and slot, an admin for ``managed`` ones), credential resolution and
+    job slots. Returns the caller's job state.
+    """
+    flag = "supports_provisioning" if capability == "provision" else "supports_suspend"
+    verb = "provisioned" if capability == "provision" else "paused"
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if body.sides is None:
+        sides = [s for s in ("embedding", "llm") if getattr(providers[s], flag)]
+    else:
+        unknown = [s for s in body.sides if s not in providers]
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown side(s): {', '.join(unknown)}")
+        sides = [s for s in ("embedding", "llm") if s in body.sides]
+        unsupported = [s for s in sides if not getattr(providers[s], flag)]
+        if unsupported:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The {', '.join(unsupported)} side of preset '{preset.name}' cannot be {verb}.",
+            )
+    if not sides:
+        raise HTTPException(status_code=400, detail=f"Preset '{preset.name}' has no side that can be {verb}.")
+
+    identity = await _authorize_provisioning(request, providers, sides)
+    slot = _slot_for(providers, sides, identity)
+
+    jobs = []
+    for side in sides:
+        credential, env = _side_credential(preset, side, body.keys, request)
+        if not credential:
+            raise HTTPException(
+                status_code=400,
+                detail=f"No API key is available for the {side} side"
+                       + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
+            )
+        ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
+        jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
+
+    if provisioning.is_running(slot, sides):
+        raise HTTPException(status_code=409, detail="A job for this endpoint is already running.")
+    provisioning.mark_running(sides, slot)
+
+    action = None
+    if capability == "suspend":
+        def action(job, progress):  # noqa: F811 - pausing returns nothing to store
+            job.provider.suspend(job.ctx, progress)
+            return {}
+
+    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path, slot=slot, action=action))
+    _provision_tasks.add(task)  # keep a strong reference until done
+    task.add_done_callback(_provision_tasks.discard)
+    return provisioning.get_job_state(slot)
+
+
 @router.post("/config/provision", status_code=202)
 async def start_provisioning(
     request: Request,
     body: Optional[ProvisionRequest] = Body(default=None),
 ):
     """
-    Provision (create or wake) the active preset's remote endpoints as a
+    Provision (create, wake or resume) the active preset's remote endpoints as a
     background job. Each requested side's provider does the work; whatever
     URL it reports is applied via the shared remote-config store as soon as
     that side succeeds. Poll GET /api/config/provision/status.
+
+    Sides are independent: one side's job does not block the other's.
 
     Who may run it follows the side's credential scope: any signed-in user for
     ``user`` sides (it runs on the caller's own key, in the caller's own job
@@ -706,52 +813,25 @@ async def start_provisioning(
             401 without a signed-in caller, 403 for a non-admin on a managed
             side; 409 if this caller's job is already running.
     """
-    settings = get_settings()
-    preset = settings.get_hardware_preset()
-    try:
-        providers = get_providers(preset)
-    except ProviderConfigError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    body = body or ProvisionRequest()
+    return await _start_job(request, body or ProvisionRequest(), "provision")
 
-    if body.sides is None:
-        sides = [s for s in ("embedding", "llm") if providers[s].supports_provisioning]
-    else:
-        unknown = [s for s in body.sides if s not in providers]
-        if unknown:
-            raise HTTPException(status_code=400, detail=f"Unknown side(s): {', '.join(unknown)}")
-        sides = [s for s in ("embedding", "llm") if s in body.sides]
-        unsupported = [s for s in sides if not providers[s].supports_provisioning]
-        if unsupported:
-            raise HTTPException(
-                status_code=400,
-                detail=f"The {', '.join(unsupported)} side of preset '{preset.name}' cannot be provisioned.",
-            )
-    if not sides:
-        raise HTTPException(status_code=400, detail=f"Preset '{preset.name}' has no side that can be provisioned.")
 
-    identity = await _authorize_provisioning(request, providers, sides)
-    slot = _slot_for(providers, sides, identity)
+@router.post("/config/suspend", status_code=202)
+async def start_suspend(
+    request: Request,
+    body: Optional[ProvisionRequest] = Body(default=None),
+):
+    """
+    Pause the active preset's remote endpoints (stops their billing and their wake-ups; the
+    URLs are kept) as a background job on the same slots and with the same gating as
+    provisioning. ``sides`` pauses only those sides. Resuming is POST /api/config/provision.
+    Poll GET /api/config/provision/status.
 
-    jobs = []
-    for side in sides:
-        credential, env = _side_credential(preset, side, body.keys, request)
-        if not credential:
-            raise HTTPException(
-                status_code=400,
-                detail=f"No API key is available for the {side} side"
-                       + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
-            )
-        ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
-        jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
-
-    if provisioning.is_running(slot):
-        raise HTTPException(status_code=409, detail="A provisioning job is already running.")
-    provisioning.mark_running(sides, slot)
-    task = asyncio.create_task(provisioning.run_job(jobs, data_path=settings.data_path, slot=slot))
-    _provision_tasks.add(task)  # keep a strong reference until done
-    task.add_done_callback(_provision_tasks.discard)
-    return provisioning.get_job_state(slot)
+    Raises:
+        HTTPException: 400 if no requested side supports pausing or has a key; 401/403 as for
+            provisioning; 409 if this caller's job is already running.
+    """
+    return await _start_job(request, body or ProvisionRequest(), "suspend")
 
 
 _provision_tasks: set = set()

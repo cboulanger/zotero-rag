@@ -172,3 +172,11 @@ register_fixture(ContractFixture(
     valid_options=[{}, {"gpu": "NVIDIA RTX A4000", "workers_max": 2, "idle_timeout": 30, "data_centers": ["EU-RO-1"]}],
     invalid_options=[{"workers_max": 0}, {"gpus": "x"}],
 ))
+
+register_fixture(ContractFixture(
+    provider_id="huggingface",
+    model_kwargs={"api_key_env": "HF_TOKEN"},
+    valid_options=[{}, {"namespace": "acme", "region": "us-east-1", "engine": "tgi", "instance": "nvidia-l4",
+                        "scale_to_zero_timeout_min": 60, "max_replica": 2}],
+    invalid_options=[{"scale_to_zero_timeout_min": 5}, {"engine": "nope"}, {"max_replica": 0}, {"bogus": 1}],
+))

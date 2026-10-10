@@ -164,7 +164,7 @@ test('a disabled provision button cannot be clicked', () => {
 	const doc = { createElementNS };
 	const calls = [];
 	const refs = S.ensureSections(doc, fakeNode(), { onProvision: (...a) => calls.push(a), onRetry: () => {} });
-	const running = { status: 'running', progress: [], sides: {} };
+	const running = { status: 'running', progress: [], sides: { embedding: { status: 'running', message: null } } };
 	S.update(refs, {
 		embedding: S.buildModel('embedding', remote(), { status: 'unreachable', detail: '' }, running),
 		llm: S.buildModel('llm', local, undefined, running),
@@ -264,12 +264,13 @@ test('opening the pane while a job is running resumes polling and shows its prog
 	assert.strictEqual(refs.embedding.progress.hidden, true);
 });
 
-test('buttons are disabled with a reason while the callers slot is busy', async () => {
-	const running = { status: 'running', progress: [], sides: {} };
+test('a side\'s buttons are disabled with a reason only while that side runs a job', async () => {
+	const running = { status: 'running', progress: [], sides: { llm: { status: 'running', message: null } } };
 	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [running, { status: 'succeeded', progress: [], sides: {} }] });
 	await controller.refresh();
 	assert.strictEqual(refs.llm.provision.disabled, true);
 	assert.match(refs.llm.provision.title, /already running/);
+	assert.strictEqual(refs.embedding.provision.disabled, false);
 });
 
 test('401 / 403 / 409 from the backend are shown inline in the section', async () => {
@@ -340,4 +341,129 @@ test('wizard intro names the starting preset, counts only the keys it needs and 
 	assert.match(text, /Model preset/);
 	assert.match(S.keysIntro({ preset_name: 'main' }, []), /needs no key/);
 	assert.match(S.keysIntro({ preset_name: 'main' }, [{ key_name: 'A' }, { key_name: 'B' }]), /these keys/);
+});
+
+// --- Pause / Resume --------------------------------------------------------------
+
+test('Pause is offered for a ready or cold side the caller can operate, Resume for a paused one', () => {
+	const S = load();
+	const cases = [
+		// [status, operable, supportsSuspend, pauseVisible, provisionLabel, provisionVisible]
+		['ready', true, true, true, 'Provision endpoint', false],
+		['cold', true, true, true, 'Provision endpoint', false],
+		['paused', true, true, false, 'Resume', true],
+		['unreachable', true, true, false, 'Provision endpoint', true],
+		['ready', false, true, false, 'Provision endpoint', false],   // not operable by this caller
+		['ready', true, false, false, 'Provision endpoint', false],   // provider cannot pause
+		['throttled', true, true, false, 'Provision endpoint', true],
+	];
+	for (const [status, operable, canSuspend, pauseVisible, label, provisionVisible] of cases) {
+		const m = S.buildModel('llm', remote({ operable_by_caller: operable, supports_suspend: canSuspend }), { status, detail: '' }, idle);
+		assert.strictEqual(m.pause.visible, pauseVisible, JSON.stringify([status, operable, canSuspend]));
+		assert.strictEqual(m.provision.visible, provisionVisible, JSON.stringify([status, operable, canSuspend]));
+		assert.strictEqual(m.provision.label, label);
+	}
+});
+
+test('a paused side shows a neutral (non-error) status row', () => {
+	const S = load();
+	const m = S.buildModel('llm', remote(), { status: 'paused', detail: 'paused; resume it to use it again' }, idle);
+	assert.strictEqual(m.health.color, 'orange');
+	assert.match(m.health.text, /paused/);
+});
+
+test('Pause posts only that side to the suspend route, and Resume is the provision route', async () => {
+	const { backend, controller } = setup({ providers: bothRemote, health: { embedding: { status: 'ready', detail: '' }, llm: { status: 'paused', detail: '' } }, jobs: [idle] });
+	await controller.refresh();
+	await controller.pause('embedding');
+	await controller.provision('llm', '');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(backend.posts)), [
+		['/api/config/suspend', { sides: ['embedding'] }],
+		['/api/config/provision', { sides: ['llm'] }],
+	]);
+});
+
+test('pausing shows its failures inline too', async () => {
+	const { refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle], postReply: { ok: false, status: 403, data: { detail: 'not an admin' } } });
+	await controller.refresh();
+	await controller.pause('llm');
+	assert.strictEqual(refs.llm.status.textContent, 'Pausing failed: not an admin');
+});
+
+test('the Pause button of a section calls the onPause handler and is disabled while a job runs', () => {
+	const S = load();
+	const calls = [];
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), { onProvision() {}, onRetry() {}, onPause: (side) => calls.push(side) });
+	const readyEverywhere = { status: 'ready', detail: '' };
+	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, idle), llm: S.buildModel('llm', local, undefined, idle) });
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, ['embedding']);
+	S.update(refs, { embedding: S.buildModel('embedding', remote(), readyEverywhere, { status: 'running', progress: [], sides: { embedding: { status: 'running', message: null } } }), llm: S.buildModel('llm', local, undefined, idle) });
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, ['embedding']);
+});
+
+test('the pane keeps polling while an endpoint is cold and stops once it is ready', async () => {
+	const cold = { embedding: { status: 'cold', detail: 'starting' }, llm: { status: 'ready', detail: '' } };
+	const ready = { embedding: { status: 'ready', detail: '' }, llm: { status: 'ready', detail: '' } };
+	const seq = [cold, cold, ready];
+	let sleeps = 0;
+	const { refs, controller } = setup(
+		{ providers: bothRemote, health: () => seq.length > 1 ? seq.shift() : seq[0], jobs: [idle] },
+		{ sleep: async () => { sleeps += 1; } },
+	);
+	await controller.poll();
+	assert.strictEqual(sleeps, 2);
+	assert.match(refs.embedding.health.textContent, /ready/);
+});
+
+test('polling a cold endpoint is bounded', async () => {
+	const cold = { embedding: { status: 'cold', detail: '' }, llm: { status: 'ready', detail: '' } };
+	let sleeps = 0;
+	const { controller } = setup({ providers: bothRemote, health: cold, jobs: [idle] }, { sleep: async () => { sleeps += 1; } });
+	await controller.poll();
+	assert.strictEqual(sleeps, 120);
+});
+
+test('Pause sends the one-time key too, so a call-only stored key can still pause', async () => {
+	const S = load();
+	const calls = [];
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), { onProvision() {}, onRetry() {}, onPause: (side, key) => calls.push([side, key]) });
+	refs.embedding.credInput.value = ' k_secret ';
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, [['embedding', 'k_secret']]);
+	assert.strictEqual(refs.embedding.credInput.value, '');
+});
+
+test('the credential field shows while Pause is on offer and hides when no action is', () => {
+	const S = load();
+	const ready = S.buildModel('embedding', remote(), { status: 'ready', detail: '' }, idle);
+	assert.strictEqual(ready.pause.visible, true);
+	assert.strictEqual(ready.credential.visible, true);
+	const unknown = S.buildModel('embedding', remote(), undefined, idle);
+	assert.strictEqual(unknown.credential.visible, false);
+});
+
+test('a management token typed once is remembered in memory and reused without re-entry', async () => {
+	const mem = {};
+	const sessionKeys = { get: (e) => mem[e] || '', set: (e, v) => { mem[e] = v; }, forget: (e) => { delete mem[e]; } };
+	const { backend, refs, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle, idle, idle, idle] }, { sessionKeys });
+	await controller.refresh();
+	await controller.provision('llm', 'k_secret');
+	assert.strictEqual(mem.SOME_API_KEY, 'k_secret');
+	await controller.pause('llm', '');
+	await controller.provision('embedding', '');
+	const keys = backend.posts.map(([, b]) => b.keys && b.keys.SOME_API_KEY);
+	assert.deepStrictEqual(keys, ['k_secret', 'k_secret', 'k_secret']);
+	assert.match(refs.llm.credInput.placeholder, /Entered earlier/);
+});
+
+test('a token typed now replaces the remembered one, and a refused one is forgotten', async () => {
+	const mem = { SOME_API_KEY: 'k_old' };
+	const sessionKeys = { get: (e) => mem[e] || '', set: (e, v) => { mem[e] = v; }, forget: (e) => { delete mem[e]; } };
+	const { backend, controller } = setup({ providers: bothRemote, health: sick, jobs: [idle, idle], postReply: { ok: false, status: 403, data: { detail: 'no' } } }, { sessionKeys });
+	await controller.refresh();
+	await controller.provision('llm', 'k_new');
+	assert.strictEqual(backend.posts[0][1].keys.SOME_API_KEY, 'k_new');
+	assert.strictEqual(mem.SOME_API_KEY, undefined);
 });

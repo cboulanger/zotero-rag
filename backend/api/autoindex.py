@@ -33,6 +33,7 @@ from backend.services.secret_store import get_key_store
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
+from backend.providers import get_provider_or_none
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.registration_service import RegistrationService
@@ -85,7 +86,9 @@ async def add_key(request: KeyRequest) -> dict:
     if request.embedding_api_key:
         settings = get_settings()
         preset = settings.get_hardware_preset()
-        emb_validation = await validate_embedding_key(request.embedding_api_key, preset.embedding)
+        emb_validation = await validate_embedding_key(
+            request.embedding_api_key, preset.embedding, get_provider_or_none(preset, "embedding")
+        )
         if emb_validation.status == "invalid":
             response["embedding_key_status"] = "invalid"
             response["embedding_key_error"] = emb_validation.reason

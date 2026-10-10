@@ -30,7 +30,7 @@ Most document-chat tools require you to manually upload PDFs to a cloud service.
 - **Attachment health tooling** — the built-in Fix Unavailable Attachments tool lists all items whose local file is missing (e.g. due to an incomplete sync) and attempts to recover them automatically through multiple strategies, keeping your index complete. See [Fix Unavailable Attachments](docs/fix-unavailable-attachments.md).
 - **Automatic (scheduled) indexing, administered from the plugin** — enable a single toggle in Preferences to have the server keep your libraries indexed on a recurring schedule, with no need to keep Zotero open or index manually. Group admins can additionally pause, resume, trigger, or monitor indexing runs for the whole server entirely from the plugin UI — no shell or server access required. Server operators can alternatively drive the same indexer headlessly via script or cron. See [Automatic Indexing Setup](docs/auto-indexing-setup.md) (or [Cron / Headless Indexing](docs/cron-indexing.md) for the server-side script).
 - **Indexed-status tags** — optionally mark indexed attachments with a `✅ rag-indexed` tag that Zotero shows as an icon in the item list, kept current in real time and reconcilable on demand from Preferences. See [Indexed-status tags](docs/indexed-status-tags.md).
-- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a preset in your `.env` file. Swap models or switch between local and remote inference without changing any code. See [Presets](docs/presets.md).
+- **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a JSON preset (the server default comes from `MODEL_PRESET` or an admin's choice in the plugin, and each user can pick a compatible one). Every remote side names a provider, so you can mix local and hosted models, or provision your own RunPod / Hugging Face endpoints from the plugin, without changing any code. See [Presets](docs/presets.md).
 
 ## Why THIS Zotero RAG?
 
@@ -56,6 +56,17 @@ shell access needed) and a **fully swappable local-or-remote RAG
 pipeline**. This project is built around exactly that combination: one
 deployment, run once by whoever administers it, serving and configurable
 by an entire research group from inside Zotero itself.
+
+**Flexible hardware and models.** Presets cover everything from a laptop running
+small local models to fully hosted setups, and each side of the pipeline
+(embeddings, answering model) picks its own provider, so you can mix them: any
+OpenAI-compatible API, OpenAI, Anthropic, KISSKI or MPCDF for closed or
+institutionally hosted models, or open-weight models on endpoints that the
+plugin provisions for you on **Hugging Face Inference Endpoints** or
+**RunPod** (create, pause and resume them from Preferences, with live
+readiness and quota meters). Each user can use their own account and keys, or
+an administrator can provide shared ones. See [Presets](docs/presets.md) and
+[Providers](docs/providers.md).
 
 ## Quick Start
 
@@ -141,7 +152,7 @@ The first time the plugin connects to a backend it isn't already configured for,
 
 - **Server URL** — the full URL of the remote server (e.g. `https://rag.example.com`)
 - **Zotero API Key** — your own personal key from <https://www.zotero.org/settings/keys>- Do not reuse an existing key, generate a new key, which **must** be read-only and should only cover the libraries that you want to query. A local server (`localhost`) needs none of this and skips straight past it; a remote server uses this key to identify you and check that you're authorized to use that instance (e.g. membership in a designated Zotero group). The Preferences pane shows a live status (username + accessible library count) once a valid key is entered.
-- **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI), enter the corresponding API key here so the plugin can pass it to the server
+- **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI, RunPod, Hugging Face), enter your own key here so the plugin can pass it to the server with your requests. Keys of self-provisioned endpoints can also be managed from the **Models** section (provision, pause, resume), where a separate management token is kept in memory only
 
 See the [Plugin Settings Reference](docs/plugin-settings.md) for every other setting available in this pane (automatic indexing, retrieval tuning, library visibility, and more) and in the query dialog's advanced options.
 

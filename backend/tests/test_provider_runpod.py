@@ -334,10 +334,16 @@ class TestHealth(unittest.TestCase):
         return provider(http=http).health(Credentials(api_key="k", base_url=self.URL)), http
 
     def test_ready_with_ready_or_running_workers(self):
-        for workers in ({"ready": 1}, {"running": 2}):
-            h, http = self.check(FakeResponse(200, {"workers": workers, "jobs": {}}))
-            self.assertEqual(h.status, "ready")
-        self.assertEqual(http.calls[0][1], "https://api.runpod.ai/v2/abc123/health")
+        for workers, jobs in (({"ready": 1}, {}), ({"running": 2}, {}), ({"running": 1}, {"inProgress": 1, "inQueue": 2})):
+            h, http = self.check(FakeResponse(200, {"workers": workers, "jobs": jobs}))
+            self.assertEqual(h.status, "ready", (workers, jobs))
+        self.assertEqual(http.calls[-1][1], "https://api.runpod.ai/v2/abc123/health")  # after the management check
+
+    def test_a_running_worker_that_has_not_picked_up_the_queued_jobs_is_still_starting(self):
+        """Seen live: the worker container is 'running' while the model loads and jobs wait in the queue."""
+        h = self.check(FakeResponse(200, {"workers": {"running": 1, "ready": 0, "idle": 0}, "jobs": {"inQueue": 2, "inProgress": 0}}))[0]
+        self.assertEqual(h.status, "cold")
+        self.assertIn("2 job(s) waiting", h.detail)
 
     def test_cold_when_scaled_to_zero_or_initializing(self):
         self.assertEqual(self.check(FakeResponse(200, {"workers": {}, "jobs": {}}))[0].status, "cold")
@@ -363,7 +369,8 @@ class TestHealth(unittest.TestCase):
     def test_malformed_or_missing_base_url_is_unreachable(self):
         p = provider(http=FakeHTTP())
         self.assertIn("Not a RunPod endpoint URL", p.health(Credentials(api_key="k", base_url="https://x.example")).detail)
-        self.assertEqual(p.health(Credentials(api_key="k")).detail, "not configured")
+        self.assertEqual(p.health(Credentials(api_key="k")).detail, "not provisioned")  # a key but no endpoint
+        self.assertEqual(p.health(Credentials()).detail, "not configured")
 
 
 class TestDefaultsAndErrors(unittest.TestCase):
@@ -404,3 +411,30 @@ def _user_preset():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPaused(unittest.TestCase):
+    BASE = "https://api.runpod.ai/v2/ep1/openai/v1"
+
+    def _http(self, workers_max):
+        http = FakeHTTP()
+        http.add("GET", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": workers_max}))
+        http.add("GET", r"/endpoints$", FakeResponse(200, [{"id": "ep1", "name": "zotero-rag-llm", "workersMax": workers_max}]))
+        http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"idle": 0, "ready": 1, "running": 0}, "jobs": {}}))
+        return http
+
+    def test_health_reports_paused_from_the_management_api_even_if_the_data_plane_looks_ready(self):
+        h = provider("llm", http=self._http(0)).health(Credentials(api_key="k", base_url=self.BASE))
+        self.assertEqual(h.status, "paused")
+        self.assertEqual(provider("llm", http=self._http(1)).health(Credentials(api_key="k", base_url=self.BASE)).status, "ready")
+
+    def test_a_key_that_cannot_read_the_management_api_falls_back_to_the_data_plane(self):
+        http = FakeHTTP()
+        http.add("GET", r"/endpoints/ep1$", FakeResponse(403, {"error": "forbidden"}))
+        http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"ready": 1}, "jobs": {}}))
+        self.assertEqual(provider("llm", http=http).health(Credentials(api_key="k", base_url=self.BASE)).status, "ready")
+
+    def test_is_paused_follows_workers_max(self):
+        self.assertTrue(provider("llm", http=self._http(0)).is_paused("k"))
+        self.assertFalse(provider("llm", http=self._http(1)).is_paused("k"))
+        self.assertFalse(provider("llm", http=FakeHTTP()).is_paused("k"))  # unreachable: not paused

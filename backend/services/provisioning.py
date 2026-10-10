@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from backend.providers import Provider, ProvisionContext, ProvisionError, Side
-from backend.services.endpoint_cache import endpoint_cache
+from backend.services.endpoint_cache import endpoint_cache, paused_cache
 from backend.services.admin_settings_store import update_remote_config
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ def user_slot(user_id: Optional[int]) -> str:
 
 
 _lock = threading.Lock()
+_ACTIVE = ("pending", "running")
 _job_states: dict[str, dict] = {}
 
 
@@ -76,24 +77,49 @@ def reset_job_state() -> None:
         _job_states.clear()
 
 
-def is_running(slot: str = GLOBAL_SLOT) -> bool:
+def is_running(slot: str = GLOBAL_SLOT, sides: Optional[list] = None) -> bool:
+    """Whether a job is active in ``slot``; with ``sides``, whether one of those sides is."""
     with _lock:
-        return _state(slot)["status"] == "running"
+        state = _state(slot)
+        if sides is None:
+            return state["status"] == "running"
+        return any(state["sides"].get(side, {}).get("status") in _ACTIVE for side in sides)
 
 
 def mark_running(sides: Optional[list] = None, slot: str = GLOBAL_SLOT) -> None:
-    """Enter the running state; the caller must have checked ``is_running(slot)``."""
+    """Enter the running state for ``sides``; the caller must have checked ``is_running``.
+
+    Sides are independent: another side's job already running in the slot (and the
+    result of one that finished) is kept, only the restarted sides are reset.
+    """
     with _lock:
-        state = _fresh_state()
-        state.update(status="running", started_at=time.time())
+        state = _state(slot)
+        if state["status"] != "running":  # a new round: forget the previous one's progress
+            state.update(_fresh_state())
+        state.update(status="running", started_at=state["started_at"] or time.time(), finished_at=None, message=None)
+        restarted = tuple(f"{side}: " for side in sides or [])
+        state["progress"] = [line for line in state["progress"] if not line.startswith(restarted)] if restarted else state["progress"]
         for side in sides or []:
             state["sides"][side] = {"status": "pending", "message": None}
-        _job_states[slot] = state
 
 
-def _finish(slot: str, status: str, message: Optional[str]) -> None:
+def _finish(slot: str, status: str, message: Optional[str], sides: Optional[list] = None) -> None:
+    """Close one job; the slot stays 'running' while a job for another side is still active."""
     with _lock:
-        _state(slot).update(status=status, message=message, finished_at=time.time())
+        state = _state(slot)
+        if any(v.get("status") in _ACTIVE for v in state["sides"].values()):
+            return
+        failures = [
+            f"{side}: {v['message']}" for side, v in state["sides"].items()
+            if v.get("status") == "failed" and (sides is None or side in sides)
+        ]
+        if failures:
+            status, message = "failed", "; ".join(failures)
+        elif status == "failed":
+            pass  # a crash before any side recorded its own failure
+        else:
+            status, message = "succeeded", None
+        state.update(status=status, message=message, finished_at=time.time())
 
 
 def _set_side(slot: str, side: str, status: str, message: Optional[str] = None) -> None:
@@ -136,6 +162,7 @@ async def run_job(
         slot: Whose job this is (``GLOBAL_SLOT`` or ``user_slot(id)``).
     """
     deadline = time.monotonic() + timeout_seconds
+    sides = [job.side for job in jobs]
     failures: list[str] = []
     try:
         for job in jobs:
@@ -154,16 +181,23 @@ async def run_job(
                     update_remote_config(values, data_path=data_path)
                 # The side's endpoint may be new or recreated: forget any cached lookup.
                 endpoint_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
+                paused_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
                 _set_side(slot, job.side, "succeeded")
             except Exception as exc:
+                paused_cache.invalidate(job.provider.id, job.side, job.ctx.credential)
                 logger.warning("Provisioning %s failed: %s", job.side, exc, exc_info=not isinstance(exc, ProvisionError))
                 message = str(exc) or type(exc).__name__
                 _set_side(slot, job.side, "failed", message)
                 failures.append(f"{job.side}: {message}")
         if failures:
-            _finish(slot, "failed", "; ".join(failures))
+            _finish(slot, "failed", "; ".join(failures), sides)
         else:
-            _finish(slot, "succeeded", None)
+            _finish(slot, "succeeded", None, sides)
     except Exception as exc:  # defensive: the state must never stay 'running'
         logger.exception("Provisioning job crashed")
-        _finish(slot, "failed", str(exc) or type(exc).__name__)
+        message = str(exc) or type(exc).__name__
+        for side in sides:
+            with _lock:
+                if _state(slot)["sides"].get(side, {}).get("status") in _ACTIVE:
+                    _state(slot)["sides"][side] = {"status": "failed", "message": message}
+        _finish(slot, "failed", message, sides)

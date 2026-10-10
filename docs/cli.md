@@ -119,7 +119,7 @@ npm install          # Install Node.js dependencies
 cp .env.dist .env    # Create environment config
 
 # Configure .env
-MODEL_PRESET=apple-silicon-kisski  # Or: see presets below
+MODEL_PRESET=remote-kisski  # Or: see presets below
 # Provider API keys (OpenAI, KISSKI, ...) are entered in the plugin, not set here
 
 # Remote server deployments (required when API_HOST is not localhost/127.0.0.1)
@@ -133,7 +133,6 @@ REQUIRE_ZOTERO=false               # Skip Zotero connectivity check
 
 | Preset | Target Hardware | Memory |
 |--------|----------------|--------|
-| `apple-silicon-kisski` | Apple Silicon (16-32GB) + KISSKI API | ~2GB |
 | `apple-silicon-32gb` | Apple Silicon 32GB, fully offline | ~10GB |
 | `high-memory` | GPU system >24GB RAM | ~16GB |
 | `cpu-only` | No GPU, low memory | ~3GB |

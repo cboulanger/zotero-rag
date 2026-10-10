@@ -265,6 +265,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		? Sections.ensureSections(doc, sectionsContainer, {
 			onProvision: (side, key) => controller && controller.provision(side, key),
 			onRetry: (side, key) => controller && controller.provision(side, key),
+			onPause: (side, key) => controller && controller.pause(side, key),
 		})
 		: null;
 	/**
@@ -293,6 +294,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					body: JSON.stringify(body),
 				});
 				return { ok: response.ok, status: response.status, data: await response.json().catch(() => ({})) };
+			},
+			// Management tokens live on the plugin object: kept while Zotero runs, never written anywhere.
+			sessionKeys: {
+				get: (env) => (this._sessionKeys && this._sessionKeys[env]) || '',
+				set: (env, value) => { this._sessionKeys = { ...(this._sessionKeys || {}), [env]: value }; },
+				forget: (env) => { if (this._sessionKeys) delete this._sessionKeys[env]; },
 			},
 		})
 		: null;

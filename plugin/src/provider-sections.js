@@ -68,6 +68,7 @@
  * @property {string} hint - advice shown while the side is not ready, '' otherwise
  * @property {ActionView} provision
  * @property {ActionView} retry
+ * @property {ActionView} pause - stops billing and wake-ups; shown for a ready or cold side
  * @property {{visible: boolean, label: string, help: string, pattern: string}} credential
  * @property {string[]} progress - this side's progress lines
  * @property {string} status - outcome message of this side's last job, '' if none
@@ -112,19 +113,26 @@ var ZoteroRAGProviderSections = {
 				side, title, local: true,
 				providerText: '',
 				health: null, hint: '',
-				provision: hidden, retry: hidden,
+				provision: hidden, retry: hidden, pause: hidden,
 				credential: { visible: false, label: '', help: '', pattern: '' },
 				progress: [], status: '', readOnlyNote: false,
 			};
 		}
 
-		const running = !!job && job.status === 'running';
+		// Sides are independent: only this side's own job disables its buttons.
+		const sideState = job && job.sides ? job.sides[side] : undefined;
+		const running = !!sideState && (sideState.status === 'running' || sideState.status === 'pending');
 		const canProvision = provider.supports_provisioning && provider.operable_by_caller;
 		const status = health ? health.status : '';
 		const needsAction = this.NEEDS_PROVISIONING.has(status);
 		const sideJob = job && job.sides ? job.sides[side] : undefined;
+		const canPause = !!provider.supports_suspend && provider.operable_by_caller;
 		const failed = !!sideJob && sideJob.status === 'failed';
-		const busyReason = running ? 'A provisioning job is already running.' : '';
+		const busyReason = running ? 'A job for this endpoint is already running.' : '';
+
+		const provisionVisible = canProvision && needsAction;
+		const retryVisible = canProvision && failed && !running;
+		const pauseVisible = canPause && (status === 'ready' || status === 'cold');
 
 		const scope = this.SCOPE_NOTES[provider.key_scope] || '';
 		const credential = provider.provisioning && provider.provisioning.credential;
@@ -140,19 +148,27 @@ var ZoteroRAGProviderSections = {
 				: null,
 			hint: health && health.status !== 'ready' && provider.unavailable_hint ? provider.unavailable_hint : '',
 			provision: {
-				visible: canProvision && needsAction,
+				visible: provisionVisible,
 				label: status === 'paused' ? 'Resume' : 'Provision endpoint',
 				disabled: running,
 				reason: busyReason,
 			},
 			retry: {
-				visible: canProvision && failed && !running,
+				visible: retryVisible,
 				label: 'Retry',
 				disabled: running,
 				reason: busyReason,
 			},
+			pause: {
+				visible: pauseVisible,
+				label: 'Pause',
+				disabled: running,
+				reason: busyReason,
+			},
 			credential: {
-				visible: canProvision,
+				// Needed by every action that talks to the provider's management API (provision,
+				// resume, retry, pause); nothing to show when none of them is on offer.
+				visible: (canProvision || canPause) && (provisionVisible || retryVisible || pauseVisible),
 				label: credential ? credential.label : 'Key for this run',
 				help: credential && credential.help ? credential.help : '',
 				pattern: credential && credential.pattern ? credential.pattern : '',
@@ -168,7 +184,7 @@ var ZoteroRAGProviderSections = {
 	 * Build the skeleton of both sections once; returns references for `update`.
 	 * @param {Document} doc
 	 * @param {HTMLElement} container
-	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
+	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
 	 * @returns {Record<'embedding'|'llm', Record<string, any>>}
 	 */
 	ensureSections(doc, container, handlers) {
@@ -197,7 +213,7 @@ var ZoteroRAGProviderSections = {
 			const credInput = el('input', 'setting-input');
 			credInput.type = 'password';
 			credInput.id = `zotero-rag-side-${side}-credential`;
-			credInput.placeholder = 'Optional — used once, never stored';
+			credInput.placeholder = 'Optional \u2014 kept in memory only';
 			credLabel.setAttribute('for', credInput.id);
 			const credHelp = el('div', 'setting-description');
 			credRow.append(credLabel, credInput);
@@ -207,7 +223,9 @@ var ZoteroRAGProviderSections = {
 			provision.id = `zotero-rag-side-${side}-provision`;
 			const retry = el('button');
 			retry.id = `zotero-rag-side-${side}-retry`;
-			actions.append(provision, retry);
+			const pause = el('button');
+			pause.id = `zotero-rag-side-${side}-pause`;
+			actions.append(provision, retry, pause);
 
 			const note = el('div', 'setting-description');
 			const progress = el('div', 'setting-description');
@@ -220,10 +238,11 @@ var ZoteroRAGProviderSections = {
 			};
 			provision.addEventListener('click', () => handlers.onProvision(side, oneTimeKey()));
 			retry.addEventListener('click', () => handlers.onRetry(side, oneTimeKey()));
+			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side, oneTimeKey()));
 
 			section.append(title, provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
 			container.appendChild(section);
-			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, note, progress, status };
+			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, pause, note, progress, status };
 		}
 		return /** @type {any} */ (refs);
 	},
@@ -258,6 +277,10 @@ var ZoteroRAGProviderSections = {
 			r.retry.textContent = m.retry.label;
 			r.retry.disabled = m.retry.disabled;
 			r.retry.title = m.retry.reason;
+			r.pause.hidden = !m.pause.visible;
+			r.pause.textContent = m.pause.label;
+			r.pause.disabled = m.pause.disabled;
+			r.pause.title = m.pause.reason;
 			r.note.hidden = !m.readOnlyNote;
 			r.note.textContent = m.readOnlyNote ? 'This endpoint is not available. Ask the server admin to provision it.' : '';
 			r.progress.textContent = m.progress.join('\n');
@@ -278,12 +301,18 @@ var ZoteroRAGProviderSections = {
  *   post: (path: string, body: any) => Promise<{ok: boolean, status: number, data: any}>,
  *   sleep?: (ms: number) => Promise<void>,
  *   pollMs?: number,
+ *   sessionKeys?: {get: (env: string) => string, set: (env: string, value: string) => void, forget: (env: string) => void},
  * }} deps
  */
 ZoteroRAGProviderSections.createController = function (deps) {
 	const S = ZoteroRAGProviderSections;
 	const sleep = deps.sleep || ((/** @type {number} */ ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	const pollMs = deps.pollMs === undefined ? 5000 : deps.pollMs;
+	// Management tokens typed in this Zotero session, kept in memory only (never saved), so a
+	// later Resume/Retry/Pause needs no re-entry; gone when Zotero quits.
+	const remembered = deps.sessionKeys || { get: () => '', set: () => {}, forget: () => {} };
+	/** Re-checks of a cold endpoint after which polling stops (about 10 minutes at the default rate). */
+	const MAX_COLD_POLLS = 120;
 	/** @type {{providers: any, health: any, job: any}} */
 	const state = { providers: null, health: null, job: null };
 	let polling = false;
@@ -309,6 +338,20 @@ ZoteroRAGProviderSections.createController = function (deps) {
 			);
 		}
 		S.update(deps.refs, models);
+		paintRemembered();
+	};
+
+	/** Tell the user that a token entered earlier this session will be used when the field is empty. */
+	const paintRemembered = () => {
+		for (const side of S.SIDES) {
+			const provider = state.providers && state.providers.sides && state.providers.sides[side] && state.providers.sides[side].provider;
+			const credential = provider && provider.provisioning && provider.provisioning.credential;
+			const input = deps.refs[side] && deps.refs[side].credInput;
+			if (!input) continue;
+			input.placeholder = credential && remembered.get(credential.env)
+				? 'Entered earlier \u2014 type to replace'
+				: 'Optional \u2014 kept in memory only';
+		}
 	};
 
 	/** Refresh now and, while the caller's job runs, every few seconds (this also resumes a job started earlier). */
@@ -316,9 +359,15 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		if (polling) return;
 		polling = true;
 		try {
-			for (;;) {
+			// Keep polling while a job runs, and while an endpoint is still starting (cold),
+			// so the status turns to ready without reopening the pane. Bounded: a cold
+			// endpoint that never comes up must not poll forever.
+			for (let coldRounds = 0; ; ) {
 				await refresh();
-				if (!state.job || state.job.status !== 'running') break;
+				const running = !!state.job && state.job.status === 'running';
+				const cold = S.SIDES.some((side) => state.health && state.health[side] && state.health[side].status === 'cold');
+				if (!running && !(cold && coldRounds < MAX_COLD_POLLS)) break;
+				coldRounds = running ? 0 : coldRounds + 1;
 				await sleep(pollMs);
 			}
 		} finally {
@@ -332,7 +381,7 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	 * @param {'embedding'|'llm'} side
 	 * @param {string} oneTimeKey
 	 */
-	const provision = async (side, oneTimeKey) => {
+	const startJob = async (path, side, oneTimeKey, failure) => {
 		const status = deps.refs[side].status;
 		const show = (/** @type {string} */ text) => { status.textContent = text; status.hidden = !text; };
 		const provider = state.providers && state.providers.sides && state.providers.sides[side] && state.providers.sides[side].provider;
@@ -341,25 +390,36 @@ ZoteroRAGProviderSections.createController = function (deps) {
 			show('The key does not look right.');
 			return;
 		}
+		// A token typed now wins over the one remembered from earlier in this session.
+		const key = oneTimeKey || (credential ? remembered.get(credential.env) : '');
 		/** @type {{sides: string[], keys?: Record<string,string>}} */
 		const body = { sides: [side] };
-		if (oneTimeKey && credential) body.keys = { [credential.env]: oneTimeKey };
+		if (key && credential) body.keys = { [credential.env]: key };
 		show('Starting\u2026');
 		try {
-			const result = await deps.post('/api/config/provision', body);
+			const result = await deps.post(path, body);
 			if (!result.ok) {
+				// A token the server refused is not worth keeping.
+				if (credential && (result.status === 401 || result.status === 403)) remembered.forget(credential.env);
 				const detail = result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`;
-				show(`Provisioning failed: ${detail}`);
+				show(`${failure}: ${detail}`);
 				return;
 			}
+			if (oneTimeKey && credential) remembered.set(credential.env, oneTimeKey);
 			show('');
 			await poll();
 		} catch (e) {
-			show(`Provisioning failed: ${e}`);
+			show(`${failure}: ${e}`);
 		}
 	};
 
-	return { state, refresh, poll, provision };
+	const provision = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey) =>
+		startJob('/api/config/provision', side, oneTimeKey, 'Provisioning failed');
+	/** Pause one side (stops billing and wake-ups; resuming is provisioning again). */
+	const pause = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey = '') =>
+		startJob('/api/config/suspend', side, oneTimeKey, 'Pausing failed');
+
+	return { state, refresh, poll, provision, pause };
 };
 
 /**

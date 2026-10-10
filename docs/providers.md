@@ -26,7 +26,8 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
 | `mpcdf` | MPCDF LLM Inference Service | `shared` | Ephemeral job URL and key set by the admin; health asks `/v1/models`. |
-| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`. |
+| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. |
+| `huggingface` | Hugging Face Inference Endpoints | `user` or `managed` | One endpoint per side in the token owner's namespace; readiness from the endpoint's `status.state`; pause/resume via the REST API; the URL is derived from the token. |
 
 ## Credential scopes
 
@@ -52,7 +53,7 @@ renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
 `health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
-`provision(ctx, progress)`, `suspend(ctx, progress)` and `teardown(ctx)`.
+`provision(ctx, progress)`, `suspend(ctx, progress)`, `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
 Providers never raise from display-only hooks (`health`, `parse_usage`).
 
 ## Adding a provider
@@ -72,14 +73,14 @@ two different providers.
 
 ## Provisioning and cost control
 
-Who may provision follows the credential scope. For `user` any signed-in user may, on their own key and in their own job slot (two users can run at once, the same user gets HTTP 409). For `managed` only an admin may, with the stored admin key and one global slot. `GET /api/config/provision/status` and `GET /api/config/health` answer for the caller's own slot and key. A provider whose endpoints live in the key owner's account sets `derives_endpoint_url` and implements `endpoint_url(key)`; the services then need no URL in the preset (lookups are cached per key in `backend/services/endpoint_cache.py`).
+Who may provision follows the credential scope. For `user` any signed-in user may, on their own key and in their own job slot (two users can run at once, the same user gets HTTP 409 only for a side that already has a job running; the two sides are independent). For `managed` only an admin may, with the stored admin key and one global slot. `GET /api/config/provision/status` and `GET /api/config/health` answer for the caller's own slot and key. A provider whose endpoints live in the key owner's account sets `derives_endpoint_url` and implements `endpoint_url(key)`; the services then need no URL in the preset (lookups are cached per key in `backend/services/endpoint_cache.py`).
 
 `POST /api/config/provision` runs each requested side's `provision()` as an
 independent job (a failure on one side does not stop the other; a failed side can
 be retried alone) and `bin/provision.py --preset <name>` does the same from the
 command line, including `--pause` and `--teardown`. Pausing keeps the resources
 and their URLs but stops billing and wake-ups; provisioning again resumes. A
-key typed for a run is used for that run only and never stored.
+key typed in the plugin is sent with each management request, kept only in memory in the running Zotero and never stored by the backend.
 
 ## Usage meters
 
