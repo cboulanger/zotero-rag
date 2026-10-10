@@ -22,7 +22,7 @@ A preset file's fields mirror `backend.config.presets.HardwarePreset` and its ne
 
 ### The `platform` field
 
-Every preset also declares a `platform` field: `"any"` (the default — visible everywhere), `"darwin"`, `"linux"`, or `"windows"`. A preset naming a specific platform is hidden from `GET /api/config`'s `available_presets`/`compatible_presets` (and rejected by `POST /api/config`) on any other host — e.g. the bundled `apple-silicon-32gb`/`apple-silicon-kisski` presets (`platform: "darwin"`) and `windows-test` (`platform: "windows"`) never appear in the preset list on the production Debian server, even though the files exist on disk. This only gates what's *listed to a client*: an operator can still explicitly run a platform-specific preset via `MODEL_PRESET` in `.env` on a matching host, and internal tooling (`scripts/eval_embeddings.py`, `scripts/check_embedding_compat.py`) lists every preset regardless of platform since it's meant for a developer comparing configs, not an end client.
+Every preset also declares a `platform` field: `"any"` (the default — visible everywhere), `"darwin"`, `"linux"`, or `"windows"`. A preset naming a specific platform is hidden from `GET /api/config`'s `available_presets`/`compatible_presets` (and rejected by `POST /api/config`) on any other host — e.g. the bundled `apple-silicon-32gb` preset (`platform: "darwin"`) and `windows-test` (`platform: "windows"`) never appear in the preset list on the production Debian server, even though the files exist on disk. This only gates what's *listed to a client*: an operator can still explicitly run a platform-specific preset via `MODEL_PRESET` in `.env` on a matching host, and internal tooling (`scripts/eval_embeddings.py`, `scripts/check_embedding_compat.py`) lists every preset regardless of platform since it's meant for a developer comparing configs, not an end client.
 
 ## Dependency overview
 
@@ -31,7 +31,6 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `apple-silicon-32gb` | Yes (~1-2 GB) | — | `darwin` |
 | `high-memory` | Yes (~1-2 GB) | — | any |
 | `cpu-only` | Yes (~1-2 GB) | — | any |
-| `apple-silicon-kisski` | **No** | `KISSKI_API_KEY` | `darwin` |
 | `remote-kisski` | **No** | `KISSKI_API_KEY` | any |
 | `remote-openai` | **No** | `OPENAI_API_KEY` | any |
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
@@ -78,7 +77,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 - Memory: ~10 GB
 - Top-k: 10 chunks / Max chunk: 800 tokens
 
-**Note:** Uses the same model as `remote-kisski` and `apple-silicon-kisski`, so existing KISSKI-generated vectors are compatible (subject to the server applying no instruction prefix — verify with `scripts/check_embedding_compat.py`). MPS acceleration on Apple Silicon gives ~50–150 texts/sec, far faster than CPU-only inference.
+**Note:** Uses the same model as `remote-kisski`, so existing KISSKI-generated vectors are compatible (subject to the server applying no instruction prefix — verify with `scripts/check_embedding_compat.py`). MPS acceleration on Apple Silicon gives ~50–150 texts/sec, far faster than CPU-only inference.
 
 **Requires:** `sentence-transformers`, `torch` (~1-2 GB extra dependencies — see [Optional local dependencies](#optional-local-dependencies))
 
@@ -184,25 +183,6 @@ to reduce peak RSS during indexing.
 
 ---
 
-### `apple-silicon-kisski` (Recommended for Apple Silicon + KISSKI)
-
-**Best for:** Apple Silicon Macs (16-32 GB RAM) with KISSKI API access
-
-**Configuration:**
-
-- Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
-- Memory: ~0.5 GB (fully remote)
-- Top-k: 10 chunks / Max chunk: 1024 tokens
-
-**Note:** This preset is now fully remote (no local torch/sentence-transformers). It differs from `remote-kisski` only in its intended context; both presets are identical in configuration.
-
-**Requires:** `KISSKI_API_KEY` environment variable
-
-**Platform:** `darwin` only — hidden from the preset list on any other host (see [How presets are stored](#how-presets-are-stored)).
-
----
-
 ### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
 
 **Best for:** Riding out an exhausted KISSKI rate limit, using a short-lived job on the MPCDF LLM Inference Service (`llm.mpcdf.mpg.de`) instead
@@ -218,7 +198,7 @@ to reduce peak RSS during indexing.
 
 **Advantages:**
 
-- Uses the same embedding model/vector space as `remote-kisski`, `apple-silicon-kisski`, and `windows-test` — switching to/from this preset at runtime (no restart) is supported for exactly this reason.
+- Uses the same embedding model/vector space as `remote-kisski` and `windows-test` — switching to/from this preset at runtime (no restart) is supported for exactly this reason.
 - No local GPU or large Python dependencies.
 
 **Trade-offs:** Requires an active MPCDF HPC allocation and manually starting a job through the MPCDF LLM Inference Service UI; not a general-purpose recommendation — use `remote-kisski` under normal circumstances.
@@ -313,7 +293,7 @@ Both endpoints require an admin — an owner/admin of the server's `AUTHORIZED_G
 | Your Setup | Recommended Preset |
 | ---------- | ----------------- |
 | Any machine + KISSKI access (recommended) | `remote-kisski` |
-| Apple Silicon Mac + KISSKI access | `apple-silicon-kisski` |
+| Apple Silicon Mac + KISSKI access | `remote-kisski` |
 | OpenAI API access | `remote-openai` |
 | Windows (no GPU setup) | `windows-test` |
 | Apple Silicon Mac (32 GB), offline/privacy | `apple-silicon-32gb` |
@@ -328,21 +308,21 @@ Both endpoints require an admin — an owner/admin of the server's `AUTHORIZED_G
 
 ### Indexing Speed
 
-1. `remote-openai` / `remote-kisski` / `apple-silicon-kisski` / `windows-test` — fast (parallel API calls, no local model load)
+1. `remote-openai` / `remote-kisski` / `windows-test` — fast (parallel API calls, no local model load)
 2. `apple-silicon-32gb` — fast (M-series Neural Engine)
 3. `high-memory` — good (GPU acceleration)
 4. `cpu-only` — slowest (CPU-bound)
 
 ### Answer Quality
 
-1. `remote-openai` / `remote-kisski` / `apple-silicon-kisski` / `windows-test` — excellent (large models, 128k context)
+1. `remote-openai` / `remote-kisski` / `windows-test` — excellent (large models, 128k context)
 2. `apple-silicon-32gb` / `high-memory` — good (7B models, 8k context)
 3. `cpu-only` — basic (1.1B model, 2k context)
 
 ### Privacy Level
 
 1. `apple-silicon-32gb` / `cpu-only` / `high-memory` — fully local
-2. `remote-kisski` / `apple-silicon-kisski` / `windows-test` — fully remote (KISSKI is an academic service hosted by GWDG)
+2. `remote-kisski` / `windows-test` — fully remote (KISSKI is an academic service hosted by GWDG)
 3. `remote-openai` — fully remote (commercial)
 
 ---

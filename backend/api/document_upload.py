@@ -396,7 +396,7 @@ async def _execute_upload_impl(
     #
     # max_chunk_size/chunk_merge_target_size are tied to the active preset's
     # rag.max_chunk_size (hand-tuned per embedding model's real token limit —
-    # see e.g. the apple-silicon-kisski preset's comment) rather than left at
+    # see e.g. the remote-kisski preset's comment) rather than left at
     # DocumentProcessor's own generic defaults (512 chars / 1500 chars). Those
     # defaults are disconnected from any particular model: merging several
     # ~512-char extractor chunks up to a 1500-char target can produce a chunk

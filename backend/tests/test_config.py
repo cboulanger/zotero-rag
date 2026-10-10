@@ -33,7 +33,6 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "high-memory",
     "cpu-only",
     "remote-openai",
-    "apple-silicon-kisski",
     "remote-kisski",
     "cloud-server-kisski",
     "windows-test",
@@ -267,7 +266,6 @@ class TestPresets(unittest.TestCase):
         linux_presets = list_presets(self.data_path, platform="linux")
 
         self.assertNotIn("windows-test", linux_presets)
-        self.assertNotIn("apple-silicon-kisski", linux_presets)
         self.assertNotIn("apple-silicon-32gb", linux_presets)
         self.assertIn("cpu-only", linux_presets)  # platform: "any"
         self.assertIn("remote-kisski", linux_presets)  # platform: "any"
@@ -276,13 +274,11 @@ class TestPresets(unittest.TestCase):
         windows_presets = list_presets(self.data_path, platform="windows")
 
         self.assertIn("windows-test", windows_presets)
-        self.assertNotIn("apple-silicon-kisski", windows_presets)
 
     def test_list_presets_with_no_platform_filter_returns_everything(self):
         unfiltered = list_presets(self.data_path)
 
         self.assertIn("windows-test", unfiltered)
-        self.assertIn("apple-silicon-kisski", unfiltered)
         self.assertIn("apple-silicon-32gb", unfiltered)
 
     def test_current_platform_matches_python_platform_module(self):
@@ -500,13 +496,12 @@ class TestConfigApi(unittest.TestCase):
         self.assertIn("remote-mpcdf", compatible)
         self.assertNotIn("remote-openai", compatible)  # different embedding model
         self.assertNotIn("cpu-only", compatible)  # local preset
-        # windows-test/apple-silicon-kisski share the embedding model too, but
-        # are each platform-gated (see test_get_config_hides_other_platforms_presets
-        # below) — only the one matching this host's actual platform shows up.
+        # windows-test shares the embedding model too, but
+        # is platform-gated (see test_get_config_hides_other_platforms_presets
+        # below) — it only shows up on a matching host.
         from backend.config.presets import current_platform
         host = current_platform()
         self.assertEqual("windows-test" in compatible, host == "windows")
-        self.assertEqual("apple-silicon-kisski" in compatible, host == "darwin")
 
     def test_get_config_lists_compatible_presets_includes_runpod_despite_hf_prefix(self):
         """runpod.json stores its embedding model as the full HuggingFace repo
@@ -527,7 +522,6 @@ class TestConfigApi(unittest.TestCase):
             r = self.client.get("/api/config")
         available = set(r.json()["available_presets"])
         self.assertNotIn("windows-test", available)
-        self.assertNotIn("apple-silicon-kisski", available)
         self.assertNotIn("apple-silicon-32gb", available)
         self.assertIn("remote-kisski", available)  # platform: "any"
         self.assertIn("cpu-only", available)  # platform: "any"

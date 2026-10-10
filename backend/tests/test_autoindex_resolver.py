@@ -214,7 +214,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         per-user key at all — a stale rate-limited status left over from a
         previously-active *personal*-key preset (e.g. KISSKI) must not block
         this user's targets. Regression test for a real bug: switching from
-        apple-silicon-kisski (personal key, hit a genuine KISSKI rate limit)
+        remote-kisski (personal key, hit a genuine KISSKI rate limit)
         to remote-mpcdf (shared key, unaffected) still excluded every target
         because resolve_targets only checked model_type == "remote"."""
         store = self._store()

@@ -224,7 +224,7 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 **Configuration System:**
 
 - **Presets:** [backend/config/presets.py](../backend/config/presets.py)
-  - Hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `apple-silicon-kisski`, `remote-kisski`, `windows-test`
+  - Hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `remote-kisski`, `windows-test`
   - Model configurations for embeddings and LLMs
   - Memory budgets and quantization settings
 - **Settings:** [backend/config/settings.py](../backend/config/settings.py)
@@ -396,15 +396,7 @@ The system includes hardware presets optimized for different deployment scenario
 - **Total Memory:** ~1GB (minimal local requirements)
 - **API Key:** `OPENAI_API_KEY` (each user's own, entered in the plugin)
 
-#### 5. `apple-silicon-kisski`
-
-- **Target:** Apple Silicon (16–32GB) with GWDG KISSKI remote LLM
-- **Embedding:** nomic-ai/nomic-embed-text-v1.5 (local, Neural Engine)
-- **LLM:** mistral-large-instruct via KISSKI (remote, 128k context)
-- **Total Memory:** ~2GB
-- **API Key:** `KISSKI_API_KEY`
-
-#### 6. `remote-kisski`
+#### 5. `remote-kisski`
 
 - **Target:** Any machine with GWDG KISSKI Academic Cloud
 - **Embedding:** all-MiniLM-L6-v2 (local, for privacy)
@@ -413,7 +405,7 @@ The system includes hardware presets optimized for different deployment scenario
 - **API Key:** `KISSKI_API_KEY`
 - **Base URL:** `https://chat-ai.academiccloud.de/v1`
 
-#### 7. `windows-test`
+#### 6. `windows-test`
 
 - **Target:** Windows (avoids PyTorch local models)
 - **Embedding:** OpenAI Embeddings API (remote)
