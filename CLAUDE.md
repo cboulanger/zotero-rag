@@ -276,8 +276,8 @@ and CLI scripts.
   `SecretsUnavailableError` (HTTP 503 from the API). Plaintext keys from older files are still read and
   are encrypted at the next write or backend startup.
 
-`bin/provision_runpod_endpoints.py` stores its endpoint URLs this way instead of in `.env`. In a
-container run it inside the container (`podman exec <container> python bin/provision_runpod_endpoints.py`)
+`bin/provision.py --preset <name>` stores provider-reported endpoint URLs this way instead of in `.env`. In a
+container run it inside the container (`podman exec <container> python bin/provision.py --preset runpod`)
 so the data volume is shared. To copy provisioned credentials to another instance, `POST` the values to
 `/api/config/remote-fields` on it (it encrypts them with its own `AUTOINDEX_SECRET`).
 

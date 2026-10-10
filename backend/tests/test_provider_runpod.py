@@ -287,6 +287,45 @@ class TestProvisionAndTeardown(unittest.TestCase):
         self.assertEqual(http.calls_matching("DELETE", r"."), [])
 
 
+class TestPauseResume(unittest.TestCase):
+    def _live(self, workers_max):
+        http = FakeHTTP()
+        p = provider("llm", http=http)
+        http.add("GET", r"/templates$", FakeResponse(200, [
+            {"id": "tpl1", "name": "zotero-rag-llm", "imageName": runpod_module.DEFAULT_IMAGE, "env": p.template_env()}]))
+        http.add("GET", r"/endpoints$", FakeResponse(200, [
+            {"id": "ep1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": ["NVIDIA RTX A5000"],
+             "workersMax": workers_max}]))
+        http.add("PATCH", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": 1}))
+        return p, http
+
+    def test_suspend_sets_workers_max_to_zero(self):
+        p, http = self._live(1)
+        msgs = []
+        p.suspend(ctx("llm"), msgs.append)
+        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
+        self.assertEqual(body, {"workersMax": 0})
+        self.assertTrue(msgs)
+
+    def test_suspend_without_endpoint_raises(self):
+        http = FakeHTTP()
+        http.add("GET", r"/endpoints$", FakeResponse(200, []))
+        p = provider("llm", http=http)
+        with self.assertRaises(ProvisionError):
+            p.suspend(ctx("llm"), lambda m: None)
+
+    def test_provision_resumes_a_paused_endpoint(self):
+        p, http = self._live(0)
+        p.provision(ctx("llm", skip_warmup=True), lambda m: None)
+        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
+        self.assertEqual(body, {"workersMax": 1})
+
+    def test_provision_leaves_a_running_endpoint_alone(self):
+        p, http = self._live(1)
+        p.provision(ctx("llm", skip_warmup=True), lambda m: None)
+        self.assertEqual(http.calls_matching("PATCH", r"/endpoints/ep1$"), [])
+
+
 class TestHealth(unittest.TestCase):
     URL = "https://api.runpod.ai/v2/abc123/openai/v1"
 

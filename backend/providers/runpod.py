@@ -80,6 +80,7 @@ class RunPodProvider(Provider):
     key_scopes = frozenset({"user", "managed"})
     default_scope = "user"
     supports_provisioning = True
+    supports_suspend = True
     http_timeout = 30.0
 
     # -- naming -----------------------------------------------------------------
@@ -232,6 +233,10 @@ class RunPodProvider(Provider):
             gpu_unverifiable = ctx.recreate and existing_gpus is None
             mismatched = existing.get("templateId") != template_id or gpu_mismatch or gpu_unverifiable
             if not mismatched:
+                if existing.get("workersMax") == 0:  # paused: resume
+                    return self._request(
+                        api_key, "PATCH", f"/endpoints/{existing['id']}", {"workersMax": opts.workers_max}
+                    )
                 return existing
             if not ctx.recreate:
                 logger.warning(
@@ -348,6 +353,17 @@ class RunPodProvider(Provider):
         progress(f"{self.side.capitalize()} endpoint ready: {base_url}")
         url_env = self.side_config.model_kwargs.get("shared_base_url_env")
         return {url_env: base_url} if url_env else {}
+
+    def suspend(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> None:
+        """Pause the endpoint by setting ``workersMax`` to 0 (requests then get 409)."""
+        api_key = ctx.credential
+        if not api_key:
+            raise ProvisionError("No RunPod API key available.")
+        endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        if endpoint is None:
+            raise ProvisionError(f"No endpoint '{self.resource_name}' to pause.")
+        self._request(api_key, "PATCH", f"/endpoints/{endpoint['id']}", {"workersMax": 0})
+        progress(f"Paused {self.side} endpoint {endpoint['id']}")
 
     def teardown(self, ctx: ProvisionContext) -> None:
         """Delete this side's endpoint and template; absent ones are a no-op."""
