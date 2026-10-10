@@ -1023,8 +1023,14 @@ test('describeEndpointBlock: nothing blocks when both endpoints are ready or hav
 test('describeEndpointBlock: a cold endpoint blocks and is re-checked soon', () => {
 	const D = loadDialogMethods();
 	const block = D.describeEndpointBlock({ embedding: { status: 'ready' }, llm: { status: 'cold' } }, false);
-	assert.match(block.message, /Starting the answering model/);
+	assert.match(block.message, /^Starting the answering model - /);
 	assert.strictEqual(block.retryMs, 5000);
+});
+
+test('describeEndpointBlock: both cold sides are named', () => {
+	const D = loadDialogMethods();
+	const block = D.describeEndpointBlock({ embedding: { status: 'cold' }, llm: { status: 'cold' } }, false);
+	assert.match(block.message, /^Starting the embedding and answering models - /);
 });
 
 test('describeEndpointBlock: indexing ignores the answering model', () => {

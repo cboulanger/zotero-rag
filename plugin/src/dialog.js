@@ -778,20 +778,21 @@ var ZoteroRAGDialog = {
 	describeEndpointBlock(health, indexOnly) {
 		if (!health) return null;
 		/** @type {Array<['embedding'|'llm', string]>} */
-		const sides = [['embedding', 'embedding model']];
-		if (!indexOnly) sides.push(['llm', 'answering model']);
-		for (const [side, label] of sides) {
+		const sides = [['embedding', 'embedding'], ['llm', 'answering']];
+		const needed = indexOnly ? sides.slice(0, 1) : sides;
+		// A paused or unreachable endpoint will not start by itself, so it is reported before a cold one.
+		for (const [side, name] of needed) {
 			const h = health[side];
-			if (!h) continue;
-			if (h.status === 'cold') {
-				return { message: `Starting the ${label} - this can take a minute or two...`, retryMs: 5000 };
+			if (h && h.status === 'paused') {
+				return { message: `The ${name} model endpoint is paused. Resume it in the Zotero RAG preferences.`, retryMs: 15000 };
 			}
-			if (h.status === 'paused') {
-				return { message: `The ${label} endpoint is paused. Resume it in the Zotero RAG preferences.`, retryMs: 15000 };
+			if (h && h.status === 'unreachable') {
+				return { message: `The ${name} model is not available${h.detail ? `: ${h.detail}` : ''}`, retryMs: 15000 };
 			}
-			if (h.status === 'unreachable') {
-				return { message: `The ${label} is not available${h.detail ? `: ${h.detail}` : ''}`, retryMs: 15000 };
-			}
+		}
+		const cold = needed.filter(([side]) => health[side] && health[side].status === 'cold').map(([, name]) => name);
+		if (cold.length) {
+			return { message: `Starting the ${cold.join(' and ')} model${cold.length > 1 ? 's' : ''} - this can take a minute or two...`, retryMs: 5000 };
 		}
 		return null;
 	},
