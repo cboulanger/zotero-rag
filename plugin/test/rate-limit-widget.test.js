@@ -35,53 +35,67 @@ function load(elements = {}, withDialog = false) {
 	return context;
 }
 
-const h = (limit, remaining, period = 'hour') => ({
-	[`x-ratelimit-limit-${period}`]: String(limit),
-	[`x-ratelimit-remaining-${period}`]: String(remaining),
+const { fakeNode, createElementNS, readRows } = require('./fake-dom.js');
+
+const m = (limit, remaining, period = 'hour', extra = {}) => ({
+	id: `requests/${period}`, side: 'embedding', unit: 'requests', period, limit, remaining, ...extra,
 });
 
 test('describe thresholds: 74% green, 75% amber, 94% amber, 95% red', () => {
 	const { ZoteroRAGRateLimitWidget: w } = load();
-	assert.strictEqual(w.describe(h(100, 26), 'hour').color, '#2e9e4f');
-	assert.strictEqual(w.describe(h(100, 25), 'hour').color, '#e6a817');
-	assert.strictEqual(w.describe(h(100, 6), 'hour').color, '#e6a817');
-	assert.strictEqual(w.describe(h(100, 5), 'hour').color, '#cc3300');
+	assert.strictEqual(w.describe(m(100, 26)).color, '#2e9e4f');
+	assert.strictEqual(w.describe(m(100, 25)).color, '#e6a817');
+	assert.strictEqual(w.describe(m(100, 6)).color, '#e6a817');
+	assert.strictEqual(w.describe(m(100, 5)).color, '#cc3300');
 });
 
-test('describe returns usedPct and text', () => {
+test('describe returns usedPct and a unit/period label', () => {
 	const { ZoteroRAGRateLimitWidget: w } = load();
-	const d = w.describe(h(200, 50, 'day'), 'day');
+	const d = w.describe(m(200, 50, 'day'));
 	assert.strictEqual(d.usedPct, 75);
-	assert.strictEqual(d.remaining, 50);
 	assert.strictEqual(d.text, '50 requests left/day');
+	assert.strictEqual(w.describe({ ...m(10, 3), unit: 'tokens', period: null }).text, '3 tokens left');
 });
 
-test('describe returns null for missing/zero limits or headers', () => {
+test('describe returns null for a missing or zero limit', () => {
 	const { ZoteroRAGRateLimitWidget: w } = load();
-	assert.strictEqual(w.describe(null, 'hour'), null);
-	assert.strictEqual(w.describe({}, 'hour'), null);
-	assert.strictEqual(w.describe(h(0, 0), 'hour'), null);
+	assert.strictEqual(w.describe(null), null);
+	assert.strictEqual(w.describe(m(0, 0)), null);
 });
 
-test('render honours visible flag and id prefix', () => {
-	const mk = () => ({ style: {}, textContent: '' });
-	const els = { 'x-rate-limit-section': mk(), 'x-rate-limit-bar-hour': mk(), 'x-rate-limit-text-hour': mk(),
-		'x-rate-limit-bar-day': mk(), 'x-rate-limit-text-day': mk() };
+test('render paints one bar per meter, honours visible and the id prefix', () => {
+	const els = { 'x-rate-limit-section': fakeNode(), 'x-rate-limit-bars': fakeNode() };
 	const ctx = load(els);
-	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, { ...h(100, 50), ...h(10, 9, 'day') }, { visible: true, prefix: 'x-' });
+	ctx.document.createElementNS = createElementNS;
+	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, [m(100, 50), m(10, 9, 'day')], { visible: true, prefix: 'x-' });
 	assert.strictEqual(els['x-rate-limit-section'].style.display, '');
-	assert.strictEqual(els['x-rate-limit-bar-hour'].style.width, '50%');
-	assert.strictEqual(els['x-rate-limit-text-day'].textContent, '9 requests left/day');
+	const rows = readRows(els['x-rate-limit-bars']);
+	assert.deepStrictEqual(rows.map((r) => r.text), ['50 requests left/hour', '9 requests left/day']);
+	assert.strictEqual(rows[0].width, '50%');
+	// A second render replaces the rows instead of appending.
+	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, [m(100, 50)], { visible: true, prefix: 'x-' });
+	assert.strictEqual(els['x-rate-limit-bars'].children.length, 1);
 	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, null, { visible: false, prefix: 'x-' });
 	assert.strictEqual(els['x-rate-limit-section'].style.display, 'none');
+	assert.strictEqual(els['x-rate-limit-bars'].children.length, 0);
 });
 
-test('fetch resolves headers, or null when unavailable / failing', async () => {
+test('render labels the side only when meters of both sides are shown', () => {
+	const els = { 'rate-limit-section': fakeNode(), 'rate-limit-bars': fakeNode() };
+	const ctx = load(els);
+	ctx.document.createElementNS = createElementNS;
+	const llm = { ...m(5, 5, 'minute'), side: 'llm' };
+	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, [m(100, 50), llm], { visible: true });
+	assert.deepStrictEqual(readRows(els['rate-limit-bars']).map((r) => r.text),
+		['Embedding: 50 requests left/hour', 'Answering: 5 requests left/minute']);
+});
+
+test('fetch resolves meters, or null when unavailable / failing', async () => {
 	const { ZoteroRAGRateLimitWidget: w } = load();
 	const plugin = { backendURL: 'http://x', getAuthHeaders: () => ({}) };
-	global.fetch = async () => ({ ok: true, json: async () => ({ available: true, limits: h(1, 1) }) });
-	assert.deepStrictEqual({ ...await w.fetch(plugin) }, h(1, 1));
-	global.fetch = async () => ({ ok: true, json: async () => ({ available: false }) });
+	global.fetch = async () => ({ ok: true, json: async () => ({ available: true, meters: [m(1, 1)] }) });
+	assert.strictEqual((await w.fetch(plugin))[0].limit, 1);
+	global.fetch = async () => ({ ok: true, json: async () => ({ available: false, meters: [] }) });
 	assert.strictEqual(await w.fetch(plugin), null);
 	global.fetch = async () => { throw new Error('down'); };
 	assert.strictEqual(await w.fetch(plugin), null);
@@ -90,18 +104,18 @@ test('fetch resolves headers, or null when unavailable / failing', async () => {
 // --- Ask dialog regression + footer button -----------------------------------
 
 test('Ask dialog updateRateLimitDisplay paints the same bars via the widget', () => {
-	const mk = () => ({ style: {}, textContent: '' });
-	const els = { 'rate-limit-section': mk(), 'rate-limit-bar-hour': mk(), 'rate-limit-text-hour': mk(),
-		'rate-limit-bar-day': mk(), 'rate-limit-text-day': mk() };
+	const els = { 'rate-limit-section': fakeNode(), 'rate-limit-bars': fakeNode() };
 	const ctx = load(els, true);
+	ctx.document.createElementNS = createElementNS;
 	const fake = { rateLimitAvailable: true, isOperationInProgress: true, isIndexOnlyMode: () => false,
-		rateLimitHeaders: { ...h(100, 20), ...h(100, 1, 'day') } };
+		rateLimitMeters: [m(100, 20), m(100, 1, 'day')] };
 	ctx.ZoteroRAGDialog.updateRateLimitDisplay.call(fake);
 	assert.strictEqual(els['rate-limit-section'].style.display, '');
-	assert.strictEqual(els['rate-limit-bar-hour'].style.width, '80%');
-	assert.strictEqual(els['rate-limit-bar-hour'].style.backgroundColor, '#e6a817');
-	assert.strictEqual(els['rate-limit-text-hour'].textContent, '20 requests left/hour');
-	assert.strictEqual(els['rate-limit-bar-day'].style.backgroundColor, '#cc3300');
+	const rows = readRows(els['rate-limit-bars']);
+	assert.strictEqual(rows[0].width, '80%');
+	assert.strictEqual(rows[0].color, '#e6a817');
+	assert.strictEqual(rows[0].text, '20 requests left/hour');
+	assert.strictEqual(rows[1].color, '#cc3300');
 	fake.rateLimitAvailable = false;
 	ctx.ZoteroRAGDialog.updateRateLimitDisplay.call(fake);
 	assert.strictEqual(els['rate-limit-section'].style.display, 'none');

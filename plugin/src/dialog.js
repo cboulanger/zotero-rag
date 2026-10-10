@@ -73,7 +73,7 @@ var ZoteroRAGDialog = {
 	rateLimitAvailable: false,
 
 	/** @type {Record<string,string>|null} */
-	rateLimitHeaders: null,
+	rateLimitMeters: null,
 
 	/** @type {AbortController|null} */
 	abortController: null,
@@ -458,7 +458,7 @@ var ZoteroRAGDialog = {
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
-					this.fetchRateLimitHeaders();
+					this.fetchRateLimitMeters();
 				}
 			}
 		} catch (error) {
@@ -821,18 +821,18 @@ var ZoteroRAGDialog = {
 	 * @returns {void}
 	 */
 	/** @returns {Promise<void>} */
-	async fetchRateLimitHeaders() {
+	async fetchRateLimitMeters() {
 		if (!this.plugin) return;
-		const headers = await ZoteroRAGRateLimitWidget.fetch(this.plugin);
-		if (headers) {
-			this.rateLimitHeaders = headers;
+		const meters = await ZoteroRAGRateLimitWidget.fetch(this.plugin);
+		if (meters) {
+			this.rateLimitMeters = meters;
 			this.updateRateLimitDisplay();
 		}
 	},
 
 	updateRateLimitDisplay() {
 		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
-		ZoteroRAGRateLimitWidget.render(document, this.rateLimitHeaders, { visible: show });
+		ZoteroRAGRateLimitWidget.render(document, this.rateLimitMeters, { visible: show });
 	},
 
 	/**
@@ -1906,8 +1906,8 @@ var ZoteroRAGDialog = {
 							return null;
 						}
 					},
-					onRateLimitUpdate: (headers) => {
-						this.rateLimitHeaders = headers;
+					onRateLimitUpdate: (meters) => {
+						this.rateLimitMeters = meters;
 						this.updateRateLimitDisplay();
 					},
 				});
@@ -1959,8 +1959,8 @@ var ZoteroRAGDialog = {
 				}
 
 				// Update rate limit display from headers returned by this indexing run
-				if (indexResult.rateLimitHeaders) {
-					this.rateLimitHeaders = indexResult.rateLimitHeaders;
+				if (indexResult.rateLimitMeters) {
+					this.rateLimitMeters = indexResult.rateLimitMeters;
 					this.updateRateLimitDisplay();
 				}
 
@@ -2067,7 +2067,7 @@ var ZoteroRAGDialog = {
 		}
 
 		if (this.rateLimitAvailable) {
-			this.fetchRateLimitHeaders();
+			this.fetchRateLimitMeters();
 		}
 
 		if (indexingErrors.length > 0) {
