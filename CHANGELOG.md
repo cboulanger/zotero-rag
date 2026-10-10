@@ -1,3 +1,19 @@
+# [1.60.0](https://github.com/cboulanger/zotero-rag/compare/v1.59.0...v1.60.0) (2026-10-10)
+
+
+### Bug Fixes
+
+* **scripts:** persist embedding model across rotated log file boundaries ([054d45d](https://github.com/cboulanger/zotero-rag/commit/054d45da5e9934abcfe0ef17c9c2e0acdab58b6c))
+
+
+### Features
+
+* credential scopes, keys out of the environment, default preset and per-user preset choice ([#74](https://github.com/cboulanger/zotero-rag/issues/74)) ([464206f](https://github.com/cboulanger/zotero-rag/commit/464206f00fd0f73bad3db823b16c903408dfcf40))
+* Hugging Face provider, pause/resume and endpoint readiness ([#76](https://github.com/cboulanger/zotero-rag/issues/76)) ([9ff0be1](https://github.com/cboulanger/zotero-rag/commit/9ff0be19ea42089f6edee5a0be2f1dbe5c1e50d7))
+* **indexing:** guard Kreuzberg against pathological scans and quarantine repeatedly failing attachments ([8b35032](https://github.com/cboulanger/zotero-rag/commit/8b350327f34cc821f243dafd6de491479e2e6153))
+* provider abstraction layer with per-side providers, provisioning and usage meters ([#73](https://github.com/cboulanger/zotero-rag/issues/73)) ([3e03308](https://github.com/cboulanger/zotero-rag/commit/3e03308d084b222e2fa37dff861225fea39a6c21))
+* provider descriptors API and per-side model sections in the plugin ([#75](https://github.com/cboulanger/zotero-rag/issues/75)) ([aefc6e6](https://github.com/cboulanger/zotero-rag/commit/aefc6e693801ae8fad3fb7e51ab3a596690e63fb))
+
 # [1.59.0](https://github.com/cboulanger/zotero-rag/compare/v1.58.0...v1.59.0) (2026-10-09)
 
 
