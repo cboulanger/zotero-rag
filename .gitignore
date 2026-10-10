@@ -70,3 +70,6 @@ node_modules
 .claude/settings.local.json
 # Visual brainstorming companion scratch files
 .superpowers/
+
+# Local git worktrees
+.worktrees/
