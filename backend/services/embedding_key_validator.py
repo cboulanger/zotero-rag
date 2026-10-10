@@ -8,7 +8,7 @@ let a later cron run re-discover any real problem.
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import EmbeddingAuthenticationError, create_embedding_service
@@ -25,16 +25,22 @@ class EmbeddingKeyValidation:
     reason: Optional[str] = None
 
 
-async def validate_embedding_key(api_key: str, config: EmbeddingConfig) -> EmbeddingKeyValidation:
-    """Validate `api_key` against the configured remote embedding provider."""
-    key_name = config.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
+async def validate_embedding_key(
+    api_key: str, config: EmbeddingConfig, provider: Optional[Any] = None
+) -> EmbeddingKeyValidation:
+    """Validate `api_key` against the configured remote embedding provider.
+
+    ``provider`` is the side's provider: one that derives the endpoint from the key
+    (RunPod, Hugging Face) needs it, else the call would go to the OpenAI default URL.
+    """
+    key_name = config.model_kwargs.get("api_key_env") or ""
     if config.model_type != "remote":
         return EmbeddingKeyValidation(
             status="unverified",
             key_name=key_name,
             reason="Cannot validate an embedding key against a non-remote model config.",
         )
-    service = create_embedding_service(config, api_key=api_key)
+    service = create_embedding_service(config, api_key=api_key, provider=provider)
     try:
         await service.embed_text("test")
     except EmbeddingAuthenticationError as exc:

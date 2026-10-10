@@ -421,13 +421,12 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_openai_cls.call_args
         self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
 
-    async def test_get_client_falls_back_to_env_when_shared_store_empty(self):
+    async def test_get_client_ignores_shared_values_set_only_in_the_environment(self):
         import os
         import tempfile
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as tmp:
-            data_path = Path(tmp)
             with patch.dict(os.environ, {
                 "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/from-env/v1",
                 "MPCDF_EMBEDDING_API_KEY": "env-key",
@@ -440,12 +439,18 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
                         "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY",
                     },
                 )
-                service = RemoteEmbeddingService(config, data_path=data_path)
-                with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                service = RemoteEmbeddingService(config, data_path=Path(tmp))
+                with self.assertRaises(EmbeddingConfigurationError):
                     service._get_client()
-                    _, kwargs = mock_openai_cls.call_args
-        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/from-env/v1")
-        self.assertEqual(kwargs["api_key"], "env-key")
+
+    async def test_get_client_ignores_a_personal_key_set_only_in_the_environment(self):
+        import os
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "from-env"}):
+            with self.assertRaises(EmbeddingConfigurationError):
+                RemoteEmbeddingService(config)._get_client()
 
     async def test_get_client_raises_clear_error_when_shared_base_url_unset(self):
         import tempfile
@@ -475,9 +480,8 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
         config = EmbeddingConfig(
             model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
-            service = RemoteEmbeddingService(config)
-            service._get_client()
+        service = RemoteEmbeddingService(config, api_key="k")
+        service._get_client()
         self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 120.0)
 
     @patch("openai.AsyncOpenAI")
@@ -486,9 +490,8 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
             model_type="remote", model_name="openai",
             model_kwargs={"api_key_env": "OPENAI_API_KEY", "timeout": 30},
         )
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "k"}):
-            service = RemoteEmbeddingService(config)
-            service._get_client()
+        service = RemoteEmbeddingService(config, api_key="k")
+        service._get_client()
         self.assertEqual(mock_openai_cls.call_args.kwargs["timeout"], 30.0)
 
     async def test_get_client_raises_configuration_error_when_shared_api_key_unset(self):
@@ -509,13 +512,25 @@ class TestRemoteEmbeddingService(unittest.IsolatedAsyncioTestCase):
                 service._get_client()
         self.assertIn("MPCDF_EMBEDDING_API_KEY", str(ctx.exception))
 
-    async def test_get_client_raises_configuration_error_when_default_api_key_unset(self):
-        config = EmbeddingConfig(model_type="remote", model_name="openai")
+    async def test_get_client_raises_configuration_error_when_the_named_api_key_is_unset(self):
+        config = EmbeddingConfig(
+            model_type="remote", model_name="openai", model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+        )
         with patch.dict(os.environ, {}, clear=True):
             service = RemoteEmbeddingService(config)
             with self.assertRaises(EmbeddingConfigurationError) as ctx:
                 service._get_client()
         self.assertIn("OPENAI_API_KEY", str(ctx.exception))
+
+    @patch("openai.AsyncOpenAI")
+    async def test_get_client_without_a_declared_key_uses_a_placeholder(self, mock_openai_cls):
+        """A generic OpenAI-compatible server that declares no key needs none."""
+        config = EmbeddingConfig(
+            model_type="remote", model_name="local-embedder", model_kwargs={"base_url": "http://localhost:8000/v1"},
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            RemoteEmbeddingService(config)._get_client()
+        self.assertEqual(mock_openai_cls.call_args.kwargs["api_key"], "not-needed")
 
     @patch("openai.AsyncOpenAI")
     async def test_embed_text_returns_correct_dimension(self, mock_openai_cls):
@@ -708,11 +723,25 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(result)
 
-    async def test_generic_500_exhausts_retries_then_raises(self):
+    async def test_generic_500_exhausts_retries_then_raises_endpoint_unavailable(self):
+        """A 5xx that never recovers is a systemic endpoint problem (e.g. a
+        provider's upstream gateway failing, not this request's content), so
+        it must be wrapped the same way APIConnectionError/APIStatusError
+        already are — not left as the raw SDK exception.
+
+        Regression: CronIndexer._drain_pending_uploads exempts
+        EmbeddingEndpointUnavailableError (and other systemic types) from
+        counting toward a pending-upload entry's quarantine threshold. A raw
+        OpenAIInternalServerError falls outside that exemption set, so a
+        perfectly good document could get permanently quarantined and tagged
+        rag-failed purely because the embedding provider was flaky — observed
+        in production with a RunPod/Cloudflare 502 recurring across several
+        cron cycles on an attachment that extracted identically every time.
+        """
         service = self._make_service()
         mock_response = MagicMock()
         mock_response.headers = {}
-        exc = OpenAIInternalServerError("Error code: 500", response=mock_response, body=None)
+        exc = OpenAIInternalServerError("Error code: 502 - Bad gateway", response=mock_response, body=None)
 
         with patch.object(service, "_get_client") as mock_client_fn, \
              patch("asyncio.sleep", new_callable=AsyncMock):
@@ -720,7 +749,7 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
             mock_client_fn.return_value = mock_client
             mock_client.embeddings.with_raw_response.create = AsyncMock(side_effect=exc)
 
-            with self.assertRaises(OpenAIInternalServerError):
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
                 await service._create_embeddings_with_backoff(["hello"])
 
 

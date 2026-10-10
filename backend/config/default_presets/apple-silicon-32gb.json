@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "description": "Optimized for Apple Silicon Macs with 32GB RAM — local multilingual embeddings via MPS",
   "embedding": {
     "model_type": "local",

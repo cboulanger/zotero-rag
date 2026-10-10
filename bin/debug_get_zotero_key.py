@@ -44,6 +44,11 @@ def _main(argv: list[str]) -> int:
         help="Print the stored embedding/LLM provider key (e.g. KISSKI_API_KEY) instead "
              "of the Zotero API key. Prints 'NAME=value' so the key's env var name is visible.",
     )
+    parser.add_argument(
+        "--key-name", metavar="NAME",
+        help="With --embedding-key: which stored provider key to print (e.g. HF_API_TOKEN); "
+             "default is the first one by name. Use --list to see what a user has stored.",
+    )
     args = parser.parse_args(argv)
 
     from backend.services.secret_store import get_key_store
@@ -60,14 +65,15 @@ def _main(argv: list[str]) -> int:
 
     if args.list:
         for fp, _key, entry in entries:
-            print(f"{fp}  user_id={entry.get('user_id')}  targets={entry.get('targets')}")
+            names = sorted(entry.get("embedding_keys", {}))
+            print(f"{fp}  user_id={entry.get('user_id')}  targets={entry.get('targets')}  provider_keys={names}")
         return 0
 
     for fp, key, entry in entries:
         if args.user is not None and str(entry.get("user_id")) != str(args.user):
             continue
         if args.embedding_key:
-            result = store.get_decrypted_embedding_key(fp)
+            result = store.get_decrypted_embedding_key(fp, args.key_name)
             if result is None:
                 continue
             key_name, key_value = result

@@ -63,6 +63,8 @@
   </script>
   <style>
     /* Inline styles */
+    /* The window cannot be made smaller than its initial size (the footer would collapse). */
+    html { min-width: 600px; min-height: 600px; }
     body { margin: 0; padding: 20px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; height: 100vh; overflow: hidden; box-sizing: border-box; }
     .dialog-container { display: flex; flex-direction: column; height: 100%; }
     .dialog-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -234,21 +236,15 @@
 
     <!-- Dialog buttons -->
     <div id="input-buttons" class="dialog-buttons">
-      <span id="plugin-version" style="font-size: 11px; color: #999; align-self: center; margin-right: auto;"></span>
+      <span id="plugin-version" style="font-size: 11px; color: #999; align-self: center;"></span>
+      <span id="endpoint-status" style="flex: 1 1 0; min-width: 0; font-size: 12px; color: #b35c00; align-self: center; overflow-wrap: break-word;" role="status"></span>
       <label id="force-reindex-container" class="force-reindex-label" style="display: none; margin-right: auto; align-items: center;">
         <input type="checkbox" id="force-full-reindex" style="margin-right: 5px;"/>
         <span style="font-size: 13px; color: #666;">Force Full Reindex (Dev)</span>
       </label>
       <!-- Rate limit indicators (shown in Index mode when embedding has rate limits) -->
       <div id="rate-limit-section" style="display: none;">
-        <div class="rate-limit-row">
-          <div class="rate-limit-bar-track"><div id="rate-limit-bar-hour" class="rate-limit-bar"></div></div>
-          <span id="rate-limit-text-hour" class="rate-limit-text">— requests left/hour</span>
-        </div>
-        <div class="rate-limit-row">
-          <div class="rate-limit-bar-track"><div id="rate-limit-bar-day" class="rate-limit-bar"></div></div>
-          <span id="rate-limit-text-day" class="rate-limit-text">— requests left/day</span>
-        </div>
+        <div id="rate-limit-bars"></div>
       </div>
       <button id="autoindex-status-button" type="button" class="dialog-button" style="display: none;" title="Show server-side automatic indexing status">Indexing status</button>
       <button id="cancel-button" type="button" class="dialog-button" title="Close this dialog">Close</button>

@@ -32,6 +32,8 @@ from filelock import FileLock, Timeout
 from backend.api.document_upload import _execute_upload_impl
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
+from backend.providers import get_provider_or_none
+from backend.services.effective_preset import preset_for_target
 from backend.db.vector_store import VectorStore
 from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
@@ -41,6 +43,7 @@ from backend.services.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
+    RemoteEmbeddingService,
 )
 from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
 from backend.services import pending_upload_cache
@@ -76,6 +79,9 @@ _FATAL_UPLOAD_ERROR_TYPES = {
     "EmbeddingRateLimitExhaustedError",
     "KreuzbergUnavailableError",
 }
+
+
+_SYSTEMIC_EMBEDDING_ERROR_TYPES = _FATAL_UPLOAD_ERROR_TYPES - {"KreuzbergUnavailableError"}
 
 
 @dataclass
@@ -462,9 +468,12 @@ class CronIndexer:
 
                 rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:
-                    status["last_rate_limit_headers"] = rate_limit_headers
-                    status["last_rate_limit_headers_at"] = datetime.now(timezone.utc).isoformat()
-                    status["last_rate_limit_preset"] = get_settings().get_hardware_preset().name
+                    # Per side, so a later LLM-side capture can sit next to it.
+                    status.setdefault("last_usage", {})["embedding"] = {
+                        "headers": rate_limit_headers,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "preset": get_settings().get_hardware_preset().name,
+                    }
                 status["slugs"][slug_info.slug].update({
                     "status": "done",
                     "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -649,11 +658,21 @@ class CronIndexer:
                     # Either way, one bad entry must not abort the rest of this library's
                     # queue or any other library in the run.
                     self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), str(exc),
+                    )
                     failed += 1
                     continue
                 if result.status == "error":
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
+                    # Embedding auth/quota/endpoint failures say nothing about this file,
+                    # so they must not count toward quarantining it; a Kreuzberg outage
+                    # does (the file may be what crashed the sidecar).
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), result.message,
+                        result.error_type not in _SYSTEMIC_EMBEDDING_ERROR_TYPES,
+                    )
                     failed += 1
                     if result.error_type in _FATAL_UPLOAD_ERROR_TYPES:
                         # A systemic failure — bad/rate-limited credentials, or
@@ -733,8 +752,22 @@ class CronIndexer:
                 if control.get("skip_slug") == slug_info.slug:
                     raise SlugSkipRequested(slug_info.slug)
 
-        preset = get_settings().get_hardware_preset()
-        embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
+        preset = preset_for_target(get_settings(), target)
+        embedding_service = create_embedding_service(
+            preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
+            provider=get_provider_or_none(preset, "embedding"),
+        )
+
+        if isinstance(embedding_service, RemoteEmbeddingService) and await embedding_service.is_paused():
+            # The owner paused the endpoint on purpose: skip their libraries without calling it
+            # (and without touching their key's status or any pending upload's attempt count).
+            reason = "embedding_paused"
+            self.log.warning("Embedding endpoint is paused for %s; skipping.", slug_info.slug)
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = reason
+            status["slugs"][slug_info.slug]["skip_detail"] = "The embedding endpoint is paused; resume it in Preferences."
+            self._write_status(status)
+            return {"status": "skipped", "skip_reason": reason}
 
         try:
             # Inside the try (not before it): progress_callback can now raise
@@ -790,7 +823,7 @@ class CronIndexer:
         except EmbeddingAuthenticationError as exc:
             fp = target.get("fingerprint")
             if fp and self.key_store:
-                self.key_store.set_embedding_key_status(fp, "invalid")
+                self.key_store.set_embedding_key_status(fp, "invalid", key_name=target.get("embedding_key_name"))
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
@@ -821,7 +854,8 @@ class CronIndexer:
             fp = target.get("fingerprint")
             if fp and self.key_store:
                 self.key_store.set_embedding_key_status(
-                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat()
+                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat(),
+                    key_name=target.get("embedding_key_name"),
                 )
             self.log.warning(
                 "Embedding quota exhausted for %s: available again at %s", slug_info.slug, exc.available_at

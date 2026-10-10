@@ -7,6 +7,7 @@ hardware presets and storage paths.
 
 import logging
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Optional
 from pydantic import Field, field_validator, model_validator
@@ -17,6 +18,10 @@ from backend.__version__ import __version__
 from .presets import HardwarePreset, get_preset, ensure_default_presets
 
 logger = logging.getLogger(__name__)
+
+#: The preset bound to the current request by the auth middleware (see
+#: backend.services.effective_preset); None means "the server default".
+_request_preset: ContextVar[Optional[HardwarePreset]] = ContextVar("request_preset", default=None)
 
 
 class Settings(BaseSettings):
@@ -65,8 +70,8 @@ class Settings(BaseSettings):
 
     # Model Configuration
     model_preset: str = Field(
-        default="cpu-only",
-        description="Hardware preset name"
+        default="remote-kisski",
+        description="Fallback default preset name, used until an admin sets the default via POST /api/config"
     )
 
     # Abstract fallback indexing
@@ -117,6 +122,23 @@ class Settings(BaseSettings):
         default=30 * 1024 ** 2,
         description="Target byte size of each part when splitting a large PDF. "
                     "Accepts '30MB', '500KB', or a raw byte count.",
+    )
+    pdf_scan_max_pages_per_part: int = Field(
+        default=50,
+        description="PDFs without a text layer (image-only scans, every page needs OCR) are split "
+                    "into parts of at most this many pages before being sent to kreuzberg. "
+                    "Byte size is a poor proxy for OCR memory cost, so this applies regardless "
+                    "of pdf_split_threshold.",
+    )
+    pdf_scan_max_pages: int = Field(
+        default=2000,
+        description="Hard cap on the page count of a PDF without a text layer. Larger scans are "
+                    "refused (skipped_too_costly, tagged rag-failed) and must be split manually.",
+    )
+    pending_upload_max_attempts: int = Field(
+        default=5,
+        description="A deferred upload that fails this many times is quarantined: it is no longer "
+                    "retried and its attachment is tagged rag-failed until the user removes the tag.",
     )
     kreuzberg_max_content_bytes: int = Field(
         default=200 * 1024 ** 2,
@@ -317,6 +339,11 @@ class Settings(BaseSettings):
         return self.data_path / "system" / "index_events.jsonl"
 
     @property
+    def failed_attachments_path(self) -> Path:
+        """Attachments refused for processing, tagged ``rag-failed`` (see FailedAttachmentStore)."""
+        return self.data_path / "system" / "failed_attachments.json"
+
+    @property
     def indexed_tag_runs_path(self) -> Path:
         """Directory of per-run JSON-lines files written by bin/sync_indexed_tags.py."""
         return self.data_path / "system" / "indexed_tag_sync"
@@ -332,7 +359,18 @@ class Settings(BaseSettings):
         return v_upper
 
     def get_hardware_preset(self) -> HardwarePreset:
-        """Get the configured hardware preset.
+        """The preset of the current request, or the server default outside one.
+
+        Within a request the auth middleware binds the user's effective preset
+        (backend.services.effective_preset); everywhere else (cron, CLI, startup)
+        this is :meth:`get_default_preset`. Admin-level code that means "the
+        server's default" calls that directly.
+        """
+        bound = _request_preset.get()
+        return bound.model_copy(deep=True) if bound is not None else self.get_default_preset()
+
+    def get_default_preset(self) -> HardwarePreset:
+        """Get the server's default hardware preset.
 
         An admin-set runtime override (backend.services.admin_settings_store,
         set via POST /api/config) takes precedence over MODEL_PRESET, letting
@@ -348,14 +386,14 @@ class Settings(BaseSettings):
         value is ignored with a warning rather than raising, since this is
         called from request-handling code, not just at startup.
         """
-        from backend.services.admin_settings_store import get_active_preset_override
-        override = get_active_preset_override(self.data_path)
+        from backend.services.admin_settings_store import get_default_preset
+        override = get_default_preset(self.data_path)
         if override:
             try:
                 preset = get_preset(override, self.data_path)
             except ValueError:
                 logger.warning(
-                    "active_preset_override=%r is not a known preset; falling back to MODEL_PRESET=%r",
+                    "default_preset=%r is not a known preset; falling back to MODEL_PRESET=%r",
                     override, self.model_preset,
                 )
                 preset = get_preset(self.model_preset, self.data_path)
@@ -396,16 +434,15 @@ class Settings(BaseSettings):
         allowing for flexible configuration without hardcoding provider-specific fields.
 
         Args:
-            env_var_name: Name of the environment variable (e.g., "OPENAI_API_KEY", "KISSKI_API_KEY")
+            env_var_name: Name of the environment variable (e.g., "HF_TOKEN"). Not for
+                provider API keys, which are never read from the environment
 
         Returns:
             API key if available, None otherwise
 
         Examples:
-            >>> settings.get_api_key("OPENAI_API_KEY")
-            "sk-..."
-            >>> settings.get_api_key("KISSKI_API_KEY")
-            "your-kisski-key"
+            >>> settings.get_api_key("HF_TOKEN")
+            "hf_..."
         """
         return os.getenv(env_var_name)
 

@@ -33,6 +33,7 @@ from backend.services.secret_store import get_key_store
 from backend.services.autoindex_resolver import is_embedding_key_usable
 from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
 from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
+from backend.providers import get_provider_or_none
 from backend.services.embedding_key_validator import validate_embedding_key
 from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.registration_service import RegistrationService
@@ -85,7 +86,9 @@ async def add_key(request: KeyRequest) -> dict:
     if request.embedding_api_key:
         settings = get_settings()
         preset = settings.get_hardware_preset()
-        emb_validation = await validate_embedding_key(request.embedding_api_key, preset.embedding)
+        emb_validation = await validate_embedding_key(
+            request.embedding_api_key, preset.embedding, get_provider_or_none(preset, "embedding")
+        )
         if emb_validation.status == "invalid":
             response["embedding_key_status"] = "invalid"
             response["embedding_key_error"] = emb_validation.reason
@@ -118,7 +121,7 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
     user_id to any caller who merely passed the instance-wide access gate.
     """
     store = _store()
-    all_keys = store.list_metadata()
+    all_keys = store.list_metadata(_active_key_name())
     if identity is None:
         return {"keys": all_keys}
     return {"keys": [k for k in all_keys if k.get("user_id") == identity.user_id]}
@@ -424,8 +427,13 @@ async def skip_slug(
     return {"skip_requested": True, "slug": body.slug}
 
 
+def _active_key_name() -> Optional[str]:
+    """Name of the personal provider key the active preset's embedding side uses, if any."""
+    return get_settings().get_hardware_preset().embedding.model_kwargs.get("api_key_env")
+
+
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
-    return next((k for k in store.list_metadata() if k["fingerprint"] == fp), None)
+    return next((k for k in store.list_metadata(_active_key_name()) if k["fingerprint"] == fp), None)
 
 
 def _embedding_key_block_reason(own: dict) -> Optional[str]:

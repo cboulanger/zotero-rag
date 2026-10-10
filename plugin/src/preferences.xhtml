@@ -47,39 +47,33 @@
     </html:div>
   </html:fieldset>
 
-  <!-- Active Model Preset (admin only; populated from the backend's compatible_presets) -->
+  <!-- Model preset: the caller's own choice and (admins) the server default -->
   <html:fieldset class="settings-group" id="zotero-rag-preset-group">
-    <html:legend>Active Model Preset</html:legend>
-    <html:div class="setting-row">
-      <html:label for="zotero-rag-preset-select">Preset:</html:label>
+    <html:legend>Model preset</html:legend>
+    <html:div class="setting-row" id="zotero-rag-preset-row">
+      <html:label for="zotero-rag-preset-select" id="zotero-rag-preset-label">Preset:</html:label>
       <html:select id="zotero-rag-preset-select" class="setting-input">
         <html:option value="">(not connected)</html:option>
       </html:select>
     </html:div>
     <html:div class="setting-description" id="zotero-rag-preset-description"></html:div>
+    <html:div id="zotero-rag-preset-keys"></html:div>
+    <html:div class="setting-row" id="zotero-rag-default-row" hidden="hidden">
+      <html:label for="zotero-rag-default-select">Server default:</html:label>
+      <html:select id="zotero-rag-default-select" class="setting-input"></html:select>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-default-help" hidden="hidden">
+      The preset every user runs on until they choose their own (admins only).
+    </html:div>
     <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
-    <html:div class="setting-description" id="zotero-rag-endpoint-health-embedding"></html:div>
-    <html:div class="setting-description" id="zotero-rag-endpoint-health-llm"></html:div>
-    <html:div class="setting-row" id="zotero-rag-provision-row" hidden="hidden">
-      <html:label for="zotero-rag-provision-key">Provisioning key:</html:label>
-      <html:input type="password" id="zotero-rag-provision-key" class="setting-input"
-                  placeholder="Optional — used once, never stored"/>
-      <html:button id="zotero-rag-provision-endpoints">Provision endpoints</html:button>
-    </html:div>
-    <html:div class="setting-description" id="zotero-rag-provision-help" hidden="hidden">
-      Creating endpoints may need a key with broader rights than the one used for queries.
-      Leave empty to use the stored API key.
-    </html:div>
-    <html:div class="setting-description" id="zotero-rag-provision-status"></html:div>
   </html:fieldset>
 
-  <!-- Service API Keys (populated dynamically from the backend's /api/required-keys) -->
-  <html:fieldset class="settings-group" id="zotero-rag-service-keys-group">
-    <html:legend>Service API Keys</html:legend>
-    <html:div id="zotero-rag-service-keys-container">
-      <html:div class="setting-description" id="zotero-rag-service-keys-placeholder">
-        No API keys required for this backend configuration, or not yet connected.
-      </html:div>
+  <!-- Per-side model configuration (rendered from the backend's provider descriptors) -->
+  <html:fieldset class="settings-group" id="zotero-rag-provider-group">
+    <html:legend>Models</html:legend>
+    <html:div id="zotero-rag-provider-sections"></html:div>
+    <html:div class="setting-description" id="zotero-rag-service-keys-placeholder">
+      No API keys required for this backend configuration, or not yet connected.
     </html:div>
   </html:fieldset>
 
@@ -109,10 +103,12 @@
     <html:legend>Indexed-status tags</html:legend>
 
     <html:div class="setting-description">
-      Mark attachments that are indexed with a "✅ rag-indexed" tag, which Zotero shows as a small
-      icon before the title. Tags are added as automatic tags, so Zotero's "Delete Automatic Tags
-      in This Library" also removes them; in group libraries they are visible to (and synced for)
-      all members.
+      Mark attachments that are indexed with a "✅ rag-indexed" tag, and attachments the server has
+      permanently refused to process (e.g. an oversized scan, or repeated failures) with a
+      "⚠️ rag-failed" tag, giving the reason. Zotero shows both as a small icon before the title.
+      Tags are added as automatic tags, so Zotero's "Delete Automatic Tags in This Library" also
+      removes them; in group libraries they are visible to (and synced for) all members. Removing
+      the "⚠️ rag-failed" tag asks the server to retry that attachment.
     </html:div>
 
     <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">

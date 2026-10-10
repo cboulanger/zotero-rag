@@ -9,9 +9,16 @@ directory — for any preset name not already present there — by
 on every startup, and again defensively from ``get_preset``/``list_presets``
 themselves on every call, so a caller that points ``data_path`` at a fresh
 directory without going through ``Settings.ensure_directories()`` first
-(e.g. a test fixture) still gets a working lookup. A user's edited or
-added preset file is never overwritten. See
-docs/superpowers/specs/2026-10-08-file-based-presets-design.md.
+(e.g. a test fixture) still gets a working lookup.
+
+Bundled presets are *always* re-seeded: a file with a bundled name is
+overwritten whenever its content differs from the shipped copy (a WARNING
+names the file when a local edit is discarded), so a schema change always
+reaches an existing deployment. To customise a preset, copy it to a new file
+name; such a custom file is never touched, but is checked against
+``PRESET_SCHEMA_VERSION`` and a mismatch is logged as a warning (it is not
+repaired). See docs/superpowers/specs/2026-10-08-file-based-presets-design.md
+and docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md.
 
 Loaded presets are cached in memory, keyed by (resolved data_path, name):
 once a preset file has been read and validated, every subsequent
@@ -43,8 +50,41 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PRESETS_DIR = Path(__file__).parent / "default_presets"
 
+# Bump on any breaking change to the preset *file* schema (a key removed,
+# renamed or changed in meaning); additive optional keys do not bump it.
+# Every bundled preset ships this version; a file without a "version" key is
+# treated as version 1 (the schema before per-side providers existed).
+PRESET_SCHEMA_VERSION = 2
+
+# Keys removed from the preset schema, by the version that removed them, as
+# (dotted path, replacement hint). A custom preset still containing one gets a
+# warning naming it; the key itself is ignored by the model.
+REMOVED_KEYS: dict[int, list[tuple[str, str]]] = {
+    2: [
+        ("provisioning_script", "provisioning is a provider capability; add a \"provider\" block to each side"),
+        ("embedding.health_check_provider", "health checks are a provider capability; add a \"provider\" block"),
+        ("llm.health_check_provider", "health checks are a provider capability; add a \"provider\" block"),
+        ("llm.models_status_url", "the live model list is a provider capability; add \"provider\": {\"id\": \"kisski\"} to the llm section"),
+    ],
+}
+
 _seeded_paths: set[Path] = set()
 _preset_cache: dict[tuple[Path, str], "HardwarePreset"] = {}
+_warned_custom_presets: set[Path] = set()
+
+
+class ProviderConfig(BaseModel):
+    """Which provider class serves one side (embedding or LLM) of a preset.
+
+    ``id`` selects a class from ``backend.providers`` by its registry id;
+    ``scope`` picks who supplies the credential (``None`` means the provider's
+    class default); ``options`` is opaque to core and validated by the
+    provider class itself.
+    """
+
+    id: str = "generic"
+    scope: Optional[Literal["user", "shared", "managed"]] = None
+    options: dict = Field(default_factory=dict)
 
 
 class EmbeddingConfig(BaseModel):
@@ -55,10 +95,9 @@ class EmbeddingConfig(BaseModel):
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
     batch_size: int = Field(default=32, description="Batch size for embedding generation")
     cache_enabled: bool = Field(default=True, description="Enable content-hash based caching")
-    health_check_provider: Optional[Literal["runpod"]] = Field(
-        default=None,
-        description="If set, GET /api/config/health checks this config's "
-                    "shared_base_url_env endpoint via this provider's health API.",
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving this side (see backend.providers).",
     )
 
 
@@ -72,14 +111,9 @@ class LLMConfig(BaseModel):
     max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
-    models_status_url: Optional[str] = Field(
-        default=None,
-        description="URL to query for per-model availability metrics (KISSKI format: POST → data[].{id, demand, status})",
-    )
-    health_check_provider: Optional[Literal["runpod"]] = Field(
-        default=None,
-        description="If set, GET /api/config/health checks this config's "
-                    "shared_base_url_env endpoint via this provider's health API.",
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving this side (see backend.providers).",
     )
 
     @field_validator("model_names", mode="before")
@@ -108,6 +142,10 @@ class HardwarePreset(BaseModel):
 
     name: str
     description: str
+    version: int = Field(
+        default=1,
+        description="Preset file schema version (PRESET_SCHEMA_VERSION); absent means 1.",
+    )
     embedding: EmbeddingConfig
     llm: LLMConfig
     rag: RAGConfig
@@ -119,15 +157,6 @@ class HardwarePreset(BaseModel):
                     "preset that needs Apple Silicon's MPS backend, or a Windows-oriented "
                     "preset) is hidden from listings shown to a client on any other "
                     "platform — see current_platform() and list_presets()'s platform= arg.",
-    )
-    provisioning_script: Optional[str] = Field(
-        default=None,
-        description="Repo-relative path to a script that provisions/wakes this "
-                    "preset's remote endpoint(s) (see docs/superpowers/specs/"
-                    "2026-10-09-endpoint-health-provisioning-design.md for the "
-                    "script's --json output contract). Presence of this field "
-                    "is what makes the Preferences pane show a 'Provision "
-                    "endpoints' button.",
     )
 
 
@@ -142,13 +171,20 @@ def current_platform() -> str:
     return _platform_module.system().lower()
 
 
+def _bundled_names() -> set[str]:
+    """File names (``<name>.json``) of the presets shipped with the backend."""
+    return {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+
+
 def ensure_default_presets(data_path: Path) -> None:
     """
     Seed <data_path>/presets/ with the bundled default preset files.
 
-    Copies each file under DEFAULT_PRESETS_DIR into the data directory only
-    if no file of that name exists there yet — a user's edited or deleted
-    preset is never touched or resurrected. A given data_path is seeded at
+    Every file under DEFAULT_PRESETS_DIR is written to the data directory
+    unless the bytes already there are identical. A bundled-name file whose
+    content differs (a local edit, or an older schema) is overwritten and a
+    WARNING names it; customise a preset by copying it to a new file name.
+    Files with other names are never touched. A given data_path is seeded at
     most once per process (cached by resolved path): get_preset/list_presets
     call this defensively on every invocation (see module docstring), and
     redoing the directory scan on every call would be wasted work once a
@@ -162,17 +198,27 @@ def ensure_default_presets(data_path: Path) -> None:
     presets_dir.mkdir(parents=True, exist_ok=True)
     for default_file in DEFAULT_PRESETS_DIR.glob("*.json"):
         target = presets_dir / default_file.name
+        content = default_file.read_bytes()
         if target.exists():
-            continue
-        # Copy via a temp file + atomic rename (same pattern as
+            try:
+                if target.read_bytes() == content:
+                    continue
+            except OSError:
+                pass  # unreadable: fall through and replace it
+            logger.warning(
+                "Bundled preset %s was modified locally; local changes were replaced. "
+                "To customise a preset, copy it to a new file name.",
+                target.name,
+            )
+        # Write via a temp file + atomic rename (same pattern as
         # admin_settings_store._atomic_write_json) rather than a direct
-        # shutil.copy, so a concurrent reader (e.g. another process sharing
+        # write, so a concurrent reader (e.g. another process sharing
         # this data_path, like the cron indexer) can never observe a
         # partially-written preset file.
         fd, tmp_path = tempfile.mkstemp(dir=presets_dir, suffix=".tmp", prefix=default_file.stem + "_")
         try:
             with os.fdopen(fd, "wb") as f:
-                f.write(default_file.read_bytes())
+                f.write(content)
             os.replace(tmp_path, target)
         except Exception:
             try:
@@ -182,6 +228,56 @@ def ensure_default_presets(data_path: Path) -> None:
             raise
 
     _seeded_paths.add(resolved)
+
+
+def _lookup_dotted(data: dict, dotted: str) -> bool:
+    """True if the dotted key path (e.g. ``llm.models_status_url``) is present."""
+    node: object = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _check_custom_preset(path: Path, data: dict) -> None:
+    """Warn (once per file per process) about a custom preset's schema drift.
+
+    A *custom* preset is any file whose name is not a bundled one. It still
+    loads; the warning only says what is likely to behave differently.
+    """
+    if path.name in _bundled_names():
+        return
+    resolved = path.resolve()
+    if resolved in _warned_custom_presets:
+        return
+    _warned_custom_presets.add(resolved)
+
+    declared = data.get("version", 1)
+    problems: list[str] = []
+    if declared != PRESET_SCHEMA_VERSION:
+        problems.append(
+            f"it declares version {declared!r}, the current version is {PRESET_SCHEMA_VERSION}; "
+            "fields may be ignored or behave differently (see the preset changelog in docs/presets.md)"
+        )
+    for removed_in, entries in REMOVED_KEYS.items():
+        if removed_in <= (declared if isinstance(declared, int) else 0):
+            continue
+        for dotted, hint in entries:
+            if _lookup_dotted(data, dotted):
+                problems.append(f"'{dotted}' was removed in version {removed_in} and is ignored ({hint})")
+    llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+    names = llm.get("model_names")
+    first_model = (names[0] if isinstance(names, list) and names else names) or ""
+    provider_id = (llm.get("provider") or {}).get("id", "generic") if isinstance(llm.get("provider"), dict) else "generic"
+    if isinstance(first_model, str) and "claude" in first_model.lower() and provider_id != "anthropic":
+        problems.append(
+            f"LLM model {first_model!r} looks like a Claude model but its provider is {provider_id!r}; "
+            "models are no longer routed to Anthropic by name - set "
+            '"provider": {"id": "anthropic"} on the llm section'
+        )
+    if problems:
+        logger.warning("Custom preset %s: %s.", path.name, "; ".join(problems))
 
 
 def _load_preset_file(path: Path) -> HardwarePreset:
@@ -203,9 +299,11 @@ def _load_preset_file(path: Path) -> HardwarePreset:
         raise ValueError(f"Preset file '{path}' must contain a JSON object")
     data["name"] = path.stem
     try:
-        return HardwarePreset.model_validate(data)
+        preset = HardwarePreset.model_validate(data)
     except Exception as exc:
         raise ValueError(f"Invalid preset file '{path}': {exc}") from exc
+    _check_custom_preset(path, data)
+    return preset
 
 
 def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
@@ -222,7 +320,8 @@ def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
         override — without corrupting the in-memory cache).
 
     Raises:
-        ValueError: If preset name is not found, or its file is malformed/invalid.
+        ValueError: If preset name is not found, its file is malformed/invalid,
+            or its providers break a load-time rule (see backend.providers).
     """
     if name != Path(name).name:
         # Rejects anything with a path separator or a ".."/"." component
@@ -249,6 +348,14 @@ def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
         raise ValueError(f"Unknown preset '{name}'. Available: {available}")
 
     preset = _load_preset_file(path)
+    from backend.providers import apply_provider_defaults, provider_config_error
+
+    problem = provider_config_error(preset)
+    if problem:
+        raise ValueError(f"Preset '{name}' is unavailable: {problem}")
+    # Fill each provider's defaults (key patterns, default key names, key-portal
+    # links) into model_kwargs once, so the services keep reading model_kwargs only.
+    apply_provider_defaults(preset)
     _preset_cache[cache_key] = preset
     return preset.model_copy(deep=True)
 
@@ -283,12 +390,18 @@ def list_presets(data_path: Optional[Path] = None, *, platform: Optional[str] = 
     if not presets_dir.is_dir():
         return []
 
+    from backend.providers import provider_config_error
+
     names = []
     for path in sorted(presets_dir.glob("*.json")):
         try:
             preset = _load_preset_file(path)
         except ValueError as exc:
             logger.warning("Skipping invalid preset file: %s", exc)
+            continue
+        problem = provider_config_error(preset)
+        if problem:
+            logger.warning("Skipping unavailable preset %s: %s", path.name, problem)
             continue
         if platform is not None and preset.platform not in ("any", platform):
             continue

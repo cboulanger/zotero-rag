@@ -23,7 +23,7 @@ from backend.config.settings import Settings, get_settings, reset_settings
 from backend.services.zotero_identity import reset_identity_cache
 from backend.zotero.group_roles import reset_admin_role_cache
 
-# The 9 preset names this project ships as bundled defaults. Hardcoded (not
+# The preset names this project ships as bundled defaults. Hardcoded (not
 # derived from DEFAULT_PRESETS_DIR.glob(...)) so an accidental deletion of
 # one of these files is actually caught — a count/name comparison against
 # the same glob the code under test reads would be circular and could never
@@ -33,11 +33,11 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "high-memory",
     "cpu-only",
     "remote-openai",
-    "apple-silicon-kisski",
     "remote-kisski",
     "cloud-server-kisski",
     "windows-test",
     "remote-mpcdf",
+    "huggingface",
     "runpod",
 }
 
@@ -128,14 +128,24 @@ class TestPresets(unittest.TestCase):
             get_preset("remote-kisski", self.data_path).embedding.model_name,
         )
 
-    def test_get_preset_runpod_uses_shared_dynamic_fields(self):
-        """runpod has no static base_url — both the embedding and LLM endpoint
-        URLs are only known after bin/provision_runpod_endpoints.py creates
-        them, so (like remote-mpcdf) they're resolved at request time from the
-        shared admin-set store rather than baked into the preset."""
+    def test_get_preset_runpod_is_a_user_scope_preset_with_derived_urls(self):
+        """runpod has no static base_url: each user's endpoints live in their own
+        RunPod account and the URL is found from their key."""
         preset = get_preset("runpod", self.data_path)
+        self.assertEqual(preset.embedding.provider.scope, "user")
+        self.assertEqual(preset.embedding.model_kwargs["api_key_env"], "RUNPOD_API_KEY")
+        self.assertNotIn("shared_base_url_env", preset.embedding.model_kwargs)
+        self.assertNotIn("shared_base_url_env", preset.llm.model_kwargs)
+        self.assertEqual(preset.llm.model_kwargs["api_key_env"], "RUNPOD_API_KEY")
 
-        self.assertEqual(preset.name, "runpod")
+    def test_managed_variant_uses_shared_dynamic_fields(self):
+        """An institution-funded copy (scope managed) resolves URL and key at
+        request time from the shared admin-set store."""
+        from backend.tests.runpod_variants import write_managed_runpod_preset
+        write_managed_runpod_preset(self.data_path)
+        preset = get_preset("runpod-managed", self.data_path)
+
+        self.assertEqual(preset.name, "runpod-managed")
         self.assertEqual(preset.embedding.model_type, "remote")
         self.assertEqual(preset.embedding.model_name, "intfloat/multilingual-e5-large-instruct")
         self.assertNotIn("base_url", preset.embedding.model_kwargs)
@@ -187,22 +197,6 @@ class TestPresets(unittest.TestCase):
         bundled_names = {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
         copied_names = {p.name for p in presets_dir.glob("*.json")}
         self.assertEqual(bundled_names, copied_names)
-
-    def test_ensure_default_presets_does_not_overwrite_existing_file(self):
-        """A user's edited preset file survives re-running the seeder (e.g. on
-        every backend startup)."""
-        presets_dir = self.data_path / "presets"
-        custom_content = (
-            '{"description": "edited by user", '
-            '"embedding": {"model_type": "local", "model_name": "x"}, '
-            '"llm": {"model_type": "local", "model_names": ["y"]}, '
-            '"rag": {}, "memory_budget_gb": 1.0}'
-        )
-        (presets_dir / "cpu-only.json").write_text(custom_content)
-
-        ensure_default_presets(self.data_path)
-
-        self.assertEqual((presets_dir / "cpu-only.json").read_text(), custom_content)
 
     def test_get_preset_raises_for_malformed_json(self):
         """A file that isn't valid JSON raises ValueError naming the file."""
@@ -272,7 +266,6 @@ class TestPresets(unittest.TestCase):
         linux_presets = list_presets(self.data_path, platform="linux")
 
         self.assertNotIn("windows-test", linux_presets)
-        self.assertNotIn("apple-silicon-kisski", linux_presets)
         self.assertNotIn("apple-silicon-32gb", linux_presets)
         self.assertIn("cpu-only", linux_presets)  # platform: "any"
         self.assertIn("remote-kisski", linux_presets)  # platform: "any"
@@ -281,13 +274,11 @@ class TestPresets(unittest.TestCase):
         windows_presets = list_presets(self.data_path, platform="windows")
 
         self.assertIn("windows-test", windows_presets)
-        self.assertNotIn("apple-silicon-kisski", windows_presets)
 
     def test_list_presets_with_no_platform_filter_returns_everything(self):
         unfiltered = list_presets(self.data_path)
 
         self.assertIn("windows-test", unfiltered)
-        self.assertIn("apple-silicon-kisski", unfiltered)
         self.assertIn("apple-silicon-32gb", unfiltered)
 
     def test_current_platform_matches_python_platform_module(self):
@@ -331,7 +322,7 @@ class TestSettings(unittest.TestCase):
 
             self.assertEqual(settings.api_host, "localhost")
             self.assertEqual(settings.api_port, 8119)
-            self.assertEqual(settings.model_preset, "cpu-only")
+            self.assertEqual(settings.model_preset, "remote-kisski")
             self.assertEqual(settings.log_level, "INFO")
             self.assertIsInstance(settings.version, str)
             self.assertTrue(len(settings.version) > 0)
@@ -388,12 +379,12 @@ class TestSettings(unittest.TestCase):
 
             self.assertEqual(preset.name, "cpu-only")
 
-    def test_get_hardware_preset_uses_active_preset_override_when_set(self):
-        from backend.services.admin_settings_store import set_active_preset_override
+    def test_get_hardware_preset_uses_default_preset_when_set(self):
+        from backend.services.admin_settings_store import set_default_preset
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
             settings.ensure_directories()
-            set_active_preset_override(settings.data_path, "remote-mpcdf")
+            set_default_preset(settings.data_path, "remote-mpcdf")
             self.assertEqual(settings.get_hardware_preset().name, "remote-mpcdf")
 
     def test_get_hardware_preset_falls_back_to_model_preset_when_no_override_set(self):
@@ -403,11 +394,11 @@ class TestSettings(unittest.TestCase):
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
 
     def test_get_hardware_preset_ignores_unknown_override(self):
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         with tempfile.TemporaryDirectory() as tmp:
             settings = Settings(model_preset="cpu-only", data_path=tmp)
             settings.ensure_directories()
-            set_active_preset_override(settings.data_path, "no-such-preset")
+            set_default_preset(settings.data_path, "no-such-preset")
             self.assertEqual(settings.get_hardware_preset().name, "cpu-only")
 
     def test_get_hardware_preset_applies_embedding_batch_size_env_override(self):
@@ -505,13 +496,12 @@ class TestConfigApi(unittest.TestCase):
         self.assertIn("remote-mpcdf", compatible)
         self.assertNotIn("remote-openai", compatible)  # different embedding model
         self.assertNotIn("cpu-only", compatible)  # local preset
-        # windows-test/apple-silicon-kisski share the embedding model too, but
-        # are each platform-gated (see test_get_config_hides_other_platforms_presets
-        # below) — only the one matching this host's actual platform shows up.
+        # windows-test shares the embedding model too, but
+        # is platform-gated (see test_get_config_hides_other_platforms_presets
+        # below) — it only shows up on a matching host.
         from backend.config.presets import current_platform
         host = current_platform()
         self.assertEqual("windows-test" in compatible, host == "windows")
-        self.assertEqual("apple-silicon-kisski" in compatible, host == "darwin")
 
     def test_get_config_lists_compatible_presets_includes_runpod_despite_hf_prefix(self):
         """runpod.json stores its embedding model as the full HuggingFace repo
@@ -532,7 +522,6 @@ class TestConfigApi(unittest.TestCase):
             r = self.client.get("/api/config")
         available = set(r.json()["available_presets"])
         self.assertNotIn("windows-test", available)
-        self.assertNotIn("apple-silicon-kisski", available)
         self.assertNotIn("apple-silicon-32gb", available)
         self.assertIn("remote-kisski", available)  # platform: "any"
         self.assertIn("cpu-only", available)  # platform: "any"
@@ -562,8 +551,9 @@ class TestConfigApi(unittest.TestCase):
     def test_post_config_switches_to_compatible_preset_as_admin(self):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        with patch.dict(os.environ, MPCDF_ENV):
-            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["preset_name"], "remote-mpcdf")
         r2 = self.client.get("/api/config")
@@ -583,9 +573,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_required_keys_reports_shared_kind_and_is_set_for_mpcdf(self):
         from backend.services.zotero_identity import ZoteroIdentity
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "remote-mpcdf")
         r = self.client.get("/api/required-keys")
         self.assertEqual(r.status_code, 200)
         by_key = {k["key_name"]: k for k in r.json()["keys"]}
@@ -609,9 +599,9 @@ class TestConfigApi(unittest.TestCase):
 
     def test_remote_fields_as_admin_sets_value_and_is_reflected_in_required_keys(self):
         from backend.services.zotero_identity import ZoteroIdentity
-        from backend.services.admin_settings_store import set_active_preset_override
+        from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_active_preset_override(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "remote-mpcdf")
         r = self.client.post(
             "/api/config/remote-fields",
             json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
@@ -657,7 +647,9 @@ class TestConfigApi(unittest.TestCase):
             "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/abc123/openai/v1",
             "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/def456/openai/v1",
         }, data_path=get_settings().data_path)
-        r = self.client.post("/api/config", json={"preset_name": "runpod"})
+        from backend.tests.runpod_variants import write_managed_runpod_preset
+        name = write_managed_runpod_preset(get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": name})
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_accepts_value_matching_declared_pattern(self):
@@ -688,9 +680,9 @@ class TestConfigApi(unittest.TestCase):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         with patch.dict(os.environ, {}, clear=False):
-            for name in ("RUNPOD_API_KEY", "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"):
-                os.environ.pop(name, None)
-            r = self.client.post("/api/config", json={"preset_name": "runpod"})
+            from backend.tests.runpod_variants import write_managed_runpod_preset
+            name = write_managed_runpod_preset(get_settings().data_path)
+            r = self.client.post("/api/config", json={"preset_name": name})
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_without_declared_pattern_accepts_any_value(self):
@@ -761,9 +753,15 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertNotIn("remote-mpcdf", by)
         self.assertIn("remote-mpcdf", body["compatible_presets"])
 
-    def test_shared_creds_via_env_make_preset_switchable(self):
+    def test_shared_creds_only_in_the_environment_are_ignored(self):
         with patch.dict(os.environ, MPCDF_ENV):
             by = self._names(self.client.get("/api/config").json())
+        self.assertNotIn("remote-mpcdf", by)
+
+    def test_shared_creds_in_the_store_make_preset_switchable(self):
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        by = self._names(self.client.get("/api/config").json())
         self.assertEqual(by["remote-mpcdf"]["credentials"], "ok")
         self.assertFalse(by["remote-mpcdf"]["active"])
 
@@ -782,12 +780,13 @@ class TestSwitchablePresets(unittest.TestCase):
             def __init__(self, h): self.headers = h
         self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
         self.assertEqual(_preset_credentials(preset, s, Req({"X-Kisski-Api-Key": "v"})), [])
-        with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):
-            self.assertEqual(_preset_credentials(preset, s, Req({})), [])
+        with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):  # the environment is never a key source
+            self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
         mp = get_preset("remote-mpcdf", s.data_path)
-        with patch.dict(os.environ, {"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}):
-            # LLM-side shared values still missing
-            self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config({"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}, data_path=s.data_path)
+        # LLM-side shared values still missing
+        self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
 
     def test_personal_key_via_stored_key_but_not_invalid(self):
         from backend.api.config import _preset_credentials
@@ -807,12 +806,11 @@ class TestSwitchablePresets(unittest.TestCase):
         store.set_embedding_key_status(fp, "ok")
         self.assertEqual(_preset_credentials(preset, s, Req()), [])
 
-    def test_post_rejects_missing_credentials_names_only(self):
+    def test_post_allows_switch_without_credentials(self):
+        """The preset's own sections ask for the keys; until then it is just not ready."""
         self._admin()
         r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
-        self.assertEqual(r.status_code, 400)
-        self.assertIn("MPCDF_EMBEDDING_BASE_URL", r.json()["detail"])
-        self.assertNotIn("http://x", r.json()["detail"])
+        self.assertEqual(r.status_code, 200, r.text)
 
     def test_post_success_resets_cache_and_clears_rate_limits(self):
         import backend.services.embeddings as emb
@@ -825,12 +823,14 @@ class TestSwitchablePresets(unittest.TestCase):
         fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
         store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY")
         store.set_embedding_key_status(fp, "rate_limited", "2999-01-01T00:00:00+00:00")
-        emb._last_rate_limit_headers = {"x-ratelimit-limit-hour": "1"}
+        from backend.services.usage_meters import recorder
+        recorder.record("embedding", {"x-ratelimit-limit-hour": "1"})
         self._admin()
-        with patch.dict(os.environ, MPCDF_ENV):
-            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        from backend.services.admin_settings_store import update_remote_config
+        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
-        self.assertIsNone(emb._last_rate_limit_headers)
+        self.assertEqual(recorder.latest("embedding"), (None, None))
         meta = store.list_metadata()[0]
         self.assertEqual(meta["embedding_key_status"], "ok")
         self.assertIsNone(meta["embedding_key_rate_limit_until"])
@@ -858,3 +858,21 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertEqual(store.clear_rate_limits(), 0)
         self.assertEqual(store.list_metadata()[0]["embedding_key_status"], "invalid")
         self.assertEqual(store.count_embedding_keys_by_name(), {})
+
+
+class TestBundledRunpodPreset(unittest.TestCase):
+    def test_runpod_json_is_v2_with_per_side_providers_and_validates(self):
+        import json
+        from backend.providers import get_providers
+        from backend.config.presets import HardwarePreset
+        raw = json.loads((Path(__file__).resolve().parents[1] / "config" / "default_presets" / "runpod.json").read_text())
+        self.assertEqual(raw["version"], 2)
+        for side in ("embedding", "llm"):
+            self.assertEqual(raw[side]["provider"]["id"], "runpod")
+            self.assertIn("options", raw[side]["provider"])
+            self.assertNotIn("health_check_provider", raw[side])
+            for key in raw[side].get("model_kwargs", {}):
+                self.assertFalse(key.endswith("_pattern"), key)  # patterns come from apply_defaults
+        self.assertNotIn("provisioning_script", raw)
+        providers = get_providers(HardwarePreset(name="runpod", **raw))
+        self.assertTrue(all(p.supports_provisioning for p in providers.values()))

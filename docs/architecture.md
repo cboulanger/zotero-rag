@@ -28,10 +28,10 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 
 - **Semantic Search**: Ask natural language questions about your research library
 - **Multi-Library Support**: Query across multiple Zotero libraries simultaneously
-- **Local & Remote LLMs**: Support for both local models (quantized) and remote APIs (OpenAI, Anthropic, KISSKI)
+- **Local & Remote Models**: Local models (quantized) or remote providers (OpenAI-compatible APIs, Anthropic, KISSKI, MPCDF, and self-provisioned RunPod / Hugging Face endpoints), chosen separately for embeddings and answers
 - **Smart Citations**: Answers include source citations with page numbers and text anchors
 - **Real-Time Progress**: Live progress updates during library indexing
-- **Flexible Configuration**: Hardware presets for different deployment scenarios
+- **Flexible Configuration**: JSON presets select a provider per side; each user can run on their own compatible preset and keys
 - **Remote Server Support**: Backend can run on a separate machine with optional API key authentication
 
 ### Technology Stack
@@ -112,8 +112,13 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Configuration API:** [backend/api/config.py](../backend/api/config.py)
 
-- `GET /api/config` - Get available presets and current configuration
-- `POST /api/config` - Update configuration settings
+- `GET /api/config` - Available presets, the server default and the compatible/switchable ones
+- `POST /api/config` - Admin: switch the server default preset (credentials are not required; the preset is simply not ready until they are set)
+- `GET /PUT /api/config/my-preset` - The caller's own preset choice among compatible presets
+- `GET /api/config/providers` - Per-side provider descriptors that drive the plugin's Models section
+- `GET /api/config/health` - Readiness of each remote side (`ready` / `cold` / `throttled` / `paused` / `unreachable`)
+- `POST /api/config/provision`, `POST /api/config/suspend` - Create/resume and pause an endpoint (background jobs, one per side and slot)
+- `POST /api/config/warmup` - Wake the caller's cold endpoints (called when the question dialog opens)
 - `GET /api/version` - Version compatibility checking (exempt from identity check)
 
 **Libraries API:** [backend/api/libraries.py](../backend/api/libraries.py)
@@ -165,7 +170,9 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 
 - Abstract interface for embedding generation
 - Local models via sentence-transformers
-- Remote APIs (OpenAI, Cohere)
+- Remote models through the side's provider (any OpenAI-compatible API); the caller's key comes from the request, a shared key from the admin store, never from the environment
+- A provider that derives the endpoint from the key (RunPod, Hugging Face) supplies the URL; lookups are cached per key and made off the event loop
+- Fails fast with a "paused" / "not provisioned" error instead of calling an endpoint that cannot answer
 - Content-hash based caching
 - Batch processing support
 
@@ -173,10 +180,16 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 
 - Abstract interface for LLM inference
 - Local models with transformers + quantization (4-bit, 8-bit)
-- Remote APIs (OpenAI, Anthropic, KISSKI)
+- Remote models through the side's provider (OpenAI-compatible APIs, Anthropic wire protocol), with the same credential, endpoint-lookup and paused handling as the embedding service
 - Lazy model loading
 - Device-aware (CPU, CUDA, MPS)
 - OpenAI-compatible API support
+
+**Providers:** [backend/providers/](../backend/providers/) — see [Providers](providers.md)
+
+- One small class per vendor owns everything vendor-specific about a side: credential scope, endpoint URL, usage meters, health, error classification, provisioning and pausing
+- The core never branches on a vendor name; services and API routes ask the side's provider
+- Supporting services: `endpoint_cache.py` (key-derived endpoint and paused-state caches), `provisioning.py` (background provision/pause jobs), `usage_meters.py` (quota bars), `effective_preset.py` (the per-request preset)
 
 **RAG Query Engine:** [backend/services/rag_engine.py](../backend/services/rag_engine.py)
 
@@ -224,13 +237,14 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 **Configuration System:**
 
 - **Presets:** [backend/config/presets.py](../backend/config/presets.py)
-  - Hardware presets: `apple-silicon-32gb`, `high-memory`, `cpu-only`, `remote-openai`, `apple-silicon-kisski`, `remote-kisski`, `windows-test`
-  - Model configurations for embeddings and LLMs
-  - Memory budgets and quantization settings
+  - JSON files, one per preset; each side (embedding, LLM) names a provider by id, so sides can mix providers
+  - Local presets (`apple-silicon-32gb`, `high-memory`, `cpu-only`), remote presets (`remote-openai`, `remote-kisski`, `remote-mpcdf`, `cloud-server-kisski`, `windows-test`) and self-provisioned ones (`runpod`, `huggingface`); see [Presets](presets.md)
+  - Model configurations, retrieval parameters, memory budgets and quantization settings
+- **Providers:** [backend/providers/](../backend/providers/), [Providers](providers.md)
+  - Validated per preset by `get_providers(preset)`; an invalid preset is not listed and cannot be activated
 - **Settings:** [backend/config/settings.py](../backend/config/settings.py)
-  - Environment variable configuration
-  - Path expansion for model weights and vector DB
-  - Dynamic API key handling
+  - Environment variable configuration (paths, deployment and access settings, `MODEL_PRESET`)
+  - Provider keys are never read from the environment
   - Remote deployment settings (`authorized_group_id`, `authorized_user_ids`, `allowed_origins`)
 
 ### Zotero Plugin
@@ -262,6 +276,7 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 
 - HTML5-based dialog (no XUL dependency)
 - Question input, library selection, progress display
+- Endpoint readiness: on open it checks `GET /api/config/health`; while a needed remote endpoint is cold, paused or unreachable, Submit/Index is disabled and a status message appears left of the buttons (indexing needs the embedding side, a question both). A cold endpoint is woken once through `POST /api/config/warmup` and re-checked every few seconds
 - Indexing mode selection (auto/incremental/full)
 - Library metadata display (last indexed, item counts, chunk counts)
 - Operation cancellation support (abort button)
@@ -284,6 +299,7 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
 - Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
+- Model preset group (server default for admins, "My preset" for users) and one **Models** section per side ([plugin/src/provider-sections.js](../plugin/src/provider-sections.js)) rendered entirely from the provider descriptors: key fields, health, Provision / Resume / Retry / Pause, and the in-memory management-token field (never saved)
 - Zotero API key configuration (`extensions.zotero-rag.zoteroApiKey`), with live identity status (username + accessible library count)
 - Max concurrent queries setting
 - HTML-based preferences pane
@@ -335,8 +351,11 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 1. User submits question with selected libraries
    ↓
 2. Plugin sends POST /api/query request
+   (the dialog has already checked endpoint health and warmed a cold endpoint)
    ↓
-3. Backend RAGEngine.query():
+3. The auth middleware binds the caller's effective preset (their own valid, compatible
+   preset, else the server default); embedding and LLM services resolve their provider,
+   key and endpoint from it. Then backend RAGEngine.query():
    a. Generate query embedding (EmbeddingService)
    b. Search vector store for similar chunks (top_k, min_score)
    c. Filter by library_ids
@@ -360,83 +379,32 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 
 ## Configuration System
 
-### Hardware Presets
+### Presets and Providers
 
-The system includes hardware presets optimized for different deployment scenarios:
+A preset is a JSON file that describes both sides of the pipeline (embedding model and LLM), the retrieval parameters and, for each remote side, a **provider** (a small Python class under `backend/providers/`). The full catalogue, the per-preset requirements and the schema are in [Presets](presets.md); the provider contract is in [Providers](providers.md).
 
-#### 1. `apple-silicon-32gb`
+**Credential scopes** (per side): `user` (each user's own key, sent with their requests), `managed` (an admin's key, the institution pays, admins operate the endpoint) and `shared` (set once by an admin for everyone). Keys are never read from the environment; users enter theirs in the plugin and admins set shared ones through `POST /api/config/remote-fields`. Secrets are encrypted at rest by `backend/services/secret_store.py`.
 
-- **Target:** Apple Silicon Macs with 32GB RAM
-- **Embedding:** nomic-ai/nomic-embed-text-v1.5 (Neural Engine, ~550MB)
-- **LLM:** Mistral-7B-Instruct-v0.3 (4-bit quantized, ~4GB)
-- **Total Memory:** ~10GB
-- **Device:** MPS (Apple Silicon GPU)
+**Default and per-user presets.** The server default comes from the stored admin choice, else `MODEL_PRESET`, else `remote-kisski`. A user may run on a different preset if both sides are remote and the embedding model is the same, so the vector space is shared. The auth middleware resolves the caller's preset for each request; the cron indexer records each owner's preset with their targets.
 
-#### 2. `high-memory`
+**Endpoint lifecycle.** Remote endpoints can be cold (scaled to zero, wakes on a request), paused on purpose (billing stopped, wakes only through Resume) or not provisioned. Providers that support it create, resume and pause endpoints as background jobs per side (`POST /api/config/provision` and `/suspend`); readiness is reported by `GET /api/config/health`. A paused embedding side makes automatic indexing skip that owner's libraries and makes queries fail at once with a clear message.
 
-- **Target:** Systems with >24GB RAM (GPU or Apple Silicon)
-- **Embedding:** sentence-transformers/all-mpnet-base-v2
-- **LLM:** Mistral-7B-Instruct-v0.3 (8-bit quantized)
-- **Total Memory:** ~16GB
-- **Device:** CUDA / auto
-
-#### 3. `cpu-only`
-
-- **Target:** Systems without GPU
-- **Embedding:** all-MiniLM-L6-v2 (~80MB)
-- **LLM:** TinyLlama-1.1B (4-bit quantized)
-- **Total Memory:** ~3GB
-- **Device:** CPU
-
-#### 4. `remote-openai`
-
-- **Target:** Using OpenAI or Anthropic APIs
-- **Embedding:** OpenAI Embeddings API (remote)
-- **LLM:** gpt-4o-mini or equivalent (remote)
-- **Total Memory:** ~1GB (minimal local requirements)
-- **API Key:** `OPENAI_API_KEY`
-
-#### 5. `apple-silicon-kisski`
-
-- **Target:** Apple Silicon (16–32GB) with GWDG KISSKI remote LLM
-- **Embedding:** nomic-ai/nomic-embed-text-v1.5 (local, Neural Engine)
-- **LLM:** mistral-large-instruct via KISSKI (remote, 128k context)
-- **Total Memory:** ~2GB
-- **API Key:** `KISSKI_API_KEY`
-
-#### 6. `remote-kisski`
-
-- **Target:** Any machine with GWDG KISSKI Academic Cloud
-- **Embedding:** all-MiniLM-L6-v2 (local, for privacy)
-- **LLM:** mistral-large-instruct via KISSKI (remote, 128k context)
-- **Total Memory:** ~1GB
-- **API Key:** `KISSKI_API_KEY`
-- **Base URL:** `https://chat-ai.academiccloud.de/v1`
-
-#### 7. `windows-test`
-
-- **Target:** Windows (avoids PyTorch local models)
-- **Embedding:** OpenAI Embeddings API (remote)
-- **LLM:** mistral-large-instruct via KISSKI (remote)
-- **Total Memory:** ~0.5GB (everything remote)
-- **API Keys:** `OPENAI_API_KEY`, `KISSKI_API_KEY`
+**Usage meters.** Providers parse their quota headers into per-side, per-key meters that the plugin draws as bars.
 
 ### Configuration Files
 
 **.env (from .env.dist template):**
 
 ```bash
-# Hardware preset selection
+# Default preset (an admin can change it at runtime in the plugin)
 MODEL_PRESET=cpu-only
 
 # Storage paths
 MODEL_CACHE_DIR=~/.cache/zotero-rag/models
 VECTOR_DB_PATH=~/.local/share/zotero-rag/qdrant
 
-# API keys (for remote presets)
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-KISSKI_API_KEY=your-kisski-key
+# Provider API keys are not set here: users enter them in the plugin's
+# Preferences, and admins set shared ones via POST /api/config/remote-fields.
 
 # Qdrant vector database (optional — omit for local embedded mode)
 QDRANT_URL=http://qdrant:6333    # Set when running Qdrant as a sidecar container
@@ -529,14 +497,15 @@ The `backendURL` preference is the single configuration point for server locatio
 
 ### 5. LLM Flexibility
 
-**Decision:** Support both local (quantized) and remote (API) models
+**Decision:** Support local (quantized) and remote models behind one provider abstraction, chosen per side
 
 **Rationale:**
 
 - Local: Privacy, no cost, offline capability
 - Remote: Higher quality, no hardware requirements
-- Hardware presets make configuration easy
-- Users choose based on their needs
+- Everything vendor-specific lives in a provider class selected by a preset's JSON, so adding a vendor never touches core code and a preset can mix providers (for example local embeddings with a hosted LLM)
+- Credential scopes let a user pay for their own endpoints, an institution pay for shared ones, or an admin share a free service
+- Presets make configuration easy, and each user can choose a compatible one
 
 ### 6. Plugin UI Technology
 
@@ -684,7 +653,7 @@ The `backendURL` preference is the single configuration point for server locatio
 - `apple-silicon-32gb`: ~10GB
 - `high-memory`: ~16GB
 - `cpu-only`: ~3GB
-- `remote-*` / `windows-test`: ~0.5–2GB (minimal local)
+- Remote presets (`remote-*`, `runpod`, `huggingface`, `windows-test`): ~0.5–2GB (minimal local); the models run on the provider's side
 
 **Strategies:**
 

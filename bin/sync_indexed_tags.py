@@ -85,6 +85,7 @@ async def _main(argv: list[str] | None = None) -> int:
 
     from backend.config.settings import get_settings
     from backend.dependencies import make_vector_store
+    from backend.services.failed_attachments import get_failed_store
     from backend.services.index_event_log import INDEXED_TAG_NAME, IndexEventLog
     from backend.services.indexed_tag_sync import IndexedTagSync, JsonLinesWriter
     from backend.zotero.web_api import ZoteroWebAPI
@@ -117,6 +118,7 @@ async def _main(argv: list[str] | None = None) -> int:
             web_api_factory=lambda slug: ZoteroWebAPI(api_key=keys[slug]),
             writer_factory=(lambda slug: ZoteroWebAPI(api_key=args.write_api_key)) if args.write_api_key else None,
             dry_run=args.dry_run,
+            failed_store=get_failed_store(),
         )
         totals = await sync.run(slugs)
         emit({"type": "done", "finished_at": datetime.now(timezone.utc).isoformat(), **totals})

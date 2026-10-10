@@ -33,7 +33,8 @@ function loadDialog(elements = {}) {
 	global.window = { confirm: () => true, addEventListener: () => {} };
 	const context = {
 		document: {
-			getElementById: (id) => elements[id] || { addEventListener: () => {}, style: {} },
+			getElementById: (id) => elements[id] || { ...require('./fake-dom.js').fakeNode(), addEventListener: () => {} },
+			createElementNS: (ns, tag) => require('./fake-dom.js').createElementNS(ns, tag),
 			// Minimal stand-in so renderLibraries/renderProblems/etc. (which
 			// build rows via document.createElement) can run against non-empty
 			// data without a real DOM — just enough surface (className,
@@ -374,10 +375,12 @@ test('render leaves per-slug status untouched once the pending run is confirmed 
 
 // --- Rate-limit widget in the Status section ---------------------------------
 
-const HEADERS = {
-	'x-ratelimit-limit-hour': '100', 'x-ratelimit-remaining-hour': '40',
-	'x-ratelimit-limit-day': '1000', 'x-ratelimit-remaining-day': '10',
-};
+const { fakeNode, createElementNS, readRows } = require('./fake-dom.js');
+
+const HEADERS = [
+	{ id: 'requests/hour', side: 'embedding', unit: 'requests', period: 'hour', limit: 100, remaining: 40 },
+	{ id: 'requests/day', side: 'embedding', unit: 'requests', period: 'day', limit: 1000, remaining: 10 },
+];
 
 /** Fake element with a style bag; id-keyed registry for the rate-limit/preset markup. */
 function fakeEl(extra = {}) {
@@ -385,10 +388,10 @@ function fakeEl(extra = {}) {
 }
 
 function statusElements() {
-	const ids = ['ai-rate-limit-section', 'ai-rate-limit-bar-hour', 'ai-rate-limit-text-hour',
-		'ai-rate-limit-bar-day', 'ai-rate-limit-text-day', 'ai-rate-limit-asof', 'rate-limit-banner',
+	const ids = ['ai-rate-limit-section', 'ai-rate-limit-asof', 'rate-limit-banner',
 		'admin-preset-row', 'admin-preset-status', 'run-banner', 'admin-controls', 'run-now-button', 'admin-run-now-button'];
 	const els = Object.fromEntries(ids.map((id) => [id, fakeEl()]));
+	els['ai-rate-limit-bars'] = fakeNode();
 	els['admin-preset-select'] = fakeEl({ value: '', disabled: false, title: '', innerHTML: '', options: [] });
 	return els;
 }
@@ -421,11 +424,12 @@ test('rate-limit widget stays hidden when rate_limits.available is false', () =>
 test('rate-limit widget shows bars from data.rate_limits', () => {
 	const els = statusElements();
 	const dialog = widgetDialog(els);
-	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: true, limits: HEADERS, source: 'run' } });
+	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: true, meters: HEADERS, source: 'run' } });
 	assert.strictEqual(els['ai-rate-limit-section'].style.display, '');
-	assert.strictEqual(els['ai-rate-limit-bar-hour'].style.width, '60%');
-	assert.strictEqual(els['ai-rate-limit-text-hour'].textContent, '40 requests left/hour');
-	assert.strictEqual(els['ai-rate-limit-bar-day'].style.backgroundColor, '#cc3300');
+	const rows = readRows(els['ai-rate-limit-bars']);
+	assert.strictEqual(rows[0].width, '60%');
+	assert.strictEqual(rows[0].text, '40 requests left/hour');
+	assert.strictEqual(rows[1].color, '#cc3300');
 });
 
 test('rate-limit widget falls back once to GET /api/rate-limits when status has no limits', async () => {
@@ -434,7 +438,7 @@ test('rate-limit widget falls back once to GET /api/rate-limits when status has 
 	const urls = [];
 	global.fetch = async (url) => {
 		urls.push(url);
-		return { ok: true, json: async () => ({ available: true, limits: HEADERS }) };
+		return { ok: true, json: async () => ({ available: true, meters: HEADERS }) };
 	};
 	const data = { enabled: true, keys_registered: 1, rate_limits: { available: false } };
 	dialog.render(data);
@@ -519,13 +523,13 @@ test('switchPreset POSTs, then refreshes presets and status on success', async (
 		if (url.endsWith('/api/config')) return { ok: true, json: async () => ({ switchable_presets: PRESETS }) };
 		return { ok: true, json: async () => ({ enabled: true, keys_registered: 1, rate_limits: { available: false } }) };
 	};
-	dialog.rateLimitHeaders = HEADERS;
+	dialog.rateLimitMeters = HEADERS;
 	await dialog.switchPreset('remote-mpcdf');
 	assert.deepStrictEqual(JSON.parse(calls[0].body), { preset_name: 'remote-mpcdf' });
 	assert.strictEqual(els['admin-preset-status'].textContent, 'Switched.');
 	assert.ok(calls.some((c) => c.url.endsWith('/api/autoindex/status')));
 	assert.ok(calls.filter((c) => c.url.endsWith('/api/config') && c.method === 'GET').length === 1);
-	assert.strictEqual(dialog.rateLimitHeaders, null);
+	assert.strictEqual(dialog.rateLimitMeters, null);
 	// Other open windows (the Preferences pane) are told to refresh.
 	assert.deepStrictEqual([...dialog.plugin.presetNotifications], ['autoindex-status']);
 });

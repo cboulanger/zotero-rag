@@ -41,6 +41,7 @@ from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
 from backend.services.secret_store import get_key_store
 from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+from backend.services.usage_meters import meters_from_headers
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -216,6 +217,14 @@ class CheckIndexedResponse(BaseModel):
     statuses: list[AttachmentIndexStatus]
 
 
+async def _usage_meters(embedding_service) -> list[dict] | None:
+    """Display meters for the headers the embedding service last saw (None when unknown)."""
+    headers = await embedding_service.get_rate_limit_info()
+    if not headers:
+        return None
+    return meters_from_headers(get_settings().get_hardware_preset(), "embedding", headers) or None
+
+
 class DocumentUploadResult(BaseModel):
     """Result returned after uploading a single document."""
 
@@ -226,7 +235,7 @@ class DocumentUploadResult(BaseModel):
     status: str  # "indexed" | "skipped_duplicate" | "error"
     message: str = ""
     rate_limit_retries: int = 0
-    rate_limit_headers: dict[str, str] | None = None
+    rate_limit_meters: list[dict] | None = None
     error_detail: Optional[str] = None
     # Set only on status="error": the raised exception's class name, and (for
     # EmbeddingRateLimitExhaustedError specifically) its available_at as an ISO
@@ -387,7 +396,7 @@ async def _execute_upload_impl(
     #
     # max_chunk_size/chunk_merge_target_size are tied to the active preset's
     # rag.max_chunk_size (hand-tuned per embedding model's real token limit —
-    # see e.g. the apple-silicon-kisski preset's comment) rather than left at
+    # see e.g. the remote-kisski preset's comment) rather than left at
     # DocumentProcessor's own generic defaults (512 chars / 1500 chars). Those
     # defaults are disconnected from any particular model: merging several
     # ~512-char extractor chunks up to a 1500-char target can produce a chunk
@@ -495,7 +504,7 @@ async def _execute_upload_impl(
     if proc_result.status in (
         "indexed_fresh", "copied_cross_library", "copied_same_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
-        "skipped_too_large",
+        "skipped_too_large", "skipped_too_costly", "skipped_failed",
     ):
         _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(
@@ -506,7 +515,7 @@ async def _execute_upload_impl(
         status=api_status,
         message=f"{api_status}: {chunks_added} chunks",
         rate_limit_retries=embedding_service.rate_limit_retries,
-        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        rate_limit_meters=await _usage_meters(embedding_service),
         error_detail=proc_result.error_detail,
     )
 
@@ -1025,7 +1034,8 @@ async def process_cached_upload_now(
 
     if result.status == "error":
         await asyncio.to_thread(
-            pending_upload_cache.record_failure, settings.data_path, library_id, attachment_key, result.message
+            pending_upload_cache.note_failure, settings, library_id, attachment_key,
+            meta.get("item_key"), result.message,
         )
     else:
         await asyncio.to_thread(pending_upload_cache.delete_entry, settings.data_path, library_id, attachment_key)
@@ -1174,7 +1184,7 @@ async def upload_and_index_abstract(
         status=status,
         message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
-        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        rate_limit_meters=await _usage_meters(embedding_service),
     )
 
 
