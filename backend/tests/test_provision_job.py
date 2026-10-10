@@ -317,7 +317,6 @@ class HealthEndpointTest(unittest.TestCase):
         get_settings().model_preset = "remote-kisski"
         r = self.client.get("/api/config/health")
         self.assertEqual(r.json(), {"embedding": None, "llm": None})
-        self.assertFalse(self.client.get("/api/config").json()["provisionable"])
 
     def test_runpod_reports_statuses(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
@@ -334,7 +333,6 @@ class HealthEndpointTest(unittest.TestCase):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"]["status"], "ready")
         self.assertEqual(r.json()["llm"]["status"], "cold")
-        self.assertTrue(self.client.get("/api/config").json()["provisionable"])
 
     def test_unconfigured_side_is_unreachable_not_null(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)

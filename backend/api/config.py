@@ -220,7 +220,6 @@ class ConfigResponse(BaseModel):
     model_cache_dir: str
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
-    provisionable: bool = False  # at least one side's provider can provision
     switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials (admin switch)
     default_preset: str = ""  # the server default; ``preset_name`` is this caller's effective preset
     selectable_presets: List[SwitchablePreset] = []  # presets this caller may choose for themselves
@@ -266,14 +265,6 @@ class RemoteFieldsUpdateRequest(BaseModel):
 class RemoteFieldsResponse(BaseModel):
     """Presence map after an update — never echoes the values themselves."""
     is_set: Dict[str, bool]
-
-
-def _is_provisionable(preset: HardwarePreset) -> bool:
-    """True when at least one side's provider can create or wake endpoints."""
-    try:
-        return any(p.supports_provisioning for p in get_providers(preset).values())
-    except ProviderConfigError:
-        return False
 
 
 def _llm_provider(preset: HardwarePreset) -> Optional[Provider]:
@@ -348,7 +339,6 @@ def get_config(request: Request):
         model_cache_dir=str(settings.model_weights_path),
         available_presets=available,
         compatible_presets=compatible,
-        provisionable=_is_provisionable(preset),
         switchable_presets=_switchable_presets(default, compatible, settings, request),
         default_preset=default.name,
         selectable_presets=selectable,

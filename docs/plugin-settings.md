@@ -19,13 +19,15 @@ setting.
 | **Zotero API Key** | Your personal [Zotero API key](https://www.zotero.org/settings/keys), used to authenticate you to a *remote* server and determine which libraries you're allowed to query. Not needed for a local (`localhost`) server — the field shows "Not required for a local server." in that case. A live status line confirms the key was accepted and shows how many libraries it can access. |
 | **Run Setup Wizard…** | Re-opens the same three-step wizard shown on first connection to a new server, in case you need to reconfigure from scratch. |
 
-### Service API Keys
+### Model preset
 
-Shown only when the backend's active preset needs one (e.g. a remote LLM or
-embedding provider like OpenAI or KISSKI). One field per required key, each with a
-link to where you can obtain it and a status line confirming whether the backend
-accepted it. These keys are sent to the backend on every request rather than stored
-there, so the backend operator never has to hold your provider credentials.
+**My preset** (**Preset** on a server running on your own machine) chooses the model set you use. Everyone starts on the server's default preset; you can switch to any other preset that works with the server's vector store. A preset that needs a key you have not entered is marked "needs a key": choosing it asks for the key first. Server admins also get **Server default**, which sets the preset everyone starts on. A saved choice that stops being available is reported and you fall back to the default.
+
+### Models
+
+One section each for the **Embedding model** and the **Answering model (LLM)** of your preset, showing the provider, who operates it (your own account, the server admin, or your institution) and its live status (`ready`, `cold`, `paused`, `throttled` or `unreachable`). Each section holds the API key fields that side needs, each with a link to where you can obtain it and a status line confirming whether the backend accepted it; your own keys are sent to the backend on every request rather than stored there, so the backend operator never has to hold your provider credentials.
+
+For an endpoint that can be provisioned (created, woken or resumed), the section offers **Provision endpoint** / **Resume** when the endpoint is not reachable, runs it on your own account (or, for an institution-funded one, only for admins), shows its progress, and offers **Retry** for just the side that failed. An optional key field takes a broader key for that one run; it is used once and never stored. Only one job per user runs at a time.
 
 ### Automatic indexing
 
