@@ -213,7 +213,7 @@ var ZoteroRAGProviderSections = {
 			const credInput = el('input', 'setting-input');
 			credInput.type = 'password';
 			credInput.id = `zotero-rag-side-${side}-credential`;
-			credInput.placeholder = 'Optional \u2014 kept in memory until Zotero closes, never saved';
+			credInput.placeholder = 'Optional \u2014 kept in memory only';
 			credLabel.setAttribute('for', credInput.id);
 			const credHelp = el('div', 'setting-description');
 			credRow.append(credLabel, credInput);
@@ -349,8 +349,8 @@ ZoteroRAGProviderSections.createController = function (deps) {
 			const input = deps.refs[side] && deps.refs[side].credInput;
 			if (!input) continue;
 			input.placeholder = credential && remembered.get(credential.env)
-				? 'Entered earlier this session (kept in memory only) \u2014 type to replace'
-				: 'Optional \u2014 kept in memory until Zotero closes, never saved';
+				? 'Entered earlier \u2014 type to replace'
+				: 'Optional \u2014 kept in memory only';
 		}
 	};
 

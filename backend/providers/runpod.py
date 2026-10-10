@@ -124,11 +124,11 @@ class RunPodProvider(Provider):
         descriptor.provisioning = ProvisioningDescriptor(
             credential=CredentialDescriptor(
                 env=env,
-                label="RunPod API key",
+                label="Provisioning API key",
                 help=(
-                    "Creating endpoints may need a key with broader rights than the one used for "
-                    "queries (an endpoint-restricted key cannot create or replace endpoints). "
-                    "Leave empty to use the stored key. A key entered here is kept in memory until Zotero closes and never saved."
+                    "Kept in memory until Zotero closes, never saved. Creating, replacing, resuming or pausing "
+                    "endpoints needs a full-access RunPod API key; the stored key used for queries may be "
+                    "restricted to the endpoints, which cannot do this. Leave empty to use the stored key."
                 ),
                 pattern=KEY_PATTERN,
                 optional=True,

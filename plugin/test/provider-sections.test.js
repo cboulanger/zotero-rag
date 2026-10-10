@@ -455,7 +455,7 @@ test('a management token typed once is remembered in memory and reused without r
 	await controller.provision('embedding', '');
 	const keys = backend.posts.map(([, b]) => b.keys && b.keys.SOME_API_KEY);
 	assert.deepStrictEqual(keys, ['k_secret', 'k_secret', 'k_secret']);
-	assert.match(refs.llm.credInput.placeholder, /Entered earlier this session/);
+	assert.match(refs.llm.credInput.placeholder, /Entered earlier/);
 });
 
 test('a token typed now replaces the remembered one, and a refused one is forgotten', async () => {
