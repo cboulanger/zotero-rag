@@ -373,3 +373,4 @@ def _isolated_failed_store(tmp_path, monkeypatch):
 
     monkeypatch.setattr(failed_attachments, "get_failed_store", _store)
     monkeypatch.setattr("backend.services.document_processor.get_failed_store", _store)
+    monkeypatch.setattr("backend.api.indexed_tags.get_failed_store", _store)

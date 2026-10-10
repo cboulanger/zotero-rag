@@ -107,6 +107,13 @@ class FailedAttachmentStore:
     def is_failed(self, library_id: str, attachment_key: str) -> bool:
         return attachment_key in self._read().get(library_id, {})
 
+    def list_failed(self, library_id: str) -> list[dict]:
+        """Full failure records for a library, each with ``attachment_key`` injected."""
+        return [
+            {**record, "attachment_key": attachment_key}
+            for attachment_key, record in self._read().get(library_id, {}).items()
+        ]
+
     def failed_keys(self, library_id: str, attachment_keys: Optional[Iterable[str]] = None) -> set[str]:
         """Failed attachment keys of a library, optionally restricted to ``attachment_keys``."""
         keys = set(self._read().get(library_id, {}))

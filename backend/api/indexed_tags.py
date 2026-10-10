@@ -79,6 +79,22 @@ async def check_indexed(
     return {"indexed": sorted(indexed)}
 
 
+@router.get("/indexed-tags/failed", summary="List quarantined/refused attachments for a library, with reasons")
+async def list_failed(
+    library_id: str,
+    identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
+) -> dict:
+    """Full ``rag-failed`` records for ``library_id`` (attachment_key, item_key,
+    reason, detail, failed_at) — used by the Fix Unavailable Attachments dialog's
+    "Include permanent failures" option, which needs the reason/detail text, not
+    just the indexed/not-indexed boolean ``check`` gives."""
+    if identity is not None and library_id not in {slug_to_backend_id(t) for t in identity.targets}:
+        raise HTTPException(status_code=403, detail="No access to this library.")
+    store = get_failed_store()
+    items = await asyncio.to_thread(store.list_failed, library_id)
+    return {"items": items}
+
+
 @router.post("/indexed-tags/failed/clear", summary="Retry attachments whose rag-failed tag the user removed")
 async def clear_failed(
     body: CheckRequest,

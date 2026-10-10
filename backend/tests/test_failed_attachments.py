@@ -11,7 +11,7 @@ import pikepdf
 from pikepdf import Name
 
 from backend.services import pending_upload_cache as cache
-from backend.services.failed_attachments import FailedAttachmentStore, REASON_TOO_COSTLY
+from backend.services.failed_attachments import FailedAttachmentStore, REASON_QUARANTINED, REASON_TOO_COSTLY
 from backend.services.index_event_log import IndexEventLog
 from backend.services.indexed_tag_sync import plan_tag_ops
 from backend.utils.pdf_splitter import inspect_pdf, split_pdf_bytes
@@ -75,6 +75,23 @@ class TestFailedAttachmentStore(unittest.TestCase):
         att = [{"data": {"key": "A", "tags": []}}, {"data": {"key": "B", "tags": [{"tag": "T"}]}}]
         ops = plan_tag_ops(att, {"A"}, "T", kind="failed")
         self.assertEqual([(o["op"], o["attachment_key"], o["kind"]) for o in ops], [("add", "A", "failed"), ("remove", "B", "failed")])
+
+    def test_list_failed_returns_full_records_with_attachment_key_injected(self):
+        self.store.mark_failed("u1", "ATT1", "ITEM1", REASON_TOO_COSTLY, "1600 pages, no text layer")
+        self.store.mark_failed("u1", "ATT2", "ITEM2", REASON_QUARANTINED, "Failed 5 times: ...")
+        self.store.mark_failed("u2", "OTHER", "ITEM3", REASON_TOO_COSTLY, "unrelated library")
+
+        records = self.store.list_failed("u1")
+
+        self.assertEqual({r["attachment_key"] for r in records}, {"ATT1", "ATT2"})
+        att1 = next(r for r in records if r["attachment_key"] == "ATT1")
+        self.assertEqual(att1["item_key"], "ITEM1")
+        self.assertEqual(att1["reason"], REASON_TOO_COSTLY)
+        self.assertEqual(att1["detail"], "1600 pages, no text layer")
+        self.assertIn("failed_at", att1)
+
+    def test_list_failed_empty_for_unknown_library(self):
+        self.assertEqual(self.store.list_failed("nonexistent"), [])
 
 
 class TestQuarantine(unittest.TestCase):

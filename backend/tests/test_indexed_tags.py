@@ -480,6 +480,31 @@ class IndexedTagsApiTest(unittest.TestCase):
             app.dependency_overrides.clear()
         self.assertEqual(denied.status_code, 403)
 
+    def test_list_failed_returns_records_for_the_library_and_enforces_access(self):
+        from backend.dependencies import get_zotero_identity
+        from backend.services.failed_attachments import REASON_QUARANTINED, REASON_TOO_COSTLY, get_failed_store
+        from backend.services.zotero_identity import ZoteroIdentity
+
+        store = get_failed_store()
+        store.mark_failed("1", "ATT1", "ITEM1", REASON_TOO_COSTLY, "1600 pages, no text layer")
+        store.mark_failed("2", "OTHER", "ITEM2", REASON_QUARANTINED, "unrelated library")
+
+        r = self.client.get("/api/indexed-tags/failed", params={"library_id": "1"})
+        self.assertEqual(r.status_code, 200)
+        items = r.json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            (items[0]["attachment_key"], items[0]["item_key"], items[0]["reason"], items[0]["detail"]),
+            ("ATT1", "ITEM1", REASON_TOO_COSTLY, "1600 pages, no text layer"),
+        )
+
+        app.dependency_overrides[get_zotero_identity] = lambda: ZoteroIdentity(user_id=5, username="u", targets=["groups/1"])
+        try:
+            denied = self.client.get("/api/indexed-tags/failed", params={"library_id": "2"})
+        finally:
+            app.dependency_overrides.clear()
+        self.assertEqual(denied.status_code, 403)
+
     def test_refresh_requires_registered_key(self):
         r = self.client.post("/api/indexed-tags/refresh", headers={"X-Zotero-API-Key": "UNREGISTERED"})
         self.assertEqual(r.status_code, 400)
