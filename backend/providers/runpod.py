@@ -445,7 +445,16 @@ class RunPodProvider(Provider):
             jobs = payload.get("jobs") or {}
             ready = int(workers.get("ready") or 0)
             running = int(workers.get("running") or 0)
-            if ready > 0 or running > 0:
+            if ready > 0:
+                return Health(status="ready", detail=f"{ready} ready, {running} running workers")
+            if running > 0:
+                # A worker counts as "running" from the moment its container starts, while the
+                # model is still loading: queued jobs that no worker has picked up yet mean it
+                # is not serving. One that is busy with a job (or has an empty queue) is.
+                in_queue = int(jobs.get("inQueue") or 0)
+                in_progress = int(jobs.get("inProgress") or 0)
+                if in_queue > 0 and in_progress == 0:
+                    return Health(status="cold", detail=f"worker starting, {in_queue} job(s) waiting for it")
                 return Health(status="ready", detail=f"{ready} ready, {running} running workers")
             throttled = int(workers.get("throttled") or 0)
             if throttled > 0:

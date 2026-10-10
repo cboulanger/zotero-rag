@@ -334,10 +334,16 @@ class TestHealth(unittest.TestCase):
         return provider(http=http).health(Credentials(api_key="k", base_url=self.URL)), http
 
     def test_ready_with_ready_or_running_workers(self):
-        for workers in ({"ready": 1}, {"running": 2}):
-            h, http = self.check(FakeResponse(200, {"workers": workers, "jobs": {}}))
-            self.assertEqual(h.status, "ready")
+        for workers, jobs in (({"ready": 1}, {}), ({"running": 2}, {}), ({"running": 1}, {"inProgress": 1, "inQueue": 2})):
+            h, http = self.check(FakeResponse(200, {"workers": workers, "jobs": jobs}))
+            self.assertEqual(h.status, "ready", (workers, jobs))
         self.assertEqual(http.calls[-1][1], "https://api.runpod.ai/v2/abc123/health")  # after the management check
+
+    def test_a_running_worker_that_has_not_picked_up_the_queued_jobs_is_still_starting(self):
+        """Seen live: the worker container is 'running' while the model loads and jobs wait in the queue."""
+        h = self.check(FakeResponse(200, {"workers": {"running": 1, "ready": 0, "idle": 0}, "jobs": {"inQueue": 2, "inProgress": 0}}))[0]
+        self.assertEqual(h.status, "cold")
+        self.assertIn("2 job(s) waiting", h.detail)
 
     def test_cold_when_scaled_to_zero_or_initializing(self):
         self.assertEqual(self.check(FakeResponse(200, {"workers": {}, "jobs": {}}))[0].status, "cold")
