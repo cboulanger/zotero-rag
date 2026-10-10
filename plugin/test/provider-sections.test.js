@@ -424,3 +424,22 @@ test('polling a cold endpoint is bounded', async () => {
 	await controller.poll();
 	assert.strictEqual(sleeps, 120);
 });
+
+test('Pause sends the one-time key too, so a call-only stored key can still pause', async () => {
+	const S = load();
+	const calls = [];
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), { onProvision() {}, onRetry() {}, onPause: (side, key) => calls.push([side, key]) });
+	refs.embedding.credInput.value = ' k_secret ';
+	refs.embedding.pause.click();
+	assert.deepStrictEqual(calls, [['embedding', 'k_secret']]);
+	assert.strictEqual(refs.embedding.credInput.value, '');
+});
+
+test('the credential field shows while Pause is on offer and hides when no action is', () => {
+	const S = load();
+	const ready = S.buildModel('embedding', remote(), { status: 'ready', detail: '' }, idle);
+	assert.strictEqual(ready.pause.visible, true);
+	assert.strictEqual(ready.credential.visible, true);
+	const unknown = S.buildModel('embedding', remote(), undefined, idle);
+	assert.strictEqual(unknown.credential.visible, false);
+});

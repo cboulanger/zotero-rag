@@ -126,8 +126,13 @@ var ZoteroRAGProviderSections = {
 		const status = health ? health.status : '';
 		const needsAction = this.NEEDS_PROVISIONING.has(status);
 		const sideJob = job && job.sides ? job.sides[side] : undefined;
+		const canPause = !!provider.supports_suspend && provider.operable_by_caller;
 		const failed = !!sideJob && sideJob.status === 'failed';
 		const busyReason = running ? 'A job for this endpoint is already running.' : '';
+
+		const provisionVisible = canProvision && needsAction;
+		const retryVisible = canProvision && failed && !running;
+		const pauseVisible = canPause && (status === 'ready' || status === 'cold');
 
 		const scope = this.SCOPE_NOTES[provider.key_scope] || '';
 		const credential = provider.provisioning && provider.provisioning.credential;
@@ -143,25 +148,27 @@ var ZoteroRAGProviderSections = {
 				: null,
 			hint: health && health.status !== 'ready' && provider.unavailable_hint ? provider.unavailable_hint : '',
 			provision: {
-				visible: canProvision && needsAction,
+				visible: provisionVisible,
 				label: status === 'paused' ? 'Resume' : 'Provision endpoint',
 				disabled: running,
 				reason: busyReason,
 			},
 			retry: {
-				visible: canProvision && failed && !running,
+				visible: retryVisible,
 				label: 'Retry',
 				disabled: running,
 				reason: busyReason,
 			},
 			pause: {
-				visible: provider.supports_suspend && provider.operable_by_caller && (status === 'ready' || status === 'cold'),
+				visible: pauseVisible,
 				label: 'Pause',
 				disabled: running,
 				reason: busyReason,
 			},
 			credential: {
-				visible: canProvision,
+				// Needed by every action that talks to the provider's management API (provision,
+				// resume, retry, pause); nothing to show when none of them is on offer.
+				visible: (canProvision || canPause) && (provisionVisible || retryVisible || pauseVisible),
 				label: credential ? credential.label : 'Key for this run',
 				help: credential && credential.help ? credential.help : '',
 				pattern: credential && credential.pattern ? credential.pattern : '',
@@ -177,7 +184,7 @@ var ZoteroRAGProviderSections = {
 	 * Build the skeleton of both sections once; returns references for `update`.
 	 * @param {Document} doc
 	 * @param {HTMLElement} container
-	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm') => void}} handlers
+	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
 	 * @returns {Record<'embedding'|'llm', Record<string, any>>}
 	 */
 	ensureSections(doc, container, handlers) {
@@ -231,7 +238,7 @@ var ZoteroRAGProviderSections = {
 			};
 			provision.addEventListener('click', () => handlers.onProvision(side, oneTimeKey()));
 			retry.addEventListener('click', () => handlers.onRetry(side, oneTimeKey()));
-			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side));
+			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side, oneTimeKey()));
 
 			section.append(title, provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
 			container.appendChild(section);
@@ -386,7 +393,8 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	const provision = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey) =>
 		startJob('/api/config/provision', side, oneTimeKey, 'Provisioning failed');
 	/** Pause one side (stops billing and wake-ups; resuming is provisioning again). */
-	const pause = (/** @type {'embedding'|'llm'} */ side) => startJob('/api/config/suspend', side, '', 'Pausing failed');
+	const pause = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey = '') =>
+		startJob('/api/config/suspend', side, oneTimeKey, 'Pausing failed');
 
 	return { state, refresh, poll, provision, pause };
 };
