@@ -114,9 +114,13 @@ def get_zotero_key(env_var: str = "RAG_EVAL_ZOTERO_KEY") -> Optional[str]:
 def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
     """Per-request provider-key headers a preset needs (values never printed).
 
-    For each personal ``api_key`` field the preset requires (embedding + LLM),
-    use ``$<KEY_NAME>`` if set, else the matching key stored in the auto-index
-    key store. Admin-set ``shared_*`` fields are resolved server-side.
+    The backend no longer reads provider keys from its environment: a ``user``
+    scope side expects the caller's own key as a request header, so the
+    harness must supply one. For each personal ``api_key`` field the preset
+    requires (embedding + LLM) use ``$<KEY_NAME>`` if set in this shell, else the
+    key of that name in the auto-index key store (a user can store one key per
+    provider key name). Admin-set ``managed``/``shared`` fields are resolved
+    server-side and need no header.
     """
     headers: dict[str, str] = dict(extra or {})
     if preset is None:
@@ -128,23 +132,45 @@ def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dic
         return headers
     fields = RemoteEmbeddingService.required_client_fields(preset.embedding)
     fields += RemoteLLMService.required_client_fields_for_config(preset.llm)
-    stored: dict[str, str] = {}
-    try:
+    entries = _store_entries()
+    store = None
+    if entries:
         from backend.services.secret_store import get_key_store
         store = get_key_store()
-        for fp, _zkey, _entry in _store_entries():
-            got = store.get_decrypted_embedding_key(fp)
-            if got:
-                stored.setdefault(got[0], got[1])
-    except Exception:
-        pass
     for field in fields:
-        if field.get("kind", "api_key") != "api_key":
+        if field.get("kind", "api_key") != "api_key" or field["header_name"] in headers:
             continue
-        value = os.environ.get(field["key_name"]) or stored.get(field["key_name"])
+        name = field["key_name"]
+        value = os.environ.get(name)
+        if not value and store is not None:
+            for fp, _zkey, _entry in entries:
+                got = store.get_decrypted_embedding_key(fp, name)
+                if got and got[0] == name:
+                    value = got[1]
+                    break
         if value:
             headers[field["header_name"]] = value
     return headers
+
+
+def missing_provider_keys(preset: Any, headers: dict[str, str]) -> list[str]:
+    """Key names a preset still lacks given the headers this harness would send.
+
+    Uses the backend's own credential check (``backend.api.config``) with a stub
+    request carrying ``headers``; admin-set shared values count only if set on
+    this checkout's data directory. Returns ``[]`` when the check is unavailable.
+    """
+    try:
+        from backend.api.config import _preset_credentials
+    except Exception:
+        return []
+
+    class _Request:
+        pass
+
+    request = _Request()
+    request.headers = headers  # type: ignore[attr-defined]
+    return sorted(_preset_credentials(preset, local_settings(), request, {}))
 
 
 def auth_headers(zotero_key: Optional[str]) -> dict[str, str]:

@@ -41,6 +41,9 @@ auto proxies in the composite (`scoring.WEIGHTS_JUDGED`).
 - **Metadata and mentions agents** (counting/filtering questions, citation
   evidence round trip): need their own gold questions; the current set exercises
   the RAG agent (the router may still route elsewhere; `agents` is recorded).
+- **Provider quota use per run**: the provider layer records rate-limit meters
+  (`GET /api/rate-limits`, `backend/providers/usage.py`); diffing them before and
+  after a run would give requests/tokens consumed per preset (quota, not billing).
 - **Rank-based retrieval metrics** (MRR/nDCG) over chunk-level relevance labels.
 
 ## Verdict thresholds

@@ -1,15 +1,23 @@
 """Run the gold questions against the live RAG pipeline for chosen presets/models.
 
-For every selected preset it activates the preset (POST /api/config; falls back
-to writing the admin override file when the backend runs from this checkout),
-then asks every gold question once per LLM model (each model separately),
+For every selected preset it selects the preset, makes sure its endpoints are
+ready, then asks every gold question once per LLM model (each model separately),
 saves each raw ``/api/query`` response with ``include_trace=true``, scores it
 (scoring.py) and finally restores the original preset and writes the report
 (report.py).
 
-WARNING: switching the preset changes the *server-wide* active preset for the
-duration of the run (also for the cron indexer and any other client). Only run
-against a dev instance. The original preset is restored in a ``finally`` block.
+How a preset is selected (docs/presets.md): with a Zotero identity key the
+harness uses the caller's own preset choice (``PUT /api/config/my-preset``), which
+affects nobody else. Without an identity (a loopback dev server) the only
+mechanism is the *server default* (``POST /api/config``, or the admin settings
+file when the backend runs from this checkout), which changes the preset for every
+client and the cron indexer for the duration of the run: only do that on a dev
+instance. Either way the original state is restored in a ``finally`` block.
+
+Endpoint readiness (``GET /api/config/health``): a ``cold`` endpoint is woken
+(``POST /api/config/warmup``) and polled until ready; a ``paused`` or
+``unreachable`` one (stopped on purpose, or nothing provisioned) is skipped with
+the remedy instead of producing 10 error rows.
 
 Examples:
     # what would run, no queries sent
@@ -65,41 +73,121 @@ def _git_commit() -> str:
 
 
 class PresetSwitcher:
-    """Activate presets and restore the original one, via API or the override file."""
+    """Select a preset for the evaluation and restore the original state afterwards.
+
+    Preferred: the caller's own choice (``PUT /api/config/my-preset``), invisible to
+    other users. Fallback when there is no usable identity: the server default
+    (``POST /api/config``; on a loopback checkout, the admin settings file when the
+    API refuses), which affects every client until restored.
+    """
 
     def __init__(self, base_url: str, zotero_key: Optional[str], use_local: bool):
         self.base_url = base_url
-        self.headers = auth_headers(zotero_key)
+        self.auth = auth_headers(zotero_key)
+        self.has_identity_key = bool(zotero_key)
         self.settings = local_settings() if use_local and local_backend_available() else None
         self.is_loopback = bool(re.match(r"https?://(localhost|127\.0\.0\.1)(:|/|$)", base_url))
-        self.original_override: Optional[str] = None
-        if self.settings is not None and self.is_loopback:
-            from backend.services.admin_settings_store import get_active_preset_override
-            self.original_override = get_active_preset_override(self.settings.data_path)
-        self.original_active: Optional[str] = None
+        self.original_default: Optional[str] = None
+        self.original_effective: Optional[str] = None
+        self.original_admin_default: Optional[str] = None
+        self.used_user = False
+        self.used_default = False
+        self.headers_for = lambda name: dict(self.auth)
 
-    def remember(self, active: str) -> None:
-        self.original_active = active
+    def remember(self, default: str, effective: str) -> None:
+        self.original_default, self.original_effective = default, effective
+        if self.settings is not None and self.is_loopback:
+            from backend.services.admin_settings_store import get_default_preset
+            self.original_admin_default = get_default_preset(self.settings.data_path)
+
+    def _effective(self, headers: dict) -> Optional[str]:
+        status, config = http_json("GET", f"{self.base_url}/api/config", headers, timeout=60)
+        return config.get("preset_name") if status == 200 and isinstance(config, dict) else None
 
     def switch(self, name: str) -> tuple[bool, str]:
-        status, data = http_json("POST", f"{self.base_url}/api/config", self.headers, {"preset_name": name}, timeout=120)
-        if status == 200:
-            return True, "api"
+        """Make ``name`` the preset this harness runs on; returns ``(ok, how_or_reason)``."""
+        headers = self.headers_for(name)
+        if self.has_identity_key:
+            status, data = http_json("PUT", f"{self.base_url}/api/config/my-preset", headers,
+                                     {"preset_name": name}, timeout=120)
+            if status == 200:
+                self.used_user = True
+                if self._effective(headers) == name:
+                    return True, "own preset choice"
+                return False, "saved as own choice but not honoured (incompatible with the default or invalid)"
+            detail = str(data)[:240]
+            if not (status == 400 and ("signed-in" in detail or "identity" in detail)):
+                return False, f"HTTP {status}: {detail}"
+            # no usable identity on this server (loopback): fall through to the server default
+        status, data = http_json("POST", f"{self.base_url}/api/config", headers, {"preset_name": name}, timeout=120)
+        how = "server default"
         if status in (401, 403) and self.settings is not None and self.is_loopback:
-            from backend.services.admin_settings_store import set_active_preset_override
-            set_active_preset_override(self.settings.data_path, name)
-            return True, "override-file"
-        return False, f"HTTP {status}: {str(data)[:200]}"
+            from backend.services.admin_settings_store import set_default_preset
+            set_default_preset(self.settings.data_path, name)
+            status, how = 200, "server default (settings file)"
+        if status != 200:
+            return False, f"HTTP {status}: {str(data)[:240]}"
+        self.used_default = True
+        if self._effective(headers) != name:
+            return False, "server default switched, but this caller runs on its own saved preset"
+        return True, how
 
     def restore(self) -> str:
-        if self.original_active is None:
-            return "nothing to restore"
-        if self.settings is not None and self.is_loopback:
-            from backend.services.admin_settings_store import set_active_preset_override
-            set_active_preset_override(self.settings.data_path, self.original_override)
-            return f"override restored to {self.original_override!r}"
-        ok, how = self.switch(self.original_active)
-        return f"restored {self.original_active} via {how}" if ok else f"RESTORE FAILED ({how}) - switch back manually"
+        """Put the preset state back exactly as it was found."""
+        notes = []
+        if self.used_user:
+            target = None if self.original_effective in (None, self.original_default) else self.original_effective
+            status, data = http_json("PUT", f"{self.base_url}/api/config/my-preset",
+                                     self.headers_for(target) if target else self.auth, {"preset_name": target},
+                                     timeout=120)
+            notes.append(f"own choice restored to {target!r}" if status == 200
+                         else f"RESTORE OF OWN CHOICE FAILED (HTTP {status}); run PUT /api/config/my-preset manually")
+        if self.used_default:
+            if self.settings is not None and self.is_loopback:
+                from backend.services.admin_settings_store import set_default_preset
+                set_default_preset(self.settings.data_path, self.original_admin_default)
+                notes.append(f"server default restored to {self.original_admin_default!r} (settings file)")
+            else:
+                status, data = http_json("POST", f"{self.base_url}/api/config", self.auth,
+                                         {"preset_name": self.original_default}, timeout=120)
+                notes.append(f"server default restored to {self.original_default!r}" if status == 200
+                             else f"RESTORE OF SERVER DEFAULT FAILED (HTTP {status}); switch back manually")
+        return "; ".join(notes) or "nothing to restore"
+
+
+def ensure_ready(base_url: str, headers: dict, timeout: float, poll: float) -> tuple[bool, str]:
+    """Check endpoint readiness of the effective preset; wake cold sides.
+
+    Returns ``(ok, reason)``: not ok for ``paused`` or ``unreachable`` sides (with the
+    remedy). A side that stays cold past ``timeout`` is reported but not fatal.
+    """
+    deadline = time.monotonic() + timeout
+    warmed = False
+    while True:
+        status, health = http_json("GET", f"{base_url}/api/config/health", headers, timeout=60)
+        if status != 200 or not isinstance(health, dict):
+            return True, "health endpoint unavailable (not checked)"
+        sides = {side: h for side, h in health.items() if isinstance(h, dict)}
+        bad = {side: h for side, h in sides.items() if h.get("status") in ("paused", "unreachable")}
+        if bad:
+            what = "; ".join(f"{side}: {h['status']} ({h.get('detail', '')})" for side, h in bad.items())
+            remedy = ("resume/provision it first (plugin Preferences, or bin/provision.py --preset <name>)"
+                      if any(h["status"] == "paused" for h in bad.values())
+                      else "check the endpoint URL/key or provision it (bin/provision.py --preset <name>)")
+            return False, f"{what} - {remedy}"
+        cold = [side for side, h in sides.items() if h.get("status") == "cold"]
+        throttled = [side for side, h in sides.items() if h.get("status") == "throttled"]
+        if throttled:
+            print(f"[WARN] provider reports no capacity right now for: {', '.join(throttled)} (expect 429/503 retries)")
+        if not cold:
+            return True, ""
+        if not warmed:
+            http_json("POST", f"{base_url}/api/config/warmup", headers, {}, timeout=60)
+            warmed = True
+            print(f"[INFO] waking cold endpoint(s): {', '.join(cold)}")
+        if time.monotonic() > deadline:
+            return True, f"still cold after {timeout:.0f}s ({', '.join(cold)}); first latencies include the cold start"
+        time.sleep(poll)
 
 
 def _query(base_url: str, headers: dict, payload: dict, timeout: float, retries: int, retry_wait: float) -> tuple[int, Any, int]:
@@ -170,6 +258,8 @@ def main() -> int:
     parser.add_argument("--retry-wait", type=float, default=10.0)
     parser.add_argument("--delay", type=float, default=0.5, help="pause between queries (provider rate limits)")
     parser.add_argument("--no-warmup", action="store_true", help="skip the per-model warm-up query")
+    parser.add_argument("--warm-timeout", type=float, default=300.0, help="seconds to wait for a cold endpoint to wake")
+    parser.add_argument("--warm-poll", type=float, default=10.0, help="seconds between readiness polls")
     parser.add_argument("--no-restore", action="store_true", help="leave the last tested preset active")
     parser.add_argument("--no-local", action="store_true", help="do not import backend code (remote instance)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and exit")
@@ -183,11 +273,14 @@ def main() -> int:
         raise SystemExit("[FAIL] no questions selected")
 
     zotero_key = get_zotero_key()
-    info = discover(args.url, zotero_key, use_local=not args.no_local)
-    plan = build_plan(info, args)
+    extra = {k.strip(): v.strip() for k, v in (h.split(":", 1) for h in args.header if ":" in h)}
+    base_headers = {**auth_headers(zotero_key), **extra}
     use_local = not args.no_local
+    info = discover(args.url, zotero_key, use_local=use_local, extra_headers=extra)
+    plan = build_plan(info, args)
 
-    print(f"[INFO] backend {args.url}, active preset {info['active']}, discovery={info['mode']}")
+    print(f"[INFO] backend {args.url}, effective preset {info['active']}, server default {info['default']}, "
+          f"discovery={info['mode']}")
     total = 0
     for step in plan:
         if "skip" in step:
@@ -207,16 +300,26 @@ def main() -> int:
         args.output_dir or PROJECT_ROOT / "data" / "logs" / "rag_eval" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     (out_dir / "raw").mkdir(parents=True, exist_ok=True)
     library_id = args.library_id or resolve_library_id(args.url, zotero_key, gold)
-    extra = dict(h.split(":", 1) for h in args.header if ":" in h)
-    extra = {k.strip(): v.strip() for k, v in extra.items()}
-    base_headers = {**auth_headers(zotero_key), **extra}
+
+    def headers_for(name: Optional[str]) -> dict:
+        """Auth + the provider-key headers the named preset needs (values never printed)."""
+        preset_obj = None
+        if name and use_local and local_backend_available():
+            try:
+                from backend.config.presets import get_preset
+                preset_obj = get_preset(name, local_settings().data_path)
+            except Exception:
+                pass
+        return provider_headers(preset_obj, base_headers)
 
     switcher = PresetSwitcher(args.url, zotero_key, use_local)
-    switcher.remember(info["active"])
+    switcher.headers_for = headers_for
+    switcher.remember(info["default"], info["active"])
     meta: dict[str, Any] = {
         "started": datetime.now(timezone.utc).isoformat(), "url": args.url, "git_commit": _git_commit(),
         "gold_version": gold["version"], "library_id": library_id, "original_preset": info["active"],
-        "args": {k: v for k, v in vars(args).items() if k != "header"}, "skipped": [], "health": {},
+        "original_default_preset": info["default"],
+        "args": {k: v for k, v in vars(args).items() if k != "header"}, "skipped": [], "switch": {},
     }
     n_done = 0
     try:
@@ -225,29 +328,26 @@ def main() -> int:
                 meta["skipped"].append({"preset": step["preset"], "reason": step["skip"]})
                 continue
             name = step["preset"]
-            if not step["active"] or name != info["active"]:
+            if name != info["active"]:
                 ok, how = switcher.switch(name)
                 if not ok:
-                    print(f"[SKIP] {name}: cannot switch ({how})")
-                    meta["skipped"].append({"preset": name, "reason": f"switch failed: {how}"})
+                    print(f"[SKIP] {name}: cannot select ({how})")
+                    meta["skipped"].append({"preset": name, "reason": f"selection failed: {how}"})
                     continue
-                print(f"[INFO] switched to {name} ({how})")
-            st, config = http_json("GET", f"{args.url}/api/config", base_headers, timeout=60)
+                meta["switch"][name] = how
+                print(f"[INFO] selected {name} ({how})")
+            headers = headers_for(name)
+            ready, why = ensure_ready(args.url, headers, args.warm_timeout, args.warm_poll)
+            if not ready:
+                print(f"[SKIP] {name}: {why}")
+                meta["skipped"].append({"preset": name, "reason": why})
+                continue
+            if why:
+                print(f"[WARN] {name}: {why}")
+                meta.setdefault("warnings", {})[name] = why
+            st, config = http_json("GET", f"{args.url}/api/config", headers, timeout=60)
             live_models = config.get("llm_models", []) if st == 200 and isinstance(config, dict) else step["models"]
             models = select_models(live_models, args.models)
-            hst, health = http_json("GET", f"{args.url}/api/config/health", base_headers, timeout=60)
-            if hst == 200:
-                meta["health"][name] = health
-                if any(isinstance(s, dict) and s.get("status") not in ("ready",) for s in health.values() if s):
-                    print(f"[WARN] {name}: endpoint health {health} - first latencies may include a cold start")
-            preset_obj = None
-            if use_local and local_backend_available():
-                try:
-                    from backend.config.presets import get_preset
-                    preset_obj = get_preset(name, local_settings().data_path)
-                except Exception:
-                    pass
-            headers = provider_headers(preset_obj, base_headers)
 
             for model in models:
                 label = model or "default"

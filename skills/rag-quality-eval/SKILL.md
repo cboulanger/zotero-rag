@@ -45,15 +45,26 @@ use `uv run python` for anything that imports backend code (project rule), plain
 ## 0. Preflight
 
 1. Backend up on the dev instance: `curl -s localhost:8119/api/config | head -c 200`
-   (start with `npm start`). Never point this at production: the run switches the
-   server-wide preset (also seen by the cron indexer and other clients) and
-   restores it afterwards.
+   (start with `npm start`). The run selects each preset in turn and restores
+   the original state afterwards. With a Zotero identity key it uses *your own*
+   preset choice (`PUT /api/config/my-preset`, docs/presets.md), which affects nobody
+   else. Without an identity (typical loopback dev server) the only mechanism is
+   the *server default*, which changes the preset for every client and the cron
+   indexer while the run lasts: only do that on a dev instance, never on
+   production, and tell the user before you start.
 2. The gold library is indexed: `curl -s localhost:8119/api/libraries` lists `6297749`.
    If it is missing, index it first (plugin, or `bin/index_libraries.py`).
-3. Keys (never print them): the Zotero identity key comes from
+3. Keys (never print them). The Zotero identity key comes from
    `$RAG_EVAL_ZOTERO_KEY` or the encrypted key store (`bin/autoindex_add_key.py`);
-   provider keys (KISSKI etc.) from the preset's env var or the key store. A
-   loopback dev instance without `AUTHORIZED_GROUP_ID` needs no identity key.
+   a loopback dev instance without `AUTHORIZED_GROUP_ID` needs none (then only the
+   server-default mechanism is available). The backend does **not** read provider
+   keys from its environment any more (docs/providers.md, credential scopes):
+   for `user`-scope presets (KISSKI, OpenAI, Anthropic, Hugging Face, ...) the
+   harness sends your key as a request header, taken from `$<KEY_NAME>` in the
+   shell (e.g. `KISSKI_API_KEY`, `HF_TOKEN`) or from the key store, which holds
+   one key per key name (`uv run python bin/debug_get_zotero_key.py --list` shows
+   the names without values). `managed`/`shared` presets (RunPod as bundled,
+   MPCDF) use the admin-set key on the server; nothing to send.
 4. Sanity-check the skill itself: `python -m unittest discover -s skills/rag-quality-eval/tests`
    and `python skills/rag-quality-eval/scripts/gold_tools.py validate`.
    If the library changed since the gold file was written:
@@ -66,11 +77,14 @@ use `uv run python` for anything that imports backend code (project rule), plain
 uv run python skills/rag-quality-eval/scripts/list_targets.py
 ```
 
-It classifies every preset: `active`, `switchable` (same remote embedding model,
-credentials present), `credentials_missing` (names the missing keys),
-`needs_restart` (different embedding model or a local-model preset: the existing
-index would no longer match; needs `MODEL_PRESET` + restart and usually a
-re-index, so it is **not** evaluated automatically; tell the user).
+It classifies every preset relative to the server's *default* preset and shows
+each side's provider and credential scope: `active` (the preset your requests run
+on now), `switchable` (compatible with the default, i.e. both sides remote and the
+same embedding model, and every key it needs can be supplied), `credentials_missing`
+(names the missing key names; export them or store them), `needs_restart` (a
+different embedding model or a local-model side: the existing index would no longer
+match; needs `MODEL_PRESET` + restart and usually a re-index, so it is **not**
+evaluated automatically; tell the user).
 
 Then use `AskUserQuestion`:
 
@@ -79,8 +93,8 @@ Then use `AskUserQuestion`:
   names). Always show what will be skipped and why.
 - **Models:** each model of a preset is evaluated **separately**
   (`--models all`, default); offer `first` (preset default only) or a named
-  list when the user wants a quick run. Presets with a live model list (KISSKI)
-  are re-read after switching.
+  list when the user wants a quick run. Providers with a live model list (KISSKI)
+  are re-read after selecting the preset, with your key.
 - **Repetitions:** default 1; suggest 3 when comparing close contenders or when
   the user cares about stability (router and LLM run at temperature 0.7).
 - **Scope:** all 10 questions (default), or `--max-difficulty 3` for a smoke test.
@@ -92,7 +106,9 @@ uv run python skills/rag-quality-eval/scripts/run_eval.py --presets all --dry-ru
 ```
 
 (5 KISSKI models x 10 questions = 50 queries per preset, plus one warm-up per
-model; remote models can be slow or rate-limited, hence `--delay` and `--retries`.)
+model; remote models can be slow or rate-limited, hence `--delay` and `--retries`.
+Providers expose quota meters, `GET /api/rate-limits`: check them before a large
+matrix on a metered key.)
 
 ## 2. Run
 
@@ -103,13 +119,19 @@ uv run python skills/rag-quality-eval/scripts/run_eval.py --presets <active|all|
 
 Output goes to `data/logs/rag_eval/<UTC timestamp>/`: `raw/` (one JSON per query:
 response + trace, no keys), `meta.json`, then `results.jsonl`, `report.json`,
-`report.md`. The original preset is restored in a `finally` block (check the last
-`[INFO]` line; if it says `RESTORE FAILED` switch back manually). An interrupted
-run is continued with `--resume <dir>`. The one-line progress output already shows
-verdict, recall, cited sources, words, detected language and latency.
+`report.md`. The original state (your own choice, or the server default) is restored
+in a `finally` block; check the last `[INFO]` line, and if it says `RESTORE ... FAILED`
+put it back manually. `meta.json` records how each preset was selected. An
+interrupted run is continued with `--resume <dir>`. The one-line progress output
+already shows verdict, recall, cited sources, words, detected language and latency.
 
-If a preset's endpoints are cold (RunPod scale-to-zero) the script warns and the
-warm-up query absorbs the cold start; do not trust the first latencies otherwise.
+Endpoint readiness is checked per preset (`GET /api/config/health`, the provider's
+view): a `cold` endpoint (scale-to-zero) is woken with `POST /api/config/warmup`
+and polled up to `--warm-timeout`; a `paused` one (stopped on purpose) or
+`unreachable` one (nothing provisioned) is **skipped with the remedy** in the report
+(resume/provision it in the plugin's Preferences or `bin/provision.py --preset
+<name>`, then re-run with `--resume`). A `throttled` provider is a warning. Do not
+trust the first latencies of a preset that was cold.
 
 ## 3. Judge (mandatory, this is where you use your reasoning)
 
@@ -163,6 +185,8 @@ present provisional scores as final.
 | no or malformed citations, `uncited_answers`, high retry rate | the CRITICAL CITATION RULE in `_build_generation_prompt`, `_missing_citations`/`_low_citation_diversity` retry guards in `rag_engine.py`, weaker models |
 | wrong answer language | the "Respond in the same language" line in the prompt, model |
 | `<think>` blocks, tool-call text, narration | reasoning models (deepseek-r1), `_looks_like_tool_call_leak`, answer post-processing |
+| endpoint paused/cold/unreachable, 429/503 on one preset only | the provider layer: `backend/providers/` (`health`, `classify_http_error`, `parse_usage`), `docs/providers.md`, `services/endpoint_cache.py` |
+| a user's query ran on a different preset than expected | `services/effective_preset.py` (default vs. saved choice, compatibility), `api/config.py` (`my-preset`) |
 | routing surprises (`agents` is not `["rag"]`) | `query_router.py`, `query_orchestrator.py`, `docs/query-routing.md` |
 | one query to investigate | `scripts/debug_live_query.py "<question>" --repeat 3` (CLAUDE.md "Live Query Debugging") and the saved `raw/*.json` trace |
 

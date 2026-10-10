@@ -6,6 +6,7 @@ Run:  python -m unittest discover -s skills/rag-quality-eval/tests -v
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -202,9 +203,63 @@ def q_facts():
     return Q["Q09"]["facts"]
 
 
+class RealBackendTests(unittest.TestCase):
+    """The harness's local-code paths against the real backend modules (skipped without them)."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import backend.api.config  # noqa: F401
+            from backend.config.presets import get_preset
+        except Exception:
+            raise unittest.SkipTest("backend not importable")
+        import common
+        cls.common = common
+        cls.settings = common.local_settings()
+        cls.get_preset = staticmethod(get_preset)
+
+    def test_provider_headers_come_from_the_shell_by_key_name(self):
+        preset = self.get_preset("remote-kisski", self.settings.data_path)
+        with mock.patch.dict(os.environ, {"KISSKI_API_KEY": "secret-value"}):
+            headers = self.common.provider_headers(preset, {"X-Zotero-API-Key": "z"})
+        self.assertEqual(headers["X-Kisski-Api-Key"], "secret-value")
+        self.assertEqual(headers["X-Zotero-API-Key"], "z")
+
+    def test_missing_keys_use_the_backends_own_credential_check(self):
+        preset = self.get_preset("remote-kisski", self.settings.data_path)
+        self.assertEqual(self.common.missing_provider_keys(preset, {}), ["KISSKI_API_KEY"])
+        self.assertEqual(self.common.missing_provider_keys(preset, {"X-Kisski-Api-Key": "x"}), [])
+
+    def test_target_classification_matches_the_compatibility_rule(self):
+        import list_targets
+        default, rows = list_targets._discover_local(self.settings, "remote-kisski", [], {})
+        status = {r["name"]: r["status"] for r in rows}
+        self.assertEqual(default, self.settings.get_default_preset().name)
+        self.assertEqual(status["remote-kisski"], "active")
+        self.assertEqual(status["cpu-only"], "needs_restart")  # local models: index would not match
+        live = {r["name"]: r["live_model_list"] for r in rows}
+        self.assertTrue(live["remote-kisski"])                 # provider has_live_models, not the removed field
+
+    def test_default_preset_settings_file_roundtrip_used_by_the_switcher(self):
+        from backend.services.admin_settings_store import get_default_preset, set_default_preset
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp)
+            (data / "system").mkdir()
+            self.assertIsNone(get_default_preset(data))
+            set_default_preset(data, "runpod")
+            self.assertEqual(get_default_preset(data), "runpod")
+            set_default_preset(data, None)
+            self.assertIsNone(get_default_preset(data))
+
+
 class MockBackend(BaseHTTPRequestHandler):
-    """Just enough of the backend API for run_eval/judge/report."""
-    state = {"preset": "remote-kisski", "switched": []}
+    """Just enough of the backend API (incl. per-user presets and endpoint health) for run_eval/judge/report."""
+    state: dict = {}
+
+    @classmethod
+    def reset(cls):
+        cls.state = {"default": "remote-kisski", "user_choice": None, "default_switches": [], "user_choices": [],
+                     "health": {}, "warmups": 0}
 
     def log_message(self, *a):  # silence
         pass
@@ -217,30 +272,51 @@ class MockBackend(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _effective(self):
+        st = self.state
+        return (st["user_choice"] if self.headers.get("X-Zotero-API-Key") else None) or st["default"]
+
     def do_GET(self):
+        st = self.state
+        eff = self._effective()
         if self.path == "/api/config":
-            st = self.state
+            sel = [{"name": n, "active": n == eff, "credentials": "ok", "missing_keys": [], "description": ""}
+                   for n in ("remote-kisski", "runpod")]
             self._send(200, {
-                "preset_name": st["preset"], "preset_description": "", "api_version": "1", "embedding_model": "e",
+                "preset_name": eff, "preset_description": "", "api_version": "1", "embedding_model": "e",
                 "embedding_model_type": "remote", "llm_model": "m-a", "llm_models": ["m-a", "m-b"],
                 "vector_db_path": "", "model_cache_dir": "", "available_presets": ["remote-kisski", "runpod", "cpu-only"],
-                "compatible_presets": ["remote-kisski", "runpod"],
-                "switchable_presets": [{"name": "remote-kisski", "active": st["preset"] == "remote-kisski", "credentials": "ok"},
-                                       {"name": "runpod", "active": st["preset"] == "runpod", "credentials": "ok"}],
+                "compatible_presets": ["remote-kisski", "runpod"], "switchable_presets": sel,
+                "default_preset": st["default"], "selectable_presets": sel, "preset_fell_back": None,
                 "default_top_k": 10, "default_min_score": 0.3, "max_chunk_size": 800})
         elif self.path == "/api/config/health":
-            self._send(200, {"embedding": None, "llm": None})
+            self._send(200, st["health"].get(eff, {"embedding": {"status": "ready", "detail": ""},
+                                                  "llm": {"status": "ready", "detail": ""}}))
         elif self.path == "/api/libraries":
             self._send(200, [{"library_id": "6297749"}])
         else:
             self._send(404, {})
 
+    def do_PUT(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if self.path == "/api/config/my-preset":
+            if not self.headers.get("X-Zotero-API-Key"):
+                return self._send(400, {"detail": "Choosing a preset needs a signed-in Zotero identity."})
+            self.state["user_choice"] = body.get("preset_name")
+            self.state["user_choices"].append(body.get("preset_name"))
+            return self._send(200, {"effective": self.state["user_choice"] or self.state["default"]})
+        self._send(404, {})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         if self.path == "/api/config":
-            self.state["preset"] = body["preset_name"]
-            self.state["switched"].append(body["preset_name"])
+            self.state["default"] = body["preset_name"]
+            self.state["default_switches"].append(body["preset_name"])
             self._send(200, {"preset_name": body["preset_name"]})
+        elif self.path == "/api/config/warmup":
+            self.state["warmups"] += 1
+            self.state["health"].pop(self._effective(), None)  # the endpoint is awake from now on
+            self._send(202, {"warming": ["llm"]})
         elif self.path == "/api/query":
             question = next((q for q in GOLD["questions"] if q["question"] == body["question"]), Q["Q01"])
             answer = " ".join(f"{f['text']} [S1]." for f in question["facts"] if f.get("answer_patterns"))
@@ -252,7 +328,6 @@ class MockBackend(BaseHTTPRequestHandler):
 class EndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        MockBackend.state = {"preset": "remote-kisski", "switched": []}
         cls.server = HTTPServer(("127.0.0.1", 0), MockBackend)
         cls.url = f"http://127.0.0.1:{cls.server.server_port}"
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
@@ -261,18 +336,65 @@ class EndToEndTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.server.shutdown()
 
+    def setUp(self):
+        MockBackend.reset()
+
+    def _run(self, out: Path, extra_args: list[str], identity: bool = True) -> int:
+        argv = ["run_eval.py", "--presets", "all", "--models", "all", "--questions", "Q01,Q03,Q09", "--url", self.url,
+                "--output-dir", str(out), "--no-local", "--delay", "0", "--no-warmup", "--warm-poll", "0.01",
+                *extra_args]
+        env = {"RAG_EVAL_ZOTERO_KEY": "dummy"} if identity else {}
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv):
+            if not identity:
+                os.environ.pop("RAG_EVAL_ZOTERO_KEY", None)
+            return run_eval.main()
+
+    def test_own_preset_choice_leaves_the_server_default_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            self.assertEqual(self._run(out, []), 0)
+            self.assertEqual(len(list((out / "raw").glob("*.json"))), 12)  # 2 presets x 2 models x 3 questions
+            st = MockBackend.state
+            self.assertEqual(st["default_switches"], [])            # nobody else was affected
+            self.assertEqual(st["user_choices"], ["runpod", None])  # selected, then cleared again
+            self.assertIsNone(st["user_choice"])
+            self.assertEqual(st["default"], "remote-kisski")
+            self.assertEqual(json.loads((out / "meta.json").read_text())["switch"], {"runpod": "own preset choice"})
+
+    def test_without_identity_the_server_default_is_switched_and_restored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            self.assertEqual(self._run(out, [], identity=False), 0)
+            st = MockBackend.state
+            self.assertEqual(st["default_switches"], ["runpod", "remote-kisski"])
+            self.assertEqual(st["default"], "remote-kisski")
+            self.assertEqual(json.loads((out / "meta.json").read_text())["switch"], {"runpod": "server default"})
+
+    def test_paused_endpoint_is_skipped_with_a_remedy(self):
+        MockBackend.state["health"]["runpod"] = {"embedding": {"status": "paused", "detail": "stopped"},
+                                                 "llm": {"status": "ready", "detail": ""}}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            self.assertEqual(self._run(out, []), 0)
+            self.assertEqual(len(list((out / "raw").glob("*.json"))), 6)  # only remote-kisski ran
+            skipped = json.loads((out / "meta.json").read_text())["skipped"]
+            self.assertEqual(skipped[0]["preset"], "runpod")
+            self.assertIn("paused", skipped[0]["reason"])
+            self.assertIn("provision", skipped[0]["reason"])
+            self.assertIsNone(MockBackend.state["user_choice"])  # still restored
+
+    def test_cold_endpoint_is_woken_before_the_first_query(self):
+        MockBackend.state["health"]["runpod"] = {"embedding": {"status": "cold", "detail": ""},
+                                                 "llm": {"status": "ready", "detail": ""}}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self._run(Path(tmp) / "run", []), 0)
+            self.assertEqual(MockBackend.state["warmups"], 1)
+            self.assertEqual(len(list((Path(tmp) / "run" / "raw").glob("*.json"))), 12)
+
     def test_full_pipeline_run_judge_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "run"
-            argv = ["run_eval.py", "--presets", "all", "--models", "all", "--questions", "Q01,Q03,Q09", "--url", self.url,
-                    "--output-dir", str(out), "--no-local", "--delay", "0", "--no-warmup"]
-            with mock.patch.object(sys, "argv", argv):
-                self.assertEqual(run_eval.main(), 0)
-            # 2 presets x 2 models x 3 questions
-            self.assertEqual(len(list((out / "raw").glob("*.json"))), 12)
-            # active preset restored after switching to runpod
-            self.assertEqual(MockBackend.state["preset"], "remote-kisski")
-            self.assertIn("runpod", MockBackend.state["switched"])
+            self.assertEqual(self._run(out, []), 0)
             self.assertTrue((out / "report.md").exists())
             self.assertIn("Automatic floor only", (out / "report.md").read_text())
 
@@ -299,12 +421,11 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(g["judged_runs"], 3)
             self.assertEqual(g["recall_by_level"]["inference"], 1.0)
 
-    def test_dry_run_sends_no_queries(self):
+    def test_dry_run_sends_no_queries_and_switches_nothing(self):
         argv = ["run_eval.py", "--presets", "all", "--url", self.url, "--no-local", "--dry-run"]
-        before = len(MockBackend.state["switched"])
         with mock.patch.object(sys, "argv", argv):
             self.assertEqual(run_eval.main(), 0)
-        self.assertEqual(len(MockBackend.state["switched"]), before)
+        self.assertEqual(MockBackend.state["user_choices"] + MockBackend.state["default_switches"], [])
 
 
 if __name__ == "__main__":
