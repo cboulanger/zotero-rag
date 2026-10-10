@@ -17,6 +17,7 @@ from backend.dependencies import get_zotero_identity, require_authorized_group_a
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.effective_preset import is_compatible
+from backend.services.user_settings import get_preferred_preset, set_preferred_preset
 from backend.services.admin_settings_store import (
     set_default_preset,
     update_remote_config,
@@ -161,6 +162,25 @@ def _switchable_presets(
     return result
 
 
+def _selectable_presets(
+    effective: HardwarePreset, compatible: List[str], settings, request: Request,
+) -> List["SwitchablePreset"]:
+    """Presets this caller may choose: compatible with the default, credentials usable.
+    The caller's current (effective) preset is always listed."""
+    names = list(compatible)
+    if effective.name not in names:
+        names.append(effective.name)
+    return _switchable_presets(effective, names, settings, request)
+
+
+def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: HardwarePreset) -> Optional[str]:
+    """The preset the caller saved but is not running on (removed, incompatible, ...), if any."""
+    if identity is None:
+        return None
+    chosen = get_preferred_preset(settings.data_path, identity.user_id)
+    return chosen if chosen and chosen != effective.name else None
+
+
 class SwitchablePreset(BaseModel):
     """A preset the admin may switch to at runtime."""
     name: str
@@ -182,7 +202,10 @@ class ConfigResponse(BaseModel):
     available_presets: List[str]  # filtered to this host's platform — see current_platform()
     compatible_presets: List[str]
     provisionable: bool = False  # at least one side's provider can provision
-    switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials
+    switchable_presets: List[SwitchablePreset] = []  # compatible presets with usable credentials (admin switch)
+    default_preset: str = ""  # the server default; ``preset_name`` is this caller's effective preset
+    selectable_presets: List[SwitchablePreset] = []  # presets this caller may choose for themselves
+    preset_fell_back: Optional[str] = None  # the caller's saved choice, when it is no longer honoured
     # RAG configuration
     default_top_k: int
     default_min_score: float
@@ -291,6 +314,8 @@ def get_config(request: Request):
     available = list_presets(settings.data_path, platform=current_platform())
     default = settings.get_default_preset()
     compatible = _compatible_presets(default, settings.data_path, available)
+    identity = get_zotero_identity(request)
+    selectable = _selectable_presets(preset, compatible, settings, request)
     return ConfigResponse(
         preset_name=preset.name,
         preset_description=preset.description,
@@ -305,11 +330,80 @@ def get_config(request: Request):
         compatible_presets=compatible,
         provisionable=_is_provisionable(preset),
         switchable_presets=_switchable_presets(default, compatible, settings, request),
+        default_preset=default.name,
+        selectable_presets=selectable,
+        preset_fell_back=_fell_back_choice(settings, identity, preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,
         max_chunk_size=preset.rag.max_chunk_size
     )
+
+
+class MyPresetUpdate(BaseModel):
+    """Body of PUT /api/config/my-preset; ``null`` returns the caller to the server default."""
+    preset_name: Optional[str] = None
+
+
+@router.get("/config/my-preset")
+def get_my_preset(request: Request) -> dict:
+    """The caller's preset: the server default, the one they run on, their saved choice and
+    what they may choose. A saved choice that is no longer honoured shows as ``fell_back``."""
+    return _my_preset_view(request, get_settings().get_hardware_preset())
+
+
+def _my_preset_view(request: Request, effective: HardwarePreset) -> dict:
+    settings = get_settings()
+    default = settings.get_default_preset()
+    available = list_presets(settings.data_path, platform=current_platform())
+    compatible = _compatible_presets(default, settings.data_path, available)
+    identity = get_zotero_identity(request)
+    return {
+        "default": default.name,
+        "effective": effective.name,
+        "fell_back": _fell_back_choice(settings, identity, effective),
+        "selectable": [p.model_dump() for p in _selectable_presets(effective, compatible, settings, request)],
+    }
+
+
+@router.put("/config/my-preset")
+def put_my_preset(update: MyPresetUpdate, request: Request) -> dict:
+    """Choose the preset this caller runs on (``null`` clears the choice).
+
+    Needs a signed-in identity (a loopback server with no identity always runs the
+    default). The choice must be compatible with the server default and the caller must
+    have usable credentials for it (their key sent in its header, or a shared one set).
+    """
+    settings = get_settings()
+    identity = get_zotero_identity(request)
+    if identity is None:
+        raise HTTPException(status_code=400, detail="Choosing a preset needs a signed-in Zotero identity.")
+    if update.preset_name is None:
+        set_preferred_preset(settings.data_path, identity.user_id, None)
+        return _my_preset_view(request, settings.get_default_preset())
+
+    default = settings.get_default_preset()
+    available = list_presets(settings.data_path, platform=current_platform())
+    if update.preset_name not in available:
+        raise HTTPException(status_code=400, detail=f"Unknown preset: {update.preset_name}.")
+    if update.preset_name not in _compatible_presets(default, settings.data_path, available):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{update.preset_name}' is not compatible with the server default '{default.name}' "
+                   "(both sides must be remote and use the same embedding model).",
+        )
+    try:
+        chosen = get_preset(update.preset_name, settings.data_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    missing = _preset_credentials(chosen, settings, request, _stored_embedding_key_counts(settings))
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preset '{update.preset_name}' lacks credentials: {sorted(missing)}.",
+        )
+    set_preferred_preset(settings.data_path, identity.user_id, update.preset_name)
+    return _my_preset_view(request, chosen)
 
 
 @router.post("/config", response_model=ConfigResponse)
