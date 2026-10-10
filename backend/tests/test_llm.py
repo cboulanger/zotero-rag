@@ -27,6 +27,14 @@ except ImportError:
     HAS_TRANSFORMERS = False
 
 
+def _raw(parsed):
+    """A with_raw_response result: parsed body plus (empty) headers."""
+    raw = Mock()
+    raw.parse.return_value = parsed
+    raw.headers = {}
+    return raw
+
+
 class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
     """Test LLM service factory function."""
 
@@ -376,13 +384,13 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer from OpenAI"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertEqual(result, "Generated answer from OpenAI")
-        mock_client.chat.completions.create.assert_called_once()
+        mock_client.chat.completions.with_raw_response.create.assert_called_once()
 
     async def test_generate_anthropic(self):
         """Test generation with Anthropic API."""
@@ -393,13 +401,13 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.content = [Mock()]
         mock_response.content[0].text = "Generated answer from Claude"
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("anthropic.AsyncAnthropic", return_value=mock_client):
             result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertEqual(result, "Generated answer from Claude")
-        mock_client.messages.create.assert_called_once()
+        mock_client.messages.with_raw_response.create.assert_called_once()
 
     async def test_generate_openai_raises_endpoint_unavailable_on_connection_error(self):
         """A transport-level failure (e.g. a cold/unreachable RunPod serverless
@@ -411,7 +419,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
 
         mock_client = AsyncMock()
-        mock_client.chat.completions.create.side_effect = OpenAIAPIConnectionError(
+        mock_client.chat.completions.with_raw_response.create.side_effect = OpenAIAPIConnectionError(
             request=httpx.Request("POST", "https://example.com/v1/chat/completions")
         )
 
@@ -443,7 +451,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         exc = APIStatusError(html, response=response, body=html)
 
         mock_client = AsyncMock()
-        mock_client.chat.completions.create.side_effect = exc
+        mock_client.chat.completions.with_raw_response.create.side_effect = exc
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             with self.assertRaises(RuntimeError) as ctx:
@@ -476,14 +484,14 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_openai = AsyncMock()
         response = Mock(); response.choices = [Mock()]
         response.choices[0].message.content = "via openai protocol"
-        mock_openai.chat.completions.create.return_value = response
+        mock_openai.chat.completions.with_raw_response.create.return_value = _raw(response)
         with patch("openai.AsyncOpenAI", return_value=mock_openai):
             self.assertEqual(await openai_service.generate("hi"), "via openai protocol")
-        mock_openai.chat.completions.create.assert_called_once()
+        mock_openai.chat.completions.with_raw_response.create.assert_called_once()
 
         mock_anthropic = AsyncMock()
         reply = Mock(); reply.content = [Mock()]; reply.content[0].text = "via anthropic protocol"
-        mock_anthropic.messages.create.return_value = reply
+        mock_anthropic.messages.with_raw_response.create.return_value = _raw(reply)
         with patch("anthropic.AsyncAnthropic", return_value=mock_anthropic):
             self.assertEqual(await anthropic_service.generate("hi"), "via anthropic protocol")
 
@@ -501,7 +509,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         service = RemoteLLMService(settings)
         mock_client = AsyncMock()
         response = Mock(); response.choices = [Mock()]; response.choices[0].message.content = "ok"
-        mock_client.chat.completions.create.return_value = response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(response)
         with patch("openai.AsyncOpenAI", return_value=mock_client) as ctor:
             await service.generate("hi")
         self.assertEqual(ctor.call_args.kwargs["api_key"], "not-needed")
@@ -538,13 +546,13 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             result = await service.generate("Test prompt")  # No max_tokens, temperature
 
         # Should use defaults from config
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertEqual(call_args.kwargs["temperature"], 0.7)  # From preset
         self.assertEqual(call_args.kwargs["max_tokens"], 512)  # Default
 
@@ -574,12 +582,12 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertEqual(
             call_args.kwargs["extra_body"],
             {"chat_template_kwargs": {"enable_thinking": False}},
@@ -593,12 +601,12 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertIsNone(call_args.kwargs["extra_body"])
 
     async def test_generate_openai_raises_clear_error_on_none_content(self):
@@ -611,7 +619,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = None
         mock_response.choices[0].finish_reason = "length"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             with self.assertRaises(RuntimeError) as context:
@@ -629,7 +637,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response.content = [Mock()]
         mock_response.content[0].text = None
         mock_response.stop_reason = "max_tokens"
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("anthropic.AsyncAnthropic", return_value=mock_client):
             with self.assertRaises(RuntimeError) as context:

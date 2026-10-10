@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from backend.config.settings import Settings
 from backend.services.embeddings import KEYLESS_API_KEY, env_var_to_header, docs_url_for, _extract_error_detail
+from backend.services.usage_meters import key_fingerprint, recorder as usage_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -401,6 +402,13 @@ class RemoteLLMService(LLMService):
         api_key_env = kwargs.get("api_key_env")
         return self.api_key or (os.getenv(api_key_env) if api_key_env else None)
 
+    def _record_usage(self, headers: Any) -> None:
+        """Remember the response's rate-limit headers for the usage meters."""
+        try:
+            usage_recorder.record("llm", headers, key_fingerprint(self._resolve_api_key()))
+        except Exception:  # display-only signal, never break a generation
+            logger.debug("Could not record usage headers", exc_info=True)
+
     def _llm_api(self) -> str:
         """Wire protocol of the LLM side, as declared by its provider."""
         from backend.providers import ProviderConfigError, get_providers
@@ -498,7 +506,9 @@ class RemoteLLMService(LLMService):
         extra_body = self.llm_config.model_kwargs.get("extra_body")
         self._dump_inference_request({**payload, **({"extra_body": extra_body} if extra_body else {})})
 
-        response = await client.chat.completions.create(**payload, extra_body=extra_body)
+        raw = await client.chat.completions.with_raw_response.create(**payload, extra_body=extra_body)
+        self._record_usage(raw.headers)
+        response = raw.parse()
 
         choice = response.choices[0]
         generated_text = choice.message.content
@@ -531,7 +541,9 @@ class RemoteLLMService(LLMService):
         }
         self._dump_inference_request(payload)
 
-        response = await client.messages.create(**payload)
+        raw = await client.messages.with_raw_response.create(**payload)
+        self._record_usage(raw.headers)
+        response = raw.parse()
 
         generated_text = response.content[0].text
         if not generated_text:

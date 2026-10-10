@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 import numpy as np
 
 from backend.config.presets import EmbeddingConfig
+from backend.services.usage_meters import key_fingerprint, recorder
 
 
 logger = logging.getLogger(__name__)
@@ -146,28 +147,6 @@ def _extract_error_detail(exc: Exception) -> str:
             return stripped[:_MAX_ERROR_DETAIL_LENGTH]
     return str(exc)
 
-
-# Module-level cache for rate-limit headers received from the last remote embedding call.
-# Updated by RemoteEmbeddingService after every API response (success or 429).
-_last_rate_limit_headers: dict[str, str] | None = None
-# UTC timestamp (ISO 8601) of when ``_last_rate_limit_headers`` was captured.
-_last_rate_limit_headers_at: str | None = None
-
-
-def get_last_rate_limit_snapshot() -> tuple[dict[str, str] | None, str | None]:
-    """Return the in-process rate-limit headers and their capture time (ISO UTC)."""
-    return _last_rate_limit_headers, _last_rate_limit_headers_at
-
-
-def reset_rate_limit_cache() -> None:
-    """Forget the cached rate-limit headers.
-
-    Called when the active preset changes: the cached numbers belong to the
-    previous provider and must not be shown for the new one.
-    """
-    global _last_rate_limit_headers, _last_rate_limit_headers_at
-    _last_rate_limit_headers = None
-    _last_rate_limit_headers_at = None
 
 #: The OpenAI SDK insists on a non-empty key; this is sent to servers that need none.
 KEYLESS_API_KEY = "not-needed"
@@ -452,6 +431,7 @@ class RemoteEmbeddingService(EmbeddingService):
         self._dim: Optional[int] = None
         self.rate_limit_retries: int = 0
         self.rate_limit_wait_seconds: float = 0.0
+        self._fingerprint: Optional[str] = key_fingerprint(api_key)
         logger.debug(
             f"Initialized RemoteEmbeddingService: model={config.model_name} "
             f"base_url={config.model_kwargs.get('base_url', 'openai-default')}"
@@ -550,6 +530,7 @@ class RemoteEmbeddingService(EmbeddingService):
                     # No key declared: an OpenAI-compatible server that needs none.
                     api_key = self._api_key or KEYLESS_API_KEY
 
+            self._fingerprint = key_fingerprint(api_key)
             if shared_url_env:
                 base_url = resolve_shared_value(shared_url_env, self.data_path)
                 if not base_url:
@@ -580,17 +561,10 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:
         """Extract and cache rate-limit headers from an API response."""
-        global _last_rate_limit_headers, _last_rate_limit_headers_at
-        extracted = {
-            k: v for k, v in headers.items()
-            if k.lower().startswith("x-ratelimit") or k.lower().startswith("ratelimit")
-        }
-        if extracted:
-            _last_rate_limit_headers = extracted
-            _last_rate_limit_headers_at = datetime.now(timezone.utc).isoformat()
+        recorder.record("embedding", headers, self._fingerprint)
 
     async def get_rate_limit_info(self) -> dict[str, str] | None:
-        return _last_rate_limit_headers
+        return recorder.latest("embedding", self._fingerprint)[0]
 
     async def probe_rate_limits(self) -> dict[str, str] | None:
         """Embed a single short string to fetch fresh rate-limit headers from the API."""
@@ -605,7 +579,7 @@ class RemoteEmbeddingService(EmbeddingService):
             self._capture_rate_limit_headers(raw.headers)
         except Exception:
             pass
-        return _last_rate_limit_headers
+        return recorder.latest("embedding", self._fingerprint)[0]
 
     def _resolve_model_name(self) -> str:
         """Return the actual API model name (maps 'openai' sentinel to a real name)."""

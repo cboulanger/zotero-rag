@@ -754,7 +754,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         await indexer.run()
 
         status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertEqual(status.get("last_rate_limit_headers"), headers)
+        self.assertEqual(status["last_usage"]["embedding"]["headers"], headers)
         # The synthetic key must not leak into the per-slug status entry.
         self.assertNotIn("rate_limit_headers", status["slugs"]["users/1"])
 

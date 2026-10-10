@@ -809,12 +809,13 @@ class TestSwitchablePresets(unittest.TestCase):
         fp = store.add("zkey", KeyValidation(user_id=1, username="u", targets=["users/1"], read_only=True))
         store.set_embedding_key(fp, "ekey", "KISSKI_API_KEY")
         store.set_embedding_key_status(fp, "rate_limited", "2999-01-01T00:00:00+00:00")
-        emb._last_rate_limit_headers = {"x-ratelimit-limit-hour": "1"}
+        from backend.services.usage_meters import recorder
+        recorder.record("embedding", {"x-ratelimit-limit-hour": "1"})
         self._admin()
         with patch.dict(os.environ, MPCDF_ENV):
             r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
         self.assertEqual(r.status_code, 200)
-        self.assertIsNone(emb._last_rate_limit_headers)
+        self.assertEqual(recorder.latest("embedding"), (None, None))
         meta = store.list_metadata()[0]
         self.assertEqual(meta["embedding_key_status"], "ok")
         self.assertIsNone(meta["embedding_key_rate_limit_until"])

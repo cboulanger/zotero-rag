@@ -25,7 +25,8 @@ from backend.services.secret_store import (
     SecretsUnavailableError, is_secret_name, require_secrets_enabled,
 )
 from backend.services.secret_store import get_key_store
-from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header, reset_rate_limit_cache
+from backend.services.embeddings import RemoteEmbeddingService, env_var_to_header
+from backend.services.usage_meters import recorder as usage_recorder
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers
@@ -398,7 +399,7 @@ async def update_config(
 
     set_active_preset_override(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
-    reset_rate_limit_cache()
+    usage_recorder.reset()
     try:
         store = get_key_store()
         if store.enabled:
