@@ -2,8 +2,11 @@
 
 An attachment lands here when processing it is known to be futile or harmful:
 its OCR cost is out of proportion (``too_costly``), it exceeds the extraction
-size cap (``too_large``), or it kept failing in the deferred-upload queue
-(``quarantined``). While an attachment is recorded, ``DocumentProcessor`` skips
+size cap (``too_large``), it kept failing in the deferred-upload queue
+(``quarantined``), or the Zotero item is a ``linked_file``/``linked_url``
+attachment with no file in Zotero's cloud storage for the Web API to serve
+(``not_downloadable``) — retrying that download would 404 forever. While an
+attachment is recorded, ``DocumentProcessor`` skips
 it, so a single pathological file can neither crash the shared Kreuzberg sidecar
 again nor block its library's queue.
 
@@ -31,6 +34,7 @@ logger = logging.getLogger(__name__)
 REASON_TOO_COSTLY = "too_costly"
 REASON_TOO_LARGE = "too_large"
 REASON_QUARANTINED = "quarantined"
+REASON_NOT_DOWNLOADABLE = "not_downloadable"
 
 
 class FailedAttachmentStore:

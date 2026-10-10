@@ -38,7 +38,12 @@ from backend.services.extraction.kreuzberg import (
 )
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
-from backend.services.failed_attachments import REASON_TOO_COSTLY, REASON_TOO_LARGE, get_failed_store
+from backend.services.failed_attachments import (
+    REASON_NOT_DOWNLOADABLE,
+    REASON_TOO_COSTLY,
+    REASON_TOO_LARGE,
+    get_failed_store,
+)
 from backend.utils.pdf_splitter import inspect_pdf
 from backend.services import diagnostics_collector as diag
 from backend.db.vector_store import VectorStore
@@ -120,6 +125,12 @@ def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> b
         and att_data.get("contentType") == "text/html"
         and att_data.get("title") == "Snapshot"
     ):
+        return False
+    if att_data.get("linkMode") == "linked_url":
+        # A web-only bookmark — Zotero never stores a file for it anywhere
+        # (not in cloud storage, not locally), so a download attempt would
+        # always 404. Unlike linked_file (see _index_item), there is no
+        # client capable of resolving it, so exclude it outright.
         return False
     return True
 
@@ -1097,8 +1108,27 @@ class DocumentProcessor:
                 )
 
                 if not file_bytes:
-                    logger.warning(f"Could not download attachment {attachment_key}")
-                    self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
+                    link_mode = attachment["data"].get("linkMode")
+                    if link_mode == "linked_file":
+                        # Points at a file on the uploader's own disk, not in Zotero's
+                        # cloud storage — the remote Web API's 404 for it is permanent,
+                        # not transient, so retrying every sync is futile. Mark it
+                        # rag-failed like other permanent refusals instead of adding it
+                        # to _download_failures, which would keep retrying it forever.
+                        logger.warning(
+                            f"Attachment {attachment_key} is a linked_file with no file "
+                            "in Zotero's cloud storage; marking rag-failed instead of retrying"
+                        )
+                        await asyncio.to_thread(
+                            get_failed_store().mark_failed,
+                            library_id, attachment_key, item_key, REASON_NOT_DOWNLOADABLE,
+                            "Attachment is a 'linked_file' link to a file on the uploader's own "
+                            "disk — Zotero's API has no file to serve for it. Upload it to Zotero "
+                            "storage, or remove the rag-failed tag in Zotero to retry.",
+                        )
+                    else:
+                        logger.warning(f"Could not download attachment {attachment_key}")
+                        self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
                     continue
 
                 try:

@@ -4,7 +4,7 @@ Unit tests for document processor.
 
 import unittest
 import hashlib
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, patch
 
 from backend.services.document_processor import DocumentProcessor
 from backend.services.extraction.base import DocumentExtractor, ExtractionChunk
@@ -82,6 +82,29 @@ class TestIsIndexableAttachment(unittest.TestCase):
         from backend.services.document_processor import _is_indexable_attachment
         att = {"contentType": "application/pdf", "title": "Snapshot"}
         self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_linked_url_excluded_regardless_of_mime_type(self):
+        """linkMode 'linked_url' is a web-only bookmark — Zotero never stores a
+        file for it anywhere (not in cloud storage, not locally), so it must
+        never be attempted for download regardless of its contentType."""
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "application/pdf", "title": "Some PDF", "linkMode": "linked_url"}
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=True))
+        self.assertFalse(_is_indexable_attachment(att, index_snapshots_enabled=False))
+
+    def test_linked_file_still_included(self):
+        """linkMode 'linked_file' points at a file on the user's own disk — it
+        has no file in Zotero's cloud storage, but a local Zotero client can
+        still resolve it, so it must stay indexable (the download attempt,
+        not this filter, is where remote-vs-local capability is decided)."""
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "application/pdf", "title": "Some PDF", "linkMode": "linked_file"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
+
+    def test_imported_file_without_link_mode_field_still_included(self):
+        from backend.services.document_processor import _is_indexable_attachment
+        att = {"contentType": "application/pdf"}
+        self.assertTrue(_is_indexable_attachment(att, index_snapshots_enabled=True))
 
 
 class TestDefaultExtractorConnectRetryWiring(unittest.TestCase):
@@ -973,6 +996,37 @@ class TestDocumentProcessor(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.processor._download_failures, [
             {"item_key": "ITEM123", "attachment_key": "PDF123"},
         ])
+
+    async def test_index_item_marks_linked_file_download_failure_as_permanent(self):
+        """A 'linked_file' attachment (local-disk link) has no file in Zotero's
+        cloud storage, so the remote Web API's 404 for it is permanent, not
+        transient like a real connectivity blip. _index_item must mark it
+        rag-failed (via FailedAttachmentStore) instead of recording it in
+        self._download_failures, which would otherwise retry the same futile
+        download forever on every incremental sync."""
+        from backend.services.failed_attachments import REASON_NOT_DOWNLOADABLE
+
+        mock_item = {
+            "version": 1,
+            "data": {"key": "ITEM123", "itemType": "journalArticle", "title": "Test Paper"},
+        }
+        mock_pdf_attachment = {
+            "data": {
+                "key": "PDF123", "itemType": "attachment", "contentType": "application/pdf",
+                "linkMode": "linked_file",
+            },
+        }
+        self.mock_zotero_client.get_item_children.return_value = [mock_pdf_attachment]
+        self.mock_zotero_client.get_attachment_file.return_value = None  # 404 via remote API
+
+        mock_store = Mock()
+        with patch("backend.services.document_processor.get_failed_store", return_value=mock_store):
+            await self.processor._index_item(mock_item, "test_lib", "user")
+
+        self.assertEqual(self.processor._download_failures, [])
+        mock_store.mark_failed.assert_called_once_with(
+            "test_lib", "PDF123", "ITEM123", REASON_NOT_DOWNLOADABLE, ANY
+        )
 
     async def test_index_item_skips_snapshot_attachment_when_setting_off(self):
         with patch("backend.services.document_processor.read_admin_settings", return_value={"index_snapshots": False}):
