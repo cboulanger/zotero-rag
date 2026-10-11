@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "created": "2026-10-10",
   "library": {
     "slug": "groups/6297749",
@@ -98,12 +98,12 @@
       "facts": [
         {"id": "url", "text": "URL imported only by Mendeley", "answer_patterns": ["\\bURL\\b"], "source_patterns": ["URL 0 1"], "docs": ["basak2014"], "level": "verbatim"},
         {"id": "doi", "text": "DOI imported only by Mendeley", "answer_patterns": ["\\bDOI\\b"], "source_patterns": ["DOI 0 1"], "docs": ["basak2014"], "level": "verbatim"},
-        {"id": "neither", "text": "publisher and ISSN were imported by neither", "weight": 0.5, "answer_patterns": ["ISSN", "publisher"], "all_of": true, "docs": ["basak2014"], "level": "semantic"}
+        {"id": "neither", "text": "publisher and ISSN were imported by neither", "weight": 0.5, "answer_patterns": ["ISSN", "publisher"], "source_patterns": ["Publisher 0 0", "ISSN no\\. 0 0"], "all_of": true, "docs": ["basak2014"], "level": "semantic"}
       ],
       "min_sources": 1,
       "min_distinct_cited": 1,
       "length": {"min_words": 25, "max_words": 220},
-      "judge_notes": "Fail if URL/DOI are attributed to Zotero. Basak has a second library item (RefWorks/Mendeley/EndNote comparison); citing it for this fact is wrong."
+      "judge_notes": "Fail if URL/DOI are attributed to Zotero. Basak has a second library item (RefWorks/Mendeley/EndNote comparison); citing it for this fact is wrong. The 'neither' fact is confirmed correct against the clean Zotero full-text API (table row: 'Publisher 0 0 ISSN no. 0 0 URL 0 1 DOI 0 1'); the RAG-retrieved chunk for this question drops the table's numeric values and the Fig. 2 Zotero sentence, so judge against the source table above, not against what the pipeline retrieved."
     },
     {
       "id": "Q05",
