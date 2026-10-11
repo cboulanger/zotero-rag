@@ -74,7 +74,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Configuration:**
 
 - Embedding: `gemini-embedding-001` (3072-dim) via Google's OpenAI-compatible endpoint
-- LLM: `gemini-2.5-flash` (alternatives `gemini-2.5-flash-lite`, `gemini-2.5-pro`, `gemini-3.5-flash`, `gemini-3.8-flash`; 1M context)
+- LLM: `gemini-2.5-flash` (1M context); the model picker lists the Flash models your key can use, newest first, fetched live from the Gemini API (static fallback: `gemini-2.5-flash`, `-flash-lite`, `-pro`)
 - Provider: `google` (key portal: <https://aistudio.google.com/apikey>)
 - Top-k: 10 chunks / Max chunk: 1024 tokens
 
