@@ -372,6 +372,33 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orch._llm_service.generate.call_count, 2)
         self.assertEqual(result.answer, diverse_answer)
 
+    async def test_synthesis_retries_once_when_answer_looks_like_leaked_reasoning(self):
+        """Mirrors rag_engine.py's own leaked-reasoning retry: a reasoning-
+        capable model can leak backtracking deliberation ("Wait," "re-
+        evaluating...") into the synthesis answer instead of a clean
+        conclusion. Retry once with a reinforced prompt."""
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="META context", sources=[]))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        leaked = "Wait, let me reconsider [S1]. Re-evaluating the claim [S1]."
+        clean = "The answer is X [S1]."
+        orch._llm_service.generate = AsyncMock(side_effect=[leaked, clean])
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            result = await orch.query(question="Q?", library_ids=["1"], enable_routing=True)
+
+        self.assertEqual(orch._llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, clean)
+
     async def test_synthesis_custom_low_diversity_floor_suppresses_retry(self):
         """A caller-supplied low_diversity_available_floor higher than the number
         of merged sources means the low-diversity retry guard never applies —

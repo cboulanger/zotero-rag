@@ -5,7 +5,7 @@ Unit tests for RAG query engine.
 import unittest
 from unittest.mock import AsyncMock, Mock, MagicMock
 
-from backend.services.rag_engine import RAGEngine, QueryResult, SourceInfo
+from backend.services.rag_engine import RAGEngine, QueryResult, SourceInfo, _looks_like_leaked_reasoning
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore, SearchResult
@@ -466,6 +466,52 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         self.mock_llm_service.generate.assert_called_once()
         self.assertEqual(result.answer, "Authors identify a shift toward qualitative methods [S1].")
+
+    async def test_query_retries_once_when_answer_looks_like_leaked_reasoning(self):
+        """A reasoning-capable model can leak its raw step-by-step deliberation
+        into the final answer instead of a clean conclusion (e.g. repeated
+        "Wait," self-contradicting re-derivations) — not as a separate
+        <think> block, just as ordinary backtracking prose. Detect this and
+        retry once, same as the tool-call-leak case above."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer = (
+            "Authors identify a shift toward qualitative methods [S1]. "
+            "Wait, actually the text says quantitative methods [S1]. "
+            "Re-evaluating strictly based on the source: Wait, it does say "
+            "qualitative after all [S1]."
+        )
+        good_answer = "Authors identify a shift toward qualitative methods [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer, good_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, good_answer)
+
+    async def test_query_uses_final_answer_if_retry_still_looks_like_leaked_reasoning(self):
+        """If the retry also leaks reasoning, don't loop forever — use the
+        retry's answer anyway (best effort) rather than the original."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer_1 = (
+            "Wait, let me reconsider [S1]. Re-evaluating the claim [S1]."
+        )
+        bad_answer_2 = (
+            "Wait, on second thought [S1]. Re-evaluating once more [S1]."
+        )
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer_1, bad_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, bad_answer_2)
+
+    def test_looks_like_leaked_reasoning_ignores_single_incidental_match(self):
+        """A single incidental use of a backtracking word (e.g. a paper that
+        legitimately discusses "wait times") must not trigger a retry —
+        only repeated backtracking language should."""
+        self.assertFalse(_looks_like_leaked_reasoning(
+            "The study measured patient wait times in the emergency room [S1]."
+        ))
 
     async def test_prompt_forbids_process_narration_and_ungrounded_speculation(self):
         """A weak model can narrate its process ("I will use the library to find

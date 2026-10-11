@@ -46,6 +46,31 @@ def _looks_like_tool_call_leak(text: str) -> bool:
     return bool(_TOOL_CALL_LEAK_PATTERN.search(text))
 
 
+# A reasoning-capable model can leak its raw step-by-step deliberation into
+# the final answer instead of a clean conclusion — not as a separate
+# <think> block (which would be easy to strip), just as ordinary prose/HTML
+# that backtracks on itself mid-answer. Observed live: qwen3.5-397b-a17b
+# produced a ~2090-word answer (vs. 50-430 words for every other answer in
+# the same eval run) containing repeated "Wait," self-contradicting
+# re-derivations and an explicit "Re-evaluating strictly based on..."
+# restart partway through. Require multiple backtracking markers, not just
+# one, so a legitimate single use of a trigger word in prose (e.g. a paper
+# discussing patient "wait times") doesn't false-positive.
+_REASONING_LEAK_PATTERN = re.compile(
+    r"\bWait,|\bre-?evaluat(?:e|ing)\b|\blet(?:'s| us) (?:re-?check|reconsider|re-?evaluate)\b"
+    r"|\bhold on\b|\bon second thought\b|\bactually,? (?:wait|no)\b",
+    re.IGNORECASE,
+)
+_REASONING_LEAK_MIN_MATCHES = 2
+
+
+def _looks_like_leaked_reasoning(text: str) -> bool:
+    """True if `text` contains repeated backtracking/self-correction language
+    characteristic of a reasoning model's internal deliberation leaking into
+    the final answer, rather than a clean conclusion."""
+    return len(_REASONING_LEAK_PATTERN.findall(text)) >= _REASONING_LEAK_MIN_MATCHES
+
+
 # Weaker models frequently comply with the CRITICAL CITATION RULE's *format*
 # but skip citations altogether — observed live: 2 of 3 repeated attempts at
 # the same question produced an answer with zero [SN] markers anywhere.
@@ -146,6 +171,13 @@ def _quality_issue_reinforcement(
             "You have no tools available — answer directly in plain prose using only "
             "the context above."
         )
+    if _looks_like_leaked_reasoning(answer):
+        return (
+            "Your previous response showed visible step-by-step reasoning and "
+            "backtracking (e.g. \"Wait,\" \"re-evaluating...\") instead of a clean "
+            "final answer. Provide only your final conclusion in plain prose — do "
+            "not show your work or reconsider earlier statements."
+        )
     if _missing_citations(answer):
         return (
             "Your previous response did not include any [SN] citations. Revise it to "
@@ -171,6 +203,8 @@ def _count_quality_issues(
     original answer against an escalated-retrieval retry."""
     issues = 0
     if _looks_like_tool_call_leak(answer):
+        issues += 1
+    if _looks_like_leaked_reasoning(answer):
         issues += 1
     if _missing_citations(answer):
         issues += 1

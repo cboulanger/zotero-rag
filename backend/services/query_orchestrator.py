@@ -34,7 +34,8 @@ from backend.services.metadata_agent import MetadataAgent
 from backend.services.query_router import QueryRouter
 from backend.services.rag_agent import RAGAgent
 from backend.services.rag_engine import (
-    QueryResult, SourceInfo, _looks_like_tool_call_leak, _missing_citations, _low_citation_diversity,
+    QueryResult, SourceInfo, _looks_like_tool_call_leak, _looks_like_leaked_reasoning,
+    _missing_citations, _low_citation_diversity,
     _LOW_DIVERSITY_AVAILABLE_FLOOR, _DIVERSITY_FLOOR, _DIVERSITY_ESCALATION_FACTOR,
     _DIVERSITY_ESCALATION_MAX_TOP_K, _MAX_CHUNKS_PER_DOCUMENT,
 )
@@ -91,6 +92,13 @@ def _quality_issue_reinforcement(
             "Your previous response incorrectly attempted to call a tool or function. "
             "You have no tools available — answer directly in plain prose using only "
             "the retrieved information above."
+        )
+    if _looks_like_leaked_reasoning(answer):
+        return (
+            "Your previous response showed visible step-by-step reasoning and "
+            "backtracking (e.g. \"Wait,\" \"re-evaluating...\") instead of a clean "
+            "final answer. Provide only your final conclusion in plain prose — do "
+            "not show your work or reconsider earlier statements."
         )
     if _missing_citations(answer):
         return (
