@@ -488,6 +488,15 @@ class CheckGoldIndexTests(unittest.TestCase):
         MockBackend.state["unindexed_attachments"] = {some_key}
         self.assertEqual(self._run(), 1)
 
+    def test_passes_when_only_a_duplicate_item_copy_is_unindexed(self):
+        """A document with multiple item_keys (same paper saved twice) lists one
+        attachment_key per copy; same-library dedup legitimately skips chunking
+        a duplicate once the first copy is indexed, so that key alone being
+        unindexed must not fail the check as long as a sibling key is."""
+        dup_doc = next(doc for doc in GOLD["documents"].values() if len(doc["attachment_keys"]) > 1)
+        MockBackend.state["unindexed_attachments"] = {dup_doc["attachment_keys"][1]}
+        self.assertEqual(self._run(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

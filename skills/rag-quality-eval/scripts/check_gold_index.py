@@ -39,11 +39,7 @@ def main() -> int:
     zotero_key = get_zotero_key()
     library_id = resolve_library_id(args.url, zotero_key, gold)
 
-    attachment_to_docs: dict[str, list[str]] = {}
-    for doc_id, doc in gold["documents"].items():
-        for key in doc["attachment_keys"]:
-            attachment_to_docs.setdefault(key, []).append(doc_id)
-    all_keys = sorted(attachment_to_docs)
+    all_keys = sorted({key for doc in gold["documents"].values() for key in doc["attachment_keys"]})
 
     status, data = http_json(
         "POST",
@@ -57,14 +53,24 @@ def main() -> int:
         return 1
 
     indexed = set(data.get("indexed", []))
-    missing = [key for key in all_keys if key not in indexed]
 
-    if missing:
-        print(f"[FAIL] {len(missing)}/{len(all_keys)} gold attachments have NO chunks in the "
-              f"currently active embedding collection:")
-        for key in missing:
-            docs = ", ".join(attachment_to_docs[key])
-            print(f"  {key}  (used by: {docs})")
+    # A document is satisfied if ANY of its attachment_keys is indexed, not all of
+    # them: a document with multiple item_keys (e.g. a paper saved twice in the
+    # library) lists one attachment_key per duplicate, and same-library content-hash
+    # dedup deliberately skips re-indexing a duplicate's bytes once the first copy is
+    # already indexed — that duplicate's attachment_key legitimately never gets
+    # chunks of its own, which is not an indexing gap.
+    unsatisfied_docs = {
+        doc_id: doc["attachment_keys"]
+        for doc_id, doc in gold["documents"].items()
+        if not any(key in indexed for key in doc["attachment_keys"])
+    }
+
+    if unsatisfied_docs:
+        print(f"[FAIL] {len(unsatisfied_docs)}/{len(gold['documents'])} gold documents have NO "
+              f"indexed attachment in the currently active embedding collection:")
+        for doc_id, keys in unsatisfied_docs.items():
+            print(f"  {doc_id}  (attachment_keys: {', '.join(keys)})")
         print(
             "\nRe-index before running the eval, e.g.:\n"
             f"  uv run python bin/index_libraries.py --mode incremental --slug {gold['library']['slug']}\n"
@@ -72,7 +78,7 @@ def main() -> int:
         )
         return 1
 
-    print(f"[PASS] all {len(all_keys)} gold attachments are indexed in the active collection")
+    print(f"[PASS] all {len(gold['documents'])} gold documents have at least one indexed attachment")
     return 0
 
 
