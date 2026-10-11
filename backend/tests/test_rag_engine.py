@@ -5,7 +5,9 @@ Unit tests for RAG query engine.
 import unittest
 from unittest.mock import AsyncMock, Mock, MagicMock
 
-from backend.services.rag_engine import RAGEngine, QueryResult, SourceInfo, _looks_like_leaked_reasoning
+from backend.services.rag_engine import (
+    RAGEngine, QueryResult, SourceInfo, _looks_like_leaked_reasoning, _looks_like_wrong_language_answer,
+)
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore, SearchResult
@@ -511,6 +513,84 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         only repeated backtracking language should."""
         self.assertFalse(_looks_like_leaked_reasoning(
             "The study measured patient wait times in the emergency room [S1]."
+        ))
+
+    async def test_query_retries_once_when_answer_is_english_but_question_is_not(self):
+        """Observed live (qwen3-omni-30b-a3b-instruct, eval run
+        20261011T111753Z): the model answered 2 of 3 non-English gold
+        questions (French, German) entirely in English despite the prompt's
+        explicit "respond in the same language" instruction, while every
+        other model matched 100% of the time on the identical prompt.
+        Detect the mismatch and retry once, same pattern as the other
+        quality-issue checks."""
+        question, library_ids = await self._query_with_single_chunk()
+        question = "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?"
+        english_answer = (
+            "According to the context, Zotero offers 300 MB of free cloud storage [S1], "
+            "and the same source also mentions that this can be increased with a paid plan."
+        )
+        german_answer = "Laut dem Kontext bietet Zotero 300 MB kostenlosen Speicherplatz [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[english_answer, german_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, german_answer)
+
+    async def test_query_uses_final_answer_if_retry_is_still_the_wrong_language(self):
+        """Don't loop forever if the retry also comes back in English — use
+        it anyway (best effort), same pattern as the other quality checks."""
+        question, library_ids = await self._query_with_single_chunk()
+        question = "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?"
+        english_answer_1 = (
+            "According to the context, Zotero offers 300 MB of free cloud storage [S1], "
+            "and the same source also mentions that this can be increased with a paid plan."
+        )
+        english_answer_2 = (
+            "Based on the context provided, Zotero offers 300 MB of storage for free [S1], "
+            "and the same source notes that this limit can be raised with a paid plan too."
+        )
+        self.mock_llm_service.generate = AsyncMock(side_effect=[english_answer_1, english_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, english_answer_2)
+
+    def test_looks_like_wrong_language_answer_false_when_question_is_english(self):
+        """No regression: an English question answered in English must not
+        trigger a retry (nothing to compare against)."""
+        self.assertFalse(_looks_like_wrong_language_answer(
+            "What research trends do authors identify?",
+            "Authors identify a shift toward qualitative methods [S1].",
+        ))
+
+    def test_looks_like_wrong_language_answer_false_for_non_english_answer_quoting_english_terms(self):
+        """Observed live (deepseek-v4-flash-0731 and others, eval run
+        20261011T111753Z, Q10): a genuinely German answer about two
+        English-named systems (PyZoBot, HySemRAG) can rack up a handful of
+        incidental English-stopword hits ("in", "to", "on", "the"...) from
+        quoted technical terms, without actually being an English answer.
+        An absolute stopword-count floor alone flagged this; density must
+        also be checked (a real English answer is >30% stopwords, this one
+        is ~3%)."""
+        question = "Vergleiche PyZoBot und HySemRAG: Welche Retrieval-Ansätze setzen sie ein?"
+        answer = (
+            "Die verfügbaren Kontextabschnitte enthalten nur begrenzte Informationen zu "
+            "PyZoBot und HySemRAG und reichen nicht aus, um die Frage vollständig zu "
+            "beantworten. Zu PyZoBot ist bekannt: das System verwendet ein "
+            "Prompt-Design, das auf einem strukturierten, evidenzbasierten Format "
+            "basiert, um Genauigkeit, Transparenz und Rückverfolgbarkeit zu maximieren, "
+            "laut der verfügbaren Quelle, die dies im Detail beschreibt und erläutert."
+        )
+        self.assertFalse(_looks_like_wrong_language_answer(question, answer))
+
+    def test_looks_like_wrong_language_answer_false_when_both_non_english(self):
+        """No regression: a non-English question answered in the same
+        non-English language must not trigger a retry."""
+        self.assertFalse(_looks_like_wrong_language_answer(
+            "Combien d'articles ont servi à tester la corrélation?",
+            "Mille six cent treize articles ont servi à tester la corrélation [S1].",
         ))
 
     async def test_prompt_forbids_process_narration_and_ungrounded_speculation(self):
@@ -1179,6 +1259,54 @@ class TestThinContextCoverage(unittest.TestCase):
         from backend.services.rag_engine import _thin_context_coverage
         answer = "The only relevant source states X [S1]."
         self.assertFalse(_thin_context_coverage(answer, documents_grouped=1))
+
+    def test_true_when_marker_is_missing_its_trailing_hashes(self):
+        """Observed live (qwen3-omni-30b-a3b-instruct, eval run
+        20261011T111753Z, Q09): the model reproduced the instructed sentinel
+        imperfectly, emitting "###CONTEXT_INSUFFICIENT" with no trailing
+        "###", so the exact-string marker check missed it and it leaked
+        into the user-facing answer verbatim. Detection must tolerate a
+        missing (or partial) trailing hash sequence.
+
+        documents_grouped=20 isolates this from the citation-utilization
+        fallback (see test_false_when_pool_is_large_even_if_few_cited,
+        which asserts False for the same low citation count on a pool this
+        large) — only the marker check itself can make this True."""
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "I can only find a partial answer [S1].\n###CONTEXT_INSUFFICIENT"
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=20))
+
+
+class TestStripInsufficientContextMarker(unittest.TestCase):
+    """_strip_insufficient_context_marker must remove the sentinel even when
+    the model reproduces it imperfectly — see CONTEXT_INSUFFICIENT_MARKER's
+    near-miss case documented above."""
+
+    def test_strips_well_formed_marker(self):
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n###CONTEXT_INSUFFICIENT###"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_strips_marker_missing_trailing_hashes(self):
+        """The exact case observed live: no trailing ###."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n###CONTEXT_INSUFFICIENT"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_strips_marker_wrapped_in_a_paragraph_tag(self):
+        """Observed live: the marker survived markdown->HTML rendering
+        wrapped in its own <p> tag because stripping happens on the raw
+        text before rendering — this test documents the raw-text shape,
+        not the rendered HTML, since stripping must happen pre-render."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n\n###CONTEXT_INSUFFICIENT"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_does_not_strip_unrelated_hash_text(self):
+        """No regression: ordinary markdown headings or hashtags must survive."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "### Summary\nThe answer is X [S1]."
+        self.assertEqual(_strip_insufficient_context_marker(answer), "### Summary\nThe answer is X [S1].")
 
 
 class TestSourceInfo(unittest.TestCase):

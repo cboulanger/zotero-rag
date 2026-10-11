@@ -35,7 +35,7 @@ from backend.services.query_router import QueryRouter
 from backend.services.rag_agent import RAGAgent
 from backend.services.rag_engine import (
     QueryResult, SourceInfo, _looks_like_tool_call_leak, _looks_like_leaked_reasoning,
-    _missing_citations, _low_citation_diversity,
+    _looks_like_wrong_language_answer, _missing_citations, _low_citation_diversity,
     _LOW_DIVERSITY_AVAILABLE_FLOOR, _DIVERSITY_FLOOR, _DIVERSITY_ESCALATION_FACTOR,
     _DIVERSITY_ESCALATION_MAX_TOP_K, _MAX_CHUNKS_PER_DOCUMENT,
 )
@@ -73,6 +73,9 @@ Instructions:
   what is missing and stop there — do not supplement your answer with general
   knowledge, guesses, or suggestions that are not grounded in and cited from the
   retrieved information above.
+- Respond in the same language as the Question above (for example, if the Question
+  is written in German, answer in German), regardless of what language the
+  retrieved information above happens to be written in.
 """
 
 
@@ -80,13 +83,15 @@ def _quality_issue_reinforcement(
     answer: str,
     available_sources: int = 0,
     low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+    question: str = "",
 ) -> Optional[str]:
     """Return a reinforcement instruction to retry synthesis with, if `answer`
     has a detectable quality issue — or None if it looks fine. Mirrors
     rag_engine.py's own check (same underlying model, same failure modes).
 
     available_sources: number of distinct sources merged into context, used
-    only by the low-diversity check below."""
+    only by the low-diversity check below.
+    question: the original question, used only by the wrong-language check below."""
     if _looks_like_tool_call_leak(answer):
         return (
             "Your previous response incorrectly attempted to call a tool or function. "
@@ -99,6 +104,12 @@ def _quality_issue_reinforcement(
             "backtracking (e.g. \"Wait,\" \"re-evaluating...\") instead of a clean "
             "final answer. Provide only your final conclusion in plain prose — do "
             "not show your work or reconsider earlier statements."
+        )
+    if _looks_like_wrong_language_answer(question, answer):
+        return (
+            "Your previous response was written in English, but the question above is "
+            "not written in English. Respond entirely in the same language as the "
+            "question instead."
         )
     if _missing_citations(answer):
         return (
@@ -397,7 +408,7 @@ class QueryOrchestrator:
             temperature=0.7,
         )
 
-        reinforcement = _quality_issue_reinforcement(answer, len(sources), low_diversity_available_floor)
+        reinforcement = _quality_issue_reinforcement(answer, len(sources), low_diversity_available_floor, question)
         if reinforcement:
             logger.warning(
                 f"Synthesis answer had a quality issue; retrying once. {reinforcement} "
@@ -409,7 +420,7 @@ class QueryOrchestrator:
                 max_tokens=max_tokens,
                 temperature=0.7,
             )
-            if _quality_issue_reinforcement(answer, len(sources), low_diversity_available_floor):
+            if _quality_issue_reinforcement(answer, len(sources), low_diversity_available_floor, question):
                 logger.warning(
                     f"Synthesis retry still had a quality issue; using it anyway: {answer[:200]!r}"
                 )

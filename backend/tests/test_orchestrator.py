@@ -399,6 +399,39 @@ class TestOrchestratorQuery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(orch._llm_service.generate.call_count, 2)
         self.assertEqual(result.answer, clean)
 
+    async def test_synthesis_retries_once_when_answer_is_english_but_question_is_not(self):
+        """Mirrors rag_engine.py's own wrong-language retry: a model can
+        default to English in the synthesis answer despite a non-English
+        question. Retry once with a reinforced prompt."""
+        orch = _make_orchestrator()
+        rag_agent = _stub_agent("rag", AgentResult(agent_name="rag", context_text="RAG context", sources=[]))
+        meta_agent = _stub_agent("metadata", AgentResult(agent_name="metadata", context_text="META context", sources=[]))
+        orch.register(rag_agent)
+        orch.register(meta_agent)
+
+        question = (
+            "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, "
+            "und welche Quellen in der Bibliothek nennen das?"
+        )
+        english_answer = (
+            "According to the context, Zotero offers 300 MB of free cloud storage [S1], "
+            "and the same source also mentions that this can be increased with a paid plan."
+        )
+        german_answer = "Laut dem Kontext bietet Zotero 300 MB kostenlosen Speicherplatz [S1]."
+        orch._llm_service.generate = AsyncMock(side_effect=[english_answer, german_answer])
+        orch._settings.get_hardware_preset.return_value.llm.max_answer_tokens = 512
+
+        mock_plan = QueryPlan(agents_to_use=["rag", "metadata"], filters=MetadataFilters())
+        with patch("backend.services.query_orchestrator.QueryRouter") as MockRouter:
+            mock_router_instance = MagicMock()
+            mock_router_instance.route = AsyncMock(return_value=mock_plan)
+            MockRouter.return_value = mock_router_instance
+
+            result = await orch.query(question=question, library_ids=["1"], enable_routing=True)
+
+        self.assertEqual(orch._llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, german_answer)
+
     async def test_synthesis_custom_low_diversity_floor_suppresses_retry(self):
         """A caller-supplied low_diversity_available_floor higher than the number
         of merged sources means the low-diversity retry guard never applies —

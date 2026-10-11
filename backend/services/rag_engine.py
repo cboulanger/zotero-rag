@@ -71,6 +71,77 @@ def _looks_like_leaked_reasoning(text: str) -> bool:
     return len(_REASONING_LEAK_PATTERN.findall(text)) >= _REASONING_LEAK_MIN_MATCHES
 
 
+# Weaker models occasionally default to English even when explicitly
+# instructed (see _build_generation_prompt's "Respond in the same language"
+# line) to answer in the question's language. Observed live:
+# qwen3-omni-30b-a3b-instruct answered 2 of 3 non-English gold questions
+# (French, German) entirely in English despite otherwise-correct content,
+# while every other model tested against the identical prompt matched the
+# question's language 100% of the time — a model-specific instruction-
+# following gap, not a missing instruction. This is deliberately a
+# one-directional check (an English-looking answer to a clearly-non-English
+# question) rather than general language identification: it's the only
+# failure direction observed (models defaulting to English), and a full
+# language identifier is unneeded machinery for that.
+#
+# Two different thresholds by design: _looks_like_non_english (checked
+# against the QUESTION) is deliberately lenient — a short question like "Wie
+# viel...?" only has a handful of words to find evidence in at all, and a
+# false negative here just means a real mismatch goes undetected (same as
+# today). _looks_like_english (checked against the ANSWER, which is
+# typically a full paragraph) can afford a stricter floor, and must have
+# one — a naive floor of 1 on the question side alone misfired on ordinary
+# short English questions like "What is machine learning?" (only "is"
+# matches), which would otherwise flag every answer to a terse English
+# question as a false "wrong language" positive.
+_NON_ENGLISH_LETTER_PATTERN = re.compile(r"[àâäçèéêëîïôöùûüÿñãõßÀ-ÿ¿¡]")
+_NON_ENGLISH_STOPWORDS = frozenset(
+    "und ist nicht der die das für von mit auch sind werden wie welche "
+    "le la les est sont avec pour dans une que para ont qui "
+    "los las una con son por".split()
+)
+_ENGLISH_STOPWORDS = frozenset(
+    "the and is of to in that for a an with as this these those on by from "
+    "at be are was were have has it its or not but which their".split()
+)
+_ENGLISH_STOPWORD_FLOOR = 4
+# A density floor, not just an absolute count, matters here: observed live,
+# a substantially non-English (German) answer that merely quotes a few
+# English technical terms or source titles can still rack up 4-6 incidental
+# stopword hits over a long enough answer (e.g. 6 hits / 217 words = 3%
+# density) — nowhere near the ~30-43% density of an answer that's actually
+# written in English throughout. Both floors must be cleared.
+_ENGLISH_STOPWORD_DENSITY_FLOOR = 0.12
+_NON_ENGLISH_STOPWORD_FLOOR = 2
+
+
+def _looks_like_non_english(text: str) -> bool:
+    """Lightweight, deliberately permissive signal that `text` is probably
+    not English: a letter with a diacritic uncommon in English (or a
+    Spanish-style inverted ¿/¡), or at least two recognizable German/
+    French/Spanish function words."""
+    if _NON_ENGLISH_LETTER_PATTERN.search(text):
+        return True
+    words = re.findall(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", text.lower(), re.UNICODE)
+    return sum(1 for w in words if w in _NON_ENGLISH_STOPWORDS) >= _NON_ENGLISH_STOPWORD_FLOOR
+
+
+def _looks_like_english(text: str) -> bool:
+    words = re.findall(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", text.lower(), re.UNICODE)
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in _ENGLISH_STOPWORDS)
+    return hits >= _ENGLISH_STOPWORD_FLOOR and hits / len(words) >= _ENGLISH_STOPWORD_DENSITY_FLOOR
+
+
+def _looks_like_wrong_language_answer(question: str, answer: str) -> bool:
+    """True if `question` reads as probably non-English but `answer` reads
+    as clearly English prose anyway (see the notes on both helpers above)."""
+    if not question or not _looks_like_non_english(question):
+        return False
+    return _looks_like_english(answer)
+
+
 # Weaker models frequently comply with the CRITICAL CITATION RULE's *format*
 # but skip citations altogether — observed live: 2 of 3 repeated attempts at
 # the same question produced an answer with zero [SN] markers anywhere.
@@ -135,6 +206,16 @@ def _low_citation_diversity(
 # that doesn't depend on the model following this instruction at all.
 CONTEXT_INSUFFICIENT_MARKER = "###CONTEXT_INSUFFICIENT###"
 
+# Observed live (qwen3-omni-30b-a3b-instruct, eval run 20261011T111753Z,
+# Q09): the model reproduced the instructed sentinel imperfectly, emitting
+# "###CONTEXT_INSUFFICIENT" with no trailing "###" — an exact-string match
+# against CONTEXT_INSUFFICIENT_MARKER missed it, so it leaked verbatim into
+# the user-facing answer instead of being stripped. Match the trailing hash
+# sequence as optional (0-3 chars) so a near-miss reproduction is still
+# recognized; the leading "###" is kept mandatory so this can't match
+# unrelated prose that merely contains the word.
+_CONTEXT_INSUFFICIENT_PATTERN = re.compile(r"###CONTEXT_INSUFFICIENT#{0,3}")
+
 
 def _thin_context_coverage(
     answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
@@ -142,11 +223,12 @@ def _thin_context_coverage(
     """True if the answer suggests the retrieved context itself was too thin
     or off-topic, rather than the model merely under-citing relevant
     material: either the model explicitly flagged this via
-    CONTEXT_INSUFFICIENT_MARKER, or citation utilization is low on a small
+    CONTEXT_INSUFFICIENT_MARKER (or a near-miss reproduction of it, see
+    _CONTEXT_INSUFFICIENT_PATTERN), or citation utilization is low on a small
     retrieved pool (<= 2x the low-diversity floor — a large pool with few
     citations is a citation-behavior issue, not evidence the pool itself
     was thin, so that case is left to _low_citation_diversity instead)."""
-    if CONTEXT_INSUFFICIENT_MARKER in answer:
+    if _CONTEXT_INSUFFICIENT_PATTERN.search(answer):
         return True
     if documents_grouped == 0 or documents_grouped > low_diversity_floor * 2:
         return False
@@ -158,13 +240,15 @@ def _quality_issue_reinforcement(
     answer: str,
     available_sources: int = 0,
     low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+    question: str = "",
 ) -> Optional[str]:
     """Return a reinforcement instruction to retry generation with, if `answer`
     has a detectable quality issue — or None if it looks fine. Checked once
     per generation attempt; only the first detected issue is reported.
 
     available_sources: number of distinct documents available in the context,
-    used only by the low-diversity check below."""
+    used only by the low-diversity check below.
+    question: the original question, used only by the wrong-language check below."""
     if _looks_like_tool_call_leak(answer):
         return (
             "Your previous response incorrectly attempted to call a tool or function. "
@@ -177,6 +261,12 @@ def _quality_issue_reinforcement(
             "backtracking (e.g. \"Wait,\" \"re-evaluating...\") instead of a clean "
             "final answer. Provide only your final conclusion in plain prose — do "
             "not show your work or reconsider earlier statements."
+        )
+    if _looks_like_wrong_language_answer(question, answer):
+        return (
+            "Your previous response was written in English, but the question above is "
+            "not written in English. Respond entirely in the same language as the "
+            "question instead."
         )
     if _missing_citations(answer):
         return (
@@ -197,7 +287,10 @@ def _quality_issue_reinforcement(
 
 
 def _count_quality_issues(
-    answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
+    answer: str,
+    documents_grouped: int,
+    low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+    question: str = "",
 ) -> int:
     """Count detectable quality issues in `answer`, used to compare an
     original answer against an escalated-retrieval retry."""
@@ -205,6 +298,8 @@ def _count_quality_issues(
     if _looks_like_tool_call_leak(answer):
         issues += 1
     if _looks_like_leaked_reasoning(answer):
+        issues += 1
+    if _looks_like_wrong_language_answer(question, answer):
         issues += 1
     if _missing_citations(answer):
         issues += 1
@@ -216,12 +311,14 @@ def _count_quality_issues(
 
 
 def _strip_insufficient_context_marker(answer: str) -> str:
-    """Remove the CONTEXT_INSUFFICIENT_MARKER sentinel (and any trailing
-    whitespace left behind) from the user-facing answer — it's a detection
-    signal for _thin_context_coverage, not something the user should see.
-    The raw answer (marker included) is still what gets traced, so a future
-    trace inspection can see whether the model actually emitted it."""
-    return answer.replace(CONTEXT_INSUFFICIENT_MARKER, "").rstrip()
+    """Remove the CONTEXT_INSUFFICIENT_MARKER sentinel — or a near-miss
+    reproduction of it, see _CONTEXT_INSUFFICIENT_PATTERN — (and any
+    trailing whitespace left behind) from the user-facing answer; it's a
+    detection signal for _thin_context_coverage, not something the user
+    should see. The raw answer (marker included) is still what gets traced,
+    so a future trace inspection can see whether the model actually
+    emitted it."""
+    return _CONTEXT_INSUFFICIENT_PATTERN.sub("", answer).rstrip()
 
 
 # Observed live: a fixed top_k can be entirely saturated by chunks from a single
@@ -563,7 +660,9 @@ class RAGEngine:
         )
 
         available_sources = len(sorted_doc_keys)
-        reinforcement = _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor)
+        reinforcement = _quality_issue_reinforcement(
+            answer, available_sources, low_diversity_available_floor, question
+        )
         if reinforcement:
             logger.warning(
                 f"LLM answer had a quality issue; retrying once. {reinforcement} "
@@ -575,7 +674,7 @@ class RAGEngine:
                 max_tokens=max_tokens,
                 temperature=0.7
             )
-            if _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor):
+            if _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor, question):
                 logger.warning(
                     f"Retry still had a quality issue; using it anyway: {answer[:200]!r}"
                 )
@@ -610,9 +709,11 @@ class RAGEngine:
                 retry_answer = await self.llm_service.generate(
                     prompt=retry_prompt, max_tokens=max_tokens, temperature=0.7
                 )
-                original_issues = _count_quality_issues(answer, available_sources, low_diversity_available_floor)
+                original_issues = _count_quality_issues(
+                    answer, available_sources, low_diversity_available_floor, question
+                )
                 retry_issues = _count_quality_issues(
-                    retry_answer, len(retry_sorted_doc_keys), low_diversity_available_floor
+                    retry_answer, len(retry_sorted_doc_keys), low_diversity_available_floor, question
                 )
                 retry_improved = retry_issues < original_issues
                 if retry_improved:
