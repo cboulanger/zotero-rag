@@ -65,7 +65,21 @@ use `uv run python` for anything that imports backend code (project rule), plain
    one key per key name (`uv run python bin/debug_get_zotero_key.py --list` shows
    the names without values). `managed`/`shared` presets (RunPod as bundled,
    MPCDF) use the admin-set key on the server; nothing to send.
-4. Sanity-check the skill itself: `python -m unittest discover -s skills/rag-quality-eval/tests`
+4. Check for missing credentials before planning anything:
+   `uv run python scripts/setup_credentials.py --dry-run`. It prints the names of
+   any still-missing required credential (nothing else, never a value) and exits
+   1 if any are missing, 0 if every preset you could evaluate already has what it
+   needs. If it reports anything, **stop and tell the user** to run
+   `uv run python scripts/setup_credentials.py` themselves in their own terminal —
+   it prompts interactively (and can reuse a matching value already sitting in
+   `.env` on Enter) and stores whatever they enter encrypted; you cannot type a
+   secret into it yourself (it would appear in your own tool-call text). Re-run
+   `--dry-run` after they say they're done, and only proceed once it's clean —
+   `list_targets.py`'s own per-preset check (step 1) tells you which *specific*
+   presets that leaves usable, but a preset reported `credentials_missing` there
+   is not a reason to skip this step; it's what this step exists to prevent
+   finding out about mid-run.
+5. Sanity-check the skill itself: `python -m unittest discover -s skills/rag-quality-eval/tests`
    and `python skills/rag-quality-eval/scripts/gold_tools.py validate`.
    If the library changed since the gold file was written:
    `python skills/rag-quality-eval/scripts/fetch_gold_corpus.py verify`

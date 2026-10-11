@@ -762,6 +762,7 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 
 - Never commit secrets, API keys, or credentials to version control
 - Use environment variables for all sensitive configuration
+- **Never put a secret in `.env` unless absolutely necessary** (i.e. nothing else can hold it — `AUTOINDEX_SECRET`, the Fernet key that decrypts the secret store, is the canonical example: it can't be stored by the thing it unlocks). Provider/API credentials belong in the encrypted secret store (`backend/services/secret_store.py`; add one interactively with `uv run python scripts/setup_credentials.py`) instead of as plaintext `.env` lines. When a script needs a stored secret, extract it programmatically into a variable — e.g. `backend.services.secret_store.get_key_store()` /`AutoIndexKeyStore.get_decrypted_embedding_key()`, the pattern `bin/debug_get_zotero_key.py` uses — rather than reading it from an env var or a `.env` file.
 - Validate and sanitize all user inputs
 - Use parameterized queries to prevent injection attacks
 - Keep dependencies updated to patch security vulnerabilities
