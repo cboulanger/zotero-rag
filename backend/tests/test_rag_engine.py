@@ -896,6 +896,38 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertEqual(prompt.count("Content from Dominant Doc"), 3)
 
+    async def test_query_dedupes_identical_chunk_text_across_different_documents(self):
+        """Observed live (#87 follow-up): a Zotero library can hold two
+        separate items (different item_keys) for the same underlying article
+        (e.g. one user adds it twice, or it's imported from two sources) —
+        the gold test library's lorenzetti2013 entry is exactly this case.
+        Both items' attachments extract to identical chunk text, so the
+        existing within-document dedup (keyed by item_key) never sees them
+        as duplicates: each item's copy independently consumes its own
+        top_k slot with the same content, crowding out a genuinely
+        different document that would otherwise have made the window."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "The same article, indexed twice under two different library items."
+        dup_a = self._make_chunk("DOC_A", "ATT_A", "Duplicate Item A", 0.9, chunk_index=0, text=duplicate_text)
+        dup_b = self._make_chunk("DOC_B", "ATT_B", "Duplicate Item B", 0.85, chunk_index=0, text=duplicate_text)
+        other_doc = self._make_chunk("DOC_C", "ATT_C", "Other Doc", 0.8, chunk_index=0)
+        crowded_out_doc = self._make_chunk("DOC_D", "ATT_D", "Crowded Out Doc", 0.75, chunk_index=0)
+
+        self.mock_vector_store.search = Mock(return_value=[dup_a, dup_b, other_doc, crowded_out_doc])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=3)
+
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_D", cited_docs,
+            "the cross-item duplicate should have been deduped, freeing the "
+            "3rd top_k slot for the genuinely different DOC_D instead of "
+            "wasting it on DOC_B's duplicate of DOC_A's text",
+        )
+
     async def test_query_custom_diversity_floor_suppresses_escalation(self):
         """A caller-supplied diversity_floor of 1 means "1 document is already
         enough" — escalation must not fire even though the default floor (3)

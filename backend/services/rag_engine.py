@@ -372,12 +372,17 @@ def _normalize_for_dedup(text: str) -> str:
 
 
 def _dedup_chunks_by_text(results: list) -> list:
-    """Within one document's chunks, drop exact-after-normalization text
-    duplicates, keeping the highest-scoring copy of each. Observed live: the
-    same page re-extracted from two attachment_keys of one Zotero item (or
-    chunked twice during indexing) produces two SearchResults with identical
-    text, wasting a context slot that could hold a genuinely different
-    passage."""
+    """Drop exact-after-normalization text duplicates from ``results``,
+    keeping the highest-scoring copy of each, regardless of which document
+    (item_key) each copy belongs to. Observed live: the same page re-extracted
+    from two attachment_keys of one Zotero item (or chunked twice during
+    indexing) produces two SearchResults with identical text — and a Zotero
+    library can separately hold two distinct items for the same underlying
+    article (e.g. added twice, or imported from two sources), whose
+    attachments then extract to identical chunk text under two different
+    item_keys. Either way the duplicate wastes a context slot that could
+    hold a genuinely different passage or document, so this intentionally
+    compares across documents, not just within one."""
     best_by_text: dict[str, object] = {}
     for result in results:
         key = _normalize_for_dedup(result.chunk.text)
@@ -388,28 +393,32 @@ def _dedup_chunks_by_text(results: list) -> list:
 
 
 def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: int) -> list:
-    """Within each document (grouped by item_key), drop exact-after-normalization
-    text duplicates (see _dedup_chunks_by_text) and cap the survivors to at most
-    max_chunks_per_document, keeping the highest-scoring ones. Returns everything
-    re-sorted by score (descending).
+    """Drop exact-after-normalization text duplicates across the whole pool
+    (see _dedup_chunks_by_text — this includes duplicates that span two
+    different item_keys, not just two attachments of one item), then within
+    each surviving document (grouped by item_key) cap to at most
+    max_chunks_per_document, keeping the highest-scoring ones. Returns
+    everything re-sorted by score (descending).
 
     Applied to the RAW search pool before the top_k cutoff (see #87 and
     _SEARCH_CANDIDATE_POOL_SIZE above) — deduping first ensures a cap slot is
     never wasted on a near-identical repeat of a passage that would be
     discarded anyway, so it doesn't crowd out a genuinely different passage
-    from the same document. _assemble_context's own dedup/cap pass over the
-    final top_k window is then a no-op for chunks already handled here, but
-    still matters for chunks that only became neighbors after the cutoff
-    (e.g. an escalation retry merging a new document's chunks in)."""
+    (from the same document, or — since dedup is global — from a different
+    document entirely, such as a duplicate library item for the same
+    article). _assemble_context's own dedup/cap pass over the final top_k
+    window is then a no-op for chunks already handled here, but still
+    matters for chunks that only became neighbors after the cutoff (e.g. an
+    escalation retry merging a new document's chunks in)."""
+    deduped_globally = _dedup_chunks_by_text(results)
     by_doc: dict[str, list] = {}
-    for result in results:
+    for result in deduped_globally:
         key = result.chunk.metadata.document_metadata.item_key
         by_doc.setdefault(key, []).append(result)
     capped: list = []
     for doc_results in by_doc.values():
-        deduped = _dedup_chunks_by_text(doc_results)
-        deduped.sort(key=lambda r: r.score, reverse=True)
-        capped.extend(deduped[:max_chunks_per_document])
+        doc_results.sort(key=lambda r: r.score, reverse=True)
+        capped.extend(doc_results[:max_chunks_per_document])
     capped.sort(key=lambda r: r.score, reverse=True)
     return capped
 
