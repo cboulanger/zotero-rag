@@ -113,6 +113,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=5,
             min_score=0.5,
+            search_candidate_pool_size=5,
         )
 
         # Verify embedding was generated
@@ -233,6 +234,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=10,
             min_score=0.6,
+            search_candidate_pool_size=10,
         )
 
         # Verify search was performed with both libraries
@@ -327,6 +329,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=20,
             min_score=0.8,
+            search_candidate_pool_size=20,
         )
 
         # Verify custom parameters were passed to search
@@ -643,7 +646,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
         self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
 
-        result = await self.rag_engine.query(question, library_ids, top_k=5)
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=5, search_candidate_pool_size=5,
+        )
 
         self.assertEqual(self.mock_vector_store.search.call_count, 2)
         second_call_kwargs = self.mock_vector_store.search.call_args_list[1].kwargs
@@ -672,7 +677,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
         self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
 
-        result = await self.rag_engine.query(question, library_ids, top_k=10)
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=10,
+        )
 
         self.assertEqual(
             self.mock_vector_store.search.call_count, 2,
@@ -726,6 +733,55 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         await self.rag_engine.query(question, library_ids, top_k=30)
 
         self.mock_vector_store.search.assert_called_once()
+
+    async def test_query_surfaces_document_crowded_out_of_top_k_by_other_documents(self):
+        """Observed live (#87, jin2026): a relevant document's only chunk can
+        rank just outside a naive top_k window because a few OTHER documents
+        together contribute enough higher-scoring chunks to fill it — even
+        though the window already contains exactly diversity_floor distinct
+        documents, so the existing diversity-escalation mechanism (which
+        only checks DISTINCT document count, not per-document concentration)
+        never catches this. Capping each document's contribution to the
+        candidate pool BEFORE the top_k cutoff (not just at context-assembly
+        time, which only runs on whatever already survived the cutoff) must
+        let the crowded-out document back in.
+
+        Fixture: DOC_A supplies 6 of the top-10 raw-score slots (ranks 1-6),
+        DOC_B 3 (ranks 7-9), DOC_C 1 (rank 10) — exactly 3 distinct
+        documents in the naive top_k=10 window, meeting diversity_floor=3
+        exactly, so escalation never fires either. DOC_TARGET's only chunk
+        is rank 11, just outside. Capping each document to its top 4 chunks
+        drops DOC_A's 2 lowest (ranks 5-6), which is enough to pull
+        DOC_TARGET into the resulting top_k=10 window — a real vector store
+        honors `limit` by truncating to the N highest-scoring results, so
+        the mock must do the same (a plain Mock(return_value=...) would
+        hand back everything regardless of `limit`, masking the exact
+        truncation behavior this test exercises)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        crowding_a = [self._make_chunk("DOC_A", "ATT_A", "Crowding Doc A", 0.99 - i * 0.01, i) for i in range(6)]
+        crowding_b = [self._make_chunk("DOC_B", "ATT_B", "Crowding Doc B", 0.93 - i * 0.01, i) for i in range(3)]
+        crowding_c = [self._make_chunk("DOC_C", "ATT_C", "Crowding Doc C", 0.90)]
+        target = self._make_chunk("DOC_TARGET", "ATT_T", "Target Doc", 0.89)
+        pool = sorted(crowding_a + crowding_b + crowding_c + [target], key=lambda r: r.score, reverse=True)
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3,S4]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=10)
+
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_TARGET", cited_docs,
+            "Target document's only chunk (score 0.89, raw rank #11) must "
+            "survive the per-document cap applied before the top_k cutoff, "
+            "even though the naive top-10 window already contains exactly "
+            "diversity_floor (3) distinct documents and so never escalates.",
+        )
 
     async def test_query_caps_chunks_per_document_in_the_assembled_context(self):
         """A single over-chunked document must not be allowed to dominate the
@@ -888,7 +944,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.model_name = "test-model"
 
         collector = TraceCollector(question, library_ids, {})
-        await self.rag_engine.query(question, library_ids, top_k=5, trace=collector)
+        await self.rag_engine.query(
+            question, library_ids, top_k=5, trace=collector, search_candidate_pool_size=5,
+        )
         trace = collector.finalize()
 
         self.assertTrue(trace.agent_executions[0].retrieval.escalated)
@@ -1147,6 +1205,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         result = await self.rag_engine.query(
             question, library_ids, top_k=3, enable_quality_self_review=True,
+            search_candidate_pool_size=3,
         )
 
         self.assertEqual(

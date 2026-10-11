@@ -338,6 +338,19 @@ _DIVERSITY_ESCALATION_MAX_TOP_K = 30
 # keeps the context readable, independent of document diversity itself.
 _MAX_CHUNKS_PER_DOCUMENT = 4
 
+# Raw candidate pool size fetched from the vector store before the
+# per-document dedup+cap (_dedup_and_cap_chunks_per_document) is applied and
+# before the top_k cutoff. Needed because a few documents each contributing
+# several near-duplicate/high-scoring chunks can occupy most of a naive
+# top_k window, crowding out a genuinely relevant but less-chunked document
+# even when that window already contains >= diversity_floor distinct
+# documents — the diversity escalation above only looks at DISTINCT document
+# count in the window, not at per-document chunk concentration, so it never
+# catches this case (see #87: a relevant document's best chunk ranked #39 by
+# raw score — past even the escalated top_k=30 ceiling — because a handful
+# of other documents' near-duplicate chunks saturated ranks 1-38).
+_SEARCH_CANDIDATE_POOL_SIZE = 100
+
 
 def _format_authors(authors: list[str]) -> str:
     if not authors:
@@ -372,6 +385,33 @@ def _dedup_chunks_by_text(results: list) -> list:
         if existing is None or result.score > existing.score:
             best_by_text[key] = result
     return list(best_by_text.values())
+
+
+def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: int) -> list:
+    """Within each document (grouped by item_key), drop exact-after-normalization
+    text duplicates (see _dedup_chunks_by_text) and cap the survivors to at most
+    max_chunks_per_document, keeping the highest-scoring ones. Returns everything
+    re-sorted by score (descending).
+
+    Applied to the RAW search pool before the top_k cutoff (see #87 and
+    _SEARCH_CANDIDATE_POOL_SIZE above) — deduping first ensures a cap slot is
+    never wasted on a near-identical repeat of a passage that would be
+    discarded anyway, so it doesn't crowd out a genuinely different passage
+    from the same document. _assemble_context's own dedup/cap pass over the
+    final top_k window is then a no-op for chunks already handled here, but
+    still matters for chunks that only became neighbors after the cutoff
+    (e.g. an escalation retry merging a new document's chunks in)."""
+    by_doc: dict[str, list] = {}
+    for result in results:
+        key = result.chunk.metadata.document_metadata.item_key
+        by_doc.setdefault(key, []).append(result)
+    capped: list = []
+    for doc_results in by_doc.values():
+        deduped = _dedup_chunks_by_text(doc_results)
+        deduped.sort(key=lambda r: r.score, reverse=True)
+        capped.extend(deduped[:max_chunks_per_document])
+    capped.sort(key=lambda r: r.score, reverse=True)
+    return capped
 
 
 def _group_chunks_by_document(search_results: list) -> tuple[dict[str, list], list[str]]:
@@ -535,6 +575,7 @@ class RAGEngine:
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         low_diversity_available_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
         enable_quality_self_review: bool = False,
+        search_candidate_pool_size: int = _SEARCH_CANDIDATE_POOL_SIZE,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -548,8 +589,9 @@ class RAGEngine:
                 larger top_k (see module docstring above _DIVERSITY_FLOOR).
             diversity_escalation_factor: Multiplier applied to top_k when escalating.
             diversity_escalation_max_top_k: Ceiling on the escalated top_k.
-            max_chunks_per_document: Cap on chunks from a single document in the
-                assembled context.
+            max_chunks_per_document: Cap on chunks from a single document, applied
+                before the top_k cutoff (see _dedup_and_cap_chunks_per_document) and
+                again (as a no-op safety net) in the assembled context.
             low_diversity_available_floor: Minimum distinct available sources before the
                 low-citation-diversity retry guard checks the answer (see
                 _LOW_DIVERSITY_AVAILABLE_FLOOR above).
@@ -558,6 +600,9 @@ class RAGEngine:
                 retry once with escalated retrieval before returning, and
                 keep whichever answer has fewer detectable quality issues.
                 Default False — doubles latency on queries that trigger it.
+            search_candidate_pool_size: Raw chunk pool size fetched from the vector
+                store before the per-document dedup+cap and the top_k cutoff (see
+                module docstring above _SEARCH_CANDIDATE_POOL_SIZE).
 
         Returns:
             Query result with answer and source citations.
@@ -570,19 +615,28 @@ class RAGEngine:
         query_embedding = await self.embedding_service.embed_text(question)
         embedding_model = getattr(self.embedding_service, "model_name", "unknown")
 
-        # Step 2: Search vector database for relevant chunks
-        logger.debug(f"Searching for top {top_k} chunks in libraries: {library_ids}")
+        # Step 2: Search vector database for relevant chunks. Fetch a raw candidate
+        # pool larger than top_k, then dedup+cap how many chunks any one document
+        # contributes BEFORE the top_k cutoff — otherwise a few documents with many
+        # near-duplicate/high-scoring chunks can occupy the entire window and crowd
+        # out a genuinely relevant, less-chunked document (see #87 and
+        # _SEARCH_CANDIDATE_POOL_SIZE above).
+        candidate_pool_size = max(top_k, search_candidate_pool_size)
+        logger.debug(
+            f"Searching for top {top_k} chunks (candidate pool {candidate_pool_size}) "
+            f"in libraries: {library_ids}"
+        )
         active_filters = filters if filters and not filters.is_empty() else None
-        search_results = await asyncio.to_thread(
+        raw_results = await asyncio.to_thread(
             self.vector_store.search,
             query_vector=query_embedding,
-            limit=top_k,
+            limit=candidate_pool_size,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
             filters=active_filters,
         )
 
-        if not search_results:
+        if not raw_results:
             logger.warning("No relevant chunks found for query")
             return QueryResult(
                 question=question,
@@ -590,39 +644,46 @@ class RAGEngine:
                 sources=[]
             )
 
+        capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+        search_results = capped_pool[:top_k]
+
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
-        # Escalate once if the search hit the top_k cap (not the corpus limit) and
-        # came back dominated by too few distinct documents. Both this check and
-        # the post-generation thin-context check below (gated on
-        # enable_quality_self_review) can fire independently — they detect
-        # different failure modes (structural retrieval narrowness vs.
-        # answer-quality degradation) and are not a strict superset of each
-        # other. The post-generation block only runs if this one didn't already
-        # fire, so a query only ever spends one escalation retry regardless of
-        # which mechanism catches the problem first.
+        # Escalate once if the raw search hit the candidate-pool fetch limit (not
+        # the corpus limit) — meaning more chunks may exist beyond what was
+        # fetched — and the capped, top_k-cut window still came back dominated by
+        # too few distinct documents. Both this check and the post-generation
+        # thin-context check below (gated on enable_quality_self_review) can fire
+        # independently — they detect different failure modes (structural
+        # retrieval narrowness vs. answer-quality degradation) and are not a
+        # strict superset of each other. The post-generation block only runs if
+        # this one didn't already fire, so a query only ever spends one
+        # escalation retry regardless of which mechanism catches the problem first.
         escalated = False
-        if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
+        if len(raw_results) == candidate_pool_size and top_k < diversity_escalation_max_top_k:
             unique_doc_count = len({
                 r.chunk.metadata.document_metadata.item_key
                 for r in search_results
             })
             if unique_doc_count < diversity_floor:
                 escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
+                escalated_candidate_pool_size = candidate_pool_size * diversity_escalation_factor
                 logger.info(
                     f"Retrieval diversity low ({unique_doc_count} documents from top_k={top_k}); "
-                    f"escalating to top_k={escalated_top_k}"
+                    f"escalating to top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size})"
                 )
-                escalated_results = await asyncio.to_thread(
+                escalated_raw_results = await asyncio.to_thread(
                     self.vector_store.search,
                     query_vector=query_embedding,
-                    limit=escalated_top_k,
+                    limit=escalated_candidate_pool_size,
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
                     filters=active_filters,
                 )
-                if len(escalated_results) > len(search_results):
-                    search_results = escalated_results
+                if len(escalated_raw_results) > len(raw_results):
+                    raw_results = escalated_raw_results
+                    capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+                    search_results = capped_pool[:escalated_top_k]
                     escalated = True
                     logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
 
@@ -687,20 +748,23 @@ class RAGEngine:
             and _thin_context_coverage(answer, available_sources, low_diversity_available_floor)
         ):
             escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
+            escalated_candidate_pool_size = candidate_pool_size * diversity_escalation_factor
             logger.info(
                 f"Thin context coverage detected; escalating retrieval to "
-                f"top_k={escalated_top_k} and regenerating once"
+                f"top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size}) and regenerating once"
             )
-            retry_search_results = await asyncio.to_thread(
+            retry_raw_results = await asyncio.to_thread(
                 self.vector_store.search,
                 query_vector=query_embedding,
-                limit=escalated_top_k,
+                limit=escalated_candidate_pool_size,
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
             )
             retry_improved = False
-            if len(retry_search_results) > len(search_results):
+            if len(retry_raw_results) > len(raw_results):
+                retry_capped_pool = _dedup_and_cap_chunks_per_document(retry_raw_results, max_chunks_per_document)
+                retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
                 retry_context, retry_doc_representatives = _assemble_context(
                     retry_doc_chunks, retry_sorted_doc_keys, max_chunks_per_document
