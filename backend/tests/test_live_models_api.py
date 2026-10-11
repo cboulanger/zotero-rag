@@ -13,10 +13,14 @@ from backend.providers.kisski import KisskiProvider
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 
 MODELS = {"data": [
-    {"id": "busy-model", "input": ["text"], "output": ["text"], "demand": 7},
-    {"id": "free-model", "input": ["text"], "output": ["text"], "demand": 0},
+    # busy/free are entries of the bundled remote-kisski preset's model_names;
+    # unlisted-model is suitable for RAG but not named there, so the preset filters it out.
+    {"id": "qwen3.5-122b-a10b", "input": ["text"], "output": ["text"], "demand": 7},
+    {"id": "mistral-large-3-675b-instruct-2512", "input": ["text"], "output": ["text"], "demand": 0},
+    {"id": "unlisted-model", "input": ["text"], "output": ["text"], "demand": 0},
     {"id": "some-coder", "input": ["text"], "output": ["text"], "demand": 0},
 ]}
+BUSY, FREE = "qwen3.5-122b-a10b", "mistral-large-3-675b-instruct-2512"
 
 
 class _Base(unittest.TestCase):
@@ -50,11 +54,19 @@ class _Base(unittest.TestCase):
 
 
 class TestConfigLiveModels(_Base):
-    def test_models_are_listed_most_available_first_when_a_key_is_sent(self):
+    def test_live_models_are_filtered_by_model_names_in_their_order(self):
+        # The first model_names entry is the default, whatever the provider's demand order.
         r = self.client.get("/api/config", headers={"X-Kisski-Api-Key": "k"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["llm_models"], ["free-model", "busy-model"])
-        self.assertEqual(r.json()["llm_model"], "free-model")
+        self.assertEqual(r.json()["llm_models"], [FREE, BUSY])
+        self.assertEqual(r.json()["llm_model"], FREE)
+
+    def test_a_filter_matching_nothing_falls_back_to_the_static_list(self):
+        self.fake.add("POST", r"/models$", FakeResponse(200, {"data": [
+            {"id": "other-model", "input": ["text"], "output": ["text"], "demand": 0}]}))
+        r = self.client.get("/api/config", headers={"X-Kisski-Api-Key": "k"})
+        self.assertIn(FREE, r.json()["llm_models"])
+        self.assertNotIn("other-model", r.json()["llm_models"])
 
     def test_without_a_key_the_static_list_is_used_and_nothing_is_fetched(self):
         with patch.dict("os.environ", {}, clear=False):
@@ -77,8 +89,8 @@ class TestModelsStatus(_Base):
         r = self.client.get("/api/models/status", headers={"X-Kisski-Api-Key": "k"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()["models"], [
-            {"model": "free-model", "demand": 0, "status": "available"},
-            {"model": "busy-model", "demand": 7, "status": "very busy"},
+            {"model": FREE, "demand": 0, "status": "available"},
+            {"model": BUSY, "demand": 7, "status": "very busy"},
         ])
 
     def test_empty_when_the_endpoint_fails(self):

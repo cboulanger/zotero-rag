@@ -13,6 +13,22 @@ Each preset is a JSON file under `<data_path>/presets/<name>.json` (e.g. `data/p
 
 A preset file's fields mirror `backend.config.presets.HardwarePreset` and its nested `embedding`/`llm`/`rag` sections (see that module for the full Pydantic schema and field descriptions). The file's own `name` key, if present, is ignored — a preset's identity always comes from its filename.
 
+### Choosing the LLM models: `llm.model_names`
+
+`llm.model_names` lists the models a preset offers. Each entry is a case-insensitive glob pattern (`*`, `?`, `[...]`); a plain model id is a pattern that matches only itself.
+
+- **Default model:** the first entry. Without a live model list (see below) the picker shows the plain entries, and the first one is the default.
+- **Live model list:** if the LLM's provider can list its models (`kisski`, `google`), the list is fetched from the provider and filtered to the entries, so the picker offers only matching models. It keeps the order of `model_names`, with the provider's own order (for example newest first or least busy first) within one pattern, so the first entry's match is the default.
+- **Query validation:** a request for a model matching no entry is rejected with HTTP 400.
+- **Empty result:** if no live model matches (a typo, or a key without access to those models) or the fetch fails, the plain entries are used instead.
+- **At least one plain entry:** a list with only wildcards is rejected, since wildcard entries are not model ids and there would be no default.
+
+```json
+"model_names": ["gemini-3.5-flash", "gemini-*-flash"]
+```
+
+offers `gemini-3.5-flash` first (the default), then every other Gemini Flash model of that form the key can use.
+
 ### Preset schema versions
 
 | Version | Change |
@@ -75,7 +91,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Configuration:**
 
 - Embedding: `gemini-embedding-001` (3072-dim) via Google's OpenAI-compatible endpoint
-- LLM: `gemini-2.5-flash` (1M context); the model picker lists the Flash models your key can use, newest first, fetched live from the Gemini API (static fallback: `gemini-2.5-flash`, `-flash-lite`, `-pro`)
+- LLM: `model_names` is `["gemini-2.5-flash", "gemini-*flash*"]` (1M context): `gemini-2.5-flash` is the default and the picker adds the other Flash models your key can use, fetched live from the Gemini API (the static fallback is `gemini-2.5-flash` alone)
 - Provider: `google` (key portal: <https://aistudio.google.com/apikey>)
 - Top-k: 10 chunks / Max chunk: 1024 tokens
 
@@ -85,7 +101,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 
 ### `kisski-gemini` (KISSKI embeddings, Gemini answers)
 
-**Best for:** Users with both a KISSKI and a Gemini key who want KISSKI-hosted embeddings (`multilingual-e5-large-instruct`, 1024-dim, same index as `remote-kisski`) with answers from `gemini-3.5-flash` (1M context). The two sides use separate providers (`kisski`, `google`) and keys; the LLM model list is fetched live from the Gemini API (Flash models, newest first).
+**Best for:** Users with both a KISSKI and a Gemini key who want KISSKI-hosted embeddings (`multilingual-e5-large-instruct`, 1024-dim, same index as `remote-kisski`) with answers from `gemini-3.5-flash` (1M context; `model_names` is `["gemini-3.5-flash", "gemini-*-flash"]`, so other Flash versions are offered after it). The two sides use separate providers (`kisski`, `google`) and keys.
 
 **Requires:** `KISSKI_API_KEY` and `GEMINI_API_KEY` (each user's own, entered in the plugin)
 
