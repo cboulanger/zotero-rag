@@ -176,6 +176,8 @@ _KNOWN_DIMS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "openai": 1536,  # generic "openai" sentinel used in remote-openai preset
+    # Google Gemini (OpenAI-compatible endpoint)
+    "gemini-embedding-001": 3072,
     # KISSKI / SAIA (https://docs.hpc.gwdg.de/services/ai-services/saia/)
     "multilingual-e5-large-instruct": 1024,
     "e5-mistral-7b-instruct": 4096,
