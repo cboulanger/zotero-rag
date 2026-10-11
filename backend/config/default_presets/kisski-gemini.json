@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "description": "KISSKI embeddings with Google Gemini answers",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "multilingual-e5-large-instruct",
+    "batch_size": 256,
+    "provider": {"id": "kisski"},
+    "model_kwargs": {
+      "base_url": "https://chat-ai.academiccloud.de/v1",
+      "api_key_env": "KISSKI_API_KEY"
+    }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": ["gemini-3.5-flash"],
+    "max_context_length": 1000000,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "provider": {"id": "google"},
+    "model_kwargs": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "api_key_env": "GEMINI_API_KEY"
+    }
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any"
+}
