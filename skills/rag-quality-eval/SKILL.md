@@ -53,7 +53,24 @@ use `uv run python` for anything that imports backend code (project rule), plain
    indexer while the run lasts: only do that on a dev instance, never on
    production, and tell the user before you start.
 2. The gold library is indexed: `curl -s localhost:8119/api/libraries` lists `6297749`.
-   If it is missing, index it first (plugin, or `bin/index_libraries.py`).
+   If it is missing, index it first (plugin, or `bin/index_libraries.py`). This only
+   confirms *some* items in the library are indexed — not that every gold document
+   has content in the *currently active* embedding collection (a document can be
+   Zotero-tagged "indexed" from a previous embedding-model collection while the
+   active one has zero chunks for it, e.g. right after a preset/embedding-model
+   switch whose re-index hasn't finished). Run the dedicated check next:
+
+   ```bash
+   uv run python skills/rag-quality-eval/scripts/check_gold_index.py
+   ```
+
+   If it reports missing attachments, re-index before doing anything else
+   (`uv run python bin/index_libraries.py --mode incremental --slug groups/6297749`,
+   then re-run the check) — do not proceed to scoring against a gold set with
+   silent indexing gaps: it measures "never indexed" as a retrieval/generation
+   defect instead. This is exactly how issue #80 was first misdiagnosed as a
+   `top_k`/`score_threshold` tuning problem; the real cause was two gold
+   documents that had never been chunked into the active collection at all.
 3. Keys (never print them). The Zotero identity key comes from
    `$RAG_EVAL_ZOTERO_KEY` or the encrypted key store (`bin/autoindex_add_key.py`);
    a loopback dev instance without `AUTHORIZED_GROUP_ID` needs none (then only the

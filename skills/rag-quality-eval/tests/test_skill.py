@@ -18,6 +18,7 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import check_gold_index  # noqa: E402
 import gold_tools  # noqa: E402
 import judge  # noqa: E402
 import report  # noqa: E402
@@ -282,7 +283,7 @@ class MockBackend(BaseHTTPRequestHandler):
     @classmethod
     def reset(cls):
         cls.state = {"default": "remote-kisski", "user_choice": None, "default_switches": [], "user_choices": [],
-                     "health": {}, "warmups": 0}
+                     "health": {}, "warmups": 0, "unindexed_attachments": set()}
 
     def log_message(self, *a):  # silence
         pass
@@ -344,6 +345,10 @@ class MockBackend(BaseHTTPRequestHandler):
             question = next((q for q in GOLD["questions"] if q["question"] == body["question"]), Q["Q01"])
             answer = " ".join(f"{f['text']} [S1]." for f in question["facts"] if f.get("answer_patterns"))
             self._send(200, make_response(question, answer))
+        elif self.path == "/api/indexed-tags/check":
+            unindexed = self.state["unindexed_attachments"]
+            indexed = [k for k in body["attachment_keys"] if k not in unindexed]
+            self._send(200, {"indexed": sorted(indexed)})
         else:
             self._send(404, {})
 
@@ -449,6 +454,39 @@ class EndToEndTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", argv):
             self.assertEqual(run_eval.main(), 0)
         self.assertEqual(MockBackend.state["user_choices"] + MockBackend.state["default_switches"], [])
+
+
+class CheckGoldIndexTests(unittest.TestCase):
+    """check_gold_index.py: catches a gold document with zero chunks in the
+    active embedding collection even though its library is listed as indexed
+    (see issue #80 - this is exactly the gap that let it be misdiagnosed as a
+    retrieval-tuning problem instead of an indexing-completeness one)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = HTTPServer(("127.0.0.1", 0), MockBackend)
+        cls.url = f"http://127.0.0.1:{cls.server.server_port}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+
+    def setUp(self):
+        MockBackend.reset()
+
+    def _run(self) -> int:
+        argv = ["check_gold_index.py", "--url", self.url]
+        with mock.patch.dict(os.environ, {"RAG_EVAL_ZOTERO_KEY": "dummy"}), mock.patch.object(sys, "argv", argv):
+            return check_gold_index.main()
+
+    def test_passes_when_every_gold_attachment_is_indexed(self):
+        self.assertEqual(self._run(), 0)
+
+    def test_fails_when_a_gold_attachment_has_no_chunks(self):
+        some_key = next(iter(GOLD["documents"].values()))["attachment_keys"][0]
+        MockBackend.state["unindexed_attachments"] = {some_key}
+        self.assertEqual(self._run(), 1)
 
 
 if __name__ == "__main__":
