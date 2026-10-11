@@ -90,5 +90,10 @@ def _main(argv: list[str]) -> int:
     return 1
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the ``rag-key`` console script (see pyproject.toml)."""
     sys.exit(_main(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    main()

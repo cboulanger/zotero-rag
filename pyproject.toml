@@ -43,6 +43,12 @@ eval = [
     "ir-datasets>=0.5.5",
 ]
 
+[project.scripts]
+# Short, stable names for the most-used debugging scripts (`uv run <name>`),
+# decoupled from the underlying file's path — move/rename the script and only
+# this line needs updating, not every CLAUDE.md/SKILL.md call site.
+rag-key = "bin.debug_get_zotero_key:main"
+
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
 python_files = "test_*.py"
@@ -64,7 +70,7 @@ addopts = "-rs -m 'not integration and not api and not container'"
 timeout = 30
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend"]
+packages = ["backend", "bin"]
 
 [build-system]
 requires = ["hatchling"]
