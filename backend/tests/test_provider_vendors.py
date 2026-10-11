@@ -34,6 +34,21 @@ class TestOpenAI(unittest.TestCase):
             get_providers(preset_with("openai", scope="shared", kwargs={"shared_api_key_env": "OPENAI_API_KEY"}))
 
 
+class TestGoogle(unittest.TestCase):
+    def test_key_metadata(self):
+        provider = get_providers(preset_with("google"))["llm"]
+        self.assertEqual(provider.default_key_env(), "GEMINI_API_KEY")
+        self.assertEqual(provider.key_docs_url("GEMINI_API_KEY"), "https://aistudio.google.com/apikey")
+        self.assertIsNone(provider.key_docs_url("OTHER"))
+        self.assertEqual(provider.llm_api, "openai")
+
+    def test_serves_both_sides_and_rejects_shared_scope(self):
+        for side in ("embedding", "llm"):
+            get_providers(preset_with("google", side))
+        with self.assertRaises(ProviderConfigError):
+            get_providers(preset_with("google", scope="shared", kwargs={"shared_api_key_env": "GEMINI_API_KEY"}))
+
+
 class TestBundledPresetsPickUpProviderDefaults(unittest.TestCase):
     """get_preset() runs each provider's apply_defaults(), so the services read model_kwargs only."""
 

@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "description": "Using Google Gemini remote inference (OpenAI-compatible endpoint)",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "gemini-embedding-001",
+    "batch_size": 100,
+    "provider": {"id": "google"},
+    "model_kwargs": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "api_key_env": "GEMINI_API_KEY"
+    }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"],
+    "max_context_length": 1000000,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "provider": {"id": "google"},
+    "model_kwargs": {
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "api_key_env": "GEMINI_API_KEY"
+    }
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.5,
+    "max_chunk_size": 1024
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any"
+}

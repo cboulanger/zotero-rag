@@ -33,6 +33,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `cpu-only` | Yes (~1-2 GB) | — | any |
 | `remote-kisski` | **No** | `KISSKI_API_KEY` | any |
 | `remote-openai` | **No** | `OPENAI_API_KEY` | any |
+| `remote-gemini` | **No** | `GEMINI_API_KEY` | any |
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
@@ -63,6 +64,21 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 - No local GPU or `torch` required
 
 **Requires:** `OPENAI_API_KEY` environment variable
+
+---
+
+### `remote-gemini` (Google Gemini API)
+
+**Best for:** Users with a Google AI Studio / Gemini API key
+
+**Configuration:**
+
+- Embedding: `gemini-embedding-001` (3072-dim) via Google's OpenAI-compatible endpoint
+- LLM: `gemini-2.5-flash` (alternatives `gemini-2.5-flash-lite`, `gemini-2.5-pro`; 1M context)
+- Provider: `google` (key portal: <https://aistudio.google.com/apikey>)
+- Top-k: 10 chunks / Max chunk: 1024 tokens
+
+**Requires:** `GEMINI_API_KEY` (each user's own, entered in the plugin)
 
 ---
 

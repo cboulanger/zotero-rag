@@ -33,6 +33,7 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "high-memory",
     "cpu-only",
     "remote-openai",
+    "remote-gemini",
     "remote-kisski",
     "cloud-server-kisski",
     "windows-test",
