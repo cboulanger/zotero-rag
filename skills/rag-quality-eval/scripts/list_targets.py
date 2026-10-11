@@ -11,12 +11,16 @@ Two preset notions exist on the server (docs/presets.md): the *default* preset
 own saved choice, else the default). "active" below is the effective one.
 
 Status per preset:
-  active               the caller's effective preset
+  active               the caller's effective preset, and every key it needs
+                       can be supplied by this harness (checked the same way
+                       as for a switchable one below - being effective does
+                       not by itself mean this harness can query it)
   switchable           compatible with the default (both sides remote, same
                        embedding model) and every key it needs can be supplied
                        by this harness: it can be selected at runtime
-  credentials_missing  compatible, but a key is missing (names listed): export
-                       the key as $<KEY_NAME> or store it (bin/autoindex_add_key.py)
+  credentials_missing  a key is missing (names listed), whether this is the
+                       effective preset or a compatible one: export the key
+                       as $<KEY_NAME> or store it (bin/autoindex_add_key.py)
   needs_restart        incompatible with the default (different embedding model,
                        or a local-model side): the existing index would not
                        match; needs MODEL_PRESET + restart (+ re-index), so it is
@@ -90,7 +94,17 @@ def _discover_local(settings: Any, effective_name: str, live_models: list[str],
             "missing_credentials": [],
         }
         if name == effective_name:
-            row["status"] = "active"
+            # Being the effective preset doesn't mean this harness can actually
+            # query it: a "user" scope side still needs the caller's own key as
+            # a request header, and nothing earlier in this loop has checked
+            # that for the active preset. Without this, a preset whose
+            # credential requirement went undetected (e.g. a pre-provider-layer
+            # preset file missing a declared "provider" id) would be reported
+            # "active" and ready, and the harness would burn a full run of 503s
+            # discovering that at query time instead of here.
+            missing = missing_provider_keys(preset, headers)
+            row["missing_credentials"] = missing
+            row["status"] = "credentials_missing" if missing else "active"
         elif name not in compatible:
             row["status"] = "needs_restart"
             row["note"] = "incompatible with the default (different embedding model or a local side): " \

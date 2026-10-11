@@ -232,13 +232,36 @@ class RealBackendTests(unittest.TestCase):
 
     def test_target_classification_matches_the_compatibility_rule(self):
         import list_targets
-        default, rows = list_targets._discover_local(self.settings, "remote-kisski", [], {})
+        with mock.patch.dict(os.environ, {"KISSKI_API_KEY": "secret-value"}):
+            default, rows = list_targets._discover_local(self.settings, "remote-kisski", [], {})
         status = {r["name"]: r["status"] for r in rows}
         self.assertEqual(default, self.settings.get_default_preset().name)
         self.assertEqual(status["remote-kisski"], "active")
         self.assertEqual(status["cpu-only"], "needs_restart")  # local models: index would not match
         live = {r["name"]: r["live_model_list"] for r in rows}
         self.assertTrue(live["remote-kisski"])                 # provider has_live_models, not the removed field
+
+    def test_active_preset_still_reports_missing_credentials(self):
+        """Being the effective preset must not short-circuit the credential check: a preset
+
+        can be "active" (what GET /api/config says you're on right now) while this harness
+        still lacks the key it needs to actually query it. Regression for the incident where
+        a custom preset missing provider metadata was reported "active"/ready, and a full
+        evaluation run burned every query discovering the 503s itself instead of this check
+        catching it upfront.
+        """
+        import list_targets
+        # Patches the key store too, not just the shell env: provider_headers() (which
+        # _discover_local calls to build the headers it feeds the credential check) falls
+        # back to the real encrypted store, and this checkout may genuinely have
+        # KISSKI_API_KEY stored there -- the test must stay hermetic either way.
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(self.common, "_store_entries", return_value=[]):
+            os.environ.pop("KISSKI_API_KEY", None)
+            _, rows = list_targets._discover_local(self.settings, "remote-kisski", [], {})
+        row = {r["name"]: r for r in rows}["remote-kisski"]
+        self.assertEqual(row["status"], "credentials_missing")
+        self.assertEqual(row["missing_credentials"], ["KISSKI_API_KEY"])
 
     def test_default_preset_settings_file_roundtrip_used_by_the_switcher(self):
         from backend.services.admin_settings_store import get_default_preset, set_default_preset
