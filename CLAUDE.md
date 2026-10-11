@@ -389,13 +389,33 @@ comparison. Add `--inspect-index` to additionally report how many chunks each
 indexed item contributes to the library (helpful when `documents_grouped` looks
 suspiciously low and you suspect a few over-chunked documents are crowding out
 others in nearest-neighbor search) — this stops the backend via
-`scripts/server.py stop` (embedded/sidecar Qdrant only allows one process to hold
-the storage directory open at a time) and restarts it via `scripts/server.py start`
-afterward, so expect ~10s of downtime and, on the first `start` after a manual
-`kill` of the uvicorn process, a rebuild of the Qdrant/Kreuzberg sidecar
-containers (`podman ps` to confirm they're up) — this is normal, not a sign of
-data loss; the sidecars mount `data/qdrant-server/`, the same persisted data an
-embedded-mode connection reads.
+`scripts/server.py stop` and restarts it via `scripts/server.py start` afterward,
+so expect ~10s of downtime and, on the first `start` after a manual `kill` of the
+uvicorn process, a rebuild of the Qdrant/Kreuzberg sidecar containers (`podman ps`
+to confirm they're up) — this is normal, not a sign of data loss.
+
+**There is exactly one Qdrant dataset that matters: the sidecar container** on
+`localhost:6333` (the one `scripts/server.py start` launches and points the
+backend at via a `QDRANT_URL` env var it injects — see `.env`'s own `QDRANT_URL`
+line, which now forces this for every invocation, not just ones launched through
+that script). Any script that constructs a `VectorStore` without `QDRANT_URL` set
+falls back to a separate, disconnected **embedded local-mode** store at
+`data/qdrant/<model-slug>/` — a real, silently-created, independently-writable
+Qdrant instance, not a read view onto the sidecar's data. The two are **not** the
+same data (an earlier version of this doc wrongly claimed they were): a 2026-10-11
+debugging session spent hours fixing an "indexing gap" by writing to the embedded
+store via plain `uv run python bin/index_libraries.py ...` (no `QDRANT_URL` in
+that shell), then couldn't understand why the live backend's `/api/query` and
+`/api/indexed-tags/check` still showed the original symptom — because the backend
+was reading the sidecar the whole time, which the fix never touched. `.env` now
+sets `QDRANT_URL=http://localhost:6333` unconditionally so this can't recur
+silently; the stale embedded data from that session was moved aside to
+`data/qdrant.stale-embedded-local-mode-DO-NOT-USE/` (not deleted, in case it's
+ever needed forensically) rather than left at the path a future accidental
+fallback would read from. If you ever need embedded mode on purpose (see
+"Running the backend + plugin dev servers from a worktree" above, which relies on
+it for a worktree without its own sidecar), unset `QDRANT_URL` for that specific
+invocation — don't remove it from this checkout's `.env`.
 
 Use the manual steps below only when you need something the script doesn't do
 yet (a non-default library, testing plugin-side JS, or inspecting the index
@@ -741,6 +761,10 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 ## Debugging
 
 - if you insert code that is only for debugging, mark it as such so that it can be easily idenitified and removed after the code has been fixed (e.g., by a `# DEBUG` trailing comment or `# BEGIN DEBUG`/`# END DEBUG` header and footer for longer code fragments).
+- **Any script that creates a `VectorStore` must have `QDRANT_URL` set** (the live backend's `.env` now sets it unconditionally) — without it, Qdrant silently falls back to a separate, disconnected embedded-mode store instead of the sidecar container everything else reads from. See "Live Query Debugging" below (`--inspect-index`) for the full incident this caused and why the embedded store is no longer at its default path.
+- A document's library being "indexed" does not mean that document has chunks in the *currently active* embedding collection. The Zotero "✅ rag-indexed" tag is per-attachment, not per-embedding-model — it survives a preset/embedding-model switch even though the new model's collection starts empty for every item, and nothing forces a re-index until the incremental indexer actually runs again. Before concluding a retrieval or generation bug ("the model ignored source X", "recall is low on this question"), confirm the relevant attachment actually has chunks right now: `POST /api/indexed-tags/check` with `{library_id, attachment_keys}` gives a live, API-only answer (no direct DB access, safe to call anytime) — don't infer indexed state from the tag, from `/api/libraries` listing the library at all, or from a trace's `documents_grouped` count alone. A whole class of "retrieval misses facts" reports can be this instead of a ranking/tuning problem; checking first avoids tuning `top_k`/`score_threshold` against a symptom that re-indexing fixes outright.
+- A long-running maintenance script that isn't atomic per item (e.g. `bin/index_libraries.py`, which deletes an item's old chunks before re-inserting the new ones) must not be run under an aggressive external timeout (`gtimeout`, a short background-job deadline, etc.) — killing it between the delete and the re-insert leaves that item with zero chunks, strictly worse than before the run started. It resumes correctly on its own (it detects its own stale lock file and continues), but prefer letting it run to natural completion, or at least re-run it immediately to completion after any interruption, rather than treating a partial run as good enough.
+- `scripts/server.py stop` also stops the plugin dev server, which in turn kills any Zotero process whose name matches "zotero" (`scripts/zotero_plugin.py`'s `get_zotero_processes()` matches by process name, not by `-profile`) — the exact anti-pattern "Never kill/restart Zotero by name" below warns about, just reached indirectly through a command that looks like it only touches the backend. Check `ps aux | grep -i zotero` for the `-profile` flag before running `scripts/server.py stop` (or `npm run dev:stop`) if a plugin dev server might be running alongside a separate main Zotero instance.
 
 ## Documentation
 
