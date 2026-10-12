@@ -298,4 +298,4 @@ The question *"Which publications by Mertz deal with the law school curriculum?"
 
 ## Systematic quality evaluation
 
-To compare presets and models on a fixed gold standard (answer quality, source coverage, citation/prompt compliance, multilingual behaviour, groundedness) instead of debugging a single query, use the `rag-quality-eval` skill in [`skills/rag-quality-eval/`](../skills/rag-quality-eval/SKILL.md). It runs the gold questions with `include_trace=true` against each preset/model and reports where quality is lost (retrieval vs. generation).
+To compare presets and models on a fixed gold standard (answer quality, source coverage, citation/prompt compliance, multilingual behaviour, groundedness) instead of debugging a single query, use the `rag-quality-eval` skill. It runs the gold questions with `include_trace=true` against each preset/model and reports where quality is lost (retrieval vs. generation) — see [RAG quality evaluation](evaluation.md) for how to run it locally or in the cloud, and [`skills/rag-quality-eval/SKILL.md`](../skills/rag-quality-eval/SKILL.md) for the full workflow.

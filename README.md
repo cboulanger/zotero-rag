@@ -208,6 +208,7 @@ See [CI/CD documentation](docs/ci-cd.md) for the full workflow.
 - **[Application architecture](docs/architecture.md)**
 - **[Query routing & agent system](docs/query-routing.md)**
 - **[Debugging RAG queries](docs/debugging-rag-queries.md)**
+- **[RAG quality evaluation](docs/evaluation.md)**
 - **[Plugin development & hot reload](https://github.com/cboulanger/zotero-skills/)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**
