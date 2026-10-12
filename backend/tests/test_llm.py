@@ -3,15 +3,18 @@ Unit tests for LLM service.
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import os
 
 import httpx
 from openai import APIConnectionError as OpenAIAPIConnectionError
+from openai import RateLimitError as OpenAIRateLimitError
 
 from backend.services.llm import (
     LLMConfigurationError,
     LLMEndpointUnavailableError,
+    LLMRateLimitExhaustedError,
     LLMService,
     LocalLLMService,
     RemoteLLMService,
@@ -19,6 +22,7 @@ from backend.services.llm import (
 )
 from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, ProviderConfig, RAGConfig
+from backend.services.usage_meters import recorder
 
 try:
     import transformers  # noqa: F401
@@ -644,6 +648,115 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertIn("max_tokens", str(context.exception))
+
+
+class TestLLMRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
+    """Mirrors TestEmbeddingRateLimitExhaustedError in test_embeddings.py: a 429 from
+    the remote LLM must be backed off / surfaced the same way a 429 from the
+    embedding API already is, instead of becoming a bare RuntimeError (see #follow-up
+    to the eval sweep that discovered generate() had no rate-limit handling at all)."""
+
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
+
+    def _make_service(self) -> RemoteLLMService:
+        preset = HardwarePreset(
+            name="test-openai",
+            description="Test OpenAI preset",
+            embedding=EmbeddingConfig(model_type="remote", model_name="openai"),
+            llm=LLMConfig(
+                model_type="remote",
+                model_names="gpt-4o-mini",
+                temperature=0.7,
+                provider=ProviderConfig(id="openai"),
+                model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+            ),
+            rag=RAGConfig(),
+            memory_budget_gb=1.0,
+        )
+        mock_settings = Mock(spec=Settings)
+        mock_settings.get_hardware_preset.return_value = preset
+        return RemoteLLMService(mock_settings, api_key="test-key")
+
+    async def test_long_retry_after_header_raises_exhausted(self):
+        """retry-after > 60 s must raise LLMRateLimitExhaustedError immediately."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {"retry-after": "3600"}
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(side_effect=exc)
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError) as ctx:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertIsInstance(ctx.exception.available_at, datetime)
+
+    async def test_no_retry_after_header_raises_exhausted(self):
+        """Missing retry-after on a RateLimitError must raise LLMRateLimitExhaustedError."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {}
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(side_effect=exc)
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError):
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+    async def test_short_retry_after_retries_then_succeeds(self):
+        """retry-after <= 60 s should sleep and retry (not raise LLMRateLimitExhaustedError)."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {"retry-after": "1"}
+        rate_exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        success_response = Mock()
+        success_response.choices = [Mock()]
+        success_response.choices[0].message.content = "Generated answer"
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(
+            side_effect=[rate_exc, _raw(success_response)]
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client), \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        mock_sleep.assert_awaited_once()
+        sleep_duration = mock_sleep.call_args[0][0]
+        self.assertGreater(sleep_duration, 0.9)
+        self.assertLess(sleep_duration, 3.0)
+        self.assertEqual(result, "Generated answer")
+
+    async def test_a_rate_limit_seen_by_one_call_is_respected_by_the_next(self):
+        """A cooldown recorded by an earlier call (e.g. the router's LLM call) must be
+        honored by a later, independent call on the same key — not rediscovered by
+        hammering the endpoint again."""
+        service = self._make_service()
+        available_at = datetime.now(timezone.utc) + timedelta(seconds=3600)
+        from backend.services.usage_meters import key_fingerprint
+        recorder.mark_rate_limited("llm", available_at, key_fingerprint("test-key"))
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(
+            side_effect=AssertionError("must not call the endpoint while a long cooldown is active")
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError) as ctx:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertEqual(ctx.exception.available_at, available_at)
+        mock_client.chat.completions.with_raw_response.create.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, MagicMock
 
 from backend.services.rag_engine import (
     RAGEngine, QueryResult, SourceInfo, _looks_like_leaked_reasoning, _looks_like_wrong_language_answer,
+    _best_excluded_candidate_near_cutoff,
 )
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
@@ -126,6 +127,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.5,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
         # Verify LLM was called with context
@@ -244,6 +246,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.6,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
         # Verify result
@@ -339,6 +342,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.8,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
     async def test_query_llm_parameters(self):
@@ -734,6 +738,84 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         self.mock_vector_store.search.assert_called_once()
 
+    def _make_score_proximity_pool(self):
+        """16 distinct single-chunk documents: ranks 1-10 span 0.90 down to
+        0.81 (the naive top_k=10 window — already 10 distinct documents, so
+        the diversity-floor trigger never fires), TARGET sits at rank 11
+        with score 0.809 (just 0.001 below the cutoff), and ranks 12-16 fill
+        out the pool down to 0.76 so the gap is small relative to the pool's
+        own 0.14 score range (~0.7%) without being zero."""
+        docs = [
+            self._make_chunk(f"DOC{i}", f"ATT{i}", f"Doc {i}", round(0.90 - i * 0.01, 3))
+            for i in range(10)
+        ]
+        target = self._make_chunk("DOC_TARGET", "ATT_T", "Target Doc", 0.809)
+        filler = [
+            self._make_chunk(f"DOC_F{i}", f"ATT_F{i}", f"Filler {i}", round(0.80 - i * 0.01, 3))
+            for i in range(5)
+        ]
+        return sorted(docs + [target] + filler, key=lambda r: r.score, reverse=True)
+
+    async def test_query_escalates_when_best_excluded_candidate_is_near_the_cutoff_score(self):
+        """Observed live (#89, jin2026): many distinct-but-moderately-relevant
+        documents can fill the top_k window (so the diversity-floor trigger
+        never fires) while a genuinely relevant chunk sits just below the
+        cutoff by a score margin that's small relative to the pool's own
+        range. settings.retrieval_score_proximity_epsilon, when set, must
+        escalate retrieval in this case even though diversity is already
+        sufficient."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_settings.retrieval_score_proximity_epsilon = 0.01
+
+        pool = self._make_score_proximity_pool()
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=15,
+        )
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_TARGET", cited_docs,
+            "best excluded candidate (rank #11, score 0.809) is within 1% of "
+            "the pool's score range from the cutoff (rank #10, score 0.81) "
+            "and must be pulled in by the escalation retry",
+        )
+
+    async def test_query_does_not_escalate_from_score_proximity_when_disabled_by_default(self):
+        """Same near-cutoff scenario as the test above, but with the setting
+        left at its default (off) — must behave exactly as before this
+        feature existed: no second search, target chunk stays excluded."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        # self.mock_settings is Mock(spec=Settings) with no explicit value set for
+        # retrieval_score_proximity_epsilon, matching a real Settings instance's
+        # default of 0.0 (disabled) in spirit — getattr(...) would return a Mock,
+        # not a number, which the isinstance guard treats as "disabled" too.
+
+        pool = self._make_score_proximity_pool()
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=15,
+        )
+
+        self.mock_vector_store.search.assert_called_once()
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertNotIn("DOC_TARGET", cited_docs)
+
     async def test_query_surfaces_document_crowded_out_of_top_k_by_other_documents(self):
         """Observed live (#87, jin2026): a relevant document's only chunk can
         rank just outside a naive top_k window because a few OTHER documents
@@ -766,7 +848,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         target = self._make_chunk("DOC_TARGET", "ATT_T", "Target Doc", 0.89)
         pool = sorted(crowding_a + crowding_b + crowding_c + [target], key=lambda r: r.score, reverse=True)
 
-        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters):
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
             return pool[:limit]
 
         self.mock_vector_store.search = Mock(side_effect=fake_search)
@@ -1345,6 +1427,44 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(CONTEXT_INSUFFICIENT_MARKER, result.answer)
         self.assertEqual(result.answer, "The first source states X [S1].")
         self.assertIn(CONTEXT_INSUFFICIENT_MARKER, trace.llm_calls[-1].response)
+
+
+class TestBestExcludedCandidateNearCutoff(unittest.TestCase):
+    """_best_excluded_candidate_near_cutoff backs the score-proximity
+    escalation trigger (#89): normalizing epsilon to the pool's own min-max
+    score range, rather than using a fixed absolute cosine-score epsilon,
+    matters because that range varies a lot by query (observed 0.025-0.08
+    across the gold question set) — see Settings.retrieval_score_proximity_epsilon."""
+
+    @staticmethod
+    def _pool(scores):
+        return [Mock(score=s) for s in scores]
+
+    def test_false_when_epsilon_is_zero(self):
+        pool = self._pool([0.9, 0.8, 0.799, 0.1])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.0))
+
+    def test_false_when_pool_is_not_larger_than_top_k(self):
+        """Nothing was excluded — there's no 'best excluded candidate' to check."""
+        pool = self._pool([0.9, 0.8])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.5))
+
+    def test_false_when_pool_has_no_score_range(self):
+        """All candidates tied — a relative epsilon is undefined (division by
+        zero avoided), and there's no meaningful 'proximity' to measure."""
+        pool = self._pool([0.9, 0.9, 0.9])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.5))
+
+    def test_true_when_gap_is_within_the_relative_epsilon(self):
+        """range=0.90-0.6=0.3; gap at the cutoff=0.899-0.898=0.001; 0.001 <= 1% of 0.3 (0.003)."""
+        pool = self._pool([0.90, 0.899, 0.898, 0.6])
+        self.assertTrue(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.01))
+
+    def test_false_when_gap_exceeds_the_relative_epsilon(self):
+        """Same range (0.3) as the test above, but a much larger gap (0.1) at
+        the cutoff — a real, not borderline, separation must not escalate."""
+        pool = self._pool([0.90, 0.80, 0.7, 0.6])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.01))
 
 
 class TestThinContextCoverage(unittest.TestCase):

@@ -19,6 +19,7 @@ from backend.models.trace import AgentExecutionTrace, ChunkTrace, LLMCallTrace, 
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.services.lexical_rerank import fuse_lexical
+from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
 from backend.db.vector_store import VectorStore
 from backend.config.settings import Settings
 
@@ -475,6 +476,24 @@ def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: i
     return capped
 
 
+def _best_excluded_candidate_near_cutoff(
+    capped_pool: list, top_k: int, epsilon_fraction: float
+) -> bool:
+    """Return True if the best candidate just outside the top_k window scores
+    within epsilon_fraction of the cutoff score, relative to the pool's own
+    min-max score range (see Settings.retrieval_score_proximity_epsilon for why
+    the epsilon is relative, not absolute). capped_pool must already be sorted
+    by score descending."""
+    if epsilon_fraction <= 0 or len(capped_pool) <= top_k:
+        return False
+    score_range = capped_pool[0].score - capped_pool[-1].score
+    if score_range <= 0:
+        return False
+    cutoff_score = capped_pool[top_k - 1].score
+    next_score = capped_pool[top_k].score
+    return (cutoff_score - next_score) <= epsilon_fraction * score_range
+
+
 def _group_chunks_by_document(search_results: list) -> tuple[dict[str, list], list[str]]:
     """Group search results by item_key (a Zotero item can have several
     indexed attachments, which must still count as one document), returning
@@ -630,6 +649,36 @@ class RAGEngine:
             return fuse_lexical(question, results, weight)
         return results
 
+    def _use_embedding_mmr(self) -> bool:
+        """Whether settings.retrieval_embedding_mmr_lambda enables global
+        embedding-vector MMR reranking (see embedding_mmr_rerank) — also
+        determines whether search() needs to fetch vectors at all."""
+        lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
+        return isinstance(lambda_param, (int, float)) and lambda_param > 0
+
+    def _apply_embedding_mmr(self, results: list) -> list:
+        """Re-rank the raw candidate pool by embedding-vector MMR when
+        settings.retrieval_embedding_mmr_lambda > 0; no-op otherwise. Requires
+        results to carry chunk.embedding (see _use_embedding_mmr/search's
+        with_vectors).
+
+        Deduping exact-text duplicates first matters here specifically: two
+        item_keys holding the same underlying article (e.g. the gold library's
+        deliberately-duplicated lorenzetti2013 entry, 6MC3G9EV/GQMHNT7V — see
+        dee8114) have identical embeddings for the same passage. Without
+        deduping first, MMR sees each duplicate as if it were a second,
+        independent data point rather than a repeat, so it doesn't get
+        penalized as a near-duplicate of itself — both copies' chunks can end
+        up ranked high, exactly the dilution MMR is meant to reduce. The
+        later per-document dedup+cap's own dedup pass is then a no-op here
+        (already deduped), same as for the lexical-fusion-then-dedup order
+        above it."""
+        lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
+        if isinstance(lambda_param, (int, float)) and lambda_param > 0:
+            results = _dedup_chunks_by_text(results)
+            return rerank_embedding_mmr(results, lambda_param)
+        return results
+
     async def query(
         self,
         question: str,
@@ -658,6 +707,9 @@ class RAGEngine:
                 larger top_k (see module docstring above _DIVERSITY_FLOOR).
             diversity_escalation_factor: Multiplier applied to top_k when escalating.
             diversity_escalation_max_top_k: Ceiling on the escalated top_k.
+                Escalation can also be triggered independently of diversity by
+                settings.retrieval_score_proximity_epsilon (default 0, off) — see
+                _best_excluded_candidate_near_cutoff and that setting's docstring.
             max_chunks_per_document: Cap on chunks from a single document, applied
                 before the top_k cutoff (see _dedup_and_cap_chunks_per_document) and
                 again (as a no-op safety net) in the assembled context.
@@ -696,6 +748,7 @@ class RAGEngine:
             f"in libraries: {library_ids}"
         )
         active_filters = filters if filters and not filters.is_empty() else None
+        use_embedding_mmr = self._use_embedding_mmr()
         raw_results = await asyncio.to_thread(
             self.vector_store.search,
             query_vector=query_embedding,
@@ -703,6 +756,7 @@ class RAGEngine:
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
             filters=active_filters,
+            with_vectors=use_embedding_mmr,
         )
 
         if not raw_results:
@@ -714,6 +768,7 @@ class RAGEngine:
             )
 
         raw_results = self._apply_lexical_fusion(question, raw_results)
+        raw_results = self._apply_embedding_mmr(raw_results)
 
         capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
         search_results = capped_pool[:top_k]
@@ -736,11 +791,21 @@ class RAGEngine:
                 r.chunk.metadata.document_metadata.item_key
                 for r in search_results
             })
-            if unique_doc_count < diversity_floor:
+            score_proximity_epsilon = getattr(self.settings, "retrieval_score_proximity_epsilon", 0.0)
+            score_proximity_triggered = (
+                isinstance(score_proximity_epsilon, (int, float))
+                and _best_excluded_candidate_near_cutoff(capped_pool, top_k, score_proximity_epsilon)
+            )
+            if unique_doc_count < diversity_floor or score_proximity_triggered:
                 escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
                 escalated_candidate_pool_size = candidate_pool_size * diversity_escalation_factor
+                reason = (
+                    f"diversity low ({unique_doc_count} documents from top_k={top_k})"
+                    if unique_doc_count < diversity_floor
+                    else "best excluded candidate near the top_k cutoff score"
+                )
                 logger.info(
-                    f"Retrieval diversity low ({unique_doc_count} documents from top_k={top_k}); "
+                    f"Retrieval escalation triggered ({reason}); "
                     f"escalating to top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size})"
                 )
                 escalated_raw_results = await asyncio.to_thread(
@@ -750,10 +815,12 @@ class RAGEngine:
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
                     filters=active_filters,
+                    with_vectors=use_embedding_mmr,
                 )
                 if len(escalated_raw_results) > len(raw_results):
                     raw_results = escalated_raw_results
                     raw_results = self._apply_lexical_fusion(question, raw_results)
+                    raw_results = self._apply_embedding_mmr(raw_results)
                     capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
                     search_results = capped_pool[:escalated_top_k]
                     escalated = True
@@ -832,11 +899,13 @@ class RAGEngine:
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
+                with_vectors=use_embedding_mmr,
             )
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
-                    self._apply_lexical_fusion(question, retry_raw_results), max_chunks_per_document
+                    self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results)),
+                    max_chunks_per_document,
                 )
                 retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
