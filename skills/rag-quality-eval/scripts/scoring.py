@@ -152,11 +152,43 @@ def _context_text(trace: Optional[dict]) -> str:
 
 
 # ---------------------------------------------------------------- criteria
-def score_facts(answer: str, context: str, facts: list[dict]) -> dict:
+_SOURCE_HEADER = re.compile(r"^\[S(\d+)(?::[^\]\n]*)?\]\s*$", re.M)
+
+
+def _context_by_document(context: str, sources: list[dict], matchers: list[dict]) -> Optional[dict[str, str]]:
+    """Split the assembled context into its ``[SN: ...]`` sections and group them by gold document.
+
+    Returns ``{gold_doc_id: text of that document's sections}`` (empty string for a gold
+    document that has no section), or ``None`` when the context has no parseable sections or
+    no sources to map them through - callers then fall back to the whole context.
+    """
+    headers = list(_SOURCE_HEADER.finditer(context or ""))
+    if not headers or not sources:
+        return None
+    out = {m["id"]: [] for m in matchers}
+    for i, h in enumerate(headers):
+        n = int(h.group(1))
+        if not 1 <= n <= len(sources):
+            continue
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(context)
+        src = sources[n - 1]
+        for m in matchers:
+            if _matches(m, [src.get("item_id")], src.get("title", "")):
+                out[m["id"]].append(context[h.end():end])
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def score_facts(answer: str, context: str, facts: list[dict],
+                doc_contexts: Optional[dict[str, str]] = None) -> dict:
     """Automatic fact recall (regex floor) plus the retrieval-vs-generation diagnosis.
 
     Facts without ``answer_patterns`` are judge-only (inference facts): they are
     listed but neither counted here nor diagnosed.
+
+    ``doc_contexts`` (gold doc id -> that document's context sections, see
+    ``_context_by_document``) scopes each fact's ``in_context`` check to the documents the
+    fact lives in (``fact["docs"]``), so a pattern meant for one document cannot be matched by
+    unrelated text from another. Without it the whole context is searched.
     """
     total = got = 0.0
     detail, missed_retrieval, missed_generation = [], [], []
@@ -173,7 +205,10 @@ def score_facts(answer: str, context: str, facts: list[dict]) -> dict:
             return all(checks) if fact.get("all_of") else any(checks)
 
         in_answer = hit(answer)
-        in_context = hit(context) if context else None
+        if doc_contexts is not None and fact.get("docs"):
+            in_context = hit("\n".join(doc_contexts.get(d, "") for d in fact["docs"])) if context else None
+        else:
+            in_context = hit(context) if context else None
         total += weight
         got += weight if in_answer else 0
         stat = by_level.setdefault(level, [0.0, 0.0])
@@ -342,7 +377,8 @@ def score_run(response: dict, question: dict, gold: dict) -> dict:
     sources = response.get("sources") or []
 
     result: dict[str, Any] = {"question_id": question["id"], "answer_text": answer}
-    result.update(score_facts(answer, context, question["facts"]))
+    doc_contexts = _context_by_document(context, sources, _doc_matchers(question, gold))
+    result.update(score_facts(answer, context, question["facts"], doc_contexts))
     result.update(score_sources(response, question, gold))
     result.update(score_citations(answer, len(sources)))
     result.update(score_grounded_numbers(answer, context))

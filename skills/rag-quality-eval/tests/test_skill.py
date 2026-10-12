@@ -127,6 +127,23 @@ class ScoringTests(unittest.TestCase):
         self.assertTrue(by_id["inference_access_not_popularity"]["judge_only"])
         self.assertNotIn("inference", res["recall_by_level"])  # judge-only facts are not counted automatically
 
+    def test_in_context_is_scoped_to_the_facts_own_documents(self):
+        # A fact whose pattern matches text of an unrelated source must not count as retrieved.
+        q = Q["Q09"]
+        fact = {"id": "f", "level": "verbatim", "answer_patterns": ["47\\s?%"], "docs": [q["documents"][0]]}
+        d0, d1 = (GOLD["documents"][d] for d in q["documents"][:2])
+        sources = [{"item_id": d["item_keys"][0], "title": d["title"]} for d in (d0, d1)]
+        matchers = scoring._doc_matchers(q, GOLD)
+        context = f"[S1: {d0['title']}]\nnothing relevant\n\n[S2: A (2020) \u2014 {d1['title']}]\nit was 47% here"
+        by_doc = scoring._context_by_document(context, sources, matchers)
+        res = scoring.score_facts("no", context, [fact], by_doc)
+        self.assertFalse(res["facts"][0]["in_context"])
+        self.assertEqual(res["missed_retrieval"], ["f"])
+        # Unscoped (legacy) behavior would have reported a false positive.
+        self.assertTrue(scoring.score_facts("no", context, [fact])["facts"][0]["in_context"])
+        # Unparseable context -> fall back to whole-context matching.
+        self.assertIsNone(scoring._context_by_document("plain text", sources, matchers))
+
     def test_good_answer_scores_high_and_bad_answer_fails(self):
         q = Q["Q01"]
         good = make_response(q, "EndNote retrieved 47% of the available full texts while Zotero retrieved 52% [S1]. "
