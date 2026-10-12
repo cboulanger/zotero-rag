@@ -13,7 +13,7 @@ The checkbox state is persisted across dialog sessions. Untick it to return to n
 ### From the command line
 
 ```bash
-uv run python scripts/query_trace.py "Your question here" \
+uv run rag-query "Your question here" \
     --library-ids <library_id> \
     --output trace.json
 ```

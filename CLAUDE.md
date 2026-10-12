@@ -376,7 +376,7 @@ a compact per-run summary (agents used, `documents_grouped` retrieval diversity,
 whether every source has a `[SN]` citation) plus the full trace JSON per run:
 
 ```bash
-uv run python scripts/debug_live_query.py "the exact question" \
+uv run rag-debug-query "the exact question" \
   --llm-model meta-llama-3.1-8b-instruct \
   --repeat 5
 ```
@@ -404,7 +404,7 @@ falls back to a separate, disconnected **embedded local-mode** store at
 Qdrant instance, not a read view onto the sidecar's data. The two are **not** the
 same data (an earlier version of this doc wrongly claimed they were): a 2026-10-11
 debugging session spent hours fixing an "indexing gap" by writing to the embedded
-store via plain `uv run python bin/index_libraries.py ...` (no `QDRANT_URL` in
+store via plain `uv run rag-index ...` (no `QDRANT_URL` in
 that shell), then couldn't understand why the live backend's `/api/query` and
 `/api/indexed-tags/check` still showed the original symptom — because the backend
 was reading the sidecar the whole time, which the fix never touched. `.env` now
@@ -457,7 +457,7 @@ supports arbitrary extra headers (needed for remote-model presets, which
 require a client-supplied provider key header like `X-Kisski-Api-Key`):
 
 ```bash
-uv run python scripts/query_trace.py "the exact question" \
+uv run rag-query "the exact question" \
   --library-ids <backend-library-id> \
   --api-key "$ZOTERO_KEY" \
   --header "X-Kisski-Api-Key: <value>" \

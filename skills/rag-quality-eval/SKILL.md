@@ -53,7 +53,7 @@ use `uv run python` for anything that imports backend code (project rule), plain
    indexer while the run lasts: only do that on a dev instance, never on
    production, and tell the user before you start.
 2. The gold library is indexed: `curl -s localhost:8119/api/libraries` lists `6297749`.
-   If it is missing, index it first (plugin, or `bin/index_libraries.py`). This only
+   If it is missing, index it first (plugin, or `uv run rag-index`). This only
    confirms *some* items in the library are indexed — not that every gold document
    has content in the *currently active* embedding collection (a document can be
    Zotero-tagged "indexed" from a previous embedding-model collection while the
@@ -61,11 +61,11 @@ use `uv run python` for anything that imports backend code (project rule), plain
    switch whose re-index hasn't finished). Run the dedicated check next:
 
    ```bash
-   uv run python skills/rag-quality-eval/scripts/check_gold_index.py
+   uv run rag-check-gold-index
    ```
 
    If it reports missing attachments, re-index before doing anything else
-   (`uv run python bin/index_libraries.py --mode incremental --slug groups/6297749`,
+   (`uv run rag-index --mode incremental --slug groups/6297749`,
    then re-run the check) — do not proceed to scoring against a gold set with
    silent indexing gaps: it measures "never indexed" as a retrieval/generation
    defect instead. This is exactly how issue #80 was first misdiagnosed as a
@@ -219,7 +219,7 @@ present provisional scores as final.
 | endpoint paused/cold/unreachable, 429/503 on one preset only | the provider layer: `backend/providers/` (`health`, `classify_http_error`, `parse_usage`), `docs/providers.md`, `services/endpoint_cache.py` |
 | a user's query ran on a different preset than expected | `services/effective_preset.py` (default vs. saved choice, compatibility), `api/config.py` (`my-preset`) |
 | routing surprises (`agents` is not `["rag"]`) | `query_router.py`, `query_orchestrator.py`, `docs/query-routing.md` |
-| one query to investigate | `scripts/debug_live_query.py "<question>" --repeat 3` (CLAUDE.md "Live Query Debugging") and the saved `raw/*.json` trace |
+| one query to investigate | `uv run rag-debug-query "<question>" --repeat 3` (CLAUDE.md "Live Query Debugging") and the saved `raw/*.json` trace |
 
 Propose fixes with the evidence; do not change pipeline code unless asked.
 
