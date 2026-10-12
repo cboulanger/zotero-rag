@@ -277,7 +277,12 @@ def cmd_index(a: argparse.Namespace) -> int:
                                files={"file": (pdf.name, pdf.read_bytes(), "application/pdf")},
                                data={"metadata": json.dumps(meta)})
             body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            ok = resp.status_code == 200 and body.get("status") in ("indexed", "skipped")
+            # backend/models/document.py's ProcessingStatus: any outcome other than the
+            # skipped_* failure variants means the gold library already has (or now has)
+            # this document's chunks, which is what `publish` needs before exporting.
+            ok = resp.status_code == 200 and body.get("status") in (
+                "indexed_fresh", "skipped_duplicate", "copied_cross_library", "copied_same_library",
+            )
             done, failed = done + ok, failed + (not ok)
             log(f"[{'OK' if ok else 'FAIL'}] {att['attachment_key']} {body.get('message', resp.status_code)}")
     print(f"[OK] indexed {done}, failed {failed}")
