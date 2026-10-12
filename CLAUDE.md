@@ -353,6 +353,8 @@ uv run python bin/library_snapshot.py info .local/gold.jsonl.gz
 
 Pass `--source-key`/`--dest-key` (admin read-only Zotero keys) unless the instance is loopback-mode.
 
+The rag-quality-eval skill keeps the gold library's PDFs, this snapshot and the eval reports in a public Hugging Face dataset repo and wraps these commands (`skills/rag-quality-eval/scripts/gold_env.py`, `hf_store.py`; see its SKILL.md).
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)

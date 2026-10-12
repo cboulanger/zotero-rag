@@ -111,6 +111,20 @@ def get_zotero_key(env_var: str = "RAG_EVAL_ZOTERO_KEY") -> Optional[str]:
     return entries[0][1] if entries else None
 
 
+PROXY_KEYS_FLAG = PROJECT_ROOT / ".local" / "rag_eval_env" / "assume_proxy_keys"
+PROXY_KEY_PLACEHOLDER = "proxy-managed"
+
+
+def assume_proxy_keys() -> bool:
+    """True where an outbound proxy injects provider credentials (cloud sessions).
+
+    The backend still wants *a* key header for ``user``-scope presets; any value
+    works because the proxy replaces the credential on the way out. Enabled by
+    ``$RAG_EVAL_ASSUME_PROXY_KEYS=1`` or by the flag file ``gold_env.py up`` writes.
+    """
+    return os.environ.get("RAG_EVAL_ASSUME_PROXY_KEYS") == "1" or PROXY_KEYS_FLAG.exists()
+
+
 def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
     """Per-request provider-key headers a preset needs (values never printed).
 
@@ -148,6 +162,8 @@ def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dic
                 if got and got[0] == name:
                     value = got[1]
                     break
+        if not value and assume_proxy_keys():
+            value = PROXY_KEY_PLACEHOLDER
         if value:
             headers[field["header_name"]] = value
     return headers

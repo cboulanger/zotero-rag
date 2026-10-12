@@ -1,6 +1,6 @@
 ---
 name: rag-quality-eval
-description: Qualitative and quantitative evaluation of the zotero-rag query pipeline against a gold standard of 10 questions (easy verbatim to hard inference, in en/de/fr/es) over the public test-rag-plugin Zotero group. Asks which preset(s) to test, runs every LLM model of each preset separately, scores length, answer quality, source coverage, prompt-structure compliance, multilingual behaviour and groundedness, and has Claude judge semantic and inferred answers beyond regex matching. Use when asked to evaluate, benchmark, compare or regression-test the RAG pipeline, a preset, a model, a prompt change or a retrieval change; also for extending the gold standard.
+description: Qualitative and quantitative evaluation of the zotero-rag query pipeline against a gold standard of 10 questions (easy verbatim to hard inference, in en/de/fr/es) over the public test-rag-plugin Zotero group. Asks which preset(s) to test, runs every LLM model of each preset separately, scores length, answer quality, source coverage, prompt-structure compliance, multilingual behaviour and groundedness, and has Claude judge semantic and inferred answers beyond regex matching. Use when asked to evaluate, benchmark, compare or regression-test the RAG pipeline, a preset, a model, a prompt change or a retrieval change; also for extending the gold standard, and for recreating the evaluation environment (backend plus prebuilt index restored from the Hugging Face store) in a cloud session or publishing it from a local one.
 ---
 
 # RAG quality evaluation
@@ -30,6 +30,8 @@ to explain a result, not just report it.
 | `scripts/judge.py` | prepare judging packets, validate/track judgments |
 | `scripts/report.py` | aggregate to `report.md`/`report.json`, optional `--baseline` diff; re-scores saved runs |
 | `scripts/scoring.py` | all criteria (pure functions, reusable) |
+| `scripts/gold_env.py` | `up`/`down`/`status` create the environment (backend + restored index); `fetch-sources`, `index`, `publish` build and upload it (local) |
+| `scripts/hf_store.py` | the Hugging Face dataset store: PDFs, index snapshots, reports, dataset card |
 | `scripts/fetch_gold_corpus.py` | `verify` the gold facts against the real PDF text, `corpus` regenerate `gold/corpus.md` |
 | `scripts/gold_tools.py` | `validate`, `format`, `stats` for the gold file |
 | `references/criteria.md` | every criterion, its measurement and rationale, ideas not yet built |
@@ -42,10 +44,67 @@ Make it discoverable as a Claude Code skill with
 use `uv run python` for anything that imports backend code (project rule), plain
 `python` is enough for `fetch_gold_corpus.py`, `gold_tools.py` and the tests.
 
+## Environment and the Hugging Face store
+
+Everything the evaluation needs besides this repo lives in one public dataset
+repo on Hugging Face (default `cmboulanger/zotero-rag-gold`, override with
+`RAG_EVAL_HF_REPO`; all documents are open access, CC BY 4.0): the library's
+**source PDFs** (`sources/`), a prebuilt **index snapshot** per embedding model
+(`snapshots/`), and every published **report** (`reports/`), with a dataset card
+regenerated from those contents. Details in the `hf_store.py` docstring.
+
+**Which situation are you in?** `uv run python skills/rag-quality-eval/scripts/gold_env.py status`
+
+- **A backend is already running with the gold library indexed** (the user's
+  full local environment): skip to Preflight.
+- **Cloud or otherwise restricted session** (no Kreuzberg, no usable container
+  runtime): recreate the environment in one command, then continue with Preflight:
+
+  ```bash
+  uv run python skills/rag-quality-eval/scripts/gold_env.py up
+  ```
+
+  It starts a backend on **embedded** Qdrant under `.local/rag_eval_env/`
+  (extractor `legacy`, because the Kreuzberg image cannot be pulled in these
+  sessions; the spaCy model is installed if missing), pulls the snapshot for the
+  backend's embedding model from the store, imports it, and runs
+  `check_gold_index`. Provider credentials are injected by the session's outbound
+  proxy: `up` notices the proxy and sends a placeholder key header, so no key is
+  needed (`down` stops the backend; `--snapshot FILE` restores from a local
+  file instead of the store). Only presets whose provider hosts the proxy
+  authenticates can be evaluated there (KISSKI works); `list_targets.py` shows
+  what is usable, and a model that returns HTTP 500 may just be down at the
+  moment: retry or pick another model of the preset.
+- **Full local environment, store empty or stale** (you have a read-only Zotero
+  key and the Kreuzberg sidecar): publish it once so every other environment can
+  restore it:
+
+  ```bash
+  RAG_EVAL_ZOTERO_KEY=... uv run python skills/rag-quality-eval/scripts/gold_env.py fetch-sources
+  uv run python skills/rag-quality-eval/scripts/hf_store.py init            # first time only; needs HF_TOKEN with write access
+  uv run python skills/rag-quality-eval/scripts/gold_env.py publish         # index with the real extractor, export, upload
+  ```
+
+**What a restored environment is good for.** The snapshot is the
+production-equivalent index (real Kreuzberg chunks and vectors), so everything
+that happens at or after retrieval is measured faithfully: top_k, score
+thresholds, dedup/cap/MMR, lexical fusion (`RETRIEVAL_LEXICAL_WEIGHT`), reranking,
+prompts, models, routing. Changes to **chunking or extraction** are not: the
+cloud session can only re-index with the `legacy` extractor, whose chunks differ
+from production. Do those in the full local environment, then re-`publish`.
+After deliberately changing the index, record why in the commit; the card shows
+which code commit and extractor each snapshot came from.
+
+**Comparisons across sessions.** Published runs are the baselines:
+`hf_store.py pull-report latest` (or a run name) puts a run under
+`data/logs/rag_eval/`, usable as `report.py --baseline`. Keep the question set
+(gold version) and the snapshot the same when comparing; `report.md` shows the gold
+version and the card shows the snapshot's provenance.
+
 ## 0. Preflight
 
 1. Backend up on the dev instance: `curl -s localhost:8119/api/config | head -c 200`
-   (start with `npm start`). The run selects each preset in turn and restores
+   (start with `npm start`, or `gold_env.py up` in a restricted session, see above). The run selects each preset in turn and restores
    the original state afterwards. With a Zotero identity key it uses *your own*
    preset choice (`PUT /api/config/my-preset`, docs/presets.md), which affects nobody
    else. Without an identity (typical loopback dev server) the only mechanism is
@@ -203,6 +262,18 @@ Present `report.md` to the user in your own words, not as a table dump:
 - the three most useful concrete findings with the evidence (quote the failing
   answer or trace line) and a recommendation.
 
+**Publish** a judged, final run so the next session has a baseline and the card's
+results table stays current (public; contains questions, answers and traces but
+no keys; add `--with-raw` to include the raw traces):
+
+```bash
+uv run python skills/rag-quality-eval/scripts/hf_store.py push-report data/logs/rag_eval/<run>
+```
+
+Needs write access to the store, i.e. `HF_TOKEN`; without it, tell the user the
+report is local only. Only publish after `judge.py validate` passes and only for
+runs worth comparing against (not smoke tests).
+
 State clearly if some runs are unjudged (the report banner says so) and never
 present provisional scores as final.
 
@@ -222,6 +293,17 @@ present provisional scores as final.
 | one query to investigate | `uv run rag-debug-query "<question>" --repeat 3` (CLAUDE.md "Live Query Debugging") and the saved `raw/*.json` trace |
 
 Propose fixes with the evidence; do not change pipeline code unless asked.
+
+When asked to **optimize** (a retrieval or prompt change rather than just a
+diagnosis), work as an experiment loop in a restored environment: run the
+baseline (`pull-report latest`, or run it yourself on the unchanged code), make
+one change behind a flag or setting, restart the backend (`gold_env.py down`, then
+`up`: the restored data persists under `.local/rag_eval_env/data`), run the same
+question subset with `--repeat 3`, `report.py --baseline`, and judge the
+questions whose scores moved. Report the effect on retrieval-lost and
+generation-lost facts separately, and check the other questions for regressions
+before proposing a default. Do not tune against questions you will score with
+(see "Keep the set honest").
 
 ## Maintaining and extending the gold standard
 

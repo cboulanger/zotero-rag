@@ -275,7 +275,8 @@ class RealBackendTests(unittest.TestCase):
         # back to the real encrypted store, and this checkout may genuinely have
         # KISSKI_API_KEY stored there -- the test must stay hermetic either way.
         with mock.patch.dict(os.environ, {}, clear=False), \
-                mock.patch.object(self.common, "_store_entries", return_value=[]):
+                mock.patch.object(self.common, "_store_entries", return_value=[]), \
+                mock.patch.object(self.common, "assume_proxy_keys", return_value=False):
             os.environ.pop("KISSKI_API_KEY", None)
             _, rows = list_targets._discover_local(self.settings, "remote-kisski", [], {})
         row = {r["name"]: r for r in rows}["remote-kisski"]
