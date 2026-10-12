@@ -64,6 +64,19 @@ class StoreHelperTests(unittest.TestCase):
         self.assertEqual(deletes, ["reports/latest/raw/a.json"])  # stale file of the previous run only
         self.assertNotIn("reports/old/report.md", deletes)          # the archive is never touched
 
+    def test_no_latest_archives_only_and_keeps_baseline(self):
+        existing = ["reports/latest/report.md", "reports/latest/raw/a.json"]
+        adds, deletes = hf_store.plan_report_commit("exp", ["report.md"], existing, update_latest=False)
+        self.assertEqual(adds, [("reports/exp/report.md", "report.md")])
+        self.assertEqual(deletes, [])
+        base = hf_store.report_index_entry("20261012T000000Z", REPORT)
+        exp = hf_store.report_index_entry("20261013T000000Z", REPORT, latest=False)
+        self.assertTrue(exp["not_latest"])
+        self.assertNotIn("not_latest", base)
+        self.assertEqual(hf_store.latest_run([base, exp]), "20261012T000000Z")
+        card = hf_store.render_card("o/r", None, [], [base, exp])
+        self.assertIn("Latest run: `20261012T000000Z`", card)
+
     def test_card_links_the_latest_report(self):
         card = hf_store.render_card("o/r", None, [], [hf_store.report_index_entry("run1", REPORT)])
         self.assertIn("[report](reports/latest/report.md)", card)
