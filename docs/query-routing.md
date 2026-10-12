@@ -312,6 +312,16 @@ end-user-facing explanation of each, and `RetrievalTrace.escalated` /
 `QueryTrace.parameters` (visible via `include_trace: true`) for observing them at
 runtime.
 
+### Lexical (BM25) fusion
+
+Vector similarity under-ranks short, term-dense chunks (numeric results, proper
+nouns). With `RETRIEVAL_LEXICAL_WEIGHT` > 0 (0-1, default 0 = off), the raw
+candidate pool is re-scored before dedup, the per-document cap and the `top_k`
+cut as `(1 - w) * norm(vector) + w * norm(BM25)` (min-max over the pool; BM25
+document frequencies come from the pool itself, so no extra index is needed).
+The blended score replaces the vector score for all downstream ordering.
+Implemented in `backend/services/lexical_rerank.py`.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored

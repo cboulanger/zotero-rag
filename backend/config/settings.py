@@ -39,6 +39,15 @@ class Settings(BaseSettings):
         """Initialize settings."""
         super().__init__(**kwargs)
 
+    # Retrieval
+    retrieval_lexical_weight: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Weight (0-1) of a BM25 lexical score blended into the vector score of the "
+                    "raw candidate pool before dedup/cap/top_k (backend/services/lexical_rerank.py). "
+                    "0 disables it. Helps short numeric/proper-noun fact chunks that vector "
+                    "similarity under-ranks (#90)."
+    )
+
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
     api_port: int = Field(default=8119, description="API server port")

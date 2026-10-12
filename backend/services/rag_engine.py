@@ -18,6 +18,7 @@ from backend.models.filters import MetadataFilters
 from backend.models.trace import AgentExecutionTrace, ChunkTrace, LLMCallTrace, RetrievalTrace
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
+from backend.services.lexical_rerank import fuse_lexical
 from backend.db.vector_store import VectorStore
 from backend.config.settings import Settings
 
@@ -621,6 +622,14 @@ class RAGEngine:
         self.vector_store = vector_store
         self.settings = settings
 
+    def _apply_lexical_fusion(self, question: str, results: list) -> list:
+        """Blend BM25 into the raw candidate pool's scores when
+        settings.retrieval_lexical_weight > 0 (see lexical_rerank); no-op otherwise."""
+        weight = getattr(self.settings, "retrieval_lexical_weight", 0.0)
+        if isinstance(weight, (int, float)) and weight > 0:
+            return fuse_lexical(question, results, weight)
+        return results
+
     async def query(
         self,
         question: str,
@@ -704,6 +713,8 @@ class RAGEngine:
                 sources=[]
             )
 
+        raw_results = self._apply_lexical_fusion(question, raw_results)
+
         capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
         search_results = capped_pool[:top_k]
 
@@ -742,6 +753,7 @@ class RAGEngine:
                 )
                 if len(escalated_raw_results) > len(raw_results):
                     raw_results = escalated_raw_results
+                    raw_results = self._apply_lexical_fusion(question, raw_results)
                     capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
                     search_results = capped_pool[:escalated_top_k]
                     escalated = True
@@ -823,7 +835,9 @@ class RAGEngine:
             )
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
-                retry_capped_pool = _dedup_and_cap_chunks_per_document(retry_raw_results, max_chunks_per_document)
+                retry_capped_pool = _dedup_and_cap_chunks_per_document(
+                    self._apply_lexical_fusion(question, retry_raw_results), max_chunks_per_document
+                )
                 retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
                 retry_context, retry_doc_representatives = _assemble_context(
