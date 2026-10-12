@@ -5,6 +5,7 @@ Run:  python -m unittest discover -s skills/rag-quality-eval/tests -v
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -372,9 +373,14 @@ class EndToEndTests(unittest.TestCase):
                 "--output-dir", str(out), "--no-local", "--delay", "0", "--no-warmup", "--warm-poll", "0.01",
                 *extra_args]
         env = {"RAG_EVAL_ZOTERO_KEY": "dummy"} if identity else {}
-        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv):
+        with mock.patch.dict(os.environ, env), mock.patch.object(sys, "argv", argv), \
+                contextlib.ExitStack() as stack:
             if not identity:
                 os.environ.pop("RAG_EVAL_ZOTERO_KEY", None)
+                # get_zotero_key() falls back to the encrypted key store; keep the
+                # test hermetic regardless of credentials stored on this machine.
+                import common
+                stack.enter_context(mock.patch.object(common, "_store_entries", return_value=[]))
             return run_eval.main()
 
     def test_own_preset_choice_leaves_the_server_default_alone(self):
