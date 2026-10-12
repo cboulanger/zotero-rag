@@ -498,6 +498,7 @@ class VectorStore:
         score_threshold: Optional[float] = None,
         library_ids: Optional[list[str]] = None,
         filters: Optional[MetadataFilters] = None,
+        with_vectors: bool = False,
     ) -> list[SearchResult]:
         """
         Search for similar chunks.
@@ -508,6 +509,11 @@ class VectorStore:
             score_threshold: Minimum similarity score
             library_ids: Optional list of library IDs to filter by
             filters: Optional bibliographic metadata filters
+            with_vectors: When True, populate each result's chunk.embedding with
+                its stored vector (extra payload per result — only set this when
+                a caller actually needs it, e.g. embedding-based MMR reranking;
+                see backend/services/embedding_mmr_rerank.py). Default False
+                matches prior behavior (chunk.embedding always None).
 
         Returns:
             List of search results with chunks and scores
@@ -546,6 +552,7 @@ class VectorStore:
                 score_threshold=score_threshold,
                 query_filter=query_filter,
                 with_payload=True,
+                with_vectors=with_vectors,
             ).points
         except (TimeoutException, ReadTimeout, WriteTimeout) as exc:
             logger.warning(f"Qdrant search timed out after {self.qdrant_timeout}s")
@@ -590,7 +597,7 @@ class VectorStore:
             chunk = DocumentChunk(
                 text=payload["text"],
                 metadata=metadata,
-                embedding=None,  # Don't return vectors in search results
+                embedding=result.vector if with_vectors else None,
             )
 
             search_results.append(
