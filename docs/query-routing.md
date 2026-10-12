@@ -322,6 +322,25 @@ document frequencies come from the pool itself, so no extra index is needed).
 The blended score replaces the vector score for all downstream ordering.
 Implemented in `backend/services/lexical_rerank.py`.
 
+**Evaluated at `0.2`/`0.4`/`0.6` against the gold suite (#89/#90's specific
+under-recall cases) and left at the `0` default**: none of the targeted facts
+(Lorenzetti's EndNote/Reference-Manager/RefWorks breakdown in Q02, Mendeley's
+2 GB figure in Q06, Zotero's least-effort finding in Q05) entered the
+retrieved context at any tested weight — the blend doesn't change which
+*documents* reach the candidate pool, and these chunks' BM25 score isn't high
+enough relative to competing chunks to climb in either. Worse, two previously
+retrieved facts regressed: Q07's numeric results (present at `0`) dropped out
+of context from `0.2` upward, and `jin2026` (#89's crowd-out case) ranked
+*lower* as weight increased (19th at `0`, 30th at `0.2`/`0.4`, 33rd at `0.6`)
+— its chunk has strong vector similarity but weak literal term overlap with
+the query, so blending in a weak BM25 score pulls its combined score down
+rather than up. Aggregate `fact_recall` across the full 10-question gold set
+did rise at `0.2`/`0.4` (unrelated facts benefited) before falling back at
+`0.6`, but that's a different, broader effect than what this setting was
+built to fix, and doesn't offset the specific regressions above. Raising it
+further is not expected to help: the failure mode is score dilution, not an
+insufficient blend ratio.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
