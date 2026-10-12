@@ -333,6 +333,26 @@ and the slower tier rides out a long stretch of bad/no wifi (e.g. a train
 commute). Ctrl-C during a wait exits cleanly; resume with `--mode=resume`
 afterward either way.
 
+### Portable snapshots (restore an index where Kreuzberg can't run)
+
+`bin/library_snapshot.py` reuses the same `/api/migration/*` endpoints but writes
+one library's chunks, dedup records and index metadata to a single
+`.jsonl.gz` file instead of a second live instance, so an index built in the full
+local environment can be restored in a session without the extraction sidecar
+(e.g. a cloud session with embedded Qdrant). Import overwrites that library on
+the destination and refuses on an embedding model/dimension mismatch.
+
+```bash
+# local, full environment (backend on the sidecar, gold library fully indexed):
+uv run rag-check-gold-index
+uv run python bin/library_snapshot.py export groups/6297749 http://localhost:8119 .local/gold.jsonl.gz
+# elsewhere (backend running, same embedding preset):
+uv run python bin/library_snapshot.py import .local/gold.jsonl.gz http://localhost:8119
+uv run python bin/library_snapshot.py info .local/gold.jsonl.gz
+```
+
+Pass `--source-key`/`--dest-key` (admin read-only Zotero keys) unless the instance is loopback-mode.
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
