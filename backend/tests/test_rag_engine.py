@@ -814,6 +814,49 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertLessEqual(prompt.count("Content from Dominant Doc"), 2)
 
+    async def test_query_per_document_cap_favors_diverse_chunks_over_near_duplicates(self):
+        """Observed live (#87 follow-up): a document's own highest-scoring
+        chunks can be several near-paraphrases of the same narrow sub-topic
+        (e.g. three different sentences all about the survey's response
+        rate), each scoring a hair higher than the one chunk that actually
+        answers a different part of the question (e.g. which programs were
+        used). Plain top-N-by-score caps this document's context to the
+        near-duplicate cluster and drops the only chunk with the needed
+        fact. The cap must instead prefer a lower-scoring chunk once a
+        higher-scoring candidate is too similar to one already kept."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        cluster_1 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.95, chunk_index=0,
+            text="The survey achieved a high response rate among the authors who were surveyed about the response rate study.",
+        )
+        cluster_2 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.94, chunk_index=1,
+            text="Response rate for the survey was high and authors reported a strong response rate overall in the study.",
+        )
+        cluster_3 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.93, chunk_index=2,
+            text="Authors surveyed reported a high response rate in this response rate study of systematic reviews.",
+        )
+        fact_chunk = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.90, chunk_index=3,
+            text="EndNote was used by forty-one authors, Reference Manager by fourteen, and RefWorks by six participants.",
+        )
+
+        self.mock_vector_store.search = Mock(return_value=[cluster_1, cluster_2, cluster_3, fact_chunk])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=4, max_chunks_per_document=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn(
+            fact_chunk.chunk.text, prompt,
+            "the fact-bearing chunk should survive the cap by virtue of being "
+            "topically distinct from the already-selected top-scoring chunk, "
+            "even though its raw score is lower than the near-duplicates",
+        )
+
     async def test_query_dedupes_identical_chunk_text_within_one_document(self):
         """Observed live: the same passage can be indexed twice for one
         Zotero item (e.g. extracted from two attachment_keys, or re-chunked

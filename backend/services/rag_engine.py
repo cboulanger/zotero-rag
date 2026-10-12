@@ -392,12 +392,64 @@ def _dedup_chunks_by_text(results: list) -> list:
     return list(best_by_text.values())
 
 
+_MMR_LAMBDA = 0.6  # weight on raw score vs. diversity when capping a document's chunks
+
+_WORD_PATTERN = re.compile(r"[^\W\d_]+|\d+", re.UNICODE)
+
+
+def _tokenize_for_similarity(text: str) -> set[str]:
+    """Lowercased word/number tokens, used as a cheap text-similarity proxy
+    (no chunk embeddings are available this late in the pipeline — see
+    DocumentChunk.embedding, always None on search results)."""
+    return set(_WORD_PATTERN.findall(text.lower()))
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _select_diverse_chunks(results: list, k: int) -> list:
+    """Pick up to k of ``results`` (already deduped) via Maximal Marginal
+    Relevance over token overlap, instead of plain top-k-by-score.
+
+    A document's highest-scoring chunks are often several near-paraphrases
+    of the same narrow sub-topic (e.g. three sentences all about a survey's
+    response rate) — plain top-k-by-score then caps the document's context
+    to that one cluster and drops a lower-scoring but topically distinct
+    chunk that may be the only one carrying a different needed fact. MMR
+    greedily keeps the top-scoring chunk first, then at each step prefers
+    the candidate maximizing ``_MMR_LAMBDA * score - (1 - _MMR_LAMBDA) *
+    max_similarity_to_already_selected`` — so a candidate too similar to
+    what's already kept loses out to a more distinct, if lower-scoring,
+    alternative."""
+    pool = sorted(results, key=lambda r: r.score, reverse=True)
+    if len(pool) <= k:
+        return pool
+    token_sets = [_tokenize_for_similarity(r.chunk.text) for r in pool]
+    selected = [0]
+    remaining = set(range(1, len(pool)))
+    while len(selected) < k and remaining:
+        best_idx, best_value = None, float("-inf")
+        for idx in remaining:
+            max_sim = max(_jaccard_similarity(token_sets[idx], token_sets[s]) for s in selected)
+            value = _MMR_LAMBDA * pool[idx].score - (1 - _MMR_LAMBDA) * max_sim
+            if value > best_value:
+                best_value, best_idx = value, idx
+        selected.append(best_idx)
+        remaining.discard(best_idx)
+    return [pool[i] for i in selected]
+
+
 def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: int) -> list:
     """Drop exact-after-normalization text duplicates across the whole pool
     (see _dedup_chunks_by_text — this includes duplicates that span two
     different item_keys, not just two attachments of one item), then within
     each surviving document (grouped by item_key) cap to at most
-    max_chunks_per_document, keeping the highest-scoring ones. Returns
+    max_chunks_per_document via diversity-aware selection (see
+    _select_diverse_chunks) rather than plain top-N-by-score. Returns
     everything re-sorted by score (descending).
 
     Applied to the RAW search pool before the top_k cutoff (see #87 and
@@ -417,8 +469,7 @@ def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: i
         by_doc.setdefault(key, []).append(result)
     capped: list = []
     for doc_results in by_doc.values():
-        doc_results.sort(key=lambda r: r.score, reverse=True)
-        capped.extend(doc_results[:max_chunks_per_document])
+        capped.extend(_select_diverse_chunks(doc_results, max_chunks_per_document))
     capped.sort(key=lambda r: r.score, reverse=True)
     return capped
 
@@ -447,16 +498,16 @@ def _assemble_context(
 ) -> tuple[str, list]:
     """Build the numbered [S1]/[S2]/... context string, one source per
     document. Within each document: dedup identical-text chunks first (see
-    _dedup_chunks_by_text), then cap to max_chunks_per_document, keeping the
-    highest-scoring survivors. Returns (context, doc_representatives) —
-    doc_representatives is the best-scoring chunk per document, in [SN]
-    order, used for SourceInfo citations."""
+    _dedup_chunks_by_text), then cap to max_chunks_per_document via
+    diversity-aware selection (see _select_diverse_chunks). Returns
+    (context, doc_representatives) — doc_representatives is the
+    best-scoring chunk per document, in [SN] order, used for SourceInfo
+    citations."""
     context_parts = []
     doc_representatives: list = []
     for i, doc_key in enumerate(sorted_doc_keys, 1):
         results_for_doc = _dedup_chunks_by_text(doc_chunks[doc_key])
-        if len(results_for_doc) > max_chunks_per_document:
-            results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:max_chunks_per_document]
+        results_for_doc = _select_diverse_chunks(results_for_doc, max_chunks_per_document)
         results_for_doc.sort(key=lambda r: (
             r.chunk.metadata.page_number or 0,
             r.chunk.metadata.chunk_index or 0,
