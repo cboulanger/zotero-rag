@@ -10,6 +10,12 @@ the list of libraries after indexing.
 Click on the badge or on that message to open the **Fix Unavailable
 Attachments** dialog, which lists all affected items in the current library.
 
+The dialog only lists attachments the backend has not indexed. Before showing
+the list it asks the backend which of the candidates already have chunks and
+drops those, so an attachment indexed from another computer (for example via
+Search & Fix there, which uploads the file directly) does not show up as
+unavailable here just because its file is not downloaded on this computer.
+
 ## Recovery strategies
 
 For each missing file the tool tries the following strategies in order:

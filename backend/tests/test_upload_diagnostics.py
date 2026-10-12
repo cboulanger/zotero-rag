@@ -105,6 +105,26 @@ class TestExecuteUploadDiagnostics(unittest.IsolatedAsyncioTestCase):
             [{"item_key": "I", "attachment_key": "A", "detail": "too big"}],
         )
 
+    async def test_indexed_upload_clears_stale_failure_entries_for_that_attachment(self):
+        # A file the server couldn't fetch itself (e.g. WebDAV storage) that a
+        # client then uploaded directly must drop out of the failure lists, or
+        # every other computer's Fix Unavailable dialog keeps showing it.
+        from backend.models.library import LibraryIndexMetadata
+        kwargs = _kwargs()
+        kwargs["vector_store"].get_library_metadata.return_value = LibraryIndexMetadata(
+            library_id="lib", library_type="user", library_name="",
+            last_scan_failed_downloads=[
+                {"item_key": "I", "attachment_key": "A", "error": "403"},
+                {"item_key": "J", "attachment_key": "B", "error": "403"},
+            ],
+            last_scan_skipped_too_large=[{"item_key": "I", "attachment_key": "A", "detail": "big"}],
+        )
+        with _patch_processor(AttachmentProcessingResult(chunks_written=2, status="indexed_fresh")):
+            await _execute_upload(**kwargs)
+        saved = kwargs["vector_store"].update_library_metadata.call_args.args[0]
+        self.assertEqual([f["attachment_key"] for f in saved.last_scan_failed_downloads], ["B"])
+        self.assertEqual(saved.last_scan_skipped_too_large, [])
+
     async def test_rate_limit_exhausted_error_carries_type_and_available_at(self):
         # CronIndexer._drain_pending_uploads detects an exhausted embedding quota
         # via these two fields (not by string-matching `message`) to stop
