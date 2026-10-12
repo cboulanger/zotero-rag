@@ -25,7 +25,9 @@ Commands (``python`` is enough for ``card``/``status``; the rest needs
   push-sources [DIR]        upload DIR (default .local/rag_eval_sources) to sources/
   pull-index [--model M]    download the snapshot for embedding model M (default: the running backend's)
   push-index FILE           upload a snapshot file as the model's ``latest`` (+ provenance)
-  push-report RUN_DIR       upload a report (``--with-raw`` adds raw/ traces) and refresh the card
+  push-report RUN_DIR       upload a report (``--with-raw`` adds raw/ traces) and refresh the card;
+                            ``--no-latest`` archives the run only, leaving ``reports/latest/`` (the comparison
+                            baseline) and the card's "latest run" on the previous run
   pull-report NAME          download reports/NAME into data/logs/rag_eval/NAME (usable as --baseline)
   card                      regenerate README.md from the repo's own contents
 
@@ -99,11 +101,16 @@ def provenance(header: dict, extractor: str, preset: str, sources_sha: str) -> d
     }
 
 
-def report_index_entry(name: str, report: dict) -> dict:
-    """Compact summary of a run for ``reports/index.json`` and the card's table."""
+def report_index_entry(name: str, report: dict, latest: bool = True) -> dict:
+    """Compact summary of a run for ``reports/index.json`` and the card's table.
+
+    ``latest=False`` marks a run that was archived without becoming the comparison
+    baseline (e.g. an experiment with non-default settings).
+    """
     meta, groups = report.get("meta", {}), report.get("groups", {})
     return {
         "run": name,
+        **({} if latest else {"not_latest": True}),
         "gold_version": meta.get("gold_version"),
         "git_commit": meta.get("git_commit"),
         "started_at": meta.get("started_at") or meta.get("timestamp"),
@@ -155,7 +162,7 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
                          f"{p['extractor']} | {p['preset']} | `{p['git_commit']}` | {(p.get('built_at') or '')[:10]} |")
         lines.append("")
     if index:
-        newest = max(index, key=lambda e: e["run"])["run"]
+        newest = latest_run(index) or max(index, key=lambda e: e["run"])["run"]
         lines += ["## Results", "",
                   f"Latest run: `{newest}` ([report](reports/latest/report.md)); every run is kept under `reports/<run>/`.", "",
                   "Composite is the mean over runs (0-1); recall is fact recall; judge is the 0-5 judged overall.", "",
@@ -171,16 +178,27 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
     return "\n".join(lines)
 
 
-def plan_report_commit(run_name: str, staged: list[str], existing: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+def latest_run(index: list[dict]) -> Optional[str]:
+    """Name of the newest run that is the comparison baseline (not archived with ``--no-latest``)."""
+    runs = [e["run"] for e in index if not e.get("not_latest")]
+    return max(runs) if runs else None
+
+
+def plan_report_commit(run_name: str, staged: list[str], existing: list[str],
+                       update_latest: bool = True) -> tuple[list[tuple[str, str]], list[str]]:
     """Paths for one atomic report publication.
 
     ``staged`` are the run's files relative to its folder. Returns ``(adds, deletes)``:
     ``adds`` is ``(path_in_repo, relative_file)`` for the archive copy under
     ``reports/<run>/`` and the ``reports/latest/`` mirror; ``deletes`` removes files
     left in ``reports/latest/`` by the previous run that this one does not have,
-    so ``latest`` never mixes two runs.
+    so ``latest`` never mixes two runs. With ``update_latest=False`` only the archive
+    copy is added and ``reports/latest/`` is left untouched.
     """
-    adds = [(f"reports/{run_name}/{rel}", rel) for rel in staged] + [(f"reports/latest/{rel}", rel) for rel in staged]
+    adds = [(f"reports/{run_name}/{rel}", rel) for rel in staged]
+    if not update_latest:
+        return adds, []
+    adds += [(f"reports/latest/{rel}", rel) for rel in staged]
     keep = {f"reports/latest/{rel}" for rel in staged}
     deletes = [f for f in existing if f.startswith("reports/latest/") and f not in keep]
     return adds, deletes
@@ -328,20 +346,20 @@ def cmd_push_report(a, api) -> int:
                         (stage / sub / f.relative_to(run / sub)).parent.mkdir(parents=True, exist_ok=True)
                         (stage / sub / f.relative_to(run / sub)).write_bytes(f.read_bytes())
         rels = sorted(str(f.relative_to(stage)) for f in stage.rglob("*") if f.is_file())
-        adds, deletes = plan_report_commit(run.name, rels, _list(api, a.repo))
-        # One commit: the archive copy and the `latest` mirror change together.
+        adds, deletes = plan_report_commit(run.name, rels, _list(api, a.repo), update_latest=not a.no_latest)
+        # One commit: the archive copy and the `latest` mirror change together (unless --no-latest).
         api.create_commit(
             a.repo, repo_type="dataset",
             operations=[CommitOperationAdd(dest, str(stage / rel)) for dest, rel in adds]
             + [CommitOperationDelete(d) for d in deletes],
-            commit_message=f"Eval run {run.name} (archive + latest)",
+            commit_message=f"Eval run {run.name} ({'archive only' if a.no_latest else 'archive + latest'})",
         )
-    index = merge_index(_read_json(api, a.repo, "reports/index.json", []), report_index_entry(run.name, report))
+    index = merge_index(_read_json(api, a.repo, "reports/index.json", []), report_index_entry(run.name, report, latest=not a.no_latest))
     api.upload_file(path_or_fileobj=json.dumps(index, indent=2).encode(), path_in_repo="reports/index.json",
                     repo_id=a.repo, repo_type="dataset", commit_message="Update report index")
     refresh_card(api, a.repo)
-    print(f"[OK] archived at reports/{run.name}/ and mirrored to reports/latest/: "
-          f"https://huggingface.co/datasets/{a.repo}/tree/main/reports/{run.name}")
+    print(f"[OK] archived at reports/{run.name}/" + ("" if a.no_latest else " and mirrored to reports/latest/")
+          + f": https://huggingface.co/datasets/{a.repo}/tree/main/reports/{run.name}")
     return 0
 
 
@@ -352,7 +370,7 @@ def cmd_pull_report(a, api) -> int:
         index = _read_json(api, a.repo, "reports/index.json", [])
         if not index:
             raise SystemExit("[FAIL] no published reports")
-        name = index[-1]["run"]
+        name = latest_run(index) or index[-1]["run"]
     snapshot_download(a.repo, repo_type="dataset", allow_patterns=[f"reports/{name}/*"], local_dir=LOCAL_ROOT, token=api.token)
     dest = RUNS_DIR / name
     dest.mkdir(parents=True, exist_ok=True)
@@ -383,6 +401,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     s.add_argument("--preset", default=os.environ.get("MODEL_PRESET", "remote-kisski"))
     s.add_argument("--sources", default=str(SOURCES_DIR), help="dir holding manifest.json (for the fingerprint)")
     s = sub.add_parser("push-report"); s.add_argument("run_dir"); s.add_argument("--with-raw", action="store_true")
+    s.add_argument("--no-latest", action="store_true",
+                   help="archive only: keep reports/latest/ and the card's latest run unchanged")
     s = sub.add_parser("pull-report"); s.add_argument("name", help="run folder name or 'latest'")
     a = p.parse_args(argv)
     api = _api()
