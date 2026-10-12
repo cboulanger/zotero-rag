@@ -9,7 +9,8 @@ Layout of the repo (default ``cmboulanger/zotero-rag-gold``, override with
   snapshots/<embedding-model>/latest.jsonl.gz  index snapshot (bin/library_snapshot.py)
   snapshots/<embedding-model>/latest.json      its provenance (extractor, commit, counts)
   reports/index.json                           one summary entry per published run
-  reports/<run>/{report.md,report.json,meta.json,results.jsonl,judgments/,raw/}
+  reports/<run>/{report.md,report.json,meta.json,results.jsonl,judgments/,raw/}   the archive: every run, kept
+  reports/latest/                              copy of the newest run (HF has no symlinks), replaced in the same commit
 
 Why a snapshot rather than rebuilding: the index depends on the extractor
 (Kreuzberg in production) which not every environment can run; the snapshot
@@ -154,7 +155,9 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
                          f"{p['extractor']} | {p['preset']} | `{p['git_commit']}` | {(p.get('built_at') or '')[:10]} |")
         lines.append("")
     if index:
+        newest = max(index, key=lambda e: e["run"])["run"]
         lines += ["## Results", "",
+                  f"Latest run: `{newest}` ([report](reports/latest/report.md)); every run is kept under `reports/<run>/`.", "",
                   "Composite is the mean over runs (0-1); recall is fact recall; judge is the 0-5 judged overall.", "",
                   "| Run | Gold | Commit | Preset / model | Runs | Composite | Recall en | Recall non-en | Judge | Lost retr. | Lost gen. |",
                   "|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -166,6 +169,21 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
                              f"{s.get('lost_in_retrieval')} | {s.get('lost_in_generation')} |")
         lines.append("")
     return "\n".join(lines)
+
+
+def plan_report_commit(run_name: str, staged: list[str], existing: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """Paths for one atomic report publication.
+
+    ``staged`` are the run's files relative to its folder. Returns ``(adds, deletes)``:
+    ``adds`` is ``(path_in_repo, relative_file)`` for the archive copy under
+    ``reports/<run>/`` and the ``reports/latest/`` mirror; ``deletes`` removes files
+    left in ``reports/latest/`` by the previous run that this one does not have,
+    so ``latest`` never mixes two runs.
+    """
+    adds = [(f"reports/{run_name}/{rel}", rel) for rel in staged] + [(f"reports/latest/{rel}", rel) for rel in staged]
+    keep = {f"reports/latest/{rel}" for rel in staged}
+    deletes = [f for f in existing if f.startswith("reports/latest/") and f not in keep]
+    return adds, deletes
 
 
 def merge_index(index: list[dict], entry: dict) -> list[dict]:
@@ -296,6 +314,7 @@ def cmd_push_report(a, api) -> int:
     report = json.loads((run / "report.json").read_text())
     report["meta"] = {**report.get("meta", {}), **meta}
     api.create_repo(a.repo, repo_type="dataset", exist_ok=True)
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete
     with tempfile.TemporaryDirectory() as tmp:
         stage = Path(tmp)
         for name in REPORT_FILES:
@@ -308,13 +327,21 @@ def cmd_push_report(a, api) -> int:
                     if f.is_file():
                         (stage / sub / f.relative_to(run / sub)).parent.mkdir(parents=True, exist_ok=True)
                         (stage / sub / f.relative_to(run / sub)).write_bytes(f.read_bytes())
-        api.upload_folder(folder_path=str(stage), path_in_repo=f"reports/{run.name}", repo_id=a.repo,
-                          repo_type="dataset", commit_message=f"Eval run {run.name}")
+        rels = sorted(str(f.relative_to(stage)) for f in stage.rglob("*") if f.is_file())
+        adds, deletes = plan_report_commit(run.name, rels, _list(api, a.repo))
+        # One commit: the archive copy and the `latest` mirror change together.
+        api.create_commit(
+            a.repo, repo_type="dataset",
+            operations=[CommitOperationAdd(dest, str(stage / rel)) for dest, rel in adds]
+            + [CommitOperationDelete(d) for d in deletes],
+            commit_message=f"Eval run {run.name} (archive + latest)",
+        )
     index = merge_index(_read_json(api, a.repo, "reports/index.json", []), report_index_entry(run.name, report))
     api.upload_file(path_or_fileobj=json.dumps(index, indent=2).encode(), path_in_repo="reports/index.json",
                     repo_id=a.repo, repo_type="dataset", commit_message="Update report index")
     refresh_card(api, a.repo)
-    print(f"[OK] https://huggingface.co/datasets/{a.repo}/tree/main/reports/{run.name}")
+    print(f"[OK] archived at reports/{run.name}/ and mirrored to reports/latest/: "
+          f"https://huggingface.co/datasets/{a.repo}/tree/main/reports/{run.name}")
     return 0
 
 

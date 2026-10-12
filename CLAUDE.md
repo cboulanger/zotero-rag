@@ -353,7 +353,71 @@ uv run python bin/library_snapshot.py info .local/gold.jsonl.gz
 
 Pass `--source-key`/`--dest-key` (admin read-only Zotero keys) unless the instance is loopback-mode.
 
-The rag-quality-eval skill keeps the gold library's PDFs, this snapshot and the eval reports in a public Hugging Face dataset repo and wraps these commands (`skills/rag-quality-eval/scripts/gold_env.py`, `hf_store.py`; see its SKILL.md).
+The rag-quality-eval skill keeps this snapshot in a Hugging Face dataset repo and wraps these commands; see "Cloud runs and the Hugging Face evaluation store" below.
+
+## Cloud runs and the Hugging Face evaluation store
+
+The `rag-quality-eval` skill (`skills/rag-quality-eval/`) can run in a cloud session without
+the full local stack. Everything the evaluation needs besides this repo is kept in one
+**public Hugging Face dataset repo** (default `cmboulanger/zotero-rag-gold`, override with
+`RAG_EVAL_HF_REPO`; the gold library's documents are open access, CC BY 4.0):
+
+| Path in the HF repo | Content |
+|---|---|
+| `sources/` | the 41 PDFs of `groups/6297749` plus `manifest.json` (item metadata, sha256) |
+| `snapshots/<embedding-model>/latest.jsonl.gz` + `latest.json` | the production-equivalent index (chunks, vectors, metadata; `bin/library_snapshot.py` format) and how it was built (extractor, code commit, counts) |
+| `reports/<run>/` | the archive: every published eval run is kept |
+| `reports/latest/` | a copy of the newest run (HF has no symlinks), replaced in the same commit as the archive copy |
+| `reports/index.json`, `README.md` | run summaries; the dataset card, regenerated from the repo's contents |
+
+Tools: `scripts/gold_env.py` (`up`/`down`/`status` create the environment, `fetch-sources`/`index`/`publish`
+build and upload it) and `scripts/hf_store.py` (`status`, `init`, `pull-*`, `push-*`, `card`), both under
+`skills/rag-quality-eval/`. Full workflow in its `SKILL.md`.
+
+### What a cloud session can and cannot do
+
+- **Can:** start a backend on embedded Qdrant, restore the snapshot, run the whole eval workflow
+  (`run_eval`, judging, reports, `--baseline` against `pull-report latest`), and evaluate anything at or after
+  retrieval: `top_k`, thresholds, dedup/cap/MMR, reranking, prompts, models, routing. Provider calls
+  (KISSKI, Hugging Face) work because the session's outbound proxy injects the credentials; `gold_env.py up`
+  sends a placeholder key header, so no key is needed in the session.
+- **Cannot:** run Kreuzberg (`ghcr.io/kreuzberg-dev/kreuzberg` is denied by the proxy) or podman (only a
+  manually started `dockerd` exists, and Qdrant's image pulls from Docker Hub, but embedded mode makes it
+  unnecessary). Re-indexing there falls back to the `legacy` extractor, whose chunks differ from production, so
+  **never judge chunking or extraction changes in the cloud**; do those locally and `publish` again. The snapshot
+  is only valid for the embedding model it was built with (import refuses a mismatch).
+- Transient HTTP 500 from one KISSKI model (the preset's default has done this) is the provider, not the code:
+  use another model of the preset, as with any live query (see "Replaying a query against the live backend").
+
+### Preparing for a cloud run (once, in the full local environment)
+
+1. Have the backend running on the sidecar with the Kreuzberg extractor (`npm start`), a read-only Zotero key
+   in `RAG_EVAL_ZOTERO_KEY`, and a Hugging Face token with **write** access in `HF_TOKEN` (keep both out of `.env`
+   and out of command output).
+2. `uv run python skills/rag-quality-eval/scripts/gold_env.py fetch-sources`: downloads the PDFs and
+   `manifest.json` into `.local/rag_eval_sources/`.
+3. `uv run python skills/rag-quality-eval/scripts/hf_store.py init`: creates the public dataset repo (first time only).
+4. `uv run python skills/rag-quality-eval/scripts/gold_env.py publish`: indexes the PDFs through the real
+   extractor, exports the snapshot and uploads sources, snapshot and the regenerated card. Re-run it whenever
+   chunking, extraction, the embedding model or the source set changes; `hf_store.py status` shows what the
+   store currently holds and the commit it was built from.
+5. In the cloud environment's settings allow outbound access to `huggingface.co`, `chat-ai.academiccloud.de`,
+   `github.com` (the spaCy wheel) and `pypi.org`, and make sure the environment has the connected services
+   (KISSKI, Hugging Face) so the proxy injects their credentials (`read_documentation` topics
+   `environment.network`, `connectors.add`). A setup script that runs `uv sync` saves time.
+
+Then start the session with a prompt such as: *"Use the rag-quality-eval skill. Run
+`gold_env.py up`, then <the task>"*. The session restores the index (about a minute), checks that every gold
+document has chunks, and proceeds with the skill's preflight. When it finishes a run worth keeping it publishes it with
+`hf_store.py push-report <run dir>` (needs write access; without a token the report stays local, which the session should say).
+
+### Rules for agents working with the store
+
+- Compare only runs with the same gold version and the same snapshot (the report shows the gold version, the card
+  the snapshot's provenance).
+- Publish only judged, final runs, never smoke tests; add `--with-raw` only when the traces are needed.
+- Never start or stop processes by name pattern (`pkill -f uvicorn` kills the shell that runs it); use
+  `gold_env.py down`, which kills the process group it started.
 
 ## Python Environment
 

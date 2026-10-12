@@ -56,6 +56,18 @@ class StoreHelperTests(unittest.TestCase):
         later = hf_store.merge_index(index, {**entry, "run": "20261013T000000Z"})
         self.assertEqual([e["run"] for e in later], ["20261012T000000Z", "20261013T000000Z"])
 
+    def test_report_commit_archives_and_replaces_latest_atomically(self):
+        existing = ["reports/old/report.md", "reports/latest/report.md", "reports/latest/raw/a.json", "sources/x.pdf"]
+        adds, deletes = hf_store.plan_report_commit("new", ["report.md", "report.json"], existing)
+        self.assertIn(("reports/new/report.json", "report.json"), adds)
+        self.assertIn(("reports/latest/report.json", "report.json"), adds)
+        self.assertEqual(deletes, ["reports/latest/raw/a.json"])  # stale file of the previous run only
+        self.assertNotIn("reports/old/report.md", deletes)          # the archive is never touched
+
+    def test_card_links_the_latest_report(self):
+        card = hf_store.render_card("o/r", None, [], [hf_store.report_index_entry("run1", REPORT)])
+        self.assertIn("[report](reports/latest/report.md)", card)
+
     def test_card_has_license_attribution_and_tables(self):
         prov = {"embedding_model": "m", "embedding_dim": 3, "counts": {"chunks": 24}, "extractor": "kreuzberg",
                 "preset": "p", "git_commit": "abc", "built_at": "2026-10-12T00:00:00"}

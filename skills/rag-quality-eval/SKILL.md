@@ -96,7 +96,7 @@ After deliberately changing the index, record why in the commit; the card shows
 which code commit and extractor each snapshot came from.
 
 **Comparisons across sessions.** Published runs are the baselines:
-`hf_store.py pull-report latest` (or a run name) puts a run under
+`hf_store.py pull-report latest` (or any archived run name) puts a run under
 `data/logs/rag_eval/`, usable as `report.py --baseline`. Keep the question set
 (gold version) and the snapshot the same when comparing; `report.md` shows the gold
 version and the card shows the snapshot's provenance.
@@ -270,7 +270,9 @@ no keys; add `--with-raw` to include the raw traces):
 uv run python skills/rag-quality-eval/scripts/hf_store.py push-report data/logs/rag_eval/<run>
 ```
 
-Needs write access to the store, i.e. `HF_TOKEN`; without it, tell the user the
+Every run is kept under `reports/<run>/` and `reports/latest/` is replaced by a
+copy of the newest one in the same commit (HF has no symlinks). Needs write
+access to the store, i.e. `HF_TOKEN`; without it, tell the user the
 report is local only. Only publish after `judge.py validate` passes and only for
 runs worth comparing against (not smoke tests).
 
