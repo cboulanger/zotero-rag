@@ -15,8 +15,8 @@ two of this run's own targets) had never been chunked into the active
 collection at all.
 
 Usage:
-    uv run python skills/rag-quality-eval/scripts/check_gold_index.py
-    uv run python skills/rag-quality-eval/scripts/check_gold_index.py --url http://localhost:8119
+    uv run rag-check-gold-index
+    uv run rag-check-gold-index --url http://localhost:8119
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ def main() -> int:
             print(f"  {doc_id}  (attachment_keys: {', '.join(keys)})")
         print(
             "\nRe-index before running the eval, e.g.:\n"
-            f"  uv run python bin/index_libraries.py --mode incremental --slug {gold['library']['slug']}\n"
+            f"  uv run rag-index --mode incremental --slug {gold['library']['slug']}\n"
             "then re-run this check."
         )
         return 1

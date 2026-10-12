@@ -2,7 +2,7 @@
 Trace a RAG query and save the full execution trace to JSON.
 
 Usage:
-    uv run python scripts/query_trace.py "What is autopoiesis?" \\
+    uv run rag-query "What is autopoiesis?" \\
         --library-ids 12345678 \\
         --output trace.json
 

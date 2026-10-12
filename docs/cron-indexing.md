@@ -75,16 +75,16 @@ Keys and targets come from the store, so no slugs are passed on the command line
 
 ```bash
 # Index everything resolvable from the stored keys (auto mode)
-uv run python bin/index_libraries.py
+uv run rag-index
 
 # Force a full sync (ignore incremental state)
-uv run python bin/index_libraries.py --mode full
+uv run rag-index --mode full
 
 # Limit to 100 items per library (useful for testing)
-uv run python bin/index_libraries.py --max-items 100
+uv run rag-index --max-items 100
 
 # Override the log file location
-uv run python bin/index_libraries.py --log-file /var/log/zotero_index.log
+uv run rag-index --log-file /var/log/zotero_index.log
 ```
 
 ### All Options
@@ -246,7 +246,7 @@ lock file:
 ```cron
 # Edit with: crontab -e
 # Index every night at 2 AM (targets come from the stored keys)
-0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py >> data/logs/cron_indexer.log 2>&1
+0 2 * * * cd /path/to/zotero-rag && uv run rag-index >> data/logs/cron_indexer.log 2>&1
 ```
 
 ## Reading Progress
@@ -472,7 +472,7 @@ run died is forced to run a full sync on the next invocation.
 To force-clear a lock manually (e.g. if PID wrap-around caused a false
 positive):
 ```bash
-uv run python bin/index_libraries.py --force
+uv run rag-index --force
 ```
 
 ### "AUTOINDEX_SECRET is not set; nothing to index"

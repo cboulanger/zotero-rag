@@ -2,8 +2,8 @@
 CLI script for cron-driven Zotero library indexing via the web API.
 
 Usage:
-    uv run python bin/index_libraries.py
-    uv run python bin/index_libraries.py --mode full --max-items 500
+    uv run rag-index
+    uv run rag-index --mode full --max-items 500
 
 Libraries and keys are resolved from the encrypted auto-index key store: every
 stored read-only key is re-validated against api.zotero.org each run, revoked
@@ -204,5 +204,10 @@ async def _main(argv: list[str] | None = None) -> int:
         return 1
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the ``rag-index`` console script (see pyproject.toml)."""
     sys.exit(asyncio.run(_main()))
+
+
+if __name__ == "__main__":
+    main()

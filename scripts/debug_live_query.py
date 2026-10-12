@@ -13,10 +13,10 @@ whether every source has a citation, and the answer text. Full trace JSON
 for each run is written to --output-dir for deeper inspection.
 
 Usage:
-    uv run python scripts/debug_live_query.py "Which features does Zotero have that Citavi does not?"
-    uv run python scripts/debug_live_query.py "..." --repeat 5
-    uv run python scripts/debug_live_query.py "..." --llm-model meta-llama-3.1-8b-instruct
-    uv run python scripts/debug_live_query.py "..." --inspect-index
+    uv run rag-debug-query "Which features does Zotero have that Citavi does not?"
+    uv run rag-debug-query "..." --repeat 5
+    uv run rag-debug-query "..." --llm-model meta-llama-3.1-8b-instruct
+    uv run rag-debug-query "..." --inspect-index
 
 --inspect-index additionally stops the backend (embedded Qdrant only allows
 one process to hold the storage directory open at a time), reports how many
