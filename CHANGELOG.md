@@ -1,3 +1,35 @@
+# [1.61.0](https://github.com/cboulanger/zotero-rag/compare/v1.60.0...v1.61.0) (2026-10-13)
+
+
+### Bug Fixes
+
+* accept current backend ProcessingStatus values in gold_env.py index check ([29f1f9a](https://github.com/cboulanger/zotero-rag/commit/29f1f9a8f2cb6658d2d2ccf09edf513ffdff5a40))
+* cap chunks-per-document before the top_k cutoff, not just after ([7092446](https://github.com/cboulanger/zotero-rag/commit/7092446f55d73e2352e02c8ba0884e6038468eb7)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87) [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+* dedup near-identical chunk text across different library items, not just within one ([dee8114](https://github.com/cboulanger/zotero-rag/commit/dee8114ce4c60475fd8ae847bd2c3f080f2ae812)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+* detect and retry leaked chain-of-thought in generated answers ([2cb22f3](https://github.com/cboulanger/zotero-rag/commit/2cb22f3f3300e5570ef7b9f2fb23eb2d407c0067)), closes [#81](https://github.com/cboulanger/zotero-rag/issues/81)
+* detect English-language fallback, harden insufficient-context marker ([82b85c1](https://github.com/cboulanger/zotero-rag/commit/82b85c1c496b669a3befd60774f9fd89c35bbf45)), closes [#82](https://github.com/cboulanger/zotero-rag/issues/82)
+* don't flag deliberately-deduped duplicate attachments as missing ([f742890](https://github.com/cboulanger/zotero-rag/commit/f742890fdb4da191b266473f667ddc8e636f83f6))
+* don't skip Qdrant sidecar management just because QDRANT_URL is set ([d2dccf1](https://github.com/cboulanger/zotero-rag/commit/d2dccf1569c92f712c7306ef054037f859b67da6)), closes [#88](https://github.com/cboulanger/zotero-rag/issues/88)
+* handle remote LLM rate limits with backoff, mirroring embeddings ([750ea48](https://github.com/cboulanger/zotero-rag/commit/750ea4803039d3169d205c33d4325f54be7dae71))
+* rag-quality-eval preflight now checks the active preset's credentials too ([dca287d](https://github.com/cboulanger/zotero-rag/commit/dca287d99ad825f4ba3f0733d0ac95cd9fbee1e2))
+* test_kisski_api.py reads the key from the encrypted key store only ([8a13bd6](https://github.com/cboulanger/zotero-rag/commit/8a13bd67a78492c0f96e88eacbdbc021b5ffe760)), closes [#78](https://github.com/cboulanger/zotero-rag/issues/78)
+* verify Q04 gold fact against source, harden its verification ([b85282c](https://github.com/cboulanger/zotero-rag/commit/b85282c7d40954a42f1de0b285395c852bbdf103)), closes [#83](https://github.com/cboulanger/zotero-rag/issues/83) [#80](https://github.com/cboulanger/zotero-rag/issues/80) [#83](https://github.com/cboulanger/zotero-rag/issues/83)
+
+
+### Features
+
+* add a generic Docling extractor and the kisski-docling preset ([#97](https://github.com/cboulanger/zotero-rag/issues/97)) ([42f7ccc](https://github.com/cboulanger/zotero-rag/commit/42f7ccc0a2a8a4a5ae63d23609a1d4199b5ed9c4))
+* add preflight check that gold attachments are actually indexed ([8a6d6b8](https://github.com/cboulanger/zotero-rag/commit/8a6d6b8ffd6de40648effc0f677f3d45ce80fe1f)), closes [#80](https://github.com/cboulanger/zotero-rag/issues/80)
+* Add RAG quality evaluation skill with gold standard and scoring ([#71](https://github.com/cboulanger/zotero-rag/issues/71)) ([28c25a6](https://github.com/cboulanger/zotero-rag/commit/28c25a601ca8136865ad74d20ab6ecb7af2a5d3a)), closes [#73](https://github.com/cboulanger/zotero-rag/issues/73) [-#76](https://github.com/-/issues/76)
+* add rag-key as a uv console-script alias, pilot for more ([419d9bc](https://github.com/cboulanger/zotero-rag/commit/419d9bce951b7fd16aec521ea2116952054670aa))
+* add score-proximity retrieval escalation; prototype embedding MMR reranking ([#89](https://github.com/cboulanger/zotero-rag/issues/89)) ([ec3363b](https://github.com/cboulanger/zotero-rag/commit/ec3363bd9e753f76a2000fd04a49fa1b6679329c)), closes [#90](https://github.com/cboulanger/zotero-rag/issues/90)
+* add temporary script to find/fix legacy Snapshot chunks ([#80](https://github.com/cboulanger/zotero-rag/issues/80)/[#87](https://github.com/cboulanger/zotero-rag/issues/87)) ([6bac070](https://github.com/cboulanger/zotero-rag/commit/6bac070e20de3e77e1b696b0ad01d7c4b735dba4))
+* Google Gemini provider, Gemini presets and glob filters for live model lists ([#85](https://github.com/cboulanger/zotero-rag/issues/85)) ([22b1543](https://github.com/cboulanger/zotero-rag/commit/22b154314ccfd8c69e2d9de11ee8076ca14b5726))
+* interactive credential setup script, wired into rag-quality-eval preflight ([bfb1e9e](https://github.com/cboulanger/zotero-rag/commit/bfb1e9e43b230edcde331fc1e3a46469e799c757))
+* **plugin:** add visibleIndices filename-filter matching to fix-unavailable dialog ([144de6d](https://github.com/cboulanger/zotero-rag/commit/144de6d45a5107407082f8cfd62497b7adef4f7e))
+* **plugin:** glob filter over all columns in Fix Unavailable dialog ([d8f2182](https://github.com/cboulanger/zotero-rag/commit/d8f21820333bf9feb7946279f6af90522221a372))
+* use MMR-style diversity selection for the per-document chunk cap ([ee8dc3e](https://github.com/cboulanger/zotero-rag/commit/ee8dc3efd57b74788400c6bd98576bde2d9f264e)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+
 # [1.60.0](https://github.com/cboulanger/zotero-rag/compare/v1.59.0...v1.60.0) (2026-10-10)
 
 
