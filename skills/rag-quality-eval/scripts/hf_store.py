@@ -30,8 +30,9 @@ Commands (``python`` is enough for ``card``/``status``; the rest needs
   pull-index [--model M] [--extractor E]
                             download the snapshot for embedding model M and extractor E (default: the
                             running backend's; a ``legacy`` backend restores the Kreuzberg snapshot)
-  push-index FILE [--extractor E]
-                            upload a snapshot file as the model's ``latest`` for that extractor (+ provenance)
+  push-index FILE [--extractor E] [--name N]
+                            upload a snapshot file for that extractor (+ provenance) as ``latest``, or under
+                            another name N that is kept but not restored by default
   push-report RUN_DIR       upload a report plus a Markdown rendering of the gold questions (``--with-raw`` adds raw/ traces) and refresh the card;
                             ``--no-latest`` archives the run only, leaving ``reports/latest/`` (the comparison
                             baseline) and the card's "latest run" on the previous run
@@ -77,12 +78,16 @@ def model_slug(model: str) -> str:
 DEFAULT_EXTRACTOR = "kreuzberg"
 
 
-def snapshot_paths(model: str, extractor: str = DEFAULT_EXTRACTOR) -> tuple[str, str]:
-    """(snapshot file, provenance file) paths inside the repo for an embedding model and extractor."""
+def snapshot_paths(model: str, extractor: str = DEFAULT_EXTRACTOR, name: str = "latest") -> tuple[str, str]:
+    """(snapshot file, provenance file) paths inside the repo for an embedding model and extractor.
+
+    ``name`` is ``latest`` for the snapshot a fresh environment restores; any other name
+    (e.g. a date or commit) keeps a snapshot next to it without becoming the one restored.
+    """
     base = f"snapshots/{model_slug(model)}"
     if extractor != DEFAULT_EXTRACTOR:
         base += f"/{model_slug(extractor)}"
-    return f"{base}/latest.jsonl.gz", f"{base}/latest.json"
+    return f"{base}/{name}.jsonl.gz", f"{base}/{name}.json"
 
 
 def restore_extractor(backend_extractor: Optional[str]) -> str:
@@ -394,7 +399,7 @@ def cmd_pull_index(a, api) -> int:
     from huggingface_hub import hf_hub_download
     model = a.model or _backend_model(a.url)
     extractor = a.extractor or restore_extractor(_backend_extractor(a.url))
-    snap, prov = snapshot_paths(model, extractor)
+    snap, prov = snapshot_paths(model, extractor, a.name)
     local = hf_hub_download(a.repo, snap, repo_type="dataset", token=api.token, local_dir=LOCAL_ROOT, revision=a.revision)
     hf_hub_download(a.repo, prov, repo_type="dataset", token=api.token, local_dir=LOCAL_ROOT, revision=a.revision)
     print(local)
@@ -410,14 +415,14 @@ def cmd_push_index(a, api) -> int:
     if a.extractor == "legacy":
         raise SystemExit("[FAIL] a legacy-extractor index is not production-equivalent; not publishing it")
     prov = provenance(header, a.extractor, a.preset, sources_fingerprint(manifest))
-    snap, prov_path = snapshot_paths(header["embedding_model_name"], a.extractor)
+    snap, prov_path = snapshot_paths(header["embedding_model_name"], a.extractor, a.name)
     api.create_repo(a.repo, repo_type="dataset", exist_ok=True)
     api.upload_file(path_or_fileobj=str(path), path_in_repo=snap, repo_id=a.repo, repo_type="dataset",
                     commit_message=f"Index snapshot for {header['embedding_model_name']} ({a.extractor})")
     api.upload_file(path_or_fileobj=json.dumps(prov, indent=2).encode(), path_in_repo=prov_path, repo_id=a.repo,
                     repo_type="dataset", commit_message="Snapshot provenance")
-    refresh_card(api, a.repo)
-    print(f"[OK] pushed {snap}")
+    refresh_card(api, a.repo)  # lists only the `latest` snapshots
+    print(f"[OK] pushed {snap}" + ("" if a.name == "latest" else " (not the restored `latest`)"))
     return 0
 
 
@@ -498,7 +503,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     s = sub.add_parser("push-sources"); s.add_argument("dir", nargs="?", default=str(SOURCES_DIR))
     s = sub.add_parser("pull-index"); s.add_argument("--model"); s.add_argument("--revision")
     s.add_argument("--extractor", help="snapshot of this extractor (default: the backend's, see restore_extractor)")
+    s.add_argument("--name", default="latest", help="snapshot name (default latest)")
     s = sub.add_parser("push-index"); s.add_argument("file")
+    s.add_argument("--name", default="latest",
+                   help="snapshot name; anything but `latest` is stored alongside it and never restored by default")
     s.add_argument("--extractor", default=None,
                    help="extractor the index was built with (default: the backend's, else $EXTRACTOR_BACKEND)")
     s.add_argument("--preset", default=os.environ.get("MODEL_PRESET", "remote-kisski"))

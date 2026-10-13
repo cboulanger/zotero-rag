@@ -107,7 +107,8 @@ regenerated from those contents. Details in the `hf_store.py` docstring.
   there is one; otherwise it pulls the source PDFs from the store and indexes
   them through SAIA (about 1200 pages in 10-page requests at one request per
   second, roughly 15-25 minutes; `--rebuild` always builds). `publish` then
-  uploads that snapshot (needs a write token). This makes chunking and
+  uploads that snapshot as `latest` (needs a write token); to keep one without
+  making it the restored default, use `hf_store.py push-index FILE --extractor docling --name <name>`. This makes chunking and
   extraction changes measurable end to end in the cloud, for the Docling
   pipeline: a Docling index is not the Kreuzberg one, so compare runs only
   within one extractor (the card's snapshot table and `gold_env.py status` name

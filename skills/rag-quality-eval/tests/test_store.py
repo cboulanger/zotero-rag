@@ -37,6 +37,10 @@ class StoreHelperTests(unittest.TestCase):
         self.assertEqual(hf_store.snapshot_paths("m", "docling"),
                          ("snapshots/m/docling/latest.jsonl.gz", "snapshots/m/docling/latest.json"))
 
+    def test_named_snapshot_does_not_touch_latest(self):
+        self.assertEqual(hf_store.snapshot_paths("m", "docling", "20261013-02f00c6"),
+                         ("snapshots/m/docling/20261013-02f00c6.jsonl.gz", "snapshots/m/docling/20261013-02f00c6.json"))
+
     def test_legacy_backend_restores_the_kreuzberg_snapshot(self):
         self.assertEqual(hf_store.restore_extractor("legacy"), "kreuzberg")
         self.assertEqual(hf_store.restore_extractor(None), "kreuzberg")
