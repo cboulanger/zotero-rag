@@ -1,5 +1,6 @@
 /* Rate-limit bars shared by dialog.xhtml and autoindex-status.xhtml */
-.rate-limit-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-.rate-limit-bar-track { flex: 1; height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; min-width: 0; }
-.rate-limit-bar { height: 100%; border-radius: 3px; width: 0%; transition: width 0.3s, background-color 0.3s; }
-.rate-limit-text { min-width: 9em; flex-shrink: 0; color: #555; white-space: nowrap; }
+.rate-limit-row { display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 1.6; }
+/* Fixed track width (not flex: 1) so all bars have the same length and the labels line up. */
+.rate-limit-bar-track { flex: 0 0 80px; width: 80px; height: 3px; background: #e0e0e0; border-radius: 2px; overflow: hidden; }
+.rate-limit-bar { height: 100%; border-radius: 2px; width: 0%; transition: width 0.3s, background-color 0.3s; }
+.rate-limit-text { flex: 1 1 auto; min-width: 0; color: #555; white-space: nowrap; }

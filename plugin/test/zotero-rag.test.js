@@ -284,6 +284,7 @@ test('_getUnavailableAttachments includes download-failed entries only when incl
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	zotero.DB = { columnQueryAsync: async () => [] };
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.log = () => {};
 	plugin.getIndexSnapshotsEnabled = async () => false;
 	plugin._getParseErrorAttachments = async () => [];
 	plugin._getSkippedServerAttachments = async () => [];
@@ -1955,4 +1956,97 @@ test('setSharedRemoteField returns ok:false with the server detail message on a 
 
 	// Same cross-realm-object caveat as above.
 	assert.deepStrictEqual({ ...result }, { ok: false, error: 'Unknown remote-config key' });
+});
+
+test('_getUnavailableAttachments drops rows the backend already has indexed and prunes them from the download-failed store', async () => {
+	// A second computer: the server's stale failure list still names DL1, but it
+	// was indexed via Search & Fix on another PC, so the backend has chunks for it.
+	const { zotero, ioUtils, pathUtils, files } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	/** @type {any[]} */
+	const bodies = [];
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ init) => {
+		assert.match(url, /\/api\/indexed-tags\/check$/);
+		bodies.push(JSON.parse(init.body));
+		return { ok: true, json: async () => ({ indexed: ['DL1'] }) };
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+		{ attachmentItem: { key: 'DL2' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P2', isLinked: false, serverDownloadFailed: true },
+	];
+	await plugin.storeDownloadFailedItems('u1', ['DL1', 'DL2']);
+
+	const rows = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+
+	assert.deepStrictEqual([...rows.map((/** @type {any} */ r) => r.attachmentItem.key)], ['DL2']);
+	assert.deepStrictEqual(bodies[0].attachment_keys.sort(), ['DL1', 'DL2']);
+	assert.deepStrictEqual(JSON.parse(files[plugin._downloadFailedFilePath(1)]), ['DL2']);
+});
+
+test('_getUnavailableAttachments keeps every row when the indexed check fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const fetchStub = async () => { throw new Error('network down'); };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+	];
+
+	const rows = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+
+	assert.strictEqual(rows.length, 1);
+});
+
+test('_dropBackendIndexed marks rows unverified (not unindexed) when the check fails, keeps them, and retries once', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	let calls = 0;
+	const fetchStub = async () => { calls++; return { ok: false, status: 504 }; };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	const rows = [{ attachmentItem: { key: 'A1' } }, { attachmentItem: { key: 'A2' } }];
+	/** @type {Array<[number, number]>} */
+	const progress = [];
+
+	const kept = await plugin._dropBackendIndexed(1, rows, (d, t) => progress.push([d, t]));
+
+	assert.strictEqual(kept.length, 2);
+	assert.strictEqual(calls, 2); // one batch, one retry
+	assert.strictEqual(kept[0].serverIndexState, 'unknown');
+	assert.strictEqual(kept[0].serverIndexDetail, 'HTTP 504');
+	assert.deepStrictEqual(progress, [[2, 2]]);
+});
+
+test('_dropBackendIndexed marks rows the server answered for as unindexed and checks in batches', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	/** @type {number[]} */
+	const sizes = [];
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ init) => {
+		const keys = JSON.parse(init.body).attachment_keys;
+		sizes.push(keys.length);
+		return { ok: true, json: async () => ({ indexed: keys.filter((/** @type {string} */ k) => k === 'K0') }) };
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	const rows = Array.from({ length: 450 }, (_, i) => ({ attachmentItem: { key: `K${i}` } }));
+
+	const kept = await plugin._dropBackendIndexed(1, rows);
+
+	assert.deepStrictEqual(sizes, [200, 200, 50]);
+	assert.strictEqual(kept.length, 449);
+	assert.ok(kept.every((/** @type {any} */ r) => r.serverIndexState === 'unindexed'));
 });

@@ -13,7 +13,7 @@ The checkbox state is persisted across dialog sessions. Untick it to return to n
 ### From the command line
 
 ```bash
-uv run python scripts/query_trace.py "Your question here" \
+uv run rag-query "Your question here" \
     --library-ids <library_id> \
     --output trace.json
 ```
@@ -295,3 +295,7 @@ The question *"Which publications by Mertz deal with the law school curriculum?"
 4. **LLM generation** correctly identified S1, S3, and S5 as the most relevant and noted that S2, S4, S6 are less directly relevant. The answer is accurate given the context, but the retrieval of S4 and S6 (bibliography-heavy chunks) shows that the `min_score` of 0.35 was not the binding constraint — the author filter pulled in reference-list chunks that happened to mention Mertz.
 
    A possible improvement: raise `--min-score` slightly or increase `--top-k` to dilute the reference-list chunks with more substantive ones.
+
+## Systematic quality evaluation
+
+To compare presets and models on a fixed gold standard (answer quality, source coverage, citation/prompt compliance, multilingual behaviour, groundedness) instead of debugging a single query, use the `rag-quality-eval` skill. It runs the gold questions with `include_trace=true` against each preset/model and reports where quality is lost (retrieval vs. generation) — see [RAG quality evaluation](evaluation.md) for how to run it locally or in the cloud, and [`skills/rag-quality-eval/SKILL.md`](../skills/rag-quality-eval/SKILL.md) for the full workflow.

@@ -93,6 +93,24 @@ test('_typeLabelFor falls back to the file type label', () => {
 	assert.strictEqual(dialog._typeLabelFor({ attachmentItem: {} }), 'PDF');
 });
 
+test('_filenameFor returns the regular attachment filename for a non-linked file', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: false, attachmentItem: { attachmentFilename: 'report.pdf', attachmentPath: '' } };
+	assert.strictEqual(dialog._filenameFor(info), 'report.pdf');
+});
+
+test('_filenameFor returns the linked path for a linked file', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: true, attachmentItem: { attachmentFilename: 'ignored.pdf', attachmentPath: '/Users/x/notes.pdf' } };
+	assert.strictEqual(dialog._filenameFor(info), '/Users/x/notes.pdf');
+});
+
+test('_filenameFor falls back to an empty string when neither is set', () => {
+	const dialog = loadDialog();
+	const info = { isLinked: false, attachmentItem: {} };
+	assert.strictEqual(dialog._filenameFor(info), '');
+});
+
 test('searchAndFix prunes successfully-fixed serverDownloadFailed entries from the persistent store', async () => {
 	const dialog = loadDialog();
 	dialog.backendLibraryId = 'u1';
@@ -889,13 +907,52 @@ test('populateTable shows and updates the progress meter while check-indexed sta
 	// (reusing the same meter the fix run uses), and hidden again once done —
 	// otherwise a large library leaves the dialog looking frozen while the
 	// backend works through check-indexed batches in the background.
+	// (The first show/hide pair is the list-loading phase in _getUnavailableAttachments.)
 	assert.deepStrictEqual(calls, [
+		'show',
+		'hide',
 		'show',
 		'update:0/2:attachments checked',
 		'update:1/2:attachments checked',
 		'update:2/2:attachments checked',
 		'hide',
 	]);
+});
+
+test('populateTable reports load progress, and labels rows by the server index check (never blank)', async () => {
+	const dialog = loadDialog({ Zotero: { Libraries: { get: () => ({ name: 'Test Library' }) } } });
+	dialog.libraryID = 1;
+	dialog.backendLibraryId = 'u1';
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set();
+	/** @type {Array<string>} */
+	const calls = [];
+	dialog._showProgress = () => calls.push('show');
+	dialog._hideProgress = () => calls.push('hide');
+	dialog._updateProgress = (processed, total, label) => calls.push(`update:${processed}/${total}:${label}`);
+	dialog.plugin = {
+		_getUnavailableAttachments: async (_id, opts) => {
+			opts.onProgress('Checking local files', 25, 50);
+			opts.onProgress('Checking index status on server', 200, 400);
+			return [
+				{ attachmentItem: { key: 'A1' }, isLinked: false, serverIndexState: 'unindexed' },
+				{ attachmentItem: { key: 'A2' }, isLinked: false, serverIndexState: 'unknown', serverIndexDetail: 'HTTP 504' },
+			];
+		},
+		getAutoIndexedLibraryIds: async () => new Set(),
+	};
+
+	await dialog.populateTable();
+
+	assert.deepStrictEqual(calls, [
+		'show',
+		'update:25/50:files checked',
+		'update:200/400:attachments verified on server',
+		'hide',
+	]);
+	assert.match(dialog.rowStatus.get(0).text, /not indexed/i);
+	assert.strictEqual(dialog.rowStatus.get(1).text, 'Server check failed');
+	assert.match(dialog.rowStatus.get(1).tooltip, /HTTP 504/);
 });
 
 test('autoindex-status-button click opens the autoindex status dialog', () => {
@@ -982,4 +1039,201 @@ test('refreshAutoindexButton hides the button on a fetch error (fails closed)', 
 	await dialog.refreshAutoindexButton();
 
 	assert.strictEqual(button.style.display, 'none');
+});
+
+// ---------------------------------------------------------------------------
+// Row filter (glob pattern over every column)
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {Partial<{authors: string, year: string, title: string, zoteroID: string, filename: string}>} f
+ */
+function row(f) {
+	return {
+		isLinked: false,
+		authors: f.authors || '',
+		year: f.year || '',
+		title: f.title || '',
+		zoteroID: f.zoteroID || '',
+		attachmentItem: { attachmentFilename: f.filename || '' },
+	};
+}
+
+/** @param {string} filterText @param {Array<any>} items @param {Map<number, any>} [rowStatus] */
+function visibleFor(filterText, items, rowStatus = new Map()) {
+	const dialog = loadDialog();
+	dialog.filterText = filterText;
+	dialog.items = items;
+	dialog.rowStatus = rowStatus;
+	dialog._computeVisibleIndices();
+	return [...dialog.visibleIndices];
+}
+
+test('_computeVisibleIndices includes every row when filterText is empty or blank', () => {
+	const items = [row({ filename: 'a.pdf' }), row({ filename: 'b.docx' })];
+	assert.deepStrictEqual(visibleFor('', items), [0, 1]);
+	assert.deepStrictEqual(visibleFor('   ', items), [0, 1]);
+});
+
+test('_computeVisibleIndices: plain text matches case-insensitively anywhere in any column', () => {
+	const items = [
+		row({ authors: 'Smith, J.', filename: 'a.docx' }),
+		row({ title: 'Reference managers compared', filename: 'b.docx' }),
+		row({ filename: 'REPORT.PDF' }),
+		row({ zoteroID: 'ABCD1234', filename: 'c.txt' }),
+	];
+	assert.deepStrictEqual(visibleFor('smith', items), [0]);
+	assert.deepStrictEqual(visibleFor('MANAGER', items), [1]);
+	assert.deepStrictEqual(visibleFor('pdf', items), [2]);
+	assert.deepStrictEqual(visibleFor('cd12', items), [3]);
+	assert.deepStrictEqual(visibleFor('zzz', items), []);
+});
+
+test('_computeVisibleIndices: * and ? wildcards must match a whole column value', () => {
+	const items = [
+		row({ filename: 'report.pdf' }),
+		row({ filename: 'report.pdf.bak' }),
+		row({ filename: 'notes.docx' }),
+		row({ year: '2019', filename: 'x' }),
+		row({ year: '2021', filename: 'y' }),
+	];
+	assert.deepStrictEqual(visibleFor('*.pdf', items), [0]);
+	assert.deepStrictEqual(visibleFor('*.PDF*', items), [0, 1]);
+	assert.deepStrictEqual(visibleFor('notes.doc?', items), [2]);
+	assert.deepStrictEqual(visibleFor('20?1', items), [4]);
+});
+
+test('_computeVisibleIndices: [set], [a-z] and [!set] character classes', () => {
+	const items = [
+		row({ year: '2019' }),
+		row({ year: '2020' }),
+		row({ year: '2021' }),
+	];
+	assert.deepStrictEqual(visibleFor('202[01]', items), [1, 2]);
+	assert.deepStrictEqual(visibleFor('20[1-1]?', items), [0]);
+	assert.deepStrictEqual(visibleFor('202[!0]', items), [2]);
+});
+
+test('_computeVisibleIndices treats regex metacharacters literally', () => {
+	const items = [row({ title: 'C++ (2nd ed.)' }), row({ title: 'Cxx 2nd ed' })];
+	assert.deepStrictEqual(visibleFor('c++ (2nd', items), [0]);
+	assert.deepStrictEqual(visibleFor('*(2nd ed.)', items), [0]);
+	// An unmatched "[" is literal, not a broken character class.
+	assert.deepStrictEqual(visibleFor('[unclosed', [row({ title: 'a [unclosed bracket' })]), [0]);
+});
+
+test('_computeVisibleIndices matches the status text and the linked path', () => {
+	const items = [
+		row({ filename: 'a.pdf' }),
+		{ isLinked: true, attachmentItem: { attachmentPath: '/home/me/papers/b.pdf', attachmentFilename: 'b.pdf' } },
+	];
+	const rowStatus = new Map([[0, { cssClass: 'not-found', text: 'Refused by server', tooltip: '' }]]);
+	assert.deepStrictEqual(visibleFor('refused', items, rowStatus), [0]);
+	assert.deepStrictEqual(visibleFor('/home/*', items, rowStatus), [1]);
+});
+
+test('populateTable recomputes visibleIndices against freshly loaded items, honoring a persisted filter', async () => {
+	const dialog = loadDialog({ Zotero: { Libraries: { get: () => ({ name: 'Test Library' }) } } });
+	dialog.libraryID = 1;
+	dialog.backendLibraryId = 'u1';
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set();
+	dialog.filterText = '*.pdf';
+	dialog.plugin = {
+		_getUnavailableAttachments: async () => ([
+			{ attachmentItem: { key: 'A1', attachmentFilename: 'report.pdf' }, isLinked: false },
+			{ attachmentItem: { key: 'A2', attachmentFilename: 'notes.docx' }, isLinked: false },
+		]),
+	};
+
+	await dialog.populateTable();
+
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
+});
+
+test('_handleSelectAllChange(true) selects only the currently visible indices', () => {
+	const dialog = loadDialog();
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2];
+	dialog.selected = new Set();
+	dialog.updateActionButtons = () => {};
+	dialog._handleSelectAllChange(true);
+	assert.deepStrictEqual([...dialog.selected].sort(), [0, 2]);
+});
+
+test('_handleSelectAllChange(false) clears the entire selection, including hidden rows', () => {
+	const dialog = loadDialog();
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2];
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.updateActionButtons = () => {};
+	dialog._handleSelectAllChange(false);
+	assert.deepStrictEqual([...dialog.selected], []);
+});
+
+test('_updateSelectAllCheckbox reflects only the visible rows', () => {
+	const cb = { checked: false, indeterminate: false };
+	const dialog = loadDialog({
+		document: { getElementById: (id) => (id === 'select-all-cb' ? cb : { addEventListener: () => {}, style: {} }) },
+	});
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2]; // row 1 is hidden by the filter
+	dialog.selected = new Set([0, 2]);
+	dialog._updateSelectAllCheckbox();
+	assert.strictEqual(cb.checked, true);
+	assert.strictEqual(cb.indeterminate, false);
+
+	dialog.selected = new Set([0, 1]);
+	dialog._updateSelectAllCheckbox();
+	assert.strictEqual(cb.checked, false);
+	assert.strictEqual(cb.indeterminate, true);
+});
+
+test('_handleFilterInput filters rows without touching the selection; _handleFilterClear restores all rows', () => {
+	const dialog = loadDialog();
+	dialog.items = [row({ filename: 'report.pdf' }), row({ filename: 'notes.docx' })];
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([1]);
+	dialog.updateActionButtons = () => {};
+	dialog._handleFilterInput('*.pdf');
+	assert.strictEqual(dialog.filterText, '*.pdf');
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
+	assert.deepStrictEqual([...dialog.selected], [1]);
+	dialog._handleFilterClear();
+	assert.strictEqual(dialog.filterText, '');
+	assert.deepStrictEqual([...dialog.visibleIndices], [0, 1]);
+});
+
+test('setRowStatus invalidates the row at its display position, and skips hidden rows', () => {
+	const invalidated = [];
+	const dialog = loadDialog();
+	dialog.rowStatus = new Map();
+	dialog.visibleIndices = [1, 3];
+	dialog.tableHelper = { treeInstance: { invalidateRow: (i) => invalidated.push(i) } };
+	dialog.setRowStatus(3, 'fixed', 'Downloaded');
+	dialog.setRowStatus(2, 'fixed', 'Downloaded');
+	assert.deepStrictEqual(invalidated, [1]);
+	assert.strictEqual(dialog.rowStatus.get(2).text, 'Downloaded');
+});
+
+test('searchAndFix recomputes visibleIndices after dropping fixed rows, preserving an active filter', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1]);
+	dialog.filterText = '*.doc';
+	dialog.items = [
+		{ attachmentItem: { key: 'FIXED', attachmentFilename: 'report.pdf' }, isLinked: false },
+		{ attachmentItem: { key: 'KEPT', attachmentFilename: 'notes.doc' }, isLinked: false },
+	];
+	dialog.plugin = {
+		_tryDownloadAttachment: async (att) => ({ downloaded: att.key === 'FIXED' }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+	};
+
+	await dialog.searchAndFix();
+
+	assert.strictEqual(dialog.items.length, 1);
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
 });

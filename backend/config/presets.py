@@ -42,9 +42,22 @@ import os
 import platform as _platform_module
 import shutil
 import tempfile
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from typing import List, Literal, Optional, Protocol, TypeVar
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class _HasId(Protocol):
+    id: str
+
+
+T = TypeVar("T", bound=_HasId)
+
+
+def is_glob_pattern(name: str) -> bool:
+    """True if a ``model_names`` entry contains glob wildcards rather than naming one model."""
+    return any(c in name for c in "*?[")
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +118,7 @@ class LLMConfig(BaseModel):
     """Configuration for LLM models."""
 
     model_type: Literal["local", "remote"] = "local"
-    model_names: List[str] = Field(..., description="Model identifier(s) — first entry is the default")
+    model_names: List[str] = Field(..., description="Model identifier(s) or glob patterns. A provider's live model list is filtered to these; the first entry is the default")
     quantization: Optional[Literal["4bit", "8bit", "none"]] = None
     max_context_length: int = Field(default=4096, description="Maximum context window size")
     max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
@@ -123,10 +136,43 @@ class LLMConfig(BaseModel):
             return [m.strip() for m in v.split(",") if m.strip()]
         return v  # type: ignore[return-value]
 
+    @model_validator(mode="after")
+    def require_a_literal_model_name(self) -> "LLMConfig":
+        # Wildcard-only lists have no usable default when the live model list is unavailable.
+        if not self.literal_model_names:
+            raise ValueError("model_names needs at least one entry without wildcards (*, ?, [)")
+        return self
+
+    @property
+    def literal_model_names(self) -> List[str]:
+        """Entries that are real model ids (no glob characters): the static fallback list."""
+        return [m for m in self.model_names if not is_glob_pattern(m)]
+
     @property
     def model_name(self) -> str:
-        """Backward-compatible alias: returns the first (default) model name."""
-        return self.model_names[0]
+        """Default model when no live list is available: the first literal entry."""
+        return self.literal_model_names[0]
+
+    def matches_model(self, model_id: str) -> bool:
+        """True if ``model_id`` matches any ``model_names`` entry (case-insensitive glob)."""
+        return any(fnmatchcase(model_id.lower(), p.lower()) for p in self.model_names)
+
+    def filter_models(self, models: List[T]) -> List[T]:
+        """Restrict a provider's live list to ``model_names`` patterns.
+
+        Entries are ``fnmatch`` globs (a plain name matches only itself). The result
+        follows the order of ``model_names`` — so the first entry's match is the default
+        — and the provider's own order within one pattern. A model matching several
+        patterns appears once, at its first pattern.
+        """
+        ordered: List[T] = []
+        seen: set[str] = set()
+        for pattern in self.model_names:
+            for m in models:
+                if m.id not in seen and fnmatchcase(m.id.lower(), pattern.lower()):
+                    seen.add(m.id)
+                    ordered.append(m)
+        return ordered
 
 
 class RAGConfig(BaseModel):
@@ -135,6 +181,18 @@ class RAGConfig(BaseModel):
     top_k: int = Field(default=5, description="Number of chunks to retrieve")
     score_threshold: float = Field(default=0.3, description="Minimum similarity score (0.0-1.0)")
     max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
+
+
+class ExtractionConfig(BaseModel):
+    """Which document extractor indexes documents for this preset.
+
+    Optional: a preset without it uses the server's ``EXTRACTOR_BACKEND``.
+    ``options`` is backend-specific; for ``docling`` see
+    ``backend.services.extraction.create_configured_extractor``.
+    """
+
+    backend: Literal["kreuzberg", "legacy", "docling"]
+    options: dict = Field(default_factory=dict)
 
 
 class HardwarePreset(BaseModel):
@@ -149,6 +207,10 @@ class HardwarePreset(BaseModel):
     embedding: EmbeddingConfig
     llm: LLMConfig
     rag: RAGConfig
+    extraction: Optional[ExtractionConfig] = Field(
+        default=None,
+        description="Document extractor for indexing; None uses the server's EXTRACTOR_BACKEND.",
+    )
     memory_budget_gb: float = Field(..., description="Estimated memory usage in GB")
     platform: Literal["any", "darwin", "linux", "windows"] = Field(
         default="any",

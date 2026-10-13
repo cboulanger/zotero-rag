@@ -39,6 +39,44 @@ class Settings(BaseSettings):
         """Initialize settings."""
         super().__init__(**kwargs)
 
+    # Retrieval
+    retrieval_lexical_weight: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Weight (0-1) of a BM25 lexical score blended into the vector score of the "
+                    "raw candidate pool before dedup/cap/top_k (backend/services/lexical_rerank.py). "
+                    "0 disables it. Helps short numeric/proper-noun fact chunks that vector "
+                    "similarity under-ranks (#90)."
+    )
+    retrieval_embedding_mmr_lambda: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Lambda (0-1) for global embedding-vector MMR reranking of the raw "
+                    "candidate pool before dedup/cap/top_k (backend/services/embedding_mmr_rerank.py). "
+                    "0 disables it (and skips fetching chunk vectors from Qdrant, avoiding the "
+                    "extra payload/latency). 1 is equivalent to no reranking (pure relevance); "
+                    "lower values increasingly trade relevance for distinctness from "
+                    "already-selected candidates. Prototype for #90's global ranking-dilution "
+                    "case, where several chunks from different, topically-adjacent documents "
+                    "together outscore a genuinely relevant chunk without any one of them "
+                    "dominating — unlike the per-document cap/dedup, which can't reach this."
+    )
+    retrieval_score_proximity_epsilon: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Fraction (0-1) of the candidate pool's own score range (max minus min "
+                    "score among the fetched/capped candidates) within which the best "
+                    "excluded candidate must fall, relative to the top_k cutoff score, to "
+                    "trigger a retrieval escalation retry (backend/services/rag_engine.py's "
+                    "query()). 0 disables it. A fixed absolute epsilon doesn't work here: "
+                    "dense embedding cosine scores cluster tightly and their dynamic range "
+                    "varies a lot by query (observed 0.025-0.08 total spread across the gold "
+                    "question set), so it either never fires or fires on almost every query; "
+                    "normalizing to each query's own range makes it comparable. Meant to "
+                    "catch cases like #89's jin2026, where many moderately-relevant documents "
+                    "dilute the ranking enough that a genuinely relevant chunk falls just "
+                    "outside top_k without triggering the existing diversity-floor escalation "
+                    "(which only looks at distinct document count in the window, not how "
+                    "close the next excluded candidate's score is)."
+    )
+
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
     api_port: int = Field(default=8119, description="API server port")
@@ -95,7 +133,28 @@ class Settings(BaseSettings):
     # Extraction backend
     extractor_backend: str = Field(
         default="kreuzberg",
-        description="Document extraction backend: 'kreuzberg' (default) or 'legacy' (pypdf+spaCy)"
+        description="Document extraction backend: 'kreuzberg' (default), 'docling' (a remote Docling "
+                    "service, see docling_url) or 'legacy' (pypdf+spaCy). A preset with an 'extraction' "
+                    "section overrides this for indexing under that preset."
+    )
+    docling_url: str = Field(
+        default="http://localhost:5001",
+        description="Base URL of the Docling service used when extractor_backend='docling' "
+                    "(a docling-serve instance, or https://chat-ai.academiccloud.de with docling_api_flavor='saia').",
+    )
+    docling_api_flavor: str = Field(
+        default="serve",
+        description="Docling API dialect: 'serve' (docling-serve's /v1/convert/file) or "
+                    "'saia' (KISSKI/SAIA's /v1/documents/convert).",
+    )
+    docling_async: bool = Field(
+        default=False,
+        description="docling-serve only: submit conversions as async jobs and poll for the result "
+                    "instead of one blocking request (avoids the server's sync-wait limit on long OCR jobs).",
+    )
+    docling_min_request_interval: float = Field(
+        default=0.0,
+        description="Minimum seconds between two requests to the Docling service (rate-limited endpoints).",
     )
     ocr_enabled: bool = Field(
         default=True,

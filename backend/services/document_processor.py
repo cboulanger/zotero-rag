@@ -27,7 +27,7 @@ from backend.services.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
 )
-from backend.services.extraction import DocumentExtractor, create_document_extractor
+from backend.services.extraction import DocumentExtractor, create_configured_extractor
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.admin_settings_store import read_admin_settings
 from backend.services.extraction.kreuzberg import (
@@ -97,6 +97,12 @@ def merge_download_failures(existing: list[dict], new_failures: list[dict]) -> l
             seen.add(key)
             merged.append(failure)
     return merged[:MAX_TRACKED_DOWNLOAD_FAILURES]
+
+
+def drop_attachment_failures(existing: list[dict], attachment_key: str) -> list[dict]:
+    """Return ``existing`` without the entries for ``attachment_key`` (the
+    counterpart of merge_download_failures, for an attachment that is now indexed)."""
+    return [f for f in existing if f.get("attachment_key") != attachment_key]
 
 
 # MIME types that will be downloaded and indexed
@@ -331,8 +337,9 @@ class DocumentProcessor:
             zotero_client: Zotero API client.
             embedding_service: Service for generating embeddings.
             vector_store: Vector database for storing embeddings.
-            document_extractor: Extraction + chunking backend.  When None a
-                KreuzbergExtractor is created using max_chunk_size / chunk_overlap.
+            document_extractor: Extraction + chunking backend.  When None the
+                active preset's extractor is created using max_chunk_size /
+                chunk_overlap (see create_configured_extractor).
             max_chunk_size: Maximum characters per chunk (used when
                 document_extractor is None).
             chunk_overlap: Overlap between chunks (used when document_extractor
@@ -347,20 +354,14 @@ class DocumentProcessor:
         self.chunk_merge_target_size = chunk_merge_target_size
 
         if document_extractor is None:
-            settings = get_settings()
-            document_extractor = create_document_extractor(
-                backend=settings.extractor_backend,
+            # The active preset's extractor (its `extraction` section, else
+            # EXTRACTOR_BACKEND); a Docling service that takes the embedding
+            # provider's key gets the one embedding_service runs with.
+            document_extractor = create_configured_extractor(
+                get_settings(),
+                embedding_service=embedding_service,
                 max_chunk_size=max_chunk_size,
                 chunk_overlap=chunk_overlap,
-                ocr_enabled=settings.ocr_enabled,
-                kreuzberg_url=settings.kreuzberg_url,
-                kreuzberg_timeout_cap=settings.kreuzberg_timeout_seconds,
-                kreuzberg_max_content_bytes=settings.kreuzberg_max_content_bytes,
-                # 0 in testing mode: a test exercising the real upload path
-                # without mocking httpx (the sidecar is never actually running
-                # under pytest) must fail on the first connection attempt, not
-                # retry for minutes and hang past the test's own timeout.
-                kreuzberg_connect_retry_seconds=0 if settings.testing else 600,
             )
         self.document_extractor = document_extractor
 

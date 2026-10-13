@@ -21,7 +21,13 @@ import numpy as np
 
 from backend.config.presets import EmbeddingConfig
 from backend.services.endpoint_errors import classify_status_error, unavailable_message
-from backend.services.usage_meters import key_fingerprint, recorder
+from backend.services.usage_meters import (
+    RateLimitStillActive,
+    extract_retry_after,
+    key_fingerprint,
+    recorder,
+    wait_out_known_rate_limit,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -176,6 +182,8 @@ _KNOWN_DIMS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "openai": 1536,  # generic "openai" sentinel used in remote-openai preset
+    # Google Gemini (OpenAI-compatible endpoint)
+    "gemini-embedding-001": 3072,
     # KISSKI / SAIA (https://docs.hpc.gwdg.de/services/ai-services/saia/)
     "multilingual-e5-large-instruct": 1024,
     "e5-mistral-7b-instruct": 4096,
@@ -688,6 +696,15 @@ class RemoteEmbeddingService(EmbeddingService):
         base_delay = 2.0
         max_rate_limit_wait = 60.0
 
+        try:
+            await wait_out_known_rate_limit("embedding", self._fingerprint, max_rate_limit_wait)
+        except RateLimitStillActive as exc:
+            raise EmbeddingRateLimitExhaustedError(
+                f"Embedding rate limit still in effect (seen on an earlier request); "
+                f"available at {exc.available_at.isoformat()} UTC.",
+                available_at=exc.available_at,
+            ) from exc
+
         for attempt in range(max_attempts):
             try:
                 raw = await client.embeddings.with_raw_response.create(
@@ -696,6 +713,7 @@ class RemoteEmbeddingService(EmbeddingService):
                     encoding_format="float",
                 )
                 self._capture_rate_limit_headers(raw.headers)
+                recorder.clear_rate_limit("embedding", self._fingerprint)
                 return raw.parse()
             except (AuthenticationError, PermissionDeniedError) as exc:
                 # Invalid/expired API key (401) or forbidden (403): not recoverable
@@ -736,19 +754,10 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 await asyncio.sleep(retry_after)
             except RateLimitError as exc:
-                # Extract the server-supplied retry-after (in seconds).
-                retry_after: Optional[float] = None
                 headers = getattr(exc, "response", None) and exc.response.headers
                 if headers:
                     self._capture_rate_limit_headers(headers)
-                    for header in ("retry-after", "ratelimit-reset", "x-ratelimit-reset-minute"):
-                        val = headers.get(header)
-                        if val is not None:
-                            try:
-                                retry_after = float(val)
-                            except ValueError:
-                                pass
-                            break
+                retry_after = extract_retry_after(headers) if headers else None
 
                 if retry_after is None or retry_after > max_rate_limit_wait:
                     # No hint or long wait: quota is likely exhausted.
@@ -767,6 +776,10 @@ class RemoteEmbeddingService(EmbeddingService):
                             f"Estimated available after {wait_str} "
                             f"({available_at.isoformat()} UTC)."
                         )
+                    # Remembered process-wide so any other call on this key (a
+                    # different document, a different request) skips straight to
+                    # raising instead of re-discovering the same limit itself.
+                    recorder.mark_rate_limited("embedding", available_at, self._fingerprint)
                     raise EmbeddingRateLimitExhaustedError(msg, available_at=available_at) from exc
 
                 # Short wait supplied by server — honor it exactly (no exponential backoff).
@@ -777,6 +790,9 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 self.rate_limit_retries += 1
                 self.rate_limit_wait_seconds += retry_after
+                recorder.mark_rate_limited(
+                    "embedding", datetime.now(timezone.utc) + timedelta(seconds=retry_after), self._fingerprint
+                )
                 await asyncio.sleep(retry_after)
             except BadRequestError as exc:
                 # A paused endpoint answers 400 on some providers: classify it

@@ -154,6 +154,13 @@ register_fixture(ContractFixture(
 ))
 
 register_fixture(ContractFixture(
+    provider_id="google",
+    model_kwargs={"api_key_env": "GEMINI_API_KEY"},
+    invalid_options=[{"anything": 1}],
+    usage_samples=[({"x-ratelimit-limit-requests": "10", "x-ratelimit-remaining-requests": "9"}, 1)],
+))
+
+register_fixture(ContractFixture(
     provider_id="anthropic",
     model_kwargs={"api_key_env": "ANTHROPIC_API_KEY"},
     invalid_options=[{"anything": 1}],

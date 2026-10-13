@@ -333,6 +333,100 @@ and the slower tier rides out a long stretch of bad/no wifi (e.g. a train
 commute). Ctrl-C during a wait exits cleanly; resume with `--mode=resume`
 afterward either way.
 
+### Portable snapshots (restore an index where Kreuzberg can't run)
+
+`bin/library_snapshot.py` reuses the same `/api/migration/*` endpoints but writes
+one library's chunks, dedup records and index metadata to a single
+`.jsonl.gz` file instead of a second live instance, so an index built in the full
+local environment can be restored in a session without the extraction sidecar
+(e.g. a cloud session with embedded Qdrant). Import overwrites that library on
+the destination and refuses on an embedding model/dimension mismatch.
+
+```bash
+# local, full environment (backend on the sidecar, gold library fully indexed):
+uv run rag-check-gold-index
+uv run python bin/library_snapshot.py export groups/6297749 http://localhost:8119 .local/gold.jsonl.gz
+# elsewhere (backend running, same embedding preset):
+uv run python bin/library_snapshot.py import .local/gold.jsonl.gz http://localhost:8119
+uv run python bin/library_snapshot.py info .local/gold.jsonl.gz
+```
+
+Pass `--source-key`/`--dest-key` (admin read-only Zotero keys) unless the instance is loopback-mode.
+
+The rag-quality-eval skill keeps this snapshot in a Hugging Face dataset repo and wraps these commands; see "Cloud runs and the Hugging Face evaluation store" below.
+
+## Cloud runs and the Hugging Face evaluation store
+
+The `rag-quality-eval` skill (`skills/rag-quality-eval/`) can run in a cloud session without
+the full local stack. Everything the evaluation needs besides this repo is kept in one
+**public Hugging Face dataset repo** (default `cmboulanger/zotero-rag-gold`, override with
+`RAG_EVAL_HF_REPO`; the gold library's documents are open access, CC BY 4.0):
+
+| Path in the HF repo | Content |
+|---|---|
+| `sources/` | the 41 PDFs of `groups/6297749` plus `manifest.json` (item metadata, sha256) |
+| `snapshots/<embedding-model>/latest.jsonl.gz` + `latest.json` | the production-equivalent index (chunks, vectors, metadata; `bin/library_snapshot.py` format) and how it was built (extractor, code commit, counts) |
+| `snapshots/<embedding-model>/docling/latest.*` | the same, built with the Docling extractor (`kisski-docling`) |
+| `reports/<run>/` | the archive: every published eval run is kept |
+| `reports/latest/` | a copy of the newest run (HF has no symlinks), replaced in the same commit as the archive copy |
+| `reports/index.json`, `README.md` | run summaries; the dataset card, regenerated from the repo's contents |
+
+Tools: `scripts/gold_env.py` (`up`/`down`/`status` create the environment, `fetch-sources`/`index`/`publish`
+build and upload it) and `scripts/hf_store.py` (`status`, `init`, `pull-*`, `push-*`, `card`), both under
+`skills/rag-quality-eval/`. Full workflow in its `SKILL.md`.
+
+### What a cloud session can and cannot do
+
+- **Can:** start a backend on embedded Qdrant, restore the snapshot, run the whole eval workflow
+  (`run_eval`, judging, reports, `--baseline` against `pull-report latest`), and evaluate anything at or after
+  retrieval: `top_k`, thresholds, dedup/cap/MMR, reranking, prompts, models, routing. Provider calls
+  (KISSKI, Hugging Face) work because the session's outbound proxy injects the credentials; `gold_env.py up`
+  sends a placeholder key header, so no key is needed in the session.
+- **Cannot:** run Kreuzberg (`ghcr.io/kreuzberg-dev/kreuzberg` is denied by the proxy) or podman (only a
+  manually started `dockerd` exists, and Qdrant's image pulls from Docker Hub, but embedded mode makes it
+  unnecessary). Re-indexing under a Kreuzberg preset there falls back to the `legacy` extractor, whose chunks
+  differ from production, so **never judge Kreuzberg chunking or extraction changes in the cloud**; do those
+  locally and `publish` again. The snapshot is only valid for the embedding model it was built with (import
+  refuses a mismatch).
+- **Can, with Docling:** build and evaluate a whole index end to end with the `kisski-docling` preset, which
+  converts documents with KISSKI/SAIA's Docling endpoint (`gold_env.py up --preset kisski-docling`; it restores
+  the store's Docling snapshot or builds one from the store's PDFs, and `publish` uploads it under
+  `snapshots/<model>/docling/`). Compare such runs only with other Docling runs. The session's outbound proxy
+  closes a request after about 30 s (`502 upstream request failed`), which is why the preset sends PDFs in
+  10-page ranges and the extractor halves a range that still fails.
+- Transient HTTP 500 from one KISSKI model (the preset's default has done this) is the provider, not the code:
+  use another model of the preset, as with any live query (see "Replaying a query against the live backend").
+
+### Preparing for a cloud run (once, in the full local environment)
+
+1. Have the backend running on the sidecar with the Kreuzberg extractor (`npm start`), a read-only Zotero key
+   in `RAG_EVAL_ZOTERO_KEY`, and a Hugging Face token with **write** access in `HF_TOKEN` (keep both out of `.env`
+   and out of command output).
+2. `uv run python skills/rag-quality-eval/scripts/gold_env.py fetch-sources`: downloads the PDFs and
+   `manifest.json` into `.local/rag_eval_sources/`.
+3. `uv run python skills/rag-quality-eval/scripts/hf_store.py init`: creates the public dataset repo (first time only).
+4. `uv run python skills/rag-quality-eval/scripts/gold_env.py publish`: indexes the PDFs through the real
+   extractor, exports the snapshot and uploads sources, snapshot and the regenerated card. Re-run it whenever
+   chunking, extraction, the embedding model or the source set changes; `hf_store.py status` shows what the
+   store currently holds and the commit it was built from.
+5. In the cloud environment's settings allow outbound access to `huggingface.co`, `chat-ai.academiccloud.de`,
+   `github.com` (the spaCy wheel) and `pypi.org`, and make sure the environment has the connected services
+   (KISSKI, Hugging Face) so the proxy injects their credentials (`read_documentation` topics
+   `environment.network`, `connectors.add`). A setup script that runs `uv sync` saves time.
+
+Then start the session with a prompt such as: *"Use the rag-quality-eval skill. Run
+`gold_env.py up`, then <the task>"*. The session restores the index (about a minute), checks that every gold
+document has chunks, and proceeds with the skill's preflight. When it finishes a run worth keeping it publishes it with
+`hf_store.py push-report <run dir>` (needs write access; without a token the report stays local, which the session should say).
+
+### Rules for agents working with the store
+
+- Compare only runs with the same gold version and the same snapshot (the report shows the gold version, the card
+  the snapshot's provenance).
+- Publish only judged, final runs, never smoke tests; add `--with-raw` only when the traces are needed.
+- Never start or stop processes by name pattern (`pkill -f uvicorn` kills the shell that runs it); use
+  `gold_env.py down`, which kills the process group it started.
+
 ## Python Environment
 
 - **Python Version**: 3.12 (downgraded from 3.13 due to PyTorch compatibility issues on Windows)
@@ -376,7 +470,7 @@ a compact per-run summary (agents used, `documents_grouped` retrieval diversity,
 whether every source has a `[SN]` citation) plus the full trace JSON per run:
 
 ```bash
-uv run python scripts/debug_live_query.py "the exact question" \
+uv run rag-debug-query "the exact question" \
   --llm-model meta-llama-3.1-8b-instruct \
   --repeat 5
 ```
@@ -389,13 +483,33 @@ comparison. Add `--inspect-index` to additionally report how many chunks each
 indexed item contributes to the library (helpful when `documents_grouped` looks
 suspiciously low and you suspect a few over-chunked documents are crowding out
 others in nearest-neighbor search) — this stops the backend via
-`scripts/server.py stop` (embedded/sidecar Qdrant only allows one process to hold
-the storage directory open at a time) and restarts it via `scripts/server.py start`
-afterward, so expect ~10s of downtime and, on the first `start` after a manual
-`kill` of the uvicorn process, a rebuild of the Qdrant/Kreuzberg sidecar
-containers (`podman ps` to confirm they're up) — this is normal, not a sign of
-data loss; the sidecars mount `data/qdrant-server/`, the same persisted data an
-embedded-mode connection reads.
+`scripts/server.py stop` and restarts it via `scripts/server.py start` afterward,
+so expect ~10s of downtime and, on the first `start` after a manual `kill` of the
+uvicorn process, a rebuild of the Qdrant/Kreuzberg sidecar containers (`podman ps`
+to confirm they're up) — this is normal, not a sign of data loss.
+
+**There is exactly one Qdrant dataset that matters: the sidecar container** on
+`localhost:6333` (the one `scripts/server.py start` launches and points the
+backend at via a `QDRANT_URL` env var it injects — see `.env`'s own `QDRANT_URL`
+line, which now forces this for every invocation, not just ones launched through
+that script). Any script that constructs a `VectorStore` without `QDRANT_URL` set
+falls back to a separate, disconnected **embedded local-mode** store at
+`data/qdrant/<model-slug>/` — a real, silently-created, independently-writable
+Qdrant instance, not a read view onto the sidecar's data. The two are **not** the
+same data (an earlier version of this doc wrongly claimed they were): a 2026-10-11
+debugging session spent hours fixing an "indexing gap" by writing to the embedded
+store via plain `uv run rag-index ...` (no `QDRANT_URL` in
+that shell), then couldn't understand why the live backend's `/api/query` and
+`/api/indexed-tags/check` still showed the original symptom — because the backend
+was reading the sidecar the whole time, which the fix never touched. `.env` now
+sets `QDRANT_URL=http://localhost:6333` unconditionally so this can't recur
+silently; the stale embedded data from that session was moved aside to
+`data/qdrant.stale-embedded-local-mode-DO-NOT-USE/` (not deleted, in case it's
+ever needed forensically) rather than left at the path a future accidental
+fallback would read from. If you ever need embedded mode on purpose (see
+"Running the backend + plugin dev servers from a worktree" above, which relies on
+it for a worktree without its own sidecar), unset `QDRANT_URL` for that specific
+invocation — don't remove it from this checkout's `.env`.
 
 Use the manual steps below only when you need something the script doesn't do
 yet (a non-default library, testing plugin-side JS, or inspecting the index
@@ -437,7 +551,7 @@ supports arbitrary extra headers (needed for remote-model presets, which
 require a client-supplied provider key header like `X-Kisski-Api-Key`):
 
 ```bash
-uv run python scripts/query_trace.py "the exact question" \
+uv run rag-query "the exact question" \
   --library-ids <backend-library-id> \
   --api-key "$ZOTERO_KEY" \
   --header "X-Kisski-Api-Key: <value>" \
@@ -638,6 +752,8 @@ Available skills (invoke via `/skill-name` in Claude Code):
 - **`zotero-plugin-dev`** — vanilla plugin development, Zotero APIs, and discovered API index
 - **`zotero-plugin-toolkit`** — `UITool`, `DialogHelper`, `VirtualizedTableHelper`, and other toolkit helpers
 
+A separate, local (in-repo) skill lives at [skills/rag-quality-eval/SKILL.md](skills/rag-quality-eval/SKILL.md) — evaluates the RAG query pipeline (routing, retrieval, generation, citations) against a 16-question gold standard over the `test-rag-plugin` library, for benchmarking a preset/model/retrieval change. It is not auto-discovered by Claude Code; make it invocable with `ln -s ../../skills/rag-quality-eval .claude/skills/rag-quality-eval`, or just read the SKILL.md directly.
+
 ### Development Workflow
 
 **Hot Reload Plugin Development Server:**
@@ -741,6 +857,10 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 ## Debugging
 
 - if you insert code that is only for debugging, mark it as such so that it can be easily idenitified and removed after the code has been fixed (e.g., by a `# DEBUG` trailing comment or `# BEGIN DEBUG`/`# END DEBUG` header and footer for longer code fragments).
+- **Any script that creates a `VectorStore` must have `QDRANT_URL` set** (the live backend's `.env` now sets it unconditionally) — without it, Qdrant silently falls back to a separate, disconnected embedded-mode store instead of the sidecar container everything else reads from. See "Live Query Debugging" below (`--inspect-index`) for the full incident this caused and why the embedded store is no longer at its default path.
+- A document's library being "indexed" does not mean that document has chunks in the *currently active* embedding collection. The Zotero "✅ rag-indexed" tag is per-attachment, not per-embedding-model — it survives a preset/embedding-model switch even though the new model's collection starts empty for every item, and nothing forces a re-index until the incremental indexer actually runs again. Before concluding a retrieval or generation bug ("the model ignored source X", "recall is low on this question"), confirm the relevant attachment actually has chunks right now: `POST /api/indexed-tags/check` with `{library_id, attachment_keys}` gives a live, API-only answer (no direct DB access, safe to call anytime) — don't infer indexed state from the tag, from `/api/libraries` listing the library at all, or from a trace's `documents_grouped` count alone. A whole class of "retrieval misses facts" reports can be this instead of a ranking/tuning problem; checking first avoids tuning `top_k`/`score_threshold` against a symptom that re-indexing fixes outright.
+- A long-running maintenance script that isn't atomic per item (e.g. `bin/index_libraries.py`, which deletes an item's old chunks before re-inserting the new ones) must not be run under an aggressive external timeout (`gtimeout`, a short background-job deadline, etc.) — killing it between the delete and the re-insert leaves that item with zero chunks, strictly worse than before the run started. It resumes correctly on its own (it detects its own stale lock file and continues), but prefer letting it run to natural completion, or at least re-run it immediately to completion after any interruption, rather than treating a partial run as good enough.
+- `scripts/server.py stop` also stops the plugin dev server, which in turn kills any Zotero process whose name matches "zotero" (`scripts/zotero_plugin.py`'s `get_zotero_processes()` matches by process name, not by `-profile`) — the exact anti-pattern "Never kill/restart Zotero by name" below warns about, just reached indirectly through a command that looks like it only touches the backend. Check `ps aux | grep -i zotero` for the `-profile` flag before running `scripts/server.py stop` (or `npm run dev:stop`) if a plugin dev server might be running alongside a separate main Zotero instance.
 
 ## Documentation
 
@@ -762,6 +882,7 @@ A fresh worktree only has git-tracked files, so several things the main checkout
 
 - Never commit secrets, API keys, or credentials to version control
 - Use environment variables for all sensitive configuration
+- **Never put a secret in `.env` unless absolutely necessary** (i.e. nothing else can hold it — `AUTOINDEX_SECRET`, the Fernet key that decrypts the secret store, is the canonical example: it can't be stored by the thing it unlocks). Provider/API credentials belong in the encrypted secret store (`backend/services/secret_store.py`; add one interactively with `uv run python scripts/setup_credentials.py`) instead of as plaintext `.env` lines. When a script needs a stored secret, extract it programmatically into a variable — e.g. `backend.services.secret_store.get_key_store()` /`AutoIndexKeyStore.get_decrypted_embedding_key()`, the pattern `bin/debug_get_zotero_key.py` uses — rather than reading it from an env var or a `.env` file.
 - Validate and sanitize all user inputs
 - Use parameterized queries to prevent injection attacks
 - Keep dependencies updated to patch security vulnerabilities

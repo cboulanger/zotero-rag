@@ -1,9 +1,11 @@
 """Unit tests for the Kreuzberg extraction adapter's timeout computation."""
 
+import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import psutil
 
 from backend.services.extraction.kreuzberg import (
     AttachmentTooLargeError,
@@ -48,7 +50,22 @@ class TestComputeTimeout(unittest.TestCase):
         self.assertEqual(doubled, base * 2)
 
 
+# The wiring test below needs a payload large enough that the computed timeout
+# hits the cap, which means materialising ~10 GB of bytes. That stalls or OOMs
+# memory-restricted environments (cloud sessions, CI runners), so it is skipped
+# unless enough RAM is free or RUN_MEMORY_HEAVY_TESTS=1 forces it.
+_HEAVY_PAYLOAD_BYTES = 10_000_000_000
+_ENOUGH_MEMORY = (
+    os.environ.get("RUN_MEMORY_HEAVY_TESTS") == "1"
+    or psutil.virtual_memory().available > 2 * _HEAVY_PAYLOAD_BYTES
+)
+
+
 class TestKreuzbergExtractorTimeoutWiring(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(
+        _ENOUGH_MEMORY,
+        "needs ~10 GB free RAM for the oversized payload; set RUN_MEMORY_HEAVY_TESTS=1 to force",
+    )
     async def test_extract_and_chunk_uses_configured_cap_and_multiplier(self):
         extractor = KreuzbergExtractor(timeout_cap=600)
 
@@ -66,7 +83,7 @@ class TestKreuzbergExtractorTimeoutWiring(unittest.IsolatedAsyncioTestCase):
             return_value=mock_client,
         ) as mock_client_cls:
             await extractor.extract_and_chunk(
-                b"x" * 10_000_000_000, "application/pdf", timeout_multiplier=2.0
+                b"x" * _HEAVY_PAYLOAD_BYTES, "application/pdf", timeout_multiplier=2.0
             )
 
         # cap=600, multiplier=2.0 → expect the doubled cap, not the default 1800-based one.

@@ -31,6 +31,7 @@ Most document-chat tools require you to manually upload PDFs to a cloud service.
 - **Automatic (scheduled) indexing, administered from the plugin** — enable a single toggle in Preferences to have the server keep your libraries indexed on a recurring schedule, with no need to keep Zotero open or index manually. Group admins can additionally pause, resume, trigger, or monitor indexing runs for the whole server entirely from the plugin UI — no shell or server access required. Server operators can alternatively drive the same indexer headlessly via script or cron. See [Automatic Indexing Setup](docs/auto-indexing-setup.md) (or [Cron / Headless Indexing](docs/cron-indexing.md) for the server-side script).
 - **Indexed-status tags** — optionally mark indexed attachments with a `✅ rag-indexed` tag that Zotero shows as an icon in the item list, kept current in real time and reconcilable on demand from Preferences. See [Indexed-status tags](docs/indexed-status-tags.md).
 - **Fully configurable** — every step of the pipeline (chunking strategy, embedding model, LLM, retrieval parameters) is controlled through a JSON preset (the server default comes from `MODEL_PRESET` or an admin's choice in the plugin, and each user can pick a compatible one). Every remote side names a provider, so you can mix local and hosted models, or provision your own RunPod / Hugging Face endpoints from the plugin, without changing any code. See [Presets](docs/presets.md).
+- **Measured answer quality** — a gold-standard evaluation of the whole query pipeline (routing, retrieval, generation, citations) runs against a public test library, scoring every preset and model on fact recall, source coverage, citation compliance, multilingual behavior and whether the router picks the right agent. Published results let you compare models and detect regressions instead of guessing. See [RAG Quality Evaluation](docs/evaluation.md).
 
 ## Why THIS Zotero RAG?
 
@@ -56,6 +57,16 @@ shell access needed) and a **fully swappable local-or-remote RAG
 pipeline**. This project is built around exactly that combination: one
 deployment, run once by whoever administers it, serving and configurable
 by an entire research group from inside Zotero itself.
+
+**Measured quality.** Of the tools above, only Beaver advertises an
+evaluation of answer quality (a modified LitQA2 benchmark of 197 multiple-choice
+questions, with more promised), and PapersGPT publishes a speed and memory
+benchmark rather than an accuracy one; the public READMEs of the others
+describe no evaluation of answers (BibGenie's site could not be checked). This
+project ships a reproducible gold-standard evaluation of the whole pipeline that
+you run against your own preset and model choice and that also scores query
+routing, multilingual behavior and citation compliance. See
+[RAG Quality Evaluation](docs/evaluation.md).
 
 **Flexible hardware and models.** Presets cover everything from a laptop running
 small local models to fully hosted setups, and each side of the pipeline
@@ -208,6 +219,7 @@ See [CI/CD documentation](docs/ci-cd.md) for the full workflow.
 - **[Application architecture](docs/architecture.md)**
 - **[Query routing & agent system](docs/query-routing.md)**
 - **[Debugging RAG queries](docs/debugging-rag-queries.md)**
+- **[RAG quality evaluation](docs/evaluation.md)**
 - **[Plugin development & hot reload](https://github.com/cboulanger/zotero-skills/)**
 - **[Testing Guide](docs/testing.md)**
 - **[CLI commands](docs/cli.md)**

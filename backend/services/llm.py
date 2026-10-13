@@ -4,16 +4,31 @@ LLM service for text generation.
 Supports both local models (via transformers) and remote APIs (OpenAI, Anthropic).
 """
 
+import asyncio
 import json
 import logging
 import os
+import random
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional
 
 from backend.config.settings import Settings
 from backend.services.embeddings import KEYLESS_API_KEY, env_var_to_header, docs_url_for, _extract_error_detail
 from backend.services.endpoint_errors import classify_status_error, unavailable_message
-from backend.services.usage_meters import key_fingerprint, recorder as usage_recorder
+from backend.services.usage_meters import (
+    RateLimitStillActive,
+    extract_retry_after,
+    key_fingerprint,
+    recorder as usage_recorder,
+    wait_out_known_rate_limit,
+)
+
+#: Server-supplied 429 wait this short is slept through and retried in-process;
+#: a longer or missing one raises LLMRateLimitExhaustedError immediately (mirrors
+#: RemoteEmbeddingService._create_embeddings_with_backoff's max_rate_limit_wait).
+_MAX_RATE_LIMIT_WAIT = 60.0
+_MAX_RATE_LIMIT_ATTEMPTS = 5
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +59,20 @@ class LLMEndpointUnavailableError(Exception):
     point the admin at GET /api/config/health / the "Provision endpoints"
     button rather than block the request retrying.
     """
+
+
+class LLMRateLimitExhaustedError(Exception):
+    """Raised when the remote LLM API's rate limit cannot be resolved within the call.
+
+    Mirrors ``backend.services.embeddings.EmbeddingRateLimitExhaustedError``:
+    ``available_at`` is the UTC datetime after which the provider is expected
+    to accept requests again (from the response's ``retry-after``-style
+    header, or a default estimate when none is given).
+    """
+
+    def __init__(self, message: str, available_at: datetime):
+        super().__init__(message)
+        self.available_at = available_at
 
 
 class LLMService(ABC):
@@ -520,11 +549,10 @@ class RemoteLLMService(LLMService):
             await self._ensure_not_paused()
             await self._ensure_endpoint()
             # The provider declares the wire protocol; core knows protocols, not vendors.
-            if self._llm_api() == "anthropic":
-                return await self._generate_anthropic(prompt, max_tokens, temperature)
-            return await self._generate_openai(prompt, max_tokens, temperature)
+            dispatch = self._generate_anthropic if self._llm_api() == "anthropic" else self._generate_openai
+            return await self._generate_with_rate_limit_backoff(dispatch, prompt, max_tokens, temperature)
 
-        except (LLMConfigurationError, LLMEndpointUnavailableError):
+        except (LLMConfigurationError, LLMEndpointUnavailableError, LLMRateLimitExhaustedError):
             raise
         except Exception as e:
             connection_error_types: tuple = ()
@@ -558,6 +586,99 @@ class RemoteLLMService(LLMService):
             detail = _extract_error_detail(e) if hasattr(e, "body") else str(e)
             logger.error(f"Error during remote generation: {e}", exc_info=True)
             raise RuntimeError(f"Remote LLM generation failed: {detail}") from e
+
+    @staticmethod
+    def _rate_limit_exception_types() -> tuple:
+        """openai.RateLimitError and/or anthropic.RateLimitError, whichever is installed."""
+        types: tuple = ()
+        try:
+            from openai import RateLimitError as OpenAIRateLimitError
+            types += (OpenAIRateLimitError,)
+        except ImportError:
+            pass
+        try:
+            from anthropic import RateLimitError as AnthropicRateLimitError
+            types += (AnthropicRateLimitError,)
+        except ImportError:
+            pass
+        return types
+
+    async def _generate_with_rate_limit_backoff(
+        self,
+        dispatch: Callable[[str, int, float], "Any"],
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        """Call ``dispatch`` with the same rate-limit handling as
+        ``RemoteEmbeddingService._create_embeddings_with_backoff``: a short
+        server-supplied wait is slept through and retried in-process; a longer
+        or missing one raises ``LLMRateLimitExhaustedError`` immediately.
+
+        Also honors (and contributes to) the process-wide cooldown in
+        ``usage_meters`` for this provider+key, so a 429 seen by the routing
+        call, a previous question, or a concurrent request is respected here
+        too instead of every call site re-discovering the same limit itself.
+        """
+        rate_limit_errors = self._rate_limit_exception_types()
+        fp = key_fingerprint(self._resolve_api_key())
+
+        for attempt in range(_MAX_RATE_LIMIT_ATTEMPTS):
+            try:
+                await wait_out_known_rate_limit("llm", fp, _MAX_RATE_LIMIT_WAIT)
+            except RateLimitStillActive as exc:
+                raise LLMRateLimitExhaustedError(
+                    f"LLM rate limit still in effect (seen on an earlier request); "
+                    f"available at {exc.available_at.isoformat()} UTC.",
+                    available_at=exc.available_at,
+                ) from exc
+
+            if not rate_limit_errors:
+                return await dispatch(prompt, max_tokens, temperature)
+
+            try:
+                result = await dispatch(prompt, max_tokens, temperature)
+                usage_recorder.clear_rate_limit("llm", fp)
+                return result
+            except rate_limit_errors as exc:
+                headers = getattr(exc, "response", None) and exc.response.headers
+                if headers:
+                    self._record_usage(headers)
+                retry_after = extract_retry_after(headers) if headers else None
+
+                if retry_after is None or retry_after > _MAX_RATE_LIMIT_WAIT:
+                    available_at = datetime.now(timezone.utc) + timedelta(
+                        seconds=retry_after or _MAX_RATE_LIMIT_WAIT
+                    )
+                    usage_recorder.mark_rate_limited("llm", available_at, fp)
+                    raise LLMRateLimitExhaustedError(
+                        f"LLM rate limit exceeded ({self._model_name}); "
+                        f"available again at {available_at.isoformat()} UTC.",
+                        available_at=available_at,
+                    ) from exc
+
+                retry_after += random.uniform(0, 1)  # small jitter to avoid thundering herd
+                available_at = datetime.now(timezone.utc) + timedelta(seconds=retry_after)
+                usage_recorder.mark_rate_limited("llm", available_at, fp)
+                if attempt == _MAX_RATE_LIMIT_ATTEMPTS - 1:
+                    raise LLMRateLimitExhaustedError(
+                        f"LLM rate limit exceeded ({self._model_name}) after "
+                        f"{_MAX_RATE_LIMIT_ATTEMPTS} attempts.",
+                        available_at=available_at,
+                    ) from exc
+                logger.warning(
+                    "LLM rate limit hit (attempt %d/%d). Waiting %.1fs (server-supplied).",
+                    attempt + 1, _MAX_RATE_LIMIT_ATTEMPTS, retry_after,
+                )
+                # The next loop iteration's wait_out_known_rate_limit call (top of
+                # the loop) performs the actual sleep for this cooldown — not here
+                # — so a cooldown discovered mid-retry and one discovered by a
+                # completely different call are both waited out through the same
+                # one code path instead of this method sleeping a second time.
+        # Unreachable: the loop above always returns or raises.
+        raise LLMRateLimitExhaustedError(
+            "LLM rate limit retries exhausted.", available_at=datetime.now(timezone.utc)
+        )
 
     async def _generate_openai(
         self,

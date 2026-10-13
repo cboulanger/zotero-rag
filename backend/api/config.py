@@ -17,6 +17,7 @@ from backend.dependencies import get_client_api_keys, get_zotero_identity, requi
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.effective_preset import is_compatible
+from backend.services.extraction import effective_extractor_backend
 from backend.services.user_settings import get_preferred_preset, set_preferred_preset
 from backend.services.admin_settings_store import (
     set_default_preset,
@@ -228,6 +229,7 @@ class ConfigResponse(BaseModel):
     default_top_k: int
     default_min_score: float
     max_chunk_size: int
+    extractor_backend: str = ""  # the extractor indexing runs with under ``preset_name``
 
 
 class ApiKeyRequirement(BaseModel):
@@ -296,7 +298,11 @@ def _live_llm_models(
     api_key = (request.headers.get(header_name) if header_name else None) or ""
     if require_key and not api_key:
         return None
-    return provider.live_models(base_url, api_key)
+    models = provider.live_models(base_url, api_key)
+    if models is None:
+        return None
+    # An empty result (typo'd pattern, key without access) falls back to the static list.
+    return preset.llm.filter_models(models) or None
 
 
 @router.get("/config", response_model=ConfigResponse)
@@ -317,7 +323,7 @@ def get_config(request: Request):
     # Presets whose LLM provider has a live model endpoint (e.g. KISSKI) get a
     # dynamically fetched, availability-ordered list; any failure falls back
     # to the preset's static model list.
-    llm_models = preset.llm.model_names
+    llm_models = preset.llm.literal_model_names
     live_models = _live_llm_models(request, preset, require_key=True)
     if live_models:
         llm_models = [m.id for m in live_models]
@@ -343,6 +349,7 @@ def get_config(request: Request):
         default_preset=default.name,
         selectable_presets=selectable,
         preset_fell_back=_fell_back_choice(settings, identity, preset),
+        extractor_backend=effective_extractor_backend(settings, preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,

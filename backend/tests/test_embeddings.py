@@ -20,6 +20,7 @@ from openai import (
 )
 
 from backend.config.presets import EmbeddingConfig
+from backend.services.usage_meters import recorder
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
     EmbeddingConfigurationError,
@@ -603,6 +604,12 @@ class TestCreateEmbeddingService(unittest.TestCase):
 class TestEmbeddingRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
     """Verify that long retry-after values raise EmbeddingRateLimitExhaustedError."""
 
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
+
     def _make_service(self) -> RemoteEmbeddingService:
         config = EmbeddingConfig(
             model_type="remote",
@@ -693,6 +700,12 @@ class TestEmbeddingInternalServerErrorRetry(unittest.IsolatedAsyncioTestCase):
     transient, but previously raised on the first attempt instead of retrying.
     """
 
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
+
     def _make_service(self) -> RemoteEmbeddingService:
         config = EmbeddingConfig(
             model_type="remote",
@@ -769,6 +782,12 @@ class TestEmbeddingContextLengthRetry(unittest.IsolatedAsyncioTestCase):
     "AttributeError: 'NoneType' object has no attribute 'data'" — a confusing
     crash that hid the real, actionable "still exceeds context length" error.
     """
+
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
 
     def _make_service(self) -> RemoteEmbeddingService:
         config = EmbeddingConfig(
@@ -1011,6 +1030,12 @@ class TestEmbeddingEndpointUnavailableError(unittest.IsolatedAsyncioTestCase):
     remaining item in the library, each failing identically, instead of
     aborting once like an authentication failure already does.
     """
+
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
 
     def _make_service(self) -> RemoteEmbeddingService:
         config = EmbeddingConfig(

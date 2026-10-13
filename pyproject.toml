@@ -27,6 +27,7 @@ dependencies = [
     "filelock>=3.12.0",
     "cryptography>=42.0.0",
     "tqdm>=4.0.0",
+    "huggingface-hub>=0.26.0",
     "pikepdf>=10.5.1",
 ]
 
@@ -42,6 +43,16 @@ local-models = [
 eval = [
     "ir-datasets>=0.5.5",
 ]
+
+[project.scripts]
+# Short, stable names for the most-used debugging scripts (`uv run <name>`),
+# decoupled from the underlying file's path — move/rename the script and only
+# this line needs updating, not every CLAUDE.md/SKILL.md call site.
+rag-key = "bin.debug_get_zotero_key:main"
+rag-query = "scripts.query_trace:main"
+rag-debug-query = "scripts.debug_live_query:main"
+rag-index = "bin.index_libraries:main"
+rag-check-gold-index = "scripts.rag_check_gold_index:main"
 
 [tool.pytest.ini_options]
 testpaths = ["backend/tests"]
@@ -64,7 +75,7 @@ addopts = "-rs -m 'not integration and not api and not container'"
 timeout = 30
 
 [tool.hatch.build.targets.wheel]
-packages = ["backend"]
+packages = ["backend", "bin", "scripts"]
 
 [build-system]
 requires = ["hatchling"]
