@@ -366,6 +366,7 @@ the full local stack. Everything the evaluation needs besides this repo is kept 
 |---|---|
 | `sources/` | the 41 PDFs of `groups/6297749` plus `manifest.json` (item metadata, sha256) |
 | `snapshots/<embedding-model>/latest.jsonl.gz` + `latest.json` | the production-equivalent index (chunks, vectors, metadata; `bin/library_snapshot.py` format) and how it was built (extractor, code commit, counts) |
+| `snapshots/<embedding-model>/docling/latest.*` | the same, built with the Docling extractor (`kisski-docling`) |
 | `reports/<run>/` | the archive: every published eval run is kept |
 | `reports/latest/` | a copy of the newest run (HF has no symlinks), replaced in the same commit as the archive copy |
 | `reports/index.json`, `README.md` | run summaries; the dataset card, regenerated from the repo's contents |
@@ -383,9 +384,16 @@ build and upload it) and `scripts/hf_store.py` (`status`, `init`, `pull-*`, `pus
   sends a placeholder key header, so no key is needed in the session.
 - **Cannot:** run Kreuzberg (`ghcr.io/kreuzberg-dev/kreuzberg` is denied by the proxy) or podman (only a
   manually started `dockerd` exists, and Qdrant's image pulls from Docker Hub, but embedded mode makes it
-  unnecessary). Re-indexing there falls back to the `legacy` extractor, whose chunks differ from production, so
-  **never judge chunking or extraction changes in the cloud**; do those locally and `publish` again. The snapshot
-  is only valid for the embedding model it was built with (import refuses a mismatch).
+  unnecessary). Re-indexing under a Kreuzberg preset there falls back to the `legacy` extractor, whose chunks
+  differ from production, so **never judge Kreuzberg chunking or extraction changes in the cloud**; do those
+  locally and `publish` again. The snapshot is only valid for the embedding model it was built with (import
+  refuses a mismatch).
+- **Can, with Docling:** build and evaluate a whole index end to end with the `kisski-docling` preset, which
+  converts documents with KISSKI/SAIA's Docling endpoint (`gold_env.py up --preset kisski-docling`; it restores
+  the store's Docling snapshot or builds one from the store's PDFs, and `publish` uploads it under
+  `snapshots/<model>/docling/`). Compare such runs only with other Docling runs. The session's outbound proxy
+  closes a request after about 30 s (`502 upstream request failed`), which is why the preset sends PDFs in
+  10-page ranges and the extractor halves a range that still fails.
 - Transient HTTP 500 from one KISSKI model (the preset's default has done this) is the provider, not the code:
   use another model of the preset, as with any live query (see "Replaying a query against the live backend").
 

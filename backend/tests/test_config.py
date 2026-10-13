@@ -35,6 +35,7 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "remote-openai",
     "remote-gemini",
     "kisski-gemini",
+    "kisski-docling",
     "remote-kisski",
     "cloud-server-kisski",
     "windows-test",

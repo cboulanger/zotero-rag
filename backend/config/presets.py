@@ -183,6 +183,18 @@ class RAGConfig(BaseModel):
     max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
 
 
+class ExtractionConfig(BaseModel):
+    """Which document extractor indexes documents for this preset.
+
+    Optional: a preset without it uses the server's ``EXTRACTOR_BACKEND``.
+    ``options`` is backend-specific; for ``docling`` see
+    ``backend.services.extraction.create_configured_extractor``.
+    """
+
+    backend: Literal["kreuzberg", "legacy", "docling"]
+    options: dict = Field(default_factory=dict)
+
+
 class HardwarePreset(BaseModel):
     """Complete hardware-specific configuration preset."""
 
@@ -195,6 +207,10 @@ class HardwarePreset(BaseModel):
     embedding: EmbeddingConfig
     llm: LLMConfig
     rag: RAGConfig
+    extraction: Optional[ExtractionConfig] = Field(
+        default=None,
+        description="Document extractor for indexing; None uses the server's EXTRACTOR_BACKEND.",
+    )
     memory_budget_gb: float = Field(..., description="Estimated memory usage in GB")
     platform: Literal["any", "darwin", "linux", "windows"] = Field(
         default="any",

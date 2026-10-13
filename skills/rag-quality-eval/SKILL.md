@@ -95,6 +95,24 @@ regenerated from those contents. Details in the `hf_store.py` docstring.
   authenticates can be evaluated there (KISSKI works); `list_targets.py` shows
   what is usable, and a model that returns HTTP 500 may just be down at the
   moment: retry or pick another model of the preset.
+- **Evaluating with the Docling extractor, in any session** (also the cloud):
+  the `kisski-docling` preset converts documents with KISSKI/SAIA's Docling
+  service, so the index can be built where Kreuzberg cannot run:
+
+  ```bash
+  uv run python skills/rag-quality-eval/scripts/gold_env.py up --preset kisski-docling
+  ```
+
+  It restores the store's Docling snapshot (`snapshots/<model>/docling/`) when
+  there is one; otherwise it pulls the source PDFs from the store and indexes
+  them through SAIA (about 1200 pages in 10-page requests at one request per
+  second, roughly 15-25 minutes; `--rebuild` always builds). `publish` then
+  uploads that snapshot as `latest` (needs a write token); to keep one without
+  making it the restored default, use `hf_store.py push-index FILE --extractor docling --name <name>`. This makes chunking and
+  extraction changes measurable end to end in the cloud, for the Docling
+  pipeline: a Docling index is not the Kreuzberg one, so compare runs only
+  within one extractor (the card's snapshot table and `gold_env.py status` name
+  it).
 - **Full local environment, store empty or stale** (you have a read-only Zotero
   key and the Kreuzberg sidecar): publish it once so every other environment can
   restore it:
@@ -109,9 +127,11 @@ regenerated from those contents. Details in the `hf_store.py` docstring.
 production-equivalent index (real Kreuzberg chunks and vectors), so everything
 that happens at or after retrieval is measured faithfully: top_k, score
 thresholds, dedup/cap/MMR, lexical fusion (`RETRIEVAL_LEXICAL_WEIGHT`), reranking,
-prompts, models, routing. Changes to **chunking or extraction** are not: the
-cloud session can only re-index with the `legacy` extractor, whose chunks differ
-from production. Do those in the full local environment, then re-`publish`.
+prompts, models, routing. Changes to **chunking or extraction** of the Kreuzberg
+pipeline are not: without Kreuzberg a cloud session can only re-index with the
+`legacy` extractor, whose chunks differ from production. Do those in the full
+local environment, then re-`publish`, or measure them on the Docling pipeline
+(`up --preset kisski-docling --rebuild`, see above).
 After deliberately changing the index, record why in the commit; the card shows
 which code commit and extractor each snapshot came from.
 

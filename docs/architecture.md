@@ -163,8 +163,10 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 
 - **`DocumentExtractor`** (ABC) — `extract_and_chunk(content: bytes, mime_type: str) → list[ExtractionChunk]`
 - **`KreuzbergExtractor`** (default) — Rust-based, native async, 91+ formats via [Kreuzberg](https://kreuzberg.dev/). Chunking and page tracking built-in.
+- **`DoclingExtractor`** — Calls a remote Docling service (docling-serve or the KISSKI/SAIA endpoint) and chunks its `DoclingDocument` JSON with page provenance; rate limits and gateway errors handled in the adapter.
 - **`LegacyExtractor`** — Wraps the original `PDFExtractor` (pypdf) + `TextChunker` (spaCy) pipeline. PDF-only; kept for fallback.
 - **`create_document_extractor(backend, max_chunk_size, chunk_overlap, ocr_enabled)`** — factory function; backend selectable via `extractor_backend` setting.
+- **`create_configured_extractor(settings, preset, embedding_service)`** — what `DocumentProcessor` uses: the preset's `extraction` section when it has one, else `extractor_backend`; a Docling key named like the embedding side's key (`KISSKI_API_KEY`) is the one the embedding service runs with.
 
 **Embedding Service:** [backend/services/embeddings.py](../backend/services/embeddings.py)
 

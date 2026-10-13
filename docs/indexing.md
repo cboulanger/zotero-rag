@@ -33,9 +33,12 @@ Pluggable extraction layer supporting multiple backends and MIME types.
 | Class | Backend | Notes |
 | ------- | --------- | ------- |
 | `KreuzbergExtractor` | Kreuzberg (Rust) | Default; native async; 91+ formats; PDFium-based |
+| `DoclingExtractor` | remote Docling service | docling-serve (`/v1/convert/file`, optional async jobs) or KISSKI/SAIA (`/v1/documents/convert`); page numbers from Docling's JSON provenance |
 | `LegacyExtractor` | pypdf + spaCy | PDF-only fallback |
 
-Select backend via `extractor_backend` setting (`kreuzberg` or `legacy`).
+Select backend via `extractor_backend` setting (`kreuzberg`, `docling` or `legacy`). A preset can
+name its own extractor in an `extraction` section, which wins for indexing under that preset (see
+`docs/presets.md`, `kisski-docling`).
 
 #### Chunk Coalescing
 
@@ -400,6 +403,27 @@ chunks: list[ExtractionChunk] = await extractor.extract_and_chunk(file_bytes, mi
 - OCR support (Tesseract); disable via `ocr_enabled=False`
 - Graceful fallback to no-OCR if Tesseract not installed
 
+**DoclingExtractor** (remote Docling service):
+
+- Sends the file to a Docling conversion service and reads its lossless JSON export
+  (`DoclingDocument`): body items in reading order, page headers/footers dropped, tables
+  rendered as `cell | cell` rows, captions kept; each chunk's page is its first item's
+  `prov.page_no`. A heading starts a new chunk; a block longer than `max_chunk_size` is split
+  on word boundaries. Falls back to the Markdown export (no page numbers) if no JSON is returned.
+- `api_flavor="serve"`: [docling-serve](https://github.com/docling-project/docling-serve)
+  (`POST /v1/convert/file`, `to_formats=json`, `do_ocr` from `ocr_enabled`, key as `X-Api-Key`;
+  `async_mode` submits to `/v1/convert/file/async` and polls `/v1/status/poll/{id}`).
+- `api_flavor="saia"`: the KISSKI/SAIA endpoint
+  (`POST https://chat-ai.academiccloud.de/v1/documents/convert?response_type=json`, field
+  `document`, `Authorization: Bearer <KISSKI key>`). The gateway allows 1 request/second and has
+  hourly/daily/monthly quotas (500/1000/5000 at the time of writing, see the `X-Ratelimit-*`
+  response headers): requests are spaced by `min_request_interval`, a short 429 is waited out,
+  and a spent quota raises `KreuzbergUnavailableError`, which stops the indexing run like a downed
+  sidecar does (it resumes on the next run). 502/503/504 are retried three times with backoff.
+- Uses the same error types as `KreuzbergExtractor`, so `skipped_timeout`/`skipped_parse_error`/
+  `skipped_too_large` and the fatal-run handling are unchanged. Plain text is chunked locally;
+  formats Docling cannot read (e.g. EPUB) are `skipped_parse_error`.
+
 **LegacyExtractor** (fallback, PDF-only):
 
 - pypdf for extraction, spaCy for sentence-boundary chunking
@@ -524,7 +548,7 @@ QDRANT_STORAGE_PATH = Path("~/.local/share/zotero-rag/qdrant")
 EMBEDDING_DIM = 768  # Model-specific
 MAX_CHUNK_SIZE = 512
 CHUNK_OVERLAP = 50
-EXTRACTOR_BACKEND = "kreuzberg"  # or "legacy" for pypdf+spaCy
+EXTRACTOR_BACKEND = "kreuzberg"  # or "docling" (DOCLING_URL, DOCLING_API_FLAVOR), "legacy" for pypdf+spaCy
 ```
 
 ### Storage Paths

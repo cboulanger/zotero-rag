@@ -32,6 +32,20 @@ class StoreHelperTests(unittest.TestCase):
         self.assertEqual(snap, "snapshots/intfloat--multilingual-e5-large/latest.jsonl.gz")
         self.assertTrue(prov.endswith("latest.json"))
 
+    def test_non_production_extractor_gets_its_own_folder(self):
+        self.assertEqual(hf_store.snapshot_paths("m", "kreuzberg")[0], "snapshots/m/latest.jsonl.gz")
+        self.assertEqual(hf_store.snapshot_paths("m", "docling"),
+                         ("snapshots/m/docling/latest.jsonl.gz", "snapshots/m/docling/latest.json"))
+
+    def test_named_snapshot_does_not_touch_latest(self):
+        self.assertEqual(hf_store.snapshot_paths("m", "docling", "20261013-02f00c6"),
+                         ("snapshots/m/docling/20261013-02f00c6.jsonl.gz", "snapshots/m/docling/20261013-02f00c6.json"))
+
+    def test_legacy_backend_restores_the_kreuzberg_snapshot(self):
+        self.assertEqual(hf_store.restore_extractor("legacy"), "kreuzberg")
+        self.assertEqual(hf_store.restore_extractor(None), "kreuzberg")
+        self.assertEqual(hf_store.restore_extractor("docling"), "docling")
+
     def test_fingerprint_is_order_independent_and_content_sensitive(self):
         reordered = {"attachments": list(reversed(MANIFEST["attachments"]))}
         self.assertEqual(hf_store.sources_fingerprint(MANIFEST), hf_store.sources_fingerprint(reordered))
