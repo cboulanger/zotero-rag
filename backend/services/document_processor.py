@@ -99,6 +99,12 @@ def merge_download_failures(existing: list[dict], new_failures: list[dict]) -> l
     return merged[:MAX_TRACKED_DOWNLOAD_FAILURES]
 
 
+def drop_attachment_failures(existing: list[dict], attachment_key: str) -> list[dict]:
+    """Return ``existing`` without the entries for ``attachment_key`` (the
+    counterpart of merge_download_failures, for an attachment that is now indexed)."""
+    return [f for f in existing if f.get("attachment_key") != attachment_key]
+
+
 # MIME types that will be downloaded and indexed
 INDEXABLE_MIME_TYPES = {
     "application/pdf",

@@ -3349,6 +3349,16 @@ class ZoteroRAGPlugin {
 				}
 			}
 		}
+		// Every tier above is derived from local state on *this* computer (file
+		// presence, or failure lists cached from earlier runs), none of which knows
+		// whether the attachment has since been indexed from somewhere else — e.g.
+		// via Search & Fix on another PC, which uploads the file directly. Ask the
+		// backend and drop whatever already has chunks; quarantined rows (appended
+		// below) are already the backend's own live verdict.
+		const stillUnindexed = await this._dropBackendIndexed(libraryID, result);
+		result.splice(0, result.length, ...stillUnindexed);
+		missingKeys.clear();
+		for (const r of result) missingKeys.add(r.attachmentItem.key);
 		// Append backend-quarantined ("rag-failed") attachments, deduplicating by
 		// key. Opt-in only (see includePermanentFailures doc above).
 		if (includePermanentFailures) {
@@ -3361,6 +3371,50 @@ class ZoteroRAGPlugin {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * Drop rows whose attachment the backend already has chunks for
+	 * (POST /api/indexed-tags/check), and prune those keys from the local
+	 * download-failed / skipped-server stores so they don't come back on the
+	 * next refresh. Those stores and the local fileExists() scan are per-computer,
+	 * so on a second PC they list attachments that were long since indexed from
+	 * the first one (or that the server's metadata still reports as a stale
+	 * download failure).
+	 *
+	 * Never throws: on a network/HTTP/parse failure the rows are returned
+	 * unchanged, since showing a stale row beats hiding a genuinely broken one.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {Array<UnavailableAttachmentInfo>} rows
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _dropBackendIndexed(libraryID, rows) {
+		if (rows.length === 0) return rows;
+		const keys = [...new Set(rows.map(r => r.attachmentItem.key))];
+		/** @type {Set<string>} */
+		const indexed = new Set();
+		let backendLibraryId = '';
+		try {
+			backendLibraryId = this.getBackendLibraryId(libraryID);
+			for (let i = 0; i < keys.length; i += 500) {
+				const response = await fetch(`${this.backendURL}/api/indexed-tags/check`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ library_id: backendLibraryId, attachment_keys: keys.slice(i, i + 500) }),
+				});
+				if (!response.ok) return rows;
+				const data = /** @type {{indexed?: string[]}} */ (await response.json());
+				for (const k of data.indexed || []) indexed.add(k);
+			}
+		} catch (e) {
+			this.log(`[ZoteroRAG] _dropBackendIndexed failed: ${e instanceof Error ? e.message : String(e)}`);
+			return rows;
+		}
+		if (indexed.size === 0) return rows;
+		const indexedKeys = [...indexed];
+		await this.removeDownloadFailedItems(backendLibraryId, indexedKeys);
+		await this.removeSkippedServerItems(backendLibraryId, indexedKeys);
+		return rows.filter(r => !indexed.has(r.attachmentItem.key));
 	}
 
 	/**

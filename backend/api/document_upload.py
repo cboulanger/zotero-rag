@@ -49,7 +49,7 @@ from backend.services.diagnostics_collector import (
     current as current_diagnostics,
     stage as diag_stage,
 )
-from backend.services.document_processor import DocumentProcessor, merge_download_failures
+from backend.services.document_processor import DocumentProcessor, drop_attachment_failures, merge_download_failures
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.config.settings import get_settings
 from backend.utils import format_file_size
@@ -444,6 +444,20 @@ async def _execute_upload_impl(
             lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
             if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
                 lib_meta.total_items_indexed += 1
+            if proc_result.status in (
+                "indexed_fresh", "copied_cross_library", "copied_same_library", "skipped_duplicate",
+            ):
+                # The attachment is indexed now, so any failure an earlier server scan
+                # recorded for it is stale. Without this, a file the server can't fetch
+                # (e.g. WebDAV storage) but a client uploaded directly stays listed in
+                # last_scan_failed_downloads, and every other computer's plugin keeps
+                # showing it in Fix Unavailable Attachments.
+                lib_meta.last_scan_failed_downloads = drop_attachment_failures(
+                    lib_meta.last_scan_failed_downloads, attachment_key
+                )
+                lib_meta.last_scan_skipped_too_large = drop_attachment_failures(
+                    lib_meta.last_scan_skipped_too_large, attachment_key
+                )
             if proc_result.status == "skipped_too_large":
                 # Surfaced to the plugin's Fix Unavailable tool as a non-actionable,
                 # explanatory status — covers both the plugin's direct process-now
