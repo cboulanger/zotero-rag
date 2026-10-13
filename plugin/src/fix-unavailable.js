@@ -377,14 +377,21 @@ var ZoteroFixUnavailableDialog = {
 
 		const includeMissingCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-missing-cb'));
 		const includeFailedCb = /** @type {HTMLInputElement|null} */ (document.getElementById('include-failed-cb'));
+		this._showProgress();
 		try {
 			this.items = await this.plugin._getUnavailableAttachments(this.libraryID, {
 				includeDownloadFailed: includeMissingCb?.checked ?? false,
 				includePermanentFailures: includeFailedCb?.checked ?? false,
+				onProgress: (phase, done, total) => {
+					this.setStatus(`${phase}...`);
+					this._updateProgress(done, total, phase === 'Checking local files' ? 'files checked' : 'attachments verified on server');
+				},
 			});
 		} catch (e) {
 			this.setStatus(`Error loading items: ${e instanceof Error ? e.message : String(e)}`);
 			return;
+		} finally {
+			this._hideProgress();
 		}
 
 		this.rowStatus.clear();
@@ -393,10 +400,12 @@ var ZoteroFixUnavailableDialog = {
 		if (this.plugin && typeof this.plugin.updateMissingFilesCount === 'function') {
 			this.plugin.updateMissingFilesCount(this.backendLibraryId, this.items.length);
 		}
+		const unverifiedCount = this.items.filter(it => it.serverIndexState === 'unknown').length;
 		if (this.items.length === 0) {
 			this.setStatus('No unavailable attachments found in this library.');
 		} else {
-			this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`);
+			this.setStatus(`${this.items.length} unavailable attachment${this.items.length !== 1 ? 's' : ''} found.`
+				+ (unverifiedCount > 0 ? ` Could not check ${unverifiedCount} against the server (see Status column).` : ''));
 		}
 
 		// Pre-set status labels for non-fixable items so they're visible without running a search
@@ -433,6 +442,23 @@ var ZoteroFixUnavailableDialog = {
 					text: 'File too large',
 					tooltip: item.tooLargeDetail || 'Exceeds the size limit for automatic text extraction',
 				});
+			}
+			// Rows with no more specific label: say what the server check found, so the
+			// column is never blank for a row whose status is already known.
+			if (!this.rowStatus.has(i)) {
+				if (item.serverIndexState === 'unknown') {
+					this.rowStatus.set(i, {
+						cssClass: 'not-found',
+						text: 'Server check failed',
+						tooltip: `Could not ask the server whether this attachment is indexed (${item.serverIndexDetail || 'unknown error'}).`,
+					});
+				} else if (item.serverIndexState === 'unindexed') {
+					this.rowStatus.set(i, {
+						cssClass: 'not-found',
+						text: 'Not indexed, file missing locally',
+						tooltip: 'The server has no index for this attachment and the file is not available on this computer.',
+					});
+				}
 			}
 		}
 

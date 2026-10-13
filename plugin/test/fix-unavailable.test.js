@@ -889,13 +889,52 @@ test('populateTable shows and updates the progress meter while check-indexed sta
 	// (reusing the same meter the fix run uses), and hidden again once done —
 	// otherwise a large library leaves the dialog looking frozen while the
 	// backend works through check-indexed batches in the background.
+	// (The first show/hide pair is the list-loading phase in _getUnavailableAttachments.)
 	assert.deepStrictEqual(calls, [
+		'show',
+		'hide',
 		'show',
 		'update:0/2:attachments checked',
 		'update:1/2:attachments checked',
 		'update:2/2:attachments checked',
 		'hide',
 	]);
+});
+
+test('populateTable reports load progress, and labels rows by the server index check (never blank)', async () => {
+	const dialog = loadDialog({ Zotero: { Libraries: { get: () => ({ name: 'Test Library' }) } } });
+	dialog.libraryID = 1;
+	dialog.backendLibraryId = 'u1';
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set();
+	/** @type {Array<string>} */
+	const calls = [];
+	dialog._showProgress = () => calls.push('show');
+	dialog._hideProgress = () => calls.push('hide');
+	dialog._updateProgress = (processed, total, label) => calls.push(`update:${processed}/${total}:${label}`);
+	dialog.plugin = {
+		_getUnavailableAttachments: async (_id, opts) => {
+			opts.onProgress('Checking local files', 25, 50);
+			opts.onProgress('Checking index status on server', 200, 400);
+			return [
+				{ attachmentItem: { key: 'A1' }, isLinked: false, serverIndexState: 'unindexed' },
+				{ attachmentItem: { key: 'A2' }, isLinked: false, serverIndexState: 'unknown', serverIndexDetail: 'HTTP 504' },
+			];
+		},
+		getAutoIndexedLibraryIds: async () => new Set(),
+	};
+
+	await dialog.populateTable();
+
+	assert.deepStrictEqual(calls, [
+		'show',
+		'update:25/50:files checked',
+		'update:200/400:attachments verified on server',
+		'hide',
+	]);
+	assert.match(dialog.rowStatus.get(0).text, /not indexed/i);
+	assert.strictEqual(dialog.rowStatus.get(1).text, 'Server check failed');
+	assert.match(dialog.rowStatus.get(1).tooltip, /HTTP 504/);
 });
 
 test('autoindex-status-button click opens the autoindex status dialog', () => {

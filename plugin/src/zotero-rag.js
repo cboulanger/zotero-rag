@@ -2466,6 +2466,11 @@ class ZoteroRAGPlugin {
 	 *   the deferred-upload queue). Like tooLarge, nothing in this dialog can fix it automatically;
 	 *   unlike tooLarge, removing the rag-failed tag in Zotero (once the underlying cause is
 	 *   addressed) is what makes the backend retry it. See _getQuarantinedAttachments.
+	 * @property {'unindexed'|'unknown'} [serverIndexState] - Result of the Fix Unavailable
+	 *   dialog's check against the backend (see _dropBackendIndexed): 'unindexed' = the backend
+	 *   was asked and has no chunks for this attachment; 'unknown' = the check itself failed
+	 *   (reason in serverIndexDetail). Unset for rows that skipped the check (quarantined).
+	 * @property {string} [serverIndexDetail] - Why the indexed check failed, for serverIndexState 'unknown'.
 	 * @property {string} [quarantineReason] - The backend's reason code: "too_costly" | "too_large" | "quarantined".
 	 * @property {string} [quarantineDetail] - Human-readable detail for quarantineReason.
 	 */
@@ -3249,7 +3254,7 @@ class ZoteroRAGPlugin {
 	/**
 	 * Return full detail records for all unavailable attachments in a library.
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDownloadFailed?: boolean, includePermanentFailures?: boolean}} [opts] -
+	 * @param {{includeDownloadFailed?: boolean, includePermanentFailures?: boolean, onProgress?: (phase: string, done: number, total: number) => void}} [opts] -
 	 *   includeDownloadFailed: also include attachments the server merely couldn't download
 	 *   during indexing (see _getDownloadFailedAttachments) — off by default since these aren't
 	 *   actually broken (just not yet downloaded/uploaded), only sometimes worth fixing
@@ -3258,9 +3263,11 @@ class ZoteroRAGPlugin {
 	 *   permanently refused and tagged rag-failed (see _getQuarantinedAttachments) — off by
 	 *   default since there is nothing to fix here either, only something to understand and
 	 *   possibly clear. Driven by the dialog's "Include permanent failures" checkbox.
+	 *   onProgress: reports the slow phases (local file scan, backend index check) so the
+	 *   dialog can show activity instead of leaving the user waiting.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false, includePermanentFailures = false } = {}) {
+	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false, includePermanentFailures = false, onProgress } = {}) {
 		const indexSnapshotsEnabled = await this.getIndexSnapshotsEnabled();
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
@@ -3277,7 +3284,10 @@ class ZoteroRAGPlugin {
 		const attachments = /** @type {any[]} */ (ids && ids.length > 0 ? await Zotero.Items.getAsync(ids) : []);
 		/** @type {Array<UnavailableAttachmentInfo>} */
 		const result = [];
+		let scanned = 0;
 		for (const attachment of attachments) {
+			if (onProgress && scanned % 25 === 0) onProgress('Checking local files', scanned, attachments.length);
+			scanned++;
 			let exists = false;
 			try {
 				exists = await attachment.fileExists();
@@ -3355,7 +3365,8 @@ class ZoteroRAGPlugin {
 		// via Search & Fix on another PC, which uploads the file directly. Ask the
 		// backend and drop whatever already has chunks; quarantined rows (appended
 		// below) are already the backend's own live verdict.
-		const stillUnindexed = await this._dropBackendIndexed(libraryID, result);
+		const stillUnindexed = await this._dropBackendIndexed(libraryID, result,
+			onProgress ? (done, total) => onProgress('Checking index status on server', done, total) : undefined);
 		result.splice(0, result.length, ...stillUnindexed);
 		missingKeys.clear();
 		for (const r of result) missingKeys.add(r.attachmentItem.key);
@@ -3382,38 +3393,73 @@ class ZoteroRAGPlugin {
 	 * the first one (or that the server's metadata still reports as a stale
 	 * download failure).
 	 *
-	 * Never throws: on a network/HTTP/parse failure the rows are returned
-	 * unchanged, since showing a stale row beats hiding a genuinely broken one.
+	 * Never throws. A batch the server cannot answer (HTTP error, timeout) is
+	 * retried once; if it still fails its rows are kept — showing a stale row beats
+	 * hiding a genuinely broken one — and marked `serverIndexState = 'unknown'` with
+	 * the failure in `serverIndexDetail`, so the dialog can say the check failed
+	 * instead of silently presenting unverified rows as unindexed. Rows the server
+	 * answered for and does not have are marked `serverIndexState = 'unindexed'`.
 	 * @param {number} libraryID - Zotero internal library ID
 	 * @param {Array<UnavailableAttachmentInfo>} rows
+	 * @param {(done: number, total: number) => void} [onProgress] - called after each batch
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _dropBackendIndexed(libraryID, rows) {
+	async _dropBackendIndexed(libraryID, rows, onProgress) {
 		if (rows.length === 0) return rows;
+		const BATCH = 200;
 		const keys = [...new Set(rows.map(r => r.attachmentItem.key))];
 		/** @type {Set<string>} */
 		const indexed = new Set();
+		/** @type {Map<string, string>} */
+		const unverified = new Map();
 		let backendLibraryId = '';
 		try {
 			backendLibraryId = this.getBackendLibraryId(libraryID);
-			for (let i = 0; i < keys.length; i += 500) {
-				const response = await fetch(`${this.backendURL}/api/indexed-tags/check`, {
-					method: 'POST',
-					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify({ library_id: backendLibraryId, attachment_keys: keys.slice(i, i + 500) }),
-				});
-				if (!response.ok) return rows;
-				const data = /** @type {{indexed?: string[]}} */ (await response.json());
-				for (const k of data.indexed || []) indexed.add(k);
-			}
 		} catch (e) {
-			this.log(`[ZoteroRAG] _dropBackendIndexed failed: ${e instanceof Error ? e.message : String(e)}`);
-			return rows;
+			this.log(`[ZoteroRAG] _dropBackendIndexed: no backend library id: ${e instanceof Error ? e.message : String(e)}`);
 		}
-		if (indexed.size === 0) return rows;
-		const indexedKeys = [...indexed];
-		await this.removeDownloadFailedItems(backendLibraryId, indexedKeys);
-		await this.removeSkippedServerItems(backendLibraryId, indexedKeys);
+		for (let i = 0; i < keys.length; i += BATCH) {
+			const batch = keys.slice(i, i + BATCH);
+			let failure = backendLibraryId ? '' : 'library not known to the backend';
+			for (let attempt = 0; backendLibraryId && attempt < 2; attempt++) {
+				try {
+					const response = await fetch(`${this.backendURL}/api/indexed-tags/check`, {
+						method: 'POST',
+						headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+						body: JSON.stringify({ library_id: backendLibraryId, attachment_keys: batch }),
+					});
+					if (!response.ok) {
+						failure = `HTTP ${response.status}`;
+						continue;
+					}
+					const data = /** @type {{indexed?: string[]}} */ (await response.json());
+					for (const k of data.indexed || []) indexed.add(k);
+					failure = '';
+					break;
+				} catch (e) {
+					failure = e instanceof Error ? e.message : String(e);
+				}
+			}
+			if (failure) {
+				this.log(`[ZoteroRAG] indexed check failed for ${batch.length} attachment(s): ${failure}`);
+				for (const k of batch) unverified.set(k, failure);
+			}
+			if (onProgress) onProgress(Math.min(i + BATCH, keys.length), keys.length);
+		}
+		if (indexed.size > 0) {
+			const indexedKeys = [...indexed];
+			await this.removeDownloadFailedItems(backendLibraryId, indexedKeys);
+			await this.removeSkippedServerItems(backendLibraryId, indexedKeys);
+		}
+		for (const r of rows) {
+			const failure = unverified.get(r.attachmentItem.key);
+			if (failure) {
+				r.serverIndexState = 'unknown';
+				r.serverIndexDetail = failure;
+			} else if (!indexed.has(r.attachmentItem.key)) {
+				r.serverIndexState = 'unindexed';
+			}
+		}
 		return rows.filter(r => !indexed.has(r.attachmentItem.key));
 	}
 
