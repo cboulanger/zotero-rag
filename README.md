@@ -58,6 +58,16 @@ pipeline**. This project is built around exactly that combination: one
 deployment, run once by whoever administers it, serving and configurable
 by an entire research group from inside Zotero itself.
 
+**Measured quality.** Of the tools above, only Beaver advertises an
+evaluation of answer quality (a modified LitQA2 benchmark of 197 multiple-choice
+questions, with more promised), and PapersGPT publishes a speed and memory
+benchmark rather than an accuracy one; the public READMEs of the others
+describe no evaluation of answers (BibGenie's site could not be checked). This
+project ships a reproducible gold-standard evaluation of the whole pipeline that
+you run against your own preset and model choice and that also scores query
+routing, multilingual behavior and citation compliance. See
+[RAG Quality Evaluation](docs/evaluation.md).
+
 **Flexible hardware and models.** Presets cover everything from a laptop running
 small local models to fully hosted setups, and each side of the pipeline
 (embeddings, answering model) picks its own provider, so you can mix them: any
