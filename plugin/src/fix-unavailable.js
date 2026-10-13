@@ -80,7 +80,8 @@ var ZoteroFixUnavailableDialog = {
 	selected: new Set(),
 
 	/**
-	 * Current text typed into the filename filter box.
+	 * Current text typed into the filter box: a case-insensitive glob
+	 * pattern matched against every column of a row (see _computeVisibleIndices).
 	 * @type {string}
 	 */
 	filterText: '',
@@ -160,13 +161,19 @@ var ZoteroFixUnavailableDialog = {
 		document.getElementById('include-missing-cb')?.addEventListener('change', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('include-failed-cb')?.addEventListener('change', () => { if (!this.isRunning) this.populateTable(); });
 		document.getElementById('select-all-cb')?.addEventListener('change', (/** @type {Event} */ e) => {
-			if (/** @type {HTMLInputElement} */(e.target).checked) {
-				for (let i = 0; i < this.items.length; i++) this.selected.add(i);
-			} else {
-				this.selected.clear();
-			}
-			this.tableHelper?.treeInstance?.invalidate();
-			this.updateActionButtons();
+			this._handleSelectAllChange(/** @type {HTMLInputElement} */ (e.target).checked);
+		});
+		const filterInput = /** @type {HTMLInputElement|null} */ (document.getElementById('row-filter'));
+		const filterClearBtn = /** @type {HTMLButtonElement|null} */ (document.getElementById('row-filter-clear'));
+		filterInput?.addEventListener('input', () => {
+			this._handleFilterInput(filterInput.value);
+			if (filterClearBtn) filterClearBtn.hidden = !this.filterText;
+		});
+		filterClearBtn?.addEventListener('click', () => {
+			if (filterInput) filterInput.value = '';
+			this._handleFilterClear();
+			filterClearBtn.hidden = true;
+			filterInput?.focus();
 		});
 
 		this._initTable();
@@ -196,7 +203,7 @@ var ZoteroFixUnavailableDialog = {
 	/**
 	 * The filename shown for a row: the linked path for a linked attachment,
 	 * otherwise the regular attachment filename. Shared by getRowData,
-	 * copySelectedRowsToClipboard, and the filename filter.
+	 * copySelectedRowsToClipboard, and the row filter.
 	 * @param {AttachmentInfo} info
 	 * @returns {string}
 	 */
@@ -206,22 +213,119 @@ var ZoteroFixUnavailableDialog = {
 	},
 
 	/**
-	 * Recompute this.visibleIndices from this.items + this.filterText.
+	 * The plain-text values of every visible column of row `index`
+	 * (author, year, title, Zotero ID, filename, status text), as matched
+	 * by the row filter.
+	 * @param {number} index - real index into this.items
+	 * @returns {Array<string>}
+	 */
+	_filterValuesFor(index) {
+		const info = this.items[index];
+		const status = this.rowStatus.get(index);
+		return [
+			info.authors || '',
+			String(info.year || ''),
+			info.title || '',
+			info.zoteroID || '',
+			this._filenameFor(info),
+			status ? status.text : '',
+		];
+	},
+
+	/**
+	 * Compile a filter pattern into a case-insensitive RegExp using glob
+	 * syntax: `*` matches any run of characters, `?` exactly one character,
+	 * `[abc]`/`[a-z]`/`[!abc]` a character class; everything else is literal.
+	 * A pattern containing a wildcard must match a whole cell value
+	 * (`*.pdf` = ends in ".pdf"); a pattern without one matches anywhere in
+	 * a cell, so plain text still works as a substring search.
+	 * @param {string} pattern - already trimmed, non-empty
+	 * @returns {RegExp}
+	 */
+	_globToRegExp(pattern) {
+		let re = '';
+		let hasWildcard = false;
+		for (let i = 0; i < pattern.length; i++) {
+			const c = pattern[i];
+			if (c === '*') {
+				re += '.*';
+				hasWildcard = true;
+			} else if (c === '?') {
+				re += '.';
+				hasWildcard = true;
+			} else if (c === '[' && pattern.indexOf(']', i + 2) !== -1) {
+				const end = pattern.indexOf(']', i + 2);
+				let body = pattern.slice(i + 1, end);
+				const negate = body[0] === '!';
+				if (negate) body = body.slice(1);
+				re += '[' + (negate ? '^' : '') + body.replace(/[\\\]^]/g, '\\$&') + ']';
+				hasWildcard = true;
+				i = end;
+			} else {
+				re += c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			}
+		}
+		return new RegExp(hasWildcard ? `^${re}$` : re, 'is');
+	},
+
+	/**
+	 * Recompute this.visibleIndices from this.items + this.filterText: a row
+	 * is visible when the glob pattern matches any of its column values.
 	 * Call after this.items changes, or after this.filterText changes.
 	 * @returns {void}
 	 */
 	_computeVisibleIndices() {
-		const q = this.filterText.trim().toLowerCase();
+		const q = this.filterText.trim();
 		if (!q) {
 			this.visibleIndices = this.items.map((_, i) => i);
 			return;
 		}
+		const re = this._globToRegExp(q);
 		this.visibleIndices = [];
 		for (let i = 0; i < this.items.length; i++) {
-			if (this._filenameFor(this.items[i]).toLowerCase().includes(q)) {
+			if (this._filterValuesFor(i).some(v => re.test(v))) {
 				this.visibleIndices.push(i);
 			}
 		}
+	},
+
+	/**
+	 * Handle a change on the "Select all" toolbar checkbox: checking it
+	 * selects only the currently-visible (filtered) rows; unchecking it
+	 * clears the entire selection, visible or hidden.
+	 * @param {boolean} checked
+	 * @returns {void}
+	 */
+	_handleSelectAllChange(checked) {
+		if (checked) {
+			for (const i of this.visibleIndices) this.selected.add(i);
+		} else {
+			this.selected.clear();
+		}
+		this.tableHelper?.treeInstance?.invalidate();
+		this.updateActionButtons();
+	},
+
+	/**
+	 * Handle input into the filter box: update filterText and recompute
+	 * which rows are visible. Does not touch this.selected; hidden rows
+	 * keep whatever selection state they had.
+	 * @param {string} value
+	 * @returns {void}
+	 */
+	_handleFilterInput(value) {
+		this.filterText = value;
+		this._computeVisibleIndices();
+		this.tableHelper?.treeInstance?.invalidate();
+		this.updateActionButtons();
+	},
+
+	/**
+	 * Clear the filter, restoring every row as visible.
+	 * @returns {void}
+	 */
+	_handleFilterClear() {
+		this._handleFilterInput('');
 	},
 
 	/**
@@ -249,7 +353,8 @@ var ZoteroFixUnavailableDialog = {
 			return span;
 		};
 
-		const checkboxCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+		const checkboxCellRenderer = (/** @type {number} */ displayIndex, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const index = this.visibleIndices[displayIndex];
 			const span = document.createElement('span');
 			span.className = `cell ${column.className}`;
 			span.style.cssText = 'display:flex;align-items:center;justify-content:center;';
@@ -268,7 +373,8 @@ var ZoteroFixUnavailableDialog = {
 			span.appendChild(cb);
 			return span;
 		};
-		const statusCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+		const statusCellRenderer = (/** @type {number} */ displayIndex, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const index = this.visibleIndices[displayIndex];
 			const span = document.createElement('span');
 			const status = this.rowStatus.get(index);
 			span.className = `cell ${column.className}${status ? ' status-' + status.cssClass : ''}`;
@@ -276,7 +382,8 @@ var ZoteroFixUnavailableDialog = {
 			if (status?.tooltip) span.title = status.tooltip;
 			return span;
 		};
-		const selectCellRenderer = (/** @type {number} */ index, /** @type {string} */ _data, /** @type {any} */ column) => {
+		const selectCellRenderer = (/** @type {number} */ displayIndex, /** @type {string} */ _data, /** @type {any} */ column) => {
+			const index = this.visibleIndices[displayIndex];
 			const span = document.createElement('span');
 			span.className = `cell ${column.className}`;
 			const btn = document.createElement('button');
@@ -344,9 +451,9 @@ var ZoteroFixUnavailableDialog = {
 				multiSelect: false,
 				staticColumns: true,
 				disableFontSizeScaling: false,
-				getRowCount: () => this.items.length,
-				getRowData: (/** @type {number} */ index) => {
-					const info = this.items[index];
+				getRowCount: () => this.visibleIndices.length,
+				getRowData: (/** @type {number} */ displayIndex) => {
+					const info = this.items[this.visibleIndices[displayIndex]];
 					if (!info) return { author: '', year: '', title: '', zoteroID: '', filename: '', status: '', select: '' };
 					const filename = this._filenameFor(info);
 					return {
@@ -515,6 +622,7 @@ var ZoteroFixUnavailableDialog = {
 		// Pre-check all rows in our independent checkbox set
 		this.selected.clear();
 		for (let i = 0; i < this.items.length; i++) this.selected.add(i);
+		this._computeVisibleIndices();
 
 		if (this.tableHelper?.treeInstance) {
 			this.tableHelper.treeInstance.invalidate();
@@ -660,8 +768,8 @@ var ZoteroFixUnavailableDialog = {
 	_updateSelectAllCheckbox() {
 		const cb = /** @type {HTMLInputElement|null} */ (document.getElementById('select-all-cb'));
 		if (!cb) return;
-		const count = this.selected.size;
-		const total = this.items.length;
+		const total = this.visibleIndices.length;
+		const count = this.visibleIndices.filter(i => this.selected.has(i)).length;
 		cb.checked = total > 0 && count === total;
 		cb.indeterminate = count > 0 && count < total;
 	},
@@ -1305,6 +1413,7 @@ var ZoteroFixUnavailableDialog = {
 			this.items = survivingItems;
 			this.rowStatus = survivingRowStatus;
 			this.selected = survivingSelected;
+			this._computeVisibleIndices();
 			if (this.plugin && typeof this.plugin.updateMissingFilesCount === 'function') {
 				this.plugin.updateMissingFilesCount(this.backendLibraryId, this.items.length);
 			}
@@ -1373,8 +1482,11 @@ var ZoteroFixUnavailableDialog = {
 	 */
 	setRowStatus(index, cssClass, text, tooltip = '') {
 		this.rowStatus.set(index, { cssClass, text, tooltip });
+		// The table addresses rows by display position, not by real index.
+		const displayIndex = this.visibleIndices.indexOf(index);
+		if (displayIndex === -1) return;
 		try {
-			this.tableHelper?.treeInstance?.invalidateRow(index);
+			this.tableHelper?.treeInstance?.invalidateRow(displayIndex);
 		} catch (_) {}
 	},
 

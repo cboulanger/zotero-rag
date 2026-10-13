@@ -1003,44 +1003,198 @@ test('refreshAutoindexButton hides the button on a fetch error (fails closed)', 
 });
 
 // ---------------------------------------------------------------------------
-// Filename filter
+// Row filter (glob pattern over every column)
 // ---------------------------------------------------------------------------
 
-test('_computeVisibleIndices includes every row when filterText is empty', () => {
+/**
+ * @param {Partial<{authors: string, year: string, title: string, zoteroID: string, filename: string}>} f
+ */
+function row(f) {
+	return {
+		isLinked: false,
+		authors: f.authors || '',
+		year: f.year || '',
+		title: f.title || '',
+		zoteroID: f.zoteroID || '',
+		attachmentItem: { attachmentFilename: f.filename || '' },
+	};
+}
+
+/** @param {string} filterText @param {Array<any>} items @param {Map<number, any>} [rowStatus] */
+function visibleFor(filterText, items, rowStatus = new Map()) {
 	const dialog = loadDialog();
-	dialog.filterText = '';
-	dialog.items = [
-		{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } },
-		{ isLinked: false, attachmentItem: { attachmentFilename: 'b.docx' } },
-	];
+	dialog.filterText = filterText;
+	dialog.items = items;
+	dialog.rowStatus = rowStatus;
 	dialog._computeVisibleIndices();
+	return [...dialog.visibleIndices];
+}
+
+test('_computeVisibleIndices includes every row when filterText is empty or blank', () => {
+	const items = [row({ filename: 'a.pdf' }), row({ filename: 'b.docx' })];
+	assert.deepStrictEqual(visibleFor('', items), [0, 1]);
+	assert.deepStrictEqual(visibleFor('   ', items), [0, 1]);
+});
+
+test('_computeVisibleIndices: plain text matches case-insensitively anywhere in any column', () => {
+	const items = [
+		row({ authors: 'Smith, J.', filename: 'a.docx' }),
+		row({ title: 'Reference managers compared', filename: 'b.docx' }),
+		row({ filename: 'REPORT.PDF' }),
+		row({ zoteroID: 'ABCD1234', filename: 'c.txt' }),
+	];
+	assert.deepStrictEqual(visibleFor('smith', items), [0]);
+	assert.deepStrictEqual(visibleFor('MANAGER', items), [1]);
+	assert.deepStrictEqual(visibleFor('pdf', items), [2]);
+	assert.deepStrictEqual(visibleFor('cd12', items), [3]);
+	assert.deepStrictEqual(visibleFor('zzz', items), []);
+});
+
+test('_computeVisibleIndices: * and ? wildcards must match a whole column value', () => {
+	const items = [
+		row({ filename: 'report.pdf' }),
+		row({ filename: 'report.pdf.bak' }),
+		row({ filename: 'notes.docx' }),
+		row({ year: '2019', filename: 'x' }),
+		row({ year: '2021', filename: 'y' }),
+	];
+	assert.deepStrictEqual(visibleFor('*.pdf', items), [0]);
+	assert.deepStrictEqual(visibleFor('*.PDF*', items), [0, 1]);
+	assert.deepStrictEqual(visibleFor('notes.doc?', items), [2]);
+	assert.deepStrictEqual(visibleFor('20?1', items), [4]);
+});
+
+test('_computeVisibleIndices: [set], [a-z] and [!set] character classes', () => {
+	const items = [
+		row({ year: '2019' }),
+		row({ year: '2020' }),
+		row({ year: '2021' }),
+	];
+	assert.deepStrictEqual(visibleFor('202[01]', items), [1, 2]);
+	assert.deepStrictEqual(visibleFor('20[1-1]?', items), [0]);
+	assert.deepStrictEqual(visibleFor('202[!0]', items), [2]);
+});
+
+test('_computeVisibleIndices treats regex metacharacters literally', () => {
+	const items = [row({ title: 'C++ (2nd ed.)' }), row({ title: 'Cxx 2nd ed' })];
+	assert.deepStrictEqual(visibleFor('c++ (2nd', items), [0]);
+	assert.deepStrictEqual(visibleFor('*(2nd ed.)', items), [0]);
+	// An unmatched "[" is literal, not a broken character class.
+	assert.deepStrictEqual(visibleFor('[unclosed', [row({ title: 'a [unclosed bracket' })]), [0]);
+});
+
+test('_computeVisibleIndices matches the status text and the linked path', () => {
+	const items = [
+		row({ filename: 'a.pdf' }),
+		{ isLinked: true, attachmentItem: { attachmentPath: '/home/me/papers/b.pdf', attachmentFilename: 'b.pdf' } },
+	];
+	const rowStatus = new Map([[0, { cssClass: 'not-found', text: 'Refused by server', tooltip: '' }]]);
+	assert.deepStrictEqual(visibleFor('refused', items, rowStatus), [0]);
+	assert.deepStrictEqual(visibleFor('/home/*', items, rowStatus), [1]);
+});
+
+test('populateTable recomputes visibleIndices against freshly loaded items, honoring a persisted filter', async () => {
+	const dialog = loadDialog({ Zotero: { Libraries: { get: () => ({ name: 'Test Library' }) } } });
+	dialog.libraryID = 1;
+	dialog.backendLibraryId = 'u1';
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set();
+	dialog.filterText = '*.pdf';
+	dialog.plugin = {
+		_getUnavailableAttachments: async () => ([
+			{ attachmentItem: { key: 'A1', attachmentFilename: 'report.pdf' }, isLinked: false },
+			{ attachmentItem: { key: 'A2', attachmentFilename: 'notes.docx' }, isLinked: false },
+		]),
+	};
+
+	await dialog.populateTable();
+
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
+});
+
+test('_handleSelectAllChange(true) selects only the currently visible indices', () => {
+	const dialog = loadDialog();
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2];
+	dialog.selected = new Set();
+	dialog.updateActionButtons = () => {};
+	dialog._handleSelectAllChange(true);
+	assert.deepStrictEqual([...dialog.selected].sort(), [0, 2]);
+});
+
+test('_handleSelectAllChange(false) clears the entire selection, including hidden rows', () => {
+	const dialog = loadDialog();
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2];
+	dialog.selected = new Set([0, 1, 2]);
+	dialog.updateActionButtons = () => {};
+	dialog._handleSelectAllChange(false);
+	assert.deepStrictEqual([...dialog.selected], []);
+});
+
+test('_updateSelectAllCheckbox reflects only the visible rows', () => {
+	const cb = { checked: false, indeterminate: false };
+	const dialog = loadDialog({
+		document: { getElementById: (id) => (id === 'select-all-cb' ? cb : { addEventListener: () => {}, style: {} }) },
+	});
+	dialog.items = [{}, {}, {}];
+	dialog.visibleIndices = [0, 2]; // row 1 is hidden by the filter
+	dialog.selected = new Set([0, 2]);
+	dialog._updateSelectAllCheckbox();
+	assert.strictEqual(cb.checked, true);
+	assert.strictEqual(cb.indeterminate, false);
+
+	dialog.selected = new Set([0, 1]);
+	dialog._updateSelectAllCheckbox();
+	assert.strictEqual(cb.checked, false);
+	assert.strictEqual(cb.indeterminate, true);
+});
+
+test('_handleFilterInput filters rows without touching the selection; _handleFilterClear restores all rows', () => {
+	const dialog = loadDialog();
+	dialog.items = [row({ filename: 'report.pdf' }), row({ filename: 'notes.docx' })];
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([1]);
+	dialog.updateActionButtons = () => {};
+	dialog._handleFilterInput('*.pdf');
+	assert.strictEqual(dialog.filterText, '*.pdf');
+	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
+	assert.deepStrictEqual([...dialog.selected], [1]);
+	dialog._handleFilterClear();
+	assert.strictEqual(dialog.filterText, '');
 	assert.deepStrictEqual([...dialog.visibleIndices], [0, 1]);
 });
 
-test('_computeVisibleIndices matches the filename case-insensitively, substring anywhere', () => {
+test('setRowStatus invalidates the row at its display position, and skips hidden rows', () => {
+	const invalidated = [];
 	const dialog = loadDialog();
-	dialog.filterText = 'PDF';
+	dialog.rowStatus = new Map();
+	dialog.visibleIndices = [1, 3];
+	dialog.tableHelper = { treeInstance: { invalidateRow: (i) => invalidated.push(i) } };
+	dialog.setRowStatus(3, 'fixed', 'Downloaded');
+	dialog.setRowStatus(2, 'fixed', 'Downloaded');
+	assert.deepStrictEqual(invalidated, [1]);
+	assert.strictEqual(dialog.rowStatus.get(2).text, 'Downloaded');
+});
+
+test('searchAndFix recomputes visibleIndices after dropping fixed rows, preserving an active filter', async () => {
+	const dialog = loadDialog();
+	dialog.backendLibraryId = 'u1';
+	dialog.isRunning = false;
+	dialog.rowStatus = new Map();
+	dialog.selected = new Set([0, 1]);
+	dialog.filterText = '*.doc';
 	dialog.items = [
-		{ isLinked: false, attachmentItem: { attachmentFilename: 'report.pdf' } },
-		{ isLinked: false, attachmentItem: { attachmentFilename: 'notes.docx' } },
-		{ isLinked: false, attachmentItem: { attachmentFilename: 'pdf-scan.docx' } },
+		{ attachmentItem: { key: 'FIXED', attachmentFilename: 'report.pdf' }, isLinked: false },
+		{ attachmentItem: { key: 'KEPT', attachmentFilename: 'notes.doc' }, isLinked: false },
 	];
-	dialog._computeVisibleIndices();
-	assert.deepStrictEqual([...dialog.visibleIndices], [0, 2]);
-});
+	dialog.plugin = {
+		_tryDownloadAttachment: async (att) => ({ downloaded: att.key === 'FIXED' }),
+		_searchAndFixUnavailableAttachment: async () => ({ found: false }),
+	};
 
-test('_computeVisibleIndices is empty when nothing matches', () => {
-	const dialog = loadDialog();
-	dialog.filterText = 'zzz';
-	dialog.items = [{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } }];
-	dialog._computeVisibleIndices();
-	assert.deepStrictEqual([...dialog.visibleIndices], []);
-});
+	await dialog.searchAndFix();
 
-test('_computeVisibleIndices trims surrounding whitespace from the filter text', () => {
-	const dialog = loadDialog();
-	dialog.filterText = '  pdf  ';
-	dialog.items = [{ isLinked: false, attachmentItem: { attachmentFilename: 'a.pdf' } }];
-	dialog._computeVisibleIndices();
+	assert.strictEqual(dialog.items.length, 1);
 	assert.deepStrictEqual([...dialog.visibleIndices], [0]);
 });
