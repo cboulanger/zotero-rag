@@ -15,6 +15,10 @@ the list it asks the backend which of the candidates already have chunks and
 drops those, so an attachment indexed from another computer (for example via
 Search & Fix there, which uploads the file directly) does not show up as
 unavailable here just because its file is not downloaded on this computer.
+While the list loads, the dialog shows a progress bar for the local file scan
+and for the server check. If the server cannot be reached for part of the list,
+those rows are kept and their Status reads "Server check failed" (the tooltip
+gives the reason) rather than being presented as unindexed.
 
 ### Filtering the list
 
