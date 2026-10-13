@@ -13,10 +13,10 @@ whether every source has a citation, and the answer text. Full trace JSON
 for each run is written to --output-dir for deeper inspection.
 
 Usage:
-    uv run python scripts/debug_live_query.py "Which features does Zotero have that Citavi does not?"
-    uv run python scripts/debug_live_query.py "..." --repeat 5
-    uv run python scripts/debug_live_query.py "..." --llm-model meta-llama-3.1-8b-instruct
-    uv run python scripts/debug_live_query.py "..." --inspect-index
+    uv run rag-debug-query "Which features does Zotero have that Citavi does not?"
+    uv run rag-debug-query "..." --repeat 5
+    uv run rag-debug-query "..." --llm-model meta-llama-3.1-8b-instruct
+    uv run rag-debug-query "..." --inspect-index
 
 --inspect-index additionally stops the backend (embedded Qdrant only allows
 one process to hold the storage directory open at a time), reports how many
@@ -51,12 +51,10 @@ _TEST_GROUP_LIBRARY_ID = "6297749"  # test-rag-plugin — see CLAUDE.md
 
 def _get_keys() -> tuple[str, dict[str, str]]:
     """Return (zotero_api_key, {header_name: value}) without ever printing them."""
-    from backend.config.settings import get_settings
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.embeddings import env_var_to_header
 
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         raise SystemExit("[FAIL] AUTOINDEX_SECRET is not set; cannot decrypt stored keys.")
 

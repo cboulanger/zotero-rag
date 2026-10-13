@@ -8,7 +8,7 @@ import json
 import logging
 import time
 import warnings
-from typing import Optional
+from typing import Iterable, Optional
 from pathlib import Path
 import uuid
 
@@ -37,6 +37,12 @@ from qdrant_client.models import (
 from backend.models.document import DocumentChunk, ChunkMetadata, SearchResult, DeduplicationRecord, DocumentMetadata
 from backend.models.filters import MetadataFilters
 from backend.models.library import LibraryIndexMetadata
+from backend.services.index_event_log import (
+    EVENT_INDEXED,
+    EVENT_LIBRARY_UNINDEXED,
+    EVENT_UNINDEXED,
+    IndexEventLog,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -157,6 +163,10 @@ class VectorStore:
         self.embedding_model_name = embedding_model_name
         self.distance = distance
         self.qdrant_timeout = timeout
+        # Optional sink for per-attachment indexed/un-indexed transitions, set
+        # by the owner of this store (see make_vector_store). None disables
+        # event emission, which is what unit tests and migration tooling want.
+        self.index_events: Optional[IndexEventLog] = None
 
         if url:
             self.client = QdrantClient(url=url, timeout=timeout)
@@ -274,6 +284,26 @@ class VectorStore:
         # Persist (or refresh) the embedding config so future startups can validate it
         self._save_embedding_config()
 
+    def _emit_attachment_events(
+        self,
+        event_type: str,
+        rows: Iterable[tuple[Optional[str], Optional[str], Optional[str]]],
+    ) -> None:
+        """Record (library_id, item_key, attachment_key) transitions, deduplicated.
+
+        Rows without an attachment_key (abstract-only items, legacy chunks) have
+        no attachment row to tag and are skipped.
+        """
+        if self.index_events is None:
+            return
+        unique = {r for r in rows if r[0] and r[2]}
+        if not unique:
+            return
+        self.index_events.append(
+            {"type": event_type, "library_id": lib, "item_key": item, "attachment_key": att}
+            for lib, item, att in sorted(unique)
+        )
+
     def add_chunk(self, chunk: DocumentChunk) -> str:
         """
         Add a document chunk to the vector store.
@@ -331,6 +361,9 @@ class VectorStore:
         )
 
         logger.debug(f"Added chunk {chunk.metadata.chunk_id} with ID {point_id}")
+        if chunk.metadata.has_content:
+            md = chunk.metadata.document_metadata
+            self._emit_attachment_events(EVENT_INDEXED, [(md.library_id, md.item_key, md.attachment_key)])
         return point_id
 
     def add_chunks_batch(self, chunks: list[DocumentChunk]) -> list[str]:
@@ -390,6 +423,12 @@ class VectorStore:
 
         self._upsert_batched(points)
         logger.debug(f"Added {len(points)} chunks in batch")
+        self._emit_attachment_events(EVENT_INDEXED, [
+            (c.metadata.document_metadata.library_id,
+             c.metadata.document_metadata.item_key,
+             c.metadata.document_metadata.attachment_key)
+            for c in chunks if c.embedding is not None and c.metadata.has_content
+        ])
         return point_ids
 
     def _upsert_batched(self, points: list[PointStruct], batch_size: int = 100, max_retries: int = 4) -> None:
@@ -459,6 +498,7 @@ class VectorStore:
         score_threshold: Optional[float] = None,
         library_ids: Optional[list[str]] = None,
         filters: Optional[MetadataFilters] = None,
+        with_vectors: bool = False,
     ) -> list[SearchResult]:
         """
         Search for similar chunks.
@@ -469,6 +509,11 @@ class VectorStore:
             score_threshold: Minimum similarity score
             library_ids: Optional list of library IDs to filter by
             filters: Optional bibliographic metadata filters
+            with_vectors: When True, populate each result's chunk.embedding with
+                its stored vector (extra payload per result — only set this when
+                a caller actually needs it, e.g. embedding-based MMR reranking;
+                see backend/services/embedding_mmr_rerank.py). Default False
+                matches prior behavior (chunk.embedding always None).
 
         Returns:
             List of search results with chunks and scores
@@ -507,6 +552,7 @@ class VectorStore:
                 score_threshold=score_threshold,
                 query_filter=query_filter,
                 with_payload=True,
+                with_vectors=with_vectors,
             ).points
         except (TimeoutException, ReadTimeout, WriteTimeout) as exc:
             logger.warning(f"Qdrant search timed out after {self.qdrant_timeout}s")
@@ -551,7 +597,7 @@ class VectorStore:
             chunk = DocumentChunk(
                 text=payload["text"],
                 metadata=metadata,
-                embedding=None,  # Don't return vectors in search results
+                embedding=result.vector if with_vectors else None,
             )
 
             search_results.append(
@@ -863,7 +909,7 @@ class VectorStore:
         Text indexes on authors and title enable substring matching.
         Called on every startup so existing deployments pick up indexes without a rebuild.
         """
-        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower", "chunk_id")
+        keyword_fields = ("library_id", "item_key", "item_type", "author_lastnames", "tags_lower", "chunk_id", "attachment_title", "attachment_key")
         for field in keyword_fields:
             try:
                 with warnings.catch_warnings():
@@ -1008,6 +1054,9 @@ class VectorStore:
                 break
         if new_points:
             self._upsert_batched(new_points)
+            self._emit_attachment_events(
+                EVENT_INDEXED, [(target_library_id, target_item_key, target_attachment_key)]
+            )
         logger.info(
             f"Copied {len(new_points)} chunks "
             f"{source_library_id}/{source_item_key} -> "
@@ -1120,6 +1169,8 @@ class VectorStore:
         )
 
         logger.info(f"Deleted {count_before} chunks for library {library_id}")
+        if self.index_events is not None and count_before:
+            self.index_events.append([{"type": EVENT_LIBRARY_UNINDEXED, "library_id": library_id}])
         return count_before
 
     def get_collection_info(self) -> dict:
@@ -1474,7 +1525,12 @@ class VectorStore:
         if not chunks:
             return 0
 
-        return self.delete_chunks_by_ids([c["id"] for c in chunks])
+        deleted = self.delete_chunks_by_ids([c["id"] for c in chunks])
+        self._emit_attachment_events(
+            EVENT_UNINDEXED,
+            [(library_id, item_key, c["payload"].get("attachment_key")) for c in chunks],
+        )
+        return deleted
 
     def delete_chunks_by_ids(self, point_ids: list[str]) -> int:
         """
@@ -1523,9 +1579,13 @@ class VectorStore:
         have attachment_title=None and are never matched, so this is a no-op
         on data from before this feature shipped until it's re-indexed.
 
-        No payload index exists on attachment_title (this runs rarely, as an
-        explicit admin maintenance action, not a hot path — same tradeoff
-        already made for attachment_key, which also has no index).
+        attachment_title has a keyword payload index (see
+        _ensure_chunks_indexes) so this filter is a fast index lookup rather
+        than a full collection scan — on a large production collection
+        (millions of points, on_disk_payload), scanning every point's
+        payload for an unindexed field exceeded the Qdrant client timeout.
+        attachment_key still has no index (same original tradeoff, not yet
+        needed by any query).
 
         Returns:
             (deleted_chunks, deleted_attachments) — deleted_attachments counts
@@ -1560,6 +1620,7 @@ class VectorStore:
                 break
 
         deleted_chunks = self.delete_chunks_by_ids(point_ids)
+        self._emit_attachment_events(EVENT_UNINDEXED, touched_attachments)
         for library_id, item_key in touched_items:
             if not self.get_item_chunks(library_id, item_key):
                 self.delete_item_deduplication_records(library_id, item_key)
@@ -1591,6 +1652,48 @@ class VectorStore:
             # qdrant_client local storage raises IndexError on empty collections with filters
             logger.warning(f"Error counting chunks for library {library_id}, returning 0: {e}")
             return 0
+
+    def get_indexed_attachment_keys(
+        self, library_id: str, attachment_keys: Optional[list[str]] = None
+    ) -> set[str]:
+        """Return the attachment keys that currently have searchable chunks.
+
+        This is the single "is this attachment indexed?" ground truth shared by
+        the real-time event hooks and the indexed-status tag sync. Catalog-only
+        stubs (``has_content`` False) and legacy chunks without an
+        ``attachment_key`` don't count. Pass ``attachment_keys`` to check a
+        batch (one filtered scroll, stops early once all are found); omit it to
+        enumerate the whole library.
+        """
+        if attachment_keys is not None and not attachment_keys:
+            return set()
+        must = [FieldCondition(key="library_id", match=MatchValue(value=library_id))]
+        if attachment_keys is not None:
+            must.append(FieldCondition(key="attachment_key", match=MatchAny(any=attachment_keys)))
+        scroll_filter = Filter(
+            must=must,
+            must_not=[FieldCondition(key="has_content", match=MatchValue(value=False))],
+        )
+        wanted = set(attachment_keys) if attachment_keys is not None else None
+        found: set[str] = set()
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.CHUNKS_COLLECTION,
+                scroll_filter=scroll_filter,
+                limit=5000,
+                offset=offset,
+                with_payload=["attachment_key"],
+                with_vectors=False,
+                timeout=self.qdrant_timeout,
+            )
+            for point in points:
+                key = point.payload.get("attachment_key")
+                if key:
+                    found.add(key)
+            if offset is None or (wanted is not None and wanted <= found):
+                break
+        return found
 
     def count_indexed_items(self, library_id: str) -> int:
         """Count distinct item_keys with at least one indexed chunk for a library."""

@@ -15,6 +15,8 @@ from fastapi import HTTPException, Request
 from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.services.access_gate import is_loopback, passes_gate
+from backend.services.index_event_log import IndexEventLog
+from backend.providers import get_provider_or_none
 from backend.services.embeddings import EmbeddingService, create_embedding_service, RemoteEmbeddingService
 from backend.services.llm import LLMService, create_llm_service, RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity, get_identity_cache
@@ -95,21 +97,29 @@ async def require_authorized_group_admin(request: Request) -> Optional[ZoteroIde
 
 
 def get_client_api_keys(request: Request) -> dict[str, str]:
-    """Extract client-supplied API keys from request headers."""
+    """Extract client-supplied *personal* API keys from request headers.
+
+    Only `kind == "api_key"` fields are read from headers — a `shared_base_url`/
+    `shared_api_key` field (e.g. remote-mpcdf) is deliberately never read from a
+    per-request header; it's admin-set globally via POST /api/config/remote-fields
+    and resolved server-side (backend.services.admin_settings_store), the same for
+    every caller and for the cron indexer.
+    """
     settings = get_settings()
     preset = settings.get_hardware_preset()
     keys: dict[str, str] = {}
-    for key_info in RemoteEmbeddingService.required_api_keys(preset.embedding):
+    for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
+        if key_info["kind"] != "api_key":
+            continue
         val = request.headers.get(key_info["header_name"])
-        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
-    for key_info in RemoteLLMService.required_api_keys(settings):
+    for key_info in RemoteLLMService.required_client_fields(settings):
+        if key_info["kind"] != "api_key":
+            continue
         val = request.headers.get(key_info["header_name"])
-        logger.debug("DEBUG header %s: %s", key_info["header_name"], "present" if val else "absent/empty")  # DEBUG
         if val:
             keys[key_info["key_name"]] = val
-    logger.debug("DEBUG client_api_keys resolved: %s", list(keys.keys()))  # DEBUG
     return keys
 
 
@@ -122,13 +132,15 @@ def make_embedding_service(client_api_keys: dict[str, str] | None = None) -> Emb
         dim = next((d for k, d in _KNOWN_DIMS.items() if k in model_name), 1024)
         return MockEmbeddingService(embedding_dim=dim)
     preset = settings.get_hardware_preset()
-    api_key_env = preset.embedding.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-    client_key = (client_api_keys or {}).get(api_key_env) or None
+    api_key_env = preset.embedding.model_kwargs.get("api_key_env")
+    client_key = (client_api_keys or {}).get(api_key_env) if api_key_env else None
     return create_embedding_service(
         preset.embedding,
         cache_dir=str(settings.model_weights_path),
         api_key=client_key,
         hf_token=settings.get_api_key("HF_TOKEN"),
+        data_path=settings.data_path,
+        provider=get_provider_or_none(preset, "embedding"),
     )
 
 
@@ -139,8 +151,8 @@ def make_llm_service(client_api_keys: dict[str, str] | None = None, model_name_o
         from backend.services.llm import MockLLMService
         return MockLLMService()
     preset = settings.get_hardware_preset()
-    api_key_env = preset.llm.model_kwargs.get("api_key_env", "OPENAI_API_KEY")
-    client_key = (client_api_keys or {}).get(api_key_env) or None
+    api_key_env = preset.llm.model_kwargs.get("api_key_env")
+    client_key = (client_api_keys or {}).get(api_key_env) if api_key_env else None
     return create_llm_service(settings, api_key=client_key, model_name_override=model_name_override)
 
 
@@ -182,13 +194,15 @@ def make_vector_store() -> VectorStore:
     qdrant_url = settings.qdrant_url or None
     if not qdrant_url:
         _migrate_legacy_db(settings.vector_db_path)
-    return VectorStore(
+    store = VectorStore(
         storage_path=storage_path,
         embedding_dim=embedding_service.get_embedding_dim(),
         embedding_model_name=model_name,
         url=qdrant_url,
         timeout=settings.qdrant_timeout,
     )
+    store.index_events = IndexEventLog(settings.index_events_path)
+    return store
 
 
 def get_vector_store(request: Request) -> VectorStore:

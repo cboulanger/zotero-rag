@@ -1,12 +1,103 @@
 """
 Configuration presets for different hardware scenarios.
 
-Each preset defines the optimal models and settings for different hardware configurations.
+Presets are loaded from JSON files under ``<data_path>/presets/`` rather
+than defined in this module. Bundled defaults live in
+``backend/config/default_presets/`` and are copied into the data
+directory — for any preset name not already present there — by
+``ensure_default_presets``, called from ``Settings.ensure_directories()``
+on every startup, and again defensively from ``get_preset``/``list_presets``
+themselves on every call, so a caller that points ``data_path`` at a fresh
+directory without going through ``Settings.ensure_directories()`` first
+(e.g. a test fixture) still gets a working lookup.
+
+Bundled presets are *always* re-seeded: a file with a bundled name is
+overwritten whenever its content differs from the shipped copy (a WARNING
+names the file when a local edit is discarded), so a schema change always
+reaches an existing deployment. To customise a preset, copy it to a new file
+name; such a custom file is never touched, but is checked against
+``PRESET_SCHEMA_VERSION`` and a mismatch is logged as a warning (it is not
+repaired). See docs/superpowers/specs/2026-10-08-file-based-presets-design.md
+and docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md.
+
+Loaded presets are cached in memory, keyed by (resolved data_path, name):
+once a preset file has been read and validated, every subsequent
+``get_preset()`` call for the same name returns a deep copy of the cached
+object instead of re-reading the file. This matters because this module
+is called from several ``async def`` FastAPI route handlers (directly and
+via ``Settings.get_hardware_preset()``) — per this project's own "never
+block the event loop" rule, synchronous disk I/O must not run on every
+request, and a plain dict-of-HardwarePreset lookup (like the hardcoded
+PRESETS dict this module replaced) is the cheapest way to guarantee that.
+The trade-off: hand-editing an already-loaded preset's *file content*
+while the backend is running requires a restart to take effect (adding a
+*new* preset file, or editing one that hasn't been loaded yet in this
+process, does not). ``ensure_default_presets``/seeding bookkeeping is
+cached per-path separately so it isn't redone on every call either.
 """
 
+import json
+import logging
 import os
-from typing import List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+import platform as _platform_module
+import shutil
+import tempfile
+from fnmatch import fnmatchcase
+from pathlib import Path
+from typing import List, Literal, Optional, Protocol, TypeVar
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+class _HasId(Protocol):
+    id: str
+
+
+T = TypeVar("T", bound=_HasId)
+
+
+def is_glob_pattern(name: str) -> bool:
+    """True if a ``model_names`` entry contains glob wildcards rather than naming one model."""
+    return any(c in name for c in "*?[")
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_PRESETS_DIR = Path(__file__).parent / "default_presets"
+
+# Bump on any breaking change to the preset *file* schema (a key removed,
+# renamed or changed in meaning); additive optional keys do not bump it.
+# Every bundled preset ships this version; a file without a "version" key is
+# treated as version 1 (the schema before per-side providers existed).
+PRESET_SCHEMA_VERSION = 2
+
+# Keys removed from the preset schema, by the version that removed them, as
+# (dotted path, replacement hint). A custom preset still containing one gets a
+# warning naming it; the key itself is ignored by the model.
+REMOVED_KEYS: dict[int, list[tuple[str, str]]] = {
+    2: [
+        ("provisioning_script", "provisioning is a provider capability; add a \"provider\" block to each side"),
+        ("embedding.health_check_provider", "health checks are a provider capability; add a \"provider\" block"),
+        ("llm.health_check_provider", "health checks are a provider capability; add a \"provider\" block"),
+        ("llm.models_status_url", "the live model list is a provider capability; add \"provider\": {\"id\": \"kisski\"} to the llm section"),
+    ],
+}
+
+_seeded_paths: set[Path] = set()
+_preset_cache: dict[tuple[Path, str], "HardwarePreset"] = {}
+_warned_custom_presets: set[Path] = set()
+
+
+class ProviderConfig(BaseModel):
+    """Which provider class serves one side (embedding or LLM) of a preset.
+
+    ``id`` selects a class from ``backend.providers`` by its registry id;
+    ``scope`` picks who supplies the credential (``None`` means the provider's
+    class default); ``options`` is opaque to core and validated by the
+    provider class itself.
+    """
+
+    id: str = "generic"
+    scope: Optional[Literal["user", "shared", "managed"]] = None
+    options: dict = Field(default_factory=dict)
 
 
 class EmbeddingConfig(BaseModel):
@@ -17,21 +108,25 @@ class EmbeddingConfig(BaseModel):
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
     batch_size: int = Field(default=32, description="Batch size for embedding generation")
     cache_enabled: bool = Field(default=True, description="Enable content-hash based caching")
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving this side (see backend.providers).",
+    )
 
 
 class LLMConfig(BaseModel):
     """Configuration for LLM models."""
 
     model_type: Literal["local", "remote"] = "local"
-    model_names: List[str] = Field(..., description="Model identifier(s) — first entry is the default")
+    model_names: List[str] = Field(..., description="Model identifier(s) or glob patterns. A provider's live model list is filtered to these; the first entry is the default")
     quantization: Optional[Literal["4bit", "8bit", "none"]] = None
     max_context_length: int = Field(default=4096, description="Maximum context window size")
     max_answer_tokens: int = Field(default=2048, description="Maximum tokens for generated answers")
     temperature: float = Field(default=0.7, description="Sampling temperature")
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
-    models_status_url: Optional[str] = Field(
-        default=None,
-        description="URL to query for per-model availability metrics (KISSKI format: POST → data[].{id, demand, status})",
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving this side (see backend.providers).",
     )
 
     @field_validator("model_names", mode="before")
@@ -41,26 +136,43 @@ class LLMConfig(BaseModel):
             return [m.strip() for m in v.split(",") if m.strip()]
         return v  # type: ignore[return-value]
 
+    @model_validator(mode="after")
+    def require_a_literal_model_name(self) -> "LLMConfig":
+        # Wildcard-only lists have no usable default when the live model list is unavailable.
+        if not self.literal_model_names:
+            raise ValueError("model_names needs at least one entry without wildcards (*, ?, [)")
+        return self
+
+    @property
+    def literal_model_names(self) -> List[str]:
+        """Entries that are real model ids (no glob characters): the static fallback list."""
+        return [m for m in self.model_names if not is_glob_pattern(m)]
+
     @property
     def model_name(self) -> str:
-        """Backward-compatible alias: returns the first (default) model name."""
-        return self.model_names[0]
+        """Default model when no live list is available: the first literal entry."""
+        return self.literal_model_names[0]
 
+    def matches_model(self, model_id: str) -> bool:
+        """True if ``model_id`` matches any ``model_names`` entry (case-insensitive glob)."""
+        return any(fnmatchcase(model_id.lower(), p.lower()) for p in self.model_names)
 
-# Fallback model list for KISSKI presets — used only when the live API is unreachable.
-# The active preset replaces this list at runtime via fetch_kisski_rag_models().
-# First entry is the default. Update when models are decommissioned on KISSKI.
-# All KISSKI llm.model_kwargs below set extra_body.chat_template_kwargs.enable_thinking=False:
-# several models here (Qwen3.x, deepseek-r1*) run vLLM "thinking" mode by default and will
-# otherwise spend the entire max_tokens budget on hidden reasoning, returning
-# message.content=None with finish_reason="length" instead of an answer.
-KISSKI_RAG_MODELS: List[str] = [
-    "mistral-large-3-675b-instruct-2512",   # Mistral Large 3, excellent general-purpose
-    "qwen3.5-122b-a10b",                    # large MoE, high quality
-    "gemma-4-31b-it",                       # efficient, multimodal-capable
-    "deepseek-r1-distill-llama-70b",        # reasoning model, strong instruction following
-    "qwen3-30b-a3b-instruct-2507",          # text-focused MoE, recent Qwen3
-]
+    def filter_models(self, models: List[T]) -> List[T]:
+        """Restrict a provider's live list to ``model_names`` patterns.
+
+        Entries are ``fnmatch`` globs (a plain name matches only itself). The result
+        follows the order of ``model_names`` — so the first entry's match is the default
+        — and the provider's own order within one pattern. A model matching several
+        patterns appears once, at its first pattern.
+        """
+        ordered: List[T] = []
+        seen: set[str] = set()
+        for pattern in self.model_names:
+            for m in models:
+                if m.id not in seen and fnmatchcase(m.id.lower(), pattern.lower()):
+                    seen.add(m.id)
+                    ordered.append(m)
+        return ordered
 
 
 class RAGConfig(BaseModel):
@@ -76,263 +188,268 @@ class HardwarePreset(BaseModel):
 
     name: str
     description: str
+    version: int = Field(
+        default=1,
+        description="Preset file schema version (PRESET_SCHEMA_VERSION); absent means 1.",
+    )
     embedding: EmbeddingConfig
     llm: LLMConfig
     rag: RAGConfig
     memory_budget_gb: float = Field(..., description="Estimated memory usage in GB")
+    platform: Literal["any", "darwin", "linux", "windows"] = Field(
+        default="any",
+        description="Host OS this preset is meant for. 'any' (the default) is visible "
+                    "everywhere; a preset naming a specific platform (e.g. a local-model "
+                    "preset that needs Apple Silicon's MPS backend, or a Windows-oriented "
+                    "preset) is hidden from listings shown to a client on any other "
+                    "platform — see current_platform() and list_presets()'s platform= arg.",
+    )
 
 
-# Define available presets
-PRESETS = {
-    "apple-silicon-32gb": HardwarePreset(
-        name="apple-silicon-32gb",
-        description="Optimized for Apple Silicon Macs with 32GB RAM — local multilingual embeddings via MPS",
-        embedding=EmbeddingConfig(
-            model_type="local",
-            model_name="intfloat/multilingual-e5-large-instruct",  # 1024-dim, same model as KISSKI remote
-            model_kwargs={"device": "mps"},
-            batch_size=64,
-        ),
-        llm=LLMConfig(
-            model_type="local",
-            model_names="mistralai/Mistral-7B-Instruct-v0.3",
-            quantization="4bit",
-            max_context_length=8192,
-            max_answer_tokens=2048,
-            temperature=0.7,
-            model_kwargs={"device_map": "auto", "trust_remote_code": True},
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.35,
-            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
-        ),
-        memory_budget_gb=10.0,
-    ),
-
-    "high-memory": HardwarePreset(
-        name="high-memory",
-        description="For systems with >24GB RAM (GPU or Apple Silicon)",
-        embedding=EmbeddingConfig(
-            model_type="local",
-            model_name="sentence-transformers/all-mpnet-base-v2",
-            batch_size=64,
-        ),
-        llm=LLMConfig(
-            model_type="local",
-            model_names="mistralai/Mistral-7B-Instruct-v0.3",
-            quantization="8bit",
-            max_context_length=8192,
-            max_answer_tokens=2048,  # Larger model can handle more
-            temperature=0.7,
-            model_kwargs={"device_map": "auto"},
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.4,  # all-mpnet-base-v2 produces higher quality scores
-            max_chunk_size=768,
-        ),
-        memory_budget_gb=16.0,
-    ),
-
-    "cpu-only": HardwarePreset(
-        name="cpu-only",
-        description="CPU-optimized smaller models",
-        embedding=EmbeddingConfig(
-            model_type="local",
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            batch_size=16,
-        ),
-        llm=LLMConfig(
-            model_type="local",
-            model_names="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            quantization="4bit",
-            max_context_length=2048,
-            max_answer_tokens=512,  # Small model, limited capacity
-            temperature=0.7,
-            model_kwargs={"device_map": "cpu"},
-        ),
-        rag=RAGConfig(
-            top_k=5,
-            score_threshold=0.3,  # all-MiniLM-L6-v2 tends to have lower absolute scores
-            max_chunk_size=384,
-        ),
-        memory_budget_gb=3.0,
-    ),
-
-    "remote-openai": HardwarePreset(
-        name="remote-openai",
-        description="Using OpenAI/Anthropic remote inference endpoints",
-        embedding=EmbeddingConfig(
-            model_type="remote",
-            model_name="openai",  # Will use OpenAI embeddings API
-            batch_size=100,
-        ),
-        llm=LLMConfig(
-            model_type="remote",
-            model_names="gpt-4o-mini",  # Or anthropic/claude-3-5-sonnet
-            max_context_length=128000,
-            max_answer_tokens=4096,  # Large context window allows comprehensive answers
-            temperature=0.7,
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.5,  # OpenAI embeddings are well-calibrated, can use higher threshold
-            max_chunk_size=1024,
-        ),
-        memory_budget_gb=1.0,  # Minimal local memory needed
-    ),
-
-    "apple-silicon-kisski": HardwarePreset(
-        name="apple-silicon-kisski",
-        description="Apple Silicon (16-32GB) with KISSKI remote embeddings + LLM (fully remote, no torch)",
-        embedding=EmbeddingConfig(
-            model_type="remote",
-            model_name="multilingual-e5-large-instruct",  # KISSKI: good for multilingual academic content
-            batch_size=64,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-            },
-        ),
-        llm=LLMConfig(
-            model_type="remote",
-            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
-            max_context_length=128000,
-            max_answer_tokens=4096,
-            temperature=0.7,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
-            },
-            models_status_url="https://chat-ai.academiccloud.de/v1/models",
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.35,
-            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
-        ),
-        memory_budget_gb=0.5,  # Fully remote — minimal local footprint
-    ),
-
-    "remote-kisski": HardwarePreset(
-        name="remote-kisski",
-        description="Fully remote via GWDG KISSKI/SAIA Academic Cloud (no local GPU or torch required)",
-        embedding=EmbeddingConfig(
-            model_type="remote",
-            model_name="multilingual-e5-large-instruct",  # KISSKI: 1024-dim, multilingual
-            batch_size=int(os.environ.get("EMBEDDING_BATCH_SIZE", "256")),  # tunable; lower to reduce peak RSS
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-            },
-        ),
-        llm=LLMConfig(
-            model_type="remote",
-            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
-            max_context_length=128000,
-            max_answer_tokens=4096,
-            temperature=0.7,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
-            },
-            models_status_url="https://chat-ai.academiccloud.de/v1/models",
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.35,  # multilingual-e5-large-instruct scores
-            max_chunk_size=800,    # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
-        ),
-        memory_budget_gb=0.5,  # Fully remote — no local model weights
-    ),
-
-    "cloud-server-kisski": HardwarePreset(
-        name="cloud-server-kisski",
-        description="Cloud server (16GB RAM, 4 vCPU, no GPU): local multilingual embeddings + KISSKI LLM",
-        embedding=EmbeddingConfig(
-            model_type="local",
-            model_name="intfloat/multilingual-e5-small",  # ~470MB, CPU-friendly, multilingual
-            batch_size=16,  # Conservative batch size for CPU-only inference
-        ),
-        llm=LLMConfig(
-            model_type="remote",
-            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
-            max_context_length=128000,
-            max_answer_tokens=4096,
-            temperature=0.7,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
-            },
-            models_status_url="https://chat-ai.academiccloud.de/v1/models",
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.3,  # e5-small tends toward lower absolute scores
-            max_chunk_size=768,
-        ),
-        memory_budget_gb=2.0,  # ~470MB model + overhead
-    ),
-
-    "windows-test": HardwarePreset(
-        name="windows-test",
-        description="Windows-compatible: fully remote via KISSKI (avoids PyTorch/CUDA setup)",
-        embedding=EmbeddingConfig(
-            model_type="remote",
-            model_name="multilingual-e5-large-instruct",  # KISSKI embeddings
-            batch_size=64,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-            },
-        ),
-        llm=LLMConfig(
-            model_type="remote",
-            model_names=KISSKI_RAG_MODELS,  # KISSKI: multiple options, llama is default
-            max_context_length=128000,
-            max_answer_tokens=4096,
-            temperature=0.7,
-            model_kwargs={
-                "base_url": "https://chat-ai.academiccloud.de/v1",
-                "api_key_env": "KISSKI_API_KEY",
-                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},  # disable thinking mode
-            },
-            models_status_url="https://chat-ai.academiccloud.de/v1/models",
-        ),
-        rag=RAGConfig(
-            top_k=10,
-            score_threshold=0.35,
-            max_chunk_size=800,  # multilingual-e5-large-instruct has 512-token limit; ~2 chars/token for dense text
-        ),
-        memory_budget_gb=0.5,  # Fully remote
-    ),
-}
-
-
-def get_preset(name: str) -> HardwarePreset:
+def current_platform() -> str:
     """
-    Get a hardware preset by name.
+    This host's normalized platform identifier: 'darwin', 'linux', or 'windows'.
+
+    Matches the values a preset's own `platform` field can declare, so a
+    caller can filter a preset listing with
+    ``list_presets(data_path, platform=current_platform())``.
+    """
+    return _platform_module.system().lower()
+
+
+def _bundled_names() -> set[str]:
+    """File names (``<name>.json``) of the presets shipped with the backend."""
+    return {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+
+
+def ensure_default_presets(data_path: Path) -> None:
+    """
+    Seed <data_path>/presets/ with the bundled default preset files.
+
+    Every file under DEFAULT_PRESETS_DIR is written to the data directory
+    unless the bytes already there are identical. A bundled-name file whose
+    content differs (a local edit, or an older schema) is overwritten and a
+    WARNING names it; customise a preset by copying it to a new file name.
+    Files with other names are never touched. A given data_path is seeded at
+    most once per process (cached by resolved path): get_preset/list_presets
+    call this defensively on every invocation (see module docstring), and
+    redoing the directory scan on every call would be wasted work once a
+    path is known to already be seeded.
+    """
+    resolved = Path(data_path).resolve()
+    if resolved in _seeded_paths:
+        return
+
+    presets_dir = resolved / "presets"
+    presets_dir.mkdir(parents=True, exist_ok=True)
+    for default_file in DEFAULT_PRESETS_DIR.glob("*.json"):
+        target = presets_dir / default_file.name
+        content = default_file.read_bytes()
+        if target.exists():
+            try:
+                if target.read_bytes() == content:
+                    continue
+            except OSError:
+                pass  # unreadable: fall through and replace it
+            logger.warning(
+                "Bundled preset %s was modified locally; local changes were replaced. "
+                "To customise a preset, copy it to a new file name.",
+                target.name,
+            )
+        # Write via a temp file + atomic rename (same pattern as
+        # admin_settings_store._atomic_write_json) rather than a direct
+        # write, so a concurrent reader (e.g. another process sharing
+        # this data_path, like the cron indexer) can never observe a
+        # partially-written preset file.
+        fd, tmp_path = tempfile.mkstemp(dir=presets_dir, suffix=".tmp", prefix=default_file.stem + "_")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(content)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+    _seeded_paths.add(resolved)
+
+
+def _lookup_dotted(data: dict, dotted: str) -> bool:
+    """True if the dotted key path (e.g. ``llm.models_status_url``) is present."""
+    node: object = data
+    for part in dotted.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _check_custom_preset(path: Path, data: dict) -> None:
+    """Warn (once per file per process) about a custom preset's schema drift.
+
+    A *custom* preset is any file whose name is not a bundled one. It still
+    loads; the warning only says what is likely to behave differently.
+    """
+    if path.name in _bundled_names():
+        return
+    resolved = path.resolve()
+    if resolved in _warned_custom_presets:
+        return
+    _warned_custom_presets.add(resolved)
+
+    declared = data.get("version", 1)
+    problems: list[str] = []
+    if declared != PRESET_SCHEMA_VERSION:
+        problems.append(
+            f"it declares version {declared!r}, the current version is {PRESET_SCHEMA_VERSION}; "
+            "fields may be ignored or behave differently (see the preset changelog in docs/presets.md)"
+        )
+    for removed_in, entries in REMOVED_KEYS.items():
+        if removed_in <= (declared if isinstance(declared, int) else 0):
+            continue
+        for dotted, hint in entries:
+            if _lookup_dotted(data, dotted):
+                problems.append(f"'{dotted}' was removed in version {removed_in} and is ignored ({hint})")
+    llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+    names = llm.get("model_names")
+    first_model = (names[0] if isinstance(names, list) and names else names) or ""
+    provider_id = (llm.get("provider") or {}).get("id", "generic") if isinstance(llm.get("provider"), dict) else "generic"
+    if isinstance(first_model, str) and "claude" in first_model.lower() and provider_id != "anthropic":
+        problems.append(
+            f"LLM model {first_model!r} looks like a Claude model but its provider is {provider_id!r}; "
+            "models are no longer routed to Anthropic by name - set "
+            '"provider": {"id": "anthropic"} on the llm section'
+        )
+    if problems:
+        logger.warning("Custom preset %s: %s.", path.name, "; ".join(problems))
+
+
+def _load_preset_file(path: Path) -> HardwarePreset:
+    """
+    Load and validate a single preset file.
+
+    The file's own "name" key, if present, is ignored — the preset name
+    always comes from the filename stem, so a rename or copy can't leave
+    a preset's identity out of sync with its content.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        # ValueError also covers json.JSONDecodeError and UnicodeDecodeError
+        # (raised by read_text on non-UTF-8 bytes) — both are "this file is
+        # unreadable", not a schema problem, so both get the same message.
+        raise ValueError(f"Could not read preset file '{path}': {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Preset file '{path}' must contain a JSON object")
+    data["name"] = path.stem
+    try:
+        preset = HardwarePreset.model_validate(data)
+    except Exception as exc:
+        raise ValueError(f"Invalid preset file '{path}': {exc}") from exc
+    _check_custom_preset(path, data)
+    return preset
+
+
+def get_preset(name: str, data_path: Optional[Path] = None) -> HardwarePreset:
+    """
+    Get a hardware preset by name, loading it from <data_path>/presets/<name>.json.
 
     Args:
-        name: Preset name (e.g., "apple-silicon-32gb")
+        name: Preset name (e.g., "cpu-only")
+        data_path: Base data directory. Defaults to the global Settings' data_path.
 
     Returns:
-        HardwarePreset configuration
+        HardwarePreset configuration (a fresh copy — safe for the caller to
+        mutate, e.g. Settings.get_hardware_preset()'s EMBEDDING_BATCH_SIZE
+        override — without corrupting the in-memory cache).
 
     Raises:
-        ValueError: If preset name is not found
+        ValueError: If preset name is not found, its file is malformed/invalid,
+            or its providers break a load-time rule (see backend.providers).
     """
-    if name not in PRESETS:
-        available = ", ".join(PRESETS.keys())
+    if name != Path(name).name:
+        # Rejects anything with a path separator or a ".."/"." component
+        # (e.g. "../../etc/passwd") before it ever reaches the filesystem —
+        # defense in depth should a less-trusted caller ever reach this
+        # function directly, even though today's only HTTP-reachable caller
+        # (backend/api/config.py) already validates against list_presets().
+        raise ValueError(f"Invalid preset name: {name!r}")
+
+    if data_path is None:
+        from backend.config.settings import get_settings
+        data_path = get_settings().data_path
+    resolved = Path(data_path).resolve()
+    ensure_default_presets(resolved)
+
+    cache_key = (resolved, name)
+    cached = _preset_cache.get(cache_key)
+    if cached is not None:
+        return cached.model_copy(deep=True)
+
+    path = resolved / "presets" / f"{name}.json"
+    if not path.exists():
+        available = ", ".join(list_presets(resolved))
         raise ValueError(f"Unknown preset '{name}'. Available: {available}")
 
-    return PRESETS[name]
+    preset = _load_preset_file(path)
+    from backend.providers import apply_provider_defaults, provider_config_error
+
+    problem = provider_config_error(preset)
+    if problem:
+        raise ValueError(f"Preset '{name}' is unavailable: {problem}")
+    # Fill each provider's defaults (key patterns, default key names, key-portal
+    # links) into model_kwargs once, so the services keep reading model_kwargs only.
+    apply_provider_defaults(preset)
+    _preset_cache[cache_key] = preset
+    return preset.model_copy(deep=True)
 
 
-def list_presets() -> list[str]:
-    """List all available preset names."""
-    return list(PRESETS.keys())
+def list_presets(data_path: Optional[Path] = None, *, platform: Optional[str] = None) -> list[str]:
+    """
+    List all available preset names found under <data_path>/presets/.
+
+    A file that fails to parse or validate is skipped (with a logged
+    warning) rather than raising, so one broken custom preset doesn't hide
+    every other valid preset. Unlike get_preset(), this always re-scans the
+    directory (not cached) so a newly added or removed preset file shows up
+    immediately — this is only called from low-frequency admin/tooling
+    paths, not the hot query path, so that cost is acceptable.
+
+    Args:
+        platform: If given, a preset whose own `platform` field names a
+            specific platform other than this one is excluded — e.g.
+            list_presets(data_path, platform=current_platform()) hides the
+            bundled Windows/Apple-Silicon-only presets on a Linux host.
+            Omit it (the default) for an unfiltered listing of every
+            preset regardless of platform (e.g. internal tooling that
+            wants to see everything).
+    """
+    if data_path is None:
+        from backend.config.settings import get_settings
+        data_path = get_settings().data_path
+    resolved = Path(data_path).resolve()
+    ensure_default_presets(resolved)
+
+    presets_dir = resolved / "presets"
+    if not presets_dir.is_dir():
+        return []
+
+    from backend.providers import provider_config_error
+
+    names = []
+    for path in sorted(presets_dir.glob("*.json")):
+        try:
+            preset = _load_preset_file(path)
+        except ValueError as exc:
+            logger.warning("Skipping invalid preset file: %s", exc)
+            continue
+        problem = provider_config_error(preset)
+        if problem:
+            logger.warning("Skipping unavailable preset %s: %s", path.name, problem)
+            continue
+        if platform is not None and preset.platform not in ("any", platform):
+            continue
+        names.append(path.stem)
+    return names

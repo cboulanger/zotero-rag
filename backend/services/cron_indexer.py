@@ -26,20 +26,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
+import psutil
 from filelock import FileLock, Timeout
 
 from backend.api.document_upload import _execute_upload_impl
 from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
+from backend.providers import get_provider_or_none
+from backend.services.effective_preset import preset_for_target
 from backend.db.vector_store import VectorStore
 from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     create_embedding_service,
+    RemoteEmbeddingService,
 )
+from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
 from backend.services import pending_upload_cache
 from backend.zotero.web_api import ZoteroWebAPI
 
@@ -62,6 +68,22 @@ class SlugSkipRequested(Exception):
     """Raised to unwind out of indexing the current slug when an admin requests a skip."""
 
 
+# DocumentUploadResult.error_type values that mean "this affects every
+# remaining entry in the drain queue identically" — see
+# CronIndexer._drain_pending_uploads, which stops early and re-raises the
+# matching exception on any of these instead of recording each as an
+# isolated per-attachment failure and continuing through the whole backlog.
+_FATAL_UPLOAD_ERROR_TYPES = {
+    "EmbeddingAuthenticationError",
+    "EmbeddingEndpointUnavailableError",
+    "EmbeddingRateLimitExhaustedError",
+    "KreuzbergUnavailableError",
+}
+
+
+_SYSTEMIC_EMBEDDING_ERROR_TYPES = _FATAL_UPLOAD_ERROR_TYPES - {"KreuzbergUnavailableError"}
+
+
 @dataclass
 class SlugInfo:
     """Parsed Zotero library slug with all ID representations."""
@@ -72,8 +94,32 @@ class SlugInfo:
     numeric_id: str     # "12345" (display and web API)
 
 
-def is_process_alive(pid: int) -> bool:
-    """Return True if a process with the given PID is currently running."""
+def is_process_alive(pid: int, expected_create_time: Optional[float] = None) -> bool:
+    """Return True if a process with the given PID is currently running.
+
+    If `expected_create_time` is given (a process's creation time as recorded
+    via `psutil.Process.create_time()` at the moment its PID was captured),
+    this also verifies the process currently holding `pid` is the SAME
+    process that was recorded, not merely some process that happens to have
+    the same number now.
+
+    A bare PID check is not sufficient for that: once a process exits, the
+    OS is free to recycle its PID number for an unrelated process — or even
+    for a *thread* of a different, long-lived process, since Linux allocates
+    PIDs and TIDs from the same namespace, and `os.kill(tid, 0)` against a
+    reused PID that is now a thread of another process still succeeds. That
+    let a long-dead indexer run appear perpetually "alive" in production
+    (the recycled PID had become a thread of the backend's own process),
+    permanently wedging the status and, worse, making an abort request
+    deliver SIGTERM to the backend itself (see abort_process).
+    """
+    if expected_create_time is not None:
+        try:
+            actual_create_time = psutil.Process(pid).create_time()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+        return abs(actual_create_time - expected_create_time) < 1.0
+
     if sys.platform == "win32":
         # On Windows, os.kill(pid, 0) opens the process handle; raises
         # PermissionError if alive but inaccessible, OSError if not found.
@@ -94,8 +140,14 @@ def is_process_alive(pid: int) -> bool:
             return True  # alive, insufficient permission
 
 
-def abort_process(pid: int) -> bool:
+def abort_process(pid: int, expected_create_time: Optional[float] = None) -> bool:
     """Send a termination signal to a running cron-indexer process.
+
+    `expected_create_time` (see is_process_alive) must match the live
+    process at `pid`, or no signal is sent — this is the safety check that
+    stops a recycled PID (e.g. one that now belongs to a thread of the
+    backend's own process) from being signalled, which would otherwise kill
+    the wrong thing entirely.
 
     Returns False if the process was already gone. Uses the same POSIX/Windows
     branching as is_process_alive(): SIGTERM on POSIX (kernel releases the
@@ -103,7 +155,7 @@ def abort_process(pid: int) -> bool:
     via os.kill(pid, signal.SIGTERM) on Windows (Python maps this to
     TerminateProcess for non-Python-created handles).
     """
-    if not is_process_alive(pid):
+    if not is_process_alive(pid, expected_create_time):
         return False
     try:
         os.kill(pid, signal.SIGTERM)
@@ -114,21 +166,63 @@ def abort_process(pid: int) -> bool:
     return True
 
 
+def mark_run_stopped(data_path: Path, reason: Literal["crashed", "aborted"]) -> dict:
+    """Persist that the current run is no longer active, resolving any slug
+    still marked "indexing" to the same reason (with a finished_at) so it
+    doesn't keep showing as actively running in the UI forever.
+
+    Called from two places: read_live_status, to self-heal a status file
+    left behind by a process that died without updating it (reason=
+    "crashed"), and the abort endpoint, immediately after signalling the
+    process (reason="aborted") — so a deliberate stop is reported
+    correctly instead of looking identical to an unexpected crash.
+    Idempotent: safe to call even if another reader already applied this
+    same update (running is already False, so there's nothing to resolve).
+    """
+    status_path = data_path / "system" / "cron_status.json"
+    try:
+        cron_data = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not cron_data.get("running"):
+        return cron_data
+    cron_data["running"] = False
+    cron_data[reason] = True
+    finished_at = datetime.now(timezone.utc).isoformat()
+    for slug_status in cron_data.get("slugs", {}).values():
+        if slug_status.get("status") == "indexing":
+            slug_status["status"] = reason
+            slug_status["finished_at"] = finished_at
+    fd, tmp_path = tempfile.mkstemp(dir=status_path.parent, suffix=".tmp", prefix="cron_status_")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cron_data, f, indent=2, default=str)
+        os.replace(tmp_path, status_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return cron_data
+
+
 def read_live_status(data_path: Path) -> dict:
     """Return the last cron run's live status from ``system/cron_status.json``.
 
     Applies a liveness check: if the status file claims ``running=True`` but the
-    recorded PID is no longer alive, the run is reported as crashed. Returns an
-    empty dict when no status file exists yet (no cron run has happened).
+    recorded PID is no longer alive (or now belongs to a different process —
+    see is_process_alive), the run is persisted and reported as crashed (see
+    mark_run_stopped). Returns an empty dict when no status file exists yet
+    (no cron run has happened).
     """
     status_path = data_path / "system" / "cron_status.json"
     if not status_path.exists():
         return {}
     cron_data = json.loads(status_path.read_text(encoding="utf-8"))
     if cron_data.get("running") and cron_data.get("pid"):
-        if not is_process_alive(int(cron_data["pid"])):
-            cron_data["running"] = False
-            cron_data["crashed"] = True
+        if not is_process_alive(int(cron_data["pid"]), cron_data.get("pid_create_time")):
+            cron_data = mark_run_stopped(data_path, "crashed")
     return cron_data
 
 
@@ -333,6 +427,7 @@ class CronIndexer:
             "running": True,
             "started_at": started_at,
             "pid": os.getpid(),
+            "pid_create_time": psutil.Process(os.getpid()).create_time(),
             "slugs": {s.slug: {"status": "pending"} for s in slug_infos},
             "key_issues": getattr(self, "key_issues", []),
         }
@@ -373,7 +468,12 @@ class CronIndexer:
 
                 rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:
-                    status["last_rate_limit_headers"] = rate_limit_headers
+                    # Per side, so a later LLM-side capture can sit next to it.
+                    status.setdefault("last_usage", {})["embedding"] = {
+                        "headers": rate_limit_headers,
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "preset": get_settings().get_hardware_preset().name,
+                    }
                 status["slugs"][slug_info.slug].update({
                     "status": "done",
                     "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -558,31 +658,50 @@ class CronIndexer:
                     # Either way, one bad entry must not abort the rest of this library's
                     # queue or any other library in the run.
                     self.log.error("Drain of cached upload %s/%s raised: %s", slug_info.library_id, attachment_key, exc)
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, str(exc))
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), str(exc),
+                    )
                     failed += 1
                     continue
                 if result.status == "error":
-                    await asyncio.to_thread(pending_upload_cache.record_failure, data_path, slug_info.library_id, attachment_key, result.message)
+                    # Embedding auth/quota/endpoint failures say nothing about this file,
+                    # so they must not count toward quarantining it; a Kreuzberg outage
+                    # does (the file may be what crashed the sidecar).
+                    await asyncio.to_thread(
+                        pending_upload_cache.note_failure, get_settings(), slug_info.library_id,
+                        attachment_key, entry.get("item_key"), result.message,
+                        result.error_type not in _SYSTEMIC_EMBEDDING_ERROR_TYPES,
+                    )
                     failed += 1
-                    if result.error_type == "EmbeddingRateLimitExhaustedError":
-                        # The quota is exhausted for (likely) hours, not this one
-                        # attachment's fault — every remaining entry would fail the
-                        # exact same way. Stop here instead of burning through the
-                        # rest of the backlog: each attempt still fully downloads
-                        # and extracts (Kreuzberg OCR included) before reaching the
-                        # embedding call that's guaranteed to fail, which previously
-                        # meant a large backlog kept hammering the kreuzberg sidecar
-                        # — sequential, one request at a time — for nothing, run
-                        # after run, until the quota reset. Raising here (rather
-                        # than returning a flag) reuses _index_slug's existing
-                        # EmbeddingRateLimitExhaustedError handling, including the
-                        # key_store rate_limited status update.
-                        available_at = (
-                            datetime.fromisoformat(result.rate_limit_available_at)
-                            if result.rate_limit_available_at
-                            else datetime.now(timezone.utc)
-                        )
-                        raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
+                    if result.error_type in _FATAL_UPLOAD_ERROR_TYPES:
+                        # A systemic failure — bad/rate-limited credentials, or
+                        # the shared embedding/extraction backend itself being
+                        # down — affects every remaining entry identically.
+                        # Stop here instead of burning through the rest of the
+                        # backlog: each attempt still fully downloads and
+                        # extracts (Kreuzberg OCR included) before reaching
+                        # whichever stage is guaranteed to fail, which
+                        # previously meant a large backlog kept hammering a
+                        # dead sidecar/endpoint — sequential, one request at a
+                        # time — for nothing, run after run, until it
+                        # recovered. Raising here (rather than returning a
+                        # flag) reuses _index_slug's existing per-type
+                        # handling, including the key_store status update for
+                        # the two cases where that's meaningful.
+                        if result.error_type == "EmbeddingRateLimitExhaustedError":
+                            available_at = (
+                                datetime.fromisoformat(result.rate_limit_available_at)
+                                if result.rate_limit_available_at
+                                else datetime.now(timezone.utc)
+                            )
+                            raise EmbeddingRateLimitExhaustedError(result.message, available_at=available_at)
+                        elif result.error_type == "EmbeddingAuthenticationError":
+                            raise EmbeddingAuthenticationError(result.message)
+                        elif result.error_type == "EmbeddingEndpointUnavailableError":
+                            raise EmbeddingEndpointUnavailableError(result.message)
+                        elif result.error_type == "KreuzbergUnavailableError":
+                            raise KreuzbergUnavailableError(result.message)
                 else:
                     await asyncio.to_thread(pending_upload_cache.delete_entry, data_path, slug_info.library_id, attachment_key)
                     drained += 1
@@ -633,8 +752,22 @@ class CronIndexer:
                 if control.get("skip_slug") == slug_info.slug:
                     raise SlugSkipRequested(slug_info.slug)
 
-        preset = get_settings().get_hardware_preset()
-        embedding_service = create_embedding_service(preset.embedding, api_key=target["embedding_key"])
+        preset = preset_for_target(get_settings(), target)
+        embedding_service = create_embedding_service(
+            preset.embedding, api_key=target["embedding_key"], data_path=get_settings().data_path,
+            provider=get_provider_or_none(preset, "embedding"),
+        )
+
+        if isinstance(embedding_service, RemoteEmbeddingService) and await embedding_service.is_paused():
+            # The owner paused the endpoint on purpose: skip their libraries without calling it
+            # (and without touching their key's status or any pending upload's attempt count).
+            reason = "embedding_paused"
+            self.log.warning("Embedding endpoint is paused for %s; skipping.", slug_info.slug)
+            status["slugs"][slug_info.slug]["status"] = "skipped"
+            status["slugs"][slug_info.slug]["skip_reason"] = reason
+            status["slugs"][slug_info.slug]["skip_detail"] = "The embedding endpoint is paused; resume it in Preferences."
+            self._write_status(status)
+            return {"status": "skipped", "skip_reason": reason}
 
         try:
             # Inside the try (not before it): progress_callback can now raise
@@ -690,9 +823,29 @@ class CronIndexer:
         except EmbeddingAuthenticationError as exc:
             fp = target.get("fingerprint")
             if fp and self.key_store:
-                self.key_store.set_embedding_key_status(fp, "invalid")
+                self.key_store.set_embedding_key_status(fp, "invalid", key_name=target.get("embedding_key_name"))
             self.log.error("Embedding API rejected credentials for %s: %s", slug_info.slug, exc)
             error_message = f"Embedding API authentication failed: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except EmbeddingEndpointUnavailableError as exc:
+            # Not a per-user key problem (e.g. remote-mpcdf's shared key is
+            # fine) — the endpoint route itself is gone, most commonly an
+            # expired ephemeral job. No key_store update: this isn't about
+            # any individual user's credentials.
+            self.log.error("Embedding endpoint unavailable for %s: %s", slug_info.slug, exc)
+            error_message = f"Embedding endpoint unavailable: {exc}"
+            status["slugs"][slug_info.slug]["status"] = "error"
+            status["slugs"][slug_info.slug]["error"] = error_message
+            self._write_status(status)
+            return {"status": "error", "error": error_message}
+        except KreuzbergUnavailableError as exc:
+            # Also not a per-user problem — the shared extraction sidecar
+            # itself is down. No key_store update.
+            self.log.error("Extraction sidecar unavailable for %s: %s", slug_info.slug, exc)
+            error_message = f"Extraction sidecar unavailable: {exc}"
             status["slugs"][slug_info.slug]["status"] = "error"
             status["slugs"][slug_info.slug]["error"] = error_message
             self._write_status(status)
@@ -701,15 +854,21 @@ class CronIndexer:
             fp = target.get("fingerprint")
             if fp and self.key_store:
                 self.key_store.set_embedding_key_status(
-                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat()
+                    fp, "rate_limited", rate_limit_until=exc.available_at.isoformat(),
+                    key_name=target.get("embedding_key_name"),
                 )
             self.log.warning(
                 "Embedding quota exhausted for %s: available again at %s", slug_info.slug, exc.available_at
             )
             status["slugs"][slug_info.slug]["status"] = "skipped"
             status["slugs"][slug_info.slug]["skip_reason"] = "embedding_rate_limit"
+            status["slugs"][slug_info.slug]["rate_limit_until"] = exc.available_at.isoformat()
             self._write_status(status)
-            return {"status": "skipped", "skip_reason": "embedding_rate_limit"}
+            return {
+                "status": "skipped",
+                "skip_reason": "embedding_rate_limit",
+                "rate_limit_until": exc.available_at.isoformat(),
+            }
         except SlugSkipRequested:
             self.log.info("Skip requested by admin for %s; moving to next slug.", slug_info.slug)
             status["slugs"][slug_info.slug]["status"] = "skipped"

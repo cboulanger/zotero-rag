@@ -66,8 +66,14 @@ async function startup({ id, version, rootURI }) {
 	// dialog.xhtml for ZoteroRAGDialog's use) has never been opened.
 	Services.scriptloader.loadSubScript(rootURI + 'remote_indexer.js');
 
+	// Plugin-lifetime too: polls the backend for attachment indexed/un-indexed
+	// events and keeps the emoji "indexed" tag in sync; also driven by the
+	// Preferences pane's Refresh button. Must load before zotero-rag.js starts it.
+	Services.scriptloader.loadSubScript(rootURI + 'indexed-tags.js');
+
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
+	Services.scriptloader.loadSubScript(rootURI + 'provider-sections.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;

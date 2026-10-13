@@ -18,6 +18,8 @@ from backend.models.filters import MetadataFilters
 from backend.models.trace import AgentExecutionTrace, ChunkTrace, LLMCallTrace, RetrievalTrace
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
+from backend.services.lexical_rerank import fuse_lexical
+from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
 from backend.db.vector_store import VectorStore
 from backend.config.settings import Settings
 
@@ -44,6 +46,102 @@ def _looks_like_tool_call_leak(text: str) -> bool:
     """True if `text` looks like leaked tool/function-call pseudocode rather
     than a natural-language answer."""
     return bool(_TOOL_CALL_LEAK_PATTERN.search(text))
+
+
+# A reasoning-capable model can leak its raw step-by-step deliberation into
+# the final answer instead of a clean conclusion — not as a separate
+# <think> block (which would be easy to strip), just as ordinary prose/HTML
+# that backtracks on itself mid-answer. Observed live: qwen3.5-397b-a17b
+# produced a ~2090-word answer (vs. 50-430 words for every other answer in
+# the same eval run) containing repeated "Wait," self-contradicting
+# re-derivations and an explicit "Re-evaluating strictly based on..."
+# restart partway through. Require multiple backtracking markers, not just
+# one, so a legitimate single use of a trigger word in prose (e.g. a paper
+# discussing patient "wait times") doesn't false-positive.
+_REASONING_LEAK_PATTERN = re.compile(
+    r"\bWait,|\bre-?evaluat(?:e|ing)\b|\blet(?:'s| us) (?:re-?check|reconsider|re-?evaluate)\b"
+    r"|\bhold on\b|\bon second thought\b|\bactually,? (?:wait|no)\b",
+    re.IGNORECASE,
+)
+_REASONING_LEAK_MIN_MATCHES = 2
+
+
+def _looks_like_leaked_reasoning(text: str) -> bool:
+    """True if `text` contains repeated backtracking/self-correction language
+    characteristic of a reasoning model's internal deliberation leaking into
+    the final answer, rather than a clean conclusion."""
+    return len(_REASONING_LEAK_PATTERN.findall(text)) >= _REASONING_LEAK_MIN_MATCHES
+
+
+# Weaker models occasionally default to English even when explicitly
+# instructed (see _build_generation_prompt's "Respond in the same language"
+# line) to answer in the question's language. Observed live:
+# qwen3-omni-30b-a3b-instruct answered 2 of 3 non-English gold questions
+# (French, German) entirely in English despite otherwise-correct content,
+# while every other model tested against the identical prompt matched the
+# question's language 100% of the time — a model-specific instruction-
+# following gap, not a missing instruction. This is deliberately a
+# one-directional check (an English-looking answer to a clearly-non-English
+# question) rather than general language identification: it's the only
+# failure direction observed (models defaulting to English), and a full
+# language identifier is unneeded machinery for that.
+#
+# Two different thresholds by design: _looks_like_non_english (checked
+# against the QUESTION) is deliberately lenient — a short question like "Wie
+# viel...?" only has a handful of words to find evidence in at all, and a
+# false negative here just means a real mismatch goes undetected (same as
+# today). _looks_like_english (checked against the ANSWER, which is
+# typically a full paragraph) can afford a stricter floor, and must have
+# one — a naive floor of 1 on the question side alone misfired on ordinary
+# short English questions like "What is machine learning?" (only "is"
+# matches), which would otherwise flag every answer to a terse English
+# question as a false "wrong language" positive.
+_NON_ENGLISH_LETTER_PATTERN = re.compile(r"[àâäçèéêëîïôöùûüÿñãõßÀ-ÿ¿¡]")
+_NON_ENGLISH_STOPWORDS = frozenset(
+    "und ist nicht der die das für von mit auch sind werden wie welche "
+    "le la les est sont avec pour dans une que para ont qui "
+    "los las una con son por".split()
+)
+_ENGLISH_STOPWORDS = frozenset(
+    "the and is of to in that for a an with as this these those on by from "
+    "at be are was were have has it its or not but which their".split()
+)
+_ENGLISH_STOPWORD_FLOOR = 4
+# A density floor, not just an absolute count, matters here: observed live,
+# a substantially non-English (German) answer that merely quotes a few
+# English technical terms or source titles can still rack up 4-6 incidental
+# stopword hits over a long enough answer (e.g. 6 hits / 217 words = 3%
+# density) — nowhere near the ~30-43% density of an answer that's actually
+# written in English throughout. Both floors must be cleared.
+_ENGLISH_STOPWORD_DENSITY_FLOOR = 0.12
+_NON_ENGLISH_STOPWORD_FLOOR = 2
+
+
+def _looks_like_non_english(text: str) -> bool:
+    """Lightweight, deliberately permissive signal that `text` is probably
+    not English: a letter with a diacritic uncommon in English (or a
+    Spanish-style inverted ¿/¡), or at least two recognizable German/
+    French/Spanish function words."""
+    if _NON_ENGLISH_LETTER_PATTERN.search(text):
+        return True
+    words = re.findall(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", text.lower(), re.UNICODE)
+    return sum(1 for w in words if w in _NON_ENGLISH_STOPWORDS) >= _NON_ENGLISH_STOPWORD_FLOOR
+
+
+def _looks_like_english(text: str) -> bool:
+    words = re.findall(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", text.lower(), re.UNICODE)
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in _ENGLISH_STOPWORDS)
+    return hits >= _ENGLISH_STOPWORD_FLOOR and hits / len(words) >= _ENGLISH_STOPWORD_DENSITY_FLOOR
+
+
+def _looks_like_wrong_language_answer(question: str, answer: str) -> bool:
+    """True if `question` reads as probably non-English but `answer` reads
+    as clearly English prose anyway (see the notes on both helpers above)."""
+    if not question or not _looks_like_non_english(question):
+        return False
+    return _looks_like_english(answer)
 
 
 # Weaker models frequently comply with the CRITICAL CITATION RULE's *format*
@@ -110,6 +208,16 @@ def _low_citation_diversity(
 # that doesn't depend on the model following this instruction at all.
 CONTEXT_INSUFFICIENT_MARKER = "###CONTEXT_INSUFFICIENT###"
 
+# Observed live (qwen3-omni-30b-a3b-instruct, eval run 20261011T111753Z,
+# Q09): the model reproduced the instructed sentinel imperfectly, emitting
+# "###CONTEXT_INSUFFICIENT" with no trailing "###" — an exact-string match
+# against CONTEXT_INSUFFICIENT_MARKER missed it, so it leaked verbatim into
+# the user-facing answer instead of being stripped. Match the trailing hash
+# sequence as optional (0-3 chars) so a near-miss reproduction is still
+# recognized; the leading "###" is kept mandatory so this can't match
+# unrelated prose that merely contains the word.
+_CONTEXT_INSUFFICIENT_PATTERN = re.compile(r"###CONTEXT_INSUFFICIENT#{0,3}")
+
 
 def _thin_context_coverage(
     answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
@@ -117,11 +225,12 @@ def _thin_context_coverage(
     """True if the answer suggests the retrieved context itself was too thin
     or off-topic, rather than the model merely under-citing relevant
     material: either the model explicitly flagged this via
-    CONTEXT_INSUFFICIENT_MARKER, or citation utilization is low on a small
+    CONTEXT_INSUFFICIENT_MARKER (or a near-miss reproduction of it, see
+    _CONTEXT_INSUFFICIENT_PATTERN), or citation utilization is low on a small
     retrieved pool (<= 2x the low-diversity floor — a large pool with few
     citations is a citation-behavior issue, not evidence the pool itself
     was thin, so that case is left to _low_citation_diversity instead)."""
-    if CONTEXT_INSUFFICIENT_MARKER in answer:
+    if _CONTEXT_INSUFFICIENT_PATTERN.search(answer):
         return True
     if documents_grouped == 0 or documents_grouped > low_diversity_floor * 2:
         return False
@@ -133,18 +242,33 @@ def _quality_issue_reinforcement(
     answer: str,
     available_sources: int = 0,
     low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+    question: str = "",
 ) -> Optional[str]:
     """Return a reinforcement instruction to retry generation with, if `answer`
     has a detectable quality issue — or None if it looks fine. Checked once
     per generation attempt; only the first detected issue is reported.
 
     available_sources: number of distinct documents available in the context,
-    used only by the low-diversity check below."""
+    used only by the low-diversity check below.
+    question: the original question, used only by the wrong-language check below."""
     if _looks_like_tool_call_leak(answer):
         return (
             "Your previous response incorrectly attempted to call a tool or function. "
             "You have no tools available — answer directly in plain prose using only "
             "the context above."
+        )
+    if _looks_like_leaked_reasoning(answer):
+        return (
+            "Your previous response showed visible step-by-step reasoning and "
+            "backtracking (e.g. \"Wait,\" \"re-evaluating...\") instead of a clean "
+            "final answer. Provide only your final conclusion in plain prose — do "
+            "not show your work or reconsider earlier statements."
+        )
+    if _looks_like_wrong_language_answer(question, answer):
+        return (
+            "Your previous response was written in English, but the question above is "
+            "not written in English. Respond entirely in the same language as the "
+            "question instead."
         )
     if _missing_citations(answer):
         return (
@@ -165,12 +289,19 @@ def _quality_issue_reinforcement(
 
 
 def _count_quality_issues(
-    answer: str, documents_grouped: int, low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR
+    answer: str,
+    documents_grouped: int,
+    low_diversity_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
+    question: str = "",
 ) -> int:
     """Count detectable quality issues in `answer`, used to compare an
     original answer against an escalated-retrieval retry."""
     issues = 0
     if _looks_like_tool_call_leak(answer):
+        issues += 1
+    if _looks_like_leaked_reasoning(answer):
+        issues += 1
+    if _looks_like_wrong_language_answer(question, answer):
         issues += 1
     if _missing_citations(answer):
         issues += 1
@@ -182,12 +313,14 @@ def _count_quality_issues(
 
 
 def _strip_insufficient_context_marker(answer: str) -> str:
-    """Remove the CONTEXT_INSUFFICIENT_MARKER sentinel (and any trailing
-    whitespace left behind) from the user-facing answer — it's a detection
-    signal for _thin_context_coverage, not something the user should see.
-    The raw answer (marker included) is still what gets traced, so a future
-    trace inspection can see whether the model actually emitted it."""
-    return answer.replace(CONTEXT_INSUFFICIENT_MARKER, "").rstrip()
+    """Remove the CONTEXT_INSUFFICIENT_MARKER sentinel — or a near-miss
+    reproduction of it, see _CONTEXT_INSUFFICIENT_PATTERN — (and any
+    trailing whitespace left behind) from the user-facing answer; it's a
+    detection signal for _thin_context_coverage, not something the user
+    should see. The raw answer (marker included) is still what gets traced,
+    so a future trace inspection can see whether the model actually
+    emitted it."""
+    return _CONTEXT_INSUFFICIENT_PATTERN.sub("", answer).rstrip()
 
 
 # Observed live: a fixed top_k can be entirely saturated by chunks from a single
@@ -206,6 +339,19 @@ _DIVERSITY_ESCALATION_MAX_TOP_K = 30
 # while other included documents get only one or two — bounds prompt size and
 # keeps the context readable, independent of document diversity itself.
 _MAX_CHUNKS_PER_DOCUMENT = 4
+
+# Raw candidate pool size fetched from the vector store before the
+# per-document dedup+cap (_dedup_and_cap_chunks_per_document) is applied and
+# before the top_k cutoff. Needed because a few documents each contributing
+# several near-duplicate/high-scoring chunks can occupy most of a naive
+# top_k window, crowding out a genuinely relevant but less-chunked document
+# even when that window already contains >= diversity_floor distinct
+# documents — the diversity escalation above only looks at DISTINCT document
+# count in the window, not at per-document chunk concentration, so it never
+# catches this case (see #87: a relevant document's best chunk ranked #39 by
+# raw score — past even the escalated top_k=30 ceiling — because a handful
+# of other documents' near-duplicate chunks saturated ranks 1-38).
+_SEARCH_CANDIDATE_POOL_SIZE = 100
 
 
 def _format_authors(authors: list[str]) -> str:
@@ -228,12 +374,17 @@ def _normalize_for_dedup(text: str) -> str:
 
 
 def _dedup_chunks_by_text(results: list) -> list:
-    """Within one document's chunks, drop exact-after-normalization text
-    duplicates, keeping the highest-scoring copy of each. Observed live: the
-    same page re-extracted from two attachment_keys of one Zotero item (or
-    chunked twice during indexing) produces two SearchResults with identical
-    text, wasting a context slot that could hold a genuinely different
-    passage."""
+    """Drop exact-after-normalization text duplicates from ``results``,
+    keeping the highest-scoring copy of each, regardless of which document
+    (item_key) each copy belongs to. Observed live: the same page re-extracted
+    from two attachment_keys of one Zotero item (or chunked twice during
+    indexing) produces two SearchResults with identical text — and a Zotero
+    library can separately hold two distinct items for the same underlying
+    article (e.g. added twice, or imported from two sources), whose
+    attachments then extract to identical chunk text under two different
+    item_keys. Either way the duplicate wastes a context slot that could
+    hold a genuinely different passage or document, so this intentionally
+    compares across documents, not just within one."""
     best_by_text: dict[str, object] = {}
     for result in results:
         key = _normalize_for_dedup(result.chunk.text)
@@ -241,6 +392,106 @@ def _dedup_chunks_by_text(results: list) -> list:
         if existing is None or result.score > existing.score:
             best_by_text[key] = result
     return list(best_by_text.values())
+
+
+_MMR_LAMBDA = 0.6  # weight on raw score vs. diversity when capping a document's chunks
+
+_WORD_PATTERN = re.compile(r"[^\W\d_]+|\d+", re.UNICODE)
+
+
+def _tokenize_for_similarity(text: str) -> set[str]:
+    """Lowercased word/number tokens, used as a cheap text-similarity proxy
+    (no chunk embeddings are available this late in the pipeline — see
+    DocumentChunk.embedding, always None on search results)."""
+    return set(_WORD_PATTERN.findall(text.lower()))
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def _select_diverse_chunks(results: list, k: int) -> list:
+    """Pick up to k of ``results`` (already deduped) via Maximal Marginal
+    Relevance over token overlap, instead of plain top-k-by-score.
+
+    A document's highest-scoring chunks are often several near-paraphrases
+    of the same narrow sub-topic (e.g. three sentences all about a survey's
+    response rate) — plain top-k-by-score then caps the document's context
+    to that one cluster and drops a lower-scoring but topically distinct
+    chunk that may be the only one carrying a different needed fact. MMR
+    greedily keeps the top-scoring chunk first, then at each step prefers
+    the candidate maximizing ``_MMR_LAMBDA * score - (1 - _MMR_LAMBDA) *
+    max_similarity_to_already_selected`` — so a candidate too similar to
+    what's already kept loses out to a more distinct, if lower-scoring,
+    alternative."""
+    pool = sorted(results, key=lambda r: r.score, reverse=True)
+    if len(pool) <= k:
+        return pool
+    token_sets = [_tokenize_for_similarity(r.chunk.text) for r in pool]
+    selected = [0]
+    remaining = set(range(1, len(pool)))
+    while len(selected) < k and remaining:
+        best_idx, best_value = None, float("-inf")
+        for idx in remaining:
+            max_sim = max(_jaccard_similarity(token_sets[idx], token_sets[s]) for s in selected)
+            value = _MMR_LAMBDA * pool[idx].score - (1 - _MMR_LAMBDA) * max_sim
+            if value > best_value:
+                best_value, best_idx = value, idx
+        selected.append(best_idx)
+        remaining.discard(best_idx)
+    return [pool[i] for i in selected]
+
+
+def _dedup_and_cap_chunks_per_document(results: list, max_chunks_per_document: int) -> list:
+    """Drop exact-after-normalization text duplicates across the whole pool
+    (see _dedup_chunks_by_text — this includes duplicates that span two
+    different item_keys, not just two attachments of one item), then within
+    each surviving document (grouped by item_key) cap to at most
+    max_chunks_per_document via diversity-aware selection (see
+    _select_diverse_chunks) rather than plain top-N-by-score. Returns
+    everything re-sorted by score (descending).
+
+    Applied to the RAW search pool before the top_k cutoff (see #87 and
+    _SEARCH_CANDIDATE_POOL_SIZE above) — deduping first ensures a cap slot is
+    never wasted on a near-identical repeat of a passage that would be
+    discarded anyway, so it doesn't crowd out a genuinely different passage
+    (from the same document, or — since dedup is global — from a different
+    document entirely, such as a duplicate library item for the same
+    article). _assemble_context's own dedup/cap pass over the final top_k
+    window is then a no-op for chunks already handled here, but still
+    matters for chunks that only became neighbors after the cutoff (e.g. an
+    escalation retry merging a new document's chunks in)."""
+    deduped_globally = _dedup_chunks_by_text(results)
+    by_doc: dict[str, list] = {}
+    for result in deduped_globally:
+        key = result.chunk.metadata.document_metadata.item_key
+        by_doc.setdefault(key, []).append(result)
+    capped: list = []
+    for doc_results in by_doc.values():
+        capped.extend(_select_diverse_chunks(doc_results, max_chunks_per_document))
+    capped.sort(key=lambda r: r.score, reverse=True)
+    return capped
+
+
+def _best_excluded_candidate_near_cutoff(
+    capped_pool: list, top_k: int, epsilon_fraction: float
+) -> bool:
+    """Return True if the best candidate just outside the top_k window scores
+    within epsilon_fraction of the cutoff score, relative to the pool's own
+    min-max score range (see Settings.retrieval_score_proximity_epsilon for why
+    the epsilon is relative, not absolute). capped_pool must already be sorted
+    by score descending."""
+    if epsilon_fraction <= 0 or len(capped_pool) <= top_k:
+        return False
+    score_range = capped_pool[0].score - capped_pool[-1].score
+    if score_range <= 0:
+        return False
+    cutoff_score = capped_pool[top_k - 1].score
+    next_score = capped_pool[top_k].score
+    return (cutoff_score - next_score) <= epsilon_fraction * score_range
 
 
 def _group_chunks_by_document(search_results: list) -> tuple[dict[str, list], list[str]]:
@@ -267,16 +518,16 @@ def _assemble_context(
 ) -> tuple[str, list]:
     """Build the numbered [S1]/[S2]/... context string, one source per
     document. Within each document: dedup identical-text chunks first (see
-    _dedup_chunks_by_text), then cap to max_chunks_per_document, keeping the
-    highest-scoring survivors. Returns (context, doc_representatives) —
-    doc_representatives is the best-scoring chunk per document, in [SN]
-    order, used for SourceInfo citations."""
+    _dedup_chunks_by_text), then cap to max_chunks_per_document via
+    diversity-aware selection (see _select_diverse_chunks). Returns
+    (context, doc_representatives) — doc_representatives is the
+    best-scoring chunk per document, in [SN] order, used for SourceInfo
+    citations."""
     context_parts = []
     doc_representatives: list = []
     for i, doc_key in enumerate(sorted_doc_keys, 1):
         results_for_doc = _dedup_chunks_by_text(doc_chunks[doc_key])
-        if len(results_for_doc) > max_chunks_per_document:
-            results_for_doc = sorted(results_for_doc, key=lambda r: r.score, reverse=True)[:max_chunks_per_document]
+        results_for_doc = _select_diverse_chunks(results_for_doc, max_chunks_per_document)
         results_for_doc.sort(key=lambda r: (
             r.chunk.metadata.page_number or 0,
             r.chunk.metadata.chunk_index or 0,
@@ -390,6 +641,44 @@ class RAGEngine:
         self.vector_store = vector_store
         self.settings = settings
 
+    def _apply_lexical_fusion(self, question: str, results: list) -> list:
+        """Blend BM25 into the raw candidate pool's scores when
+        settings.retrieval_lexical_weight > 0 (see lexical_rerank); no-op otherwise."""
+        weight = getattr(self.settings, "retrieval_lexical_weight", 0.0)
+        if isinstance(weight, (int, float)) and weight > 0:
+            return fuse_lexical(question, results, weight)
+        return results
+
+    def _use_embedding_mmr(self) -> bool:
+        """Whether settings.retrieval_embedding_mmr_lambda enables global
+        embedding-vector MMR reranking (see embedding_mmr_rerank) — also
+        determines whether search() needs to fetch vectors at all."""
+        lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
+        return isinstance(lambda_param, (int, float)) and lambda_param > 0
+
+    def _apply_embedding_mmr(self, results: list) -> list:
+        """Re-rank the raw candidate pool by embedding-vector MMR when
+        settings.retrieval_embedding_mmr_lambda > 0; no-op otherwise. Requires
+        results to carry chunk.embedding (see _use_embedding_mmr/search's
+        with_vectors).
+
+        Deduping exact-text duplicates first matters here specifically: two
+        item_keys holding the same underlying article (e.g. the gold library's
+        deliberately-duplicated lorenzetti2013 entry, 6MC3G9EV/GQMHNT7V — see
+        dee8114) have identical embeddings for the same passage. Without
+        deduping first, MMR sees each duplicate as if it were a second,
+        independent data point rather than a repeat, so it doesn't get
+        penalized as a near-duplicate of itself — both copies' chunks can end
+        up ranked high, exactly the dilution MMR is meant to reduce. The
+        later per-document dedup+cap's own dedup pass is then a no-op here
+        (already deduped), same as for the lexical-fusion-then-dedup order
+        above it."""
+        lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
+        if isinstance(lambda_param, (int, float)) and lambda_param > 0:
+            results = _dedup_chunks_by_text(results)
+            return rerank_embedding_mmr(results, lambda_param)
+        return results
+
     async def query(
         self,
         question: str,
@@ -404,6 +693,7 @@ class RAGEngine:
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         low_diversity_available_floor: int = _LOW_DIVERSITY_AVAILABLE_FLOOR,
         enable_quality_self_review: bool = False,
+        search_candidate_pool_size: int = _SEARCH_CANDIDATE_POOL_SIZE,
     ) -> QueryResult:
         """
         Answer a question using RAG.
@@ -417,8 +707,12 @@ class RAGEngine:
                 larger top_k (see module docstring above _DIVERSITY_FLOOR).
             diversity_escalation_factor: Multiplier applied to top_k when escalating.
             diversity_escalation_max_top_k: Ceiling on the escalated top_k.
-            max_chunks_per_document: Cap on chunks from a single document in the
-                assembled context.
+                Escalation can also be triggered independently of diversity by
+                settings.retrieval_score_proximity_epsilon (default 0, off) — see
+                _best_excluded_candidate_near_cutoff and that setting's docstring.
+            max_chunks_per_document: Cap on chunks from a single document, applied
+                before the top_k cutoff (see _dedup_and_cap_chunks_per_document) and
+                again (as a no-op safety net) in the assembled context.
             low_diversity_available_floor: Minimum distinct available sources before the
                 low-citation-diversity retry guard checks the answer (see
                 _LOW_DIVERSITY_AVAILABLE_FLOOR above).
@@ -427,6 +721,9 @@ class RAGEngine:
                 retry once with escalated retrieval before returning, and
                 keep whichever answer has fewer detectable quality issues.
                 Default False — doubles latency on queries that trigger it.
+            search_candidate_pool_size: Raw chunk pool size fetched from the vector
+                store before the per-document dedup+cap and the top_k cutoff (see
+                module docstring above _SEARCH_CANDIDATE_POOL_SIZE).
 
         Returns:
             Query result with answer and source citations.
@@ -439,19 +736,30 @@ class RAGEngine:
         query_embedding = await self.embedding_service.embed_text(question)
         embedding_model = getattr(self.embedding_service, "model_name", "unknown")
 
-        # Step 2: Search vector database for relevant chunks
-        logger.debug(f"Searching for top {top_k} chunks in libraries: {library_ids}")
+        # Step 2: Search vector database for relevant chunks. Fetch a raw candidate
+        # pool larger than top_k, then dedup+cap how many chunks any one document
+        # contributes BEFORE the top_k cutoff — otherwise a few documents with many
+        # near-duplicate/high-scoring chunks can occupy the entire window and crowd
+        # out a genuinely relevant, less-chunked document (see #87 and
+        # _SEARCH_CANDIDATE_POOL_SIZE above).
+        candidate_pool_size = max(top_k, search_candidate_pool_size)
+        logger.debug(
+            f"Searching for top {top_k} chunks (candidate pool {candidate_pool_size}) "
+            f"in libraries: {library_ids}"
+        )
         active_filters = filters if filters and not filters.is_empty() else None
-        search_results = await asyncio.to_thread(
+        use_embedding_mmr = self._use_embedding_mmr()
+        raw_results = await asyncio.to_thread(
             self.vector_store.search,
             query_vector=query_embedding,
-            limit=top_k,
+            limit=candidate_pool_size,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
             filters=active_filters,
+            with_vectors=use_embedding_mmr,
         )
 
-        if not search_results:
+        if not raw_results:
             logger.warning("No relevant chunks found for query")
             return QueryResult(
                 question=question,
@@ -459,39 +767,62 @@ class RAGEngine:
                 sources=[]
             )
 
+        raw_results = self._apply_lexical_fusion(question, raw_results)
+        raw_results = self._apply_embedding_mmr(raw_results)
+
+        capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+        search_results = capped_pool[:top_k]
+
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
 
-        # Escalate once if the search hit the top_k cap (not the corpus limit) and
-        # came back dominated by too few distinct documents. Both this check and
-        # the post-generation thin-context check below (gated on
-        # enable_quality_self_review) can fire independently — they detect
-        # different failure modes (structural retrieval narrowness vs.
-        # answer-quality degradation) and are not a strict superset of each
-        # other. The post-generation block only runs if this one didn't already
-        # fire, so a query only ever spends one escalation retry regardless of
-        # which mechanism catches the problem first.
+        # Escalate once if the raw search hit the candidate-pool fetch limit (not
+        # the corpus limit) — meaning more chunks may exist beyond what was
+        # fetched — and the capped, top_k-cut window still came back dominated by
+        # too few distinct documents. Both this check and the post-generation
+        # thin-context check below (gated on enable_quality_self_review) can fire
+        # independently — they detect different failure modes (structural
+        # retrieval narrowness vs. answer-quality degradation) and are not a
+        # strict superset of each other. The post-generation block only runs if
+        # this one didn't already fire, so a query only ever spends one
+        # escalation retry regardless of which mechanism catches the problem first.
         escalated = False
-        if len(search_results) == top_k and top_k < diversity_escalation_max_top_k:
+        if len(raw_results) == candidate_pool_size and top_k < diversity_escalation_max_top_k:
             unique_doc_count = len({
                 r.chunk.metadata.document_metadata.item_key
                 for r in search_results
             })
-            if unique_doc_count < diversity_floor:
+            score_proximity_epsilon = getattr(self.settings, "retrieval_score_proximity_epsilon", 0.0)
+            score_proximity_triggered = (
+                isinstance(score_proximity_epsilon, (int, float))
+                and _best_excluded_candidate_near_cutoff(capped_pool, top_k, score_proximity_epsilon)
+            )
+            if unique_doc_count < diversity_floor or score_proximity_triggered:
                 escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
-                logger.info(
-                    f"Retrieval diversity low ({unique_doc_count} documents from top_k={top_k}); "
-                    f"escalating to top_k={escalated_top_k}"
+                escalated_candidate_pool_size = candidate_pool_size * diversity_escalation_factor
+                reason = (
+                    f"diversity low ({unique_doc_count} documents from top_k={top_k})"
+                    if unique_doc_count < diversity_floor
+                    else "best excluded candidate near the top_k cutoff score"
                 )
-                escalated_results = await asyncio.to_thread(
+                logger.info(
+                    f"Retrieval escalation triggered ({reason}); "
+                    f"escalating to top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size})"
+                )
+                escalated_raw_results = await asyncio.to_thread(
                     self.vector_store.search,
                     query_vector=query_embedding,
-                    limit=escalated_top_k,
+                    limit=escalated_candidate_pool_size,
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
                     filters=active_filters,
+                    with_vectors=use_embedding_mmr,
                 )
-                if len(escalated_results) > len(search_results):
-                    search_results = escalated_results
+                if len(escalated_raw_results) > len(raw_results):
+                    raw_results = escalated_raw_results
+                    raw_results = self._apply_lexical_fusion(question, raw_results)
+                    raw_results = self._apply_embedding_mmr(raw_results)
+                    capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+                    search_results = capped_pool[:escalated_top_k]
                     escalated = True
                     logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
 
@@ -529,7 +860,9 @@ class RAGEngine:
         )
 
         available_sources = len(sorted_doc_keys)
-        reinforcement = _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor)
+        reinforcement = _quality_issue_reinforcement(
+            answer, available_sources, low_diversity_available_floor, question
+        )
         if reinforcement:
             logger.warning(
                 f"LLM answer had a quality issue; retrying once. {reinforcement} "
@@ -541,7 +874,7 @@ class RAGEngine:
                 max_tokens=max_tokens,
                 temperature=0.7
             )
-            if _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor):
+            if _quality_issue_reinforcement(answer, available_sources, low_diversity_available_floor, question):
                 logger.warning(
                     f"Retry still had a quality issue; using it anyway: {answer[:200]!r}"
                 )
@@ -554,20 +887,27 @@ class RAGEngine:
             and _thin_context_coverage(answer, available_sources, low_diversity_available_floor)
         ):
             escalated_top_k = min(top_k * diversity_escalation_factor, diversity_escalation_max_top_k)
+            escalated_candidate_pool_size = candidate_pool_size * diversity_escalation_factor
             logger.info(
                 f"Thin context coverage detected; escalating retrieval to "
-                f"top_k={escalated_top_k} and regenerating once"
+                f"top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size}) and regenerating once"
             )
-            retry_search_results = await asyncio.to_thread(
+            retry_raw_results = await asyncio.to_thread(
                 self.vector_store.search,
                 query_vector=query_embedding,
-                limit=escalated_top_k,
+                limit=escalated_candidate_pool_size,
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
+                with_vectors=use_embedding_mmr,
             )
             retry_improved = False
-            if len(retry_search_results) > len(search_results):
+            if len(retry_raw_results) > len(raw_results):
+                retry_capped_pool = _dedup_and_cap_chunks_per_document(
+                    self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results)),
+                    max_chunks_per_document,
+                )
+                retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
                 retry_context, retry_doc_representatives = _assemble_context(
                     retry_doc_chunks, retry_sorted_doc_keys, max_chunks_per_document
@@ -576,9 +916,11 @@ class RAGEngine:
                 retry_answer = await self.llm_service.generate(
                     prompt=retry_prompt, max_tokens=max_tokens, temperature=0.7
                 )
-                original_issues = _count_quality_issues(answer, available_sources, low_diversity_available_floor)
+                original_issues = _count_quality_issues(
+                    answer, available_sources, low_diversity_available_floor, question
+                )
                 retry_issues = _count_quality_issues(
-                    retry_answer, len(retry_sorted_doc_keys), low_diversity_available_floor
+                    retry_answer, len(retry_sorted_doc_keys), low_diversity_available_floor, question
                 )
                 retry_improved = retry_issues < original_issues
                 if retry_improved:

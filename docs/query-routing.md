@@ -312,6 +312,116 @@ end-user-facing explanation of each, and `RetrievalTrace.escalated` /
 `QueryTrace.parameters` (visible via `include_trace: true`) for observing them at
 runtime.
 
+### Score-proximity escalation
+
+A second, independent escalation trigger alongside the diversity-floor one
+above: when `RETRIEVAL_SCORE_PROXIMITY_EPSILON` > 0 (0-1, default 0 = off),
+the pre-generation escalation also fires if the best candidate excluded by
+the `top_k` cutoff scores within that fraction of the candidate pool's own
+score range (max minus min score among the fetched/capped candidates) of the
+cutoff score — i.e. the ranking looks like a close call at the boundary, even
+when the window already has plenty of distinct documents (so the diversity
+trigger never fires). A fixed *absolute* epsilon doesn't work for this:
+dense embedding cosine scores cluster tightly and their dynamic range varies
+a lot by query (observed 0.025-0.08 total spread across the gold question
+set), so it either never fires or fires on almost every query; normalizing
+to each query's own range makes it comparable. Implemented in
+`_best_excluded_candidate_near_cutoff` (`backend/services/rag_engine.py`).
+
+**Evaluated at `0.01` against the gold suite (#89's jin2026 crowd-out case)
+and left at the `0` default (the setting exists to be turned on by whoever
+deploys it, not to change the shipped default)**: jin2026's chunk (score
+0.883 at rank 19, vs. a rank-10 cutoff score of 0.8857 — a gap of 0.3% of the
+pool's own 2.6%-wide score range) triggers the escalation, raising `top_k`
+from 10 to 30 and pulling it into context; the generated answer then
+correctly cites and contrasts it. The same run also recovered all three of
+Q05's previously-missing facts (`zotero_least`, `endnote_most`,
+`reason_no_extraction`) — not targeted by this change, but also sitting just
+below a close cutoff — with no regressions on the other eight questions
+(composite rose +0.03 to +0.04 across both models tested; the one apparent
+drop, Q06, had `escalated: false` in both runs, confirming it was LLM
+generation variance at temperature 0.7 on a single repetition, not a
+retrieval effect). Escalating roughly doubles that query's latency (extra
+vector search, plus a larger generation context) — same cost profile the
+existing diversity-floor trigger already has, just reached by a different
+condition; across the gold set this fired on about 20% of queries. Does not
+help #90's Q02/Q06/Q07 cases: their target chunks sit far below the cutoff
+(e.g. Q02's ~44th out of 458), not just barely below it, so the gap is never
+small relative to the pool's range and the trigger correctly doesn't fire —
+see "Embedding-vector MMR reranking" below for what was tried for those.
+
+### Embedding-vector MMR reranking
+
+Prototype for #90's "global ranking dilution" case, where several chunks
+from *different*, topically-adjacent-but-not-actually-relevant documents
+together outscore a genuinely relevant chunk without any one of them
+dominating (so neither the per-document cap/dedup nor the score-proximity
+trigger above can reach it — the competition is pool-wide and the gap is
+large, not a close call at the boundary). `RETRIEVAL_EMBEDDING_MMR_LAMBDA`
+(0-1, default 0 = off) re-ranks the whole raw candidate pool by real MMR
+(`lambda * relevance - (1 - lambda) * max_similarity_to_already_selected`)
+over actual embedding vectors fetched from Qdrant
+(`VectorStore.search(..., with_vectors=True)`) — unlike the existing
+per-document `_select_diverse_chunks`, which only runs within one document
+and uses a cheap token-overlap similarity proxy, not real embeddings.
+Implemented in `backend/services/embedding_mmr_rerank.py`.
+
+**Evaluated at `lambda=0.7` against the gold suite (#90's Q02/Q06/Q07 cases)
+and left at the `0` default — not recommended for production use as
+implemented, for two independent reasons:**
+
+1. **It doesn't fix the targeted facts.** Q02's `endnote_top`/
+   `refmanager_refworks` and Q06/Q07's facts stayed out of context; Q08's
+   `jin_negative` (already fixed by the score-proximity trigger above) came
+   back *out* of context too. The chunks these facts need are far enough
+   below the cutoff that trading relevance for distinctness among the
+   already-in-range candidates doesn't reach them — MMR reorders *which*
+   distinct chunks win the window, it doesn't widen the window.
+2. **The reference implementation is far too slow to ship regardless.**
+   Computing pairwise cosine similarity in pure Python over the candidate
+   pool is effectively O(n³) in the pool size (each of the ~n greedy
+   selection steps scans the remaining candidates, each comparing against a
+   growing selected set): a synthetic 100-candidate, 1024-dim benchmark
+   measured **~17.7 seconds** of added CPU time alone, and a live gold-suite
+   run against real per-query pool sizes (30-51 candidates) measured
+   individual queries taking 8-41 seconds versus 2-31 seconds for the same
+   questions without it. Fetching the vectors themselves is cheap by
+   comparison (+12ms median round-trip over 100 results, measured directly
+   against the sidecar) — the Python-side MMR loop is the entire cost.
+   Vectorizing with NumPy would likely fix this, but NumPy is only a
+   transitive dependency today (via `qdrant-client`), not a declared one —
+   and reason 1 above already rules this variant out on its own merits, so
+   adding a new direct dependency to fix only the latency wasn't pursued.
+
+### Lexical (BM25) fusion
+
+Vector similarity under-ranks short, term-dense chunks (numeric results, proper
+nouns). With `RETRIEVAL_LEXICAL_WEIGHT` > 0 (0-1, default 0 = off), the raw
+candidate pool is re-scored before dedup, the per-document cap and the `top_k`
+cut as `(1 - w) * norm(vector) + w * norm(BM25)` (min-max over the pool; BM25
+document frequencies come from the pool itself, so no extra index is needed).
+The blended score replaces the vector score for all downstream ordering.
+Implemented in `backend/services/lexical_rerank.py`.
+
+**Evaluated at `0.2`/`0.4`/`0.6` against the gold suite (#89/#90's specific
+under-recall cases) and left at the `0` default**: none of the targeted facts
+(Lorenzetti's EndNote/Reference-Manager/RefWorks breakdown in Q02, Mendeley's
+2 GB figure in Q06, Zotero's least-effort finding in Q05) entered the
+retrieved context at any tested weight — the blend doesn't change which
+*documents* reach the candidate pool, and these chunks' BM25 score isn't high
+enough relative to competing chunks to climb in either. Worse, two previously
+retrieved facts regressed: Q07's numeric results (present at `0`) dropped out
+of context from `0.2` upward, and `jin2026` (#89's crowd-out case) ranked
+*lower* as weight increased (19th at `0`, 30th at `0.2`/`0.4`, 33rd at `0.6`)
+— its chunk has strong vector similarity but weak literal term overlap with
+the query, so blending in a weak BM25 score pulls its combined score down
+rather than up. Aggregate `fact_recall` across the full 10-question gold set
+did rise at `0.2`/`0.4` (unrelated facts benefited) before falling back at
+`0.6`, but that's a different, broader effect than what this setting was
+built to fix, and doesn't offset the specific regressions above. Raising it
+further is not expected to help: the failure mode is score dilution, not an
+insufficient blend ratio.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored

@@ -1010,3 +1010,38 @@ test('exportDebugInfo shows an error status if writing the file fails', async ()
 	assert.strictEqual(statusCalls[0].type, 'error');
 	assert.ok(statusCalls[0].msg.includes('disk full'));
 });
+
+// --- describeEndpointBlock: what stops Submit/Index while an endpoint is not ready ---
+
+test('describeEndpointBlock: nothing blocks when both endpoints are ready or have no health', () => {
+	const D = loadDialogMethods();
+	assert.strictEqual(D.describeEndpointBlock(null, false), null);
+	assert.strictEqual(D.describeEndpointBlock({ embedding: null, llm: null }, false), null);
+	assert.strictEqual(D.describeEndpointBlock({ embedding: { status: 'ready' }, llm: { status: 'throttled' } }, false), null);
+});
+
+test('describeEndpointBlock: a cold endpoint blocks and is re-checked soon', () => {
+	const D = loadDialogMethods();
+	const block = D.describeEndpointBlock({ embedding: { status: 'ready' }, llm: { status: 'cold' } }, false);
+	assert.match(block.message, /^Starting the answering model - /);
+	assert.strictEqual(block.retryMs, 5000);
+});
+
+test('describeEndpointBlock: both cold sides are named', () => {
+	const D = loadDialogMethods();
+	const block = D.describeEndpointBlock({ embedding: { status: 'cold' }, llm: { status: 'cold' } }, false);
+	assert.match(block.message, /^Starting the embedding and answering models - /);
+});
+
+test('describeEndpointBlock: indexing ignores the answering model', () => {
+	const D = loadDialogMethods();
+	const health = { embedding: { status: 'ready' }, llm: { status: 'cold' } };
+	assert.strictEqual(D.describeEndpointBlock(health, true), null);
+	assert.match(D.describeEndpointBlock({ embedding: { status: 'paused' }, llm: { status: 'ready' } }, true).message, /embedding model endpoint is paused/);
+});
+
+test('describeEndpointBlock: unreachable shows the provider detail', () => {
+	const D = loadDialogMethods();
+	const block = D.describeEndpointBlock({ embedding: { status: 'unreachable', detail: 'not provisioned' }, llm: null }, false);
+	assert.match(block.message, /embedding model is not available: not provisioned/);
+});

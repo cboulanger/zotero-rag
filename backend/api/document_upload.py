@@ -39,8 +39,9 @@ from backend.models.diagnostics import DiagnosticsPayload
 from backend.models.library import LibraryIndexMetadata
 from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
-from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.secret_store import get_key_store
 from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+from backend.services.usage_meters import meters_from_headers
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
     activate as activate_diagnostics,
@@ -48,7 +49,7 @@ from backend.services.diagnostics_collector import (
     current as current_diagnostics,
     stage as diag_stage,
 )
-from backend.services.document_processor import DocumentProcessor, merge_download_failures
+from backend.services.document_processor import DocumentProcessor, drop_attachment_failures, merge_download_failures
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.config.settings import get_settings
 from backend.utils import format_file_size
@@ -216,6 +217,14 @@ class CheckIndexedResponse(BaseModel):
     statuses: list[AttachmentIndexStatus]
 
 
+async def _usage_meters(embedding_service) -> list[dict] | None:
+    """Display meters for the headers the embedding service last saw (None when unknown)."""
+    headers = await embedding_service.get_rate_limit_info()
+    if not headers:
+        return None
+    return meters_from_headers(get_settings().get_hardware_preset(), "embedding", headers) or None
+
+
 class DocumentUploadResult(BaseModel):
     """Result returned after uploading a single document."""
 
@@ -226,7 +235,7 @@ class DocumentUploadResult(BaseModel):
     status: str  # "indexed" | "skipped_duplicate" | "error"
     message: str = ""
     rate_limit_retries: int = 0
-    rate_limit_headers: dict[str, str] | None = None
+    rate_limit_meters: list[dict] | None = None
     error_detail: Optional[str] = None
     # Set only on status="error": the raised exception's class name, and (for
     # EmbeddingRateLimitExhaustedError specifically) its available_at as an ISO
@@ -387,7 +396,7 @@ async def _execute_upload_impl(
     #
     # max_chunk_size/chunk_merge_target_size are tied to the active preset's
     # rag.max_chunk_size (hand-tuned per embedding model's real token limit —
-    # see e.g. the apple-silicon-kisski preset's comment) rather than left at
+    # see e.g. the remote-kisski preset's comment) rather than left at
     # DocumentProcessor's own generic defaults (512 chars / 1500 chars). Those
     # defaults are disconnected from any particular model: merging several
     # ~512-char extractor chunks up to a 1500-char target can produce a chunk
@@ -435,6 +444,20 @@ async def _execute_upload_impl(
             lib_meta.total_chunks = await asyncio.to_thread(vector_store.count_library_chunks, library_id)
             if proc_result.status in ("indexed_fresh", "copied_cross_library", "copied_same_library"):
                 lib_meta.total_items_indexed += 1
+            if proc_result.status in (
+                "indexed_fresh", "copied_cross_library", "copied_same_library", "skipped_duplicate",
+            ):
+                # The attachment is indexed now, so any failure an earlier server scan
+                # recorded for it is stale. Without this, a file the server can't fetch
+                # (e.g. WebDAV storage) but a client uploaded directly stays listed in
+                # last_scan_failed_downloads, and every other computer's plugin keeps
+                # showing it in Fix Unavailable Attachments.
+                lib_meta.last_scan_failed_downloads = drop_attachment_failures(
+                    lib_meta.last_scan_failed_downloads, attachment_key
+                )
+                lib_meta.last_scan_skipped_too_large = drop_attachment_failures(
+                    lib_meta.last_scan_skipped_too_large, attachment_key
+                )
             if proc_result.status == "skipped_too_large":
                 # Surfaced to the plugin's Fix Unavailable tool as a non-actionable,
                 # explanatory status — covers both the plugin's direct process-now
@@ -495,7 +518,7 @@ async def _execute_upload_impl(
     if proc_result.status in (
         "indexed_fresh", "copied_cross_library", "copied_same_library",
         "skipped_empty", "skipped_timeout", "skipped_parse_error", "skipped_duplicate",
-        "skipped_too_large",
+        "skipped_too_large", "skipped_too_costly", "skipped_failed",
     ):
         _update_item_cache(library_id, {item_key: {"item_version": item_version, "schema_version": CURRENT_SCHEMA_VERSION}})
     return DocumentUploadResult(
@@ -506,7 +529,7 @@ async def _execute_upload_impl(
         status=api_status,
         message=f"{api_status}: {chunks_added} chunks",
         rate_limit_retries=embedding_service.rate_limit_retries,
-        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        rate_limit_meters=await _usage_meters(embedding_service),
         error_detail=proc_result.error_detail,
     )
 
@@ -646,7 +669,7 @@ async def check_indexed(
     cached_entries = await asyncio.to_thread(pending_upload_cache.list_entries, settings.data_path, library_id)
     cached_keys = {entry["attachment_key"] for entry in cached_entries}
     if cached_keys:
-        key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        key_store = get_key_store()
         queue_status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
         for s in statuses:
             if s.attachment_key in cached_keys:
@@ -941,7 +964,7 @@ async def upload_document_to_cache(
     )
     logger.info(f"Cached deferred upload: library={library_id} attachment={attachment_key}")
 
-    key_store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    key_store = get_key_store()
     status = await asyncio.to_thread(pending_upload_cache.get_queue_status, settings, library_id, key_store)
     return CacheUploadResponse(status="queued", eta=status["eta"], reason=status["reason"])
 
@@ -1025,7 +1048,8 @@ async def process_cached_upload_now(
 
     if result.status == "error":
         await asyncio.to_thread(
-            pending_upload_cache.record_failure, settings.data_path, library_id, attachment_key, result.message
+            pending_upload_cache.note_failure, settings, library_id, attachment_key,
+            meta.get("item_key"), result.message,
         )
     else:
         await asyncio.to_thread(pending_upload_cache.delete_entry, settings.data_path, library_id, attachment_key)
@@ -1174,7 +1198,7 @@ async def upload_and_index_abstract(
         status=status,
         message=f"Indexed {chunks_added} abstract chunks" if chunks_added > 0 else "Abstract already indexed",
         rate_limit_retries=embedding_service.rate_limit_retries,
-        rate_limit_headers=await embedding_service.get_rate_limit_info(),
+        rate_limit_meters=await _usage_meters(embedding_service),
     )
 
 

@@ -2,16 +2,19 @@
 Test script for KISSKI Chat-AI API connectivity.
 
 This script verifies that:
-1. KISSKI_API_KEY is configured
+1. A KISSKI_API_KEY is stored in the encrypted key store
 2. The API endpoint is accessible
 3. All available models can be queried
 4. Chat completion works correctly
+
+The key is read only from the encrypted key store (never from the
+environment or .env). Add one with `uv run python scripts/setup_credentials.py`
+or via the plugin's Preferences; AUTOINDEX_SECRET must be set to decrypt it.
 
 Usage:
     uv run python scripts/test_kisski_api.py
 """
 
-import os
 import sys
 import asyncio
 from pathlib import Path
@@ -58,15 +61,30 @@ def print_status(test_name: str, passed: bool, message: str = ""):
         print(f"  -> {message}")
 
 
+def load_api_key() -> str | None:
+    """Return the stored KISSKI_API_KEY from the encrypted key store, or None."""
+    from backend.services.secret_store import get_key_store
+
+    store = get_key_store()
+    if not store.enabled:
+        return None
+    for fp, _key, _entry in store.iter_decrypted():
+        result = store.get_decrypted_embedding_key(fp, "KISSKI_API_KEY")
+        if result:
+            return result[1]
+    return None
+
+
 async def test_api_key():
-    """Test if KISSKI_API_KEY is configured."""
-    api_key = os.getenv("KISSKI_API_KEY")
+    """Test if KISSKI_API_KEY is stored in the encrypted key store."""
+    api_key = load_api_key()
 
     if not api_key:
-        print_status("API Key Configuration", False, "KISSKI_API_KEY not found in environment")
+        print_status("API Key Configuration", False, "No KISSKI_API_KEY in the encrypted key store")
         print("\nTo fix:")
-        print("  1. Add KISSKI_API_KEY to your .env file")
-        print("  2. Or set environment variable: export KISSKI_API_KEY=your_key")
+        print("  1. Run: uv run python scripts/setup_credentials.py")
+        print("     (or enter the key in the plugin's Preferences)")
+        print("  2. Make sure AUTOINDEX_SECRET is set so the store can be decrypted")
         return False
 
     # Check if it looks like a valid key (basic sanity check)
@@ -74,7 +92,7 @@ async def test_api_key():
         print_status("API Key Configuration", False, "API key seems too short")
         return False
 
-    print_status("API Key Configuration", True, f"Key found (length: {len(api_key)})")
+    print_status("API Key Configuration", True, f"Key found in store (length: {len(api_key)})")
     return True
 
 
@@ -108,7 +126,7 @@ async def test_model(client: AsyncOpenAI, model_name: str) -> bool:
 
 async def test_connectivity():
     """Test basic connectivity to KISSKI API."""
-    api_key = os.getenv("KISSKI_API_KEY")
+    api_key = load_api_key()
 
     if not api_key:
         return False

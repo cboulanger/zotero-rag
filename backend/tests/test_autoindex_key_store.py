@@ -195,5 +195,58 @@ class AutoIndexKeyStoreTest(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+class MultipleProviderKeysTest(unittest.TestCase):
+    """A user can hold one key per provider key name; each has its own status."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = AutoIndexKeyStore(Path(self.tmp.name) / "k.json", Fernet.generate_key().decode())
+        self.fp = self.store.add("ZK", _validation())
+
+    def test_two_keys_for_one_user_are_both_kept(self):
+        self.store.set_embedding_key(self.fp, "kisski-secret", "KISSKI_API_KEY")
+        self.store.set_embedding_key(self.fp, "hf-secret", "HF_API_TOKEN")
+        self.assertEqual(self.store.get_decrypted_embedding_key(self.fp, "KISSKI_API_KEY"), ("KISSKI_API_KEY", "kisski-secret"))
+        self.assertEqual(self.store.get_decrypted_embedding_key(self.fp, "HF_API_TOKEN"), ("HF_API_TOKEN", "hf-secret"))
+        self.assertIsNone(self.store.get_decrypted_embedding_key(self.fp, "OTHER"))
+
+    def test_status_and_rate_limit_are_per_key_name(self):
+        self.store.set_embedding_key(self.fp, "a", "KISSKI_API_KEY")
+        self.store.set_embedding_key(self.fp, "b", "HF_API_TOKEN")
+        self.store.set_embedding_key_status(self.fp, "rate_limited", "2999-01-01T00:00:00+00:00", key_name="KISSKI_API_KEY")
+        meta = self.store.list_metadata("HF_API_TOKEN")[0]
+        self.assertEqual(meta["embedding_key_status"], "ok")
+        self.assertEqual(self.store.list_metadata("KISSKI_API_KEY")[0]["embedding_key_status"], "rate_limited")
+        self.assertEqual(set(meta["embedding_keys"]), {"KISSKI_API_KEY", "HF_API_TOKEN"})
+
+    def test_replacing_one_key_leaves_the_other_alone(self):
+        self.store.set_embedding_key(self.fp, "old", "KISSKI_API_KEY")
+        self.store.set_embedding_key(self.fp, "hf", "HF_API_TOKEN")
+        self.store.set_embedding_key(self.fp, "new", "KISSKI_API_KEY")
+        self.assertEqual(self.store.get_decrypted_embedding_key(self.fp, "KISSKI_API_KEY")[1], "new")
+        self.assertEqual(self.store.get_decrypted_embedding_key(self.fp, "HF_API_TOKEN")[1], "hf")
+
+    def test_keys_survive_a_zotero_key_rotation(self):
+        self.store.set_embedding_key(self.fp, "k1", "KISSKI_API_KEY")
+        self.store.set_embedding_key(self.fp, "k2", "HF_API_TOKEN")
+        new_fp = self.store.add("ZK-ROTATED", _validation())
+        self.assertNotEqual(new_fp, self.fp)
+        self.assertEqual(self.store.get_decrypted_embedding_key(new_fp, "KISSKI_API_KEY")[1], "k1")
+        self.assertEqual(self.store.get_decrypted_embedding_key(new_fp, "HF_API_TOKEN")[1], "k2")
+
+    def test_clear_rate_limits_and_counts_cover_every_key(self):
+        self.store.set_embedding_key(self.fp, "a", "KISSKI_API_KEY")
+        self.store.set_embedding_key(self.fp, "b", "HF_API_TOKEN", status="invalid")
+        self.store.set_embedding_key_status(self.fp, "rate_limited", "2999-01-01T00:00:00+00:00", key_name="KISSKI_API_KEY")
+        self.assertEqual(self.store.clear_rate_limits(), 1)
+        self.assertEqual(self.store.count_embedding_keys_by_name(), {"KISSKI_API_KEY": 1})  # invalid not counted
+
+    def test_the_ciphertext_is_never_listed(self):
+        self.store.set_embedding_key(self.fp, "secret-value", "KISSKI_API_KEY")
+        self.assertNotIn("secret-value", repr(self.store.list_metadata()))
+        self.assertNotIn("secret-value", self.store._load()[self.fp]["embedding_keys"]["KISSKI_API_KEY"]["ciphertext"])
+
+
 if __name__ == "__main__":
     unittest.main()

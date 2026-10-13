@@ -2,8 +2,8 @@
 CLI script for cron-driven Zotero library indexing via the web API.
 
 Usage:
-    uv run python bin/index_libraries.py
-    uv run python bin/index_libraries.py --mode full --max-items 500
+    uv run rag-index
+    uv run rag-index --mode full --max-items 500
 
 Libraries and keys are resolved from the encrypted auto-index key store: every
 stored read-only key is re-validated against api.zotero.org each run, revoked
@@ -26,13 +26,16 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from backend.utils.cpu_affinity import restrict_current_process_cpus  # noqa: E402
 from backend.utils.disk_space import check_disk_space  # noqa: E402
+from backend.utils.log_rotation import RotatingLogHandler  # noqa: E402
 
 
 def _setup_logging(log_file: Path, log_level: str = "INFO") -> logging.Logger:
     log_file.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
 
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    # Short-lived cron process: no startup rotation (would rotate hourly);
+    # the handler still rolls over once the file predates midnight.
+    file_handler = RotatingLogHandler(log_file, rotate_on_startup=False)
     file_handler.setFormatter(fmt)
 
     root_logger = logging.getLogger()
@@ -78,6 +81,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(used by the on-demand /api/autoindex/run trigger).",
     )
     parser.add_argument(
+        "--slug",
+        metavar="SLUG",
+        default=None,
+        help="Restrict indexing to this single library slug (e.g. users/123 or "
+             "groups/456), used by the admin per-library run-slug trigger.",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -86,11 +96,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _filter_targets(targets: dict, fp: str | None) -> dict:
-    """Restrict targets to those owned by fp, if given; otherwise return them unchanged."""
-    if not fp:
-        return targets
-    return {slug: t for slug, t in targets.items() if t["fingerprint"] == fp}
+def _filter_targets(targets: dict, fp: str | None, slug: str | None = None) -> dict:
+    """Restrict targets to those owned by fp and/or to a single slug, if given;
+    otherwise return them unchanged."""
+    if fp:
+        targets = {s: t for s, t in targets.items() if t["fingerprint"] == fp}
+    if slug:
+        targets = {s: t for s, t in targets.items() if s == slug}
+    return targets
 
 
 def _clear_lock_files(lock_file: Path, log: logging.Logger) -> None:
@@ -128,10 +141,10 @@ async def _main(argv: list[str] | None = None) -> int:
 
     restrict_current_process_cpus(settings.autoindex_reserved_cpus)
 
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.services.autoindex_resolver import resolve_targets
 
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         log.error("AUTOINDEX_SECRET is not set; no keys can be decrypted. Nothing to index.")
         return 1
@@ -140,9 +153,11 @@ async def _main(argv: list[str] | None = None) -> int:
     for issue in key_issues:
         log.warning("Key pruned for user %s: %s", issue.get("user"), issue.get("reason"))
 
-    targets = _filter_targets(targets, args.fingerprint)
-    if args.fingerprint and not targets:
-        log.error("No targets for fingerprint %s; nothing to index for this user.", args.fingerprint)
+    targets = _filter_targets(targets, args.fingerprint, args.slug)
+    if (args.fingerprint or args.slug) and not targets:
+        log.error(
+            "No targets for fingerprint=%s slug=%s; nothing to index.", args.fingerprint, args.slug
+        )
         return 1
 
     if not targets:
@@ -189,5 +204,10 @@ async def _main(argv: list[str] | None = None) -> int:
         return 1
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the ``rag-index`` console script (see pyproject.toml)."""
     sys.exit(asyncio.run(_main()))
+
+
+if __name__ == "__main__":
+    main()

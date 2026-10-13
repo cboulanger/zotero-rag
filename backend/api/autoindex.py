@@ -8,6 +8,7 @@ POST   /api/autoindex/run                 — on-demand run scoped to the caller
 POST   /api/autoindex/scheduler/pause     — pause the built-in scheduler (admin only)
 POST   /api/autoindex/scheduler/resume    — resume the built-in scheduler (admin only)
 POST   /api/autoindex/scheduler/run-now   — immediate unscoped run of every library (admin only)
+POST   /api/autoindex/scheduler/run-slug  — immediate run scoped to one library (admin only)
 POST   /api/autoindex/scheduler/skip-slug — cooperatively skip one job in the active run (admin only)
 POST   /api/autoindex/abort               — kill the entire running indexing process (admin only)
 
@@ -28,11 +29,15 @@ from backend.api.public_query import slug_to_backend_id
 from backend.config.settings import get_settings
 from backend.dependencies import get_zotero_identity, require_authorized_group_admin
 from backend.services.autoindex_key_store import AutoIndexKeyStore, fingerprint
+from backend.services.secret_store import get_key_store
 from backend.services.autoindex_resolver import is_embedding_key_usable
-from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, write_scheduler_state
-from backend.services.cron_indexer import abort_process, read_live_status, write_control_state
+from backend.services.autoindex_scheduler import read_scheduler_state, trigger_index_run, update_scheduler_state
+from backend.services.cron_indexer import abort_process, mark_run_stopped, read_live_status, write_control_state
+from backend.providers import get_provider_or_none
 from backend.services.embedding_key_validator import validate_embedding_key
+from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.registration_service import RegistrationService
+from backend.services.system_health import get_system_health
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.group_roles import get_admin_role_cache
 from backend.zotero.key_validator import validate_key
@@ -50,9 +55,12 @@ class SkipSlugRequest(BaseModel):
     slug: str
 
 
+class RunSlugRequest(BaseModel):
+    slug: str
+
+
 def _store() -> AutoIndexKeyStore:
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         raise HTTPException(
             status_code=503,
@@ -78,7 +86,9 @@ async def add_key(request: KeyRequest) -> dict:
     if request.embedding_api_key:
         settings = get_settings()
         preset = settings.get_hardware_preset()
-        emb_validation = await validate_embedding_key(request.embedding_api_key, preset.embedding)
+        emb_validation = await validate_embedding_key(
+            request.embedding_api_key, preset.embedding, get_provider_or_none(preset, "embedding")
+        )
         if emb_validation.status == "invalid":
             response["embedding_key_status"] = "invalid"
             response["embedding_key_error"] = emb_validation.reason
@@ -111,7 +121,7 @@ def list_keys(identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity))
     user_id to any caller who merely passed the instance-wide access gate.
     """
     store = _store()
-    all_keys = store.list_metadata()
+    all_keys = store.list_metadata(_active_key_name())
     if identity is None:
         return {"keys": all_keys}
     return {"keys": [k for k in all_keys if k.get("user_id") == identity.user_id]}
@@ -144,7 +154,10 @@ async def status(
     Also reports ``is_admin``: True on loopback, True/False (via the cached
     Zotero group-admin check) when AUTHORIZED_GROUP_ID is configured, False
     when it isn't — the plugin uses this to decide whether to show admin
-    controls, without a separate round trip.
+    controls, without a separate round trip. Admin callers additionally get
+    ``system_health`` (host CPU/memory/swap/disk plus Kreuzberg/Qdrant
+    reachability and latency — see backend.services.system_health), so an
+    admin can tell a stuck run apart from a slow one directly in the dialog.
 
     Every visible job — for any caller, any scope — is labeled with its
     human-readable ``library_name`` and ``owner_id``: joined from
@@ -160,7 +173,7 @@ async def status(
     settings = get_settings()
     result: dict = {}
     try:
-        store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+        store = get_key_store()
         result["enabled"] = store.enabled
         if store.enabled:
             result["keys_registered"] = len(await asyncio.to_thread(store.list_metadata))
@@ -178,6 +191,7 @@ async def status(
         "active": bool(settings.autoindex_interval_minutes),
         "interval_minutes": settings.autoindex_interval_minutes,
         "paused": scheduler_state.get("paused", False),
+        "next_tick_at": scheduler_state.get("next_tick_at"),
     }
 
     try:
@@ -200,6 +214,12 @@ async def status(
     else:
         result["is_admin"] = True  # loopback: same trust-boundary bypass as require_authorized_group_admin
 
+    if result["is_admin"]:
+        try:
+            result["system_health"] = await get_system_health(settings)
+        except Exception as exc:
+            logger.warning("Failed to collect system health: %s", exc)
+
     if scope == "all" and not result["is_admin"]:
         raise HTTPException(status_code=403, detail="This Zotero account is not an admin of the authorizing group.")
 
@@ -214,6 +234,17 @@ async def status(
                 issue for issue in result["key_issues"]
                 if issue.get("user") == identity.username
             ]
+
+    # Cache-only rate-limit snapshot (never probes: this endpoint is polled
+    # every few seconds and a probe would spend real quota).
+    try:
+        cached_limits = await asyncio.to_thread(get_cached_rate_limits, settings)
+    except Exception as exc:
+        logger.warning("Failed to read cached rate limits: %s", exc)
+        cached_limits = None
+    result["rate_limits"] = (
+        {"available": True, **cached_limits} if cached_limits else {"available": False}
+    )
 
     # Human-readable library_name/owner_id labeling applies to whatever
     # slugs are visible above — for every caller, not just admins on
@@ -302,14 +333,14 @@ async def run_now(request: Request) -> dict:
 @router.post("/autoindex/scheduler/pause", summary="Pause the built-in scheduler (admin only)")
 async def pause_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
     settings = get_settings()
-    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": True})
+    await asyncio.to_thread(update_scheduler_state, settings.data_path, paused=True)
     return {"paused": True}
 
 
 @router.post("/autoindex/scheduler/resume", summary="Resume the built-in scheduler (admin only)")
 async def resume_scheduler(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
     settings = get_settings()
-    await asyncio.to_thread(write_scheduler_state, settings.data_path, {"paused": False})
+    await asyncio.to_thread(update_scheduler_state, settings.data_path, paused=False)
     return {"paused": False}
 
 
@@ -330,6 +361,30 @@ async def run_now_admin(identity: Optional[ZoteroIdentity] = Depends(require_aut
     return {"started": True}
 
 
+@router.post(
+    "/autoindex/scheduler/run-slug",
+    summary="Trigger an immediate indexing run scoped to a single library (admin only)",
+)
+async def run_slug_admin(
+    body: RunSlugRequest,
+    identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin),
+) -> dict:
+    """Start a server-side run restricted to one library — lets an admin target
+    a single library in between scheduled runs or after aborting the current
+    one, without waiting for the next scheduler tick or re-running everything.
+    """
+    settings = get_settings()
+    result = await trigger_index_run(settings, slug=body.slug)
+    if result == "already_running":
+        raise HTTPException(status_code=409, detail="Indexing is already running on the server.")
+    if result == "disabled":
+        raise HTTPException(
+            status_code=503,
+            detail="Auto-indexing is not configured on this server (AUTOINDEX_SECRET unset).",
+        )
+    return {"started": True, "slug": body.slug}
+
+
 @router.post("/autoindex/abort", summary="Abort the entire running indexing process (admin only)")
 async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authorized_group_admin)) -> dict:
     settings = get_settings()
@@ -339,7 +394,10 @@ async def abort_run(identity: Optional[ZoteroIdentity] = Depends(require_authori
     pid = live_status.get("pid")
     if pid is None:
         raise HTTPException(status_code=500, detail="Indexing is reported as running but no PID was recorded.")
-    aborted = await asyncio.to_thread(abort_process, pid)
+    create_time = live_status.get("pid_create_time")
+    aborted = await asyncio.to_thread(abort_process, pid, create_time)
+    if aborted:
+        await asyncio.to_thread(mark_run_stopped, settings.data_path, "aborted")
     return {"aborted": aborted, "pid": pid}
 
 
@@ -369,8 +427,13 @@ async def skip_slug(
     return {"skip_requested": True, "slug": body.slug}
 
 
+def _active_key_name() -> Optional[str]:
+    """Name of the personal provider key the active preset's embedding side uses, if any."""
+    return get_settings().get_hardware_preset().embedding.model_kwargs.get("api_key_env")
+
+
 def _find_own_entry(store: AutoIndexKeyStore, fp: str) -> Optional[dict]:
-    return next((k for k in store.list_metadata() if k["fingerprint"] == fp), None)
+    return next((k for k in store.list_metadata(_active_key_name()) if k["fingerprint"] == fp), None)
 
 
 def _embedding_key_block_reason(own: dict) -> Optional[str]:

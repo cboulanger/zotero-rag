@@ -1,9 +1,18 @@
 """Unit tests for the Kreuzberg extraction adapter's timeout computation."""
 
+import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergExtractor, _compute_timeout
+import httpx
+import psutil
+
+from backend.services.extraction.kreuzberg import (
+    AttachmentTooLargeError,
+    KreuzbergExtractor,
+    KreuzbergUnavailableError,
+    _compute_timeout,
+)
 
 
 class TestComputeTimeout(unittest.TestCase):
@@ -41,7 +50,22 @@ class TestComputeTimeout(unittest.TestCase):
         self.assertEqual(doubled, base * 2)
 
 
+# The wiring test below needs a payload large enough that the computed timeout
+# hits the cap, which means materialising ~10 GB of bytes. That stalls or OOMs
+# memory-restricted environments (cloud sessions, CI runners), so it is skipped
+# unless enough RAM is free or RUN_MEMORY_HEAVY_TESTS=1 forces it.
+_HEAVY_PAYLOAD_BYTES = 10_000_000_000
+_ENOUGH_MEMORY = (
+    os.environ.get("RUN_MEMORY_HEAVY_TESTS") == "1"
+    or psutil.virtual_memory().available > 2 * _HEAVY_PAYLOAD_BYTES
+)
+
+
 class TestKreuzbergExtractorTimeoutWiring(unittest.IsolatedAsyncioTestCase):
+    @unittest.skipUnless(
+        _ENOUGH_MEMORY,
+        "needs ~10 GB free RAM for the oversized payload; set RUN_MEMORY_HEAVY_TESTS=1 to force",
+    )
     async def test_extract_and_chunk_uses_configured_cap_and_multiplier(self):
         extractor = KreuzbergExtractor(timeout_cap=600)
 
@@ -59,7 +83,7 @@ class TestKreuzbergExtractorTimeoutWiring(unittest.IsolatedAsyncioTestCase):
             return_value=mock_client,
         ) as mock_client_cls:
             await extractor.extract_and_chunk(
-                b"x" * 10_000_000_000, "application/pdf", timeout_multiplier=2.0
+                b"x" * _HEAVY_PAYLOAD_BYTES, "application/pdf", timeout_multiplier=2.0
             )
 
         # cap=600, multiplier=2.0 → expect the doubled cap, not the default 1800-based one.
@@ -102,6 +126,96 @@ class TestMaxContentBytes(unittest.IsolatedAsyncioTestCase):
 
         with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client):
             await extractor.extract_and_chunk(b"x" * 1_000_000, "application/pdf")  # must not raise
+
+
+class TestKreuzbergConnectRetry(unittest.IsolatedAsyncioTestCase):
+    """A connection failure — the sidecar refusing connections outright, or
+    dropping one mid-request without sending a response — is retried for up
+    to 10 minutes before giving up — see kreuzberg.py's module-level
+    _CONNECT_RETRY_BUDGET_SECONDS.
+
+    Regression: a bare ConnectError used to raise immediately on the first
+    failed attachment, and every subsequent attachment in the run then failed
+    the exact same way with no retry at all — if the sidecar was mid-restart
+    (a known, recoverable condition after a crash/OOM/deploy), the run never
+    gave it a chance to come back.
+    """
+
+    def _make_response(self):
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json = MagicMock(return_value=[{"chunks": []}])
+        return mock_response
+
+    async def test_connect_error_retries_then_succeeds(self):
+        extractor = KreuzbergExtractor()
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        connect_exc = httpx.ConnectError("Connection refused")
+        mock_client.post = AsyncMock(side_effect=[connect_exc, connect_exc, self._make_response()])
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client), \
+             patch("backend.services.extraction.kreuzberg.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            chunks = await extractor.extract_and_chunk(b"content", "application/pdf")
+
+        self.assertEqual(chunks, [])
+        self.assertEqual(mock_client.post.await_count, 3)
+        self.assertEqual(mock_sleep.await_count, 2)
+
+    async def test_remote_protocol_error_retries_then_succeeds(self):
+        """"Server disconnected without sending a response" (e.g. the sidecar
+        crashed/restarted mid-request) gets the same retry treatment as a
+        bare ConnectError, not an immediate failure."""
+        extractor = KreuzbergExtractor()
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        disconnect_exc = httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        mock_client.post = AsyncMock(side_effect=[disconnect_exc, self._make_response()])
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client), \
+             patch("backend.services.extraction.kreuzberg.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            chunks = await extractor.extract_and_chunk(b"content", "application/pdf")
+
+        self.assertEqual(chunks, [])
+        self.assertEqual(mock_client.post.await_count, 2)
+        self.assertEqual(mock_sleep.await_count, 1)
+
+    async def test_connect_error_raises_unavailable_once_budget_exhausted(self):
+        extractor = KreuzbergExtractor()
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client), \
+             patch("backend.services.extraction.kreuzberg.asyncio.sleep", new_callable=AsyncMock), \
+             patch("backend.services.extraction.kreuzberg.time.monotonic", side_effect=[0, 1000]):
+            with self.assertRaises(KreuzbergUnavailableError) as ctx:
+                await extractor.extract_and_chunk(b"content", "application/pdf")
+
+        self.assertIn("600s", str(ctx.exception))
+
+    async def test_zero_retry_budget_raises_immediately_on_first_connect_error(self):
+        """Regression: DocumentProcessor passes connect_retry_budget_seconds=0
+        in settings.testing, so a test exercising the real upload path without
+        mocking httpx (the sidecar is never actually running under pytest)
+        must fail on the very first connection attempt rather than retrying
+        for minutes and hanging past the test's own timeout."""
+        extractor = KreuzbergExtractor(connect_retry_budget_seconds=0)
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+
+        with patch("backend.services.extraction.kreuzberg.httpx.AsyncClient", return_value=mock_client), \
+             patch("backend.services.extraction.kreuzberg.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with self.assertRaises(KreuzbergUnavailableError):
+                await extractor.extract_and_chunk(b"content", "application/pdf")
+
+        mock_client.post.assert_awaited_once()
+        mock_sleep.assert_not_awaited()
 
 
 if __name__ == "__main__":

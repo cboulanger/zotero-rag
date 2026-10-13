@@ -92,7 +92,7 @@ See [docs/presets.md](../docs/presets.md) for a full comparison of all presets.
 
 ```bash
 # In .env file
-KISSKI_API_KEY=your_key_here      # For remote-kisski / apple-silicon-kisski / windows-test
+KISSKI_API_KEY=your_key_here      # For remote-kisski / windows-test
 OPENAI_API_KEY=sk-...             # For remote-openai
 ```
 
@@ -118,7 +118,7 @@ If you later switch to a fully-remote preset you can reclaim the disk space:
 uv remove sentence-transformers torch transformers accelerate bitsandbytes
 ```
 
-Remote presets (`remote-kisski`, `remote-openai`, `windows-test`, `apple-silicon-kisski`) never load these packages — the import is lazy and skipped entirely when a remote configuration is active.
+Remote presets (`remote-kisski`, `remote-openai`, `windows-test`) never load these packages — the import is lazy and skipped entirely when a remote configuration is active.
 
 ## Troubleshooting
 

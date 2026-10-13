@@ -22,12 +22,10 @@ async def _main(argv: list[str]) -> int:
         return 2
     api_key = argv[0].strip()
 
-    from backend.config.settings import get_settings
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
     from backend.zotero.key_validator import validate_key
 
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         print("[FAIL] AUTOINDEX_SECRET is not set; cannot store keys.")
         return 1

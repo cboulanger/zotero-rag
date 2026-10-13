@@ -24,14 +24,27 @@ from backend.zotero.local_api import ZoteroLocalAPI
 from backend.services.embeddings import (
     EmbeddingService,
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
 )
 from backend.services.extraction import DocumentExtractor, create_document_extractor
 from backend.services.extraction.base import ExtractionChunk
 from backend.services.admin_settings_store import read_admin_settings
-from backend.services.extraction.kreuzberg import AttachmentTooLargeError, KreuzbergTimeoutError, KreuzbergParsingError
+from backend.services.extraction.kreuzberg import (
+    AttachmentTooLargeError,
+    KreuzbergParsingError,
+    KreuzbergTimeoutError,
+    KreuzbergUnavailableError,
+)
 from backend.services.chunking import TextChunker, coalesce_chunks
 from backend.config.settings import get_settings
+from backend.services.failed_attachments import (
+    REASON_NOT_DOWNLOADABLE,
+    REASON_TOO_COSTLY,
+    REASON_TOO_LARGE,
+    get_failed_store,
+)
+from backend.utils.pdf_splitter import inspect_pdf
 from backend.services import diagnostics_collector as diag
 from backend.db.vector_store import VectorStore
 from backend.models.document import (
@@ -45,13 +58,16 @@ from backend.models.library import LibraryIndexMetadata
 
 logger = logging.getLogger(__name__)
 
-# Fatal embedding errors abort the whole indexing run — they are never swallowed
-# per-item. An expired/invalid API key or an exhausted quota affects every item
-# equally, so continuing the loop only produces a stream of identical failures and
-# a run that "completes" with zero chunks while reporting success.
-_FATAL_EMBEDDING_ERRORS = (
+# Fatal embedding/extraction errors abort the whole indexing run — they are
+# never swallowed per-item. An expired/invalid API key, an exhausted quota, or
+# a downed extraction sidecar all affect every item equally, so continuing the
+# loop only produces a stream of identical failures and a run that "completes"
+# with zero chunks while reporting success.
+_FATAL_PROCESSING_ERRORS = (
     EmbeddingAuthenticationError,
+    EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
+    KreuzbergUnavailableError,
 )
 
 # Upper bound on tracked failed-download records — a safety net against
@@ -83,6 +99,12 @@ def merge_download_failures(existing: list[dict], new_failures: list[dict]) -> l
     return merged[:MAX_TRACKED_DOWNLOAD_FAILURES]
 
 
+def drop_attachment_failures(existing: list[dict], attachment_key: str) -> list[dict]:
+    """Return ``existing`` without the entries for ``attachment_key`` (the
+    counterpart of merge_download_failures, for an attachment that is now indexed)."""
+    return [f for f in existing if f.get("attachment_key") != attachment_key]
+
+
 # MIME types that will be downloaded and indexed
 INDEXABLE_MIME_TYPES = {
     "application/pdf",
@@ -109,6 +131,12 @@ def _is_indexable_attachment(att_data: dict, index_snapshots_enabled: bool) -> b
         and att_data.get("contentType") == "text/html"
         and att_data.get("title") == "Snapshot"
     ):
+        return False
+    if att_data.get("linkMode") == "linked_url":
+        # A web-only bookmark — Zotero never stores a file for it anywhere
+        # (not in cloud storage, not locally), so a download attempt would
+        # always 404. Unlike linked_file (see _index_item), there is no
+        # client capable of resolving it, so exclude it outright.
         return False
     return True
 
@@ -158,6 +186,7 @@ def _subprocess_index_batch(
     import asyncio as _asyncio
 
     from backend.dependencies import make_vector_store
+    from backend.providers import get_provider_or_none
     from backend.services.embeddings import create_embedding_service
     from backend.zotero.web_api import ZoteroWebAPI
 
@@ -172,6 +201,8 @@ def _subprocess_index_batch(
             cache_dir=str(settings.model_weights_path),
             api_key=embedding_api_key,
             hf_token=settings.get_api_key("HF_TOKEN"),
+            data_path=settings.data_path,
+            provider=get_provider_or_none(preset, "embedding"),
         )
         vector_store = make_vector_store()
         web_api = ZoteroWebAPI(api_key=zotero_api_key)
@@ -216,7 +247,7 @@ def _subprocess_index_batch(
                             items_updated += 1
                     else:
                         items_skipped += 1
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     raise
                 except Exception as e:
                     logger.error("Error processing item %s in subprocess batch: %s", item_key, e, exc_info=True)
@@ -251,7 +282,7 @@ def _run_subprocess_batch(
             items, library_id, library_type, indexed_versions, zotero_api_key, embedding_api_key
         )
         result_queue.put({"fatal": False, **result})
-    except _FATAL_EMBEDDING_ERRORS as e:
+    except _FATAL_PROCESSING_ERRORS as e:
         result_queue.put({"fatal": True, "error": repr(e), "error_type": type(e).__name__})
     except Exception as e:
         logger.error("Subprocess batch worker raised unexpected error: %s", e, exc_info=True)
@@ -331,6 +362,11 @@ class DocumentProcessor:
                 kreuzberg_url=settings.kreuzberg_url,
                 kreuzberg_timeout_cap=settings.kreuzberg_timeout_seconds,
                 kreuzberg_max_content_bytes=settings.kreuzberg_max_content_bytes,
+                # 0 in testing mode: a test exercising the real upload path
+                # without mocking httpx (the sidecar is never actually running
+                # under pytest) must fail on the first connection attempt, not
+                # retry for minutes and hang past the test's own timeout.
+                kreuzberg_connect_retry_seconds=0 if settings.testing else 600,
             )
         self.document_extractor = document_extractor
 
@@ -554,7 +590,7 @@ class DocumentProcessor:
                     # Already up-to-date (shouldn't happen with ?since, but defensive)
                     logger.debug(f"Item {item_key} already up-to-date (version {item_version})")
 
-            except _FATAL_EMBEDDING_ERRORS:
+            except _FATAL_PROCESSING_ERRORS:
                 # Embedding key/quota failure affects every item — abort the run so
                 # the caller surfaces an error instead of silently skipping everything.
                 raise
@@ -846,14 +882,19 @@ class DocumentProcessor:
                 if not result_q.empty():
                     result = result_q.get_nowait()
                     if result.get("fatal"):
-                        # Re-raise fatal embedding error to abort the full run
+                        # Re-raise fatal embedding/extraction error to abort the full run
                         from backend.services.embeddings import (
                             EmbeddingAuthenticationError,
+                            EmbeddingEndpointUnavailableError,
                             EmbeddingRateLimitExhaustedError,
                         )
                         error_type = result.get("error_type", "")
                         if error_type == "EmbeddingAuthenticationError":
                             raise EmbeddingAuthenticationError(result.get("error", ""))
+                        elif error_type == "EmbeddingEndpointUnavailableError":
+                            raise EmbeddingEndpointUnavailableError(result.get("error", ""))
+                        elif error_type == "KreuzbergUnavailableError":
+                            raise KreuzbergUnavailableError(result.get("error", ""))
                         raise EmbeddingRateLimitExhaustedError(result.get("error", ""))
                     chunks_added += result.get("chunks_added", 0)
                     items_added += result.get("items_added", 0)
@@ -920,7 +961,7 @@ class DocumentProcessor:
                     else:
                         items_skipped += 1
 
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     raise
                 except Exception as e:
                     logger.error("Error processing item in full sync mode: %s", e, exc_info=True)
@@ -1076,8 +1117,27 @@ class DocumentProcessor:
                 )
 
                 if not file_bytes:
-                    logger.warning(f"Could not download attachment {attachment_key}")
-                    self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
+                    link_mode = attachment["data"].get("linkMode")
+                    if link_mode == "linked_file":
+                        # Points at a file on the uploader's own disk, not in Zotero's
+                        # cloud storage — the remote Web API's 404 for it is permanent,
+                        # not transient, so retrying every sync is futile. Mark it
+                        # rag-failed like other permanent refusals instead of adding it
+                        # to _download_failures, which would keep retrying it forever.
+                        logger.warning(
+                            f"Attachment {attachment_key} is a linked_file with no file "
+                            "in Zotero's cloud storage; marking rag-failed instead of retrying"
+                        )
+                        await asyncio.to_thread(
+                            get_failed_store().mark_failed,
+                            library_id, attachment_key, item_key, REASON_NOT_DOWNLOADABLE,
+                            "Attachment is a 'linked_file' link to a file on the uploader's own "
+                            "disk — Zotero's API has no file to serve for it. Upload it to Zotero "
+                            "storage, or remove the rag-failed tag in Zotero to retry.",
+                        )
+                    else:
+                        logger.warning(f"Could not download attachment {attachment_key}")
+                        self._download_failures.append({"item_key": item_key, "attachment_key": attachment_key})
                     continue
 
                 try:
@@ -1090,7 +1150,7 @@ class DocumentProcessor:
                         item_modified=item_modified,
                         force_extraction=force_extraction,
                     )
-                except _FATAL_EMBEDDING_ERRORS:
+                except _FATAL_PROCESSING_ERRORS:
                     # Affects every attachment equally — propagate rather than
                     # burning through the rest of the item's attachments.
                     raise
@@ -1231,6 +1291,15 @@ class DocumentProcessor:
         item_key = doc_metadata.item_key
         attachment_key = doc_metadata.attachment_key
 
+        # A previously refused attachment (tagged rag-failed) stays refused until the
+        # user removes the tag, which clears this record.
+        failed_store = get_failed_store()
+        if await asyncio.to_thread(failed_store.is_failed, library_id, attachment_key):
+            return AttachmentProcessingResult(
+                chunks_written=0, status="skipped_failed",
+                error_detail="Attachment is marked rag-failed; remove the tag in Zotero to retry.",
+            )
+
         content_hash = hashlib.sha256(file_bytes).hexdigest()
 
         # Step 1: same-library dedup
@@ -1299,15 +1368,43 @@ class DocumentProcessor:
         # Extract text and chunk — split large PDFs to avoid kreuzberg OOM kills
         settings = get_settings()
         t_extract_start = time.monotonic()
+        # Byte size is a poor proxy for OCR memory cost: an image-only scan needs OCR
+        # on every page. Profile PDFs (cheap, no OCR) to cap and split such scans by pages.
+        scan_max_pages: Optional[int] = None
+        if mime_type == "application/pdf":
+            try:
+                profile = await asyncio.to_thread(inspect_pdf, file_bytes)
+            except ValueError:
+                profile = None  # unparseable: fall through to the byte-based handling
+            if profile is not None and not profile.has_text_layer:
+                if profile.page_count > settings.pdf_scan_max_pages:
+                    detail = (
+                        f"Scanned PDF without a text layer has {profile.page_count} pages "
+                        f"(limit {settings.pdf_scan_max_pages}); split it into smaller files."
+                    )
+                    logger.warning(f"Skipping attachment {attachment_key}: {detail}")
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key,
+                        REASON_TOO_COSTLY, detail,
+                    )
+                    return AttachmentProcessingResult(
+                        chunks_written=0, status="skipped_too_costly", error_detail=detail
+                    )
+                if profile.page_count > settings.pdf_scan_max_pages_per_part:
+                    scan_max_pages = settings.pdf_scan_max_pages_per_part
+        split_pdf = mime_type == "application/pdf" and (
+            len(file_bytes) > settings.pdf_split_threshold or scan_max_pages is not None
+        )
         with diag.stage("extraction") as ex_stage:
             ex_stage.set(mime_type=mime_type, size_bytes=len(file_bytes), timeout_multiplier=timeout_multiplier,
-                         split_pdf=mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold)
-            if mime_type == "application/pdf" and len(file_bytes) > settings.pdf_split_threshold:
+                         split_pdf=split_pdf)
+            if split_pdf:
                 try:
                     chunks = await self._extract_pdf_in_parts(
                         file_bytes, attachment_key, settings.pdf_split_target_part_size,
                         on_progress=on_progress,
                         timeout_multiplier=timeout_multiplier,
+                        max_pages_per_part=scan_max_pages,
                     )
                 except KreuzbergTimeoutError as e:
                     logger.warning(f"Skipping attachment {attachment_key}: {e}")
@@ -1325,6 +1422,9 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
                     ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
                     self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key, REASON_TOO_LARGE, str(e)
+                    )
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
             else:
                 if on_progress:
@@ -1345,7 +1445,16 @@ class DocumentProcessor:
                     logger.warning(f"Skipping attachment {attachment_key} (too large): {e}")
                     ex_stage.set(result="skipped_too_large", error=f"{type(e).__name__}: {e}")
                     self._too_large_skips.append({"item_key": doc_metadata.item_key, "attachment_key": attachment_key, "detail": str(e)})
+                    await asyncio.to_thread(
+                        failed_store.mark_failed, library_id, attachment_key, item_key, REASON_TOO_LARGE, str(e)
+                    )
                     return AttachmentProcessingResult(chunks_written=0, status="skipped_too_large", error_detail=str(e))
+                except KreuzbergUnavailableError:
+                    # Fatal, not per-attachment: the sidecar is down and every
+                    # remaining attachment would fail identically — propagate
+                    # unwrapped so _FATAL_PROCESSING_ERRORS aborts the run
+                    # instead of isolating it like a normal extraction failure.
+                    raise
                 except Exception as e:
                     logger.error(f"Failed to extract text from attachment {attachment_key}: {e}")
                     raise RuntimeError(f"Document extraction failed for {attachment_key}: {e}") from e
@@ -1451,8 +1560,9 @@ class DocumentProcessor:
         target_part_bytes: int,
         on_progress: Optional[Callable[[str], None]] = None,
         timeout_multiplier: float = 1.0,
+        max_pages_per_part: Optional[int] = None,
     ) -> list[ExtractionChunk]:
-        """Split a large PDF by target byte size and extract each part via kreuzberg.
+        """Split a large PDF by target byte size (and optional page cap) and extract each part via kreuzberg.
 
         Page numbers returned by kreuzberg are 1-based within each part; adding
         page_offset (0-based pages before the part) converts them back to the
@@ -1476,7 +1586,7 @@ class DocumentProcessor:
             on_progress(f"Splitting PDF ({size_mb:.0f} MB)...")
         t_split_start = time.monotonic()
         try:
-            parts = await asyncio.to_thread(split_pdf_bytes, pdf_bytes, target_part_bytes)
+            parts = await asyncio.to_thread(split_pdf_bytes, pdf_bytes, target_part_bytes, max_pages_per_part)
         except ValueError as e:
             logger.warning(f"Could not split {attachment_key}: {e} — sending whole file.")
             parts = [(pdf_bytes, 0)]

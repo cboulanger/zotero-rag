@@ -174,6 +174,8 @@ class TestProcessAttachmentBytesRouting(unittest.IsolatedAsyncioTestCase):
 
     def _mock_settings(self, threshold_bytes: int = 50 * 1024 ** 2):
         mock_settings = Mock()
+        mock_settings.pdf_scan_max_pages = 2000
+        mock_settings.pdf_scan_max_pages_per_part = 50
         mock_settings.pdf_split_threshold = threshold_bytes
         mock_settings.pdf_split_target_part_size = 30 * 1024 ** 2
         return mock_settings
@@ -184,6 +186,8 @@ class TestProcessAttachmentBytesRouting(unittest.IsolatedAsyncioTestCase):
         # Threshold below PDF size, target_part_size=1 forces pages_per_part=1
         # so the splitter produces 5 parts and the extractor is called 5 times.
         mock_settings = Mock()
+        mock_settings.pdf_scan_max_pages = 2000
+        mock_settings.pdf_scan_max_pages_per_part = 50
         mock_settings.pdf_split_threshold = len(pdf) // 2
         mock_settings.pdf_split_target_part_size = 1
 

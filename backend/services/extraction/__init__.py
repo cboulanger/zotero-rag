@@ -33,6 +33,7 @@ def create_document_extractor(
     kreuzberg_url: str = "http://localhost:8100",
     kreuzberg_timeout_cap: int = 1800,
     kreuzberg_max_content_bytes: Optional[int] = None,
+    kreuzberg_connect_retry_seconds: int = 600,
 ) -> DocumentExtractor:
     """
     Factory: create a DocumentExtractor for the named backend.
@@ -47,6 +48,9 @@ def create_document_extractor(
             computed from document size (kreuzberg backend only).
         kreuzberg_max_content_bytes: Hard cap on bytes sent to kreuzberg in one
             request; None means no cap (kreuzberg backend only).
+        kreuzberg_connect_retry_seconds: How long to retry a connection failure
+            before giving up (kreuzberg backend only) — see
+            KreuzbergExtractor.__init__'s connect_retry_budget_seconds.
 
     Returns:
         Configured DocumentExtractor instance.
@@ -63,6 +67,7 @@ def create_document_extractor(
                 ocr_enabled=ocr_enabled,
                 timeout_cap=kreuzberg_timeout_cap,
                 max_content_bytes=kreuzberg_max_content_bytes,
+                connect_retry_budget_seconds=kreuzberg_connect_retry_seconds,
             )
         case "legacy":
             return LegacyExtractor(

@@ -61,7 +61,7 @@ function formatFileSize(bytes) {
  * @property {string} status
  * @property {string} message
  * @property {number} rate_limit_retries
- * @property {Record<string,string>|null} rate_limit_headers
+ * @property {UsageMeter[]|null} rate_limit_meters
  * @property {string|null} [error_detail]
  */
 
@@ -101,7 +101,7 @@ var RemoteIndexer = {
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
 	 * @param {function(): Promise<boolean>} [opts.getIndexSnapshotsEnabled] - Returns whether the admin has enabled indexing of Snapshot-titled webpage attachments; defaults to false (exclude) when omitted
-	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], failedItems: FailedItem[], firstError: string|null, rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], failedItems: FailedItem[], firstError: string|null, rateLimitMeters: UsageMeter[]|null}>}
 	 */
 	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate, getIndexSnapshotsEnabled }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
@@ -259,8 +259,8 @@ var RemoteIndexer = {
 		const skippedTimeoutKeys = [];
 		/** @type {string|null} */
 		let firstError = null;
-		/** @type {Record<string,string>|null} */
-		let rateLimitHeaders = null;
+		/** @type {UsageMeter[]|null} */
+		let rateLimitMeters = null;
 		/** @type {FailedItem[]} */
 		const failedItems = [];
 		/** @type {Record<string, number>} */
@@ -332,9 +332,9 @@ var RemoteIndexer = {
 					att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal,
 					onStatusUpdate: msg => onProgress({ percentage: (i / total) * 100, message: `${label} — ${msg}`, current: i + 1, total }),
 				});
-				if (uploadResult.rateLimitHeaders) {
-					rateLimitHeaders = uploadResult.rateLimitHeaders;
-					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
+				if (uploadResult.rateLimitMeters) {
+					rateLimitMeters = uploadResult.rateLimitMeters;
+					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitMeters);
 				}
 				if (uploadResult.parseError) {
 					parseErrors++;
@@ -424,9 +424,9 @@ var RemoteIndexer = {
 
 			try {
 				const abstractResult = await this._uploadAbstract({ abstractItem, libraryId, libraryType, libraryName, backendURL, userId, getAuthHeaders, log, signal });
-				if (abstractResult.rateLimitHeaders) {
-					rateLimitHeaders = abstractResult.rateLimitHeaders;
-					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitHeaders);
+				if (abstractResult.rateLimitMeters) {
+					rateLimitMeters = abstractResult.rateLimitMeters;
+					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitMeters);
 				}
 				if (abstractResult.status === 'skipped_duplicate') {
 					skipped++;
@@ -513,7 +513,7 @@ var RemoteIndexer = {
 		log(`[RemoteIndexer] Finished. uploaded=${uploaded}, skipped=${skipped}, noFile=${noFile}, errors=${errors}, parseErrors=${parseErrors}, skippedEmpty=${skippedEmpty}, skippedTimeout=${skippedTimeout}`);
 		log(`[RemoteIndexer] [DIAG] run end: versionCache=${Object.keys(versionCache).length} pendingCache=${Object.keys(pendingCache).length}`);
 		return { uploaded, skipped, noFile, linkedUrls, errors, parseErrors, parseErrorKeys,
-			skippedEmpty, skippedEmptyKeys, skippedTimeout, skippedTimeoutKeys, failedItems, firstError, rateLimitHeaders, docTypeCounts };
+			skippedEmpty, skippedEmptyKeys, skippedTimeout, skippedTimeoutKeys, failedItems, firstError, rateLimitMeters, docTypeCounts };
 	},
 
 	// ---------------------------------------------------------------------------
@@ -815,7 +815,7 @@ var RemoteIndexer = {
 	 *   "Download debugging information" option. Defaults to false (no extra data requested).
 	 * @param {boolean} [opts.defer=false] - When true, upload to the deferred-indexing
 	 *   cache instead of indexing now; returns {queued, eta, queueBlockReason} immediately.
-	 * @returns {Promise<{rateLimitHeaders: Record<string,string>|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 * @returns {Promise<{rateLimitMeters: UsageMeter[]|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
 	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false, defer = false }) {
 		/** @type {Record<string, any>|null} */
@@ -941,7 +941,7 @@ var RemoteIndexer = {
 			// than surfaced, since there's nothing server-side to diagnose yet.
 			// The real diagnostics path for a deferred upload is process-now
 			// (_processQueuedNow) or the autoindex drain, not this response.
-			return { rateLimitHeaders: null, queued: true, eta: asyncData.eta ?? null, queueBlockReason: asyncData.reason ?? null };
+			return { rateLimitMeters: null, queued: true, eta: asyncData.eta ?? null, queueBlockReason: asyncData.reason ?? null };
 		}
 		/** @type {DocumentUploadResult} */
 		let result;
@@ -969,19 +969,19 @@ var RemoteIndexer = {
 			: '';
 		log(`[RemoteIndexer] ${att.attachment_key}: ${result.status} (${result.chunks_added} chunks)${rateLimitNote}`);
 
-		return this._mapTerminalResult(result, result.rate_limit_headers || null, pluginDiag);
+		return this._mapTerminalResult(result, result.rate_limit_meters || null, pluginDiag);
 	},
 
 	/**
 	 * Map a terminal DocumentUploadResult (from polling or process-now) to the
 	 * shape callers expect. Throws for status "error".
 	 * @param {any} result
-	 * @param {Record<string,string>|null} rateLimitHeaders
+	 * @param {UsageMeter[]|null} rateLimitMeters
 	 * @param {any} pluginDiag - When truthy, `diagnostics`/`pluginDiag` fields are included
 	 *   in the returned object (and on a thrown error's `.diagnostics`).
-	 * @returns {{rateLimitHeaders: Record<string,string>|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}}
+	 * @returns {{rateLimitMeters: UsageMeter[]|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}}
 	 */
-	_mapTerminalResult(result, rateLimitHeaders, pluginDiag) {
+	_mapTerminalResult(result, rateLimitMeters, pluginDiag) {
 		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
 		if (result.status === 'error') {
 			const err = /** @type {any} */ (new Error(result.message || 'Upload failed'));
@@ -989,15 +989,15 @@ var RemoteIndexer = {
 			throw err;
 		}
 		if (result.status === 'skipped_parse_error') {
-			return { rateLimitHeaders, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitMeters, parseError: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_empty') {
-			return { rateLimitHeaders, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitMeters, skippedEmpty: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
 		if (result.status === 'skipped_timeout') {
-			return { rateLimitHeaders, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
+			return { rateLimitMeters, skippedTimeout: true, errorDetail: result.error_detail || null, ...diagFields };
 		}
-		return { rateLimitHeaders, ...diagFields };
+		return { rateLimitMeters, ...diagFields };
 	},
 
 	/**
@@ -1016,7 +1016,7 @@ var RemoteIndexer = {
 	 *   one frozen in the cache at deferral time (see the backend endpoint's docstring
 	 *   for why a stale version causes the item to resurface as download-failed).
 	 * @param {number} [opts.attachmentVersion] - current Zotero attachment version
-	 * @returns {Promise<{rateLimitHeaders: null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 * @returns {Promise<{rateLimitMeters: null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
 	 */
 	async _processQueuedNow({ libraryId, attachmentKey, backendURL, getAuthHeaders, log, signal, includeDiagnostics = false, itemVersion, attachmentVersion }) {
 		/** @type {Array<string>} */
@@ -1265,7 +1265,7 @@ var RemoteIndexer = {
 	 * @param {function(Record<string,string>=): Record<string,string>} opts.getAuthHeaders
 	 * @param {function(string): void} opts.log
 	 * @param {AbortSignal} [opts.signal]
-	 * @returns {Promise<{status: string, rateLimitHeaders: Record<string,string>|null}>}
+	 * @returns {Promise<{status: string, rateLimitMeters: UsageMeter[]|null}>}
 	 */
 	/**
 	 * Send metadata-only updates for items whose schema_version is below the current backend version.
@@ -1368,13 +1368,13 @@ var RemoteIndexer = {
 		}
 		debug(log, `${abstractItem.item_key} (abstract): response received in ${Date.now() - t0}ms`);
 
-		const result = /** @type {{status: string, chunks_added: number, message?: string, rate_limit_headers?: Record<string, string>}} */ (/** @type {unknown} */ (await response.json()));
+		const result = /** @type {{status: string, chunks_added: number, message?: string, rate_limit_meters?: UsageMeter[]}} */ (/** @type {unknown} */ (await response.json()));
 		log(`[RemoteIndexer] ${abstractItem.item_key} (abstract): ${result.status} (${result.chunks_added} chunks)`);
 
 		if (result.status === 'error') {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}
-		return { status: result.status, rateLimitHeaders: result.rate_limit_headers || null };
+		return { status: result.status, rateLimitMeters: result.rate_limit_meters || null };
 	},
 
 	/**

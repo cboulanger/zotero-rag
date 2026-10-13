@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 # would consume 10+ GB RAM and crash the host.
 os.environ.setdefault("TESTING", "true")
 
+# Shared API keys in admin_settings.json are encrypted with AUTOINDEX_SECRET and
+# cannot be stored without it; give the test process a throwaway one.
+if "AUTOINDEX_SECRET" not in os.environ:
+    from cryptography.fernet import Fernet as _Fernet
+    os.environ["AUTOINDEX_SECRET"] = _Fernet.generate_key().decode()
+
 # Add backend to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
@@ -352,3 +358,19 @@ def pytest_sessionfinish(session, exitstatus):
     except (ImportError, RuntimeError, Exception):
         # Ignore any errors during cleanup
         pass
+
+
+@pytest.fixture(autouse=True)
+def _isolated_failed_store(tmp_path, monkeypatch):
+    """Keep rag-failed records (and their events) out of the real data directory."""
+    from backend.services import failed_attachments
+    from backend.services.index_event_log import IndexEventLog
+
+    def _store():
+        return failed_attachments.FailedAttachmentStore(
+            tmp_path / "failed_attachments.json", IndexEventLog(tmp_path / "index_events.jsonl")
+        )
+
+    monkeypatch.setattr(failed_attachments, "get_failed_store", _store)
+    monkeypatch.setattr("backend.services.document_processor.get_failed_store", _store)
+    monkeypatch.setattr("backend.api.indexed_tags.get_failed_store", _store)

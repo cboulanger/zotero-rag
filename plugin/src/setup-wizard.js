@@ -258,6 +258,17 @@ var ZoteroSetupWizard = {
 		}
 
 		await this.plugin.fetchRequiredApiKeys();
+		const intro = document.getElementById('wizard-keys-intro');
+		if (intro) {
+			try {
+				const response = await fetch(`${this.plugin.backendURL}/api/config`, { headers: this.plugin.getAuthHeaders() });
+				if (response.ok) {
+					intro.textContent = ZoteroRAGProviderSections.keysIntro(await response.json(), this.plugin.requiredApiKeys);
+				}
+			} catch (_) {
+				// keep the static text
+			}
+		}
 		const container = document.getElementById('wizard-service-keys-container');
 		const placeholder = document.getElementById('wizard-service-keys-placeholder');
 		this.plugin.renderServiceApiKeyFields(document, container, placeholder, this.plugin.requiredApiKeys);

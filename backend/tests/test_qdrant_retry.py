@@ -39,6 +39,16 @@ class TestEnsureChunksIndexes(unittest.TestCase):
         self.assertIn("library_id", indexed_fields)
         self.assertIn("item_key", indexed_fields)
 
+    def test_creates_keyword_index_for_attachment_title(self):
+        """attachment_title gets a keyword index so purge-snapshots can filter on it
+        without a full collection scan (see delete_snapshot_chunks)."""
+        store = _make_store()
+        store._ensure_chunks_indexes()
+
+        calls = store.client.create_payload_index.call_args_list
+        field_schemas = {c[1]["field_name"]: c[1]["field_schema"] for c in calls}
+        self.assertEqual(field_schemas.get("attachment_title"), "keyword")
+
     def test_indexes_target_chunks_collection(self):
         """create_payload_index is called with the CHUNKS_COLLECTION name."""
         store = _make_store()

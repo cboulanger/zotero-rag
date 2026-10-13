@@ -47,13 +47,33 @@
     </html:div>
   </html:fieldset>
 
-  <!-- Service API Keys (populated dynamically from the backend's /api/required-keys) -->
-  <html:fieldset class="settings-group" id="zotero-rag-service-keys-group">
-    <html:legend>Service API Keys</html:legend>
-    <html:div id="zotero-rag-service-keys-container">
-      <html:div class="setting-description" id="zotero-rag-service-keys-placeholder">
-        No API keys required for this backend configuration, or not yet connected.
-      </html:div>
+  <!-- Model preset: the caller's own choice and (admins) the server default -->
+  <html:fieldset class="settings-group" id="zotero-rag-preset-group">
+    <html:legend>Model preset</html:legend>
+    <html:div class="setting-row" id="zotero-rag-preset-row">
+      <html:label for="zotero-rag-preset-select" id="zotero-rag-preset-label">Preset:</html:label>
+      <html:select id="zotero-rag-preset-select" class="setting-input">
+        <html:option value="">(not connected)</html:option>
+      </html:select>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-preset-description"></html:div>
+    <html:div id="zotero-rag-preset-keys"></html:div>
+    <html:div class="setting-row" id="zotero-rag-default-row" hidden="hidden">
+      <html:label for="zotero-rag-default-select">Server default:</html:label>
+      <html:select id="zotero-rag-default-select" class="setting-input"></html:select>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-default-help" hidden="hidden">
+      The preset every user runs on until they choose their own (admins only).
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
+  </html:fieldset>
+
+  <!-- Per-side model configuration (rendered from the backend's provider descriptors) -->
+  <html:fieldset class="settings-group" id="zotero-rag-provider-group">
+    <html:legend>Models</html:legend>
+    <html:div id="zotero-rag-provider-sections"></html:div>
+    <html:div class="setting-description" id="zotero-rag-service-keys-placeholder">
+      No API keys required for this backend configuration, or not yet connected.
     </html:div>
   </html:fieldset>
 
@@ -76,6 +96,30 @@
     <html:div style="margin-top:8px;">
       <html:button id="zotero-rag-autoindex-monitor">View indexing status</html:button>
     </html:div>
+  </html:fieldset>
+
+  <!-- Indexed-status tags -->
+  <html:fieldset class="settings-group">
+    <html:legend>Indexed-status tags</html:legend>
+
+    <html:div class="setting-description">
+      Mark attachments that are indexed with a "✅ rag-indexed" tag, and attachments the server has
+      permanently refused to process (e.g. an oversized scan, or repeated failures) with a
+      "⚠️ rag-failed" tag, giving the reason. Zotero shows both as a small icon before the title.
+      Tags are added as automatic tags, so Zotero's "Delete Automatic Tags in This Library" also
+      removes them; in group libraries they are visible to (and synced for) all members. Removing
+      the "⚠️ rag-failed" tag asks the server to retry that attachment.
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;margin:6px 0 4px 0;">
+      <html:input type="checkbox" id="zotero-rag-indexed-tags-toggle"/>
+      <html:label for="zotero-rag-indexed-tags-toggle" style="margin-left:6px;cursor:pointer;">Keep indexed-status tags up to date</html:label>
+    </html:div>
+
+    <html:div style="display:flex;align-items:center;gap:8px;margin-top:6px;">
+      <html:button id="zotero-rag-indexed-tags-refresh">Refresh indexed-status tags</html:button>
+    </html:div>
+    <html:div class="setting-description" id="zotero-rag-indexed-tags-status"></html:div>
   </html:fieldset>
 
   <!-- Indexed Content: what gets indexed, regardless of whether indexing was

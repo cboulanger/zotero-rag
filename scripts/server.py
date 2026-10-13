@@ -409,12 +409,25 @@ def stop_kreuzberg():
         pass
 
 
+def _is_local_qdrant_url(url):
+    """Return True if url points at the sidecar this script manages (localhost:QDRANT_PORT).
+
+    QDRANT_URL tells the backend *process* where to find Qdrant; it says nothing about
+    whether server.py itself should manage the container's lifecycle. Only a URL pointing
+    somewhere else (a genuinely external/remote Qdrant) should suppress sidecar management.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    port = parsed.port or QDRANT_PORT
+    return parsed.hostname in ("localhost", "127.0.0.1") and port == QDRANT_PORT
+
+
 def start_qdrant():
     """Start the Qdrant vector store sidecar container.
 
-    Skipped when QDRANT_URL is already configured (external or remote Qdrant).
     Pulls the image if needed, then starts the container on localhost:6333.
-    Data is persisted in data/qdrant-server/.
+    Data is persisted in data/qdrant-server/. A no-op (returns True immediately)
+    if the sidecar is already running.
 
     Returns:
         bool: True if the sidecar is running (or was already running), False otherwise.
@@ -577,10 +590,12 @@ def start_server(dev_mode=True, with_plugin=False):
     # Start kreuzberg extraction sidecar
     start_kreuzberg()
 
-    # Start Qdrant sidecar unless an external QDRANT_URL is already configured
+    # Start Qdrant sidecar unless QDRANT_URL points at a genuinely external/remote Qdrant.
+    # A QDRANT_URL pointing at the sidecar's own localhost:QDRANT_PORT (the normal case
+    # per .env) still needs the container checked/(re)started here — see #88.
     qdrant_url = os.environ.get('QDRANT_URL')
-    if qdrant_url:
-        print(f"[INFO] QDRANT_URL already set ({qdrant_url}) — skipping local Qdrant sidecar")
+    if qdrant_url and not _is_local_qdrant_url(qdrant_url):
+        print(f"[INFO] QDRANT_URL points to an external Qdrant ({qdrant_url}) — skipping local Qdrant sidecar")
     else:
         if start_qdrant():
             wait_for_qdrant()

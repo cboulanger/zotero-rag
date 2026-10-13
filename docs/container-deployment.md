@@ -323,7 +323,7 @@ The main service declares `Requires=zotero-rag-kreuzberg.service` and `Requires=
 ### Secrets and key rotation
 
 User-provided env vars (everything passed as `--env KEY` / loaded from the deploy env
-file — including API keys such as `KISSKI_API_KEY`) are **not** inlined into the systemd
+file — including secrets such as `AUTOINDEX_SECRET`) are **not** inlined into the systemd
 unit. They are written to a root-only file:
 
 | File | Mode | Referenced by |
@@ -338,7 +338,7 @@ stays inline.
 `/etc/zotero-rag/<service>.env`, then restart — podman re-reads the file on each start:
 
 ```bash
-sudo nano /etc/zotero-rag/zotero-rag.env      # update KISSKI_API_KEY=...
+sudo nano /etc/zotero-rag/zotero-rag.env      # update AUTOINDEX_SECRET=...
 sudo systemctl restart zotero-rag
 ```
 

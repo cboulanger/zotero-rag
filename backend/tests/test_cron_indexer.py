@@ -17,6 +17,7 @@ from backend.services.cron_indexer import (
     abort_process,
     clear_control_state,
     is_process_alive,
+    mark_run_stopped,
     read_control_state,
     read_live_status,
     write_control_state,
@@ -429,6 +430,18 @@ class TestIsProcessAlive(unittest.TestCase):
         # PID 99999999 very unlikely to exist
         self.assertFalse(is_process_alive(99999999))
 
+    def test_matching_create_time_confirms_identity(self):
+        import psutil
+        create_time = psutil.Process(os.getpid()).create_time()
+        self.assertTrue(is_process_alive(os.getpid(), create_time))
+
+    def test_mismatched_create_time_rejects_recycled_pid(self):
+        # A live PID that does NOT match the recorded creation time means the
+        # number was recycled by the OS for a different process (or, as seen
+        # in production, a thread of a different, long-lived process) — must
+        # not be reported as the originally-recorded process.
+        self.assertFalse(is_process_alive(os.getpid(), 1.0))
+
 
 class TestReadLiveStatus(unittest.TestCase):
     def setUp(self):
@@ -461,6 +474,97 @@ class TestReadLiveStatus(unittest.TestCase):
         result = read_live_status(self.tmp)
         self.assertTrue(result["running"])
         self.assertNotIn("crashed", result)
+
+    def test_running_with_live_pid_and_matching_create_time_stays_running(self):
+        import psutil
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": psutil.Process(os.getpid()).create_time(),
+        })
+        result = read_live_status(self.tmp)
+        self.assertTrue(result["running"])
+        self.assertNotIn("crashed", result)
+
+    def test_running_with_recycled_pid_marked_crashed(self):
+        # Regression test: a PID can be legitimately alive right now without
+        # being the SAME process that was originally recorded — e.g. after
+        # the real indexer subprocess (PID 11) died, the OS later reused 11
+        # as a thread ID inside the long-lived backend process itself, which
+        # made a bare `os.kill(11, 0)` liveness check report the run as
+        # "alive" forever, wedging the indexing status permanently.
+        self._write_status({
+            "running": True,
+            "pid": os.getpid(),
+            "pid_create_time": 1.0,  # does not match the real process's creation time
+        })
+        result = read_live_status(self.tmp)
+        self.assertFalse(result["running"])
+        self.assertTrue(result["crashed"])
+
+    def test_dead_run_self_heals_on_disk_including_indexing_slug(self):
+        # Regression test: a stale "running" status must not require manual
+        # intervention to clear (production needed cron_status.json hand-edited
+        # before this fix) — the first read should persist the correction, and
+        # resolve any slug still mid-"indexing" so the UI stops showing it as
+        # actively running forever.
+        self._write_status({
+            "running": True,
+            "pid": 99999999,
+            "slugs": {
+                "users/1": {"status": "indexing", "items_processed": 0},
+                "groups/2": {"status": "pending"},
+                "groups/3": {"status": "done"},
+            },
+        })
+        read_live_status(self.tmp)
+        on_disk = json.loads((self.tmp / "system" / "cron_status.json").read_text(encoding="utf-8"))
+        self.assertFalse(on_disk["running"])
+        self.assertTrue(on_disk["crashed"])
+        self.assertEqual(on_disk["slugs"]["users/1"]["status"], "crashed")
+        self.assertIn("finished_at", on_disk["slugs"]["users/1"])
+        self.assertEqual(on_disk["slugs"]["groups/2"]["status"], "pending")
+        self.assertEqual(on_disk["slugs"]["groups/3"]["status"], "done")
+
+
+class TestMarkRunStopped(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        (self.tmp / "system").mkdir()
+
+    def _write_status(self, data: dict) -> None:
+        (self.tmp / "system" / "cron_status.json").write_text(
+            json.dumps(data), encoding="utf-8"
+        )
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(mark_run_stopped(self.tmp, "aborted"), {})
+
+    def test_not_running_is_a_noop(self):
+        self._write_status({"running": False, "finished_at": "2026-01-01T00:00:00+00:00"})
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertNotIn("aborted", result)
+
+    def test_aborted_reason_sets_aborted_not_crashed(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "indexing"}},
+        })
+        result = mark_run_stopped(self.tmp, "aborted")
+        self.assertFalse(result["running"])
+        self.assertTrue(result["aborted"])
+        self.assertNotIn("crashed", result)
+        self.assertEqual(result["slugs"]["users/1"]["status"], "aborted")
+
+    def test_pending_slugs_are_left_untouched(self):
+        self._write_status({
+            "running": True,
+            "pid": 123,
+            "slugs": {"users/1": {"status": "pending"}},
+        })
+        result = mark_run_stopped(self.tmp, "crashed")
+        self.assertEqual(result["slugs"]["users/1"]["status"], "pending")
 
 
 class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
@@ -501,7 +605,46 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         # The other user's slug must still succeed, not be aborted.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
         self.assertEqual(result["libraries"], ["users/1", "users/2"])
-        key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid")
+        key_store.set_embedding_key_status.assert_called_once_with("fp-users/1", "invalid", key_name="TEST_API_KEY")
+
+    async def test_endpoint_unavailable_isolated_to_one_slug(self):
+        """An EmbeddingEndpointUnavailableError for one slug only errors that
+        slug — and unlike an auth error, must not touch key_store, since this
+        isn't about any individual user's credentials (e.g. remote-mpcdf's
+        shared key is fine; the ephemeral job's endpoint itself expired)."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+        key_store = MagicMock()
+        indexer = _make_indexer(["users/1", "users/2"], self.tmp, key_store=key_store)
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+
+            mock_api_instance = AsyncMock()
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            mock_proc_instance = MagicMock()
+
+            async def fake_index_library(**kwargs):
+                if kwargs.get("library_name") == "users/1":
+                    raise EmbeddingEndpointUnavailableError(
+                        "Embedding API returned an unexpected error (HTTP 405): Method Not Allowed"
+                    )
+                return {"items_processed": 5, "chunks_added": 10}
+
+            mock_proc_instance.index_library = AsyncMock(side_effect=fake_index_library)
+            MockProcessor.return_value = mock_proc_instance
+
+            result = await indexer.run()
+
+        status = indexer._read_status()
+        self.assertEqual(status["slugs"]["users/1"]["status"], "error")
+        self.assertIn("endpoint unavailable", status["slugs"]["users/1"]["error"].lower())
+        # The other user's slug must still succeed, not be aborted.
+        self.assertEqual(status["slugs"]["users/2"]["status"], "done")
+        self.assertEqual(result["libraries"], ["users/1", "users/2"])
+        key_store.set_embedding_key_status.assert_not_called()
 
     async def test_rate_limit_exhausted_isolated_to_one_slug(self):
         """An EmbeddingRateLimitExhaustedError for one slug only skips that slug."""
@@ -534,10 +677,13 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         status = indexer._read_status()
         self.assertEqual(status["slugs"]["users/1"]["status"], "skipped")
         self.assertEqual(status["slugs"]["users/1"]["skip_reason"], "embedding_rate_limit")
+        # Surfaced so the UI can show a human-readable "resumes at ..." message
+        # instead of the opaque "embedding_rate_limit" string alone.
+        self.assertEqual(status["slugs"]["users/1"]["rate_limit_until"], available_at.isoformat())
         # The other user's slug must still succeed, not be skipped.
         self.assertEqual(status["slugs"]["users/2"]["status"], "done")
         key_store.set_embedding_key_status.assert_called_once_with(
-            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat(), key_name="TEST_API_KEY"
         )
 
     async def test_rate_limit_exhausted_during_drain_is_isolated_to_one_slug(self):
@@ -573,6 +719,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute_upload_impl), \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             MockWebAPI.return_value.get_items_by_keys = AsyncMock(return_value=[])
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -592,7 +739,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         # it entirely for users/1.
         mock_proc_instance.index_library.assert_awaited_once()
         key_store.set_embedding_key_status.assert_called_once_with(
-            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat()
+            "fp-users/1", "rate_limited", rate_limit_until=available_at.isoformat(), key_name="TEST_API_KEY"
         )
 
     async def test_rate_limit_headers_persisted_per_slug(self):
@@ -607,7 +754,7 @@ class TestPerSlugEmbeddingErrorIsolation(unittest.IsolatedAsyncioTestCase):
         await indexer.run()
 
         status = json.loads((self.tmp / "cron_status.json").read_text())
-        self.assertEqual(status.get("last_rate_limit_headers"), headers)
+        self.assertEqual(status["last_usage"]["embedding"]["headers"], headers)
         # The synthetic key must not leak into the per-slug status entry.
         self.assertNotIn("rate_limit_headers", status["slugs"]["users/1"])
 
@@ -761,6 +908,23 @@ class TestAbortProcess(unittest.TestCase):
              patch("backend.services.cron_indexer.os.kill", side_effect=ProcessLookupError):
             self.assertFalse(abort_process(1234))
 
+    def test_passes_expected_create_time_to_identity_check(self):
+        with patch("backend.services.cron_indexer.is_process_alive", return_value=True) as mock_alive, \
+             patch("backend.services.cron_indexer.os.kill"):
+            abort_process(1234, expected_create_time=5555.5)
+        mock_alive.assert_called_once_with(1234, 5555.5)
+
+    def test_does_not_signal_a_recycled_pid(self):
+        # The real identity check (no mocking) must refuse to signal a PID
+        # that is alive but does not match the recorded creation time —
+        # this is what stops abort from killing an unrelated process (e.g.
+        # the backend's own process, if its PID was recycled from a dead
+        # indexer run) that merely happens to share the old PID number.
+        with patch("backend.services.cron_indexer.os.kill") as mock_kill:
+            result = abort_process(os.getpid(), expected_create_time=1.0)
+        self.assertFalse(result)
+        mock_kill.assert_not_called()
+
 
 class TestControlState(unittest.TestCase):
     def setUp(self):
@@ -801,6 +965,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -836,6 +1001,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -879,6 +1045,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute_upload_impl), \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             MockWebAPI.return_value.get_items_by_keys = AsyncMock(return_value=[])
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
@@ -910,6 +1077,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -936,6 +1104,7 @@ class TestSkipSlug(unittest.IsolatedAsyncioTestCase):
              patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
              _patch_embedding_service():
             mock_get_settings.return_value.data_path = self.tmp
+            mock_get_settings.return_value.pending_upload_max_attempts = 5
 
             mock_api_instance = AsyncMock()
             MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=mock_api_instance)
@@ -957,7 +1126,7 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         (self.data_path / "system").mkdir(parents=True)
         self._settings_patch = patch(
             "backend.services.cron_indexer.get_settings",
-            return_value=MagicMock(data_path=self.data_path),
+            return_value=MagicMock(data_path=self.data_path, pending_upload_max_attempts=5),
         )
         self._settings_patch.start()
 
@@ -1004,6 +1173,32 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_FAIL"))
         _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_FAIL")
         self.assertEqual(meta["attempts"], 1)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_endpoint_unavailable_never_quarantines_an_entry(self, mock_execute):
+        """A paused/cold endpoint says nothing about the file: repeated drains stop the
+        run each time but never count toward PENDING_UPLOAD_MAX_ATTEMPTS quarantine."""
+        from backend.services.embeddings import EmbeddingEndpointUnavailableError
+
+        async def fake_execute(**kwargs):
+            return MagicMock(status="error", message="Embedding API is not available. The endpoint is paused.",
+                             error_type="EmbeddingEndpointUnavailableError", chunks_added=0)
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/1": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock",
+            status_file=self.data_path / "status.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+        for _ in range(8):  # more than pending_upload_max_attempts (5)
+            with self.assertRaises(EmbeddingEndpointUnavailableError):
+                await indexer._drain_pending_uploads(indexer.parse_slug("users/1"), MagicMock(), web_api)
+        self.assertTrue(pending_upload_cache.has_entry(self.data_path, "u1", "ATT_OK"))
+        _, meta = pending_upload_cache.read_entry(self.data_path, "u1", "ATT_OK")
+        self.assertFalse(meta.get("quarantined"))
+        self.assertEqual(meta.get("attempts", 0), 0)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_threads_attachment_title_from_the_cached_entry_into_doc_metadata(self, mock_execute):
@@ -1217,9 +1412,11 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         # Only the first (oldest-enqueued) entry was ever attempted.
         mock_execute.assert_awaited_once()
         self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
-        # ATT_A's failure was recorded for retry next run...
+        # ATT_A's failure was recorded for retry next run, without counting toward
+        # quarantine (a quota outage says nothing about the file)...
         _, meta_a = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_A")
-        self.assertEqual(meta_a["attempts"], 1)
+        self.assertEqual(meta_a["attempts"], 0)
+        self.assertTrue(meta_a["last_error"])
         # ...but ATT_B was never even read — completely untouched, attempts still 0.
         _, meta_b = pending_upload_cache.read_entry(self.data_path, "u5", "ATT_B")
         self.assertEqual(meta_b["attempts"], 0)
@@ -1255,6 +1452,55 @@ class TestDrainPendingUploads(unittest.IsolatedAsyncioTestCase):
         with patch("backend.services.cron_indexer._execute_upload_impl", side_effect=fake_execute):
             with self.assertRaises(EmbeddingRateLimitExhaustedError):
                 await indexer._drain_pending_uploads(indexer.parse_slug("users/6"), MagicMock(), web_api)
+
+    @patch("backend.services.cron_indexer._execute_upload_impl")
+    async def test_stops_draining_once_the_extraction_sidecar_is_unavailable(self, mock_execute):
+        # Regression test, same reasoning as the embedding-quota case above:
+        # the kreuzberg sidecar being unreachable affects every remaining
+        # entry identically (each attempt fully downloads only to fail at the
+        # same extraction step), so draining must stop after the first
+        # KreuzbergUnavailableError instead of churning through the backlog
+        # logging the identical connection failure for every entry.
+        from backend.services.extraction.kreuzberg import KreuzbergUnavailableError
+
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_A", b"bytes-a",
+            {"item_key": "ITEM_A", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+        pending_upload_cache.write_entry(
+            self.data_path, "u7", "ATT_B", b"bytes-b",
+            {"item_key": "ITEM_B", "mime_type": "application/pdf", "item_version": 1,
+             "attachment_version": 1, "title": "T", "authors": [], "library_type": "user",
+             "library_name": "users/7"},
+        )
+
+        async def fake_execute(**kwargs):
+            return MagicMock(
+                status="error",
+                message="kreuzberg sidecar at http://kreuzberg:8000 still unreachable after retrying for 600s",
+                error_type="KreuzbergUnavailableError",
+                rate_limit_available_at=None,
+                chunks_added=0,
+            )
+        mock_execute.side_effect = fake_execute
+
+        indexer = CronIndexer(
+            targets={"users/7": {"zotero_key": "k", "embedding_key": "e", "fingerprint": "fp"}},
+            vector_store=MagicMock(), lock_file=self.data_path / "lock7",
+            status_file=self.data_path / "status7.json", log=MagicMock(),
+        )
+        web_api = AsyncMock()
+        web_api.get_items_by_keys = AsyncMock(return_value=[])
+
+        with self.assertRaises(KreuzbergUnavailableError):
+            await indexer._drain_pending_uploads(indexer.parse_slug("users/7"), MagicMock(), web_api)
+
+        mock_execute.assert_awaited_once()
+        self.assertEqual(mock_execute.await_args.kwargs["attachment_key"], "ATT_A")
+        _, meta_b = pending_upload_cache.read_entry(self.data_path, "u7", "ATT_B")
+        self.assertEqual(meta_b["attempts"], 0)
 
     @patch("backend.services.cron_indexer._execute_upload_impl")
     async def test_reports_progress_after_each_entry_including_failures(self, mock_execute):

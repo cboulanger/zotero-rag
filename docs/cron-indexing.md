@@ -75,16 +75,16 @@ Keys and targets come from the store, so no slugs are passed on the command line
 
 ```bash
 # Index everything resolvable from the stored keys (auto mode)
-uv run python bin/index_libraries.py
+uv run rag-index
 
 # Force a full sync (ignore incremental state)
-uv run python bin/index_libraries.py --mode full
+uv run rag-index --mode full
 
 # Limit to 100 items per library (useful for testing)
-uv run python bin/index_libraries.py --max-items 100
+uv run rag-index --max-items 100
 
 # Override the log file location
-uv run python bin/index_libraries.py --log-file /var/log/zotero_index.log
+uv run rag-index --log-file /var/log/zotero_index.log
 ```
 
 ### All Options
@@ -246,7 +246,7 @@ lock file:
 ```cron
 # Edit with: crontab -e
 # Index every night at 2 AM (targets come from the stored keys)
-0 2 * * * cd /path/to/zotero-rag && uv run python bin/index_libraries.py >> data/logs/cron_indexer.log 2>&1
+0 2 * * * cd /path/to/zotero-rag && uv run rag-index >> data/logs/cron_indexer.log 2>&1
 ```
 
 ## Reading Progress
@@ -359,6 +359,23 @@ job in the run (not just their own), with each job labeled
 `library_name`/`owner_id` joined from `registrations.json` rather than a raw
 slug. A slug with no matching registration falls back to the raw slug string.
 
+Admins can also switch the active model preset at runtime with
+`POST /api/config` (the status dialog's preset dropdown uses it); only presets
+returned in `GET /api/config`'s `switchable_presets` (same embedding model,
+usable credentials) are accepted. The next scheduler tick, `run-now` or manual
+run uses the new preset; a run already in progress keeps the preset it started
+with. A successful switch clears the stored embedding-key rate-limit skips so
+libraries skipped with `embedding_rate_limit` are retried. See
+[presets.md](presets.md#admin-runtime-preset-switching--shared-remote-config).
+
+`GET /api/autoindex/status` includes `rate_limits`:
+`{"available": true, "limits": {...}, "as_of": "<ISO time>", "source": "run" | "cache"}`,
+or `{"available": false}`. It is read from cached headers only (in-process, or
+`last_rate_limit_headers` in `cron_status.json`, which is ignored when written
+under a different preset than the active one) and never probes the embedding
+API. The cron indexer records `last_rate_limit_headers_at` and
+`last_rate_limit_preset` next to the headers.
+
 `abort` vs. `skip-slug`: `abort` kills the whole subprocess and relies on the
 existing crash-recovery path (the next run detects the dead PID and forces a
 full re-index of whatever was mid-flight). `skip-slug` only ever affects the
@@ -455,7 +472,7 @@ run died is forced to run a full sync on the next invocation.
 To force-clear a lock manually (e.g. if PID wrap-around caused a false
 positive):
 ```bash
-uv run python bin/index_libraries.py --force
+uv run rag-index --force
 ```
 
 ### "AUTOINDEX_SECRET is not set; nothing to index"
@@ -507,3 +524,10 @@ uv run python bin/autoindex_add_key.py <read-only-key>
 ```
 If keys were recently pruned, check `key_issues` in `cron_status.json` for the
 reason (revoked, expired, or downgraded to write scope).
+
+## Per-user keys, presets and paused endpoints
+
+Each user's provider keys are stored per key name in the encrypted key store (`<data_path>/system/autoindex_keys.json`), so a user can hold, say, a KISSKI key and a Hugging Face token and switch presets without re-entering either. Every run indexes each owner's libraries on that owner's preset (their own choice, else the server default) with that owner's key for it; a preset with an admin-set key (`managed`/`shared` scope) needs no personal key. Keys are only pruned when they are permanently invalid.
+
+When the owner has paused their embedding endpoint (see [presets.md](presets.md), "Pause and resume"), their libraries are skipped with the reason `embedding_paused` and no call is made to the endpoint, no queued upload's attempt count advances and their key's status is left alone. Other owners' libraries are indexed as usual, and a paused LLM does not affect indexing.
+

@@ -5,7 +5,9 @@ Loads configuration from environment variables and provides access to
 hardware presets and storage paths.
 """
 
+import logging
 import os
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Annotated, Optional
 from pydantic import Field, field_validator, model_validator
@@ -13,7 +15,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings import NoDecode
 
 from backend.__version__ import __version__
-from .presets import HardwarePreset, get_preset
+from .presets import HardwarePreset, get_preset, ensure_default_presets
+
+logger = logging.getLogger(__name__)
+
+#: The preset bound to the current request by the auth middleware (see
+#: backend.services.effective_preset); None means "the server default".
+_request_preset: ContextVar[Optional[HardwarePreset]] = ContextVar("request_preset", default=None)
 
 
 class Settings(BaseSettings):
@@ -30,6 +38,44 @@ class Settings(BaseSettings):
     def __init__(self, **kwargs):
         """Initialize settings."""
         super().__init__(**kwargs)
+
+    # Retrieval
+    retrieval_lexical_weight: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Weight (0-1) of a BM25 lexical score blended into the vector score of the "
+                    "raw candidate pool before dedup/cap/top_k (backend/services/lexical_rerank.py). "
+                    "0 disables it. Helps short numeric/proper-noun fact chunks that vector "
+                    "similarity under-ranks (#90)."
+    )
+    retrieval_embedding_mmr_lambda: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Lambda (0-1) for global embedding-vector MMR reranking of the raw "
+                    "candidate pool before dedup/cap/top_k (backend/services/embedding_mmr_rerank.py). "
+                    "0 disables it (and skips fetching chunk vectors from Qdrant, avoiding the "
+                    "extra payload/latency). 1 is equivalent to no reranking (pure relevance); "
+                    "lower values increasingly trade relevance for distinctness from "
+                    "already-selected candidates. Prototype for #90's global ranking-dilution "
+                    "case, where several chunks from different, topically-adjacent documents "
+                    "together outscore a genuinely relevant chunk without any one of them "
+                    "dominating — unlike the per-document cap/dedup, which can't reach this."
+    )
+    retrieval_score_proximity_epsilon: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Fraction (0-1) of the candidate pool's own score range (max minus min "
+                    "score among the fetched/capped candidates) within which the best "
+                    "excluded candidate must fall, relative to the top_k cutoff score, to "
+                    "trigger a retrieval escalation retry (backend/services/rag_engine.py's "
+                    "query()). 0 disables it. A fixed absolute epsilon doesn't work here: "
+                    "dense embedding cosine scores cluster tightly and their dynamic range "
+                    "varies a lot by query (observed 0.025-0.08 total spread across the gold "
+                    "question set), so it either never fires or fires on almost every query; "
+                    "normalizing to each query's own range makes it comparable. Meant to "
+                    "catch cases like #89's jin2026, where many moderately-relevant documents "
+                    "dilute the ranking enough that a genuinely relevant chunk falls just "
+                    "outside top_k without triggering the existing diversity-floor escalation "
+                    "(which only looks at distinct document count in the window, not how "
+                    "close the next excluded candidate's score is)."
+    )
 
     # API Configuration
     api_host: str = Field(default="localhost", description="API server host")
@@ -62,8 +108,8 @@ class Settings(BaseSettings):
 
     # Model Configuration
     model_preset: str = Field(
-        default="cpu-only",
-        description="Hardware preset name"
+        default="remote-kisski",
+        description="Fallback default preset name, used until an admin sets the default via POST /api/config"
     )
 
     # Abstract fallback indexing
@@ -114,6 +160,23 @@ class Settings(BaseSettings):
         default=30 * 1024 ** 2,
         description="Target byte size of each part when splitting a large PDF. "
                     "Accepts '30MB', '500KB', or a raw byte count.",
+    )
+    pdf_scan_max_pages_per_part: int = Field(
+        default=50,
+        description="PDFs without a text layer (image-only scans, every page needs OCR) are split "
+                    "into parts of at most this many pages before being sent to kreuzberg. "
+                    "Byte size is a poor proxy for OCR memory cost, so this applies regardless "
+                    "of pdf_split_threshold.",
+    )
+    pdf_scan_max_pages: int = Field(
+        default=2000,
+        description="Hard cap on the page count of a PDF without a text layer. Larger scans are "
+                    "refused (skipped_too_costly, tagged rag-failed) and must be split manually.",
+    )
+    pending_upload_max_attempts: int = Field(
+        default=5,
+        description="A deferred upload that fails this many times is quarantined: it is no longer "
+                    "retried and its attachment is tagged rag-failed until the user removes the tag.",
     )
     kreuzberg_max_content_bytes: int = Field(
         default=200 * 1024 ** 2,
@@ -308,6 +371,21 @@ class Settings(BaseSettings):
             self.autoindex_keys_path = self.data_path / "system" / "autoindex_keys.json"
         return self
 
+    @property
+    def index_events_path(self) -> Path:
+        """Append-only log of attachment indexed/un-indexed transitions (see IndexEventLog)."""
+        return self.data_path / "system" / "index_events.jsonl"
+
+    @property
+    def failed_attachments_path(self) -> Path:
+        """Attachments refused for processing, tagged ``rag-failed`` (see FailedAttachmentStore)."""
+        return self.data_path / "system" / "failed_attachments.json"
+
+    @property
+    def indexed_tag_runs_path(self) -> Path:
+        """Directory of per-run JSON-lines files written by bin/sync_indexed_tags.py."""
+        return self.data_path / "system" / "indexed_tag_sync"
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v):
@@ -319,8 +397,59 @@ class Settings(BaseSettings):
         return v_upper
 
     def get_hardware_preset(self) -> HardwarePreset:
-        """Get the configured hardware preset."""
-        return get_preset(self.model_preset)
+        """The preset of the current request, or the server default outside one.
+
+        Within a request the auth middleware binds the user's effective preset
+        (backend.services.effective_preset); everywhere else (cron, CLI, startup)
+        this is :meth:`get_default_preset`. Admin-level code that means "the
+        server's default" calls that directly.
+        """
+        bound = _request_preset.get()
+        return bound.model_copy(deep=True) if bound is not None else self.get_default_preset()
+
+    def get_default_preset(self) -> HardwarePreset:
+        """Get the server's default hardware preset.
+
+        An admin-set runtime override (backend.services.admin_settings_store,
+        set via POST /api/config) takes precedence over MODEL_PRESET, letting
+        an admin hot-swap between presets without a restart — see
+        docs/superpowers/specs/2026-10-08-dynamic-remote-preset-config-design.md.
+        An override naming an unknown preset (e.g. after a code change removes
+        it) is ignored with a warning, falling back to MODEL_PRESET.
+
+        EMBEDDING_BATCH_SIZE, if set in the environment, overrides
+        embedding.batch_size on the returned preset regardless of which
+        preset is active — a documented memory-tuning knob for the cron
+        indexer on low-RAM hosts (see docs/cron-indexing.md). A non-integer
+        value is ignored with a warning rather than raising, since this is
+        called from request-handling code, not just at startup.
+        """
+        from backend.services.admin_settings_store import get_default_preset
+        override = get_default_preset(self.data_path)
+        if override:
+            try:
+                preset = get_preset(override, self.data_path)
+            except ValueError:
+                logger.warning(
+                    "default_preset=%r is not a known preset; falling back to MODEL_PRESET=%r",
+                    override, self.model_preset,
+                )
+                preset = get_preset(self.model_preset, self.data_path)
+        else:
+            preset = get_preset(self.model_preset, self.data_path)
+
+        batch_size_override = os.environ.get("EMBEDDING_BATCH_SIZE")
+        if batch_size_override:
+            try:
+                preset.embedding.batch_size = int(batch_size_override)
+            except ValueError:
+                logger.warning(
+                    "EMBEDDING_BATCH_SIZE=%r is not a valid integer; ignoring it and using "
+                    "the preset's own default (%d)",
+                    batch_size_override, preset.embedding.batch_size,
+                )
+
+        return preset
 
     def ensure_directories(self):
         """Create necessary directories if they don't exist."""
@@ -333,6 +462,7 @@ class Settings(BaseSettings):
             self.registrations_path.parent.mkdir(parents=True, exist_ok=True)
         if self.autoindex_keys_path:
             self.autoindex_keys_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_default_presets(self.data_path)
 
     def get_api_key(self, env_var_name: str) -> Optional[str]:
         """
@@ -342,16 +472,15 @@ class Settings(BaseSettings):
         allowing for flexible configuration without hardcoding provider-specific fields.
 
         Args:
-            env_var_name: Name of the environment variable (e.g., "OPENAI_API_KEY", "KISSKI_API_KEY")
+            env_var_name: Name of the environment variable (e.g., "HF_TOKEN"). Not for
+                provider API keys, which are never read from the environment
 
         Returns:
             API key if available, None otherwise
 
         Examples:
-            >>> settings.get_api_key("OPENAI_API_KEY")
-            "sk-..."
-            >>> settings.get_api_key("KISSKI_API_KEY")
-            "your-kisski-key"
+            >>> settings.get_api_key("HF_TOKEN")
+            "hf_..."
         """
         return os.getenv(env_var_name)
 

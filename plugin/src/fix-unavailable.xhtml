@@ -122,6 +122,9 @@
       <label title="Also list attachments the server couldn't download during indexing (e.g. WebDAV-stored files) — not an error, just not yet downloaded. Checking this lets you fix (download) them here.">
         <input type="checkbox" id="include-missing-cb" checked="checked"/> Include missing attachments
       </label>
+      <label title="Also list attachments the server has permanently refused to process and tagged rag-failed (e.g. a scan too costly to OCR, or repeated failures) — nothing to fix here, but the reason is shown. Remove the rag-failed tag in Zotero to let the server retry.">
+        <input type="checkbox" id="include-failed-cb" checked="checked"/> Include permanent failures
+      </label>
       <button id="refresh-btn" type="button" class="toolbar-btn" title="Reload the list of missing files">Refresh</button>
     </div>
 
@@ -144,6 +147,7 @@
         </label>
       </div>
       <div class="footer-button-row">
+        <button id="autoindex-status-button" type="button" class="dialog-button" style="display: none;" title="Show server-side automatic indexing status">Indexing status</button>
         <button id="close-btn" type="button" class="dialog-button">Close</button>
         <button id="delete-btn" type="button" class="dialog-button danger" disabled="true">Delete</button>
         <div class="split-button">

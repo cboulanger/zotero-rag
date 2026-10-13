@@ -5,7 +5,10 @@ Unit tests for RAG query engine.
 import unittest
 from unittest.mock import AsyncMock, Mock, MagicMock
 
-from backend.services.rag_engine import RAGEngine, QueryResult, SourceInfo
+from backend.services.rag_engine import (
+    RAGEngine, QueryResult, SourceInfo, _looks_like_leaked_reasoning, _looks_like_wrong_language_answer,
+    _best_excluded_candidate_near_cutoff,
+)
 from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.db.vector_store import VectorStore, SearchResult
@@ -111,6 +114,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=5,
             min_score=0.5,
+            search_candidate_pool_size=5,
         )
 
         # Verify embedding was generated
@@ -123,6 +127,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.5,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
         # Verify LLM was called with context
@@ -231,6 +236,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=10,
             min_score=0.6,
+            search_candidate_pool_size=10,
         )
 
         # Verify search was performed with both libraries
@@ -240,6 +246,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.6,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
         # Verify result
@@ -325,6 +332,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             library_ids=library_ids,
             top_k=20,
             min_score=0.8,
+            search_candidate_pool_size=20,
         )
 
         # Verify custom parameters were passed to search
@@ -334,6 +342,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
             score_threshold=0.8,
             library_ids=library_ids,
             filters=None,
+            with_vectors=False,
         )
 
     async def test_query_llm_parameters(self):
@@ -467,6 +476,130 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.generate.assert_called_once()
         self.assertEqual(result.answer, "Authors identify a shift toward qualitative methods [S1].")
 
+    async def test_query_retries_once_when_answer_looks_like_leaked_reasoning(self):
+        """A reasoning-capable model can leak its raw step-by-step deliberation
+        into the final answer instead of a clean conclusion (e.g. repeated
+        "Wait," self-contradicting re-derivations) — not as a separate
+        <think> block, just as ordinary backtracking prose. Detect this and
+        retry once, same as the tool-call-leak case above."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer = (
+            "Authors identify a shift toward qualitative methods [S1]. "
+            "Wait, actually the text says quantitative methods [S1]. "
+            "Re-evaluating strictly based on the source: Wait, it does say "
+            "qualitative after all [S1]."
+        )
+        good_answer = "Authors identify a shift toward qualitative methods [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer, good_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, good_answer)
+
+    async def test_query_uses_final_answer_if_retry_still_looks_like_leaked_reasoning(self):
+        """If the retry also leaks reasoning, don't loop forever — use the
+        retry's answer anyway (best effort) rather than the original."""
+        question, library_ids = await self._query_with_single_chunk()
+        bad_answer_1 = (
+            "Wait, let me reconsider [S1]. Re-evaluating the claim [S1]."
+        )
+        bad_answer_2 = (
+            "Wait, on second thought [S1]. Re-evaluating once more [S1]."
+        )
+        self.mock_llm_service.generate = AsyncMock(side_effect=[bad_answer_1, bad_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, bad_answer_2)
+
+    def test_looks_like_leaked_reasoning_ignores_single_incidental_match(self):
+        """A single incidental use of a backtracking word (e.g. a paper that
+        legitimately discusses "wait times") must not trigger a retry —
+        only repeated backtracking language should."""
+        self.assertFalse(_looks_like_leaked_reasoning(
+            "The study measured patient wait times in the emergency room [S1]."
+        ))
+
+    async def test_query_retries_once_when_answer_is_english_but_question_is_not(self):
+        """Observed live (qwen3-omni-30b-a3b-instruct, eval run
+        20261011T111753Z): the model answered 2 of 3 non-English gold
+        questions (French, German) entirely in English despite the prompt's
+        explicit "respond in the same language" instruction, while every
+        other model matched 100% of the time on the identical prompt.
+        Detect the mismatch and retry once, same pattern as the other
+        quality-issue checks."""
+        question, library_ids = await self._query_with_single_chunk()
+        question = "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?"
+        english_answer = (
+            "According to the context, Zotero offers 300 MB of free cloud storage [S1], "
+            "and the same source also mentions that this can be increased with a paid plan."
+        )
+        german_answer = "Laut dem Kontext bietet Zotero 300 MB kostenlosen Speicherplatz [S1]."
+        self.mock_llm_service.generate = AsyncMock(side_effect=[english_answer, german_answer])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, german_answer)
+
+    async def test_query_uses_final_answer_if_retry_is_still_the_wrong_language(self):
+        """Don't loop forever if the retry also comes back in English — use
+        it anyway (best effort), same pattern as the other quality checks."""
+        question, library_ids = await self._query_with_single_chunk()
+        question = "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?"
+        english_answer_1 = (
+            "According to the context, Zotero offers 300 MB of free cloud storage [S1], "
+            "and the same source also mentions that this can be increased with a paid plan."
+        )
+        english_answer_2 = (
+            "Based on the context provided, Zotero offers 300 MB of storage for free [S1], "
+            "and the same source notes that this limit can be raised with a paid plan too."
+        )
+        self.mock_llm_service.generate = AsyncMock(side_effect=[english_answer_1, english_answer_2])
+
+        result = await self.rag_engine.query(question, library_ids)
+
+        self.assertEqual(self.mock_llm_service.generate.call_count, 2)
+        self.assertEqual(result.answer, english_answer_2)
+
+    def test_looks_like_wrong_language_answer_false_when_question_is_english(self):
+        """No regression: an English question answered in English must not
+        trigger a retry (nothing to compare against)."""
+        self.assertFalse(_looks_like_wrong_language_answer(
+            "What research trends do authors identify?",
+            "Authors identify a shift toward qualitative methods [S1].",
+        ))
+
+    def test_looks_like_wrong_language_answer_false_for_non_english_answer_quoting_english_terms(self):
+        """Observed live (deepseek-v4-flash-0731 and others, eval run
+        20261011T111753Z, Q10): a genuinely German answer about two
+        English-named systems (PyZoBot, HySemRAG) can rack up a handful of
+        incidental English-stopword hits ("in", "to", "on", "the"...) from
+        quoted technical terms, without actually being an English answer.
+        An absolute stopword-count floor alone flagged this; density must
+        also be checked (a real English answer is >30% stopwords, this one
+        is ~3%)."""
+        question = "Vergleiche PyZoBot und HySemRAG: Welche Retrieval-Ansätze setzen sie ein?"
+        answer = (
+            "Die verfügbaren Kontextabschnitte enthalten nur begrenzte Informationen zu "
+            "PyZoBot und HySemRAG und reichen nicht aus, um die Frage vollständig zu "
+            "beantworten. Zu PyZoBot ist bekannt: das System verwendet ein "
+            "Prompt-Design, das auf einem strukturierten, evidenzbasierten Format "
+            "basiert, um Genauigkeit, Transparenz und Rückverfolgbarkeit zu maximieren, "
+            "laut der verfügbaren Quelle, die dies im Detail beschreibt und erläutert."
+        )
+        self.assertFalse(_looks_like_wrong_language_answer(question, answer))
+
+    def test_looks_like_wrong_language_answer_false_when_both_non_english(self):
+        """No regression: a non-English question answered in the same
+        non-English language must not trigger a retry."""
+        self.assertFalse(_looks_like_wrong_language_answer(
+            "Combien d'articles ont servi à tester la corrélation?",
+            "Mille six cent treize articles ont servi à tester la corrélation [S1].",
+        ))
+
     async def test_prompt_forbids_process_narration_and_ungrounded_speculation(self):
         """A weak model can narrate its process ("I will use the library to find
         relevant information...") or, when the context is thin, supplement its
@@ -517,7 +650,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
         self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
 
-        result = await self.rag_engine.query(question, library_ids, top_k=5)
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=5, search_candidate_pool_size=5,
+        )
 
         self.assertEqual(self.mock_vector_store.search.call_count, 2)
         second_call_kwargs = self.mock_vector_store.search.call_args_list[1].kwargs
@@ -546,7 +681,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_vector_store.search = Mock(side_effect=[narrow_results, diverse_results])
         self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
 
-        result = await self.rag_engine.query(question, library_ids, top_k=10)
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=10,
+        )
 
         self.assertEqual(
             self.mock_vector_store.search.call_count, 2,
@@ -601,6 +738,133 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         self.mock_vector_store.search.assert_called_once()
 
+    def _make_score_proximity_pool(self):
+        """16 distinct single-chunk documents: ranks 1-10 span 0.90 down to
+        0.81 (the naive top_k=10 window — already 10 distinct documents, so
+        the diversity-floor trigger never fires), TARGET sits at rank 11
+        with score 0.809 (just 0.001 below the cutoff), and ranks 12-16 fill
+        out the pool down to 0.76 so the gap is small relative to the pool's
+        own 0.14 score range (~0.7%) without being zero."""
+        docs = [
+            self._make_chunk(f"DOC{i}", f"ATT{i}", f"Doc {i}", round(0.90 - i * 0.01, 3))
+            for i in range(10)
+        ]
+        target = self._make_chunk("DOC_TARGET", "ATT_T", "Target Doc", 0.809)
+        filler = [
+            self._make_chunk(f"DOC_F{i}", f"ATT_F{i}", f"Filler {i}", round(0.80 - i * 0.01, 3))
+            for i in range(5)
+        ]
+        return sorted(docs + [target] + filler, key=lambda r: r.score, reverse=True)
+
+    async def test_query_escalates_when_best_excluded_candidate_is_near_the_cutoff_score(self):
+        """Observed live (#89, jin2026): many distinct-but-moderately-relevant
+        documents can fill the top_k window (so the diversity-floor trigger
+        never fires) while a genuinely relevant chunk sits just below the
+        cutoff by a score margin that's small relative to the pool's own
+        range. settings.retrieval_score_proximity_epsilon, when set, must
+        escalate retrieval in this case even though diversity is already
+        sufficient."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_settings.retrieval_score_proximity_epsilon = 0.01
+
+        pool = self._make_score_proximity_pool()
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=15,
+        )
+
+        self.assertEqual(self.mock_vector_store.search.call_count, 2)
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_TARGET", cited_docs,
+            "best excluded candidate (rank #11, score 0.809) is within 1% of "
+            "the pool's score range from the cutoff (rank #10, score 0.81) "
+            "and must be pulled in by the escalation retry",
+        )
+
+    async def test_query_does_not_escalate_from_score_proximity_when_disabled_by_default(self):
+        """Same near-cutoff scenario as the test above, but with the setting
+        left at its default (off) — must behave exactly as before this
+        feature existed: no second search, target chunk stays excluded."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        # self.mock_settings is Mock(spec=Settings) with no explicit value set for
+        # retrieval_score_proximity_epsilon, matching a real Settings instance's
+        # default of 0.0 (disabled) in spirit — getattr(...) would return a Mock,
+        # not a number, which the isinstance guard treats as "disabled" too.
+
+        pool = self._make_score_proximity_pool()
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        result = await self.rag_engine.query(
+            question, library_ids, top_k=10, search_candidate_pool_size=15,
+        )
+
+        self.mock_vector_store.search.assert_called_once()
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertNotIn("DOC_TARGET", cited_docs)
+
+    async def test_query_surfaces_document_crowded_out_of_top_k_by_other_documents(self):
+        """Observed live (#87, jin2026): a relevant document's only chunk can
+        rank just outside a naive top_k window because a few OTHER documents
+        together contribute enough higher-scoring chunks to fill it — even
+        though the window already contains exactly diversity_floor distinct
+        documents, so the existing diversity-escalation mechanism (which
+        only checks DISTINCT document count, not per-document concentration)
+        never catches this. Capping each document's contribution to the
+        candidate pool BEFORE the top_k cutoff (not just at context-assembly
+        time, which only runs on whatever already survived the cutoff) must
+        let the crowded-out document back in.
+
+        Fixture: DOC_A supplies 6 of the top-10 raw-score slots (ranks 1-6),
+        DOC_B 3 (ranks 7-9), DOC_C 1 (rank 10) — exactly 3 distinct
+        documents in the naive top_k=10 window, meeting diversity_floor=3
+        exactly, so escalation never fires either. DOC_TARGET's only chunk
+        is rank 11, just outside. Capping each document to its top 4 chunks
+        drops DOC_A's 2 lowest (ranks 5-6), which is enough to pull
+        DOC_TARGET into the resulting top_k=10 window — a real vector store
+        honors `limit` by truncating to the N highest-scoring results, so
+        the mock must do the same (a plain Mock(return_value=...) would
+        hand back everything regardless of `limit`, masking the exact
+        truncation behavior this test exercises)."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        crowding_a = [self._make_chunk("DOC_A", "ATT_A", "Crowding Doc A", 0.99 - i * 0.01, i) for i in range(6)]
+        crowding_b = [self._make_chunk("DOC_B", "ATT_B", "Crowding Doc B", 0.93 - i * 0.01, i) for i in range(3)]
+        crowding_c = [self._make_chunk("DOC_C", "ATT_C", "Crowding Doc C", 0.90)]
+        target = self._make_chunk("DOC_TARGET", "ATT_T", "Target Doc", 0.89)
+        pool = sorted(crowding_a + crowding_b + crowding_c + [target], key=lambda r: r.score, reverse=True)
+
+        def fake_search(*, query_vector, limit, score_threshold, library_ids, filters, with_vectors=False):
+            return pool[:limit]
+
+        self.mock_vector_store.search = Mock(side_effect=fake_search)
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3,S4]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=10)
+
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_TARGET", cited_docs,
+            "Target document's only chunk (score 0.89, raw rank #11) must "
+            "survive the per-document cap applied before the top_k cutoff, "
+            "even though the naive top-10 window already contains exactly "
+            "diversity_floor (3) distinct documents and so never escalates.",
+        )
+
     async def test_query_caps_chunks_per_document_in_the_assembled_context(self):
         """A single over-chunked document must not be allowed to dominate the
         prompt with many near-duplicate passages at the expense of readability —
@@ -631,6 +895,49 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertLessEqual(prompt.count("Content from Dominant Doc"), 2)
+
+    async def test_query_per_document_cap_favors_diverse_chunks_over_near_duplicates(self):
+        """Observed live (#87 follow-up): a document's own highest-scoring
+        chunks can be several near-paraphrases of the same narrow sub-topic
+        (e.g. three different sentences all about the survey's response
+        rate), each scoring a hair higher than the one chunk that actually
+        answers a different part of the question (e.g. which programs were
+        used). Plain top-N-by-score caps this document's context to the
+        near-duplicate cluster and drops the only chunk with the needed
+        fact. The cap must instead prefer a lower-scoring chunk once a
+        higher-scoring candidate is too similar to one already kept."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        cluster_1 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.95, chunk_index=0,
+            text="The survey achieved a high response rate among the authors who were surveyed about the response rate study.",
+        )
+        cluster_2 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.94, chunk_index=1,
+            text="Response rate for the survey was high and authors reported a strong response rate overall in the study.",
+        )
+        cluster_3 = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.93, chunk_index=2,
+            text="Authors surveyed reported a high response rate in this response rate study of systematic reviews.",
+        )
+        fact_chunk = self._make_chunk(
+            "DOC1", "ATT1", "Doc", 0.90, chunk_index=3,
+            text="EndNote was used by forty-one authors, Reference Manager by fourteen, and RefWorks by six participants.",
+        )
+
+        self.mock_vector_store.search = Mock(return_value=[cluster_1, cluster_2, cluster_3, fact_chunk])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
+
+        await self.rag_engine.query(question, library_ids, top_k=4, max_chunks_per_document=2)
+
+        prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
+        self.assertIn(
+            fact_chunk.chunk.text, prompt,
+            "the fact-bearing chunk should survive the cap by virtue of being "
+            "topically distinct from the already-selected top-scoring chunk, "
+            "even though its raw score is lower than the near-duplicates",
+        )
 
     async def test_query_dedupes_identical_chunk_text_within_one_document(self):
         """Observed live: the same passage can be indexed twice for one
@@ -714,6 +1021,38 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt = self.mock_llm_service.generate.call_args.kwargs["prompt"]
         self.assertEqual(prompt.count("Content from Dominant Doc"), 3)
 
+    async def test_query_dedupes_identical_chunk_text_across_different_documents(self):
+        """Observed live (#87 follow-up): a Zotero library can hold two
+        separate items (different item_keys) for the same underlying article
+        (e.g. one user adds it twice, or it's imported from two sources) —
+        the gold test library's lorenzetti2013 entry is exactly this case.
+        Both items' attachments extract to identical chunk text, so the
+        existing within-document dedup (keyed by item_key) never sees them
+        as duplicates: each item's copy independently consumes its own
+        top_k slot with the same content, crowding out a genuinely
+        different document that would otherwise have made the window."""
+        question, library_ids = "Question", ["12345"]
+        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+
+        duplicate_text = "The same article, indexed twice under two different library items."
+        dup_a = self._make_chunk("DOC_A", "ATT_A", "Duplicate Item A", 0.9, chunk_index=0, text=duplicate_text)
+        dup_b = self._make_chunk("DOC_B", "ATT_B", "Duplicate Item B", 0.85, chunk_index=0, text=duplicate_text)
+        other_doc = self._make_chunk("DOC_C", "ATT_C", "Other Doc", 0.8, chunk_index=0)
+        crowded_out_doc = self._make_chunk("DOC_D", "ATT_D", "Crowded Out Doc", 0.75, chunk_index=0)
+
+        self.mock_vector_store.search = Mock(return_value=[dup_a, dup_b, other_doc, crowded_out_doc])
+        self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1,S2,S3]")
+
+        result = await self.rag_engine.query(question, library_ids, top_k=3)
+
+        cited_docs = {s.item_id for s in result.sources}
+        self.assertIn(
+            "DOC_D", cited_docs,
+            "the cross-item duplicate should have been deduped, freeing the "
+            "3rd top_k slot for the genuinely different DOC_D instead of "
+            "wasting it on DOC_B's duplicate of DOC_A's text",
+        )
+
     async def test_query_custom_diversity_floor_suppresses_escalation(self):
         """A caller-supplied diversity_floor of 1 means "1 document is already
         enough" — escalation must not fire even though the default floor (3)
@@ -762,7 +1101,9 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.mock_llm_service.model_name = "test-model"
 
         collector = TraceCollector(question, library_ids, {})
-        await self.rag_engine.query(question, library_ids, top_k=5, trace=collector)
+        await self.rag_engine.query(
+            question, library_ids, top_k=5, trace=collector, search_candidate_pool_size=5,
+        )
         trace = collector.finalize()
 
         self.assertTrue(trace.agent_executions[0].retrieval.escalated)
@@ -1021,6 +1362,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
 
         result = await self.rag_engine.query(
             question, library_ids, top_k=3, enable_quality_self_review=True,
+            search_candidate_pool_size=3,
         )
 
         self.assertEqual(
@@ -1087,6 +1429,44 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         self.assertIn(CONTEXT_INSUFFICIENT_MARKER, trace.llm_calls[-1].response)
 
 
+class TestBestExcludedCandidateNearCutoff(unittest.TestCase):
+    """_best_excluded_candidate_near_cutoff backs the score-proximity
+    escalation trigger (#89): normalizing epsilon to the pool's own min-max
+    score range, rather than using a fixed absolute cosine-score epsilon,
+    matters because that range varies a lot by query (observed 0.025-0.08
+    across the gold question set) — see Settings.retrieval_score_proximity_epsilon."""
+
+    @staticmethod
+    def _pool(scores):
+        return [Mock(score=s) for s in scores]
+
+    def test_false_when_epsilon_is_zero(self):
+        pool = self._pool([0.9, 0.8, 0.799, 0.1])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.0))
+
+    def test_false_when_pool_is_not_larger_than_top_k(self):
+        """Nothing was excluded — there's no 'best excluded candidate' to check."""
+        pool = self._pool([0.9, 0.8])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.5))
+
+    def test_false_when_pool_has_no_score_range(self):
+        """All candidates tied — a relative epsilon is undefined (division by
+        zero avoided), and there's no meaningful 'proximity' to measure."""
+        pool = self._pool([0.9, 0.9, 0.9])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.5))
+
+    def test_true_when_gap_is_within_the_relative_epsilon(self):
+        """range=0.90-0.6=0.3; gap at the cutoff=0.899-0.898=0.001; 0.001 <= 1% of 0.3 (0.003)."""
+        pool = self._pool([0.90, 0.899, 0.898, 0.6])
+        self.assertTrue(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.01))
+
+    def test_false_when_gap_exceeds_the_relative_epsilon(self):
+        """Same range (0.3) as the test above, but a much larger gap (0.1) at
+        the cutoff — a real, not borderline, separation must not escalate."""
+        pool = self._pool([0.90, 0.80, 0.7, 0.6])
+        self.assertFalse(_best_excluded_candidate_near_cutoff(pool, top_k=2, epsilon_fraction=0.01))
+
+
 class TestThinContextCoverage(unittest.TestCase):
     """_thin_context_coverage detects a different failure mode than the
     existing _low_citation_diversity: the answer DOES cite sources, and
@@ -1133,6 +1513,54 @@ class TestThinContextCoverage(unittest.TestCase):
         from backend.services.rag_engine import _thin_context_coverage
         answer = "The only relevant source states X [S1]."
         self.assertFalse(_thin_context_coverage(answer, documents_grouped=1))
+
+    def test_true_when_marker_is_missing_its_trailing_hashes(self):
+        """Observed live (qwen3-omni-30b-a3b-instruct, eval run
+        20261011T111753Z, Q09): the model reproduced the instructed sentinel
+        imperfectly, emitting "###CONTEXT_INSUFFICIENT" with no trailing
+        "###", so the exact-string marker check missed it and it leaked
+        into the user-facing answer verbatim. Detection must tolerate a
+        missing (or partial) trailing hash sequence.
+
+        documents_grouped=20 isolates this from the citation-utilization
+        fallback (see test_false_when_pool_is_large_even_if_few_cited,
+        which asserts False for the same low citation count on a pool this
+        large) — only the marker check itself can make this True."""
+        from backend.services.rag_engine import _thin_context_coverage
+        answer = "I can only find a partial answer [S1].\n###CONTEXT_INSUFFICIENT"
+        self.assertTrue(_thin_context_coverage(answer, documents_grouped=20))
+
+
+class TestStripInsufficientContextMarker(unittest.TestCase):
+    """_strip_insufficient_context_marker must remove the sentinel even when
+    the model reproduces it imperfectly — see CONTEXT_INSUFFICIENT_MARKER's
+    near-miss case documented above."""
+
+    def test_strips_well_formed_marker(self):
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n###CONTEXT_INSUFFICIENT###"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_strips_marker_missing_trailing_hashes(self):
+        """The exact case observed live: no trailing ###."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n###CONTEXT_INSUFFICIENT"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_strips_marker_wrapped_in_a_paragraph_tag(self):
+        """Observed live: the marker survived markdown->HTML rendering
+        wrapped in its own <p> tag because stripping happens on the raw
+        text before rendering — this test documents the raw-text shape,
+        not the rendered HTML, since stripping must happen pre-render."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "Partial answer [S1].\n\n###CONTEXT_INSUFFICIENT"
+        self.assertEqual(_strip_insufficient_context_marker(answer), "Partial answer [S1].")
+
+    def test_does_not_strip_unrelated_hash_text(self):
+        """No regression: ordinary markdown headings or hashtags must survive."""
+        from backend.services.rag_engine import _strip_insufficient_context_marker
+        answer = "### Summary\nThe answer is X [S1]."
+        self.assertEqual(_strip_insufficient_context_marker(answer), "### Summary\nThe answer is X [S1].")
 
 
 class TestSourceInfo(unittest.TestCase):

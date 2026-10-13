@@ -71,7 +71,8 @@ function makeStubs(attachmentsByKey = {}) {
  */
 function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, ...extra };
+	// IndexedTags (indexed-tags.js) is a separate plugin-lifetime script; stub its lifecycle by default.
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, IndexedTags: { init() {}, shutdown() {} }, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -283,6 +284,7 @@ test('_getUnavailableAttachments includes download-failed entries only when incl
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	zotero.DB = { columnQueryAsync: async () => [] };
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.log = () => {};
 	plugin.getIndexSnapshotsEnabled = async () => false;
 	plugin._getParseErrorAttachments = async () => [];
 	plugin._getSkippedServerAttachments = async () => [];
@@ -321,7 +323,7 @@ test('retryDownloadFailedAttachment downloads then uploads to the backend, retur
 	zotero.Libraries.get = () => ({ libraryType: 'user' });
 	const uploadCalls = [];
 	const RemoteIndexer = {
-		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitHeaders: null }; },
+		_uploadAttachment: async (opts) => { uploadCalls.push(opts); return { rateLimitMeters: null }; },
 	};
 	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { RemoteIndexer });
 	plugin.getBackendLibraryId = () => 'u1';
@@ -1331,9 +1333,10 @@ test('createResultNote creates a tagged note from every turn and does not refere
 	assert.ok(noteHtmls[0].includes('Q1') && noteHtmls[0].includes('Q2'));
 });
 
-test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
+test('init() starts the TaskQueue and IndexedTags; removeFromAllWindows() stops both', () => {
 	/** @type {string[]} */
 	const calls = [];
+	const indexedTagsStub = { init: () => calls.push('tags-init'), shutdown: () => calls.push('tags-shutdown') };
 	const taskQueueStub = {
 		start: () => calls.push('start'),
 		stop: () => calls.push('stop'),
@@ -1346,11 +1349,11 @@ test('init() starts the TaskQueue and removeFromAllWindows() stops it', () => {
 		getMainWindows: () => [],
 	};
 	const servicesStub = { console: { logStringMessage: () => {}, logMessage: () => {} } };
-	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, Services: servicesStub });
+	const plugin = loadPlugin(zotero, {}, {}, { TaskQueue: taskQueueStub, IndexedTags: indexedTagsStub, Services: servicesStub });
 	plugin.init({ id: 'x', version: '1', rootURI: 'chrome://x/' });
 	plugin.removeFromAllWindows();
 
-	assert.deepStrictEqual(calls, ['start', 'stop']);
+	assert.deepStrictEqual(calls, ['start', 'tags-init', 'stop', 'tags-shutdown']);
 });
 
 test('_getSelectedLibraryIDCompat prefers the Zotero 10+ plural getter when present', () => {
@@ -1544,6 +1547,87 @@ test('_getTooLargeAttachments excludes a Snapshot-titled attachment when indexSn
 	assert.deepStrictEqual([...results], []);
 });
 
+test('_getQuarantinedAttachments resolves backend rag-failed records with quarantine fields set', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'ATT1',
+		getCreators: () => [{ lastName: 'Doe' }],
+		getField: (f) => (f === 'title' ? 'A Scanned Book' : f === 'date' ? '2020' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ ATT1: fakeAttachment });
+	const fetchStub = async (url) => {
+		assert.ok(String(url).includes('/api/indexed-tags/failed'));
+		assert.ok(String(url).includes('library_id=u1'));
+		return {
+			ok: true,
+			json: async () => ({ items: [
+				{ attachment_key: 'ATT1', item_key: 'I1', reason: 'too_costly', detail: '1600 pages, no text layer' },
+			] }),
+		};
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1);
+
+	assert.strictEqual(results.length, 1);
+	assert.strictEqual(results[0].quarantined, true);
+	assert.strictEqual(results[0].quarantineReason, 'too_costly');
+	assert.strictEqual(results[0].quarantineDetail, '1600 pages, no text layer');
+	assert.strictEqual(results[0].isLinked, false);
+	assert.strictEqual(results[0].authors, 'Doe');
+	assert.strictEqual(results[0].year, '2020');
+	assert.strictEqual(results[0].title, 'A Scanned Book');
+});
+
+test('_getQuarantinedAttachments drops records whose Zotero item no longer exists locally', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs({}); // ATT1 resolves to null
+	const fetchStub = async () => ({
+		ok: true,
+		json: async () => ({ items: [{ attachment_key: 'ATT1', item_key: 'I1', reason: 'too_costly', detail: 'x' }] }),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getQuarantinedAttachments returns an empty array instead of throwing on a fetch error', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const fetchStub = async () => { throw new Error('network down'); };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+
+	const results = await plugin._getQuarantinedAttachments(1);
+	assert.deepStrictEqual([...results], []);
+});
+
+test('_getQuarantinedAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
+	const fakeAttachment = {
+		deleted: false, parentItemID: null, key: 'SNAP1',
+		getCreators: () => [], getField: (f) => (f === 'title' ? 'Snapshot' : ''),
+	};
+	const { zotero, ioUtils, pathUtils } = makeStubs({ SNAP1: fakeAttachment });
+	const fetchStub = async () => ({
+		ok: true,
+		json: async () => ({ items: [{ attachment_key: 'SNAP1', item_key: 'I1', reason: 'too_costly', detail: 'x' }] }),
+	});
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getAuthHeaders = () => ({});
+	plugin.backendURL = 'http://backend';
+	plugin.getBackendLibraryId = () => 'u1';
+
+	const results = await plugin._getQuarantinedAttachments(1, false);
+	assert.deepStrictEqual([...results], []);
+});
+
 test('_getDownloadFailedAttachments excludes a Snapshot-titled attachment when indexSnapshotsEnabled is false', async () => {
 	const fakeAttachment = {
 		deleted: false, parentItemID: null, key: 'SNAP1',
@@ -1569,15 +1653,33 @@ test('_getUnavailableAttachments fetches indexSnapshotsEnabled once and threads 
 	plugin._getSkippedServerAttachments = async (...args) => { calls.push(['skippedServer', ...args]); return []; };
 	plugin._getTooLargeAttachments = async (...args) => { calls.push(['tooLarge', ...args]); return []; };
 	plugin._getDownloadFailedAttachments = async (...args) => { calls.push(['downloadFailed', ...args]); return []; };
+	plugin._getQuarantinedAttachments = async (...args) => { calls.push(['quarantined', ...args]); return []; };
 
-	await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+	await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true, includePermanentFailures: true });
 
 	assert.deepStrictEqual(calls, [
 		['parseError', 1, false],
 		['skippedServer', 1, false],
 		['tooLarge', 1, false],
 		['downloadFailed', 1, false],
+		['quarantined', 1, false],
 	]);
+});
+
+test('_getUnavailableAttachments does not call _getQuarantinedAttachments when includePermanentFailures is not set', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	let called = false;
+	plugin._getQuarantinedAttachments = async () => { called = true; return []; };
+
+	await plugin._getUnavailableAttachments(1);
+
+	assert.strictEqual(called, false);
 });
 
 test('_getUnavailableAttachments main scan excludes a Snapshot-titled attachment with a missing file when indexSnapshotsEnabled is false', async () => {
@@ -1599,4 +1701,311 @@ test('_getUnavailableAttachments main scan excludes a Snapshot-titled attachment
 	const results = await plugin._getUnavailableAttachments(1);
 
 	assert.deepStrictEqual([...results], []);
+});
+
+// --- Tests for the shared_base_url/shared_api_key branch of renderServiceApiKeyFields ---
+
+/**
+ * Minimal fake element sufficient for renderServiceApiKeyFields: tracks the
+ * handful of properties/methods it touches (className, textContent, type,
+ * value, placeholder, setAttribute, addEventListener, appendChild) plus a
+ * `dispatchChange` test helper that simulates a 'change' event.
+ * @returns {any}
+ */
+function makeFakeElement() {
+	const listeners = {};
+	return {
+		className: '', textContent: '', id: '', type: undefined, value: '', placeholder: '',
+		children: [],
+		setAttribute() {},
+		appendChild(child) { this.children.push(child); },
+		addEventListener(event, handler) { listeners[event] = handler; },
+		dispatchChange(value) {
+			this.value = value;
+			if (listeners.change) return listeners.change({ target: this });
+		},
+	};
+}
+
+/** @returns {any} a fake `doc` whose createElementNS always returns a fresh fake element */
+function makeFakeDoc() {
+	return { createElementNS: () => makeFakeElement(), createTextNode: () => makeFakeElement() };
+}
+
+/** @returns {any} a fake container tracking every element appended to it */
+function makeFakeContainer() {
+	const appended = [];
+	return {
+		appended,
+		querySelectorAll: () => ({ forEach: () => {} }),
+		appendChild(el) { appended.push(el); },
+	};
+}
+
+/**
+ * Find the <input>-equivalent fake element among a row's children: the only
+ * child whose `.type` was explicitly set to 'text' or 'password' (the label
+ * and status span never set `.type`, so it stays `undefined`).
+ * @param {any} row
+ * @returns {any}
+ */
+function findInputChild(row) {
+	return row.children.find(el => el.type === 'text' || el.type === 'password');
+}
+
+test('renderServiceApiKeyFields renders a shared_base_url field as a text input that POSTs via setSharedRemoteField instead of writing a local pref', async () => {
+	const prefs = {};
+	const zotero = { Prefs: { get: (k) => prefs[k], set: (k, v) => { prefs[k] = v; } } };
+	const plugin = loadPlugin(zotero, {}, {});
+	let posted = null;
+	plugin.setSharedRemoteField = async (keyName, value) => {
+		posted = { keyName, value };
+		return { ok: true, is_set: true };
+	};
+
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		header_name: 'X-Mpcdf-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {
+		throw new Error('onKeyChange must not be called for a shared field');
+	});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'text');
+	assert.strictEqual(input.value, ''); // never prefilled from a pref
+
+	await input.dispatchChange('https://llm.mpcdf.mpg.de/abc123/v1');
+
+	assert.deepStrictEqual(posted, { keyName: 'MPCDF_EMBEDDING_BASE_URL', value: 'https://llm.mpcdf.mpg.de/abc123/v1' });
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
+});
+
+test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	plugin.setSharedRemoteField = async () => ({ ok: true, is_set: true });
+
+	class FakeCustomEvent {
+		/** @param {string} type @param {{detail: any}} init */
+		constructor(type, init) { this.type = type; this.detail = init.detail; }
+	}
+	const doc = { ...makeFakeDoc(), defaultView: { CustomEvent: FakeCustomEvent } };
+	const container = makeFakeContainer();
+	/** @type {any[]} */
+	const events = [];
+	container.dispatchEvent = (ev) => { events.push(ev); return true; };
+
+	plugin.renderServiceApiKeyFields(doc, container, null, [{
+		key_name: 'RUNPOD_API_KEY',
+		header_name: 'X-Runpod-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}]);
+
+	const row = container.appended.find(el => el.children.length > 0);
+	await findInputChild(row).dispatchChange('rpa_NEW');
+
+	assert.strictEqual(events.length, 1);
+	assert.strictEqual(events[0].type, 'zotero-rag-shared-field-saved');
+	assert.strictEqual(events[0].detail.keyName, 'RUNPOD_API_KEY');
+});
+
+test('renderServiceApiKeyFields sets input.pattern/title from a declared pattern', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'RUNPOD_EMBEDDING_BASE_URL',
+		header_name: 'X-Runpod-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+		pattern: '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$',
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, '^https://api\\.runpod\\.ai/v2/[A-Za-z0-9]+/openai/v1$');
+	assert.match(input.title, /Must match/);
+});
+
+test('renderServiceApiKeyFields leaves input.pattern unset when the field declares none', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		header_name: 'X-Mpcdf-Embedding-Base-Url',
+		kind: 'shared_base_url',
+		description: 'Shared endpoint URL',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: false,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.pattern, undefined);
+});
+
+test('renderServiceApiKeyFields renders a shared_api_key field as a password input', () => {
+	const zotero = { Prefs: { get: () => null, set: () => {} } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'MPCDF_EMBEDDING_API_KEY',
+		header_name: 'X-Mpcdf-Embedding-Api-Key',
+		kind: 'shared_api_key',
+		description: 'Shared API key',
+		docs_url: null,
+		required_for: ['indexing'],
+		is_set: true,
+	}];
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, () => {});
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'password');
+	assert.strictEqual(input.placeholder, 'Configured — enter a new value to replace it');
+});
+
+test('renderServiceApiKeyFields still writes a personal api_key field to a local pref (existing behavior unchanged)', async () => {
+	const prefs = {};
+	const zotero = { Prefs: { get: (k) => prefs[k], set: (k, v) => { prefs[k] = v; } } };
+	const plugin = loadPlugin(zotero, {}, {});
+	const doc = makeFakeDoc();
+	const container = makeFakeContainer();
+	const requiredKeys = [{
+		key_name: 'KISSKI_API_KEY', header_name: 'X-Kisski-Api-Key', kind: 'api_key',
+		description: 'API key', docs_url: null, required_for: ['indexing', 'querying'],
+	}];
+	let changed = null;
+
+	plugin.renderServiceApiKeyFields(doc, container, null, requiredKeys, (keyInfo, value) => { changed = { keyInfo, value }; });
+
+	const row = container.appended.find(el => el.children.length > 0);
+	const input = findInputChild(row);
+	assert.strictEqual(input.type, 'password');
+
+	await input.dispatchChange('my-kisski-key');
+
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.KISSKI_API_KEY'], 'my-kisski-key');
+	assert.strictEqual(changed.value, 'my-kisski-key');
+});
+
+// --- Tests for setSharedRemoteField itself ---
+
+test('setSharedRemoteField POSTs to /api/config/remote-fields and returns is_set on success', async () => {
+	/** @type {Array<{url: string, init: any}>} */
+	const fetchCalls = [];
+	const fetchStub = async (url, init) => {
+		fetchCalls.push({ url, init });
+		return { ok: true, status: 200, json: async () => ({ is_set: { MPCDF_EMBEDDING_BASE_URL: true } }) };
+	};
+	const zotero = { Prefs: { get: () => null } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+	plugin.requiredApiKeys = [];
+
+	const result = await plugin.setSharedRemoteField('MPCDF_EMBEDDING_BASE_URL', 'https://llm.mpcdf.mpg.de/abc123/v1');
+
+	assert.strictEqual(fetchCalls.length, 1);
+	assert.strictEqual(fetchCalls[0].url, 'http://localhost:8119/api/config/remote-fields');
+	assert.deepStrictEqual(
+		JSON.parse(fetchCalls[0].init.body),
+		{ values: { MPCDF_EMBEDDING_BASE_URL: 'https://llm.mpcdf.mpg.de/abc123/v1' } },
+	);
+	// `result` is an object literal returned from inside the vm context (a
+	// separate realm from this test's own global), so assert.deepStrictEqual
+	// would otherwise fail on prototype identity alone — see the identical
+	// `{ ...map.get('A1') }` workaround used earlier in this file.
+	assert.deepStrictEqual({ ...result }, { ok: true, is_set: true });
+});
+
+test('setSharedRemoteField returns ok:false with the server detail message on a non-2xx response', async () => {
+	const fetchStub = async () => ({ ok: false, status: 400, json: async () => ({ detail: 'Unknown remote-config key' }) });
+	const zotero = { Prefs: { get: () => null } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+	plugin.requiredApiKeys = [];
+
+	const result = await plugin.setSharedRemoteField('NOT_A_REAL_FIELD', 'x');
+
+	// Same cross-realm-object caveat as above.
+	assert.deepStrictEqual({ ...result }, { ok: false, error: 'Unknown remote-config key' });
+});
+
+test('_getUnavailableAttachments drops rows the backend already has indexed and prunes them from the download-failed store', async () => {
+	// A second computer: the server's stale failure list still names DL1, but it
+	// was indexed via Search & Fix on another PC, so the backend has chunks for it.
+	const { zotero, ioUtils, pathUtils, files } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	/** @type {any[]} */
+	const bodies = [];
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ init) => {
+		assert.match(url, /\/api\/indexed-tags\/check$/);
+		bodies.push(JSON.parse(init.body));
+		return { ok: true, json: async () => ({ indexed: ['DL1'] }) };
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+		{ attachmentItem: { key: 'DL2' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P2', isLinked: false, serverDownloadFailed: true },
+	];
+	await plugin.storeDownloadFailedItems('u1', ['DL1', 'DL2']);
+
+	const rows = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+
+	assert.deepStrictEqual([...rows.map((/** @type {any} */ r) => r.attachmentItem.key)], ['DL2']);
+	assert.deepStrictEqual(bodies[0].attachment_keys.sort(), ['DL1', 'DL2']);
+	assert.deepStrictEqual(JSON.parse(files[plugin._downloadFailedFilePath(1)]), ['DL2']);
+});
+
+test('_getUnavailableAttachments keeps every row when the indexed check fails', async () => {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	zotero.DB = { columnQueryAsync: async () => [] };
+	const fetchStub = async () => { throw new Error('network down'); };
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch: fetchStub });
+	plugin.getBackendLibraryId = () => 'u1';
+	plugin.log = () => {};
+	plugin.getIndexSnapshotsEnabled = async () => false;
+	plugin._getParseErrorAttachments = async () => [];
+	plugin._getSkippedServerAttachments = async () => [];
+	plugin._getTooLargeAttachments = async () => [];
+	plugin._getDownloadFailedAttachments = async () => [
+		{ attachmentItem: { key: 'DL1' }, parentItem: {}, authors: '', year: '', title: '', zoteroID: 'P1', isLinked: false, serverDownloadFailed: true },
+	];
+
+	const rows = await plugin._getUnavailableAttachments(1, { includeDownloadFailed: true });
+
+	assert.strictEqual(rows.length, 1);
 });

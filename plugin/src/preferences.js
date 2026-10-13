@@ -183,7 +183,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
-	const serviceKeysContainer = doc.getElementById('zotero-rag-service-keys-container');
 	const serviceKeysPlaceholder = doc.getElementById('zotero-rag-service-keys-placeholder');
 
 	/**
@@ -257,16 +256,282 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	};
 
+	// --- Per-side model sections -------------------------------------------------
+	// Everything vendor-specific comes from the backend's provider descriptors
+	// (GET /api/config/providers); see provider-sections.js for the rendering.
+	const Sections = ZoteroRAGProviderSections;
+	const sectionsContainer = doc.getElementById('zotero-rag-provider-sections');
+	const sectionRefs = sectionsContainer
+		? Sections.ensureSections(doc, sectionsContainer, {
+			onProvision: (side, key) => controller && controller.provision(side, key),
+			onRetry: (side, key) => controller && controller.provision(side, key),
+			onPause: (side, key) => controller && controller.pause(side, key),
+		})
+		: null;
+	/**
+	 * GET a backend JSON endpoint; null on any failure (the UI then keeps what it has).
+	 * @param {string} path
+	 * @returns {Promise<any>}
+	 */
+	const fetchJson = async (path) => {
+		try {
+			const response = await fetch(`${this.backendURL}${path}`, { headers: this.getAuthHeaders() });
+			return response.ok ? await response.json() : null;
+		} catch (e) {
+			this.log(`Could not fetch ${path}: ${e}`);
+			return null;
+		}
+	};
+	/** @type {ReturnType<typeof ZoteroRAGProviderSections.createController> | null} */
+	const controller = sectionRefs
+		? Sections.createController({
+			refs: sectionRefs,
+			get: fetchJson,
+			post: async (path, body) => {
+				const response = await fetch(`${this.backendURL}${path}`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify(body),
+				});
+				return { ok: response.ok, status: response.status, data: await response.json().catch(() => ({})) };
+			},
+			// Management tokens live on the plugin object: kept while Zotero runs, never written anywhere.
+			sessionKeys: {
+				get: (env) => (this._sessionKeys && this._sessionKeys[env]) || '',
+				set: (env, value) => { this._sessionKeys = { ...(this._sessionKeys || {}), [env]: value }; },
+				forget: (env) => { if (this._sessionKeys) delete this._sessionKeys[env]; },
+			},
+		})
+		: null;
+	const pollJob = async () => { if (controller) await controller.poll(); };
+	const headerForKey = Sections.headerForKey;
+
+	/** Render each required key under the first side that uses it. */
+	const renderSideKeys = () => {
+		if (!sectionRefs) return;
+		const keys = this.requiredApiKeys || [];
+		for (const side of Sections.SIDES) {
+			const forSide = keys.filter((k) => {
+				const sides = k.sides && k.sides.length ? k.sides : ['embedding'];
+				return Sections.SIDES.find((s) => sides.includes(s)) === side;
+			});
+			this.renderServiceApiKeyFields(doc, sectionRefs[side].keys, null, forSide, onServiceKeyChange);
+		}
+		if (serviceKeysPlaceholder) serviceKeysPlaceholder.style.display = keys.length ? 'none' : '';
+	};
+
 	// Render from cache immediately so fields appear without needing a server round-trip
 	try {
-		const cached = Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]';
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, JSON.parse(cached), onServiceKeyChange);
+		this.requiredApiKeys = JSON.parse(Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]');
 	} catch (_) {}
-
+	renderSideKeys();
 	// Refresh from server in background and re-render if the list has changed
-	this.fetchRequiredApiKeys().then(() =>
-		this.renderServiceApiKeyFields(doc, serviceKeysContainer, serviceKeysPlaceholder, this.requiredApiKeys, onServiceKeyChange)
-	);
+	this.fetchRequiredApiKeys().then(renderSideKeys);
+
+	// --- Model preset group -------------------------------------------------------
+	const presetSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-preset-select'));
+	const presetLabel = doc.getElementById('zotero-rag-preset-label');
+	const presetDescription = doc.getElementById('zotero-rag-preset-description');
+	const presetStatus = doc.getElementById('zotero-rag-preset-status');
+	const presetKeys = doc.getElementById('zotero-rag-preset-keys');
+	const defaultRow = doc.getElementById('zotero-rag-default-row');
+	const defaultHelp = doc.getElementById('zotero-rag-default-help');
+	const defaultSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-default-select'));
+	/** What the preset controls currently show: 'loopback' (one control, changes the default) or 'user'. */
+	let presetMode = 'user';
+	const setPresetStatus = (/** @type {string} */ text) => { if (presetStatus) presetStatus.textContent = text; };
+
+	/**
+	 * @param {HTMLSelectElement} select
+	 * @param {Array<{value: string, text: string}>} options
+	 * @param {string} selected
+	 */
+	const fillSelect = (select, options, selected) => {
+		select.innerHTML = '';
+		for (const o of options) {
+			const option = doc.createElementNS('http://www.w3.org/1999/xhtml', 'option');
+			option.value = o.value;
+			option.textContent = o.text;
+			select.appendChild(option);
+		}
+		select.value = selected;
+	};
+
+	/**
+	 * Re-fetch the caller's preset state and repopulate both preset controls.
+	 * @returns {Promise<void>}
+	 */
+	const refreshPresetState = async () => {
+		const [my, cfg] = await Promise.all([fetchJson('/api/config/my-preset'), fetchJson('/api/config')]);
+		if (!my || !cfg) return;
+		const view = Sections.buildPresetControls(my, cfg);
+		presetMode = view.mode;
+		if (presetLabel) presetLabel.textContent = view.label;
+		if (presetSelect) fillSelect(presetSelect, view.options, view.selected);
+		if (presetDescription) presetDescription.textContent = cfg.preset_description || '';
+		if (defaultRow) defaultRow.hidden = !view.showDefault;
+		if (defaultHelp) defaultHelp.hidden = !view.showDefault;
+		if (defaultSelect && view.showDefault) fillSelect(defaultSelect, view.defaultOptions, view.defaultSelected);
+		if (view.note) setPresetStatus(view.note);
+	};
+
+	/** Refresh everything that depends on the preset after a change (made here or in another window). */
+	const applyPresetSwitch = async () => {
+		await refreshPresetState();
+		await this.fetchRequiredApiKeys();
+		renderSideKeys();
+		await pollJob();
+	};
+
+	/**
+	 * POST /api/config (changes the server default). Admins only.
+	 * @param {string} name
+	 * @returns {Promise<boolean>}
+	 */
+	const setServerDefault = async (name) => {
+		setPresetStatus('Switching\u2026');
+		try {
+			const response = await fetch(`${this.backendURL}/api/config`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ preset_name: name }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				setPresetStatus(`Error: ${err.detail || response.status}`);
+				return false;
+			}
+			setPresetStatus('Switched.');
+			this.notifyPresetChanged('preferences');
+			return true;
+		} catch (e) {
+			setPresetStatus(`Error: ${e}`);
+			return false;
+		}
+	};
+
+	/**
+	 * PUT /api/config/my-preset with any keys entered for it in this request's headers.
+	 * @param {string} name
+	 * @param {Record<string,string>} keys - key name -> value for credentials the preset still needs
+	 * @returns {Promise<boolean>}
+	 */
+	const chooseMyPreset = async (name, keys) => {
+		setPresetStatus('Switching\u2026');
+		/** @type {Record<string,string>} */
+		const extra = { 'Content-Type': 'application/json' };
+		for (const [keyName, value] of Object.entries(keys)) extra[headerForKey(keyName)] = value;
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/my-preset`, {
+				method: 'PUT',
+				headers: this.getAuthHeaders(extra),
+				body: JSON.stringify({ preset_name: name }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				setPresetStatus(`Error: ${err.detail || response.status}`);
+				return false;
+			}
+			// Keep the keys that made the choice possible, so later requests carry them.
+			for (const [keyName, value] of Object.entries(keys)) {
+				Zotero.Prefs.set(`extensions.zotero-rag.serviceApiKey.${keyName}`, value, true);
+			}
+			setPresetStatus('Switched.');
+			return true;
+		} catch (e) {
+			setPresetStatus(`Error: ${e}`);
+			return false;
+		}
+	};
+
+	/**
+	 * Ask for the keys a chosen preset still needs, then choose it.
+	 * @param {string} name
+	 * @param {string[]} missing
+	 */
+	const promptForMissingKeys = (name, missing) => {
+		if (!presetKeys) return;
+		presetKeys.innerHTML = '';
+		/** @type {Record<string, HTMLInputElement>} */
+		const inputs = {};
+		for (const keyName of missing) {
+			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+			row.className = 'setting-row';
+			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
+			label.textContent = `${keyName}:`;
+			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
+			input.type = 'password';
+			input.className = 'setting-input';
+			input.placeholder = 'Enter your key to use this preset';
+			inputs[keyName] = input;
+			row.append(label, input);
+			presetKeys.appendChild(row);
+		}
+		const go = /** @type {HTMLButtonElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'button'));
+		go.textContent = `Use ${name}`;
+		go.addEventListener('click', async () => {
+			/** @type {Record<string,string>} */
+			const keys = {};
+			for (const [k, input] of Object.entries(inputs)) if (input.value.trim()) keys[k] = input.value.trim();
+			if (Object.keys(keys).length < missing.length) {
+				setPresetStatus('Enter all the keys listed above first.');
+				return;
+			}
+			if (await chooseMyPreset(name, keys)) {
+				presetKeys.innerHTML = '';
+				this.notifyPresetChanged('preferences');
+				await applyPresetSwitch();
+			}
+		});
+		presetKeys.appendChild(go);
+		setPresetStatus(`${name} needs ${missing.length === 1 ? 'a key' : 'keys'} you have not entered yet.`);
+	};
+
+	if (presetSelect) {
+		// A switch from the auto-index status dialog must show up here too.
+		this.observePresetChanged(_window, 'preferences', () => {
+			setPresetStatus('');
+			applyPresetSwitch();
+		});
+		presetSelect.addEventListener('change', async (e) => {
+			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
+			if (presetKeys) presetKeys.innerHTML = '';
+			if (presetMode === 'loopback') {
+				if (await setServerDefault(selected)) await applyPresetSwitch();
+				else await refreshPresetState();
+				return;
+			}
+			const my = await fetchJson('/api/config/my-preset');
+			const entry = my && (my.selectable || []).find((p) => p.name === selected);
+			if (entry && entry.credentials === 'missing') {
+				promptForMissingKeys(selected, entry.missing_keys || []);
+				return;
+			}
+			if (await chooseMyPreset(selected, {})) {
+				this.notifyPresetChanged('preferences');
+				await applyPresetSwitch();
+			} else {
+				await refreshPresetState(); // revert the select to the preset still in effect
+			}
+		});
+	}
+	if (defaultSelect) {
+		defaultSelect.addEventListener('change', async (e) => {
+			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
+			if (await setServerDefault(selected)) await applyPresetSwitch();
+			else await refreshPresetState();
+		});
+	}
+	refreshPresetState();
+	pollJob();
+	// A saved shared value (e.g. a new provider API key) can change endpoint health and
+	// which presets have credentials: re-check right away.
+	if (sectionsContainer) {
+		sectionsContainer.addEventListener('zotero-rag-shared-field-saved', () => {
+			refreshPresetState();
+			pollJob();
+		});
+	}
 
 	// Library visibility section
 	const populateLibraryVisibilityList = () => {
@@ -440,7 +705,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus('', 'ok');
 			} else {
 				const own = data.keys[0];
-				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 				if (embeddingKeyInfo) {
 					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
 				}
@@ -466,7 +731,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		autoindexToggle.addEventListener('change', async () => {
 			const enabling = autoindexToggle.checked;
 			const requestURL = `${this.backendURL}/api/autoindex/keys`;
-			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.required_for.includes('indexing'));
+			const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
 			setAutoindexStatus(enabling ? 'Enabling auto-indexing...' : 'Disabling auto-indexing...');
 			try {
 				/** @type {{api_key: string, embedding_api_key?: string}} */
@@ -525,6 +790,59 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	if (autoindexMonitorButton) {
 		autoindexMonitorButton.addEventListener('click', () => {
 			this.openAutoindexStatusDialog(_window);
+		});
+	}
+
+	// Indexed-status tags: opt-in real-time tagging (polled by IndexedTags) plus a
+	// manual full reconciliation that reuses the key stored for automatic indexing.
+	const indexedTagsToggle = /** @type {HTMLInputElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-toggle'));
+	const indexedTagsRefresh = /** @type {HTMLButtonElement|null} */ (doc.getElementById('zotero-rag-indexed-tags-refresh'));
+	const indexedTagsStatus = doc.getElementById('zotero-rag-indexed-tags-status');
+
+	/**
+	 * @param {string} message
+	 * @param {'ok'|'warn'|'error'} [level='ok']
+	 * @returns {void}
+	 */
+	const setIndexedTagsStatus = (message, level = 'ok') => {
+		if (!indexedTagsStatus) return;
+		indexedTagsStatus.textContent = message;
+		indexedTagsStatus.className = `setting-description status-${level}`;
+	};
+
+	if (indexedTagsToggle && indexedTagsRefresh) {
+		indexedTagsToggle.checked = IndexedTags.isEnabled();
+		indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+		indexedTagsToggle.addEventListener('change', () => {
+			Zotero.Prefs.set(IndexedTags.PREF_ENABLED, indexedTagsToggle.checked, true);
+			indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			// Re-follow from "now" when re-enabled rather than replaying stale events.
+			if (indexedTagsToggle.checked) IndexedTags.cursor = null;
+		});
+
+		indexedTagsRefresh.addEventListener('click', async () => {
+			indexedTagsRefresh.disabled = true;
+			setIndexedTagsStatus('Starting...');
+			try {
+				const stats = await IndexedTags.refresh({
+					onProgress: (s) => {
+						const lib = s.currentLibrary ? ` (${s.currentLibrary})` : '';
+						setIndexedTagsStatus(
+							`Library ${Math.min(s.librariesDone + 1, s.librariesTotal || 1)} of ${s.librariesTotal || '?'}${lib}: ` +
+							`${s.attachmentsChecked} attachments checked, ${s.added} tagged, ${s.removed} untagged...`
+						);
+					},
+				});
+				const failed = stats.errors.length ? ` ${stats.errors.length} librar${stats.errors.length === 1 ? 'y' : 'ies'} failed: ${stats.errors.join('; ')}` : '';
+				setIndexedTagsStatus(
+					`Done: ${stats.attachmentsChecked} attachments checked, ${stats.added} tagged, ${stats.removed} untagged, ${stats.skipped} skipped.${failed}`,
+					stats.errors.length ? 'warn' : 'ok'
+				);
+			} catch (e) {
+				setIndexedTagsStatus(`Error: ${e instanceof Error ? e.message : e}`, 'error');
+			} finally {
+				indexedTagsRefresh.disabled = !indexedTagsToggle.checked;
+			}
 		});
 	}
 

@@ -150,6 +150,9 @@ function errorDiag(err, includeDiagnostics) {
 	return { backendDiag: (err && err.diagnostics) ?? null, pluginDiag: (err && err.pluginDiag) ?? null };
 }
 
+/** Observer topic for cross-window preset-switch notifications. */
+const PRESET_CHANGED_TOPIC = 'zotero-rag:preset-changed';
+
 class ZoteroRAGPlugin {
 	constructor() {
 		/** @type {string|null} */
@@ -336,6 +339,7 @@ class ZoteroRAGPlugin {
 			return { succeededKeys, failed };
 		});
 		TaskQueue.start();
+		IndexedTags.init(this);
 	}
 
 	/**
@@ -572,6 +576,7 @@ class ZoteroRAGPlugin {
 			this._notifierID = null;
 		}
 		TaskQueue.stop();
+		IndexedTags.shutdown();
 	}
 
 	/**
@@ -661,6 +666,37 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Tell every open plugin window (Preferences pane, auto-index status
+	 * dialog) that the backend's active preset changed, so each can refresh
+	 * its own view. `source` identifies the sender, which ignores its own
+	 * notification (see observePresetChanged).
+	 * @param {string} source
+	 * @returns {void}
+	 */
+	notifyPresetChanged(source) {
+		Services.obs.notifyObservers(null, PRESET_CHANGED_TOPIC, source);
+	}
+
+	/**
+	 * Call `callback` whenever another window reports a preset switch via
+	 * notifyPresetChanged. The observer is removed when `win` unloads.
+	 * @param {Window} win - Window whose lifetime bounds the subscription
+	 * @param {string} source - This window's sender id; its own notifications are ignored
+	 * @param {() => void} callback
+	 * @returns {void}
+	 */
+	observePresetChanged(win, source, callback) {
+		const observer = {
+			/** @param {unknown} _subject @param {string} _topic @param {string} data */
+			observe: (_subject, _topic, data) => {
+				if (data !== source) callback();
+			},
+		};
+		Services.obs.addObserver(observer, PRESET_CHANGED_TOPIC);
+		win.addEventListener('unload', () => Services.obs.removeObserver(observer, PRESET_CHANGED_TOPIC), { once: true });
+	}
+
+	/**
 	 * Fetch the list of API keys required by the backend preset and cache them.
 	 * Silently no-ops if the server is unreachable.
 	 * @returns {Promise<void>}
@@ -680,9 +716,48 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Render service API key input fields into `container`, one row + description
-	 * per required key, each bound to `extensions.zotero-rag.serviceApiKey.<key_name>`.
+	 * Persist one shared, admin-controlled remote-config value (a preset's
+	 * `shared_base_url_env`/`shared_api_key_env` field, e.g. for a short-lived shared
+	 * preset's rotating job endpoint/key) to the backend. Unlike a personal
+	 * API key, this is never stored in a local pref or sent as a per-request
+	 * header — it's global state shared by every caller and the cron
+	 * auto-indexer. Admin-gated server-side (require_authorized_group_admin).
+	 * @param {string} keyName
+	 * @param {string} value
+	 * @returns {Promise<{ok: boolean, is_set?: boolean, error?: string}>}
+	 */
+	async setSharedRemoteField(keyName, value) {
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/remote-fields`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ values: { [keyName]: value } }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				return { ok: false, error: err.detail || `HTTP ${response.status}` };
+			}
+			/** @type {{is_set: Record<string, boolean>}} */
+			const data = await response.json();
+			return { ok: true, is_set: data.is_set ? data.is_set[keyName] : undefined };
+		} catch (e) {
+			return { ok: false, error: e instanceof Error ? e.message : String(e) };
+		}
+	}
+
+	/**
+	 * Render service field input rows into `container`, one row + description
+	 * per required field, as reported by the backend's `/api/required-keys`.
 	 * Shared between the Preferences pane and the setup wizard so both stay in sync.
+	 *
+	 * `kind: "api_key"` fields are personal: each binds to
+	 * `extensions.zotero-rag.serviceApiKey.<key_name>` and is sent as a
+	 * per-request header (unchanged behavior). `kind: "shared_base_url"`/
+	 * `"shared_api_key"` fields are global, admin-set values (e.g. a short-lived
+	 * preset's rotating job endpoint/key) — they are never stored in a local
+	 * pref; on change they POST to `/api/config/remote-fields` via
+	 * `setSharedRemoteField` instead, and the input is cleared back to a
+	 * placeholder afterward rather than echoing the value back.
 	 *
 	 * Note: generated "Get key" links use `target="_blank"`, which is a no-op in a
 	 * privileged Zotero document. The caller must provide its own delegated
@@ -692,8 +767,8 @@ class ZoteroRAGPlugin {
 	 * @param {Document} doc - Document to create elements in (the Preferences pane document, or a dialog document)
 	 * @param {HTMLElement} container - Element to render rows into (existing dynamic rows are cleared first)
 	 * @param {HTMLElement|null} placeholder - Shown/hidden depending on whether requiredKeys is empty
-	 * @param {Array<{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}>} requiredKeys
-	 * @param {(keyInfo: {key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}, value: string) => void} [onKeyChange] - Optional callback invoked after a key's pref is set, e.g. to re-sync a server-stored copy
+	 * @param {Array<{key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}>} requiredKeys
+	 * @param {(keyInfo: {key_name: string, header_name: string, kind?: string, description: string, docs_url?: string|null, required_for: string[], is_set?: boolean|null, pattern?: string|null}, value: string) => void} [onKeyChange] - Optional callback invoked after a *personal* ("api_key") field's pref is set, e.g. to re-sync a server-stored copy. Never called for shared_* fields; a saved shared field instead dispatches a bubbling `zotero-rag-shared-field-saved` event (detail: `{keyName}`) on `container`.
 	 * @returns {void}
 	 */
 	renderServiceApiKeyFields(doc, container, placeholder, requiredKeys, onKeyChange) {
@@ -708,8 +783,9 @@ class ZoteroRAGPlugin {
 		if (placeholder) placeholder.style.display = 'none';
 
 		for (const keyInfo of requiredKeys) {
+			const isShared = keyInfo.kind === 'shared_base_url' || keyInfo.kind === 'shared_api_key';
 			const prefKey = `extensions.zotero-rag.serviceApiKey.${keyInfo.key_name}`;
-			const storedValue = Zotero.Prefs.get(prefKey, true) || '';
+			const storedValue = isShared ? '' : (Zotero.Prefs.get(prefKey, true) || '');
 
 			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 			row.className = 'setting-row service-key-row';
@@ -719,37 +795,65 @@ class ZoteroRAGPlugin {
 			label.setAttribute('for', `zotero-rag-key-${keyInfo.key_name}`);
 
 			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
-			input.type = 'password';
+			input.type = keyInfo.kind === 'shared_base_url' ? 'text' : 'password';
 			input.id = `zotero-rag-key-${keyInfo.key_name}`;
 			input.className = 'setting-input';
 			input.value = storedValue;
-			input.placeholder = 'Enter API key';
-			input.addEventListener('change', (e) => {
+			input.placeholder = isShared
+				? (keyInfo.is_set ? 'Configured — enter a new value to replace it' : 'Not yet configured')
+				: 'Enter API key';
+			// Preset-declared format check (e.g. a provider's base URL/key shape) — gives
+			// immediate feedback via the browser's native validation UI. The backend
+			// enforces the same pattern server-side regardless (POST /api/config/remote-fields),
+			// so this is a convenience, not the actual security/correctness boundary.
+			if (keyInfo.pattern) {
+				input.pattern = keyInfo.pattern;
+				input.title = `Must match: ${keyInfo.pattern}`;
+			}
+
+			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			status.className = 'service-key-status';
+			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
+
+			input.addEventListener('change', async (e) => {
 				const value = /** @type {HTMLInputElement} */ (e.target).value;
-				Zotero.Prefs.set(prefKey, value, true);
-				if (typeof onKeyChange === 'function') {
-					onKeyChange(keyInfo, value);
+				if (isShared) {
+					if (!value) return;
+					status.textContent = 'Saving…';
+					status.className = 'service-key-status';
+					const result = await this.setSharedRemoteField(keyInfo.key_name, value);
+					status.textContent = result.ok ? 'Saved.' : `Error: ${result.error}`;
+					status.className = `service-key-status ${result.ok ? 'status-ok' : 'status-error'}`;
+					if (result.ok) {
+						/** @type {HTMLInputElement} */ (e.target).value = '';
+						/** @type {HTMLInputElement} */ (e.target).placeholder = 'Configured — enter a new value to replace it';
+						// Let the host pane react (e.g. re-check endpoint health with the new value).
+						const view = doc.defaultView;
+						if (view) {
+							container.dispatchEvent(new view.CustomEvent('zotero-rag-shared-field-saved', {
+								bubbles: true,
+								detail: { keyName: keyInfo.key_name },
+							}));
+						}
+					}
+				} else {
+					Zotero.Prefs.set(prefKey, value, true);
+					if (typeof onKeyChange === 'function') {
+						onKeyChange(keyInfo, value);
+					}
 				}
 			});
 
 			row.appendChild(label);
 			row.appendChild(input);
-
-			// Populated by callers (e.g. preferences.js) when the server reports this
-			// key's validation status (ok/invalid/unverified), so a rejected key is
-			// flagged right here, right next to the field — not only in a separate
-			// summary section elsewhere.
-			const status = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
-			status.className = 'service-key-status';
-			status.id = `zotero-rag-key-status-${keyInfo.key_name}`;
 			row.appendChild(status);
-
 			container.appendChild(row);
 
 			if (keyInfo.description) {
 				const desc = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
 				desc.className = 'setting-description service-key-desc';
-				desc.textContent = `${keyInfo.description} (used for: ${keyInfo.required_for.join(', ')})`;
+				const sharedNote = isShared ? ' (shared — admin only, affects every user and the cron indexer)' : '';
+				desc.textContent = `${keyInfo.description}${sharedNote} (used for: ${keyInfo.required_for.join(', ')})`;
 				if (keyInfo.docs_url && /^https?:\/\//i.test(keyInfo.docs_url)) {
 					desc.appendChild(doc.createTextNode(' '));
 					const link = doc.createElementNS('http://www.w3.org/1999/xhtml', 'a');
@@ -2356,6 +2460,14 @@ class ZoteroRAGPlugin {
 	 *   smaller by the user. See _getTooLargeAttachments.
 	 * @property {string} [tooLargeDetail] - Human-readable reason (e.g. "329 MB, which exceeds
 	 *   the 200 MB limit...") for display/tooltip when tooLarge is set.
+	 * @property {boolean} [quarantined] - True when the backend has permanently refused to
+	 *   (re)process this attachment and tagged it rag-failed — too_costly (an OCR-requiring scan
+	 *   whose page count is out of proportion), too_large, or quarantined (repeated failures in
+	 *   the deferred-upload queue). Like tooLarge, nothing in this dialog can fix it automatically;
+	 *   unlike tooLarge, removing the rag-failed tag in Zotero (once the underlying cause is
+	 *   addressed) is what makes the backend retry it. See _getQuarantinedAttachments.
+	 * @property {string} [quarantineReason] - The backend's reason code: "too_costly" | "too_large" | "quarantined".
+	 * @property {string} [quarantineDetail] - Human-readable detail for quarantineReason.
 	 */
 
 	/**
@@ -2936,6 +3048,75 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * Load the backend's live rag-failed records for a library (GET
+	 * /api/indexed-tags/failed) and resolve them to UnavailableAttachmentInfo
+	 * objects. Unlike the other _get*Attachments fetchers, there is no local
+	 * cache file: the backend is the sole source of truth for which
+	 * attachments it currently refuses to process, so this always asks live
+	 * rather than risking a stale local copy of a state the user may have
+	 * just cleared by removing the rag-failed tag.
+	 *
+	 * Never throws (same contract as getQueuedStatusMap): a network/HTTP/parse
+	 * failure yields an empty array rather than propagating, since this is an
+	 * opt-in display enhancement, not a required step. Silently drops records
+	 * whose Zotero item no longer exists locally.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {boolean} [indexSnapshotsEnabled] - Whether Snapshot-titled attachments
+	 *   should be included (default false, matching getIndexSnapshotsEnabled()'s safe default).
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _getQuarantinedAttachments(libraryID, indexSnapshotsEnabled = false) {
+		/** @type {Array<{attachment_key: string, item_key: string, reason: string, detail: string}>} */
+		let records = [];
+		try {
+			const backendLibraryId = this.getBackendLibraryId(libraryID);
+			const response = await fetch(
+				`${this.backendURL}/api/indexed-tags/failed?library_id=${encodeURIComponent(backendLibraryId)}`,
+				{ headers: this.getAuthHeaders() },
+			);
+			if (!response.ok) return [];
+			const data = /** @type {{items?: Array<any>}} */ (await response.json());
+			records = data.items || [];
+		} catch (e) {
+			this.log(`[ZoteroRAG] _getQuarantinedAttachments failed: ${e instanceof Error ? e.message : String(e)}`);
+			return [];
+		}
+		/** @type {Array<UnavailableAttachmentInfo>} */
+		const result = [];
+		for (const record of records) {
+			// @ts-ignore
+			const attachment = await Zotero.Items.getByLibraryAndKeyAsync(libraryID, record.attachment_key);
+			if (!attachment || attachment.deleted) continue;
+			if (!indexSnapshotsEnabled && (attachment.getField ? attachment.getField('title') : '') === 'Snapshot') continue;
+			const parentItem = attachment.parentItemID
+				// @ts-ignore
+				? await Zotero.Items.getAsync(attachment.parentItemID)
+				: null;
+			const sourceItem = parentItem ?? attachment;
+			const creators = sourceItem.getCreators ? sourceItem.getCreators() : [];
+			const authors = creators
+				.map((/** @type {any} */ c) => c.lastName || c.name || '')
+				.filter((/** @type {string} */ s) => s.length > 0)
+				.join(', ');
+			const dateField = (sourceItem.getField ? sourceItem.getField('date') : '') || '';
+			const yearMatch = dateField.match(/\b(\d{4})\b/);
+			result.push({
+				parentItem: parentItem ?? attachment,
+				attachmentItem: attachment,
+				authors,
+				year: yearMatch ? yearMatch[1] : '',
+				title: sourceItem.getField ? (sourceItem.getField('title') || '') : '',
+				zoteroID: (parentItem ?? attachment).key,
+				isLinked: false,
+				quarantined: true,
+				quarantineReason: record.reason || '',
+				quarantineDetail: record.detail || '',
+			});
+		}
+		return result;
+	}
+
+	/**
 	 * Explain, in concrete terms, why the server's own download attempt for an
 	 * attachment failed — using only cheap, synchronous local Zotero state
 	 * (no network calls), so it's safe to compute for every row while
@@ -3068,14 +3249,18 @@ class ZoteroRAGPlugin {
 	/**
 	 * Return full detail records for all unavailable attachments in a library.
 	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {{includeDownloadFailed?: boolean}} [opts] - includeDownloadFailed: also include
-	 *   attachments the server merely couldn't download during indexing (see
-	 *   _getDownloadFailedAttachments) — off by default since these aren't actually broken (just
-	 *   not yet downloaded/uploaded), only sometimes worth fixing client-side. Driven by the Fix
-	 *   Unavailable dialog's "Include missing attachments" checkbox.
+	 * @param {{includeDownloadFailed?: boolean, includePermanentFailures?: boolean}} [opts] -
+	 *   includeDownloadFailed: also include attachments the server merely couldn't download
+	 *   during indexing (see _getDownloadFailedAttachments) — off by default since these aren't
+	 *   actually broken (just not yet downloaded/uploaded), only sometimes worth fixing
+	 *   client-side. Driven by the Fix Unavailable dialog's "Include missing attachments"
+	 *   checkbox. includePermanentFailures: also include attachments the backend has
+	 *   permanently refused and tagged rag-failed (see _getQuarantinedAttachments) — off by
+	 *   default since there is nothing to fix here either, only something to understand and
+	 *   possibly clear. Driven by the dialog's "Include permanent failures" checkbox.
 	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
 	 */
-	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false } = {}) {
+	async _getUnavailableAttachments(libraryID, { includeDownloadFailed = false, includePermanentFailures = false } = {}) {
 		const indexSnapshotsEnabled = await this.getIndexSnapshotsEnabled();
 		const sql = `
 			SELECT ia.itemID FROM itemAttachments ia
@@ -3164,7 +3349,72 @@ class ZoteroRAGPlugin {
 				}
 			}
 		}
+		// Every tier above is derived from local state on *this* computer (file
+		// presence, or failure lists cached from earlier runs), none of which knows
+		// whether the attachment has since been indexed from somewhere else — e.g.
+		// via Search & Fix on another PC, which uploads the file directly. Ask the
+		// backend and drop whatever already has chunks; quarantined rows (appended
+		// below) are already the backend's own live verdict.
+		const stillUnindexed = await this._dropBackendIndexed(libraryID, result);
+		result.splice(0, result.length, ...stillUnindexed);
+		missingKeys.clear();
+		for (const r of result) missingKeys.add(r.attachmentItem.key);
+		// Append backend-quarantined ("rag-failed") attachments, deduplicating by
+		// key. Opt-in only (see includePermanentFailures doc above).
+		if (includePermanentFailures) {
+			const quarantinedItems = await this._getQuarantinedAttachments(libraryID, indexSnapshotsEnabled);
+			for (const item of quarantinedItems) {
+				if (!missingKeys.has(item.attachmentItem.key)) {
+					missingKeys.add(item.attachmentItem.key);
+					result.push(item);
+				}
+			}
+		}
 		return result;
+	}
+
+	/**
+	 * Drop rows whose attachment the backend already has chunks for
+	 * (POST /api/indexed-tags/check), and prune those keys from the local
+	 * download-failed / skipped-server stores so they don't come back on the
+	 * next refresh. Those stores and the local fileExists() scan are per-computer,
+	 * so on a second PC they list attachments that were long since indexed from
+	 * the first one (or that the server's metadata still reports as a stale
+	 * download failure).
+	 *
+	 * Never throws: on a network/HTTP/parse failure the rows are returned
+	 * unchanged, since showing a stale row beats hiding a genuinely broken one.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {Array<UnavailableAttachmentInfo>} rows
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _dropBackendIndexed(libraryID, rows) {
+		if (rows.length === 0) return rows;
+		const keys = [...new Set(rows.map(r => r.attachmentItem.key))];
+		/** @type {Set<string>} */
+		const indexed = new Set();
+		let backendLibraryId = '';
+		try {
+			backendLibraryId = this.getBackendLibraryId(libraryID);
+			for (let i = 0; i < keys.length; i += 500) {
+				const response = await fetch(`${this.backendURL}/api/indexed-tags/check`, {
+					method: 'POST',
+					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+					body: JSON.stringify({ library_id: backendLibraryId, attachment_keys: keys.slice(i, i + 500) }),
+				});
+				if (!response.ok) return rows;
+				const data = /** @type {{indexed?: string[]}} */ (await response.json());
+				for (const k of data.indexed || []) indexed.add(k);
+			}
+		} catch (e) {
+			this.log(`[ZoteroRAG] _dropBackendIndexed failed: ${e instanceof Error ? e.message : String(e)}`);
+			return rows;
+		}
+		if (indexed.size === 0) return rows;
+		const indexedKeys = [...indexed];
+		await this.removeDownloadFailedItems(backendLibraryId, indexedKeys);
+		await this.removeSkippedServerItems(backendLibraryId, indexedKeys);
+		return rows.filter(r => !indexed.has(r.attachmentItem.key));
 	}
 
 	/**

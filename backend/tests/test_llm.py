@@ -3,23 +3,40 @@ Unit tests for LLM service.
 """
 
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import os
 
+import httpx
+from openai import APIConnectionError as OpenAIAPIConnectionError
+from openai import RateLimitError as OpenAIRateLimitError
+
 from backend.services.llm import (
+    LLMConfigurationError,
+    LLMEndpointUnavailableError,
+    LLMRateLimitExhaustedError,
     LLMService,
     LocalLLMService,
     RemoteLLMService,
     create_llm_service,
 )
 from backend.config.settings import Settings
-from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, RAGConfig
+from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, ProviderConfig, RAGConfig
+from backend.services.usage_meters import recorder
 
 try:
     import transformers  # noqa: F401
     HAS_TRANSFORMERS = True
 except ImportError:
     HAS_TRANSFORMERS = False
+
+
+def _raw(parsed):
+    """A with_raw_response result: parsed body plus (empty) headers."""
+    raw = Mock()
+    raw.parse.return_value = parsed
+    raw.headers = {}
+    return raw
 
 
 class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
@@ -186,6 +203,8 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="gpt-4o-mini",
                 temperature=0.7,
+                provider=ProviderConfig(id="openai"),
+                model_kwargs={"api_key_env": "OPENAI_API_KEY"},
             ),
             rag=RAGConfig(),
             memory_budget_gb=1.0,
@@ -202,6 +221,8 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="claude-3-5-sonnet-20241022",
                 temperature=0.7,
+                provider=ProviderConfig(id="anthropic"),
+                model_kwargs={"api_key_env": "ANTHROPIC_API_KEY"},
             ),
             rag=RAGConfig(),
             memory_budget_gb=1.0,
@@ -224,6 +245,140 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(service._anthropic_client)
         self.assertEqual(service.api_key, "test-key")
 
+    async def test_required_client_fields_reports_shared_kinds_for_mpcdf_style_preset(self):
+        mpcdf_preset = HardwarePreset(
+            name="test-mpcdf",
+            description="Test MPCDF preset",
+            embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+            llm=LLMConfig(
+                model_type="remote",
+                model_names="openai/gpt-oss-120b",
+                model_kwargs={
+                    "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                    "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                },
+            ),
+            rag=RAGConfig(),
+            memory_budget_gb=0.5,
+        )
+        mock_settings = Mock(spec=Settings)
+        mock_settings.get_hardware_preset.return_value = mpcdf_preset
+
+        fields = RemoteLLMService.required_client_fields(mock_settings)
+        by_key = {f["key_name"]: f for f in fields}
+        self.assertEqual(len(fields), 2)
+        self.assertEqual(by_key["MPCDF_LLM_BASE_URL"]["kind"], "shared_base_url")
+        self.assertEqual(by_key["MPCDF_LLM_API_KEY"]["kind"], "shared_api_key")
+
+    async def test_get_openai_client_resolves_shared_fields_from_store_over_env(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config({
+                "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123/v1",
+                "MPCDF_LLM_API_KEY": "store-key",
+            }, data_path=data_path)
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = data_path
+
+            with patch.dict(os.environ, {"MPCDF_LLM_BASE_URL": "https://should-not-be-used/v1"}):
+                service = RemoteLLMService(mock_settings)
+                with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                    service._get_openai_client()
+                    _, kwargs = mock_openai_cls.call_args
+
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+        self.assertEqual(kwargs["api_key"], "store-key")
+
+    async def test_get_openai_client_appends_v1_to_shared_base_url_missing_it(self):
+        import tempfile
+        from pathlib import Path
+        from backend.services.admin_settings_store import update_remote_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_path = Path(tmp)
+            update_remote_config({
+                "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/abc123",
+                "MPCDF_LLM_API_KEY": "store-key",
+            }, data_path=data_path)
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = data_path
+
+            service = RemoteLLMService(mock_settings)
+            with patch("openai.AsyncOpenAI") as mock_openai_cls:
+                service._get_openai_client()
+                _, kwargs = mock_openai_cls.call_args
+
+        self.assertEqual(kwargs["base_url"], "https://llm.mpcdf.mpg.de/abc123/v1")
+
+    async def test_get_openai_client_raises_clear_error_when_shared_api_key_unset(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mpcdf_preset = HardwarePreset(
+                name="test-mpcdf",
+                description="Test MPCDF preset",
+                embedding=EmbeddingConfig(model_type="remote", model_name="multilingual-e5-large-instruct"),
+                llm=LLMConfig(
+                    model_type="remote",
+                    model_names="openai/gpt-oss-120b",
+                    model_kwargs={
+                        "shared_base_url_env": "MPCDF_LLM_BASE_URL",
+                        "shared_api_key_env": "MPCDF_LLM_API_KEY",
+                    },
+                ),
+                rag=RAGConfig(),
+                memory_budget_gb=0.5,
+            )
+            mock_settings = Mock(spec=Settings)
+            mock_settings.get_hardware_preset.return_value = mpcdf_preset
+            mock_settings.log_file = None
+            mock_settings.data_path = Path(tmp)
+
+            service = RemoteLLMService(mock_settings)
+            with self.assertRaises(LLMConfigurationError) as ctx:
+                service._get_openai_client()
+        self.assertIn("MPCDF_LLM_API_KEY", str(ctx.exception))
+
     async def test_generate_openai(self):
         """Test generation with OpenAI API."""
         service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
@@ -233,13 +388,13 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer from OpenAI"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertEqual(result, "Generated answer from OpenAI")
-        mock_client.chat.completions.create.assert_called_once()
+        mock_client.chat.completions.with_raw_response.create.assert_called_once()
 
     async def test_generate_anthropic(self):
         """Test generation with Anthropic API."""
@@ -250,75 +405,142 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.content = [Mock()]
         mock_response.content[0].text = "Generated answer from Claude"
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("anthropic.AsyncAnthropic", return_value=mock_client):
             result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertEqual(result, "Generated answer from Claude")
-        mock_client.messages.create.assert_called_once()
+        mock_client.messages.with_raw_response.create.assert_called_once()
 
-    async def test_generate_unsupported_model(self):
-        """Test error handling for unsupported model."""
-        unsupported_preset = HardwarePreset(
-            name="test-unsupported",
-            description="Test unsupported preset",
-            embedding=EmbeddingConfig(
-                model_type="remote",
-                model_name="openai",
-            ),
-            llm=LLMConfig(
-                model_type="remote",
-                model_names="unknown-model-xyz",
-                temperature=0.7,
-            ),
-            rag=RAGConfig(),
-            memory_budget_gb=1.0,
+    async def test_generate_openai_raises_endpoint_unavailable_on_connection_error(self):
+        """A transport-level failure (e.g. a cold/unreachable RunPod serverless
+        LLM endpoint) raises openai.APIConnectionError — must become a clear,
+        typed LLMEndpointUnavailableError, not the generic
+        "Remote LLM generation failed: Connection error." RuntimeError that
+        gives the caller (backend.api.query) no way to distinguish this from
+        an actual code bug."""
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create.side_effect = OpenAIAPIConnectionError(
+            request=httpx.Request("POST", "https://example.com/v1/chat/completions")
         )
 
-        mock_settings = Mock(spec=Settings)
-        mock_settings.get_hardware_preset.return_value = unsupported_preset
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMEndpointUnavailableError) as ctx:
+                await service.generate("Test prompt")
 
-        service = RemoteLLMService(mock_settings, api_key="test-key")
+        self.assertIn("Connection error", str(ctx.exception))
 
-        with self.assertRaises(RuntimeError) as context:
-            await service.generate("Test prompt")
+    async def test_generate_openai_strips_html_from_a_gateway_error_page(self):
+        """Observed live: RunPod's edge gateway (openresty) returned a 405
+        with an HTML body, not JSON — the openai SDK uses that raw HTML text
+        verbatim as both exc.body and str(exc) (see
+        backend.services.embeddings._extract_error_detail's docstring for
+        why). The raw markup must not reach the end user as the error
+        message raised from generate()."""
+        import httpx
+        from openai import APIStatusError
 
-        self.assertIn("Unsupported remote model", str(context.exception))
+        service = RemoteLLMService(self.mock_openai_settings, api_key="test-key")
+        html = (
+            "<html>\n<head><title>405 Not Allowed</title></head>\n<body>\n"
+            "<center><h1>405 Not Allowed</h1></center>\n<hr><center>openresty</center>\n"
+            "</body>\n</html>"
+        )
+        response = httpx.Response(
+            status_code=405, request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+        )
+        exc = APIStatusError(html, response=response, body=html)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create.side_effect = exc
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(RuntimeError) as ctx:
+                await service.generate("Test prompt")
+
+        self.assertIn("405 Not Allowed", str(ctx.exception))
+        self.assertNotIn("<html>", str(ctx.exception))
+
+    async def test_protocol_comes_from_the_provider_not_the_model_name(self):
+        """A Claude-named model on an OpenAI-compatible provider uses the OpenAI
+        protocol; an unfamiliar model name on the anthropic provider uses Anthropic's."""
+        def settings_for(provider_id, model_name):
+            preset = HardwarePreset(
+                name="t", description="t",
+                embedding=EmbeddingConfig(model_type="remote", model_name="openai"),
+                llm=LLMConfig(model_type="remote", model_names=model_name, temperature=0.7,
+                              provider=ProviderConfig(id=provider_id),
+                              model_kwargs={"api_key_env": "SOME_KEY"}),
+                rag=RAGConfig(), memory_budget_gb=1.0,
+            )
+            settings = Mock(spec=Settings)
+            settings.get_hardware_preset.return_value = preset
+            return settings
+
+        openai_service = RemoteLLMService(settings_for("openai", "claude-3-opus"), api_key="k")
+        self.assertEqual(openai_service._llm_api(), "openai")
+        anthropic_service = RemoteLLMService(settings_for("anthropic", "totally-unknown-model"), api_key="k")
+        self.assertEqual(anthropic_service._llm_api(), "anthropic")
+
+        mock_openai = AsyncMock()
+        response = Mock(); response.choices = [Mock()]
+        response.choices[0].message.content = "via openai protocol"
+        mock_openai.chat.completions.with_raw_response.create.return_value = _raw(response)
+        with patch("openai.AsyncOpenAI", return_value=mock_openai):
+            self.assertEqual(await openai_service.generate("hi"), "via openai protocol")
+        mock_openai.chat.completions.with_raw_response.create.assert_called_once()
+
+        mock_anthropic = AsyncMock()
+        reply = Mock(); reply.content = [Mock()]; reply.content[0].text = "via anthropic protocol"
+        mock_anthropic.messages.with_raw_response.create.return_value = _raw(reply)
+        with patch("anthropic.AsyncAnthropic", return_value=mock_anthropic):
+            self.assertEqual(await anthropic_service.generate("hi"), "via anthropic protocol")
+
+    async def test_keyless_generic_endpoint_is_called_with_a_placeholder_key(self):
+        """A generic OpenAI-compatible server that declares no key needs none."""
+        preset = HardwarePreset(
+            name="t", description="t",
+            embedding=EmbeddingConfig(model_type="remote", model_name="openai"),
+            llm=LLMConfig(model_type="remote", model_names="local-model", temperature=0.7,
+                          model_kwargs={"base_url": "http://localhost:8000/v1"}),
+            rag=RAGConfig(), memory_budget_gb=1.0,
+        )
+        settings = Mock(spec=Settings)
+        settings.get_hardware_preset.return_value = preset
+        service = RemoteLLMService(settings)
+        mock_client = AsyncMock()
+        response = Mock(); response.choices = [Mock()]; response.choices[0].message.content = "ok"
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(response)
+        with patch("openai.AsyncOpenAI", return_value=mock_client) as ctor:
+            await service.generate("hi")
+        self.assertEqual(ctor.call_args.kwargs["api_key"], "not-needed")
 
     async def test_openai_missing_api_key(self):
-        """Test error handling when OpenAI API key is missing."""
+        """A missing API key is a classified configuration problem
+        (LLMConfigurationError, handled as a 503 by backend.api.query), not
+        a generic RuntimeError indistinguishable from an actual code bug."""
         service = RemoteLLMService(self.mock_openai_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing openai package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("No API key for", str(context.exception))
 
     async def test_anthropic_missing_api_key(self):
-        """Test error handling when Anthropic API key is missing."""
+        """Symmetrical case for Anthropic (see test_openai_missing_api_key)."""
         service = RemoteLLMService(self.mock_anthropic_settings)
 
         # Ensure no API key in environment
         with patch.dict(os.environ, {}, clear=True):
-            # The service will raise an error when trying to create the client
-            with self.assertRaises(RuntimeError) as context:
+            with self.assertRaises(LLMConfigurationError) as context:
                 await service.generate("Test prompt")
 
-            # Should fail because no API key
-            self.assertTrue(
-                "API key not provided" in str(context.exception) or
-                "Missing anthropic package" in str(context.exception) or
-                "generation failed" in str(context.exception).lower()
-            )
+            self.assertIn("Anthropic API key not provided", str(context.exception))
 
     async def test_generate_with_defaults(self):
         """Test generation uses config defaults when parameters not specified."""
@@ -328,13 +550,13 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             result = await service.generate("Test prompt")  # No max_tokens, temperature
 
         # Should use defaults from config
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertEqual(call_args.kwargs["temperature"], 0.7)  # From preset
         self.assertEqual(call_args.kwargs["max_tokens"], 512)  # Default
 
@@ -364,12 +586,12 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertEqual(
             call_args.kwargs["extra_body"],
             {"chat_template_kwargs": {"enable_thinking": False}},
@@ -383,12 +605,12 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = "Generated answer"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
-        call_args = mock_client.chat.completions.create.call_args
+        call_args = mock_client.chat.completions.with_raw_response.create.call_args
         self.assertIsNone(call_args.kwargs["extra_body"])
 
     async def test_generate_openai_raises_clear_error_on_none_content(self):
@@ -401,7 +623,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = None
         mock_response.choices[0].finish_reason = "length"
-        mock_client.chat.completions.create.return_value = mock_response
+        mock_client.chat.completions.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("openai.AsyncOpenAI", return_value=mock_client):
             with self.assertRaises(RuntimeError) as context:
@@ -419,13 +641,122 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
         mock_response.content = [Mock()]
         mock_response.content[0].text = None
         mock_response.stop_reason = "max_tokens"
-        mock_client.messages.create.return_value = mock_response
+        mock_client.messages.with_raw_response.create.return_value = _raw(mock_response)
 
         with patch("anthropic.AsyncAnthropic", return_value=mock_client):
             with self.assertRaises(RuntimeError) as context:
                 await service.generate("Test prompt", max_tokens=100, temperature=0.5)
 
         self.assertIn("max_tokens", str(context.exception))
+
+
+class TestLLMRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
+    """Mirrors TestEmbeddingRateLimitExhaustedError in test_embeddings.py: a 429 from
+    the remote LLM must be backed off / surfaced the same way a 429 from the
+    embedding API already is, instead of becoming a bare RuntimeError (see #follow-up
+    to the eval sweep that discovered generate() had no rate-limit handling at all)."""
+
+    def setUp(self):
+        recorder.reset()  # a previous test's remembered cooldown must not leak in
+
+    def tearDown(self):
+        recorder.reset()
+
+    def _make_service(self) -> RemoteLLMService:
+        preset = HardwarePreset(
+            name="test-openai",
+            description="Test OpenAI preset",
+            embedding=EmbeddingConfig(model_type="remote", model_name="openai"),
+            llm=LLMConfig(
+                model_type="remote",
+                model_names="gpt-4o-mini",
+                temperature=0.7,
+                provider=ProviderConfig(id="openai"),
+                model_kwargs={"api_key_env": "OPENAI_API_KEY"},
+            ),
+            rag=RAGConfig(),
+            memory_budget_gb=1.0,
+        )
+        mock_settings = Mock(spec=Settings)
+        mock_settings.get_hardware_preset.return_value = preset
+        return RemoteLLMService(mock_settings, api_key="test-key")
+
+    async def test_long_retry_after_header_raises_exhausted(self):
+        """retry-after > 60 s must raise LLMRateLimitExhaustedError immediately."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {"retry-after": "3600"}
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(side_effect=exc)
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError) as ctx:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertIsInstance(ctx.exception.available_at, datetime)
+
+    async def test_no_retry_after_header_raises_exhausted(self):
+        """Missing retry-after on a RateLimitError must raise LLMRateLimitExhaustedError."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {}
+        exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(side_effect=exc)
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError):
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+    async def test_short_retry_after_retries_then_succeeds(self):
+        """retry-after <= 60 s should sleep and retry (not raise LLMRateLimitExhaustedError)."""
+        service = self._make_service()
+        mock_response = Mock()
+        mock_response.headers = {"retry-after": "1"}
+        rate_exc = OpenAIRateLimitError("rate limit", response=mock_response, body=None)
+
+        success_response = Mock()
+        success_response.choices = [Mock()]
+        success_response.choices[0].message.content = "Generated answer"
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(
+            side_effect=[rate_exc, _raw(success_response)]
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client), \
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        mock_sleep.assert_awaited_once()
+        sleep_duration = mock_sleep.call_args[0][0]
+        self.assertGreater(sleep_duration, 0.9)
+        self.assertLess(sleep_duration, 3.0)
+        self.assertEqual(result, "Generated answer")
+
+    async def test_a_rate_limit_seen_by_one_call_is_respected_by_the_next(self):
+        """A cooldown recorded by an earlier call (e.g. the router's LLM call) must be
+        honored by a later, independent call on the same key — not rediscovered by
+        hammering the endpoint again."""
+        service = self._make_service()
+        available_at = datetime.now(timezone.utc) + timedelta(seconds=3600)
+        from backend.services.usage_meters import key_fingerprint
+        recorder.mark_rate_limited("llm", available_at, key_fingerprint("test-key"))
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.with_raw_response.create = AsyncMock(
+            side_effect=AssertionError("must not call the endpoint while a long cooldown is active")
+        )
+
+        with patch("openai.AsyncOpenAI", return_value=mock_client):
+            with self.assertRaises(LLMRateLimitExhaustedError) as ctx:
+                await service.generate("Test prompt", max_tokens=100, temperature=0.5)
+
+        self.assertEqual(ctx.exception.available_at, available_at)
+        mock_client.chat.completions.with_raw_response.create.assert_not_called()
 
 
 if __name__ == "__main__":

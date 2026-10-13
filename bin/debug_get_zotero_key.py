@@ -44,13 +44,16 @@ def _main(argv: list[str]) -> int:
         help="Print the stored embedding/LLM provider key (e.g. KISSKI_API_KEY) instead "
              "of the Zotero API key. Prints 'NAME=value' so the key's env var name is visible.",
     )
+    parser.add_argument(
+        "--key-name", metavar="NAME",
+        help="With --embedding-key: which stored provider key to print (e.g. HF_API_TOKEN); "
+             "default is the first one by name. Use --list to see what a user has stored.",
+    )
     args = parser.parse_args(argv)
 
-    from backend.config.settings import get_settings
-    from backend.services.autoindex_key_store import AutoIndexKeyStore
+    from backend.services.secret_store import get_key_store
 
-    settings = get_settings()
-    store = AutoIndexKeyStore(settings.autoindex_keys_path, settings.autoindex_secret)
+    store = get_key_store()
     if not store.enabled:
         print("[FAIL] AUTOINDEX_SECRET is not set; no keys can be decrypted.", file=sys.stderr)
         return 1
@@ -62,14 +65,15 @@ def _main(argv: list[str]) -> int:
 
     if args.list:
         for fp, _key, entry in entries:
-            print(f"{fp}  user_id={entry.get('user_id')}  targets={entry.get('targets')}")
+            names = sorted(entry.get("embedding_keys", {}))
+            print(f"{fp}  user_id={entry.get('user_id')}  targets={entry.get('targets')}  provider_keys={names}")
         return 0
 
     for fp, key, entry in entries:
         if args.user is not None and str(entry.get("user_id")) != str(args.user):
             continue
         if args.embedding_key:
-            result = store.get_decrypted_embedding_key(fp)
+            result = store.get_decrypted_embedding_key(fp, args.key_name)
             if result is None:
                 continue
             key_name, key_value = result
@@ -86,5 +90,10 @@ def _main(argv: list[str]) -> int:
     return 1
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point for the ``rag-key`` console script (see pyproject.toml)."""
     sys.exit(_main(sys.argv[1:]))
+
+
+if __name__ == "__main__":
+    main()

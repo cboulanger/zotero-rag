@@ -33,7 +33,7 @@ class TestCacheUploadEndpoint(unittest.TestCase):
         self.key_store.enabled = True
         self.key_store.list_metadata.return_value = [{"targets": ["users/1"]}]
         self._key_store_patch = patch(
-            "backend.api.document_upload.AutoIndexKeyStore", return_value=self.key_store
+            "backend.api.document_upload.get_key_store", return_value=self.key_store
         )
         self._key_store_patch.start()
 
@@ -188,7 +188,7 @@ class TestProcessNowEndpoint(unittest.TestCase):
         # limit. A merged chunk sized against the 1500-char default can
         # exceed a small-context model's safe budget even though the active
         # preset's rag.max_chunk_size was hand-tuned for exactly that model
-        # (see e.g. the apple-silicon-kisski preset's comment) — this
+        # (see e.g. the remote-kisski preset's comment) — this
         # construction must use the preset's value for both parameters.
         mock_processor = mock_processor_cls.return_value
         proc_result = MagicMock(status="indexed_fresh", chunks_written=1, error_detail=None)
