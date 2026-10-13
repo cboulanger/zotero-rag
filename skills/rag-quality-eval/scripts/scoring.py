@@ -41,6 +41,7 @@ except Exception:  # backend (or its heavy deps) not importable: keep a local co
 CITATION_RE = _SN_CITATION_PATTERN
 
 WEIGHTS = {
+    "routing": 0.10,   # only for questions with ``expected_agents``
     "fact_recall": 0.30,
     "expected_doc_recall": 0.10,
     "source_count": 0.05,
@@ -53,6 +54,7 @@ WEIGHTS = {
 }
 # Weights once a judgment exists: the judge's findings replace the regex proxies.
 WEIGHTS_JUDGED = {
+    "routing": 0.10,
     "fact_recall": 0.30,
     "expected_doc_recall": 0.08,
     "source_count": 0.04,
@@ -256,7 +258,8 @@ def score_sources(response: dict, question: dict, gold: dict) -> dict:
     distinct_returned = len({s.get("item_id") or s.get("title") for s in sources})
     n_docs = max(len(matchers), 1)
     return {
-        "expected_doc_recall": len(returned_hits) / n_docs,
+        # Catalog questions have no gold documents: the criterion does not apply.
+        "expected_doc_recall": (len(returned_hits) / n_docs) if matchers else None,
         "retrieved_doc_recall": (len(retrieved_hits) / n_docs) if retrieved_hits is not None else None,
         "source_count": min(1.0, distinct_returned / max(question.get("min_sources", 1), 1)),
         "cited_diversity": min(1.0, len(cited_in_range) / max(question.get("min_distinct_cited", 1), 1)),
@@ -365,11 +368,65 @@ def score_hygiene(answer: str) -> dict:
     return {"hygiene": max(0.0, 1 - 0.34 * len(flags)), "hygiene_flags": flags}
 
 
+def agents_chosen(response: dict) -> list[str]:
+    """Agents the router selected: those that ran, or the plan of a ``needs_client_evidence`` response."""
+    used = response.get("agents_used") or []
+    if not used:
+        used = (response.get("query_plan") or {}).get("agents_to_use") or []
+    return list(used)
+
+
+def score_routing(response: dict, question: dict) -> dict:
+    """Did the router pick the expected agents (and, for ``mentions``, the expected cited works)?
+
+    1.0 exact agent set, 0.5 all expected agents plus extra ones, 0.0 otherwise. A question with
+    ``expected_citation_targets`` (cited-work surnames) is also checked against the response's
+    ``citation_targets``; the score is the mean of both checks.
+    """
+    expected = question.get("expected_agents")
+    if not expected:
+        return {}
+    used = agents_chosen(response)
+    if set(used) == set(expected):
+        agent_score = 1.0
+    elif set(expected) <= set(used):
+        agent_score = 0.5
+    else:
+        agent_score = 0.0
+    result: dict[str, Any] = {"routing": agent_score, "agents_chosen": used, "agents_expected": list(expected)}
+    wanted = [a.lower() for a in question.get("expected_citation_targets", [])]
+    if wanted:
+        # The router may keep a co-author ("Lorenzetti und Ghali"): a surname inside the author string counts.
+        found = [(t.get("author") or "").lower() for t in response.get("citation_targets") or []]
+        hit = all(any(w in f for f in found) for w in wanted)
+        result["citation_targets_ok"] = hit
+        result["routing"] = (agent_score + (1.0 if hit else 0.0)) / 2
+    return result
+
+
+def score_routing_only(response: dict, question: dict) -> dict:
+    """Questions that can only be judged on routing (``"scoring": "routing"``).
+
+    The ``mentions`` agent needs the Zotero client's local full-text index for its evidence, so the
+    backend alone answers with ``needs_client_evidence`` plus the routing plan; that plan is all
+    there is to score.
+    """
+    result: dict[str, Any] = {"question_id": question["id"], "answer_text": "", "routing_only": True,
+                              "fact_recall": None}
+    result.update(score_routing(response, question))
+    routing = result.get("routing", 0.0)
+    result["composite"] = routing
+    result["verdict"] = "pass" if routing >= 1.0 else "warn" if routing >= 0.5 else "fail"
+    return result
+
+
 # ---------------------------------------------------------------- composite
 def score_run(response: dict, question: dict, gold: dict) -> dict:
     """All criteria + composite + verdict for one API response (``/api/query``) to a gold question."""
     from common import strip_html  # local import keeps this module importable standalone in tests
 
+    if question.get("scoring") == "routing":
+        return score_routing_only(response, question)
     answer = strip_html(response.get("answer") or "")
     response = {**response, "answer_text": answer}
     trace = response.get("trace")
@@ -385,6 +442,7 @@ def score_run(response: dict, question: dict, gold: dict) -> dict:
     result.update(score_length(answer, question["length"]))
     result.update(score_language(answer, question["language"]))
     result.update(score_hygiene(answer))
+    result.update(score_routing(response, question))
 
     return finalize(result, response, WEIGHTS)
 

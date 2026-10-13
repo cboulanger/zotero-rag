@@ -25,8 +25,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import GOLD_PATH, load_gold  # noqa: E402
 
 TIERS = ("easy", "medium", "hard")
+CATEGORY_TYPES = {
+    "difficulty": ("1", "2", "3", "4", "5"),
+    "domain": ("facts", "routing", "mentions", "metadata"),
+    "language": ("en", "de", "fr", "es"),
+    "scope": ("single-doc", "multi-doc", "catalog"),
+}
+AGENTS = ("rag", "metadata", "mentions")
 LEVELS = ("verbatim", "semantic", "inference")
 LANGUAGES = ("en", "de", "fr", "es")
+
+
+def _check_categories(q: dict) -> list[str]:
+    """Categories are 'type:value' strings of known types; difficulty/language must agree with the fields."""
+    problems = []
+    cats = q.get("categories", [])
+    for cat in cats:
+        kind, _, value = cat.partition(":")
+        if kind not in CATEGORY_TYPES:
+            problems.append(f"{q['id']}: unknown category type in {cat!r}")
+        elif value not in CATEGORY_TYPES[kind]:
+            problems.append(f"{q['id']}: bad category value {cat!r}")
+    for kind in ("difficulty", "domain"):
+        if sum(1 for c in cats if c.startswith(kind + ":")) != 1:
+            problems.append(f"{q['id']}: exactly one {kind}: category required")
+    if f"difficulty:{q.get('difficulty')}" not in cats:
+        problems.append(f"{q['id']}: difficulty field and difficulty: category disagree")
+    if f"language:{q.get('language')}" not in cats:
+        problems.append(f"{q['id']}: language field and language: category disagree")
+    return problems
 
 
 def validate(gold: dict) -> list[str]:
@@ -35,24 +62,28 @@ def validate(gold: dict) -> list[str]:
     ids = [q["id"] for q in gold["questions"]]
     if len(ids) != len(set(ids)):
         problems.append("duplicate question ids")
-    last = 0
     for q in gold["questions"]:
         qid = q["id"]
-        for field in ("question", "minimum_answer", "facts", "documents", "length", "language", "tier",
-                      "difficulty", "judge_notes", "min_sources", "min_distinct_cited"):
+        routing_only = q.get("scoring") == "routing"
+        for field in ("question", "minimum_answer", "facts", "documents", "language", "tier",
+                      "difficulty", "judge_notes", "categories") + (() if routing_only else (
+                          "length", "min_sources", "min_distinct_cited")):
             if field not in q:
                 problems.append(f"{qid}: missing '{field}'")
+        problems += _check_categories(q)
+        if routing_only and not q.get("expected_agents"):
+            problems.append(f"{qid}: routing-only questions need expected_agents")
+        for agent in q.get("expected_agents", []):
+            if agent not in AGENTS:
+                problems.append(f"{qid}: unknown agent {agent!r}")
         if q.get("tier") not in TIERS:
             problems.append(f"{qid}: bad tier {q.get('tier')!r}")
         if q.get("language") not in LANGUAGES:
             problems.append(f"{qid}: unsupported language {q.get('language')!r} (scoring.STOPWORDS)")
-        if q.get("difficulty", 0) < last:
-            problems.append(f"{qid}: difficulty not ascending")
-        last = q.get("difficulty", last)
         for doc_id in q.get("documents", []):
             if doc_id not in gold["documents"]:
                 problems.append(f"{qid}: unknown document {doc_id}")
-        if q.get("tier") == "hard" and not q.get("inference"):
+        if q.get("tier") == "hard" and not q.get("inference") and not routing_only and q.get("facts"):
             problems.append(f"{qid}: hard questions need an 'inference' chain for the judge")
         fact_ids = set()
         for fact in q.get("facts", []):
@@ -118,6 +149,8 @@ def stats(gold: dict) -> str:
     lines = [
         f"{len(qs)} questions, {sum(len(q['facts']) for q in qs)} facts, {len(gold['documents'])} documents",
         "by tier:     " + ", ".join(f"{k}={v}" for k, v in Counter(q["tier"] for q in qs).items()),
+        "by domain:   " + ", ".join(f"{k}={v}" for k, v in sorted(Counter(c[7:] for q in qs for c in q.get("categories", []) if c.startswith("domain:")).items())),
+        "by difficulty: " + ", ".join(f"{k}={v}" for k, v in sorted(Counter(q["difficulty"] for q in qs).items())),
         "by language: " + ", ".join(f"{k}={v}" for k, v in Counter(q["language"] for q in qs).items()),
         "fact level:  " + ", ".join(f"{k}={v}" for k, v in levels.items()),
         "judge-only facts: " + str(sum(1 for q in qs for f in q["facts"] if not f.get("answer_patterns"))),

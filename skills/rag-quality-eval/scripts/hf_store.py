@@ -179,26 +179,62 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
     return "\n".join(lines)
 
 
+DOMAIN_TITLES = {
+    "facts": "Facts: answers found in the document text",
+    "routing": "Routing: the router must pick the right agent",
+    "metadata": "Metadata: answered from the library catalog",
+    "mentions": "Mentions: who cites or discusses a work",
+}
+
+
+def _categories(question: dict, kind: str) -> list[str]:
+    return [c.partition(":")[2] for c in question.get("categories", []) if c.startswith(kind + ":")]
+
+
 def render_gold_markdown(gold: dict) -> str:
-    """Human-readable Markdown rendering of the gold-standard questions (the gold version they belong to)."""
+    """Markdown rendering of the gold questions, grouped by ``domain:`` category and sorted by difficulty.
+
+    Other category types (difficulty, language, scope) appear in an index at the top and next to each question.
+    """
     lib = gold.get("library", {})
     docs = gold.get("documents", {})
+    questions = gold.get("questions", [])
     lines = [f"# Gold-standard questions (version {gold.get('version')})", "",
-             f"Library: [{lib.get('name')}]({lib.get('url')}) (`{lib.get('slug')}`). Created {gold.get('created')}.", ""]
-    for q in gold.get("questions", []):
-        lines += [f"## {q['id']} - {q.get('tier')} ({q.get('language')})", "",
-                  f"**Question:** {q['question']}", "", f"**Type:** {q.get('type')}", "",
-                  f"**Minimum answer:** {q.get('minimum_answer')}", ""]
-        cited = [docs.get(d, {}).get("citation", d) for d in q.get("documents", [])]
-        lines += ["**Documents:**", ""] + [f"- {c}" for c in cited] + [""]
-        lines += ["**Facts:**", ""]
-        for f in q.get("facts", []):
-            lines.append(f"- `{f['id']}` ({f.get('level')}): {f['text']}")
-        lines.append("")
-        if q.get("inference"):
-            lines += [f"**Inference chain:** {q['inference']}", ""]
-        if q.get("judge_notes"):
-            lines += [f"**Judge notes:** {q['judge_notes']}", ""]
+             f"Library: [{lib.get('name')}]({lib.get('url')}) (`{lib.get('slug')}`). Created {gold.get('created')}. "
+             f"{len(questions)} questions.", "",
+             "Categories are `type:value` labels: `difficulty:1-5`, `domain:facts|routing|mentions|metadata`, "
+             "`language:xx`, `scope:single-doc|multi-doc|catalog`. Questions are grouped by domain and sorted by difficulty.",
+             "", "## Index by category", ""]
+    kinds = ("domain", "difficulty", "language", "scope")
+    for kind in kinds:
+        values = sorted({v for q in questions for v in _categories(q, kind)})
+        lines.append(f"- **{kind}:** " + "; ".join(
+            f"`{kind}:{v}` " + ", ".join(q["id"] for q in questions if v in _categories(q, kind)) for v in values))
+    lines.append("")
+    for domain in DOMAIN_TITLES:
+        group = sorted((q for q in questions if (_categories(q, "domain") or ["facts"])[0] == domain),
+                       key=lambda q: (q.get("difficulty", 0), q["id"]))
+        if not group:
+            continue
+        lines += [f"## {DOMAIN_TITLES[domain]}", ""]
+        for q in group:
+            lines += [f"### {q['id']} - difficulty {q.get('difficulty')}, {q.get('language')}", "",
+                      "Categories: " + ", ".join(f"`{c}`" for c in q.get("categories", [])), "",
+                      f"**Question:** {q['question']}", "", f"**Type:** {q.get('type')}", ""]
+            if q.get("expected_agents"):
+                lines += ["**Expected agents:** " + ", ".join(f"`{a}`" for a in q["expected_agents"])
+                          + (" (scored on routing only)" if q.get("scoring") == "routing" else ""), ""]
+            lines += [f"**Minimum answer:** {q.get('minimum_answer')}", ""]
+            cited = [docs.get(d, {}).get("citation", d) for d in q.get("documents", [])]
+            if cited:
+                lines += ["**Documents:**", ""] + [f"- {c}" for c in cited] + [""]
+            if q.get("facts"):
+                lines += ["**Facts:**", ""]
+                lines += [f"- `{f['id']}` ({f.get('level')}): {f['text']}" for f in q["facts"]] + [""]
+            if q.get("inference"):
+                lines += [f"**Inference chain:** {q['inference']}", ""]
+            if q.get("judge_notes"):
+                lines += [f"**Judge notes:** {q['judge_notes']}", ""]
     return "\n".join(lines)
 
 

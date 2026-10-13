@@ -205,3 +205,12 @@ def resolve_library_id(base_url: str, zotero_key: Optional[str], gold: dict) -> 
                 f"{base_url}/api/libraries - index it first."
             )
     return wanted
+
+
+def categories_of(question: dict, kind: str) -> list[str]:
+    """Values of one category type, e.g. ``categories_of(q, "domain")`` -> ``["metadata"]``.
+
+    Categories are ``"type:value"`` strings in the question's ``categories`` list.
+    """
+    prefix = kind + ":"
+    return [c[len(prefix):] for c in question.get("categories", []) if c.startswith(prefix)]

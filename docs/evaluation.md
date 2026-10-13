@@ -2,7 +2,7 @@
 
 The `rag-quality-eval` skill (`skills/rag-quality-eval/`) measures the quality
 of the query pipeline — routing, retrieval, generation and citations — against
-a fixed gold standard: 10 questions ranging from literal lookups to
+a fixed gold standard: 16 questions ranging from literal lookups to
 cross-document inference, in English, German, French and Spanish, over the
 public [test-rag-plugin](https://www.zotero.org/groups/6297749/test-rag-plugin)
 Zotero group library. It runs each question through the real `/api/query`

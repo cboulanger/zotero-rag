@@ -39,8 +39,9 @@ def _runs(run_dir: Path, gold: dict):
     questions = {q["id"]: q for q in gold["questions"]}
     for path in sorted((run_dir / "raw").glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if raw.get("response") and raw["meta"]["question_id"] in questions:
-            yield path.stem, raw, questions[raw["meta"]["question_id"]]
+        question = questions.get(raw["meta"]["question_id"])
+        if raw.get("response") and question and question.get("scoring") != "routing":  # routing-only: nothing to judge
+            yield path.stem, raw, question
 
 
 def _skeleton(stem: str, question: dict) -> dict:
