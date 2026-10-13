@@ -16,6 +16,22 @@ drops those, so an attachment indexed from another computer (for example via
 Search & Fix there, which uploads the file directly) does not show up as
 unavailable here just because its file is not downloaded on this computer.
 
+### Filtering the list
+
+The filter box at the right of the table toolbar narrows the list to rows
+where any column (author, year, title, Zotero ID, filename or status) matches
+a case-insensitive pattern. Plain text matches anywhere in a column
+(`smith`, `pdf`). With glob wildcards the pattern has to match a whole column
+value: `*` stands for any characters, `?` for exactly one, `[abc]` or `[a-z]`
+for one character from a set and `[!abc]` for one character not in it. For
+example, `*.pdf` shows only PDF files, `201?` items from the 2010s, and
+`Refused*` attachments the server refused.
+
+Filtering only hides rows: rows you selected stay selected while hidden, and
+**Search & Fix** or **Delete** still act on them. **Select all** selects only
+the visible rows; clearing it clears the whole selection. The filter stays
+active across **Refresh**.
+
 ## Recovery strategies
 
 For each missing file the tool tries the following strategies in order:
