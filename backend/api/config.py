@@ -17,6 +17,7 @@ from backend.dependencies import get_client_api_keys, get_zotero_identity, requi
 from backend.services.access_gate import is_loopback
 from backend.services.endpoint_cache import endpoint_cache
 from backend.services.effective_preset import is_compatible
+from backend.services.extraction import effective_extractor_backend
 from backend.services.user_settings import get_preferred_preset, set_preferred_preset
 from backend.services.admin_settings_store import (
     set_default_preset,
@@ -228,6 +229,7 @@ class ConfigResponse(BaseModel):
     default_top_k: int
     default_min_score: float
     max_chunk_size: int
+    extractor_backend: str = ""  # the extractor indexing runs with under ``preset_name``
 
 
 class ApiKeyRequirement(BaseModel):
@@ -347,6 +349,7 @@ def get_config(request: Request):
         default_preset=default.name,
         selectable_presets=selectable,
         preset_fell_back=_fell_back_choice(settings, identity, preset),
+        extractor_backend=effective_extractor_backend(settings, preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,

@@ -133,7 +133,28 @@ class Settings(BaseSettings):
     # Extraction backend
     extractor_backend: str = Field(
         default="kreuzberg",
-        description="Document extraction backend: 'kreuzberg' (default) or 'legacy' (pypdf+spaCy)"
+        description="Document extraction backend: 'kreuzberg' (default), 'docling' (a remote Docling "
+                    "service, see docling_url) or 'legacy' (pypdf+spaCy). A preset with an 'extraction' "
+                    "section overrides this for indexing under that preset."
+    )
+    docling_url: str = Field(
+        default="http://localhost:5001",
+        description="Base URL of the Docling service used when extractor_backend='docling' "
+                    "(a docling-serve instance, or https://chat-ai.academiccloud.de with docling_api_flavor='saia').",
+    )
+    docling_api_flavor: str = Field(
+        default="serve",
+        description="Docling API dialect: 'serve' (docling-serve's /v1/convert/file) or "
+                    "'saia' (KISSKI/SAIA's /v1/documents/convert).",
+    )
+    docling_async: bool = Field(
+        default=False,
+        description="docling-serve only: submit conversions as async jobs and poll for the result "
+                    "instead of one blocking request (avoids the server's sync-wait limit on long OCR jobs).",
+    )
+    docling_min_request_interval: float = Field(
+        default=0.0,
+        description="Minimum seconds between two requests to the Docling service (rate-limited endpoints).",
     )
     ocr_enabled: bool = Field(
         default=True,

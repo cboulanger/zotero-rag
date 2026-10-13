@@ -51,6 +51,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `remote-openai` | **No** | `OPENAI_API_KEY` | any |
 | `remote-gemini` | **No** | `GEMINI_API_KEY` | any |
 | `kisski-gemini` | **No** | `KISSKI_API_KEY` (embeddings), `GEMINI_API_KEY` (answers) | any |
+| `kisski-docling` | **No** (no Kreuzberg container either) | `KISSKI_API_KEY` | any |
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
@@ -224,6 +225,53 @@ to reduce peak RSS during indexing.
 
 ---
 
+### `kisski-docling` (fully remote, documents converted by KISSKI/SAIA's Docling service)
+
+**Best for:** Running KISSKI without a Kreuzberg container, e.g. a host without podman or a cloud
+session, including building and evaluating a whole index there.
+
+**Configuration:** `remote-kisski`'s embedding (same model, so the same index collection), LLM and
+retrieval settings, plus an `extraction` section that converts documents with the SAIA Docling
+endpoint instead of the server's `EXTRACTOR_BACKEND`:
+
+```json
+"extraction": {
+  "backend": "docling",
+  "options": {
+    "api_flavor": "saia",
+    "url": "https://chat-ai.academiccloud.de",
+    "api_key_env": "KISSKI_API_KEY",
+    "min_request_interval_seconds": 1.1,
+    "max_pages_per_request": 10
+  }
+}
+```
+
+The Docling request uses the same `KISSKI_API_KEY` as the embedding side (the plugin user's key, or
+the stored auto-index key in the cron indexer), so no further key is needed. The endpoint allows
+one request per second and has hourly/daily/monthly quotas (500/1000/5000 at the time of writing):
+fine for a library of hundreds of documents, too few for a first full index of a large library in
+one go. A spent quota stops the indexing run, and the next run resumes where it stopped. Docling
+chunks differ from Kreuzberg's; the two share the collection, so a document indexed under one
+preset is not re-extracted when the other is selected.
+
+**Requires:** `KISSKI_API_KEY`
+
+#### The `extraction` section
+
+Any preset can name the extractor that indexes documents under it; without the section the
+server's `EXTRACTOR_BACKEND` applies. `backend` is `kreuzberg`, `docling` or `legacy`. Options for
+`docling`: `url`, `api_flavor` (`serve` for [docling-serve](https://github.com/docling-project/docling-serve),
+`saia`), `api_key_env` (the key to send; a name the embedding side also uses takes that side's key,
+any other name is read from the admin-set shared values, `POST /api/config/remote-fields`),
+`async_mode` (docling-serve job polling), `min_request_interval_seconds`, `timeout_seconds`,
+`max_pages_per_request` (PDFs are sent in page ranges of at most this many pages; a range that times
+out or hits a gateway error is halved and retried down to single pages, and a single page that still
+fails is skipped), `ocr_enabled`, `path` and `extra_options` (extra form fields or query parameters, e.g.
+`{"table_mode": "accurate"}` for docling-serve).
+
+---
+
 ### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
 
 **Best for:** Riding out an exhausted KISSKI rate limit, using a short-lived job on the MPCDF LLM Inference Service (`llm.mpcdf.mpg.de`) instead
@@ -341,6 +389,7 @@ Both endpoints require an admin — an owner/admin of the server's `AUTHORIZED_G
 | High-memory GPU system (>24 GB), offline | `high-memory` |
 | CPU-only or low memory, offline | `cpu-only` |
 | Cloud server (no GPU) + KISSKI access | `cloud-server-kisski` |
+| KISSKI access, no container runtime for Kreuzberg | `kisski-docling` |
 | Want full cost/data control, willing to self-host on RunPod | `runpod` |
 
 ---

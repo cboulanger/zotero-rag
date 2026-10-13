@@ -292,11 +292,12 @@ def build_server_info(embedding_service: Any = None) -> dict[str, Any]:
     from urllib.parse import urlparse
 
     from backend.config.settings import get_settings
+    from backend.services.extraction import effective_extractor_backend
 
     s = get_settings()
     info: dict[str, Any] = {
         "backend_version": s.version,
-        "extractor_backend": s.extractor_backend,
+        "extractor_backend": effective_extractor_backend(s),
         "ocr_enabled": s.ocr_enabled,
         "kreuzberg_timeout_cap_seconds": s.kreuzberg_timeout_seconds,
         "kreuzberg_host": urlparse(s.kreuzberg_url).hostname,
