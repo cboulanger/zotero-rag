@@ -106,18 +106,21 @@ _CONNECT_RETRY_INTERVAL_SECONDS = 15
 # daily quota is spent, which every remaining attachment would hit too, so the
 # extractor raises KreuzbergUnavailableError and the indexing run stops.
 _RATE_LIMIT_WAIT_BUDGET_SECONDS = 120
-# Gateway errors (502/503/504) on a single request are retried this many
+# Gateway errors (500/502/503/504) on a single request are retried this many
 # times with backoff. A gateway that closes slow requests after a fixed time
 # (the outbound proxy of cloud sessions answers 502 "upstream request failed"
 # after about 30 s) fails a slow PDF range on every retry, so multi-page
 # ranges are split instead (see DoclingExtractor._convert_pdf_range).
+# SAIA also answers a bare HTTP 500 for some page ranges that convert fine
+# on their own, so 500 is handled the same way.
+_GATEWAY_STATUSES = (500, 502, 503, 504)
 _GATEWAY_RETRIES = 3
 _GATEWAY_RETRY_BASE_SECONDS = 5
 _ASYNC_POLL_WAIT_SECONDS = 10
 
 
 class _GatewayError(RuntimeError):
-    """HTTP 502/503/504 from the service or a gateway in front of it, after any retries."""
+    """HTTP 500/502/503/504 from the service or a gateway in front of it, after any retries."""
 
 
 class _RequestSpacer:
@@ -665,10 +668,10 @@ class DoclingExtractor(DocumentExtractor):
                 rate_limit_waited += wait
                 await asyncio.sleep(wait)
                 continue
-            if status in (502, 503, 504) and (not retry_gateway or gateway_attempts >= _GATEWAY_RETRIES):
+            if status in _GATEWAY_STATUSES and (not retry_gateway or gateway_attempts >= _GATEWAY_RETRIES):
                 stage.set(failure="gateway_error")
                 raise _GatewayError(f"Docling service at {self._url} returned HTTP {status}: {body}")
-            if status in (502, 503, 504):
+            if status in _GATEWAY_STATUSES:
                 gateway_attempts += 1
                 wait = _GATEWAY_RETRY_BASE_SECONDS * 2 ** (gateway_attempts - 1)
                 logger.warning(

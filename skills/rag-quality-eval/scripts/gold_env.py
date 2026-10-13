@@ -222,16 +222,28 @@ def cmd_up(a: argparse.Namespace) -> int:
                 f"`gold_env.py down`, remove {DATA_DIR}, then `up --rebuild` again"
             )
         build_index(url, a.repo, a.timeout)
-    elif a.force_restore or have == 0:
+    else:
         # A remote-service extractor (Docling) can build what the store lacks; Kreuzberg's must be restored.
         can_build = extractor not in (None, "kreuzberg", "legacy") and not a.snapshot
-        if not restore_index(url, info["embedding_model_name"], a.repo, a.snapshot, extractor, required=not can_build):
+        if a.force_restore or have == 0:
+            if not restore_index(url, info["embedding_model_name"], a.repo, a.snapshot, extractor,
+                                 required=not can_build):
+                build_index(url, a.repo, a.timeout)
+        elif can_build and check_index(url, quiet=True) != 0:
+            # An interrupted build: index what is missing (indexed documents are skipped as duplicates).
+            log("[..] the gold index is incomplete; resuming the build")
             build_index(url, a.repo, a.timeout)
     have = chunk_count(url, lib)
     log(f"[OK] backend {url} ({'started' if started else 'already running'}, extractor {extractor}), "
         f"gold library: {have} chunks")
+    return check_index(url)
+
+
+def check_index(url: str, quiet: bool = False) -> int:
+    """Run check_gold_index.py against the backend; its exit code (0: every gold document has chunks)."""
     return subprocess.run(
-        ["uv", "run", "python", str(Path(__file__).with_name("check_gold_index.py")), "--url", url], cwd=PROJECT_ROOT
+        ["uv", "run", "python", str(Path(__file__).with_name("check_gold_index.py")), "--url", url], cwd=PROJECT_ROOT,
+        **({"capture_output": True} if quiet else {}),
     ).returncode
 
 
@@ -366,7 +378,7 @@ def cmd_index(a: argparse.Namespace) -> int:
             # skipped_* failure variants means the gold library already has (or now has)
             # this document's chunks, which is what `publish` needs before exporting.
             ok = resp.status_code == 200 and body.get("status") in (
-                "indexed_fresh", "skipped_duplicate", "copied_cross_library", "copied_same_library",
+                "indexed", "indexed_fresh", "skipped_duplicate", "copied_cross_library", "copied_same_library",
             )
             done, failed = done + ok, failed + (not ok)
             log(f"[{'OK' if ok else 'FAIL'}] {att['attachment_key']} {body.get('message', resp.status_code)}")
