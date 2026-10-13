@@ -208,8 +208,10 @@ def render_gold_markdown(gold: dict) -> str:
     kinds = ("domain", "difficulty", "language", "scope")
     for kind in kinds:
         values = sorted({v for q in questions for v in _categories(q, kind)})
+        # Question headings are just the id, so the anchor is the lowercase id on GitHub and in most viewers.
         lines.append(f"- **{kind}:** " + "; ".join(
-            f"`{kind}:{v}` " + ", ".join(q["id"] for q in questions if v in _categories(q, kind)) for v in values))
+            f"`{kind}:{v}` " + ", ".join(f"[{q['id']}](#{q['id'].lower()})" for q in questions if v in _categories(q, kind))
+            for v in values))
     lines.append("")
     for domain in DOMAIN_TITLES:
         group = sorted((q for q in questions if (_categories(q, "domain") or ["facts"])[0] == domain),
@@ -218,7 +220,7 @@ def render_gold_markdown(gold: dict) -> str:
             continue
         lines += [f"## {DOMAIN_TITLES[domain]}", ""]
         for q in group:
-            lines += [f"### {q['id']} - difficulty {q.get('difficulty')}, {q.get('language')}", "",
+            lines += [f"### {q['id']}", "",
                       "Categories: " + ", ".join(f"`{c}`" for c in q.get("categories", [])), "",
                       f"**Question:** {q['question']}", "", f"**Type:** {q.get('type')}", ""]
             if q.get("expected_agents"):

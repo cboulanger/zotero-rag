@@ -60,7 +60,8 @@ class StoreHelperTests(unittest.TestCase):
         gold = common.load_gold()
         md = hf_store.render_gold_markdown(gold)
         for q in gold["questions"]:
-            self.assertIn(f"### {q['id']} ", md)
+            self.assertIn(f"\n### {q['id']}\n", md)
+            self.assertIn(f"[{q['id']}](#{q['id'].lower()})", md)
             self.assertIn(q["question"], md)
 
     def test_gold_markdown_groups_by_domain_and_sorts_by_difficulty(self):
@@ -68,7 +69,7 @@ class StoreHelperTests(unittest.TestCase):
         heads = [md.index(f"## {t}") for t in hf_store.DOMAIN_TITLES.values()]
         self.assertEqual(heads, sorted(heads))
         facts = md[md.index("## Facts"):md.index("## Routing")]
-        order = [int(l.split("difficulty ")[1][0]) for l in facts.splitlines() if l.startswith("### Q")]
+        order = [int(l.split("difficulty:")[1][0]) for l in facts.splitlines() if l.startswith("Categories:")]
         self.assertEqual(order, sorted(order))
 
     def test_report_commit_archives_and_replaces_latest_atomically(self):
