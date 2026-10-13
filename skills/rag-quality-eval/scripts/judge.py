@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scoring  # noqa: E402
-from common import load_gold  # noqa: E402
+from common import load_gold, tier_of  # noqa: E402
 
 
 def _runs(run_dir: Path, gold: dict):
@@ -77,7 +77,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         packet = {
             "run": stem,
             "preset": raw["meta"]["preset"], "model": raw["meta"]["model"],
-            "question_id": question["id"], "tier": question["tier"], "language": question["language"],
+            "question_id": question["id"], "tier": tier_of(question), "language": question["language"],
             "question": question["question"],
             "minimum_answer": question["minimum_answer"],
             "judge_notes": question["judge_notes"],

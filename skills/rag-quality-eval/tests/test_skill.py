@@ -74,7 +74,7 @@ class GoldFileTests(unittest.TestCase):
 
     def test_hard_fact_questions_define_inference_facts(self):
         for q in GOLD["questions"]:
-            if q["tier"] == "hard" and q["facts"]:
+            if common.tier_of(q) == "hard" and q["facts"]:
                 self.assertTrue(q["inference"], q["id"])
                 self.assertTrue(any(f["level"] == "inference" for f in q["facts"]), q["id"])
 

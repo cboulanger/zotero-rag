@@ -10,7 +10,9 @@ word band, and record it here.
   question and `expected_agents` (scored as the new `routing` criterion). The
   `difficulty` field is now on a 1-5 scale (was 1-10, one question per step);
   Q01-Q10 keep their text and facts: Q01 1, Q02 1, Q03 2, Q04 2, Q05 3, Q06 3,
-  Q07 3, Q08 4, Q09 5, Q10 4. All carry `expected_agents: ["rag"]`.
+  Q07 3, Q08 4, Q09 5, Q10 4. The separate `tier` field is gone: reports derive
+  easy/medium/hard from `difficulty` (1-2 easy, 3 medium, 4-5 hard), which moves Q04
+  from medium to easy. All carry `expected_agents: ["rag"]`.
 - Added Q11-Q13 (`domain:metadata`, catalog questions for the metadata agent: items by
   an author, books, German preprints of 2025), Q14 (`domain:routing`, an author name
   in a content question must stay on the rag agent) and Q15-Q16 (`domain:mentions`,

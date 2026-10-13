@@ -1,7 +1,7 @@
 """Maintenance helpers for gold/questions.json.
 
   validate   schema + consistency checks (ids unique, documents exist, regexes
-             compile, tiers/levels valid, difficulty ordering, language mix)
+             compile, difficulty/categories valid, language mix)
   format     rewrite the file in the canonical compact layout (one fact per
              line) so diffs stay reviewable after programmatic edits
   stats      question counts by tier / language / fact level
@@ -22,9 +22,8 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import GOLD_PATH, load_gold  # noqa: E402
+from common import GOLD_PATH, load_gold, tier_of  # noqa: E402
 
-TIERS = ("easy", "medium", "hard")
 CATEGORY_TYPES = {
     "difficulty": ("1", "2", "3", "4", "5"),
     "domain": ("facts", "routing", "mentions", "metadata"),
@@ -65,7 +64,7 @@ def validate(gold: dict) -> list[str]:
     for q in gold["questions"]:
         qid = q["id"]
         routing_only = q.get("scoring") == "routing"
-        for field in ("question", "minimum_answer", "facts", "documents", "language", "tier",
+        for field in ("question", "minimum_answer", "facts", "documents", "language",
                       "difficulty", "judge_notes", "categories") + (() if routing_only else (
                           "length", "min_sources", "min_distinct_cited")):
             if field not in q:
@@ -76,14 +75,14 @@ def validate(gold: dict) -> list[str]:
         for agent in q.get("expected_agents", []):
             if agent not in AGENTS:
                 problems.append(f"{qid}: unknown agent {agent!r}")
-        if q.get("tier") not in TIERS:
-            problems.append(f"{qid}: bad tier {q.get('tier')!r}")
+        if "tier" in q:
+            problems.append(f"{qid}: 'tier' is derived from difficulty (common.tier_of); remove the field")
         if q.get("language") not in LANGUAGES:
             problems.append(f"{qid}: unsupported language {q.get('language')!r} (scoring.STOPWORDS)")
         for doc_id in q.get("documents", []):
             if doc_id not in gold["documents"]:
                 problems.append(f"{qid}: unknown document {doc_id}")
-        if q.get("tier") == "hard" and not q.get("inference") and not routing_only and q.get("facts"):
+        if tier_of(q) == "hard" and not q.get("inference") and not routing_only and q.get("facts"):
             problems.append(f"{qid}: hard questions need an 'inference' chain for the judge")
         fact_ids = set()
         for fact in q.get("facts", []):
@@ -148,7 +147,7 @@ def stats(gold: dict) -> str:
     levels = Counter(f["level"] for q in qs for f in q["facts"])
     lines = [
         f"{len(qs)} questions, {sum(len(q['facts']) for q in qs)} facts, {len(gold['documents'])} documents",
-        "by tier:     " + ", ".join(f"{k}={v}" for k, v in Counter(q["tier"] for q in qs).items()),
+        "by tier:     " + ", ".join(f"{k}={v}" for k, v in Counter(tier_of(q) for q in qs).items()),
         "by domain:   " + ", ".join(f"{k}={v}" for k, v in sorted(Counter(c[7:] for q in qs for c in q.get("categories", []) if c.startswith("domain:")).items())),
         "by difficulty: " + ", ".join(f"{k}={v}" for k, v in sorted(Counter(q["difficulty"] for q in qs).items())),
         "by language: " + ", ".join(f"{k}={v}" for k, v in Counter(q["language"] for q in qs).items()),

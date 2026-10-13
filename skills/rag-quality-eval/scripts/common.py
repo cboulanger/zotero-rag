@@ -207,6 +207,12 @@ def resolve_library_id(base_url: str, zotero_key: Optional[str], gold: dict) -> 
     return wanted
 
 
+def tier_of(question: dict) -> str:
+    """Coarse bucket derived from ``difficulty``: 1-2 easy, 3 medium, 4-5 hard."""
+    d = question["difficulty"]
+    return "easy" if d <= 2 else "medium" if d == 3 else "hard"
+
+
 def categories_of(question: dict, kind: str) -> list[str]:
     """Values of one category type, e.g. ``categories_of(q, "domain")`` -> ``["metadata"]``.
 

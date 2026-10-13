@@ -26,7 +26,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scoring  # noqa: E402
-from common import categories_of, load_gold  # noqa: E402
+from common import categories_of, load_gold, tier_of  # noqa: E402
 
 CRITERIA = list(scoring.WEIGHTS)
 TIERS = ("easy", "medium", "hard")
@@ -43,7 +43,7 @@ def load_records(run_dir: Path, gold: dict) -> list[dict]:
         question = questions.get(meta["question_id"])
         if question is None:
             continue
-        base = {**meta, "tier": question["tier"], "difficulty": question["difficulty"],
+        base = {**meta, "tier": tier_of(question), "difficulty": question["difficulty"],
                 "domain": (categories_of(question, "domain") or ["facts"])[0],
                 "q_language": question["language"], "file": path.name, "stem": path.stem}
         if raw.get("response"):
