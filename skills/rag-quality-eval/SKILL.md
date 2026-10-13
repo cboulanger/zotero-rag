@@ -271,7 +271,7 @@ uv run python skills/rag-quality-eval/scripts/hf_store.py push-report data/logs/
 ```
 
 Every run is kept under `reports/<run>/` and `reports/latest/` is replaced by a
-copy of the newest one in the same commit (HF has no symlinks). Add `--no-latest` to archive an experiment (e.g. a non-default `top_k`)
+copy of the newest one in the same commit (HF has no symlinks). Each run folder also gets `gold-questions.md`, a Markdown rendering of the gold questions it was scored against. Add `--no-latest` to archive an experiment (e.g. a non-default `top_k`)
 without replacing `reports/latest/`, the baseline later runs compare against. Needs write
 access to the store, i.e. `HF_TOKEN`; without it, tell the user the
 report is local only. Only publish after `judge.py validate` passes and only for

@@ -56,6 +56,13 @@ class StoreHelperTests(unittest.TestCase):
         later = hf_store.merge_index(index, {**entry, "run": "20261013T000000Z"})
         self.assertEqual([e["run"] for e in later], ["20261012T000000Z", "20261013T000000Z"])
 
+    def test_gold_markdown_lists_every_question(self):
+        gold = common.load_gold()
+        md = hf_store.render_gold_markdown(gold)
+        for q in gold["questions"]:
+            self.assertIn(f"## {q['id']} ", md)
+            self.assertIn(q["question"], md)
+
     def test_report_commit_archives_and_replaces_latest_atomically(self):
         existing = ["reports/old/report.md", "reports/latest/report.md", "reports/latest/raw/a.json", "sources/x.pdf"]
         adds, deletes = hf_store.plan_report_commit("new", ["report.md", "report.json"], existing)
