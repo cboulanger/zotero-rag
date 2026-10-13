@@ -744,7 +744,7 @@ Available skills (invoke via `/skill-name` in Claude Code):
 - **`zotero-plugin-dev`** — vanilla plugin development, Zotero APIs, and discovered API index
 - **`zotero-plugin-toolkit`** — `UITool`, `DialogHelper`, `VirtualizedTableHelper`, and other toolkit helpers
 
-A separate, local (in-repo) skill lives at [skills/rag-quality-eval/SKILL.md](skills/rag-quality-eval/SKILL.md) — evaluates the RAG query pipeline (routing, retrieval, generation, citations) against a 10-question gold standard over the `test-rag-plugin` library, for benchmarking a preset/model/retrieval change. It is not auto-discovered by Claude Code; make it invocable with `ln -s ../../skills/rag-quality-eval .claude/skills/rag-quality-eval`, or just read the SKILL.md directly.
+A separate, local (in-repo) skill lives at [skills/rag-quality-eval/SKILL.md](skills/rag-quality-eval/SKILL.md) — evaluates the RAG query pipeline (routing, retrieval, generation, citations) against a 16-question gold standard over the `test-rag-plugin` library, for benchmarking a preset/model/retrieval change. It is not auto-discovered by Claude Code; make it invocable with `ln -s ../../skills/rag-quality-eval .claude/skills/rag-quality-eval`, or just read the SKILL.md directly.
 
 ### Development Workflow
 

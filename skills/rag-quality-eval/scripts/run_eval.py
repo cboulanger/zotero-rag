@@ -384,9 +384,13 @@ def main() -> int:
                         n_done += 1
                         if record["response"]:
                             s = scoring.score_run(record["response"], q, gold)
-                            print(f"[{s['verdict'].upper():4}] {q['id']} {name}/{label} r{rep}: composite={s['composite']:.2f} "
-                                  f"recall={s['fact_recall']:.2f} cited={s['distinct_cited']} words={s['words']} "
-                                  f"lang={s['detected_language']} {wall_ms / 1000:.1f}s")
+                            if s.get("routing_only"):
+                                print(f"[{s['verdict'].upper():4}] {q['id']} {name}/{label} r{rep}: routing={s['routing']:.2f} "
+                                      f"agents={s['agents_chosen']} expected={s['agents_expected']} {wall_ms / 1000:.1f}s")
+                            else:
+                                print(f"[{s['verdict'].upper():4}] {q['id']} {name}/{label} r{rep}: composite={s['composite']:.2f} "
+                                      f"recall={s['fact_recall']:.2f} cited={s['distinct_cited']} words={s['words']} "
+                                      f"lang={s['detected_language']} {wall_ms / 1000:.1f}s")
                         else:
                             print(f"[ERR ] {q['id']} {name}/{label} r{rep}: HTTP {status} {record['error'][:100]}")
                         time.sleep(args.delay)

@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scoring  # noqa: E402
-from common import load_gold  # noqa: E402
+from common import load_gold, tier_of  # noqa: E402
 
 
 def _runs(run_dir: Path, gold: dict):
@@ -39,8 +39,9 @@ def _runs(run_dir: Path, gold: dict):
     questions = {q["id"]: q for q in gold["questions"]}
     for path in sorted((run_dir / "raw").glob("*.json")):
         raw = json.loads(path.read_text(encoding="utf-8"))
-        if raw.get("response") and raw["meta"]["question_id"] in questions:
-            yield path.stem, raw, questions[raw["meta"]["question_id"]]
+        question = questions.get(raw["meta"]["question_id"])
+        if raw.get("response") and question and question.get("scoring") != "routing":  # routing-only: nothing to judge
+            yield path.stem, raw, question
 
 
 def _skeleton(stem: str, question: dict) -> dict:
@@ -76,7 +77,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         packet = {
             "run": stem,
             "preset": raw["meta"]["preset"], "model": raw["meta"]["model"],
-            "question_id": question["id"], "tier": question["tier"], "language": question["language"],
+            "question_id": question["id"], "tier": tier_of(question), "language": question["language"],
             "question": question["question"],
             "minimum_answer": question["minimum_answer"],
             "judge_notes": question["judge_notes"],

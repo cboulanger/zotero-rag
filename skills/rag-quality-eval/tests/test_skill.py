@@ -25,6 +25,7 @@ import judge  # noqa: E402
 import report  # noqa: E402
 import run_eval  # noqa: E402
 import scoring  # noqa: E402
+import common  # noqa: E402
 from common import load_gold  # noqa: E402
 
 GOLD = load_gold()
@@ -63,16 +64,45 @@ class GoldFileTests(unittest.TestCase):
     def test_gold_is_valid(self):
         self.assertEqual(gold_tools.validate(GOLD), [])
 
-    def test_ten_questions_easy_to_hard_with_languages(self):
-        self.assertEqual(len(GOLD["questions"]), 10)
-        self.assertEqual([q["difficulty"] for q in GOLD["questions"]], list(range(1, 11)))
-        self.assertGreaterEqual({q["language"] for q in GOLD["questions"]} - {"en"}, {"de", "fr", "es"})
+    def test_questions_cover_every_domain_and_language(self):
+        qs = GOLD["questions"]
+        self.assertEqual({common.categories_of(q, "domain")[0] for q in qs}, {"facts", "routing", "mentions", "metadata"})
+        self.assertEqual([q["difficulty"] for q in qs if common.categories_of(q, "domain") == ["facts"]],
+                         [1, 1, 2, 2, 3, 3, 3, 4, 5, 4])
+        self.assertGreaterEqual({q["language"] for q in qs} - {"en"}, {"de", "fr", "es"})
+        self.assertTrue(all(1 <= q["difficulty"] <= 5 for q in qs))
 
-    def test_hard_questions_define_inference_facts(self):
+    def test_hard_fact_questions_define_inference_facts(self):
         for q in GOLD["questions"]:
-            if q["tier"] == "hard":
-                self.assertTrue(q["inference"])
+            if common.tier_of(q) == "hard" and q["facts"]:
+                self.assertTrue(q["inference"], q["id"])
                 self.assertTrue(any(f["level"] == "inference" for f in q["facts"]), q["id"])
+
+    def test_bad_categories_are_reported(self):
+        bad = json.loads(json.dumps(GOLD))
+        bad["questions"][0]["categories"] = ["difficulty:9", "domain:facts", "language:de", "colour:red"]
+        problems = gold_tools.validate(bad)
+        self.assertTrue(any("difficulty:9" in p for p in problems))
+        self.assertTrue(any("colour" in p for p in problems))
+        self.assertTrue(any("disagree" in p for p in problems))
+
+    def test_routing_only_question_is_scored_on_the_plan(self):
+        q = next(q for q in GOLD["questions"] if q["id"] == "Q15")
+        plan = {"status": "needs_client_evidence", "answer": "", "sources": [],
+                "citation_targets": [{"author": "li"}], "query_plan": {"agents_to_use": ["mentions"]}}
+        res = scoring.score_run(plan, q, GOLD)
+        self.assertEqual((res["routing"], res["verdict"], res["composite"]), (1.0, "pass", 1.0))
+        wrong = scoring.score_run({**plan, "citation_targets": [], "query_plan": {"agents_to_use": ["metadata"]}}, q, GOLD)
+        self.assertEqual((wrong["routing"], wrong["verdict"]), (0.0, "fail"))
+        extra = scoring.score_run({**plan, "query_plan": {"agents_to_use": ["mentions", "rag"]}}, q, GOLD)
+        self.assertEqual(extra["routing"], 0.75)  # 0.5 agents + targets ok
+
+    def test_routing_criterion_enters_the_composite_of_fact_questions(self):
+        q = GOLD["questions"][0]
+        res = scoring.score_run(make_response(q, "EndNote 47% Zotero 52% faster [S1]."), q, GOLD)
+        self.assertEqual(res["routing"], 1.0)
+        res = scoring.score_run({**make_response(q, "EndNote 47% Zotero 52% faster [S1]."), "agents_used": ["metadata"]}, q, GOLD)
+        self.assertEqual(res["routing"], 0.0)
 
     def test_formatter_roundtrip_is_lossless(self):
         self.assertEqual(json.loads(gold_tools.format_gold(GOLD)), GOLD)

@@ -26,10 +26,11 @@ from typing import Any, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import scoring  # noqa: E402
-from common import load_gold  # noqa: E402
+from common import categories_of, load_gold, tier_of  # noqa: E402
 
 CRITERIA = list(scoring.WEIGHTS)
 TIERS = ("easy", "medium", "hard")
+DOMAINS = ("facts", "routing", "mentions", "metadata")
 
 
 def load_records(run_dir: Path, gold: dict) -> list[dict]:
@@ -42,7 +43,8 @@ def load_records(run_dir: Path, gold: dict) -> list[dict]:
         question = questions.get(meta["question_id"])
         if question is None:
             continue
-        base = {**meta, "tier": question["tier"], "difficulty": question["difficulty"],
+        base = {**meta, "tier": tier_of(question), "difficulty": question["difficulty"],
+                "domain": (categories_of(question, "domain") or ["facts"])[0],
                 "q_language": question["language"], "file": path.name, "stem": path.stem}
         if raw.get("response"):
             scored = scoring.score_run(raw["response"], question, gold)
@@ -98,9 +100,11 @@ def summarize_group(rows: list[dict]) -> dict:
         "composite": _mean([r["composite"] for r in rows]),
         "criteria": {c: _mean([r.get(c) for r in ok]) for c in CRITERIA},
         "by_tier": {t: _mean([r["composite"] for r in rows if r["tier"] == t]) for t in TIERS},
+        "by_domain": {d: _mean([r["composite"] for r in rows if r.get("domain") == d]) for d in DOMAINS},
+        "routing_accuracy": _mean([r.get("routing") for r in ok]),
         "recall_en": _mean([r["fact_recall"] for r in en]),
         "recall_non_en": _mean([r["fact_recall"] for r in non_en]),
-        "language_match_non_en": _mean([r["language"] for r in non_en]),
+        "language_match_non_en": _mean([r.get("language") for r in non_en]),
         "judged_runs": len(judged),
         "recall_by_level": {lvl: _mean(v) for lvl, v in levels.items()},
         "recall_auto": _mean([r.get("fact_recall_auto", r["fact_recall"]) for r in ok]),
@@ -149,7 +153,7 @@ def render_markdown(groups: dict[str, dict], records: list[dict], gold: dict, me
         for s in meta.get("skipped", []):
             lines.append(f"- SKIPPED `{s['preset']}`: {s['reason']}")
     ranked = sorted(groups.items(), key=lambda kv: -(kv[1]["composite"] or 0))
-    answered = [r for r in records if "error" not in r]
+    answered = [r for r in records if "error" not in r and not r.get("routing_only")]  # routing-only runs have no answer to judge
     n_judged = sum(1 for r in answered if r.get("judged"))
     if n_judged < len(answered):
         lines += ["", f"> **Automatic floor only for {len(answered) - n_judged} of {len(answered)} answered runs.** "
@@ -169,6 +173,14 @@ def render_markdown(groups: dict[str, dict], records: list[dict], gold: dict, me
             f"{_f(g['criteria']['fact_recall'], pct=True)} | {_f(g['by_tier']['easy'])} | {_f(g['by_tier']['medium'])} | "
             f"{_f(g['by_tier']['hard'])} | {g['errors']} | {_f((g['latency_p50_ms'] or 0) / 1000 if g['latency_p50_ms'] else None, 1)} | "
             f"{_f(g['stability_stdev'], 3)} |")
+
+    lines += ["", "## Composite and routing by question domain", "",
+              "Routing = share of the expected agents chosen by the router (1 = exact set); `mentions` questions "
+              "are scored on routing alone (see SKILL.md).", "",
+              "| Preset / model | " + " | ".join(DOMAINS) + " | Routing |", "|---|" + "---|" * (len(DOMAINS) + 1)]
+    for name, g in ranked:
+        lines.append(f"| {name} | " + " | ".join(_f(g["by_domain"][d]) for d in DOMAINS)
+                     + f" | {_f(g['routing_accuracy'])} |")
 
     lines += ["", "## Criteria means per preset / model", "",
               "| Preset / model | " + " | ".join(CRITERIA) + " |", "|---|" + "---|" * len(CRITERIA)]

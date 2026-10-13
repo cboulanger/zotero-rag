@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "created": "2026-10-10",
   "library": {
     "slug": "groups/6297749",
@@ -13,7 +13,12 @@
     "length": "{min_words, max_words} acceptable answer length for this question",
     "min_sources": "minimum number of distinct sources the pipeline should return",
     "min_distinct_cited": "minimum number of distinct [SN] sources the answer should cite",
-    "inference": "question-level description of the reasoning chain a correct answer needs; given to the judge (required for hard questions)"
+    "inference": "question-level description of the reasoning chain a correct answer needs; given to the judge (required for hard questions)",
+    "categories": "list of 'type:value' strings that group questions programmatically. difficulty:1-5; domain:facts|routing|mentions|metadata (what the question exercises: document content, the router's agent choice, the mentions agent, the metadata agent); language:en|de|fr|es; scope:single-doc|multi-doc|catalog (catalog = answered from library metadata, not document text)",
+    "expected_agents": "agents the router should select (rag, metadata, mentions). Scored as the 'routing' criterion: 1.0 exact set, 0.5 expected agents plus extras, 0 otherwise",
+    "scoring": "'routing' = the question is scored on routing alone (the mentions agent needs the Zotero client's full-text index, so the backend answers needs_client_evidence); facts are then empty",
+    "expected_citation_targets": "mentions questions: lowercase surnames of the cited works the router must extract as citation_targets",
+    "difficulty": "1-5 (1 = single literal lookup, 5 = multi-document reasoning); mirrored in the difficulty: category. The easy/medium/hard tier shown in reports is derived from it (1-2 easy, 3 medium, 4-5 hard)"
   },
   "documents": {
     "fulbright2024": {"citation": "Fulbright & Evans 2024, Finding full texts in bulk (EndNote 20 vs Zotero 6)", "title": "Finding full texts in bulk: a comparison of EndNote 20 versus Zotero 6 using the University of York's subscriptions", "item_keys": ["AM4H275E"], "attachment_keys": ["M27PMN5P"]},
@@ -31,8 +36,9 @@
     {
       "id": "Q01",
       "difficulty": 1,
-      "tier": "easy",
       "language": "en",
+      "categories": ["difficulty:1", "domain:facts", "language:en", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "verbatim, single document (abstract)",
       "question": "In the comparison of EndNote 20 and Zotero 6 using the University of York's subscriptions, what percentage of the available full texts did each program retrieve, and which program was faster?",
       "documents": ["fulbright2024"],
@@ -49,9 +55,10 @@
     },
     {
       "id": "Q02",
-      "difficulty": 2,
-      "tier": "easy",
+      "difficulty": 1,
       "language": "en",
+      "categories": ["difficulty:1", "domain:facts", "language:en", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "verbatim, single document (results section)",
       "question": "Which reference management programs did the surveyed authors of systematic reviews use most often, and what response rate did the survey achieve?",
       "documents": ["lorenzetti2013"],
@@ -68,9 +75,10 @@
     },
     {
       "id": "Q03",
-      "difficulty": 3,
-      "tier": "easy",
+      "difficulty": 2,
       "language": "fr",
+      "categories": ["difficulty:2", "domain:facts", "language:fr", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "verbatim facts, French question over an English document (cross-lingual)",
       "question": "Combien d'articles ont servi à tester si le nombre d'utilisateurs de Mendeley et de CiteULike est corrélé aux citations, et de quelles revues et de quelle année provenaient-ils ?",
       "documents": ["li2012"],
@@ -88,9 +96,10 @@
     },
     {
       "id": "Q04",
-      "difficulty": 4,
-      "tier": "medium",
+      "difficulty": 2,
       "language": "en",
+      "categories": ["difficulty:2", "domain:facts", "language:en", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "single document, facts only in a table/results text",
       "question": "When Zotero and Mendeley were each used to import the same Google Scholar record, which bibliographic fields did only Mendeley import?",
       "documents": ["basak2014"],
@@ -107,9 +116,10 @@
     },
     {
       "id": "Q05",
-      "difficulty": 5,
-      "tier": "medium",
+      "difficulty": 3,
       "language": "en",
+      "categories": ["difficulty:3", "domain:facts", "language:en", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "single document, numeric table + interpretation",
       "question": "In the user study of four reference managers, which one demanded the least physical effort, which the most, why was the most demanding one so demanding, and did participants' favourite tool change after the study?",
       "documents": ["cai2021"],
@@ -127,9 +137,10 @@
     },
     {
       "id": "Q06",
-      "difficulty": 6,
-      "tier": "medium",
+      "difficulty": 3,
       "language": "de",
+      "categories": ["difficulty:3", "domain:facts", "language:de", "scope:multi-doc"],
+      "expected_agents": ["rag"],
       "type": "multi-document aggregation, German question over English documents",
       "question": "Wie viel kostenlosen Cloud-Speicher bieten Zotero und Mendeley jeweils, und welche Quellen in der Bibliothek nennen das?",
       "documents": ["jin2026", "fulbright2024", "sarkar2025"],
@@ -145,9 +156,10 @@
     },
     {
       "id": "Q07",
-      "difficulty": 7,
-      "tier": "medium",
+      "difficulty": 3,
       "language": "es",
+      "categories": ["difficulty:3", "domain:facts", "language:es", "scope:single-doc"],
+      "expected_agents": ["rag"],
       "type": "paraphrased (no keyword overlap), single document, Spanish question",
       "question": "¿Suelen los autores de revisiones sistemáticas indicar en sus artículos qué programa de gestión bibliográfica utilizaron? Compáralo con lo que ocurre con el software estadístico y explica la posible razón.",
       "documents": ["lorenzetti2013"],
@@ -166,9 +178,10 @@
     },
     {
       "id": "Q08",
-      "difficulty": 8,
-      "tier": "hard",
+      "difficulty": 4,
       "language": "en",
+      "categories": ["difficulty:4", "domain:facts", "language:en", "scope:multi-doc"],
+      "expected_agents": ["rag"],
       "type": "multi-document synthesis with conflicting evidence",
       "question": "Do the sources in the library agree on how well Zotero handles importing PDFs and extracting their bibliographic metadata? Contrast what the different studies report.",
       "documents": ["cai2021", "jin2026", "basak2014"],
@@ -187,9 +200,10 @@
     },
     {
       "id": "Q09",
-      "difficulty": 9,
-      "tier": "hard",
+      "difficulty": 5,
       "language": "en",
+      "categories": ["difficulty:5", "domain:facts", "language:en", "scope:multi-doc"],
+      "expected_agents": ["rag"],
       "type": "multi-document reasoning, conceptual question with no verbatim phrase",
       "question": "Why can Mendeley, but not Zotero, serve as a data source for readership-based indicators of scholarly impact, and what did validating such indicators against citation counts show?",
       "documents": ["li2012", "chen2018"],
@@ -209,9 +223,10 @@
     },
     {
       "id": "Q10",
-      "difficulty": 10,
-      "tier": "hard",
+      "difficulty": 4,
       "language": "de",
+      "categories": ["difficulty:4", "domain:facts", "language:de", "scope:multi-doc"],
+      "expected_agents": ["rag"],
       "type": "multi-document comparison, German question, technical RAG papers",
       "question": "Vergleiche PyZoBot und HySemRAG: Wie machen beide Systeme ihre generierten Antworten überprüfbar, und welche Retrieval-Ansätze und Sprachmodelle setzen sie ein?",
       "documents": ["pyzobot2025", "hysemrag2025"],
@@ -230,6 +245,121 @@
       "length": {"min_words": 120, "max_words": 500},
       "judge_notes": "Hardest item: two long preprints, German question, technical terms that stay English. Check each mechanism is attributed to the right system (the post-hoc citation audit and Neo4j/Qdrant belong to HySemRAG; Streamlit/Ollama/chunk display belong to PyZoBot). Mixing them up is a factual error.",
       "inference": "Abstraction required: both systems pursue verifiability but differently. PyZoBot makes answers checkable by the human (shows the retrieved chunks with automatic citations/references); HySemRAG verifies automatically and systematically (agentic self-correction, then a post-hoc audit of every citation against the ground-truth database, 99.0% citation accuracy). The answer should draw this contrast (user-side transparency vs system-side audit) and keep the retrieval stacks apart (PyZoBot: standard or knowledge-graph RAG, OpenAI or LLaMA/Mistral via Ollama; HySemRAG: hybrid semantic+keyword+knowledge-graph retrieval over Qdrant and Neo4j)."
+    },
+    {
+      "id": "Q11",
+      "difficulty": 1,
+      "language": "en",
+      "categories": ["difficulty:1", "domain:metadata", "language:en", "scope:catalog"],
+      "expected_agents": ["metadata"],
+      "type": "catalog lookup by author (metadata agent)",
+      "question": "Which items by Basak are in the library, and in which year were they published?",
+      "documents": [],
+      "minimum_answer": "Two journal articles by Basak, both from 2014: \"A comparison of researcher's reference management software: Refworks, Mendeley, and EndNote\" and \"A Comparative Analysis Of Zotero And Mendeley Reference Management Software\".",
+      "facts": [
+        {"id": "basak_refworks", "text": "Basak: A comparison of researcher's reference management software (RefWorks, Mendeley, EndNote)", "answer_patterns": ["Refworks[^.]{0,40}Mendeley[^.]{0,40}EndNote"], "docs": [], "level": "verbatim"},
+        {"id": "basak_zotero_mendeley", "text": "Basak: A Comparative Analysis Of Zotero And Mendeley Reference Management Software", "answer_patterns": ["Comparative Analysis[^.]{0,20}Zotero[^.]{0,20}Mendeley"], "docs": [], "level": "verbatim"},
+        {"id": "basak_2014", "text": "both published in 2014", "answer_patterns": ["2014"], "docs": [], "level": "verbatim"}
+      ],
+      "min_distinct_cited": 0,
+      "min_sources": 1,
+      "length": {"min_words": 8, "max_words": 220},
+      "judge_notes": "Catalog question: the answer comes from item metadata, not from reading PDFs. Both Basak items are 2014 journal articles; listing a Basak item from another year or an item by another author is an error. The pipeline may also run the rag agent; that only costs routing credit."
+    },
+    {
+      "id": "Q12",
+      "difficulty": 2,
+      "language": "en",
+      "categories": ["difficulty:2", "domain:metadata", "language:en", "scope:catalog"],
+      "expected_agents": ["metadata"],
+      "type": "catalog lookup by item type (metadata agent)",
+      "question": "List all books (not articles or book chapters) in the library together with their publication years.",
+      "documents": [],
+      "minimum_answer": "Two books: Scheliga & Bartling, Reference management (2014); Agrawal & Rasouli, EndNote 1-2-3 Easy! (2024). (Three more books in the Zotero library have no PDF attachment and are therefore not in the index.)",
+      "facts": [
+        {"id": "book_scheliga", "text": "Reference management (Scheliga & Bartling, 2014)", "answer_patterns": ["Scheliga"], "docs": [], "level": "verbatim"},
+        {"id": "book_agrawal", "text": "EndNote 1-2-3 Easy! (Agrawal & Rasouli, 2024)", "answer_patterns": ["EndNote 1-2-3"], "docs": [], "level": "verbatim"}
+      ],
+      "length": {"min_words": 8, "max_words": 220},
+      "min_sources": 1,
+      "min_distinct_cited": 0,
+      "judge_notes": "The metadata agent can only list items that have at least one indexed attachment, so only the two books with a PDF (Scheliga & Bartling 2014, Agrawal & Rasouli 2024) are expected; the books without PDF (Opening Science, Interdisziplinäre Rechtsforschung, Digital Writing Technologies) are not in the index and are not penalised when absent. Chapters must not be listed as books; the 2014 chapter \"Reference Management\" (Fenner et al.) shares its title with the Scheliga & Bartling book, so check the attribution."
+    },
+    {
+      "id": "Q13",
+      "difficulty": 3,
+      "language": "de",
+      "categories": ["difficulty:3", "domain:metadata", "language:de", "scope:catalog"],
+      "expected_agents": ["metadata"],
+      "type": "catalog lookup by item type and year, German question (metadata agent)",
+      "question": "Welche Preprints aus dem Jahr 2025 enthält die Bibliothek?",
+      "documents": [],
+      "minimum_answer": "Zwei Preprints von 2025: \"HySemRAG\" (Godinez) und \"PyZoBot\" (Alshammari, Basalelah, Rukbah).",
+      "facts": [
+        {"id": "preprint_hysemrag", "text": "Preprint HySemRAG (Godinez, 2025)", "answer_patterns": ["HySemRAG"], "docs": [], "level": "verbatim"},
+        {"id": "preprint_pyzobot", "text": "Preprint PyZoBot (Alshammari et al., 2025)", "answer_patterns": ["PyZoBot"], "docs": [], "level": "verbatim"}
+      ],
+      "length": {"min_words": 8, "max_words": 220},
+      "min_sources": 1,
+      "min_distinct_cited": 0,
+      "judge_notes": "Exactly two items have item type preprint (both 2025). The answer must be in German; listing journal articles from 2025 (Barame et al., Sarkar, Pavlenko) as preprints is an error."
+    },
+    {
+      "id": "Q14",
+      "difficulty": 2,
+      "language": "en",
+      "categories": ["difficulty:2", "domain:routing", "language:en", "scope:single-doc"],
+      "expected_agents": ["rag"],
+      "type": "negative routing case: an author name in a content question must not trigger the metadata agent",
+      "question": "What did Fulbright and Evans find about the share of available full texts that EndNote and Zotero each retrieved?",
+      "documents": ["fulbright2024"],
+      "minimum_answer": "EndNote retrieved 47% and Zotero 52% of the available full texts.",
+      "facts": [
+        {"id": "endnote_47", "text": "EndNote retrieved 47% of available full texts", "answer_patterns": ["47\\s?%"], "docs": ["fulbright2024"], "level": "verbatim"},
+        {"id": "zotero_52", "text": "Zotero retrieved 52% of available full texts", "answer_patterns": ["52\\s?%"], "docs": ["fulbright2024"], "level": "verbatim"}
+      ],
+      "length": {"min_words": 15, "max_words": 160},
+      "min_sources": 1,
+      "min_distinct_cited": 0,
+      "judge_notes": "The question names authors, but it asks WHAT the study found, so it needs document content, not a catalog listing. 47% belongs to EndNote and 52% to Zotero."
+    },
+    {
+      "id": "Q15",
+      "difficulty": 3,
+      "language": "en",
+      "categories": ["difficulty:3", "domain:mentions", "language:en", "scope:catalog"],
+      "expected_agents": ["mentions"],
+      "type": "citation lookup (mentions agent), scored on routing only",
+      "question": "Which papers in the library cite or discuss Li, Thelwall and Giustini (2012) on validating online reference managers?",
+      "documents": [],
+      "minimum_answer": "Routing to the mentions agent with citation target Li (2012). The backend answers needs_client_evidence; the evidence comes from the Zotero client.",
+      "facts": [
+      ],
+      "scoring": "routing",
+      "expected_citation_targets": ["li"],
+      "length": {"min_words": 0, "max_words": 0},
+      "min_sources": 1,
+      "min_distinct_cited": 0,
+      "judge_notes": "Routing only: the mentions agent needs the Zotero client's full-text index. Pass = agents_to_use is exactly [\"mentions\"] and citation_targets contains the author \"li\"."
+    },
+    {
+      "id": "Q16",
+      "difficulty": 4,
+      "language": "de",
+      "categories": ["difficulty:4", "domain:mentions", "language:de", "scope:catalog"],
+      "expected_agents": ["mentions"],
+      "type": "citation lookup (mentions agent), German question, scored on routing only",
+      "question": "Welche Arbeiten in der Bibliothek erwähnen Lorenzetti und Ghali (2013) über Literaturverwaltungsprogramme für systematische Übersichtsarbeiten?",
+      "documents": [],
+      "minimum_answer": "Routing zum mentions-Agenten mit dem Zitationsziel Lorenzetti (2013). Das Backend antwortet needs_client_evidence; die Belege liefert der Zotero-Client.",
+      "facts": [
+      ],
+      "scoring": "routing",
+      "expected_citation_targets": ["lorenzetti"],
+      "length": {"min_words": 0, "max_words": 0},
+      "min_sources": 1,
+      "min_distinct_cited": 0,
+      "judge_notes": "Routing only. Pass = agents_to_use is exactly [\"mentions\"] and citation_targets contains the author \"lorenzetti\". Lorenzetti & Ghali is the cited work, not the author filter: a metadata route (authors=lorenzetti) is the classic confusion."
     }
   ]
 }

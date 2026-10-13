@@ -4,6 +4,22 @@ Scores from different gold versions are not comparable. Bump `version` in
 `questions.json` for any change to a question, a fact, a pattern, a weight or a
 word band, and record it here.
 
+## v3 - 2026-10-13
+
+- Added `categories` (`difficulty:1-5`, `domain:`, `language:`, `scope:`) to every
+  question and `expected_agents` (scored as the new `routing` criterion). The
+  `difficulty` field is now on a 1-5 scale (was 1-10, one question per step);
+  Q01-Q10 keep their text and facts: Q01 1, Q02 1, Q03 2, Q04 2, Q05 3, Q06 3,
+  Q07 3, Q08 4, Q09 5, Q10 4. The separate `tier` field is gone: reports derive
+  easy/medium/hard from `difficulty` (1-2 easy, 3 medium, 4-5 hard), which moves Q04
+  from medium to easy. All carry `expected_agents: ["rag"]`.
+- Added Q11-Q13 (`domain:metadata`, catalog questions for the metadata agent: items by
+  an author, books, German preprints of 2025), Q14 (`domain:routing`, an author name
+  in a content question must stay on the rag agent) and Q15-Q16 (`domain:mentions`,
+  scored on routing only with `expected_citation_targets`). Facts for Q11-Q13 come
+  from the library catalog in `corpus.md`, restricted to items with an indexed PDF (the metadata agent
+  lists the vector store's items only; Q12 therefore expects the 2 books with a PDF, not all 5); Q14 reuses Q01's verified facts.
+
 ## v2 - 2026-10-11
 
 - Investigated #83 (Q04's `neither` fact looked like it might contradict its

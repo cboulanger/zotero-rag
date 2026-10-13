@@ -9,7 +9,7 @@ Layout of the repo (default ``cmboulanger/zotero-rag-gold``, override with
   snapshots/<embedding-model>/latest.jsonl.gz  index snapshot (bin/library_snapshot.py)
   snapshots/<embedding-model>/latest.json      its provenance (extractor, commit, counts)
   reports/index.json                           one summary entry per published run
-  reports/<run>/{report.md,report.json,meta.json,results.jsonl,judgments/,raw/}   the archive: every run, kept
+  reports/<run>/{report.md,report.json,meta.json,results.jsonl,gold-questions.md,judgments/,raw/}   the archive: every run, kept
   reports/latest/                              copy of the newest run (HF has no symlinks), replaced in the same commit
 
 Why a snapshot rather than rebuilding: the index depends on the extractor
@@ -25,7 +25,7 @@ Commands (``python`` is enough for ``card``/``status``; the rest needs
   push-sources [DIR]        upload DIR (default .local/rag_eval_sources) to sources/
   pull-index [--model M]    download the snapshot for embedding model M (default: the running backend's)
   push-index FILE           upload a snapshot file as the model's ``latest`` (+ provenance)
-  push-report RUN_DIR       upload a report (``--with-raw`` adds raw/ traces) and refresh the card;
+  push-report RUN_DIR       upload a report plus a Markdown rendering of the gold questions (``--with-raw`` adds raw/ traces) and refresh the card;
                             ``--no-latest`` archives the run only, leaving ``reports/latest/`` (the comparison
                             baseline) and the card's "latest run" on the previous run
   pull-report NAME          download reports/NAME into data/logs/rag_eval/NAME (usable as --baseline)
@@ -57,6 +57,7 @@ LOCAL_ROOT = PROJECT_ROOT / ".local" / "rag_eval_hf"
 SOURCES_DIR = PROJECT_ROOT / ".local" / "rag_eval_sources"
 RUNS_DIR = PROJECT_ROOT / "data" / "logs" / "rag_eval"
 REPORT_FILES = ("report.md", "report.json", "meta.json", "results.jsonl")
+GOLD_MARKDOWN = "gold-questions.md"
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -175,6 +176,67 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
                              f"{_fmt(s.get('recall_non_en'))} | {_fmt(s.get('judge_overall'))} | "
                              f"{s.get('lost_in_retrieval')} | {s.get('lost_in_generation')} |")
         lines.append("")
+    return "\n".join(lines)
+
+
+DOMAIN_TITLES = {
+    "facts": "Facts: answers found in the document text",
+    "routing": "Routing: the router must pick the right agent",
+    "metadata": "Metadata: answered from the library catalog",
+    "mentions": "Mentions: who cites or discusses a work",
+}
+
+
+def _categories(question: dict, kind: str) -> list[str]:
+    return [c.partition(":")[2] for c in question.get("categories", []) if c.startswith(kind + ":")]
+
+
+def render_gold_markdown(gold: dict) -> str:
+    """Markdown rendering of the gold questions, grouped by ``domain:`` category and sorted by difficulty.
+
+    Other category types (difficulty, language, scope) appear in an index at the top and next to each question.
+    """
+    lib = gold.get("library", {})
+    docs = gold.get("documents", {})
+    questions = gold.get("questions", [])
+    lines = [f"# Gold-standard questions (version {gold.get('version')})", "",
+             f"Library: [{lib.get('name')}]({lib.get('url')}) (`{lib.get('slug')}`). Created {gold.get('created')}. "
+             f"{len(questions)} questions.", "",
+             "Categories are `type:value` labels: `difficulty:1-5`, `domain:facts|routing|mentions|metadata`, "
+             "`language:xx`, `scope:single-doc|multi-doc|catalog`. Questions are grouped by domain and sorted by difficulty.",
+             "", "## Index by category", ""]
+    kinds = ("domain", "difficulty", "language", "scope")
+    for kind in kinds:
+        values = sorted({v for q in questions for v in _categories(q, kind)})
+        # Question headings are just the id, so the anchor is the lowercase id on GitHub and in most viewers.
+        lines.append(f"- **{kind}:** " + "; ".join(
+            f"`{kind}:{v}` " + ", ".join(f"[{q['id']}](#{q['id'].lower()})" for q in questions if v in _categories(q, kind))
+            for v in values))
+    lines.append("")
+    for domain in DOMAIN_TITLES:
+        group = sorted((q for q in questions if (_categories(q, "domain") or ["facts"])[0] == domain),
+                       key=lambda q: (q.get("difficulty", 0), q["id"]))
+        if not group:
+            continue
+        lines += [f"## {DOMAIN_TITLES[domain]}", ""]
+        for q in group:
+            lines += [f"### {q['id']}", "",
+                      "Categories: " + ", ".join(f"`{c}`" for c in q.get("categories", [])), "",
+                      f"**Question:** {q['question']}", "", f"**Type:** {q.get('type')}", ""]
+            if q.get("expected_agents"):
+                lines += ["**Expected agents:** " + ", ".join(f"`{a}`" for a in q["expected_agents"])
+                          + (" (scored on routing only)" if q.get("scoring") == "routing" else ""), ""]
+            lines += [f"**Minimum answer:** {q.get('minimum_answer')}", ""]
+            cited = [docs.get(d, {}).get("citation", d) for d in q.get("documents", [])]
+            if cited:
+                lines += ["**Documents:**", ""] + [f"- {c}" for c in cited] + [""]
+            if q.get("facts"):
+                lines += ["**Facts:**", ""]
+                lines += [f"- `{f['id']}` ({f.get('level')}): {f['text']}" for f in q["facts"]] + [""]
+            if q.get("inference"):
+                lines += [f"**Inference chain:** {q['inference']}", ""]
+            if q.get("judge_notes"):
+                lines += [f"**Judge notes:** {q['judge_notes']}", ""]
     return "\n".join(lines)
 
 
@@ -339,6 +401,7 @@ def cmd_push_report(a, api) -> int:
             if (run / name).exists():
                 (stage / name).write_bytes((run / name).read_bytes())
         (stage / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        (stage / GOLD_MARKDOWN).write_text(render_gold_markdown(load_gold()), encoding="utf-8")
         for sub in ("judgments",) + (("raw",) if a.with_raw else ()):
             if (run / sub).is_dir():
                 for f in (run / sub).rglob("*"):
