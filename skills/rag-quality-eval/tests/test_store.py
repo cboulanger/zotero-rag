@@ -120,6 +120,11 @@ class StoreHelperTests(unittest.TestCase):
         self.assertIn("| m (3-dim) | 24 | kreuzberg |", card)
         self.assertIn("| `run1` | v2 | `abc1234` | remote-kisski / gemma | 10 | 0.71 | 0.80 | n/a | 3.50 |", card)
 
+    def test_card_lists_evaluations(self):
+        card = hf_store.render_card("o/r", None, [], [], [{"name": "study-1", "title": "Study one"}])
+        self.assertIn("| Study one | [`evaluations/study-1/`](evaluations/study-1/README.md) |", card)
+        self.assertNotIn("## Evaluations", hf_store.render_card("o/r", None, [], []))
+
     def test_card_without_content_still_renders(self):
         self.assertIn("# zotero-rag gold evaluation corpus", hf_store.render_card("o/r", None, [], []))
 
