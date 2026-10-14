@@ -59,6 +59,20 @@ class Settings(BaseSettings):
                     "together outscore a genuinely relevant chunk without any one of them "
                     "dominating — unlike the per-document cap/dedup, which can't reach this."
     )
+    retrieval_near_dup_threshold: float = Field(
+        default=0.0, ge=0.0, le=1.0,
+        description="Cosine-similarity threshold (0-1) above which a raw candidate chunk counts as a "
+                    "near-duplicate of a higher-scoring one and is dropped before dedup/cap/top_k "
+                    "(backend/services/near_dup_filter.py). 0 disables it (and skips fetching chunk "
+                    "vectors). Frees top_k slots that near-copies of one passage would otherwise take."
+    )
+    retrieval_query_decomposition: int = Field(
+        default=0, ge=0, le=6,
+        description="Maximum number of LLM-written sub-queries searched in addition to the question, "
+                    "fused by reciprocal rank (backend/services/query_decomposition.py). 0 disables it. "
+                    "Costs one extra LLM call per query; meant for multi-part and 'why' questions whose "
+                    "answer passages are worded far from the question."
+    )
     retrieval_score_proximity_epsilon: float = Field(
         default=0.0, ge=0.0, le=1.0,
         description="Fraction (0-1) of the candidate pool's own score range (max minus min "

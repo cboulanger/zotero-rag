@@ -20,6 +20,12 @@ from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.services.lexical_rerank import fuse_lexical
 from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
+from backend.services.near_dup_filter import drop_near_duplicates
+from backend.services.query_decomposition import (
+    build_decomposition_prompt,
+    fuse_ranked_lists,
+    parse_sub_queries,
+)
 from backend.db.vector_store import VectorStore
 from backend.config.settings import Settings
 
@@ -656,6 +662,50 @@ class RAGEngine:
         lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
         return isinstance(lambda_param, (int, float)) and lambda_param > 0
 
+    def _near_dup_threshold(self) -> float:
+        """settings.retrieval_near_dup_threshold when it enables near-duplicate
+        removal (see near_dup_filter), else 0."""
+        threshold = getattr(self.settings, "retrieval_near_dup_threshold", 0.0)
+        return threshold if isinstance(threshold, (int, float)) and threshold > 0 else 0.0
+
+    def _apply_near_dup_filter(self, results: list) -> list:
+        """Drop raw candidates near-identical (by embedding) to a higher-scoring
+        one when settings.retrieval_near_dup_threshold > 0; no-op otherwise."""
+        threshold = self._near_dup_threshold()
+        return drop_near_duplicates(results, threshold) if threshold else results
+
+    async def _search_with_sub_queries(
+        self, question: str, results: list, search_kwargs: dict
+    ) -> list:
+        """When settings.retrieval_query_decomposition > 0, also search with
+        LLM-written sub-queries and fuse all ranked lists (see
+        query_decomposition); otherwise return ``results`` unchanged.
+
+        The fused pool is usually larger than one search's candidate pool, so
+        the escalation retry (which only fires when a search hit its fetch
+        limit) does not run on top of it: the sub-queries already widen the pool.
+        A failed or empty decomposition falls back to the original results.
+        """
+        max_queries = getattr(self.settings, "retrieval_query_decomposition", 0)
+        if not isinstance(max_queries, int) or isinstance(max_queries, bool) or max_queries <= 0:
+            return results
+        try:
+            text = await self.llm_service.generate(
+                prompt=build_decomposition_prompt(question, max_queries), max_tokens=300, temperature=0.0
+            )
+        except Exception as exc:  # decomposition is an optional improvement, never fatal
+            logger.warning(f"Query decomposition failed ({type(exc).__name__}: {exc}); using the question only")
+            return results
+        sub_queries = parse_sub_queries(text, max_queries, question)
+        logger.info(f"Query decomposition: {sub_queries}")
+        if not sub_queries:
+            return results
+        lists = [results]
+        for sub_query in sub_queries:
+            vector = await self.embedding_service.embed_text(sub_query)
+            lists.append(await asyncio.to_thread(self.vector_store.search, query_vector=vector, **search_kwargs))
+        return fuse_ranked_lists(lists)
+
     def _apply_embedding_mmr(self, results: list) -> list:
         """Re-rank the raw candidate pool by embedding-vector MMR when
         settings.retrieval_embedding_mmr_lambda > 0; no-op otherwise. Requires
@@ -748,7 +798,7 @@ class RAGEngine:
             f"in libraries: {library_ids}"
         )
         active_filters = filters if filters and not filters.is_empty() else None
-        use_embedding_mmr = self._use_embedding_mmr()
+        fetch_vectors = self._use_embedding_mmr() or self._near_dup_threshold() > 0
         raw_results = await asyncio.to_thread(
             self.vector_store.search,
             query_vector=query_embedding,
@@ -756,8 +806,16 @@ class RAGEngine:
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
             filters=active_filters,
-            with_vectors=use_embedding_mmr,
+            with_vectors=fetch_vectors,
         )
+
+        raw_results = await self._search_with_sub_queries(question, raw_results, dict(
+            limit=candidate_pool_size,
+            score_threshold=min_score,
+            library_ids=library_ids if library_ids else None,
+            filters=active_filters,
+            with_vectors=fetch_vectors,
+        ))
 
         if not raw_results:
             logger.warning("No relevant chunks found for query")
@@ -770,7 +828,9 @@ class RAGEngine:
         raw_results = self._apply_lexical_fusion(question, raw_results)
         raw_results = self._apply_embedding_mmr(raw_results)
 
-        capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+        capped_pool = _dedup_and_cap_chunks_per_document(
+            self._apply_near_dup_filter(raw_results), max_chunks_per_document
+        )
         search_results = capped_pool[:top_k]
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
@@ -815,13 +875,15 @@ class RAGEngine:
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
                     filters=active_filters,
-                    with_vectors=use_embedding_mmr,
+                    with_vectors=fetch_vectors,
                 )
                 if len(escalated_raw_results) > len(raw_results):
                     raw_results = escalated_raw_results
                     raw_results = self._apply_lexical_fusion(question, raw_results)
                     raw_results = self._apply_embedding_mmr(raw_results)
-                    capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+                    capped_pool = _dedup_and_cap_chunks_per_document(
+                        self._apply_near_dup_filter(raw_results), max_chunks_per_document
+                    )
                     search_results = capped_pool[:escalated_top_k]
                     escalated = True
                     logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
@@ -899,12 +961,14 @@ class RAGEngine:
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
-                with_vectors=use_embedding_mmr,
+                with_vectors=fetch_vectors,
             )
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
-                    self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results)),
+                    self._apply_near_dup_filter(
+                        self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results))
+                    ),
                     max_chunks_per_document,
                 )
                 retry_search_results = retry_capped_pool[:escalated_top_k]
