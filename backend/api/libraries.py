@@ -135,6 +135,40 @@ def get_library_status(
     return _build_detail(library_id, metadata, reg)
 
 
+def _drop_indexed_failures(
+    vector_store: VectorStore, metadata: LibraryIndexMetadata
+) -> LibraryIndexMetadata:
+    """Remove attachments that have chunks now from the reported failure lists.
+
+    ``last_scan_failed_downloads`` / ``last_scan_skipped_too_large`` are written
+    at the end of a scan and only pruned when an upload lands, so they go stale:
+    a scan that started before a client uploaded a file (e.g. one the server
+    cannot fetch from WebDAV) writes its old list back over the pruned one. The
+    plugin adds every reported key it has not seen to its "N unavailable" count,
+    so a stale list inflates that count on each start until the Fix Unavailable
+    dialog re-checks the keys. Filtering here against the chunks themselves keeps
+    the report true no matter how the list went stale.
+    """
+    keys = {
+        f["attachment_key"]
+        for f in (*metadata.last_scan_failed_downloads, *metadata.last_scan_skipped_too_large)
+        if f.get("attachment_key")
+    }
+    if not keys:
+        return metadata
+    indexed = vector_store.get_indexed_attachment_keys(metadata.library_id, sorted(keys))
+    if not indexed:
+        return metadata
+    return metadata.model_copy(update={
+        "last_scan_failed_downloads": [
+            f for f in metadata.last_scan_failed_downloads if f.get("attachment_key") not in indexed
+        ],
+        "last_scan_skipped_too_large": [
+            f for f in metadata.last_scan_skipped_too_large if f.get("attachment_key") not in indexed
+        ],
+    })
+
+
 @router.get("/libraries/{library_id}/index-status", response_model=LibraryIndexMetadata)
 def get_library_index_status(
     library_id: str,
@@ -159,7 +193,7 @@ def get_library_index_status(
                 status_code=404,
                 detail=f"Library {library_id} has not been indexed yet",
             )
-        return metadata
+        return _drop_indexed_failures(vector_store, metadata)
     except HTTPException:
         raise
     except Exception as e:

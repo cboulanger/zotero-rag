@@ -2867,7 +2867,8 @@ class ZoteroRAGPlugin {
 	 * Unavailable tool's search/download strategies may recover it.
 	 * @param {string} backendLibraryId - Backend library ID
 	 * @param {string[]} newKeys - Attachment keys the server could not download
-	 * @returns {Promise<number>} Number of keys newly added (not already stored)
+	 * @returns {Promise<number>} Number of keys newly added (not already stored,
+	 *   and not already indexed according to the backend)
 	 */
 	async storeDownloadFailedItems(backendLibraryId, newKeys) {
 		if (!newKeys || newKeys.length === 0) return 0;
@@ -2881,8 +2882,17 @@ class ZoteroRAGPlugin {
 			const text = await IOUtils.readUTF8(filePath);
 			existing = JSON.parse(text);
 		} catch (_) {}
-		const added = newKeys.filter(k => !existing.includes(k));
-		const merged = [...new Set([...existing, ...newKeys])];
+		let added = [...new Set(newKeys.filter(k => !existing.includes(k)))];
+		// The server's list can be stale (a scan that started before a client
+		// uploaded the file writes its old list back), and the Fix Unavailable
+		// dialog prunes indexed keys from this store, so without this check those
+		// keys come back as "new" on every start and inflate the unavailable count.
+		if (added.length > 0) {
+			const { indexed } = await this._checkIndexedKeys(backendLibraryId, added);
+			added = added.filter(k => !indexed.has(k));
+		}
+		if (added.length === 0) return 0;
+		const merged = [...existing, ...added];
 		try {
 			// @ts-ignore
 			const dir = PathUtils.join(Zotero.DataDirectory.dir, 'zotero-rag');
@@ -3385,39 +3395,21 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Drop rows whose attachment the backend already has chunks for
-	 * (POST /api/indexed-tags/check), and prune those keys from the local
-	 * download-failed / skipped-server stores so they don't come back on the
-	 * next refresh. Those stores and the local fileExists() scan are per-computer,
-	 * so on a second PC they list attachments that were long since indexed from
-	 * the first one (or that the server's metadata still reports as a stale
-	 * download failure).
-	 *
-	 * Never throws. A batch the server cannot answer (HTTP error, timeout) is
-	 * retried once; if it still fails its rows are kept — showing a stale row beats
-	 * hiding a genuinely broken one — and marked `serverIndexState = 'unknown'` with
-	 * the failure in `serverIndexDetail`, so the dialog can say the check failed
-	 * instead of silently presenting unverified rows as unindexed. Rows the server
-	 * answered for and does not have are marked `serverIndexState = 'unindexed'`.
-	 * @param {number} libraryID - Zotero internal library ID
-	 * @param {Array<UnavailableAttachmentInfo>} rows
+	 * Ask the backend which of these attachments have chunks right now
+	 * (POST /api/indexed-tags/check), in batches. Never throws: a batch the
+	 * server cannot answer (HTTP error, timeout) is retried once, then its keys
+	 * are reported in `unverified` with the failure text.
+	 * @param {string} backendLibraryId - Backend library ID ('' when unknown: every key is unverified)
+	 * @param {string[]} keys - Attachment keys to check (deduplicated by the caller)
 	 * @param {(done: number, total: number) => void} [onProgress] - called after each batch
-	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 * @returns {Promise<{indexed: Set<string>, unverified: Map<string, string>}>}
 	 */
-	async _dropBackendIndexed(libraryID, rows, onProgress) {
-		if (rows.length === 0) return rows;
+	async _checkIndexedKeys(backendLibraryId, keys, onProgress) {
 		const BATCH = 200;
-		const keys = [...new Set(rows.map(r => r.attachmentItem.key))];
 		/** @type {Set<string>} */
 		const indexed = new Set();
 		/** @type {Map<string, string>} */
 		const unverified = new Map();
-		let backendLibraryId = '';
-		try {
-			backendLibraryId = this.getBackendLibraryId(libraryID);
-		} catch (e) {
-			this.log(`[ZoteroRAG] _dropBackendIndexed: no backend library id: ${e instanceof Error ? e.message : String(e)}`);
-		}
 		for (let i = 0; i < keys.length; i += BATCH) {
 			const batch = keys.slice(i, i + BATCH);
 			let failure = backendLibraryId ? '' : 'library not known to the backend';
@@ -3446,6 +3438,39 @@ class ZoteroRAGPlugin {
 			}
 			if (onProgress) onProgress(Math.min(i + BATCH, keys.length), keys.length);
 		}
+		return { indexed, unverified };
+	}
+
+	/**
+	 * Drop rows whose attachment the backend already has chunks for
+	 * (POST /api/indexed-tags/check), and prune those keys from the local
+	 * download-failed / skipped-server stores so they don't come back on the
+	 * next refresh. Those stores and the local fileExists() scan are per-computer,
+	 * so on a second PC they list attachments that were long since indexed from
+	 * the first one (or that the server's metadata still reports as a stale
+	 * download failure).
+	 *
+	 * Never throws. A batch the server cannot answer (HTTP error, timeout) is
+	 * retried once; if it still fails its rows are kept — showing a stale row beats
+	 * hiding a genuinely broken one — and marked `serverIndexState = 'unknown'` with
+	 * the failure in `serverIndexDetail`, so the dialog can say the check failed
+	 * instead of silently presenting unverified rows as unindexed. Rows the server
+	 * answered for and does not have are marked `serverIndexState = 'unindexed'`.
+	 * @param {number} libraryID - Zotero internal library ID
+	 * @param {Array<UnavailableAttachmentInfo>} rows
+	 * @param {(done: number, total: number) => void} [onProgress] - called after each batch
+	 * @returns {Promise<Array<UnavailableAttachmentInfo>>}
+	 */
+	async _dropBackendIndexed(libraryID, rows, onProgress) {
+		if (rows.length === 0) return rows;
+		const keys = [...new Set(rows.map(r => r.attachmentItem.key))];
+		let backendLibraryId = '';
+		try {
+			backendLibraryId = this.getBackendLibraryId(libraryID);
+		} catch (e) {
+			this.log(`[ZoteroRAG] _dropBackendIndexed: no backend library id: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		const { indexed, unverified } = await this._checkIndexedKeys(backendLibraryId, keys, onProgress);
 		if (indexed.size > 0) {
 			const indexedKeys = [...indexed];
 			await this.removeDownloadFailedItems(backendLibraryId, indexedKeys);
