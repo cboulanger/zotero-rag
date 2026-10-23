@@ -1,3 +1,15 @@
+# [1.62.0](https://github.com/cboulanger/zotero-rag/compare/v1.61.0...v1.62.0) (2026-10-23)
+
+
+### Bug Fixes
+
+* stop stale download failures inflating the unavailable count at startup ([03d438a](https://github.com/cboulanger/zotero-rag/commit/03d438a8935e585c57b5047f7e42e8b11a0d2fba))
+
+
+### Features
+
+* **rag-eval:** list evaluations/ studies on the HF dataset card ([#100](https://github.com/cboulanger/zotero-rag/issues/100)) ([aa3f320](https://github.com/cboulanger/zotero-rag/commit/aa3f3208316ec8314cf16f468ab2e83797d3a2b7))
+
 # [1.61.0](https://github.com/cboulanger/zotero-rag/compare/v1.60.0...v1.61.0) (2026-10-13)
 
 
