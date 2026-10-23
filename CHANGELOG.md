@@ -1,3 +1,247 @@
+# [1.61.0](https://github.com/cboulanger/zotero-rag/compare/v1.60.0...v1.61.0) (2026-10-13)
+
+
+### Bug Fixes
+
+* accept current backend ProcessingStatus values in gold_env.py index check ([29f1f9a](https://github.com/cboulanger/zotero-rag/commit/29f1f9a8f2cb6658d2d2ccf09edf513ffdff5a40))
+* cap chunks-per-document before the top_k cutoff, not just after ([7092446](https://github.com/cboulanger/zotero-rag/commit/7092446f55d73e2352e02c8ba0884e6038468eb7)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87) [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+* dedup near-identical chunk text across different library items, not just within one ([dee8114](https://github.com/cboulanger/zotero-rag/commit/dee8114ce4c60475fd8ae847bd2c3f080f2ae812)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+* detect and retry leaked chain-of-thought in generated answers ([2cb22f3](https://github.com/cboulanger/zotero-rag/commit/2cb22f3f3300e5570ef7b9f2fb23eb2d407c0067)), closes [#81](https://github.com/cboulanger/zotero-rag/issues/81)
+* detect English-language fallback, harden insufficient-context marker ([82b85c1](https://github.com/cboulanger/zotero-rag/commit/82b85c1c496b669a3befd60774f9fd89c35bbf45)), closes [#82](https://github.com/cboulanger/zotero-rag/issues/82)
+* don't flag deliberately-deduped duplicate attachments as missing ([f742890](https://github.com/cboulanger/zotero-rag/commit/f742890fdb4da191b266473f667ddc8e636f83f6))
+* don't skip Qdrant sidecar management just because QDRANT_URL is set ([d2dccf1](https://github.com/cboulanger/zotero-rag/commit/d2dccf1569c92f712c7306ef054037f859b67da6)), closes [#88](https://github.com/cboulanger/zotero-rag/issues/88)
+* handle remote LLM rate limits with backoff, mirroring embeddings ([750ea48](https://github.com/cboulanger/zotero-rag/commit/750ea4803039d3169d205c33d4325f54be7dae71))
+* rag-quality-eval preflight now checks the active preset's credentials too ([dca287d](https://github.com/cboulanger/zotero-rag/commit/dca287d99ad825f4ba3f0733d0ac95cd9fbee1e2))
+* test_kisski_api.py reads the key from the encrypted key store only ([8a13bd6](https://github.com/cboulanger/zotero-rag/commit/8a13bd67a78492c0f96e88eacbdbc021b5ffe760)), closes [#78](https://github.com/cboulanger/zotero-rag/issues/78)
+* verify Q04 gold fact against source, harden its verification ([b85282c](https://github.com/cboulanger/zotero-rag/commit/b85282c7d40954a42f1de0b285395c852bbdf103)), closes [#83](https://github.com/cboulanger/zotero-rag/issues/83) [#80](https://github.com/cboulanger/zotero-rag/issues/80) [#83](https://github.com/cboulanger/zotero-rag/issues/83)
+
+
+### Features
+
+* add a generic Docling extractor and the kisski-docling preset ([#97](https://github.com/cboulanger/zotero-rag/issues/97)) ([42f7ccc](https://github.com/cboulanger/zotero-rag/commit/42f7ccc0a2a8a4a5ae63d23609a1d4199b5ed9c4))
+* add preflight check that gold attachments are actually indexed ([8a6d6b8](https://github.com/cboulanger/zotero-rag/commit/8a6d6b8ffd6de40648effc0f677f3d45ce80fe1f)), closes [#80](https://github.com/cboulanger/zotero-rag/issues/80)
+* Add RAG quality evaluation skill with gold standard and scoring ([#71](https://github.com/cboulanger/zotero-rag/issues/71)) ([28c25a6](https://github.com/cboulanger/zotero-rag/commit/28c25a601ca8136865ad74d20ab6ecb7af2a5d3a)), closes [#73](https://github.com/cboulanger/zotero-rag/issues/73) [-#76](https://github.com/-/issues/76)
+* add rag-key as a uv console-script alias, pilot for more ([419d9bc](https://github.com/cboulanger/zotero-rag/commit/419d9bce951b7fd16aec521ea2116952054670aa))
+* add score-proximity retrieval escalation; prototype embedding MMR reranking ([#89](https://github.com/cboulanger/zotero-rag/issues/89)) ([ec3363b](https://github.com/cboulanger/zotero-rag/commit/ec3363bd9e753f76a2000fd04a49fa1b6679329c)), closes [#90](https://github.com/cboulanger/zotero-rag/issues/90)
+* add temporary script to find/fix legacy Snapshot chunks ([#80](https://github.com/cboulanger/zotero-rag/issues/80)/[#87](https://github.com/cboulanger/zotero-rag/issues/87)) ([6bac070](https://github.com/cboulanger/zotero-rag/commit/6bac070e20de3e77e1b696b0ad01d7c4b735dba4))
+* Google Gemini provider, Gemini presets and glob filters for live model lists ([#85](https://github.com/cboulanger/zotero-rag/issues/85)) ([22b1543](https://github.com/cboulanger/zotero-rag/commit/22b154314ccfd8c69e2d9de11ee8076ca14b5726))
+* interactive credential setup script, wired into rag-quality-eval preflight ([bfb1e9e](https://github.com/cboulanger/zotero-rag/commit/bfb1e9e43b230edcde331fc1e3a46469e799c757))
+* **plugin:** add visibleIndices filename-filter matching to fix-unavailable dialog ([144de6d](https://github.com/cboulanger/zotero-rag/commit/144de6d45a5107407082f8cfd62497b7adef4f7e))
+* **plugin:** glob filter over all columns in Fix Unavailable dialog ([d8f2182](https://github.com/cboulanger/zotero-rag/commit/d8f21820333bf9feb7946279f6af90522221a372))
+* use MMR-style diversity selection for the per-document chunk cap ([ee8dc3e](https://github.com/cboulanger/zotero-rag/commit/ee8dc3efd57b74788400c6bd98576bde2d9f264e)), closes [#87](https://github.com/cboulanger/zotero-rag/issues/87)
+
+# [1.60.0](https://github.com/cboulanger/zotero-rag/compare/v1.59.0...v1.60.0) (2026-10-10)
+
+
+### Bug Fixes
+
+* **scripts:** persist embedding model across rotated log file boundaries ([054d45d](https://github.com/cboulanger/zotero-rag/commit/054d45da5e9934abcfe0ef17c9c2e0acdab58b6c))
+
+
+### Features
+
+* credential scopes, keys out of the environment, default preset and per-user preset choice ([#74](https://github.com/cboulanger/zotero-rag/issues/74)) ([464206f](https://github.com/cboulanger/zotero-rag/commit/464206f00fd0f73bad3db823b16c903408dfcf40))
+* Hugging Face provider, pause/resume and endpoint readiness ([#76](https://github.com/cboulanger/zotero-rag/issues/76)) ([9ff0be1](https://github.com/cboulanger/zotero-rag/commit/9ff0be19ea42089f6edee5a0be2f1dbe5c1e50d7))
+* **indexing:** guard Kreuzberg against pathological scans and quarantine repeatedly failing attachments ([8b35032](https://github.com/cboulanger/zotero-rag/commit/8b350327f34cc821f243dafd6de491479e2e6153))
+* provider abstraction layer with per-side providers, provisioning and usage meters ([#73](https://github.com/cboulanger/zotero-rag/issues/73)) ([3e03308](https://github.com/cboulanger/zotero-rag/commit/3e03308d084b222e2fa37dff861225fea39a6c21))
+* provider descriptors API and per-side model sections in the plugin ([#75](https://github.com/cboulanger/zotero-rag/issues/75)) ([aefc6e6](https://github.com/cboulanger/zotero-rag/commit/aefc6e693801ae8fad3fb7e51ab3a596690e63fb))
+
+# [1.59.0](https://github.com/cboulanger/zotero-rag/compare/v1.58.0...v1.59.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **extraction:** retry kreuzberg RemoteProtocolError like a connect failure ([b5121c5](https://github.com/cboulanger/zotero-rag/commit/b5121c53520595ea2577710a5cace4599c217941))
+* **provisioning:** move provisioning script into bin/, drop uv dependency ([d51c9eb](https://github.com/cboulanger/zotero-rag/commit/d51c9eb2c0959b16028ef2aa0606014534c8b31f))
+
+
+### Features
+
+* Add log rotation on startup and daily for server and cron indexer logs ([#67](https://github.com/cboulanger/zotero-rag/issues/67)) ([352027b](https://github.com/cboulanger/zotero-rag/commit/352027b57163c57edb7da13d78d7378b1c2548fc)), closes [#59](https://github.com/cboulanger/zotero-rag/issues/59)
+* **scripts:** add embedding throughput analyzer with log-rotation support ([b9ddaad](https://github.com/cboulanger/zotero-rag/commit/b9ddaade1f502ca62a11075338054337a2046921)), closes [#67](https://github.com/cboulanger/zotero-rag/issues/67)
+* **security:** Encrypt API keys at rest in admin_settings.json ([#66](https://github.com/cboulanger/zotero-rag/issues/66)) ([2b0f7a6](https://github.com/cboulanger/zotero-rag/commit/2b0f7a603945780c9aa1e366990fead15a6c987c)), closes [#65](https://github.com/cboulanger/zotero-rag/issues/65)
+
+# [1.58.0](https://github.com/cboulanger/zotero-rag/compare/v1.57.0...v1.58.0) (2026-10-09)
+
+
+### Bug Fixes
+
+* **backend:** abort indexing run on an unrecognized embedding API error ([44c8887](https://github.com/cboulanger/zotero-rag/commit/44c8887186120478798e7aa6febacc0e0d63976f))
+* **backend:** retry a downed kreuzberg sidecar for 10min before failing the run ([661fe3e](https://github.com/cboulanger/zotero-rag/commit/661fe3ecb254a25826ea5d0b93f4e99751a29427))
+* **backend:** truncate oversized embedding inputs by character, not word ([9a9c384](https://github.com/cboulanger/zotero-rag/commit/9a9c3845dc326e093ec0465d6c2875fe8b11a070))
+* **plugin:** don't flash the previous run's stale result on "Run now" ([9a42044](https://github.com/cboulanger/zotero-rag/commit/9a4204482fc296a226099dca421bb55372cc3843))
+
+
+### Features
+
+* Add rate limits, preset switching, and status dialog button to auto-index UI ([#61](https://github.com/cboulanger/zotero-rag/issues/61)) ([11b1061](https://github.com/cboulanger/zotero-rag/commit/11b10613d971259d25c79d21ea55e8d5fe1493e4))
+* add runpod preset and endpoint provisioning script ([#62](https://github.com/cboulanger/zotero-rag/issues/62)) ([51f8d17](https://github.com/cboulanger/zotero-rag/commit/51f8d17b9ff10beeb93aa8fbec5be2d7096e8426)), closes [#63](https://github.com/cboulanger/zotero-rag/issues/63)
+* **indexed-tags:** Add indexed-status tags: real-time and refresh sync for attachments ([#60](https://github.com/cboulanger/zotero-rag/issues/60)) ([3503cf7](https://github.com/cboulanger/zotero-rag/commit/3503cf7b4dedeba3816ba5af3fa2b019e0d2a703))
+
+# [1.57.0](https://github.com/cboulanger/zotero-rag/compare/v1.56.0...v1.57.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend:** don't gate shared-key auto-index targets on a personal key's status ([6498168](https://github.com/cboulanger/zotero-rag/commit/6498168e436e2372aec4dfbb474e542ad4b99474))
+
+
+### Features
+
+* **config:** load hardware presets from editable JSON files, with platform filtering ([acd0bb8](https://github.com/cboulanger/zotero-rag/commit/acd0bb8bebfd7648cd7ee1eb8fc9afb59b884400))
+
+# [1.56.0](https://github.com/cboulanger/zotero-rag/compare/v1.55.1...v1.56.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend,plugin:** close duplicate-run race and show readable rate-limit message ([06af946](https://github.com/cboulanger/zotero-rag/commit/06af94656b6b186a407015558ec598ec9d17d5e3))
+* **plugin:** keep per-library Index button disabled until its run truly ends ([e27b5ee](https://github.com/cboulanger/zotero-rag/commit/e27b5ee5b471c4dbdeb4934d91660a51ecfb561d))
+
+
+### Features
+
+* dynamic remote preset config with runtime preset switching ([a2288d9](https://github.com/cboulanger/zotero-rag/commit/a2288d9256d4109debf2d40e5d82bb087b107a51))
+
+## [1.55.1](https://github.com/cboulanger/zotero-rag/compare/v1.55.0...v1.55.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **deploy:** stop Kreuzberg-restart fix from crash-looping the main service ([fdb7f94](https://github.com/cboulanger/zotero-rag/commit/fdb7f94d47b814fbc7bd4288a9368690381ad977))
+
+# [1.55.0](https://github.com/cboulanger/zotero-rag/compare/v1.54.0...v1.55.0) (2026-10-08)
+
+
+### Bug Fixes
+
+* **backend,plugin:** persist stopped-run state and distinguish abort from crash ([a2d1e92](https://github.com/cboulanger/zotero-rag/commit/a2d1e929a385fed9567a095c2692b7f15b21fe8b))
+* **backend:** index attachment_title to prevent purge-snapshots timeout ([21002ba](https://github.com/cboulanger/zotero-rag/commit/21002ba72882203d95f84e607d67aae14d4cdd6c))
+* **backend:** stop recycled PIDs from wedging autoindex status and crashing abort ([81632f1](https://github.com/cboulanger/zotero-rag/commit/81632f10c91d29062827d4244540af4ee93bf861))
+* **deploy:** restart Kreuzberg sidecar on main container restart ([1edf366](https://github.com/cboulanger/zotero-rag/commit/1edf3666fe42e9d633f9d15f51f90b9a6552e2a9))
+* **plugin:** disable per-library Skip button when no run is active ([ee99b84](https://github.com/cboulanger/zotero-rag/commit/ee99b84f37382df17f2d2fb852fdd384e8774ce9))
+
+
+### Features
+
+* **backend,plugin:** admin system health panel; move run-banner to bottom ([fb8a03a](https://github.com/cboulanger/zotero-rag/commit/fb8a03a2932632454d480dfbabb94ddb62399bcf))
+* **backend,plugin:** per-library run-now and align status badge layout ([8ba17b8](https://github.com/cboulanger/zotero-rag/commit/8ba17b8dbf7eb5ebbf49e1627287b2102823b84f))
+* **plugin,backend:** reorganize status dialog sections; next-run countdown ([13efbbd](https://github.com/cboulanger/zotero-rag/commit/13efbbdb96ca15d050f0a1e8c8b74a81891d74e5))
+
+# [1.54.0](https://github.com/cboulanger/zotero-rag/compare/v1.53.0...v1.54.0) (2026-10-08)
+
+
+### Features
+
+* **plugin:** show progress while checking queued status in Fix Unavailable ([f3bfe97](https://github.com/cboulanger/zotero-rag/commit/f3bfe9750021050226f3761c7b37d179129408be))
+
+# [1.53.0](https://github.com/cboulanger/zotero-rag/compare/v1.52.2...v1.53.0) (2026-10-07)
+
+
+### Bug Fixes
+
+* **backend:** report progress while draining pending uploads ([12e2264](https://github.com/cboulanger/zotero-rag/commit/12e2264ed301066cfd27a5a3d5356057f26e227a))
+* **backend:** stop draining pending uploads once the embedding quota is exhausted ([2a4e44f](https://github.com/cboulanger/zotero-rag/commit/2a4e44febfd534a2175bdafceb555c2ecaffe0ca))
+* **plugin:** check "Include missing attachments" by default in Fix Unavailable ([20b8280](https://github.com/cboulanger/zotero-rag/commit/20b82800d085a05adf3a89d58af29ca3f159b13a))
+* **plugin:** exclude bare web-link attachments from Fix Unavailable list ([790573f](https://github.com/cboulanger/zotero-rag/commit/790573f2dc5a3dd5d291ec22ca00fdb37b2dc4b4))
+
+
+### Features
+
+* **backend:** refuse attachments over a hard size cap instead of OOM-killing kreuzberg ([2a43323](https://github.com/cboulanger/zotero-rag/commit/2a43323f082b3ba794930e22be2ee4b7e236ba22))
+* **migration:** add patient retry tier for long connectivity outages ([4c2d576](https://github.com/cboulanger/zotero-rag/commit/4c2d576ae14d15c4e0cd3bdfebe4db409c42f342))
+* **plugin:** add "Copy Row Data Only" option to Fix Unavailable dialog ([8e62da5](https://github.com/cboulanger/zotero-rag/commit/8e62da5531050cf52c7dd0616ac9bda00ad1e3f9))
+* **plugin:** surface server-refused "too large" attachments in Fix Unavailable ([51054b3](https://github.com/cboulanger/zotero-rag/commit/51054b36e686fa2b1ae34592f30067d8fee6df10))
+
+## [1.52.2](https://github.com/cboulanger/zotero-rag/compare/v1.52.1...v1.52.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** use live item/attachment version when draining pending uploads ([e3f7f34](https://github.com/cboulanger/zotero-rag/commit/e3f7f345c7798793af2b4eced54a99f0492b0fc1))
+
+## [1.52.1](https://github.com/cboulanger/zotero-rag/compare/v1.52.0...v1.52.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** size indexing chunks for the active embedding model, not generic defaults ([64545bb](https://github.com/cboulanger/zotero-rag/commit/64545bbd567a9843f9a9c77dabb93cac519209fa))
+* **backend:** use the live item version, not the stale deferral-time one, on process-now ([cea9713](https://github.com/cboulanger/zotero-rag/commit/cea971387f5b6abbbf7f876df96eeb9ad5f683b3))
+* **plugin:** fix dropdown button cropping, add progress meter and cancel/resume to Fix Unavailable ([5c6bb5d](https://github.com/cboulanger/zotero-rag/commit/5c6bb5d8bcbc291418cfa93597e7bbdc96f25ad3))
+
+# [1.52.0](https://github.com/cboulanger/zotero-rag/compare/v1.51.0...v1.52.0) (2026-10-06)
+
+
+### Bug Fixes
+
+* **backend:** guard compute_queue_eta against a naive cron_status.json timestamp ([d950a5b](https://github.com/cboulanger/zotero-rag/commit/d950a5b818d0cebe99a4365e0481f9159dd80641))
+* **backend:** isolate malformed pending-upload cache entries in _drain_pending_uploads ([12416b8](https://github.com/cboulanger/zotero-rag/commit/12416b8002b6d054a3beaa2c3d3c0cf8274e4de8))
+* **backend:** run pending_upload_cache file I/O off the event loop ([f2dff53](https://github.com/cboulanger/zotero-rag/commit/f2dff53305c9fa67bd49c31ac5b7dafee06b835e))
+* **embeddings:** raise instead of returning None when truncation is exhausted ([ba6471e](https://github.com/cboulanger/zotero-rag/commit/ba6471e1be3598bb70644d85e2923894dab6ac74))
+* **migration:** retry all httpx transport errors, not just connect/timeout ([15b0352](https://github.com/cboulanger/zotero-rag/commit/15b0352acfe9ce14d904517b90cabbcebafecf7e))
+* **plugin:** correctly flag link-only attachments in download-failed backlog ([5cb3eaa](https://github.com/cboulanger/zotero-rag/commit/5cb3eaac98c9ee3031df22b55dc47b0da6e68252))
+* **plugin:** fix debug-report gap for already-queued rows in Fix Unavailable dialog ([d74a3ed](https://github.com/cboulanger/zotero-rag/commit/d74a3ed6bc021ff87ef1264ff326e4d3ac5f81ea))
+* **plugin:** make getQueuedStatusMap fail gracefully, add check_failed test ([08691f3](https://github.com/cboulanger/zotero-rag/commit/08691f3fcab1d7b8d47c87e877fbc1d22b1f7e6f))
+* **plugin:** read queueBlockReason instead of nonexistent result.reason ([0dff410](https://github.com/cboulanger/zotero-rag/commit/0dff410a1367d864f8adef4a51ae59a6d0742e72))
+* **plugin:** remove dead 404 branch in _processQueuedNow, add logging ([0d79aba](https://github.com/cboulanger/zotero-rag/commit/0d79aba3674722611383ce4f26da94ec3e3e3369))
+
+
+### Features
+
+* **backend:** add pending-upload cache storage primitives ([2f9b7b3](https://github.com/cboulanger/zotero-rag/commit/2f9b7b348cc583b72acdbef1167360a04e18e5ce))
+* **backend:** add POST /api/index/document/cache deferred-upload endpoint ([216f59a](https://github.com/cboulanger/zotero-rag/commit/216f59aac656e6a30b5af409ec45d433740522ec))
+* **backend:** add process-now endpoint to force-index a cached upload ([cc8e826](https://github.com/cboulanger/zotero-rag/commit/cc8e8265f69b1bd91c53c9f66e3169d665d53e40))
+* **backend:** compute deferred-indexing ETA and block reason ([e86e2b3](https://github.com/cboulanger/zotero-rag/commit/e86e2b39da7906f576ef9d09a7002c25fbdd79c9))
+* **backend:** drain each library's pending-upload cache during its autoindex run ([08a4fc0](https://github.com/cboulanger/zotero-rag/commit/08a4fc02cb578af66da0ea78f1c1244666f16d87))
+* **backend:** report queued/eta status from check-indexed for cached uploads ([5538e4d](https://github.com/cboulanger/zotero-rag/commit/5538e4d69f75b03470d170dbda982d9302596185))
+* **migration:** add --mode flag and interactive resume/clean prompt ([5bcb9a6](https://github.com/cboulanger/zotero-rag/commit/5bcb9a62941bbd597effb0f7002ed630e912f4ef))
+* **migration:** add resume-from-cursor state persistence module ([56fcc3b](https://github.com/cboulanger/zotero-rag/commit/56fcc3be1d20d44278d02ef02475ed1f957bd515))
+* **migration:** make run_migration mode/state-aware for resume support ([f34ce3e](https://github.com/cboulanger/zotero-rag/commit/f34ce3ead47c267c3420e701d41b1303499aba9c))
+* **plugin:** add defer mode to RemoteIndexer._uploadAttachment ([4ade264](https://github.com/cboulanger/zotero-rag/commit/4ade2644bf5b8fb007c42b5ed9bca59a78f29db2))
+* **plugin:** add getQueuedStatusMap for the Fix dialog's queued-row display ([74a3cbc](https://github.com/cboulanger/zotero-rag/commit/74a3cbc94fd7e4d1d6c37fafbc02347946cb3640))
+* **plugin:** add RemoteIndexer._processQueuedNow for forcing a cached upload ([c2f78d4](https://github.com/cboulanger/zotero-rag/commit/c2f78d448c543c85c3e4fe9fd2cfd7d07af1dfa1))
+* **plugin:** add split-button markup and queued-status styling to Fix Unavailable dialog ([b00c72f](https://github.com/cboulanger/zotero-rag/commit/b00c72f067eff6d261500eebbf991ad9d343f3bf))
+* **plugin:** make server-download-failed attachments opt-in, with concrete status reasons ([cd5aa7b](https://github.com/cboulanger/zotero-rag/commit/cd5aa7b327252e4c75ea35992978a397d9d59b8d))
+* **plugin:** thread defer mode through Fix Unavailable upload wrappers ([b4a9127](https://github.com/cboulanger/zotero-rag/commit/b4a91277b0ee00eb191af1b02d0c5a6ed8dd96af))
+* **plugin:** wire split-button and queued-row handling into Fix Unavailable dialog ([9fd631d](https://github.com/cboulanger/zotero-rag/commit/9fd631deb91ea9e4d9e4687f75f2dafba78cc17c))
+
+# [1.51.0](https://github.com/cboulanger/zotero-rag/compare/v1.50.0...v1.51.0) (2026-10-05)
+
+
+### Bug Fixes
+
+* **autoindex:** skip indexing runs when disk space is critically low ([f9569f8](https://github.com/cboulanger/zotero-rag/commit/f9569f83cb6babf01a9840bea29c5ba59d9579c7))
+* **ci:** call release.yml as a reusable workflow instead of via workflow_run ([7032a45](https://github.com/cboulanger/zotero-rag/commit/7032a45438ee32ad8e8a4459c4ded8fa4e19e8d3))
+* **ci:** override GITHUB_REF/GITHUB_REF_NAME for semantic-release's branch detection ([d067930](https://github.com/cboulanger/zotero-rag/commit/d067930ffdc026fc0485efa54986edf1388e5b39))
+* **ci:** pin release workflow checkouts to main, not the default branch ([5dcc37e](https://github.com/cboulanger/zotero-rag/commit/5dcc37e3f7d7eeb4877f7afb1f534de1a83ed072)), closes [#46](https://github.com/cboulanger/zotero-rag/issues/46)
+* **ci:** use a scoped admin PAT for semantic-release's push to protected main ([1f1c03a](https://github.com/cboulanger/zotero-rag/commit/1f1c03afd6030fc712905efa8ca00511855eec64))
+* **deploy:** prune dangling images before pulling new ones ([5b8183b](https://github.com/cboulanger/zotero-rag/commit/5b8183b697cae3e1c89d1ee1a4c6520408f4ae02))
+* **migration:** clean up migrate_library.py help text and error handling ([25b5db6](https://github.com/cboulanger/zotero-rag/commit/25b5db6bda82d5e91ea851f43f35a306f18c836e))
+* **migration:** reject malformed import payloads with 400 instead of 500 ([833c0be](https://github.com/cboulanger/zotero-rag/commit/833c0be77b469428b4719f45121aa3fc1fa91446))
+* **migration:** retry on transient 5xx responses and add transfer progress reporting ([a789650](https://github.com/cboulanger/zotero-rag/commit/a789650950206666c126a134015ad8a5f2ce9ed5))
+* **quality-review:** don't suppress pre-generation escalation for the flag ([fe86819](https://github.com/cboulanger/zotero-rag/commit/fe86819d895cbc63bd1d5106d8b0119e44ea0b5f))
+* **quality-review:** remove stale no-op caveat, pin the escalation-budget regression ([3ea3db4](https://github.com/cboulanger/zotero-rag/commit/3ea3db4d25fffc761e7821ca29241210c9f0f23b))
+* **quality-review:** replace hedge-phrase regex with explicit sentinel ([a5c213f](https://github.com/cboulanger/zotero-rag/commit/a5c213f6bcceb4030b39fbafd940568fb53afe5b))
+* **query:** surface the real Qdrant error instead of a generic message ([3306f31](https://github.com/cboulanger/zotero-rag/commit/3306f315ce2147d29501b49fd30d744cec49919b))
+* **rag-engine:** dedup identical-text chunks before per-document truncation ([a6ec447](https://github.com/cboulanger/zotero-rag/commit/a6ec44797fe88bb0226cc203e76626b608f37840))
+* **retrieval:** group diversity by item_key, not attachment_key ([81c10c4](https://github.com/cboulanger/zotero-rag/commit/81c10c4f06a38efe961a1af21f768c02557b7368))
+* **router:** drop author/title/citation filters not mentioned in the question ([80e6427](https://github.com/cboulanger/zotero-rag/commit/80e64271bef63d84d75b74429785845829835dde))
+* **router:** instruct the routing LLM not to infer authors from topic ([17b8929](https://github.com/cboulanger/zotero-rag/commit/17b8929d2d6f02af4169b0f8a1119da87cb6c35f))
+
+
+### Features
+
+* **autoindex:** reserve CPUs for RAG queries during indexing runs ([d8277b9](https://github.com/cboulanger/zotero-rag/commit/d8277b9832328fd254205ff2f3d6376e7c293c5d))
+* **migration:** add admin-gated /api/migration/* endpoints ([b3e7152](https://github.com/cboulanger/zotero-rag/commit/b3e715240382e721f4400a911064d600e4aad7ac))
+* **migration:** add bin/migrate_library.py CLI ([8c28ae2](https://github.com/cboulanger/zotero-rag/commit/8c28ae29cae3d479180cf6162bc228e47d851e14))
+* **ops:** add production health monitoring with ntfy.sh alerts ([0f6ead1](https://github.com/cboulanger/zotero-rag/commit/0f6ead11ab8bd6805858cdc66392a84d6767d574))
+* **quality-review:** add _thin_context_coverage detector ([29f9d2d](https://github.com/cboulanger/zotero-rag/commit/29f9d2dac01fb2bdb995ad810fd3b9a3a2f301ac))
+* **quality-review:** escalate retrieval once on thin-context answers ([0ec7a4c](https://github.com/cboulanger/zotero-rag/commit/0ec7a4ccf80ded3ed58bf7e0937f828033552499))
+* **quality-review:** thread enable_quality_self_review flag end-to-end ([8e4dbb5](https://github.com/cboulanger/zotero-rag/commit/8e4dbb5f92d9ed1dcee95a0b020f0e87f6e918ee))
+* **rag-engine:** instruct the model to answer in the question's language ([85eb4ad](https://github.com/cboulanger/zotero-rag/commit/85eb4ad9dc956d3dacef92402f8bd5a89d0204c0))
+* **router:** add dropped_filters field to QueryPlan ([2b84fbb](https://github.com/cboulanger/zotero-rag/commit/2b84fbb23976c2f3a925d0d817fce10ba810e6ec))
+* **vector-store:** add export/import/count methods for cross-instance library migration ([ff20b2a](https://github.com/cboulanger/zotero-rag/commit/ff20b2a3ade90cee8de805b01043137e9913a8d0))
+
 # [1.50.0](https://github.com/cboulanger/zotero-rag/compare/v1.49.2...v1.50.0) (2026-10-03)
 
 
