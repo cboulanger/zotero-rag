@@ -72,7 +72,9 @@ function makeStubs(attachmentsByKey = {}) {
 function loadPlugin(zoteroStub, ioUtilsStub, pathUtilsStub, extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	// IndexedTags (indexed-tags.js) is a separate plugin-lifetime script; stub its lifecycle by default.
-	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, IndexedTags: { init() {}, shutdown() {} }, ...extra };
+	// Default fetch: the backend reports no attachment as indexed (POST /api/indexed-tags/check).
+	const fetch = async () => ({ ok: true, status: 200, json: async () => ({ indexed: [] }) });
+	const context = { Zotero: zoteroStub, IOUtils: ioUtilsStub, PathUtils: pathUtilsStub, console, fetch, IndexedTags: { init() {}, shutdown() {} }, ...extra };
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'zotero-rag.js' });
 	// `class ZoteroRAGPlugin` is a top-level class declaration, not a `var` —
@@ -93,6 +95,30 @@ test('storeDownloadFailedItems merges keys and returns the count of new ones', a
 
 	const secondAdded = await plugin.storeDownloadFailedItems('u1', ['ATT2', 'ATT3']);
 	assert.strictEqual(secondAdded, 1); // ATT2 already stored, only ATT3 is new
+});
+
+test('storeDownloadFailedItems does not add or count keys the backend has already indexed', async () => {
+	const { zotero, ioUtils, pathUtils, files } = makeStubs();
+	/** @type {string[][]} */
+	const checked = [];
+	const fetch = async (_url, init) => {
+		const body = JSON.parse(init.body);
+		checked.push(body.attachment_keys);
+		return { ok: true, status: 200, json: async () => ({ indexed: body.attachment_keys.filter(k => k !== 'ATT3') }) };
+	};
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils, { fetch });
+
+	// A stale server list re-reporting attachments that were uploaded and indexed
+	// since must not inflate the unavailable count on every start.
+	const added = await plugin.storeDownloadFailedItems('u1', ['ATT1', 'ATT2', 'ATT3']);
+	assert.strictEqual(added, 1);
+	assert.deepStrictEqual(checked, [['ATT1', 'ATT2', 'ATT3']]);
+	assert.deepStrictEqual(JSON.parse(files['/fake/zotero/data/zotero-rag/download-failed-1.json']), ['ATT3']);
+
+	// Keys already in the store are not re-checked.
+	checked.length = 0;
+	assert.strictEqual(await plugin.storeDownloadFailedItems('u1', ['ATT3']), 0);
+	assert.deepStrictEqual(checked, []);
 });
 
 test('removeDownloadFailedItems prunes fixed keys so they stop reappearing', async () => {

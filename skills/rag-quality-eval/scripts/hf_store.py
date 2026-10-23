@@ -156,8 +156,12 @@ def _fmt(v: Any) -> str:
     return "n/a" if v is None else f"{v:.2f}" if isinstance(v, float) else str(v)
 
 
-def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: list[dict]) -> str:
-    """Dataset card (README.md) built from the repo's own contents."""
+def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: list[dict],
+                evaluations: Optional[list[dict]] = None) -> str:
+    """Dataset card (README.md) built from the repo's own contents.
+
+    ``evaluations`` lists one-off studies under ``evaluations/<name>/`` as ``{"name", "title"}``.
+    """
     lines = [
         "---", "license: cc-by-4.0", "pretty_name: zotero-rag gold evaluation corpus",
         "tags: [rag, zotero, evaluation, retrieval, open-access]", "language: [en, de, fr, es]",
@@ -172,7 +176,8 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
         "| `snapshots/<embedding-model>/` | `latest.jsonl.gz`: chunks, vectors and index metadata exported with "
         "`bin/library_snapshot.py`; `latest.json`: how it was built (Kreuzberg extractor; another extractor's "
         "snapshot is in a subfolder named after it, e.g. `docling/`) |",
-        "| `reports/` | one folder per published eval run, plus `index.json` |", "",
+        "| `reports/` | one folder per published eval run, plus `index.json` |",
+        "| `evaluations/` | one-off studies (data, scripts and a README with the findings), one folder each |", "",
         "## License and attribution", "",
         "The PDFs are open-access publications licensed CC BY 4.0; copyright remains with their authors. "
         "`sources/manifest.json` lists title, authors, year and the Zotero item of each. The snapshot contains the "
@@ -191,6 +196,11 @@ def render_card(repo: str, manifest: Optional[dict], provs: list[dict], index: l
         for p in provs:
             lines.append(f"| {p['embedding_model']} ({p['embedding_dim']}-dim) | {p['counts'].get('chunks')} | "
                          f"{p['extractor']} | {p['preset']} | `{p['git_commit']}` | {(p.get('built_at') or '')[:10]} |")
+        lines.append("")
+    if evaluations:
+        lines += ["## Evaluations", "", "| Study | Folder |", "|---|---|"]
+        for e in sorted(evaluations, key=lambda e: e["name"], reverse=True):
+            lines.append(f"| {e['title']} | [`evaluations/{e['name']}/`](evaluations/{e['name']}/README.md) |")
         lines.append("")
     if index:
         newest = latest_run(index) or max(index, key=lambda e: e["run"])["run"]
@@ -326,12 +336,25 @@ def _list(api, repo: str) -> list[str]:
         return []
 
 
+def _readme_title(api, repo: str, path: str) -> Optional[str]:
+    """First Markdown heading of a README in the repo, or None."""
+    try:
+        from huggingface_hub import hf_hub_download
+        text = Path(hf_hub_download(repo, path, repo_type="dataset", token=api.token,
+                                    local_dir=LOCAL_ROOT / "_cache")).read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return next((l.lstrip("#").strip() for l in text.splitlines() if l.startswith("# ")), None)
+
+
 def refresh_card(api, repo: str) -> None:
     files = _list(api, repo)
     manifest = _read_json(api, repo, "sources/manifest.json", None) if "sources/manifest.json" in files else None
     provs = [_read_json(api, repo, f, None) for f in files if f.startswith("snapshots/") and f.endswith("/latest.json")]
     index = _read_json(api, repo, "reports/index.json", []) if "reports/index.json" in files else []
-    card = render_card(repo, manifest, [p for p in provs if p], index)
+    evaluations = [{"name": f.split("/")[1], "title": _readme_title(api, repo, f) or f.split("/")[1]}
+                   for f in files if f.startswith("evaluations/") and f.count("/") == 2 and f.endswith("/README.md")]
+    card = render_card(repo, manifest, [p for p in provs if p], index, evaluations)
     api.upload_file(path_or_fileobj=card.encode(), path_in_repo="README.md", repo_id=repo, repo_type="dataset",
                     commit_message="Update dataset card")
 
