@@ -51,6 +51,34 @@ class TestLibraryAPIEndpoints(unittest.TestCase):
         self.assertEqual(data["indexing_mode"], "incremental")
         self.assertFalse(data["force_reindex"])
 
+    def test_get_index_status_drops_failures_that_are_indexed_now(self):
+        """A stale failure list must not report attachments that have chunks."""
+        mock_vs = MagicMock()
+        mock_vs.get_library_metadata.return_value = LibraryIndexMetadata(
+            library_id="1",
+            library_type="user",
+            library_name="Test Library",
+            last_scan_failed_downloads=[
+                {"item_key": "I1", "attachment_key": "A1"},
+                {"item_key": "I2", "attachment_key": "A2"},
+            ],
+            last_scan_skipped_too_large=[
+                {"item_key": "I3", "attachment_key": "A3", "detail": "too big"},
+            ],
+        )
+        mock_vs.get_indexed_attachment_keys.return_value = {"A1", "A3"}
+        self._override_vs(mock_vs)
+
+        response = self.client.get("/api/libraries/1/index-status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(
+            data["last_scan_failed_downloads"], [{"item_key": "I2", "attachment_key": "A2"}]
+        )
+        self.assertEqual(data["last_scan_skipped_too_large"], [])
+        mock_vs.get_indexed_attachment_keys.assert_called_once_with("1", ["A1", "A2", "A3"])
+
     def test_get_index_status_not_found(self):
         """Test getting index status for a library that hasn't been indexed."""
         mock_vs = MagicMock()
