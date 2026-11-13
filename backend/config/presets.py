@@ -108,6 +108,15 @@ class EmbeddingConfig(BaseModel):
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
     batch_size: int = Field(default=32, description="Batch size for embedding generation")
     cache_enabled: bool = Field(default=True, description="Enable content-hash based caching")
+    query_instruction: Optional[str] = Field(
+        default=None,
+        description=(
+            "Task instruction for instruction-tuned embedding models: search queries are embedded "
+            "as 'Instruct: <instruction>\\nQuery: <question>' while document chunks stay bare. "
+            "Unset uses the model's known default (see embeddings.DEFAULT_QUERY_INSTRUCTIONS); "
+            "an empty string embeds queries bare."
+        ),
+    )
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",

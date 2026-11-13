@@ -422,6 +422,39 @@ built to fix, and doesn't offset the specific regressions above. Raising it
 further is not expected to help: the failure mode is score dilution, not an
 insufficient blend ratio.
 
+### Embedding near-duplicate removal
+
+`RETRIEVAL_NEAR_DUP_THRESHOLD` (0-1, default 0 = off) drops every raw candidate
+whose embedding is at least that cosine-similar to a higher-scoring candidate,
+before the per-document cap and the `top_k` cut, so near-copies of one passage
+(not only the exact-text duplicates `_dedup_chunks_by_text` catches) don't take
+several slots. Kept candidates keep their vector scores. Implemented in
+`backend/services/near_dup_filter.py`.
+
+**Evaluated at 0.97/0.95/0.93/0.90 on the gold library (Docling and Kreuzberg
+indexes, retrieval only) and left at the `0` default**: at 0.93 and above the
+retrieved context did not change for any targeted fact (the per-document cap
+already removes most sibling crowding). At 0.90 Q02's figures entered the
+context, but Kreuzberg lost all of Q05's and two other facts, because with this
+embedding model 0.90 means "same topic", not "same text".
+
+### Query decomposition
+
+`RETRIEVAL_QUERY_DECOMPOSITION` (0-6, default 0 = off) asks the LLM for up to
+that many short search queries (one per part of the question, in English),
+searches with each plus the question, and fuses the ranked lists by reciprocal
+rank before dedup, cap and `top_k`. One extra LLM call per query; the fused pool
+replaces the escalation retry. Implemented in
+`backend/services/query_decomposition.py`.
+
+**Evaluated with 3 and 5 sub-queries on the gold library (retrieval only) and
+left at the `0` default**: no targeted fact gained, and total facts in context
+fell (Docling 21 -> 20/17 of 39, Kreuzberg 24 -> 24/19). Ranking each answer
+passage against each sub-query shows why: sub-queries describing the question's
+parts rank the answer passage *lower* than the question does (Q05's EndNote
+result: 28 -> 70-125), and only a sub-query that already guesses the answer's
+wording helps (Q09's "Zotero does not provide an API" passage: 1942 -> 57).
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
