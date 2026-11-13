@@ -72,7 +72,7 @@ class TestEngineQueryDecomposition(unittest.IsolatedAsyncioTestCase):
         preset.llm.max_answer_tokens = 100
         settings.get_hardware_preset.return_value = preset
         embedding = Mock()
-        embedding.embed_text = AsyncMock(side_effect=lambda text: [1.0] if text == "question" else [2.0])
+        embedding.embed_query = AsyncMock(side_effect=lambda text: [1.0] if text == "question" else [2.0])
         llm = Mock()
         llm.generate = AsyncMock(
             side_effect=lambda prompt, **kw: decomposition_text if "search queries" in prompt else "Answer [S1]"

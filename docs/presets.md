@@ -29,6 +29,16 @@ A preset file's fields mirror `backend.config.presets.HardwarePreset` and its ne
 
 offers `gemini-3.5-flash` first (the default), then every other Gemini Flash model of that form the key can use.
 
+### Query instruction: `embedding.query_instruction`
+
+Instruction-tuned embedding models expect a search query to be embedded as `Instruct: <task>\nQuery: <question>`, while document chunks are embedded without a prefix. The backend applies this to queries only, so an existing index stays valid when the instruction changes.
+
+- **Unset (default):** the model's known instruction is used. `multilingual-e5-large-instruct` (used by most bundled presets, local or remote) gets `Given a question, retrieve passages from academic documents that contain the answer`; other models are embedded bare. The list is `DEFAULT_QUERY_INSTRUCTIONS` in `backend/services/embeddings.py`.
+- **A string:** that instruction is used instead, for example for another instruction-tuned model.
+- **`""`:** queries are embedded bare.
+
+On the gold library this raised the share of questions whose source passage is among the first ten results from 0.67 to 0.74 (Docling) and 0.75 (Kreuzberg), measured on retrieval only (Hugging Face dataset `evaluations/retrieval-improvements-20261113`).
+
 ### Preset schema versions
 
 | Version | Change |

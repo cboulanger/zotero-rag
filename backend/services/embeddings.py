@@ -194,6 +194,39 @@ _KNOWN_DIMS: dict[str, int] = {
 }
 
 
+# Query-side task instructions for instruction-tuned embedding models, keyed by the
+# model name without its organisation prefix. These models are trained to embed a
+# search query as "Instruct: <task>\nQuery: <query>" and documents without any prefix,
+# so only queries get it and existing indexes stay valid. Measured on the gold library
+# (HF dataset evaluations/retrieval-improvements-20261113): top-10 passage hit rate
+# .67 -> .74/.75 on the Docling/Kreuzberg indexes. A preset overrides this with
+# EmbeddingConfig.query_instruction ("" turns it off).
+DEFAULT_QUERY_INSTRUCTIONS: dict[str, str] = {
+    "multilingual-e5-large-instruct": (
+        "Given a question, retrieve passages from academic documents that contain the answer"
+    ),
+}
+
+
+def resolve_query_instruction(config: Optional["EmbeddingConfig"], model_name: str) -> Optional[str]:
+    """Return the query instruction to use, or None to embed queries bare.
+
+    An explicit ``config.query_instruction`` wins (empty string disables it);
+    otherwise the model's entry in DEFAULT_QUERY_INSTRUCTIONS applies.
+    """
+    explicit = getattr(config, "query_instruction", None) if config is not None else None
+    if explicit is not None:
+        return explicit.strip() or None
+    return DEFAULT_QUERY_INSTRUCTIONS.get(model_name.rsplit("/", 1)[-1].lower())
+
+
+def format_query_for_embedding(query: str, instruction: Optional[str]) -> str:
+    """Wrap a search query in the instruction format, or return it unchanged."""
+    if not instruction:
+        return query
+    return f"Instruct: {instruction}\nQuery: {query}"
+
+
 class EmbeddingService(ABC):
     """Abstract base class for embedding services."""
 
@@ -207,6 +240,18 @@ class EmbeddingService(ABC):
     @abstractmethod
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
+
+    def get_query_instruction(self) -> Optional[str]:
+        """Return the task instruction applied to search queries, or None."""
+        return resolve_query_instruction(getattr(self, "config", None), self.get_model_name())
+
+    async def embed_query(self, query: str) -> list[float]:
+        """Embed a search query (as opposed to a document chunk).
+
+        Instruction-tuned models get the query wrapped in their task instruction;
+        everything else is embedded exactly like ``embed_text``.
+        """
+        return await self.embed_text(format_query_for_embedding(query, self.get_query_instruction()))
 
     @abstractmethod
     async def embed_batch(

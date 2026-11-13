@@ -702,7 +702,7 @@ class RAGEngine:
             return results
         lists = [results]
         for sub_query in sub_queries:
-            vector = await self.embedding_service.embed_text(sub_query)
+            vector = await self.embedding_service.embed_query(sub_query)
             lists.append(await asyncio.to_thread(self.vector_store.search, query_vector=vector, **search_kwargs))
         return fuse_ranked_lists(lists)
 
@@ -783,7 +783,7 @@ class RAGEngine:
 
         # Step 1: Generate embedding for question
         logger.debug("Generating query embedding...")
-        query_embedding = await self.embedding_service.embed_text(question)
+        query_embedding = await self.embedding_service.embed_query(question)
         embedding_model = getattr(self.embedding_service, "model_name", "unknown")
 
         # Step 2: Search vector database for relevant chunks. Fetch a raw candidate

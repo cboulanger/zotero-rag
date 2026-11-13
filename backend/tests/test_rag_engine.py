@@ -52,7 +52,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         query_embedding = [0.1, 0.2, 0.3]
 
         # Mock embedding generation
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=query_embedding)
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=query_embedding)
 
         # Mock search results
         chunk1 = DocumentChunk(
@@ -118,7 +118,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         )
 
         # Verify embedding was generated
-        self.mock_embedding_service.embed_text.assert_called_once_with(question)
+        self.mock_embedding_service.embed_query.assert_called_once_with(question)
 
         # Verify search was performed
         self.mock_vector_store.search.assert_called_once_with(
@@ -172,7 +172,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = ["12345"]
 
         # Mock embedding generation
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1, 0.2])
 
         # Mock empty search results
         self.mock_vector_store.search.return_value = []
@@ -184,7 +184,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         )
 
         # Verify embedding was generated
-        self.mock_embedding_service.embed_text.assert_called_once()
+        self.mock_embedding_service.embed_query.assert_called_once()
 
         # Verify search was performed
         self.mock_vector_store.search.assert_called_once()
@@ -203,7 +203,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = ["12345", "67890"]
 
         # Mock embedding generation
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         # Mock search results
         chunk = DocumentChunk(
@@ -259,7 +259,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = []
 
         # Mock services
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         self.mock_vector_store.search.return_value = []
 
         # Execute query
@@ -279,7 +279,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = ["12345"]
 
         # Mock embedding
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         # Mock chunk without page number
         chunk = DocumentChunk(
@@ -323,7 +323,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = ["12345"]
 
         # Mock services
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         self.mock_vector_store.search.return_value = []
 
         # Execute query with custom params
@@ -351,7 +351,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         library_ids = ["12345"]
 
         # Mock services
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         chunk = DocumentChunk(
             text="Test content",
@@ -390,7 +390,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
     async def test_source_info_carries_chunk_id(self):
         question = "What is machine learning?"
         library_ids = ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         chunk = DocumentChunk(
             text="Machine learning is a subset of artificial intelligence.",
@@ -417,7 +417,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """Shared minimal fixture for the tool-call-leak retry tests below."""
         question = "What research trends do authors identify?"
         library_ids = ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         chunk = DocumentChunk(
             text="Several studies identify a shift toward qualitative methods.",
@@ -639,7 +639,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         cap (not the corpus limit) and fewer than 3 distinct documents came back,
         retry once with a larger top_k before generating."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
         diverse_results = (
@@ -667,7 +667,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         attachment_keys can saturate top_k and suppress escalation even though
         the library has only one genuinely relevant item represented."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         narrow_results = (
             [self._make_chunk("DOC1", "ATT1", "Same Paper", 0.9, i) for i in range(4)]
@@ -695,7 +695,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
     async def test_query_does_not_escalate_when_diversity_already_sufficient(self):
         """No wasted second search when the first pass already spans enough documents."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [
             self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
@@ -714,7 +714,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         min_score threshold) is already exhausted — escalating limit wouldn't
         surface anything new, so don't waste a second search."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Only Doc", 0.9)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -728,7 +728,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """Already at/above the escalation ceiling — don't escalate further even
         if diversity is low, to keep prompt size bounded."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(30)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -765,7 +765,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         escalate retrieval in this case even though diversity is already
         sufficient."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         self.mock_settings.retrieval_score_proximity_epsilon = 0.01
 
         pool = self._make_score_proximity_pool()
@@ -794,7 +794,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         left at its default (off) — must behave exactly as before this
         feature existed: no second search, target chunk stays excluded."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         # self.mock_settings is Mock(spec=Settings) with no explicit value set for
         # retrieval_score_proximity_epsilon, matching a real Settings instance's
         # default of 0.0 (disabled) in spirit — getattr(...) would return a Mock,
@@ -840,7 +840,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         hand back everything regardless of `limit`, masking the exact
         truncation behavior this test exercises)."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         crowding_a = [self._make_chunk("DOC_A", "ATT_A", "Crowding Doc A", 0.99 - i * 0.01, i) for i in range(6)]
         crowding_b = [self._make_chunk("DOC_B", "ATT_B", "Crowding Doc B", 0.93 - i * 0.01, i) for i in range(3)]
@@ -870,7 +870,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         prompt with many near-duplicate passages at the expense of readability —
         cap how many of its chunks are included, keeping the highest-scoring ones."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(10)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -885,7 +885,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """The chunk cap must be caller-configurable (plugin Preferences), not
         hardwired to the module default."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(10)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -907,7 +907,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         fact. The cap must instead prefer a lower-scoring chunk once a
         higher-scoring candidate is too similar to one already kept."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         cluster_1 = self._make_chunk(
             "DOC1", "ATT1", "Doc", 0.95, chunk_index=0,
@@ -947,7 +947,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         the higher-scoring copy so a genuinely different chunk can fill the
         slot that would otherwise be wasted on the duplicate."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         duplicate_text = "Identical passage repeated across two attachments."
         chunk_a = self._make_chunk("DOC1", "ATT1", "Doc", 0.9, chunk_index=0, text=duplicate_text)
@@ -968,7 +968,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         must be the higher of the two, so it isn't treated as a
         lower-quality hit downstream (e.g. in SourceInfo.score)."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         duplicate_text = "Identical passage."
         low_score_first = self._make_chunk("DOC1", "ATT1", "Doc", 0.7, chunk_index=0, text=duplicate_text)
@@ -986,7 +986,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         a capitalization/whitespace artifact from re-extraction — this must
         still be recognized as a duplicate."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         chunk_a = self._make_chunk(
             "DOC1", "ATT1", "Doc", 0.9, chunk_index=0,
@@ -1010,7 +1010,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """No regression: chunks with genuinely different text must not be
         affected by dedup, even within the same document."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9 - i * 0.01, i) for i in range(3)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -1032,7 +1032,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         top_k slot with the same content, crowding out a genuinely
         different document that would otherwise have made the window."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         duplicate_text = "The same article, indexed twice under two different library items."
         dup_a = self._make_chunk("DOC_A", "ATT_A", "Duplicate Item A", 0.9, chunk_index=0, text=duplicate_text)
@@ -1058,7 +1058,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         enough" — escalation must not fire even though the default floor (3)
         would have triggered it for the same retrieval result."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -1072,7 +1072,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """A caller-supplied low_diversity_available_floor higher than the number
         of available documents means the low-diversity retry guard never applies."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [
             self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
@@ -1090,7 +1090,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.trace_collector import TraceCollector
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         narrow_results = [self._make_chunk("DOC1", "ATT1", "Dominant Doc", 0.9, i) for i in range(5)]
         diverse_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)] + [
@@ -1114,7 +1114,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         them despite the others being equally present in context. Retry once with
         a neutral instruction to consider the other sources."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [
             self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
@@ -1135,7 +1135,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         """A single relevant document is a legitimate, expected outcome — citing
         only it must not trigger the low-diversity retry."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "Only Doc", 0.9)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -1148,7 +1148,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
     async def test_query_does_not_retry_when_diversity_already_sufficient(self):
         """No wasted retry when the answer already cites more than one source."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [
             self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
@@ -1210,7 +1210,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         not change behavior when nothing triggers the review (a later task
         adds the detector and retry that actually use it)."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         results = [self._make_chunk("DOC1", "ATT1", "Doc", 0.9)]
         self.mock_vector_store.search = Mock(return_value=results)
         self.mock_llm_service.generate = AsyncMock(return_value="Answer [S1]")
@@ -1229,7 +1229,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
         escalated_results = narrow_results + [
@@ -1259,7 +1259,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
         escalated_results = narrow_results + [self._make_chunk("DOC2", "ATT2", "Second Doc", 0.85)]
@@ -1285,7 +1285,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
         self.mock_vector_store.search = Mock(return_value=results)
@@ -1300,7 +1300,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
     async def test_quality_review_does_not_fire_when_answer_already_good(self):
         """No wasted retry when the first answer already looks fine."""
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         results = [
             self._make_chunk("DOC1", "ATT1", "First Doc", 0.9),
@@ -1340,7 +1340,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.rag_engine import CONTEXT_INSUFFICIENT_MARKER
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
 
         # top_k=3, first search saturates it with 3 chunks all from DOC1 —
         # triggers pre-generation escalation (len(search_results)==top_k
@@ -1378,7 +1378,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.trace_collector import TraceCollector
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         self.mock_llm_service.model_name = "test-model"
 
         narrow_results = [self._make_chunk("DOC1", "ATT1", "First Doc", 0.9)]
@@ -1409,7 +1409,7 @@ class TestRAGEngine(unittest.IsolatedAsyncioTestCase):
         from backend.services.trace_collector import TraceCollector
 
         question, library_ids = "Question", ["12345"]
-        self.mock_embedding_service.embed_text = AsyncMock(return_value=[0.1])
+        self.mock_embedding_service.embed_query = AsyncMock(return_value=[0.1])
         self.mock_llm_service.model_name = "test-model"
 
         results = [
