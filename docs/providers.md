@@ -26,7 +26,7 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `google` | Google Gemini (OpenAI-compatible endpoint) | `user` or `managed` | Key documentation link; live list of Flash models (newest first, further filtered by the preset's `model_names` patterns); OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
-| `mpcdf` | MPCDF LLM Inference Service | `shared` (embedding, LLM) or `user` | `shared`: ephemeral job URL and key set by the admin; health asks `/v1/models`. `user` (re-ranking side): each user logs in with their own MPCDF account and the endpoint runs as a job on it (see below). |
+| `mpcdf` | MPCDF LLM Inference Service | `user` | Every side (embedding, LLM, re-ranking): each user logs in with their own MPCDF account and the endpoint runs as a job on it (see below). |
 | `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. A re-ranking side (`zotero-rag-rerank`, scope `user`) runs vLLM's `/v1/rerank` on `worker-v1-vllm`; the platform's OpenAI route does not pass `/rerank` through, so calls go to `/runsync` with the worker's route proxy, and a call during a cold start counts as "not ready" (the query runs without re-ranking and the call wakes the worker). |
 | `huggingface` | Hugging Face Inference Endpoints | `user` or `managed` | One endpoint per side in the token owner's namespace; readiness from the endpoint's `status.state`; pause/resume via the REST API; the URL is derived from the token. |
 
@@ -37,7 +37,7 @@ a preset picks one with `provider.scope`.
 
 - `user`: each user's own key, sent with their requests. Usage is per key; the user operates the resource (provision, pause).
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
-- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
+- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example an institution's own OpenAI-compatible gateway with the `generic` provider).
 
 A remote re-ranking side (`rerank`) always uses `user`.
 

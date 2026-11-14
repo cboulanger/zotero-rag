@@ -168,7 +168,7 @@ register_fixture(ContractFixture(
 
 register_fixture(ContractFixture(
     provider_id="mpcdf",
-    model_kwargs={"shared_api_key_env": "MPCDF_KEY", "shared_base_url_env": "MPCDF_URL"},
+    model_kwargs={},
     invalid_options=[{"anything": 1}],
     usage_samples=[({"RateLimit-Limit": "100", "RateLimit-Remaining": "50"}, 1)],
 ))

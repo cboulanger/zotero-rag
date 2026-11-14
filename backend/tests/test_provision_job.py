@@ -340,26 +340,19 @@ class HealthEndpointTest(unittest.TestCase):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
 
-    def test_mpcdf_reports_an_expired_job(self):
+    def test_mpcdf_reports_the_callers_endpoint_state(self):
         get_settings().model_preset = "remote-mpcdf"
-        update_remote_config({
-            "MPCDF_EMBEDDING_API_KEY": "k", "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/job1",
-            "MPCDF_LLM_API_KEY": "k", "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/job2",
-        }, data_path=get_settings().data_path)
-        from backend.tests.provider_fakes import FakeHTTP, FakeResponse
-        from backend.providers.mpcdf import MpcdfProvider
-        fake = FakeHTTP({("GET", r"/job1/v1/models$"): FakeResponse(200, {}),
-                         ("GET", r"/job2/v1/models$"): FakeResponse(404, {})})
-        original = MpcdfProvider.__init__
+        from backend.services import mpcdf_sessions
+        from backend.services.mpcdf_sessions import EndpointCredentials
+        from backend.tests.test_mpcdf_sessions import FakeSessions
 
-        def init(this, *a, **kw):
-            original(this, *a, **kw)
-            this._http_client = fake
-        with patch.object(MpcdfProvider, "__init__", init):
+        fake = FakeSessions()
+        fake.creds[(None, "zotero-rag-embedding")] = EndpointCredentials("https://job1/v1", "k", "m")
+        with patch.object(mpcdf_sessions, "available", return_value=True), \
+             patch.object(mpcdf_sessions, "get_sessions", return_value=fake):
             r = self.client.get("/api/config/health").json()
         self.assertEqual(r["embedding"]["status"], "ready")
-        self.assertEqual(r["llm"]["status"], "unreachable")
-        self.assertIn("job expired or not started", r["llm"]["detail"])
+        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
 
 
 if __name__ == "__main__":

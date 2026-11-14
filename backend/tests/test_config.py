@@ -45,9 +45,11 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
 }
 
 
-MPCDF_ENV = {
-    "MPCDF_EMBEDDING_BASE_URL": "http://x", "MPCDF_EMBEDDING_API_KEY": "k",
-    "MPCDF_LLM_BASE_URL": "http://x", "MPCDF_LLM_API_KEY": "k",
+from backend.tests.shared_gateway import write_shared_gateway_preset  # noqa: E402
+
+GATEWAY_ENV = {
+    "GATEWAY_EMBEDDING_BASE_URL": "http://x", "GATEWAY_EMBEDDING_API_KEY": "k",
+    "GATEWAY_LLM_BASE_URL": "http://x", "GATEWAY_LLM_API_KEY": "k",
 }
 
 
@@ -109,21 +111,22 @@ class TestPresets(unittest.TestCase):
         self.assertEqual(preset.llm.model_kwargs["base_url"], "https://chat-ai.academiccloud.de/v1")
         self.assertEqual(preset.llm.model_kwargs["api_key_env"], "KISSKI_API_KEY")
 
-    def test_get_preset_remote_mpcdf_uses_shared_dynamic_fields(self):
-        """remote-mpcdf has no static base_url — both base_url and API key are
+    def test_get_preset_shared_gateway_uses_shared_dynamic_fields(self):
+        """shared-gateway has no static base_url — both base_url and API key are
         resolved at request time from the shared admin-set store (see
         backend.services.admin_settings_store), not baked into the preset."""
-        preset = get_preset("remote-mpcdf", self.data_path)
+        write_shared_gateway_preset(self.data_path)
+        preset = get_preset("shared-gateway", self.data_path)
 
-        self.assertEqual(preset.name, "remote-mpcdf")
+        self.assertEqual(preset.name, "shared-gateway")
         self.assertEqual(preset.embedding.model_type, "remote")
         self.assertNotIn("base_url", preset.embedding.model_kwargs)
-        self.assertEqual(preset.embedding.model_kwargs["shared_base_url_env"], "MPCDF_EMBEDDING_BASE_URL")
-        self.assertEqual(preset.embedding.model_kwargs["shared_api_key_env"], "MPCDF_EMBEDDING_API_KEY")
+        self.assertEqual(preset.embedding.model_kwargs["shared_base_url_env"], "GATEWAY_EMBEDDING_BASE_URL")
+        self.assertEqual(preset.embedding.model_kwargs["shared_api_key_env"], "GATEWAY_EMBEDDING_API_KEY")
         self.assertEqual(preset.llm.model_type, "remote")
         self.assertNotIn("base_url", preset.llm.model_kwargs)
-        self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "MPCDF_LLM_BASE_URL")
-        self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "MPCDF_LLM_API_KEY")
+        self.assertEqual(preset.llm.model_kwargs["shared_base_url_env"], "GATEWAY_LLM_BASE_URL")
+        self.assertEqual(preset.llm.model_kwargs["shared_api_key_env"], "GATEWAY_LLM_API_KEY")
         # Same embedding model as remote-kisski — same vector space, so the two
         # presets are mutually hot-swappable at runtime.
         self.assertEqual(
@@ -471,6 +474,7 @@ class TestConfigApi(unittest.TestCase):
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
+        write_shared_gateway_preset(s.data_path)
         s.model_preset = "remote-kisski"
         self.app = app
         from fastapi.testclient import TestClient
@@ -496,7 +500,7 @@ class TestConfigApi(unittest.TestCase):
         r = self.client.get("/api/config")
         compatible = set(r.json()["compatible_presets"])
         self.assertIn("remote-kisski", compatible)
-        self.assertIn("remote-mpcdf", compatible)
+        self.assertIn("shared-gateway", compatible)
         self.assertNotIn("remote-openai", compatible)  # different embedding model
         self.assertNotIn("cpu-only", compatible)  # local preset
         # windows-test shares the embedding model too, but
@@ -509,7 +513,7 @@ class TestConfigApi(unittest.TestCase):
     def test_get_config_lists_compatible_presets_includes_runpod_despite_hf_prefix(self):
         """runpod.json stores its embedding model as the full HuggingFace repo
         id ("intfloat/multilingual-e5-large-instruct", required by the RunPod
-        worker image's API), while remote-kisski/remote-mpcdf store the short
+        worker image's API), while remote-kisski/shared-gateway store the short
         served-model alias ("multilingual-e5-large-instruct") — same
         underlying model and vector space, different literal string. The
         compatibility check must treat these as the same model (comparing by
@@ -546,7 +550,7 @@ class TestConfigApi(unittest.TestCase):
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
              patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
             r = self.client.post(
-                "/api/config", json={"preset_name": "remote-mpcdf"},
+                "/api/config", json={"preset_name": "shared-gateway"},
                 headers={"X-Zotero-API-Key": "K"},
             )
         self.assertEqual(r.status_code, 403)
@@ -555,12 +559,12 @@ class TestConfigApi(unittest.TestCase):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
-        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        update_remote_config(GATEWAY_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "shared-gateway"})
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["preset_name"], "remote-mpcdf")
+        self.assertEqual(r.json()["preset_name"], "shared-gateway")
         r2 = self.client.get("/api/config")
-        self.assertEqual(r2.json()["preset_name"], "remote-mpcdf")
+        self.assertEqual(r2.json()["preset_name"], "shared-gateway")
 
     def test_post_config_rejects_incompatible_preset_as_admin(self):
         from backend.services.zotero_identity import ZoteroIdentity
@@ -574,16 +578,16 @@ class TestConfigApi(unittest.TestCase):
         r = self.client.post("/api/config", json={"preset_name": "no-such-preset"})
         self.assertEqual(r.status_code, 400)
 
-    def test_required_keys_reports_shared_kind_and_is_set_for_mpcdf(self):
+    def test_required_keys_reports_shared_kind_and_is_set_for_a_gateway(self):
         from backend.services.zotero_identity import ZoteroIdentity
         from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_default_preset(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "shared-gateway")
         r = self.client.get("/api/required-keys")
         self.assertEqual(r.status_code, 200)
         by_key = {k["key_name"]: k for k in r.json()["keys"]}
-        self.assertEqual(by_key["MPCDF_EMBEDDING_BASE_URL"]["kind"], "shared_base_url")
-        self.assertFalse(by_key["MPCDF_EMBEDDING_BASE_URL"]["is_set"])
+        self.assertEqual(by_key["GATEWAY_EMBEDDING_BASE_URL"]["kind"], "shared_base_url")
+        self.assertFalse(by_key["GATEWAY_EMBEDDING_BASE_URL"]["is_set"])
 
     def test_remote_fields_requires_admin(self):
         from unittest.mock import AsyncMock
@@ -595,7 +599,7 @@ class TestConfigApi(unittest.TestCase):
              patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
             r = self.client.post(
                 "/api/config/remote-fields",
-                json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
+                json={"values": {"GATEWAY_EMBEDDING_BASE_URL": "https://gateway.example.org/abc/v1"}},
                 headers={"X-Zotero-API-Key": "K"},
             )
         self.assertEqual(r.status_code, 403)
@@ -604,21 +608,21 @@ class TestConfigApi(unittest.TestCase):
         from backend.services.zotero_identity import ZoteroIdentity
         from backend.services.admin_settings_store import set_default_preset
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        set_default_preset(get_settings().data_path, "remote-mpcdf")
+        set_default_preset(get_settings().data_path, "shared-gateway")
         r = self.client.post(
             "/api/config/remote-fields",
-            json={"values": {"MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/abc/v1"}},
+            json={"values": {"GATEWAY_EMBEDDING_BASE_URL": "https://gateway.example.org/abc/v1"}},
         )
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.json()["is_set"]["MPCDF_EMBEDDING_BASE_URL"])
+        self.assertTrue(r.json()["is_set"]["GATEWAY_EMBEDDING_BASE_URL"])
         r2 = self.client.get("/api/required-keys")
         by_key = {k["key_name"]: k for k in r2.json()["keys"]}
-        self.assertTrue(by_key["MPCDF_EMBEDDING_BASE_URL"]["is_set"])
+        self.assertTrue(by_key["GATEWAY_EMBEDDING_BASE_URL"]["is_set"])
 
     def test_remote_fields_rejects_unknown_key_as_admin(self):
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
-        self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        self.client.post("/api/config", json={"preset_name": "shared-gateway"})
         r = self.client.post(
             "/api/config/remote-fields",
             json={"values": {"NOT_A_REAL_FIELD": "x"}},
@@ -689,19 +693,19 @@ class TestConfigApi(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_remote_fields_without_declared_pattern_accepts_any_value(self):
-        """mpcdf fields declare no pattern — no regression in the unconstrained case."""
+        """gateway fields declare no pattern — no regression in the unconstrained case."""
         from backend.services.zotero_identity import ZoteroIdentity
         self._override_admin(ZoteroIdentity(user_id=1, username="admin", targets=["users/1"]))
         from backend.services.admin_settings_store import update_remote_config
         update_remote_config({
-            "MPCDF_EMBEDDING_BASE_URL": "https://e/v1", "MPCDF_EMBEDDING_API_KEY": "k",
-            "MPCDF_LLM_BASE_URL": "https://l/v1", "MPCDF_LLM_API_KEY": "k",
+            "GATEWAY_EMBEDDING_BASE_URL": "https://e/v1", "GATEWAY_EMBEDDING_API_KEY": "k",
+            "GATEWAY_LLM_BASE_URL": "https://l/v1", "GATEWAY_LLM_API_KEY": "k",
         }, data_path=get_settings().data_path)
-        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.post("/api/config", json={"preset_name": "shared-gateway"})
         self.assertEqual(r.status_code, 200, r.text)
         r = self.client.post(
             "/api/config/remote-fields",
-            json={"values": {"MPCDF_EMBEDDING_BASE_URL": "anything-goes"}},
+            json={"values": {"GATEWAY_EMBEDDING_BASE_URL": "anything-goes"}},
         )
         self.assertEqual(r.status_code, 200)
 
@@ -722,13 +726,14 @@ class TestSwitchablePresets(unittest.TestCase):
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
+        write_shared_gateway_preset(s.data_path)
         s.model_preset = "remote-kisski"
         s.autoindex_secret = Fernet.generate_key().decode()  # shared API keys are stored encrypted
         s.autoindex_keys_path = Path(self.tmp.name) / "system" / "autoindex_keys.json"
         self.app = app
         from fastapi.testclient import TestClient
         self.client = TestClient(app)
-        for k in list(MPCDF_ENV) + ["KISSKI_API_KEY"]:
+        for k in list(GATEWAY_ENV) + ["KISSKI_API_KEY"]:
             os.environ.pop(k, None)
 
     def tearDown(self):
@@ -753,26 +758,26 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertIn("remote-kisski", by)
         self.assertTrue(by["remote-kisski"]["active"])
         self.assertEqual(by["remote-kisski"]["credentials"], "missing")
-        self.assertNotIn("remote-mpcdf", by)
-        self.assertIn("remote-mpcdf", body["compatible_presets"])
+        self.assertNotIn("shared-gateway", by)
+        self.assertIn("shared-gateway", body["compatible_presets"])
 
     def test_shared_creds_only_in_the_environment_are_ignored(self):
-        with patch.dict(os.environ, MPCDF_ENV):
+        with patch.dict(os.environ, GATEWAY_ENV):
             by = self._names(self.client.get("/api/config").json())
-        self.assertNotIn("remote-mpcdf", by)
+        self.assertNotIn("shared-gateway", by)
 
     def test_shared_creds_in_the_store_make_preset_switchable(self):
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        update_remote_config(GATEWAY_ENV, data_path=get_settings().data_path)
         by = self._names(self.client.get("/api/config").json())
-        self.assertEqual(by["remote-mpcdf"]["credentials"], "ok")
-        self.assertFalse(by["remote-mpcdf"]["active"])
+        self.assertEqual(by["shared-gateway"]["credentials"], "ok")
+        self.assertFalse(by["shared-gateway"]["active"])
 
     def test_shared_creds_via_store(self):
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
+        update_remote_config(GATEWAY_ENV, data_path=get_settings().data_path)
         by = self._names(self.client.get("/api/config").json())
-        self.assertIn("remote-mpcdf", by)
+        self.assertIn("shared-gateway", by)
 
     def test_personal_key_via_header_env_and_llm_side(self):
         from backend.api.config import _preset_credentials
@@ -785,11 +790,11 @@ class TestSwitchablePresets(unittest.TestCase):
         self.assertEqual(_preset_credentials(preset, s, Req({"X-Kisski-Api-Key": "v"})), [])
         with patch.dict(os.environ, {"KISSKI_API_KEY": "v"}):  # the environment is never a key source
             self.assertEqual(_preset_credentials(preset, s, Req({})), ["KISSKI_API_KEY"])
-        mp = get_preset("remote-mpcdf", s.data_path)
+        mp = get_preset("shared-gateway", s.data_path)
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config({"MPCDF_EMBEDDING_BASE_URL": "u", "MPCDF_EMBEDDING_API_KEY": "k"}, data_path=s.data_path)
+        update_remote_config({"GATEWAY_EMBEDDING_BASE_URL": "u", "GATEWAY_EMBEDDING_API_KEY": "k"}, data_path=s.data_path)
         # LLM-side shared values still missing
-        self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["MPCDF_LLM_API_KEY", "MPCDF_LLM_BASE_URL"])
+        self.assertEqual(sorted(_preset_credentials(mp, s, Req({}))), ["GATEWAY_LLM_API_KEY", "GATEWAY_LLM_BASE_URL"])
 
     def test_personal_key_via_stored_key_but_not_invalid(self):
         from backend.api.config import _preset_credentials
@@ -812,7 +817,7 @@ class TestSwitchablePresets(unittest.TestCase):
     def test_post_allows_switch_without_credentials(self):
         """The preset's own sections ask for the keys; until then it is just not ready."""
         self._admin()
-        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self.client.post("/api/config", json={"preset_name": "shared-gateway"})
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_post_success_resets_cache_and_clears_rate_limits(self):
@@ -830,8 +835,8 @@ class TestSwitchablePresets(unittest.TestCase):
         recorder.record("embedding", {"x-ratelimit-limit-hour": "1"})
         self._admin()
         from backend.services.admin_settings_store import update_remote_config
-        update_remote_config(MPCDF_ENV, data_path=get_settings().data_path)
-        r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"})
+        update_remote_config(GATEWAY_ENV, data_path=get_settings().data_path)
+        r = self.client.post("/api/config", json={"preset_name": "shared-gateway"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(recorder.latest("embedding"), (None, None))
         meta = store.list_metadata()[0]
@@ -847,7 +852,7 @@ class TestSwitchablePresets(unittest.TestCase):
         identity = ZoteroIdentity(user_id=1, username="u", targets=["users/1"])
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity)), \
              patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=False)):
-            r = self.client.post("/api/config", json={"preset_name": "remote-mpcdf"},
+            r = self.client.post("/api/config", json={"preset_name": "shared-gateway"},
                                  headers={"X-Zotero-API-Key": "K"})
         self.assertEqual(r.status_code, 403)
 

@@ -12,6 +12,7 @@ from backend.config.presets import ensure_default_presets
 from backend.config.settings import get_settings, reset_settings
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.tests.runpod_variants import write_managed_runpod_preset
+from backend.tests.shared_gateway import write_shared_gateway_preset
 
 
 class DescriptorsApiTest(unittest.TestCase):
@@ -54,13 +55,20 @@ class DescriptorsApiTest(unittest.TestCase):
         self.assertFalse(self._get(name, admin=False, user_id=6, loopback=False)["sides"]["llm"]["provider"]["operable_by_caller"])  # admin role is cached per user
 
     def test_shared_scope_and_non_operable_providers_are_never_operable(self):
-        body = self._get("remote-mpcdf")
+        body = self._get(write_shared_gateway_preset(self.settings.data_path))
         d = body["sides"]["llm"]["provider"]
-        self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("mpcdf", "shared", False))
-        self.assertIn("MPCDF", d["unavailable_hint"])
+        self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("generic", "shared", False))
         kisski = self._get("remote-kisski")["sides"]["llm"]["provider"]
         self.assertFalse(kisski["operable_by_caller"])
         self.assertFalse(kisski["supports_provisioning"])
+
+    def test_mpcdf_sides_are_per_user_with_a_login_form(self):
+        body = self._get("remote-mpcdf", loopback=False)
+        for side in ("embedding", "llm"):
+            d = body["sides"][side]["provider"]
+            self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("mpcdf", "user", True))
+            self.assertIsNotNone(d["provisioning"]["login"])
+            self.assertIn("MPCDF", d["unavailable_hint"])
 
     def test_local_side_has_no_provider(self):
         body = self._get("cpu-only")
@@ -101,10 +109,14 @@ class RequiredKeysSidesTest(DescriptorsApiTest):
         self.assertEqual(sorted(kisski["sides"]), ["embedding", "llm"])  # one key serves both sides
 
     def test_a_side_with_its_own_key_is_listed_separately(self):
-        self.settings.model_preset = "remote-mpcdf"
+        self.settings.model_preset = write_shared_gateway_preset(self.settings.data_path)
         keys = {k["key_name"]: k["sides"] for k in self.client.get("/api/required-keys").json()["keys"]}
-        self.assertEqual(keys["MPCDF_EMBEDDING_API_KEY"], ["embedding"])
-        self.assertEqual(keys["MPCDF_LLM_API_KEY"], ["llm"])
+        self.assertEqual(keys["GATEWAY_EMBEDDING_API_KEY"], ["embedding"])
+        self.assertEqual(keys["GATEWAY_LLM_API_KEY"], ["llm"])
+
+    def test_per_user_mpcdf_needs_no_key(self):
+        self.settings.model_preset = "remote-mpcdf"
+        self.assertEqual(self.client.get("/api/required-keys").json()["keys"], [])
 
 
 if __name__ == "__main__":
