@@ -26,7 +26,7 @@
 2. **Bundled presets:** add a `rerank` section to the existing CPU/KISSKI presets once Phase 0 passes, or ship separate `*-rerank` presets first? The plan assumes it is added to existing presets in Phase 6, after the judged run.
 3. **Shared MPCDF/managed RunPod sides for embedding and LLM:** decided 2026-11-14: they move to per-user credentials too (Phase 7). How auto-indexing gets an embedding endpoint without a user present is deferred; auto-indexing keeps using KISSKI embeddings for now.
 4. **Hybrid candidates** (whole-library BM25 nominees re-ranked together with the dense pool): included as an optional `bm25_candidates` setting in Phase 2, off by default, only if Phase 0 shows a gain.
-5. **Other `managed` providers:** `google` and `huggingface` also allow the `managed` scope. Phase 7 removes it only from `runpod`; should the scope go everywhere (and with it the admin-only operate path), or stay for providers whose terms allow an institutional account?
+5. **Other `managed` providers:** decided 2026-11-14: `google` and `huggingface` keep the `managed` scope for now. Phase 7 removes it only from `runpod`, so the `managed` scope, the admin-only operate path and the global provisioning slot stay in core.
 
 ## File map
 
@@ -251,7 +251,7 @@ The provider terms that rule out sharing for re-ranking apply to the other sides
 
 ### Task 7.3: RunPod without `managed`
 
-**Files:** Modify `backend/providers/runpod.py` (`key_scopes = {"user"}`), `backend/api/config.py` (`_caller_may_operate`, `_slot_for`: the global admin slot stays only if decision 5 keeps `managed` elsewhere), `backend/services/provisioning.py`, `bin/provision.py`, `CLAUDE.md` ("Secrets and Credentials": the `--preset runpod` admin provisioning path); tests.
+**Files:** Modify `backend/providers/runpod.py` (`key_scopes = {"user"}`), `backend/api/config.py` (`_caller_may_operate`, `_slot_for` stay, since `google` and `huggingface` keep `managed` (decision 5)), `backend/services/provisioning.py`, `bin/provision.py`, `CLAUDE.md` ("Secrets and Credentials": the `--preset runpod` admin provisioning path); tests.
 
 - [ ] Tests: a `runpod` side with `scope: "managed"` is rejected; provisioning, pause and health use only the caller's own key and slot.
 - [ ] `bin/provision.py`: drop the RunPod admin path, or keep it as a per-user CLI that takes the user's own key from the secret store (decide during the task; the bundled `runpod` preset is already `user` scope).
@@ -261,7 +261,7 @@ The provider terms that rule out sharing for re-ranking apply to the other sides
 **Files:** Modify `backend/services/autoindex_resolver.py`, `bin/index_libraries.py`; tests.
 
 - [ ] When the active preset's embedding side is `user`-scoped on a provider that needs a per-user session (MPCDF) or a per-user endpoint (RunPod), the run indexes nothing and records one issue ("auto-indexing is not available with this preset; use KISSKI embeddings") in `cron_status.json`, shown in Preferences.
-- [ ] Docs: `docs/providers.md` scopes table (no `shared`; `managed` per decision 5), `docs/cron-indexing.md`, `docs/presets.md`.
+- [ ] Docs: `docs/providers.md` scopes table (no `shared`; `managed` only for `google` and `huggingface`), `docs/cron-indexing.md`, `docs/presets.md`.
 
 ## Deferred
 
