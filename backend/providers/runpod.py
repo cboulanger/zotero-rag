@@ -79,7 +79,8 @@ class RunPodProvider(Provider):
     id = "runpod"
     label = "RunPod"
     Options = RunPodOptions
-    key_scopes = frozenset({"user", "managed"})
+    #: Each user's own key only: RunPod's terms do not allow sharing an account.
+    key_scopes = frozenset({"user"})
     default_scope = "user"
     supports_provisioning = True
     supports_suspend = True

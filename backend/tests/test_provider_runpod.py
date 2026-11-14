@@ -14,13 +14,19 @@ EMB_URL_ENV, LLM_URL_ENV = "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"
 
 
 def runpod_preset(options=None, scope="managed"):
-    """A runpod preset in the shared-field shape (PR 1 keeps the shared store)."""
+    """A runpod preset. ``user``: the user's own key, URLs derived from it. ``managed``:
+    the shared-field shape on the test-only managed subclass (RunPod itself is user-only)."""
+    from backend.tests.runpod_variants import MANAGED_PROVIDER_ID
+
     preset = make_preset()
     for side, url_env in ((preset.embedding, EMB_URL_ENV), (preset.llm, LLM_URL_ENV)):
-        side.provider.id = "runpod"
+        side.provider.id = "runpod" if scope == "user" else MANAGED_PROVIDER_ID
         side.provider.scope = scope
         side.provider.options = options or {}
-        side.model_kwargs = {"shared_api_key_env": "RUNPOD_API_KEY", "shared_base_url_env": url_env}
+        side.model_kwargs = (
+            {"api_key_env": "RUNPOD_API_KEY"} if scope == "user"
+            else {"shared_api_key_env": "RUNPOD_API_KEY", "shared_base_url_env": url_env}
+        )
     preset.embedding.model_name = "intfloat/multilingual-e5-large-instruct"
     preset.llm.model_names = ["Qwen/Qwen2.5-7B-Instruct"]
     return preset
@@ -438,3 +444,15 @@ class TestPaused(unittest.TestCase):
         self.assertTrue(provider("llm", http=self._http(0)).is_paused("k"))
         self.assertFalse(provider("llm", http=self._http(1)).is_paused("k"))
         self.assertFalse(provider("llm", http=FakeHTTP()).is_paused("k"))  # unreachable: not paused
+
+
+class TestUserScopeOnly(unittest.TestCase):
+    def test_managed_scope_is_rejected(self):
+        """RunPod's terms do not allow sharing an account: only each user's own key."""
+        from backend.providers import ProviderConfigError
+
+        preset = runpod_preset(scope="user")
+        preset.llm.provider.scope = "managed"
+        preset.llm.model_kwargs = {"shared_api_key_env": "RUNPOD_API_KEY"}
+        with self.assertRaisesRegex(ProviderConfigError, "does not allow scope 'managed'"):
+            get_providers(preset)
