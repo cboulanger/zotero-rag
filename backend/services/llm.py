@@ -391,13 +391,14 @@ class RemoteLLMService(LLMService):
                 )
             return self.api_key
         if self._session_endpoint() is not None:
-            return self._session_key or KEYLESS_API_KEY
+            return getattr(self, "_session_key", None) or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self.api_key or KEYLESS_API_KEY
 
     def _session_endpoint(self):
         """The ``SessionEndpoint`` of a provider that runs one endpoint per user session, else None."""
-        if self._session is None:
+        # getattr: tests build services with __new__ and skip __init__.
+        if getattr(self, "_session", None) is None:
             from backend.services.session_endpoint import SessionEndpoint, uses_session_endpoints
 
             provider = self._llm_provider()
@@ -485,7 +486,7 @@ class RemoteLLMService(LLMService):
             ) from exc
         if creds is None or not creds.base_url:
             raise LLMEndpointUnavailableError(unavailable_message("llm", "Your LLM endpoint is not running."))
-        if (creds.base_url, creds.api_key) != (self._resolved_base_url, self._session_key):
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, getattr(self, "_session_key", None)):
             self._openai_client = None
         self._resolved_base_url = creds.base_url
         self._session_key = creds.api_key

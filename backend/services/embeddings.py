@@ -578,14 +578,18 @@ class RemoteEmbeddingService(EmbeddingService):
                     "(it is sent with each request, never read from the environment)."
                 )
             return self._api_key
-        if self._session is not None:
-            return self._session_key or KEYLESS_API_KEY
+        if self._session_obj() is not None:
+            return getattr(self, "_session_key", None) or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self._api_key or KEYLESS_API_KEY
 
+    def _session_obj(self):
+        # getattr: tests build services with __new__ and skip __init__.
+        return getattr(self, "_session", None)
+
     def _derives_endpoint(self) -> bool:
         """True when this side's URL is found from the key (or the caller's session), not the preset."""
-        if self._session is not None:
+        if self._session_obj() is not None:
             return True
         kwargs = self.config.model_kwargs
         return bool(
@@ -597,7 +601,7 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _forget_endpoint(self) -> None:
         """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
-        if self._session is not None:
+        if self._session_obj() is not None:
             self._resolved_base_url = None
             self._session_key = None
             self._client = None
@@ -632,7 +636,7 @@ class RemoteEmbeddingService(EmbeddingService):
 
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
-        if self._session is not None:
+        if self._session_obj() is not None:
             await self._ensure_session_endpoint()
             return
         if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
@@ -663,7 +667,7 @@ class RemoteEmbeddingService(EmbeddingService):
             raise EmbeddingEndpointUnavailableError(
                 unavailable_message("embedding", "Your embedding endpoint is not running.")
             )
-        if (creds.base_url, creds.api_key) != (self._resolved_base_url, self._session_key):
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, getattr(self, "_session_key", None)):
             self._client = None
         self._resolved_base_url = creds.base_url
         self._session_key = creds.api_key
