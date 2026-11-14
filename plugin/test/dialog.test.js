@@ -1045,3 +1045,35 @@ test('describeEndpointBlock: unreachable shows the provider detail', () => {
 	const block = D.describeEndpointBlock({ embedding: { status: 'unreachable', detail: 'not provisioned' }, llm: null }, false);
 	assert.match(block.message, /embedding model is not available: not provisioned/);
 });
+
+// --- re-ranking option and notice ---
+
+test('describeRerankNotice: nothing to say without a re-ranker, when disabled or when ready', () => {
+	const D = loadDialogMethods();
+	const info = { model_type: 'remote', provider: { supports_provisioning: true, operable_by_caller: true } };
+	assert.strictEqual(D.describeRerankNotice(null, { status: 'unreachable' }, true), null);
+	assert.strictEqual(D.describeRerankNotice(info, { status: 'unreachable' }, false), null);
+	assert.strictEqual(D.describeRerankNotice(info, { status: 'ready' }, true), null);
+	assert.strictEqual(D.describeRerankNotice(info, null, true), null);
+});
+
+test('describeRerankNotice: a stopped endpoint the caller can start offers the button', () => {
+	const D = loadDialogMethods();
+	const info = { model_type: 'remote', provider: { supports_provisioning: true, operable_by_caller: true } };
+	const view = D.describeRerankNotice(info, { status: 'paused', detail: '' }, true);
+	assert.strictEqual(view.canStart, true);
+	assert.match(view.message, /skipped/);
+	const readOnly = D.describeRerankNotice({ ...info, provider: { supports_provisioning: false, operable_by_caller: false } }, { status: 'unreachable', detail: 'no key' }, true);
+	assert.strictEqual(readOnly.canStart, false);
+	assert.match(readOnly.message, /\(no key\).*preferences/);
+	assert.strictEqual(D.describeRerankNotice(info, { status: 'cold' }, true).canStart, false);
+});
+
+test('rerankEnabledForQuery: the dialog checkbox only counts while the preset re-ranks', () => {
+	const D = loadDialogMethods();
+	const self = { rerankPrefEnabled: () => true, rerankInfo: { model_type: 'local', provider: null } };
+	assert.strictEqual(D.rerankEnabledForQuery.call(self, true), false);
+	assert.strictEqual(D.rerankEnabledForQuery.call(self, false), true);
+	assert.strictEqual(D.rerankEnabledForQuery.call({ ...self, rerankInfo: null }, true), true);
+	assert.strictEqual(D.rerankEnabledForQuery.call({ ...self, rerankPrefEnabled: () => false }, false), false);
+});

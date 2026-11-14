@@ -316,7 +316,7 @@ class HealthEndpointTest(unittest.TestCase):
     def test_null_for_preset_whose_providers_have_no_health_concept(self):
         get_settings().model_preset = "remote-kisski"
         r = self.client.get("/api/config/health")
-        self.assertEqual(r.json(), {"embedding": None, "llm": None})
+        self.assertEqual(r.json(), {"embedding": None, "llm": None, "rerank": None})
 
     def test_runpod_reports_statuses(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
@@ -340,26 +340,19 @@ class HealthEndpointTest(unittest.TestCase):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
 
-    def test_mpcdf_reports_an_expired_job(self):
+    def test_mpcdf_reports_the_callers_endpoint_state(self):
         get_settings().model_preset = "remote-mpcdf"
-        update_remote_config({
-            "MPCDF_EMBEDDING_API_KEY": "k", "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/job1",
-            "MPCDF_LLM_API_KEY": "k", "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/job2",
-        }, data_path=get_settings().data_path)
-        from backend.tests.provider_fakes import FakeHTTP, FakeResponse
-        from backend.providers.mpcdf import MpcdfProvider
-        fake = FakeHTTP({("GET", r"/job1/v1/models$"): FakeResponse(200, {}),
-                         ("GET", r"/job2/v1/models$"): FakeResponse(404, {})})
-        original = MpcdfProvider.__init__
+        from backend.services import mpcdf_sessions
+        from backend.services.mpcdf_sessions import EndpointCredentials
+        from backend.tests.test_mpcdf_sessions import FakeSessions
 
-        def init(this, *a, **kw):
-            original(this, *a, **kw)
-            this._http_client = fake
-        with patch.object(MpcdfProvider, "__init__", init):
+        fake = FakeSessions()
+        fake.creds[(None, "zotero-rag-embedding")] = EndpointCredentials("https://job1/v1", "k", "m")
+        with patch.object(mpcdf_sessions, "available", return_value=True), \
+             patch.object(mpcdf_sessions, "get_sessions", return_value=fake):
             r = self.client.get("/api/config/health").json()
         self.assertEqual(r["embedding"]["status"], "ready")
-        self.assertEqual(r["llm"]["status"], "unreachable")
-        self.assertIn("job expired or not started", r["llm"]["detail"])
+        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
 
 
 if __name__ == "__main__":
@@ -434,7 +427,13 @@ class UserScopeProvisionTest(unittest.TestCase):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
+        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])  # re-ranking only on request
+
+    def test_the_rerank_side_is_provisioned_on_request(self):
+        r = self._post(7, body={"sides": ["rerank"]})
+        self.assertEqual(r.status_code, 202, r.text)
+        self._wait(7)
+        self.assertEqual(self.calls, [("rerank", "rpa_USER")])
 
     def test_without_the_users_key_it_is_a_400_naming_the_key(self):
         r = self._post(7, key=None)
@@ -524,8 +523,9 @@ class SuspendApiTest(UserScopeProvisionTest):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
-        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused"])
+        # Pausing everything includes the re-ranking endpoint (provisioning everything does not).
+        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER"), ("rerank", "rpa_USER")])
+        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused", "rerank: paused"])
 
     def test_sides_pauses_only_the_requested_side(self):
         self._suspend(7, body={"sides": ["llm"]})

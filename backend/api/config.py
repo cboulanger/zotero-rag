@@ -34,7 +34,7 @@ from backend.services.embeddings import RemoteEmbeddingService, env_var_to_heade
 from backend.services.usage_meters import recorder as usage_recorder
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers
+from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers, preset_sides, side_config
 from backend.providers.types import ModelInfo
 
 router = APIRouter()
@@ -508,10 +508,13 @@ class EndpointHealthResponse(BaseModel):
     """Per-side health; ``None`` means the active preset declares no health check."""
     embedding: Optional[EndpointHealth] = None
     llm: Optional[EndpointHealth] = None
+    #: Only for a preset with a remote re-ranker.
+    rerank: Optional[EndpointHealth] = None
 
 
 def _side_kwargs(preset: HardwarePreset, side: str) -> dict:
-    return (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    cfg = side_config(preset, side)
+    return cfg.model_kwargs if cfg is not None else {}
 
 
 def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[str]:
@@ -541,7 +544,10 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
     if not base_url and api_key and provider.derives_endpoint_url:
         base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
-    health = provider.health(Credentials(api_key=api_key, base_url=base_url))
+    identity = get_zotero_identity(request) if request is not None else None
+    health = provider.health(Credentials(
+        api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None,
+    ))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
@@ -561,6 +567,10 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     return EndpointHealthResponse(
         embedding=_check_side(preset, "embedding", request),
         llm=_check_side(preset, "llm", request),
+        rerank=(
+            _check_side(preset, "rerank", request)
+            if preset.rerank is not None and preset.rerank.model_type == "remote" else None
+        ),
     )
 
 
@@ -641,8 +651,9 @@ async def get_provider_descriptors(request: Request) -> dict:
     """Per-side provider descriptors of the caller's effective preset, for the plugin's
     per-side configuration sections.
 
-    ``{"preset": name, "sides": {"embedding"|"llm": {"model_type", "provider"}}}``;
-    ``provider`` is ``null`` for a local side. A descriptor carries the provider's id and
+    ``{"preset": name, "sides": {"embedding"|"llm"|"rerank": {"model_type", "provider"}}}``;
+    ``provider`` is ``null`` for a local side. ``rerank`` is present only when the
+    preset has a re-ranking step; it also carries ``model_name`` and ``pool_size``. A descriptor carries the provider's id and
     label, the effective credential scope, capability flags (provisioning, pause), the
     credential the one-time provisioning key must match, an ``unavailable_hint`` and
     ``operable_by_caller``. It never contains secrets and no vendor knowledge lives in
@@ -654,15 +665,17 @@ async def get_provider_descriptors(request: Request) -> dict:
     except ProviderConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sides: Dict[str, dict] = {}
-    for side in ("embedding", "llm"):
-        cfg = preset.embedding if side == "embedding" else preset.llm
+    for side in preset_sides(preset):
+        cfg = side_config(preset, side)
         provider = providers[side]
-        if cfg.model_type != "remote":
-            sides[side] = {"model_type": cfg.model_type, "provider": None}
-            continue
-        descriptor = provider.describe()
-        descriptor.operable_by_caller = await _caller_may_operate(request, provider)
-        sides[side] = {"model_type": cfg.model_type, "provider": descriptor.model_dump()}
+        entry: Dict[str, object] = {"model_type": cfg.model_type, "provider": None}
+        if side == "rerank":
+            entry.update(model_name=cfg.model_name, pool_size=cfg.pool_size)
+        if cfg.model_type == "remote":
+            descriptor = provider.describe()
+            descriptor.operable_by_caller = await _caller_may_operate(request, provider)
+            entry["provider"] = descriptor.model_dump()
+        sides[side] = entry
     return {"preset": preset.name, "sides": sides}
 
 
@@ -745,12 +758,16 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
         raise HTTPException(status_code=400, detail=str(exc))
 
     if body.sides is None:
-        sides = [s for s in ("embedding", "llm") if getattr(providers[s], flag)]
+        sides = [s for s in preset_sides(preset) if getattr(providers[s], flag)]
+        if capability == "provision":
+            # Re-ranking is optional: its endpoint is started from its own section or
+            # the query dialog's prompt, never as a side effect. Pausing covers it.
+            sides = [s for s in sides if s != "rerank"]
     else:
         unknown = [s for s in body.sides if s not in providers]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown side(s): {', '.join(unknown)}")
-        sides = [s for s in ("embedding", "llm") if s in body.sides]
+        sides = [s for s in preset_sides(preset) if s in body.sides]
         unsupported = [s for s in sides if not getattr(providers[s], flag)]
         if unsupported:
             raise HTTPException(
@@ -766,13 +783,16 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
     jobs = []
     for side in sides:
         credential, env = _side_credential(preset, side, body.keys, request)
-        if not credential:
+        if not credential and providers[side].provisioning_needs_key:
             raise HTTPException(
                 status_code=400,
                 detail=f"No API key is available for the {side} side"
                        + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
             )
-        ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
+        ctx = ProvisionContext(
+            side=side, preset=preset, credential=credential, data_path=settings.data_path,
+            extra={"user_id": identity.user_id if identity else None},
+        )
         jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
 
     if provisioning.is_running(slot, sides):
@@ -977,6 +997,10 @@ async def get_required_api_keys():
         _merge(key_info, "embedding")
     for key_info in RemoteLLMService.required_client_fields(settings):
         _merge(key_info, "llm")
+    from backend.services.rerank import rerank_client_fields
+
+    for key_info in rerank_client_fields(preset.rerank):
+        _merge(key_info, "rerank")
 
     return RequiredKeysResponse(keys=list(seen.values()))
 
@@ -1034,3 +1058,95 @@ async def get_version():
         "api_version": settings.version,
         "service": "Zotero RAG API"
     }
+
+
+# -- per-user provider sessions (e.g. an MPCDF account login) ---------------------
+
+
+class SessionLoginRequest(BaseModel):
+    """Body of POST /api/config/session/login: the side and the login form's values."""
+    side: str
+    #: Field values by the names the side's ``provisioning.login`` descriptor declares.
+    values: Dict[str, str] = {}
+
+
+class SessionSideRequest(BaseModel):
+    side: str
+
+
+def _session_provider(request: Request, side: str) -> Tuple[Provider, Optional[int]]:
+    """The caller's session-login provider for ``side`` and the caller's user id.
+
+    Raises:
+        HTTPException: 400 when the side has no login, 401 without a signed-in caller.
+    """
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    provider = providers.get(side)
+    descriptor = provider.describe() if provider is not None else None
+    if descriptor is None or descriptor.provisioning is None or descriptor.provisioning.login is None:
+        raise HTTPException(status_code=400, detail=f"The {side} side of preset '{preset.name}' has no account login.")
+    identity = get_zotero_identity(request)
+    if identity is None and not is_loopback(get_settings()):
+        raise HTTPException(status_code=401, detail="Missing or invalid Zotero API key.")
+    return provider, identity.user_id if identity else None
+
+
+def _session_error(exc: Exception) -> HTTPException:
+    """Map a session failure to an HTTP error without echoing anything the user typed."""
+    from backend.providers.types import ProvisionError
+    from backend.services.mpcdf_sessions import LoginRateLimited, SessionsUnavailable
+
+    name = type(exc).__name__
+    if isinstance(exc, LoginRateLimited):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, SecretsUnavailableError):
+        return HTTPException(status_code=503, detail="This server cannot store sessions (AUTOINDEX_SECRET is not set).")
+    if isinstance(exc, (SessionsUnavailable, ProvisionError)):
+        return HTTPException(status_code=503, detail=str(exc))
+    if name == "LoginFailed":
+        return HTTPException(status_code=401, detail="The login was rejected; check the username, password and one-time code.")
+    logger.warning("Session call failed: %s", name)
+    return HTTPException(status_code=502, detail=f"The provider could not be reached ({name}).")
+
+
+@router.post("/config/session/login")
+def session_login(body: SessionLoginRequest, request: Request) -> dict:
+    """Log the caller in to their own account at the side's provider.
+
+    The password and one-time code are passed on once and never stored; the
+    provider keeps only the resulting session, encrypted. Returns the session
+    state (``state``, ``username``, ``expires_at``, provider extras), no secrets.
+    Plain ``def``: the provider call blocks, so FastAPI runs it in a thread.
+    """
+    provider, user_id = _session_provider(request, body.side)
+    try:
+        return provider.session_login(user_id, body.values)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _session_error(exc)
+
+
+@router.post("/config/session/logout")
+def session_logout(body: SessionSideRequest, request: Request) -> dict:
+    """End the caller's session at the side's provider (running endpoints are not stopped)."""
+    provider, user_id = _session_provider(request, body.side)
+    try:
+        provider.session_logout(user_id)
+    except Exception as exc:
+        raise _session_error(exc)
+    return {"state": "login_required"}
+
+
+@router.get("/config/session")
+def session_state(side: str, request: Request) -> dict:
+    """The caller's session state at the side's provider."""
+    provider, user_id = _session_provider(request, side)
+    try:
+        return provider.session_status(user_id) or {"state": "login_required"}
+    except Exception as exc:
+        raise _session_error(exc)

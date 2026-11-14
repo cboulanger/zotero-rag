@@ -1,4 +1,5 @@
-// Per-side configuration sections of the Preferences pane (embedding and answering model).
+// Per-side configuration sections of the Preferences pane (embedding model, answering
+// model and, for a preset that has one, the re-ranking step).
 //
 // Everything vendor-specific comes from the backend's provider descriptors
 // (`GET /api/config/providers`): this file contains no provider names. It has two
@@ -21,6 +22,29 @@
  */
 
 /**
+ * One input of a provider's account login form.
+ * @typedef {Object} LoginField
+ * @property {string} name
+ * @property {string} label
+ * @property {'text'|'password'} [type]
+ * @property {string|null} [autocomplete]
+ * @property {boolean} [optional]
+ * @property {string} [help]
+ */
+
+/**
+ * A provider whose endpoints run in the user's own login session (POST /api/config/session/login).
+ * @typedef {Object} LoginDescriptor
+ * @property {string} title
+ * @property {LoginField[]} fields
+ * @property {string} [help]
+ */
+
+/**
+ * @typedef {{state: 'ok'|'login_required', username?: string|null, expires_at?: string|null}|null} SessionState
+ */
+
+/**
  * @typedef {Object} ProviderDescriptor
  * @property {string} id
  * @property {string} label
@@ -28,7 +52,7 @@
  * @property {boolean} operable_by_caller
  * @property {boolean} supports_provisioning
  * @property {boolean} supports_suspend
- * @property {{credential?: ProvisioningCredential, hint?: string}|null} [provisioning]
+ * @property {{credential?: ProvisioningCredential|null, login?: LoginDescriptor|null, hint?: string}|null} [provisioning]
  * @property {string|null} [unavailable_hint]
  */
 
@@ -36,6 +60,12 @@
  * @typedef {Object} SideInfo
  * @property {'local'|'remote'} model_type
  * @property {ProviderDescriptor|null} provider
+ * @property {string} [model_name] - rerank side only
+ * @property {number} [pool_size] - rerank side only: candidates the re-ranker rescores
+ */
+
+/**
+ * @typedef {'embedding'|'llm'|'rerank'} SideName
  */
 
 /**
@@ -60,8 +90,10 @@
 
 /**
  * @typedef {Object} SectionModel
- * @property {'embedding'|'llm'} side
+ * @property {SideName} side
+ * @property {boolean} present - false for a rerank side the preset does not have (the section is hidden)
  * @property {string} title
+ * @property {string} modelText - what the side runs, '' when there is nothing to add
  * @property {string} providerText - e.g. "Provider: X (your own account)", '' for a local model
  * @property {boolean} local
  * @property {{text: string, color: string, title: string}|null} health
@@ -73,14 +105,18 @@
  * @property {string[]} progress - this side's progress lines
  * @property {string} status - outcome message of this side's last job, '' if none
  * @property {boolean} readOnlyNote - true when the side needs provisioning but the caller may not do it
+ * @property {{visible: boolean, title: string, help: string, fields: LoginField[], loggedIn: boolean, text: string}} login - account login form, for a provider with per-user sessions
  */
 
 var ZoteroRAGProviderSections = {
-	/** @type {Array<'embedding'|'llm'>} */
-	SIDES: ['embedding', 'llm'],
+	/** @type {Array<SideName>} */
+	SIDES: ['embedding', 'llm', 'rerank'],
 
 	/** @type {Record<string, string>} */
-	SIDE_TITLES: { embedding: 'Embedding model', llm: 'Answering model (LLM)' },
+	SIDE_TITLES: { embedding: 'Embedding model', llm: 'Answering model (LLM)', rerank: 'Re-ranking' },
+
+	/** Pref behind the "Use re-ranking" switch (default on). */
+	RERANK_PREF: 'extensions.zotero-rag.enableReranking',
 
 	/** @type {Record<string, string>} */
 	HEALTH_COLORS: { ready: 'green', cold: 'orange', paused: 'orange', throttled: 'red', unreachable: 'red' },
@@ -97,25 +133,31 @@ var ZoteroRAGProviderSections = {
 
 	/**
 	 * Build the view model of one side (pure).
-	 * @param {'embedding'|'llm'} side
+	 * @param {SideName} side
 	 * @param {SideInfo|undefined} info - from GET /api/config/providers
 	 * @param {SideHealth|undefined} health - from GET /api/config/health
 	 * @param {JobState|null|undefined} job - the caller's provisioning job
+	 * @param {SessionState} [session] - GET /api/config/session for this side
 	 * @returns {SectionModel}
 	 */
-	buildModel(side, info, health, job) {
+	buildModel(side, info, health, job, session = null) {
 		const title = this.SIDE_TITLES[side];
 		const provider = info && info.provider;
+		const present = side !== 'rerank' || !!info;
+		const modelText = side === 'rerank' && info && info.model_name
+			? `Model: ${info.model_name}; rescores the best ${info.pool_size || 100} passages before the answer is written.`
+			: '';
 		/** @type {ActionView} */
 		const hidden = { visible: false, label: '', disabled: false, reason: '' };
+		const noLogin = { visible: false, title: '', help: '', fields: [], loggedIn: false, text: '' };
 		if (!info || !provider) {
 			return {
-				side, title, local: true,
+				side, present, title, modelText, local: true,
 				providerText: '',
 				health: null, hint: '',
 				provision: hidden, retry: hidden, pause: hidden,
 				credential: { visible: false, label: '', help: '', pattern: '' },
-				progress: [], status: '', readOnlyNote: false,
+				progress: [], status: '', readOnlyNote: false, login: noLogin,
 			};
 		}
 
@@ -136,8 +178,23 @@ var ZoteroRAGProviderSections = {
 
 		const scope = this.SCOPE_NOTES[provider.key_scope] || '';
 		const credential = provider.provisioning && provider.provisioning.credential;
+		const loginInfo = provider.provisioning && provider.provisioning.login;
+		const loggedIn = !!session && session.state === 'ok';
+		const login = loginInfo
+			? {
+				visible: true,
+				title: loginInfo.title,
+				help: loginInfo.help || '',
+				fields: loginInfo.fields || [],
+				loggedIn,
+				text: loggedIn
+					? `Logged in${session && session.username ? ` as ${session.username}` : ''}` +
+						(session && session.expires_at ? ` until ${this.formatTime(session.expires_at)}` : '') + '.'
+					: 'Not logged in.',
+			}
+			: noLogin;
 		return {
-			side, title, local: false,
+			side, present, title, modelText, local: false,
 			providerText: `Provider: ${provider.label}${scope ? ` (${scope})` : ''}`,
 			health: health
 				? {
@@ -168,7 +225,7 @@ var ZoteroRAGProviderSections = {
 			credential: {
 				// Needed by every action that talks to the provider's management API (provision,
 				// resume, retry, pause); nothing to show when none of them is on offer.
-				visible: (canProvision || canPause) && (provisionVisible || retryVisible || pauseVisible),
+				visible: !loginInfo && (canProvision || canPause) && (provisionVisible || retryVisible || pauseVisible),
 				label: credential ? credential.label : 'Key for this run',
 				help: credential && credential.help ? credential.help : '',
 				pattern: credential && credential.pattern ? credential.pattern : '',
@@ -177,15 +234,30 @@ var ZoteroRAGProviderSections = {
 			status: sideJob && sideJob.status === 'failed' ? `Failed: ${sideJob.message || 'unknown error'}`
 				: sideJob && sideJob.status === 'succeeded' ? 'Done.' : '',
 			readOnlyNote: provider.supports_provisioning && !provider.operable_by_caller && needsAction,
+			login,
 		};
 	},
 
 	/**
-	 * Build the skeleton of both sections once; returns references for `update`.
+	 * Local wall-clock time of an ISO timestamp (pure apart from the time zone).
+	 * @param {string} iso
+	 * @returns {string}
+	 */
+	formatTime(iso) {
+		const d = new Date(iso);
+		if (isNaN(d.getTime())) return iso;
+		return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+	},
+
+	/**
+	 * Build the skeleton of every section once; returns references for `update`.
+	 * The rerank section starts hidden and carries the "Use re-ranking" switch.
 	 * @param {Document} doc
 	 * @param {HTMLElement} container
-	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
-	 * @returns {Record<'embedding'|'llm', Record<string, any>>}
+	 * @param {{onProvision: (side: SideName, oneTimeKey: string) => void, onRetry: (side: SideName, oneTimeKey: string) => void, onPause?: (side: SideName, oneTimeKey: string) => void,
+	 *   rerankEnabled?: {get: () => boolean, set: (enabled: boolean) => void},
+	 *   onLogin?: (side: SideName, values: Record<string, string>) => void, onLogout?: (side: SideName) => void}} handlers
+	 * @returns {Record<SideName, Record<string, any>>}
 	 */
 	ensureSections(doc, container, handlers) {
 		const NS = 'http://www.w3.org/1999/xhtml';
@@ -202,6 +274,7 @@ var ZoteroRAGProviderSections = {
 			const section = el('div', 'provider-section');
 			section.id = `zotero-rag-side-${side}`;
 			const title = el('div', 'provider-section-title');
+			const model = el('div', 'setting-description');
 			const provider = el('div', 'setting-description');
 			const health = el('div', 'setting-description');
 			const hint = el('div', 'setting-description');
@@ -231,6 +304,35 @@ var ZoteroRAGProviderSections = {
 			const progress = el('div', 'setting-description');
 			const status = el('div', 'setting-description');
 
+			// Account login form; its inputs are built on the first update that names them.
+			const loginBox = el('div', 'provider-section-login');
+			loginBox.hidden = true;
+			const loginTitle = el('div', 'setting-description');
+			const loginHelp = el('div', 'setting-description');
+			const loginFields = el('div', 'provider-section-login-fields');
+			const loginState = el('div', 'setting-description');
+			const loginActions = el('div', 'setting-row');
+			const loginButton = el('button');
+			loginButton.id = `zotero-rag-side-${side}-login`;
+			loginButton.textContent = 'Log in';
+			const logoutButton = el('button');
+			logoutButton.id = `zotero-rag-side-${side}-logout`;
+			logoutButton.textContent = 'Log out';
+			loginActions.append(loginButton, logoutButton);
+			loginBox.append(loginTitle, loginHelp, loginState, loginFields, loginActions);
+			/** @type {Record<string, any>} */
+			const loginInputs = {};
+			loginButton.addEventListener('click', () => {
+				/** @type {Record<string, string>} */
+				const values = {};
+				for (const [name, input] of Object.entries(loginInputs)) {
+					values[name] = String(input.value || '').trim();
+					if (input.type === 'password' || name !== 'username') input.value = ''; // never kept
+				}
+				if (handlers.onLogin) handlers.onLogin(side, values);
+			});
+			logoutButton.addEventListener('click', () => handlers.onLogout && handlers.onLogout(side));
+
 			const oneTimeKey = () => {
 				const value = String(credInput.value || '').trim();
 				credInput.value = ''; // never kept, never saved
@@ -240,25 +342,79 @@ var ZoteroRAGProviderSections = {
 			retry.addEventListener('click', () => handlers.onRetry(side, oneTimeKey()));
 			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side, oneTimeKey()));
 
-			section.append(title, provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
+			/** @type {any} */
+			let toggle = null;
+			const parts = [title, model];
+			if (side === 'rerank') {
+				section.hidden = true;
+				const toggleRow = el('div', 'setting-row');
+				const toggleLabel = el('label');
+				toggle = el('input');
+				toggle.type = 'checkbox';
+				toggle.id = 'zotero-rag-enable-reranking';
+				toggle.checked = handlers.rerankEnabled ? handlers.rerankEnabled.get() : true;
+				toggle.addEventListener('change', () => handlers.rerankEnabled && handlers.rerankEnabled.set(!!toggle.checked));
+				toggleLabel.setAttribute('for', toggle.id);
+				toggleLabel.textContent = 'Use re-ranking (more relevant passages, a few seconds slower)';
+				toggleRow.append(toggle, toggleLabel);
+				parts.push(toggleRow);
+			}
+			parts.push(provider, health, hint, keys, loginBox, credRow, credHelp, actions, note, progress, status);
+			section.append(...parts);
 			container.appendChild(section);
-			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, pause, note, progress, status };
+			refs[side] = {
+				section, title, model, toggle, provider, health, hint, keys, credRow, credLabel, credInput, credHelp,
+				provision, retry, pause, note, progress, status,
+				loginBox, loginTitle, loginHelp, loginFields, loginState, loginButton, logoutButton, loginInputs,
+				/** Builds the login inputs once (`el` is the section's element factory). */
+				buildLoginInputs: (/** @type {LoginField[]} */ fields) => {
+					if (Object.keys(loginInputs).length) return;
+					for (const f of fields) {
+						const row = el('div', 'setting-row');
+						const label = el('label');
+						const input = el('input', 'setting-input');
+						input.type = f.type === 'password' ? 'password' : 'text';
+						input.id = `zotero-rag-side-${side}-login-${f.name}`;
+						if (f.autocomplete) input.setAttribute('autocomplete', f.autocomplete);
+						if (f.optional) input.placeholder = 'Optional';
+						label.setAttribute('for', input.id);
+						label.textContent = `${f.label}:`;
+						row.append(label, input);
+						loginFields.appendChild(row);
+						if (f.help) {
+							const help = el('div', 'setting-description');
+							help.textContent = f.help;
+							loginFields.appendChild(help);
+						}
+						loginInputs[f.name] = input;
+					}
+				},
+			};
 		}
 		return /** @type {any} */ (refs);
 	},
 
 	/**
 	 * Apply view models to the skeleton built by `ensureSections`.
-	 * @param {Record<'embedding'|'llm', Record<string, any>>} refs
-	 * @param {Record<'embedding'|'llm', SectionModel>} models
+	 * @param {Record<SideName, Record<string, any>>} refs
+	 * @param {Partial<Record<SideName, SectionModel>>} models - a side without a model is hidden
 	 * @returns {void}
 	 */
 	update(refs, models) {
 		for (const side of this.SIDES) {
 			const r = refs[side];
 			const m = models[side];
+			if (!r) continue;
+			if (r.section) r.section.hidden = !m || !m.present;
+			if (!m) continue;
 			r.title.textContent = m.title;
-			r.provider.textContent = m.local ? 'Runs on this server; nothing to configure here.' : m.providerText;
+			if (r.model) {
+				r.model.textContent = m.modelText;
+				r.model.hidden = !m.modelText;
+			}
+			r.provider.textContent = m.local
+				? (side === 'rerank' ? 'Runs on this server.' : 'Runs on this server; nothing to configure here.')
+				: m.providerText;
 			r.health.textContent = m.health ? `${m.title}: ${m.health.text}` : '';
 			r.health.style.color = m.health ? m.health.color : '';
 			r.health.title = m.health ? m.health.title : '';
@@ -281,6 +437,19 @@ var ZoteroRAGProviderSections = {
 			r.pause.textContent = m.pause.label;
 			r.pause.disabled = m.pause.disabled;
 			r.pause.title = m.pause.reason;
+			if (r.loginBox) {
+				r.loginBox.hidden = !m.login.visible;
+				if (m.login.visible) {
+					r.buildLoginInputs(m.login.fields);
+					r.loginTitle.textContent = m.login.title;
+					r.loginHelp.textContent = m.login.help;
+					r.loginHelp.hidden = !m.login.help;
+					r.loginState.textContent = m.login.text;
+					r.loginFields.hidden = m.login.loggedIn;
+					r.loginButton.hidden = m.login.loggedIn;
+					r.logoutButton.hidden = !m.login.loggedIn;
+				}
+			}
 			r.note.hidden = !m.readOnlyNote;
 			r.note.textContent = m.readOnlyNote ? 'This endpoint is not available. Ask the server admin to provision it.' : '';
 			r.progress.textContent = m.progress.join('\n');
@@ -296,7 +465,7 @@ var ZoteroRAGProviderSections = {
  * testable without a browser: `get(path)` resolves parsed JSON or null on failure,
  * `post(path, body)` resolves `{ok, status, data}`.
  * @param {{
- *   refs: Record<'embedding'|'llm', Record<string, any>>,
+ *   refs: Record<SideName, Record<string, any>>,
  *   get: (path: string) => Promise<any>,
  *   post: (path: string, body: any) => Promise<{ok: boolean, status: number, data: any}>,
  *   sleep?: (ms: number) => Promise<void>,
@@ -313,8 +482,8 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	const remembered = deps.sessionKeys || { get: () => '', set: () => {}, forget: () => {} };
 	/** Re-checks of a cold endpoint after which polling stops (about 10 minutes at the default rate). */
 	const MAX_COLD_POLLS = 120;
-	/** @type {{providers: any, health: any, job: any}} */
-	const state = { providers: null, health: null, job: null };
+	/** @type {{providers: any, health: any, job: any, sessions: Record<string, SessionState>}} */
+	const state = { providers: null, health: null, job: null, sessions: {} };
 	let polling = false;
 
 	/** Re-fetch providers, endpoint health and the caller's job, and repaint. */
@@ -327,6 +496,13 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		if (providers) state.providers = providers;
 		if (health) state.health = health;
 		if (job) state.job = job;
+		// Sides whose provider runs in the user's own login session: ask for its state.
+		const loginSides = S.SIDES.filter((side) => {
+			const p = state.providers && state.providers.sides && state.providers.sides[side] && state.providers.sides[side].provider;
+			return !!(p && p.provisioning && p.provisioning.login);
+		});
+		const sessions = await Promise.all(loginSides.map((side) => deps.get(`/api/config/session?side=${side}`)));
+		loginSides.forEach((side, i) => { if (sessions[i]) state.sessions[side] = sessions[i]; });
 		/** @type {any} */
 		const models = {};
 		for (const side of S.SIDES) {
@@ -335,6 +511,7 @@ ZoteroRAGProviderSections.createController = function (deps) {
 				state.providers && state.providers.sides ? state.providers.sides[side] : undefined,
 				state.health ? state.health[side] : undefined,
 				state.job,
+				state.sessions[side] || null,
 			);
 		}
 		S.update(deps.refs, models);
@@ -378,7 +555,7 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	/**
 	 * Provision (create, wake or resume) or retry one side. Only that side is sent; the
 	 * one-time key goes with this request only and is never kept.
-	 * @param {'embedding'|'llm'} side
+	 * @param {SideName} side
 	 * @param {string} oneTimeKey
 	 */
 	const startJob = async (path, side, oneTimeKey, failure) => {
@@ -413,13 +590,46 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		}
 	};
 
-	const provision = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey) =>
+	const provision = (/** @type {SideName} */ side, /** @type {string} */ oneTimeKey) =>
 		startJob('/api/config/provision', side, oneTimeKey, 'Provisioning failed');
 	/** Pause one side (stops billing and wake-ups; resuming is provisioning again). */
-	const pause = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey = '') =>
+	const pause = (/** @type {SideName} */ side, /** @type {string} */ oneTimeKey = '') =>
 		startJob('/api/config/suspend', side, oneTimeKey, 'Pausing failed');
 
-	return { state, refresh, poll, provision, pause };
+	/**
+	 * Log in to the side's provider with the form's values (never kept here), then repaint.
+	 * @param {SideName} side
+	 * @param {Record<string, string>} values
+	 */
+	const login = async (side, values) => {
+		const status = deps.refs[side].status;
+		const show = (/** @type {string} */ text) => { status.textContent = text; status.hidden = !text; };
+		show('Logging in\u2026');
+		try {
+			const result = await deps.post('/api/config/session/login', { side, values });
+			if (!result.ok) {
+				show(`Login failed: ${result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`}`);
+				return;
+			}
+			state.sessions[side] = result.data;
+			show('');
+			await refresh();
+		} catch (e) {
+			show(`Login failed: ${e}`);
+		}
+	};
+
+	/** @param {SideName} side */
+	const logout = async (side) => {
+		try {
+			await deps.post('/api/config/session/logout', { side });
+		} finally {
+			state.sessions[side] = { state: 'login_required' };
+			await refresh();
+		}
+	};
+
+	return { state, refresh, poll, provision, pause, login, logout };
 };
 
 /**

@@ -29,6 +29,16 @@ One section each for the **Embedding model** and the **Answering model (LLM)** o
 
 For an endpoint that can be provisioned (created, woken or resumed), the section offers **Provision endpoint** / **Resume** when the endpoint is not reachable, runs it on your own account (or, for an institution-funded one, only for admins), shows its progress, and offers **Retry** for just the side that failed. An optional key field takes a broader key for managing the endpoint. It is kept in memory in the running Zotero, so Resume, Retry and Pause need no re-entry, and it is never saved anywhere; after Zotero restarts it has to be entered again. The two sides run independently; only a side that already has a job running is disabled.
 
+### Re-ranking
+
+Shown only when your preset has a re-ranking step. A re-ranker reads your question together with
+each candidate passage and puts the most relevant ones first before the answer is written, which
+costs a few seconds per question. The section names the model and how many passages it rescores,
+and has the **Use re-ranking** switch (on by default). A re-ranker that runs on the server needs
+nothing else. One that runs on your own provider account has its key field, live status and
+**Provision endpoint** / **Resume** here, like the model sections above. If it is not running when
+you ask a question, the question is answered without re-ranking.
+
 ### Automatic indexing
 
 A single toggle: **Enable automatic indexing of my libraries**. When on, the backend
@@ -85,7 +95,7 @@ indexing run will re-check every item against the backend from scratch.
 
 Collapsed by default in the search dialog, under the library list. These apply to
 the query you're about to run, not saved as a persistent preference (with the
-exception of the LLM model and routing choices, which are remembered for your next
+exception of the LLM model, routing and re-ranking choices, which are remembered for your next
 query).
 
 | Setting | What it does |
@@ -94,6 +104,7 @@ query).
 | **Similarity** | How closely a passage must match your question to be considered — lower values cast a wider net but pull in less relevant material. |
 | **Sources** | How many passages to retrieve before answering (this is `top_k` in the API and in [Retrieval Tuning](#retrieval-tuning) above) — higher values search more broadly but take longer and cost more per query. |
 | **Disable query routing** | Skips the routing step that decides between content search, catalog search, and citation search, going straight to a content search. Faster, but loses metadata-filter extraction, catalog listings, and citation/mentions questions. See [Query Routing & Agent System](query-routing.md) for what routing normally does. |
+| **Disable re-ranking** | Only shown when the preset has a re-ranking step. Answers this question with the passages in plain similarity order, a few seconds faster. Checked and locked when re-ranking is switched off in [Preferences](#re-ranking). When the preset's re-ranking endpoint is not running, the dialog says so and, if you can start it, offers **Start re-ranking**. |
 | **Include debugging information in note** | Attaches the full execution trace (routing decision, retrieval scores, every LLM call and prompt) to the saved result note and makes it available for export from the result view. Useful when reporting an answer-quality issue. |
 
 ## See also

@@ -131,7 +131,7 @@ def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dic
     The backend no longer reads provider keys from its environment: a ``user``
     scope side expects the caller's own key as a request header, so the
     harness must supply one. For each personal ``api_key`` field the preset
-    requires (embedding + LLM) use ``$<KEY_NAME>`` if set in this shell, else the
+    requires (embedding, LLM, and an optional re-ranking side) use ``$<KEY_NAME>`` if set in this shell, else the
     key of that name in the auto-index key store (a user can store one key per
     provider key name). Admin-set ``managed``/``shared`` fields are resolved
     server-side and need no header.
@@ -146,6 +146,12 @@ def provider_headers(preset: Any, extra: Optional[dict[str, str]] = None) -> dic
         return headers
     fields = RemoteEmbeddingService.required_client_fields(preset.embedding)
     fields += RemoteLLMService.required_client_fields_for_config(preset.llm)
+    try:
+        from backend.services.rerank import rerank_client_fields
+
+        fields += rerank_client_fields(getattr(preset, "rerank", None))
+    except Exception:
+        pass
     entries = _store_entries()
     store = None
     if entries:

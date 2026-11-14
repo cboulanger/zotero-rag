@@ -1,15 +1,12 @@
 {
   "version": 2,
-  "description": "Fully remote via MPCDF LLM Inference Service (llm.mpcdf.mpg.de) — Each endpoint is an ephemeral (<=8h) Slurm job; the endpoint URL and the API key need to be set for each job individually for both the embedding and the inference endpoint.",
+  "description": "Fully remote via the MPCDF LLM Inference Service (llm.mpcdf.mpg.de) on your own MPCDF account. Log in with your MPCDF username, password and one-time code in Preferences, then start the endpoints; each runs as a job (up to 8 hours, renewed while in use) on your account.",
   "embedding": {
     "model_type": "remote",
-    "model_name": "multilingual-e5-large-instruct",
+    "model_name": "intfloat/multilingual-e5-large-instruct",
     "batch_size": 64,
-    "provider": {"id": "mpcdf"},
-    "model_kwargs": {
-      "shared_base_url_env": "MPCDF_EMBEDDING_BASE_URL",
-      "shared_api_key_env": "MPCDF_EMBEDDING_API_KEY"
-    }
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60}},
+    "model_kwargs": {}
   },
   "llm": {
     "model_type": "remote",
@@ -17,11 +14,14 @@
     "max_context_length": 131072,
     "max_answer_tokens": 4096,
     "temperature": 0.7,
-    "provider": {"id": "mpcdf"},
-    "model_kwargs": {
-      "shared_base_url_env": "MPCDF_LLM_BASE_URL",
-      "shared_api_key_env": "MPCDF_LLM_API_KEY"
-    }
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 2, "idle_minutes": 60}},
+    "model_kwargs": {}
+  },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60}}
   },
   "rag": {
     "top_k": 10,

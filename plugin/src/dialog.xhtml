@@ -208,8 +208,18 @@
             <input type="checkbox" id="include-trace" />
             Include debugging information in note
           </label>
+          <label id="disable-reranking-row" style="display:none; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
+            <input type="checkbox" id="disable-reranking" />
+            Disable re-ranking (faster, less precise choice of passages)
+          </label>
         </div>
       </details>
+
+      <!-- Shown when the preset re-ranks but its endpoint is not running -->
+      <div id="rerank-notice" style="font-size: 12px; margin: 4px 0; display:none; align-items:center; gap:8px;">
+        <span id="rerank-notice-text"></span>
+        <button id="rerank-start-button" type="button" hidden="hidden">Start re-ranking</button>
+      </div>
 
 
       <!-- Feedback container (fixed height) -->

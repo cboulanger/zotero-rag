@@ -127,7 +127,7 @@ test('a failed side offers Retry for that side only, and shows its message', () 
 	assert.strictEqual(l.status, 'Failed: boom');
 });
 
-test('the DOM layer builds both sections once, updates them in place and clears the one-time key after use', () => {
+test('the DOM layer builds every section once, updates them in place and clears the one-time key after use', () => {
 	const S = load();
 	const doc = { createElementNS };
 	const container = fakeNode();
@@ -136,7 +136,8 @@ test('the DOM layer builds both sections once, updates them in place and clears 
 		onProvision: (side, key) => calls.push(['provision', side, key]),
 		onRetry: (side, key) => calls.push(['retry', side, key]),
 	});
-	assert.strictEqual(container.children.length, 2);
+	assert.strictEqual(container.children.length, 3);
+	assert.strictEqual(refs.rerank.section.hidden, true);       // until the preset has a rerank side
 	const models = {
 		embedding: S.buildModel('embedding', remote(), { status: 'unreachable', detail: '' }, idle),
 		llm: S.buildModel('llm', remote(), { status: 'ready', detail: '' }, idle),
@@ -156,7 +157,8 @@ test('the DOM layer builds both sections once, updates them in place and clears 
 	refs.llm.credInput.value = 'typing';
 	S.update(refs, models);
 	assert.strictEqual(refs.llm.credInput.value, 'typing');
-	assert.strictEqual(container.children.length, 2);        // no rebuild
+	assert.strictEqual(container.children.length, 3);        // no rebuild
+	assert.strictEqual(refs.rerank.section.hidden, true);
 });
 
 test('a disabled provision button cannot be clicked', () => {
@@ -466,4 +468,115 @@ test('a token typed now replaces the remembered one, and a refused one is forgot
 	await controller.provision('llm', 'k_new');
 	assert.strictEqual(backend.posts[0][1].keys.SOME_API_KEY, 'k_new');
 	assert.strictEqual(mem.SOME_API_KEY, undefined);
+});
+
+// --- rerank side ---------------------------------------------------------------
+
+test('rerank side: absent from the preset means a hidden section', () => {
+	const S = load();
+	const m = S.buildModel('rerank', undefined, undefined, idle);
+	assert.strictEqual(m.present, false);
+	assert.strictEqual(S.buildModel('embedding', undefined, undefined, idle).present, true);
+});
+
+test('rerank side: a local re-ranker shows its model and the switch', () => {
+	const S = load();
+	const calls = [];
+	let enabled = false;
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), {
+		onProvision() {}, onRetry() {},
+		rerankEnabled: { get: () => enabled, set: (v) => { enabled = v; calls.push(v); } },
+	});
+	assert.strictEqual(refs.rerank.toggle.checked, false);
+	const m = S.buildModel('rerank', { model_type: 'local', provider: null, model_name: 'BAAI/bge-reranker-v2-m3', pool_size: 100 }, undefined, idle);
+	S.update(refs, { embedding: S.buildModel('embedding', local, undefined, idle), llm: S.buildModel('llm', local, undefined, idle), rerank: m });
+	assert.strictEqual(refs.rerank.section.hidden, false);
+	assert.match(refs.rerank.model.textContent, /bge-reranker-v2-m3.*100 passages/);
+	assert.strictEqual(refs.rerank.provider.textContent, 'Runs on this server.');
+	refs.rerank.toggle.checked = true;
+	refs.rerank.toggle.listeners.change.forEach((fn) => fn());
+	assert.deepStrictEqual(calls, [true]);
+	assert.strictEqual(refs.embedding.toggle, null);
+});
+
+test('rerank side: a remote re-ranker that is not running offers to start it', () => {
+	const S = load();
+	const m = S.buildModel('rerank', { ...remote(), model_name: 'm', pool_size: 50 }, { status: 'unreachable', detail: 'not running' }, idle);
+	assert.strictEqual(m.present, true);
+	assert.strictEqual(m.provision.visible, true);
+	assert.match(m.modelText, /best 50 passages/);
+});
+
+test('controller hides the rerank section when the preset has none', async () => {
+	const S = load();
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), { onProvision() {}, onRetry() {} });
+	const responses = {
+		'/api/config/providers': { sides: { embedding: local, llm: local } },
+		'/api/config/health': { embedding: null, llm: null, rerank: null },
+		'/api/config/provision/status': idle,
+	};
+	const c = S.createController({ refs, get: async (p) => responses[p], post: async () => ({ ok: true, status: 200, data: {} }), pollMs: 0 });
+	await c.refresh();
+	assert.strictEqual(refs.rerank.section.hidden, true);
+	responses['/api/config/providers'].sides.rerank = { model_type: 'local', provider: null, model_name: 'x', pool_size: 100 };
+	await c.refresh();
+	assert.strictEqual(refs.rerank.section.hidden, false);
+});
+
+// --- account login (per-user session providers) -----------------------------------
+
+const loginDescriptor = {
+	title: 'Account', help: 'Runs on your own account.',
+	fields: [
+		{ name: 'username', label: 'User', autocomplete: 'username' },
+		{ name: 'password', label: 'Password', type: 'password', autocomplete: 'current-password' },
+		{ name: 'otp', label: 'Code', autocomplete: 'one-time-code' },
+	],
+};
+const sessionSide = () => ({ ...remote({ provisioning: { credential: null, login: loginDescriptor } }), model_name: 'm', pool_size: 100 });
+
+test('login: a session provider shows the form instead of a key field', () => {
+	const S = load();
+	const m = S.buildModel('rerank', sessionSide(), { status: 'unreachable', detail: 'log in first' }, idle, { state: 'login_required' });
+	assert.strictEqual(m.login.visible, true);
+	assert.strictEqual(m.login.loggedIn, false);
+	assert.strictEqual(m.credential.visible, false);
+	const ok = S.buildModel('rerank', sessionSide(), { status: 'ready', detail: '' }, idle, { state: 'ok', username: 'alice', expires_at: null });
+	assert.strictEqual(ok.login.text, 'Logged in as alice.');
+	assert.strictEqual(S.buildModel('embedding', remote(), undefined, idle).login.visible, false);
+});
+
+test('login: the form posts the values once and clears the secrets', async () => {
+	const S = load();
+	const posts = [];
+	let session = { state: 'login_required' };
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), {
+		onProvision() {}, onRetry() {},
+		onLogin: (side, values) => c.login(side, values),
+	});
+	const responses = {
+		'/api/config/providers': { sides: { embedding: local, llm: local, rerank: sessionSide() } },
+		'/api/config/health': { rerank: { status: 'unreachable', detail: '' } },
+		'/api/config/provision/status': idle,
+	};
+	const c = S.createController({
+		refs,
+		get: async (p) => (p.startsWith('/api/config/session') ? session : responses[p]),
+		post: async (path, body) => { posts.push([path, body]); session = { state: 'ok', username: 'alice' }; return { ok: true, status: 200, data: session }; },
+		pollMs: 0,
+	});
+	await c.refresh();
+	assert.strictEqual(refs.rerank.loginBox.hidden, false);
+	assert.strictEqual(refs.rerank.loginInputs.password.type, 'password');
+	assert.strictEqual(refs.rerank.loginInputs.otp.attrs.autocomplete, 'one-time-code');
+	refs.rerank.loginInputs.username.value = 'alice';
+	refs.rerank.loginInputs.password.value = 'pw';
+	refs.rerank.loginInputs.otp.value = '123456';
+	refs.rerank.loginButton.click();
+	await new Promise((r) => setTimeout(r, 10));
+	assert.strictEqual(JSON.stringify(posts[0]), JSON.stringify(['/api/config/session/login', { side: 'rerank', values: { username: 'alice', password: 'pw', otp: '123456' } }]));
+	assert.strictEqual(refs.rerank.loginInputs.password.value, '');
+	assert.strictEqual(refs.rerank.loginInputs.otp.value, '');
+	assert.strictEqual(refs.rerank.loginState.textContent, 'Logged in as alice.');
+	assert.strictEqual(refs.rerank.logoutButton.hidden, false);
 });

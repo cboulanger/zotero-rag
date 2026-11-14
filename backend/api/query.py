@@ -32,6 +32,7 @@ from backend.services.embeddings import (
 from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError, LLMRateLimitExhaustedError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
+from backend.services.rerank import RerankRequest, reset_rerank_request, set_rerank_request
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
 
 router = APIRouter()
@@ -61,6 +62,7 @@ class QueryRequest(BaseModel):
     query_plan: Optional[QueryPlan] = None  # echoed back from a prior "needs_client_evidence" response
     conversation_history: List[ChatTurn] = []  # prior turns of a follow-up chat conversation
     force_fresh_retrieval: bool = False        # ignore conversation_history for routing this turn
+    enable_reranking: bool = True  # False skips the preset's re-ranking step (Preferences / query dialog)
 
     # Retrieval/answer-diversity tuning — client-configurable (plugin Preferences),
     # not exposed in the query dialog itself. See rag_engine.py's module docstrings
@@ -255,27 +257,36 @@ async def query_libraries(
                 "max_chunks_per_document": max_chunks_per_document,
                 "low_diversity_available_floor": low_diversity_available_floor,
                 "enable_quality_self_review": query.enable_quality_self_review,
+                "enable_reranking": query.enable_reranking,
             },
         ) if query.include_trace else None
 
-        result = await orchestrator.query(
-            question=query.question,
-            library_ids=query.library_ids,
-            top_k=top_k,
-            min_score=min_score,
-            enable_routing=query.enable_routing,
-            trace=trace_collector,
-            client_evidence=query.client_evidence,
-            preset_plan=query.query_plan,
-            diversity_floor=diversity_floor,
-            diversity_escalation_factor=diversity_escalation_factor,
-            diversity_escalation_max_top_k=diversity_escalation_max_top_k,
-            max_chunks_per_document=max_chunks_per_document,
-            low_diversity_available_floor=low_diversity_available_floor,
-            enable_quality_self_review=query.enable_quality_self_review,
-            conversation_history=query.conversation_history,
-            force_fresh_retrieval=query.force_fresh_retrieval,
-        )
+        rerank_token = set_rerank_request(RerankRequest(
+            enabled=query.enable_reranking,
+            client_keys=client_keys,
+            user_id=identity.user_id if identity is not None else None,
+        ))
+        try:
+            result = await orchestrator.query(
+                question=query.question,
+                library_ids=query.library_ids,
+                top_k=top_k,
+                min_score=min_score,
+                enable_routing=query.enable_routing,
+                trace=trace_collector,
+                client_evidence=query.client_evidence,
+                preset_plan=query.query_plan,
+                diversity_floor=diversity_floor,
+                diversity_escalation_factor=diversity_escalation_factor,
+                diversity_escalation_max_top_k=diversity_escalation_max_top_k,
+                max_chunks_per_document=max_chunks_per_document,
+                low_diversity_available_floor=low_diversity_available_floor,
+                enable_quality_self_review=query.enable_quality_self_review,
+                conversation_history=query.conversation_history,
+                force_fresh_retrieval=query.force_fresh_retrieval,
+            )
+        finally:
+            reset_rerank_request(rerank_token)
 
         # Format citations
         sources = [

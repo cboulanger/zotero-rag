@@ -15,11 +15,28 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from backend.config.presets import HardwarePreset
 
-Side = Literal["embedding", "llm"]
+Side = Literal["embedding", "llm", "rerank"]
 Scope = Literal["user", "shared", "managed"]
 HealthStatus = Literal["ready", "cold", "throttled", "paused", "unreachable"]
 
+#: The sides every preset has.
 SIDES: tuple[Side, ...] = ("embedding", "llm")
+#: Sides a preset may leave out (``preset.rerank`` is None when it has no re-ranking step).
+OPTIONAL_SIDES: tuple[Side, ...] = ("rerank",)
+
+
+def side_config(preset: "HardwarePreset", side: Side):
+    """The ``EmbeddingConfig``, ``LLMConfig`` or ``RerankConfig`` of one side (None for an absent optional side)."""
+    if side == "embedding":
+        return preset.embedding
+    if side == "llm":
+        return preset.llm
+    return getattr(preset, side, None)
+
+
+def preset_sides(preset: "HardwarePreset") -> tuple[Side, ...]:
+    """The sides ``preset`` actually has, in display order."""
+    return SIDES + tuple(s for s in OPTIONAL_SIDES if side_config(preset, s) is not None)
 
 
 class ProviderConfigError(ValueError):
@@ -92,6 +109,8 @@ class Credentials(BaseModel):
 
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    #: Zotero user id of the caller, for a provider whose endpoints belong to a per-user session.
+    user_id: Optional[int] = None
 
 
 @dataclass
@@ -132,8 +151,34 @@ class CredentialDescriptor(BaseModel):
     optional: bool = True
 
 
+class SessionLoginField(BaseModel):
+    """One input of a session login form (rendered by the plugin as given)."""
+
+    name: str
+    label: str
+    #: HTML input type: ``text`` or ``password``.
+    type: Literal["text", "password"] = "text"
+    #: HTML ``autocomplete`` value, so password managers and one-time-code autofill work.
+    autocomplete: Optional[str] = None
+    optional: bool = False
+    help: str = ""
+
+
+class SessionLoginDescriptor(BaseModel):
+    """A provider whose endpoints run in a per-user session the user logs in to.
+
+    The plugin renders these fields instead of a key field and posts them to
+    ``POST /api/config/session/login``; ``GET /api/config/session`` reports the state.
+    """
+
+    title: str
+    fields: list[SessionLoginField]
+    help: str = ""
+
+
 class ProvisioningDescriptor(BaseModel):
     credential: Optional[CredentialDescriptor] = None
+    login: Optional[SessionLoginDescriptor] = None
     hint: Optional[str] = None
 
 
