@@ -34,7 +34,7 @@ from backend.services.embeddings import RemoteEmbeddingService, env_var_to_heade
 from backend.services.usage_meters import recorder as usage_recorder
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers
+from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers, preset_sides, side_config
 from backend.providers.types import ModelInfo
 
 router = APIRouter()
@@ -508,10 +508,13 @@ class EndpointHealthResponse(BaseModel):
     """Per-side health; ``None`` means the active preset declares no health check."""
     embedding: Optional[EndpointHealth] = None
     llm: Optional[EndpointHealth] = None
+    #: Only for a preset with a remote re-ranker.
+    rerank: Optional[EndpointHealth] = None
 
 
 def _side_kwargs(preset: HardwarePreset, side: str) -> dict:
-    return (preset.embedding if side == "embedding" else preset.llm).model_kwargs
+    cfg = side_config(preset, side)
+    return cfg.model_kwargs if cfg is not None else {}
 
 
 def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[str]:
@@ -561,6 +564,10 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     return EndpointHealthResponse(
         embedding=_check_side(preset, "embedding", request),
         llm=_check_side(preset, "llm", request),
+        rerank=(
+            _check_side(preset, "rerank", request)
+            if preset.rerank is not None and preset.rerank.model_type == "remote" else None
+        ),
     )
 
 
@@ -641,8 +648,9 @@ async def get_provider_descriptors(request: Request) -> dict:
     """Per-side provider descriptors of the caller's effective preset, for the plugin's
     per-side configuration sections.
 
-    ``{"preset": name, "sides": {"embedding"|"llm": {"model_type", "provider"}}}``;
-    ``provider`` is ``null`` for a local side. A descriptor carries the provider's id and
+    ``{"preset": name, "sides": {"embedding"|"llm"|"rerank": {"model_type", "provider"}}}``;
+    ``provider`` is ``null`` for a local side. ``rerank`` is present only when the
+    preset has a re-ranking step; it also carries ``model_name`` and ``pool_size``. A descriptor carries the provider's id and
     label, the effective credential scope, capability flags (provisioning, pause), the
     credential the one-time provisioning key must match, an ``unavailable_hint`` and
     ``operable_by_caller``. It never contains secrets and no vendor knowledge lives in
@@ -654,15 +662,17 @@ async def get_provider_descriptors(request: Request) -> dict:
     except ProviderConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     sides: Dict[str, dict] = {}
-    for side in ("embedding", "llm"):
-        cfg = preset.embedding if side == "embedding" else preset.llm
+    for side in preset_sides(preset):
+        cfg = side_config(preset, side)
         provider = providers[side]
-        if cfg.model_type != "remote":
-            sides[side] = {"model_type": cfg.model_type, "provider": None}
-            continue
-        descriptor = provider.describe()
-        descriptor.operable_by_caller = await _caller_may_operate(request, provider)
-        sides[side] = {"model_type": cfg.model_type, "provider": descriptor.model_dump()}
+        entry: Dict[str, object] = {"model_type": cfg.model_type, "provider": None}
+        if side == "rerank":
+            entry.update(model_name=cfg.model_name, pool_size=cfg.pool_size)
+        if cfg.model_type == "remote":
+            descriptor = provider.describe()
+            descriptor.operable_by_caller = await _caller_may_operate(request, provider)
+            entry["provider"] = descriptor.model_dump()
+        sides[side] = entry
     return {"preset": preset.name, "sides": sides}
 
 
@@ -745,12 +755,12 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
         raise HTTPException(status_code=400, detail=str(exc))
 
     if body.sides is None:
-        sides = [s for s in ("embedding", "llm") if getattr(providers[s], flag)]
+        sides = [s for s in preset_sides(preset) if getattr(providers[s], flag)]
     else:
         unknown = [s for s in body.sides if s not in providers]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown side(s): {', '.join(unknown)}")
-        sides = [s for s in ("embedding", "llm") if s in body.sides]
+        sides = [s for s in preset_sides(preset) if s in body.sides]
         unsupported = [s for s in sides if not getattr(providers[s], flag)]
         if unsupported:
             raise HTTPException(
@@ -977,6 +987,10 @@ async def get_required_api_keys():
         _merge(key_info, "embedding")
     for key_info in RemoteLLMService.required_client_fields(settings):
         _merge(key_info, "llm")
+    from backend.services.rerank import rerank_client_fields
+
+    for key_info in rerank_client_fields(preset.rerank):
+        _merge(key_info, "rerank")
 
     return RequiredKeysResponse(keys=list(seen.values()))
 

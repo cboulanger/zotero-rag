@@ -24,6 +24,8 @@ class ChunkTrace(Trace):
     page_number: Optional[int] = None
     score: float
     text_preview: Optional[str] = None
+    vector_score: Optional[float] = None    # set when the pool was re-ranked
+    pre_rerank_rank: Optional[int] = None   # 1-based rank before re-ranking
 
 
 class RetrievalTrace(Trace):
@@ -36,6 +38,7 @@ class RetrievalTrace(Trace):
     documents_grouped: int
     chunks: list[ChunkTrace]
     escalated: bool = False        # True if top_k was escalated due to low document diversity
+    rerank: Optional[dict] = None  # RerankOutcome of the last re-ranking pass (None when the preset has none)
 
 
 class AgentExecutionTrace(Trace):
