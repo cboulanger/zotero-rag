@@ -64,7 +64,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `kisski-docling` | **No** (no Kreuzberg container either) | `KISSKI_API_KEY` | any |
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
-| `remote-mpcdf` | **No** | `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_API_KEY` (shared, admin-set — see below) | any |
+| `remote-mpcdf` | **No** | each user's own MPCDF login (username, password, one-time code) and a Hugging Face token | any |
 | `runpod` | **No** | `RUNPOD_API_KEY` (each user's own) | any |
 | `huggingface` | **No** | `HF_TOKEN` (each user's own) | any |
 
@@ -314,27 +314,25 @@ Preferences and per query in the query dialog's advanced options.
 
 ---
 
-### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
+### `remote-mpcdf` (MPCDF LLM Inference Service, on each user's own account)
 
-**Best for:** Riding out an exhausted KISSKI rate limit, using a short-lived job on the MPCDF LLM Inference Service (`llm.mpcdf.mpg.de`) instead
+**Best for:** Users with an MPCDF account who want a large open model (and an alternative to KISSKI's rate limits), with endpoints that run as jobs on their own account on the MPCDF LLM Inference Service (`llm.mpcdf.mpg.de`)
 
 **Configuration:**
 
-- Embedding: `multilingual-e5-large-instruct` (MPCDF remote, vLLM, 1024-dim — same model and vector space as `remote-kisski`)
-- LLM: `openai/gpt-oss-120b` (MPCDF remote, vLLM, 131k context)
+- Embedding: `intfloat/multilingual-e5-large-instruct` (vLLM on 1 GPU, 1024-dim — same model and vector space as `remote-kisski`)
+- LLM: `openai/gpt-oss-120b` (vLLM on 2 GPUs, 131k context)
 - Memory: ~0.5 GB (fully remote)
-- Top-k: 10 chunks / Max chunk: 1024 tokens
+- Top-k: 10 chunks / Max chunk: 800 characters
 
-**What's different about this preset:** unlike KISSKI's per-user keys, this is a shared, institution-provided gateway: the `mpcdf` provider has credential scope `shared` (the admin sets the base URL and API key once for all users; it costs them nothing and there is nothing for them to operate). The job's endpoint and key rotate with each short-lived MPCDF job, so they are set at runtime via `POST /api/config/remote-fields` instead of being literals in the preset file. Its health row asks the gateway's `/v1/models`.
+**How it works:** the `mpcdf` provider has credential scope `user` only, because the service's terms do not allow one account to serve other people. Each user logs in in Preferences with their MPCDF username, password and one-time code (plus a Hugging Face token, which every vLLM job there needs) and starts the endpoints; each runs as a Slurm job of up to 8 hours on their account, renewed while it is in use and cancelled after `idle_minutes` without a request. The backend asks the user's session for the current URL and key before every call (see [providers.md](providers.md), "Per-user sessions"). Health shows `cold` while a job starts and `unreachable` ("not running") when there is none.
 
 **Advantages:**
 
-- Uses the same embedding model/vector space as `remote-kisski` and `windows-test` — switching to/from this preset at runtime (no restart) is supported for exactly this reason.
+- Uses the same embedding model/vector space as `remote-kisski` and `windows-test`, so switching to or from this preset at runtime (no restart) is supported.
 - No local GPU or large Python dependencies.
 
-**Trade-offs:** Requires an active MPCDF HPC allocation and manually starting a job through the MPCDF LLM Inference Service UI; not a general-purpose recommendation — use `remote-kisski` under normal circumstances.
-
-**Requires:** `MPCDF_EMBEDDING_BASE_URL`, `MPCDF_EMBEDDING_API_KEY`, `MPCDF_LLM_BASE_URL`, `MPCDF_LLM_API_KEY` — set via `POST /api/config/remote-fields` (admin only, no restart) or as environment variables. The base URL the MPCDF LLM Inference Service UI hands out for a job doesn't include the `/v1` API-version segment; it's appended automatically if missing (see "Admin: runtime preset switching & shared remote config" below), so pasting the bare job URL works either way.
+**Trade-offs:** Requires an MPCDF account with access to the LLM Inference Service; starting a job takes a few minutes in the queue plus loading the model, and the login session lasts about 12 hours. Automatic indexing skips users on this preset, since nobody is there to log in.
 
 ---
 
@@ -413,7 +411,7 @@ Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires
 
 **Default preset and per-user choice.** The server has one *default* preset: the admin-stored one (set with `POST /api/config`), else `MODEL_PRESET`, else `remote-kisski`. Everyone runs on it until they choose their own. `PUT /api/config/my-preset` (`{"preset_name": "<name>"}` or `null` to return to the default) stores a signed-in user's choice server-side; `GET /api/config/my-preset` and `GET /api/config` report `default_preset`, the caller's effective `preset_name`, `selectable_presets` and, when a saved choice is no longer honoured, `preset_fell_back`. A choice is honoured only while the preset exists, passes validation and is compatible with the default (both sides remote and the same embedding model, since the vector store is shared); to select one the user must have usable credentials for it (their own key sent in its header for `user` scope, or the shared key set for `managed`/`shared`). Requests without an identity (a loopback server, the public query page) always run on the default, and the cron indexer indexes each owner's libraries on that owner's preset using that owner's key for it. Keys for presets a user is not currently on stay in their key store, so switching back needs no re-entry. `POST /api/config` changes only the default.
 
-**Setting shared remote endpoint/API-key values.** Presets like `remote-mpcdf`, whose endpoint URL and API key rotate with each short-lived job, declare this via `shared_base_url_env`/`shared_api_key_env` in their preset file (`data/presets/remote-mpcdf.json`) rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"MPCDF_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` and picked up immediately by interactive queries and the cron indexer alike, no restart needed. Base URLs are stored as plain text; every `*_API_KEY` value is Fernet-encrypted at rest (as `{"enc": "<token>"}`) with `AUTOINDEX_SECRET`, through the central module `backend/services/secret_store.py`. Without `AUTOINDEX_SECRET`, saving a key is refused (HTTP 503) while URLs can still be saved. A plaintext key already in the file keeps working and is encrypted on the next write or at backend startup. To move provisioned credentials between instances, re-send the values with `POST /api/config/remote-fields` (the target instance encrypts them with its own `AUTOINDEX_SECRET`). The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
+**Setting shared remote endpoint/API-key values.** A preset whose endpoint URL and API key an admin sets for everyone (scope `shared` or `managed`, for example an institution's own OpenAI-compatible gateway) declares this via `shared_base_url_env`/`shared_api_key_env` in its preset file rather than a fixed `base_url`. `GET /api/required-keys` reports these fields with `kind: "shared_base_url"`/`"shared_api_key"` and an `is_set` flag (never the value itself); `POST /api/config/remote-fields` with `{"values": {"GATEWAY_EMBEDDING_BASE_URL": "...", ...}}` sets them — persisted in `<data_path>/system/admin_settings.json` and picked up immediately by interactive queries and the cron indexer alike, no restart needed. Base URLs are stored as plain text; every `*_API_KEY` value is Fernet-encrypted at rest (as `{"enc": "<token>"}`) with `AUTOINDEX_SECRET`, through the central module `backend/services/secret_store.py`. Without `AUTOINDEX_SECRET`, saving a key is refused (HTTP 503) while URLs can still be saved. A plaintext key already in the file keeps working and is encrypted on the next write or at backend startup. To move provisioned credentials between instances, re-send the values with `POST /api/config/remote-fields` (the target instance encrypts them with its own `AUTOINDEX_SECRET`). The Preferences pane's "Service API Keys" section renders these as a text/password field per value, distinct from a personal API key field (e.g. `KISSKI_API_KEY`), which is never shared across users.
 
 A stored `shared_base_url`-kind value is normalized on every read — `backend.services.admin_settings_store.normalize_base_url` appends `/v1` if it's missing (leaving a URL that already ends in `/v1` untouched) — since the openai-compatible client appends `/embeddings`/`/chat/completions` directly to whatever base URL it's given, and a bare job URL without `/v1` would otherwise 404.
 
@@ -556,8 +554,9 @@ MODEL_PRESET=remote-kisski
 
 Provider API keys are never read from `.env` or the server's environment. Where a key comes from depends on the provider's credential scope (see [providers.md](providers.md)):
 
-- `user` (KISSKI, OpenAI, Anthropic, `runpod` with the default scope): each user enters their own key in the plugin's Preferences. It is sent with their requests, and for automatic indexing the user can opt in to storing it encrypted in the auto-index key store.
-- `managed` (for example `runpod` as configured in the bundled preset) and `shared` (MPCDF): the admin sets the key, and the endpoint URL where the provider cannot derive it, with `POST /api/config/remote-fields` or the Preferences pane's "Service API Keys" section. They are stored encrypted in `<data_path>/system/admin_settings.json` using `AUTOINDEX_SECRET`.
+- `user` (KISSKI, OpenAI, Anthropic, `runpod`): each user enters their own key in the plugin's Preferences. It is sent with their requests, and for automatic indexing the user can opt in to storing it encrypted in the auto-index key store.
+- `session` style sides (MPCDF, scope `user`): each user logs in to their own account in Preferences; there is no key to enter (see [providers.md](providers.md), "Per-user sessions").
+- `managed` and `shared` (for example `google` or `huggingface` sides an admin pays for, or an institution's own OpenAI-compatible gateway with the generic provider): the admin sets the key, and the endpoint URL where the provider cannot derive it, with `POST /api/config/remote-fields` or the Preferences pane's "Service API Keys" section. They are stored encrypted in `<data_path>/system/admin_settings.json` using `AUTOINDEX_SECRET`.
 
 The Hugging Face token for downloading gated *local* model weights (`HF_TOKEN`) is not a provider credential and stays an environment setting.
 

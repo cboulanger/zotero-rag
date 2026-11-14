@@ -1792,7 +1792,7 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		key_name: 'GATEWAY_EMBEDDING_BASE_URL',
 		header_name: 'X-Mpcdf-Embedding-Base-Url',
 		kind: 'shared_base_url',
 		description: 'Shared endpoint URL',
@@ -1810,10 +1810,10 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	assert.strictEqual(input.type, 'text');
 	assert.strictEqual(input.value, ''); // never prefilled from a pref
 
-	await input.dispatchChange('https://llm.mpcdf.mpg.de/abc123/v1');
+	await input.dispatchChange('https://gateway.example.org/abc123/v1');
 
-	assert.deepStrictEqual(posted, { keyName: 'MPCDF_EMBEDDING_BASE_URL', value: 'https://llm.mpcdf.mpg.de/abc123/v1' });
-	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
+	assert.deepStrictEqual(posted, { keyName: 'GATEWAY_EMBEDDING_BASE_URL', value: 'https://gateway.example.org/abc123/v1' });
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.GATEWAY_EMBEDDING_BASE_URL'], undefined);
 });
 
 test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
@@ -1879,7 +1879,7 @@ test('renderServiceApiKeyFields leaves input.pattern unset when the field declar
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		key_name: 'GATEWAY_EMBEDDING_BASE_URL',
 		header_name: 'X-Mpcdf-Embedding-Base-Url',
 		kind: 'shared_base_url',
 		description: 'Shared endpoint URL',
@@ -1901,7 +1901,7 @@ test('renderServiceApiKeyFields renders a shared_api_key field as a password inp
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_API_KEY',
+		key_name: 'GATEWAY_EMBEDDING_API_KEY',
 		header_name: 'X-Mpcdf-Embedding-Api-Key',
 		kind: 'shared_api_key',
 		description: 'Shared API key',
@@ -1949,20 +1949,20 @@ test('setSharedRemoteField POSTs to /api/config/remote-fields and returns is_set
 	const fetchCalls = [];
 	const fetchStub = async (url, init) => {
 		fetchCalls.push({ url, init });
-		return { ok: true, status: 200, json: async () => ({ is_set: { MPCDF_EMBEDDING_BASE_URL: true } }) };
+		return { ok: true, status: 200, json: async () => ({ is_set: { GATEWAY_EMBEDDING_BASE_URL: true } }) };
 	};
 	const zotero = { Prefs: { get: () => null } };
 	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
 	plugin.backendURL = 'http://localhost:8119';
 	plugin.requiredApiKeys = [];
 
-	const result = await plugin.setSharedRemoteField('MPCDF_EMBEDDING_BASE_URL', 'https://llm.mpcdf.mpg.de/abc123/v1');
+	const result = await plugin.setSharedRemoteField('GATEWAY_EMBEDDING_BASE_URL', 'https://gateway.example.org/abc123/v1');
 
 	assert.strictEqual(fetchCalls.length, 1);
 	assert.strictEqual(fetchCalls[0].url, 'http://localhost:8119/api/config/remote-fields');
 	assert.deepStrictEqual(
 		JSON.parse(fetchCalls[0].init.body),
-		{ values: { MPCDF_EMBEDDING_BASE_URL: 'https://llm.mpcdf.mpg.de/abc123/v1' } },
+		{ values: { GATEWAY_EMBEDDING_BASE_URL: 'https://gateway.example.org/abc123/v1' } },
 	);
 	// `result` is an object literal returned from inside the vm context (a
 	// separate realm from this test's own global), so assert.deepStrictEqual

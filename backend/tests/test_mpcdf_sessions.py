@@ -210,14 +210,18 @@ class MpcdfRerankProviderTest(unittest.TestCase):
         self.assertEqual([f.name for f in d.provisioning.login.fields], ["username", "password", "otp", "hf_token"])
         self.assertIsNone(d.provisioning.credential)
 
-    def test_shared_sides_are_unchanged(self):
+    def test_bundled_preset_is_per_user_on_every_side(self):
         data = json.loads((Path(__file__).resolve().parents[1] / "config/default_presets/remote-mpcdf.json").read_text())
         preset = HardwarePreset.model_validate({"name": "remote-mpcdf", **data})
-        llm = get_providers(preset)["llm"]
-        self.assertEqual(llm.scope, "shared")
-        self.assertFalse(llm.supports_provisioning)
-        self.assertTrue(llm.provisioning_needs_key)
-        self.assertFalse(llm.uses_session_endpoints)
+        providers = get_providers(preset)
+        for side in ("embedding", "llm"):
+            p = providers[side]
+            self.assertEqual(p.scope, "user")
+            self.assertTrue(p.supports_provisioning and p.uses_session_endpoints)
+            self.assertFalse(p.provisioning_needs_key)
+            self.assertEqual(p.preset_name, f"zotero-rag-{side}")
+        self.assertNotIn("shared_api_key_env", preset.embedding.model_kwargs)
+        self.assertNotIn("shared_base_url_env", preset.llm.model_kwargs)
 
     def test_unknown_option_rejected(self):
         from backend.providers import ProviderConfigError
