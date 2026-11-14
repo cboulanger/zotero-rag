@@ -1,4 +1,5 @@
-// Per-side configuration sections of the Preferences pane (embedding and answering model).
+// Per-side configuration sections of the Preferences pane (embedding model, answering
+// model and, for a preset that has one, the re-ranking step).
 //
 // Everything vendor-specific comes from the backend's provider descriptors
 // (`GET /api/config/providers`): this file contains no provider names. It has two
@@ -36,6 +37,12 @@
  * @typedef {Object} SideInfo
  * @property {'local'|'remote'} model_type
  * @property {ProviderDescriptor|null} provider
+ * @property {string} [model_name] - rerank side only
+ * @property {number} [pool_size] - rerank side only: candidates the re-ranker rescores
+ */
+
+/**
+ * @typedef {'embedding'|'llm'|'rerank'} SideName
  */
 
 /**
@@ -60,8 +67,10 @@
 
 /**
  * @typedef {Object} SectionModel
- * @property {'embedding'|'llm'} side
+ * @property {SideName} side
+ * @property {boolean} present - false for a rerank side the preset does not have (the section is hidden)
  * @property {string} title
+ * @property {string} modelText - what the side runs, '' when there is nothing to add
  * @property {string} providerText - e.g. "Provider: X (your own account)", '' for a local model
  * @property {boolean} local
  * @property {{text: string, color: string, title: string}|null} health
@@ -76,11 +85,14 @@
  */
 
 var ZoteroRAGProviderSections = {
-	/** @type {Array<'embedding'|'llm'>} */
-	SIDES: ['embedding', 'llm'],
+	/** @type {Array<SideName>} */
+	SIDES: ['embedding', 'llm', 'rerank'],
 
 	/** @type {Record<string, string>} */
-	SIDE_TITLES: { embedding: 'Embedding model', llm: 'Answering model (LLM)' },
+	SIDE_TITLES: { embedding: 'Embedding model', llm: 'Answering model (LLM)', rerank: 'Re-ranking' },
+
+	/** Pref behind the "Use re-ranking" switch (default on). */
+	RERANK_PREF: 'extensions.zotero-rag.enableReranking',
 
 	/** @type {Record<string, string>} */
 	HEALTH_COLORS: { ready: 'green', cold: 'orange', paused: 'orange', throttled: 'red', unreachable: 'red' },
@@ -97,7 +109,7 @@ var ZoteroRAGProviderSections = {
 
 	/**
 	 * Build the view model of one side (pure).
-	 * @param {'embedding'|'llm'} side
+	 * @param {SideName} side
 	 * @param {SideInfo|undefined} info - from GET /api/config/providers
 	 * @param {SideHealth|undefined} health - from GET /api/config/health
 	 * @param {JobState|null|undefined} job - the caller's provisioning job
@@ -106,11 +118,15 @@ var ZoteroRAGProviderSections = {
 	buildModel(side, info, health, job) {
 		const title = this.SIDE_TITLES[side];
 		const provider = info && info.provider;
+		const present = side !== 'rerank' || !!info;
+		const modelText = side === 'rerank' && info && info.model_name
+			? `Model: ${info.model_name}; rescores the best ${info.pool_size || 100} passages before the answer is written.`
+			: '';
 		/** @type {ActionView} */
 		const hidden = { visible: false, label: '', disabled: false, reason: '' };
 		if (!info || !provider) {
 			return {
-				side, title, local: true,
+				side, present, title, modelText, local: true,
 				providerText: '',
 				health: null, hint: '',
 				provision: hidden, retry: hidden, pause: hidden,
@@ -137,7 +153,7 @@ var ZoteroRAGProviderSections = {
 		const scope = this.SCOPE_NOTES[provider.key_scope] || '';
 		const credential = provider.provisioning && provider.provisioning.credential;
 		return {
-			side, title, local: false,
+			side, present, title, modelText, local: false,
 			providerText: `Provider: ${provider.label}${scope ? ` (${scope})` : ''}`,
 			health: health
 				? {
@@ -181,11 +197,13 @@ var ZoteroRAGProviderSections = {
 	},
 
 	/**
-	 * Build the skeleton of both sections once; returns references for `update`.
+	 * Build the skeleton of every section once; returns references for `update`.
+	 * The rerank section starts hidden and carries the "Use re-ranking" switch.
 	 * @param {Document} doc
 	 * @param {HTMLElement} container
-	 * @param {{onProvision: (side: 'embedding'|'llm', oneTimeKey: string) => void, onRetry: (side: 'embedding'|'llm', oneTimeKey: string) => void, onPause?: (side: 'embedding'|'llm', oneTimeKey: string) => void}} handlers
-	 * @returns {Record<'embedding'|'llm', Record<string, any>>}
+	 * @param {{onProvision: (side: SideName, oneTimeKey: string) => void, onRetry: (side: SideName, oneTimeKey: string) => void, onPause?: (side: SideName, oneTimeKey: string) => void,
+	 *   rerankEnabled?: {get: () => boolean, set: (enabled: boolean) => void}}} handlers
+	 * @returns {Record<SideName, Record<string, any>>}
 	 */
 	ensureSections(doc, container, handlers) {
 		const NS = 'http://www.w3.org/1999/xhtml';
@@ -202,6 +220,7 @@ var ZoteroRAGProviderSections = {
 			const section = el('div', 'provider-section');
 			section.id = `zotero-rag-side-${side}`;
 			const title = el('div', 'provider-section-title');
+			const model = el('div', 'setting-description');
 			const provider = el('div', 'setting-description');
 			const health = el('div', 'setting-description');
 			const hint = el('div', 'setting-description');
@@ -240,25 +259,52 @@ var ZoteroRAGProviderSections = {
 			retry.addEventListener('click', () => handlers.onRetry(side, oneTimeKey()));
 			pause.addEventListener('click', () => handlers.onPause && handlers.onPause(side, oneTimeKey()));
 
-			section.append(title, provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
+			/** @type {any} */
+			let toggle = null;
+			const parts = [title, model];
+			if (side === 'rerank') {
+				section.hidden = true;
+				const toggleRow = el('div', 'setting-row');
+				const toggleLabel = el('label');
+				toggle = el('input');
+				toggle.type = 'checkbox';
+				toggle.id = 'zotero-rag-enable-reranking';
+				toggle.checked = handlers.rerankEnabled ? handlers.rerankEnabled.get() : true;
+				toggle.addEventListener('change', () => handlers.rerankEnabled && handlers.rerankEnabled.set(!!toggle.checked));
+				toggleLabel.setAttribute('for', toggle.id);
+				toggleLabel.textContent = 'Use re-ranking (more relevant passages, a few seconds slower)';
+				toggleRow.append(toggle, toggleLabel);
+				parts.push(toggleRow);
+			}
+			parts.push(provider, health, hint, keys, credRow, credHelp, actions, note, progress, status);
+			section.append(...parts);
 			container.appendChild(section);
-			refs[side] = { section, title, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, pause, note, progress, status };
+			refs[side] = { section, title, model, toggle, provider, health, hint, keys, credRow, credLabel, credInput, credHelp, provision, retry, pause, note, progress, status };
 		}
 		return /** @type {any} */ (refs);
 	},
 
 	/**
 	 * Apply view models to the skeleton built by `ensureSections`.
-	 * @param {Record<'embedding'|'llm', Record<string, any>>} refs
-	 * @param {Record<'embedding'|'llm', SectionModel>} models
+	 * @param {Record<SideName, Record<string, any>>} refs
+	 * @param {Partial<Record<SideName, SectionModel>>} models - a side without a model is hidden
 	 * @returns {void}
 	 */
 	update(refs, models) {
 		for (const side of this.SIDES) {
 			const r = refs[side];
 			const m = models[side];
+			if (!r) continue;
+			if (r.section) r.section.hidden = !m || !m.present;
+			if (!m) continue;
 			r.title.textContent = m.title;
-			r.provider.textContent = m.local ? 'Runs on this server; nothing to configure here.' : m.providerText;
+			if (r.model) {
+				r.model.textContent = m.modelText;
+				r.model.hidden = !m.modelText;
+			}
+			r.provider.textContent = m.local
+				? (side === 'rerank' ? 'Runs on this server.' : 'Runs on this server; nothing to configure here.')
+				: m.providerText;
 			r.health.textContent = m.health ? `${m.title}: ${m.health.text}` : '';
 			r.health.style.color = m.health ? m.health.color : '';
 			r.health.title = m.health ? m.health.title : '';
@@ -296,7 +342,7 @@ var ZoteroRAGProviderSections = {
  * testable without a browser: `get(path)` resolves parsed JSON or null on failure,
  * `post(path, body)` resolves `{ok, status, data}`.
  * @param {{
- *   refs: Record<'embedding'|'llm', Record<string, any>>,
+ *   refs: Record<SideName, Record<string, any>>,
  *   get: (path: string) => Promise<any>,
  *   post: (path: string, body: any) => Promise<{ok: boolean, status: number, data: any}>,
  *   sleep?: (ms: number) => Promise<void>,
@@ -378,7 +424,7 @@ ZoteroRAGProviderSections.createController = function (deps) {
 	/**
 	 * Provision (create, wake or resume) or retry one side. Only that side is sent; the
 	 * one-time key goes with this request only and is never kept.
-	 * @param {'embedding'|'llm'} side
+	 * @param {SideName} side
 	 * @param {string} oneTimeKey
 	 */
 	const startJob = async (path, side, oneTimeKey, failure) => {
@@ -413,10 +459,10 @@ ZoteroRAGProviderSections.createController = function (deps) {
 		}
 	};
 
-	const provision = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey) =>
+	const provision = (/** @type {SideName} */ side, /** @type {string} */ oneTimeKey) =>
 		startJob('/api/config/provision', side, oneTimeKey, 'Provisioning failed');
 	/** Pause one side (stops billing and wake-ups; resuming is provisioning again). */
-	const pause = (/** @type {'embedding'|'llm'} */ side, /** @type {string} */ oneTimeKey = '') =>
+	const pause = (/** @type {SideName} */ side, /** @type {string} */ oneTimeKey = '') =>
 		startJob('/api/config/suspend', side, oneTimeKey, 'Pausing failed');
 
 	return { state, refresh, poll, provision, pause };
