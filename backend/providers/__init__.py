@@ -15,6 +15,7 @@ from backend.providers.registry import (
     provider_config_error,
 )
 from backend.providers.types import (
+    OPTIONAL_SIDES,
     SIDES,
     Credentials,
     Health,
@@ -29,11 +30,16 @@ from backend.providers.types import (
     ProvisionTimeout,
     Scope,
     Side,
+    preset_sides,
+    side_config,
 )
 
 __all__ = [
     "PROVIDERS",
+    "OPTIONAL_SIDES",
     "SIDES",
+    "preset_sides",
+    "side_config",
     "Credentials",
     "GenericProvider",
     "Health",
