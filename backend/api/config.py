@@ -759,6 +759,10 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
 
     if body.sides is None:
         sides = [s for s in preset_sides(preset) if getattr(providers[s], flag)]
+        if capability == "provision":
+            # Re-ranking is optional: its endpoint is started from its own section or
+            # the query dialog's prompt, never as a side effect. Pausing covers it.
+            sides = [s for s in sides if s != "rerank"]
     else:
         unknown = [s for s in body.sides if s not in providers]
         if unknown:

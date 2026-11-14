@@ -17,6 +17,12 @@
     "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 2, "idle_minutes": 60}},
     "model_kwargs": {}
   },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60}}
+  },
   "rag": {
     "top_k": 10,
     "score_threshold": 0.35,

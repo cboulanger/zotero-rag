@@ -30,6 +30,7 @@ def write_managed_runpod_preset(data_path: Path) -> str:
     ensure_default_presets(data_path)
     preset_dir = data_path / "presets"
     data = json.loads((preset_dir / "runpod.json").read_text())
+    data.pop("rerank", None)  # a re-ranking side is always per user; these tests cover the managed sides
     for side, url_env in (("embedding", "RUNPOD_EMBEDDING_BASE_URL"), ("llm", "RUNPOD_LLM_BASE_URL")):
         data[side]["model_kwargs"] = {"shared_base_url_env": url_env, "shared_api_key_env": "RUNPOD_API_KEY"}
         data[side]["provider"]["scope"] = "managed"

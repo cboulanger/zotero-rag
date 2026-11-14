@@ -39,6 +39,13 @@
       }
     }
   },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "model_kwargs": {"api_key_env": "RUNPOD_API_KEY"},
+    "provider": {"id": "runpod", "scope": "user", "options": {"gpu": "NVIDIA RTX A5000", "workers_max": 1, "idle_timeout": 60}}
+  },
   "rag": {
     "top_k": 10,
     "score_threshold": 0.35,
