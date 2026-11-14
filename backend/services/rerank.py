@@ -192,10 +192,12 @@ class RemoteReranker(Reranker):
         headers = {"Content-Type": "application/json"}
         if creds.api_key:
             headers["Authorization"] = f"Bearer {creds.api_key}"
-        url = creds.base_url.rstrip("/") + "/rerank"
         body = {"model": self.model_name, "query": question, "documents": texts, "top_n": len(texts)}
+        # A provider may route the call differently (RunPod: through /runsync).
+        route = getattr(self.provider, "rerank_http", None)
+        url, payload = route(creds.base_url, body) if route else (creds.base_url.rstrip("/") + "/rerank", body)
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-            return await client.post(url, json=body, headers=headers)
+            return await client.post(url, json=payload, headers=headers)
 
     async def score(self, question: str, texts: list[str]) -> list[float]:
         import httpx
@@ -216,7 +218,11 @@ class RemoteReranker(Reranker):
                 await asyncio.to_thread(touch, current_rerank_request())
             except Exception as exc:  # activity reporting must never fail a query
                 logger.debug(f"Re-ranker activity report failed: {exc}")
-        return parse_rerank_response(resp.json(), len(texts))
+        data = resp.json()
+        unwrap = getattr(self.provider, "rerank_unwrap", None)
+        if unwrap is not None:
+            data = unwrap(data)
+        return parse_rerank_response(data, len(texts))
 
 
 def parse_rerank_response(data: Any, n: int) -> list[float]:
