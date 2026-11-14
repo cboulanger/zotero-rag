@@ -217,6 +217,7 @@ class MpcdfRerankProviderTest(unittest.TestCase):
         self.assertEqual(llm.scope, "shared")
         self.assertFalse(llm.supports_provisioning)
         self.assertTrue(llm.provisioning_needs_key)
+        self.assertFalse(llm.uses_session_endpoints)
 
     def test_unknown_option_rejected(self):
         from backend.providers import ProviderConfigError
@@ -232,6 +233,15 @@ class MpcdfRerankProviderTest(unittest.TestCase):
         self.assertEqual((creds.base_url, creds.api_key), ("https://ep/v1", "k"))
         self.assertIsNone(self.provider.rerank_credentials(RerankRequest(user_id=8)))
         self.provider.rerank_activity(req)
+        self.assertEqual(self.fake.touched, [(7, "zotero-rag-rerank")])
+
+    def test_session_endpoint_hooks(self):
+        self.assertTrue(self.provider.uses_session_endpoints)
+        self.assertIsNone(self.provider.session_endpoint(7))
+        self.fake.creds[(7, "zotero-rag-rerank")] = EndpointCredentials("https://ep/v1", "k", "m")
+        creds = self.provider.session_endpoint(7)
+        self.assertEqual((creds.base_url, creds.api_key, creds.user_id), ("https://ep/v1", "k", 7))
+        self.provider.session_activity(7)
         self.assertEqual(self.fake.touched, [(7, "zotero-rag-rerank")])
 
     def test_health_follows_the_callers_endpoint(self):

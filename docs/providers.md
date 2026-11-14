@@ -111,6 +111,15 @@ The session lasts about 12 hours, and logging in to the MPCDF web interface ends
 `time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
 arguments without quotes, default `--enforce-eager`).
 
+A per-user side has no fixed URL or key: the provider sets `uses_session_endpoints` and answers
+`session_endpoint(user_id)` with the caller's running endpoint (or None) and `session_activity(user_id)`
+when it is used. The embedding and LLM services ask for it before every call, because a renewal changes
+both URL and key, and report use at most once a minute; the caller is the Zotero user of the request
+(`backend/services/caller_context.py`, bound by the auth middleware). A side whose endpoint is not running
+fails with "endpoint unavailable" and the provider's hint, and never falls back to another URL.
+Automatic indexing skips a user whose embedding side is such a session (issue kind `session`), since
+nobody is there to log in.
+
 ## Usage meters
 
 Each response's rate-limit headers are recorded per side and per key

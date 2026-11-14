@@ -103,6 +103,10 @@ class MpcdfProvider(Provider):
         return not self.per_user
 
     @property
+    def uses_session_endpoints(self) -> bool:  # type: ignore[override]
+        return self.per_user
+
+    @property
     def preset_name(self) -> str:
         """Name of this side's preset in the user's ``mpcdf-llm`` store."""
         return f"zotero-rag-{self.side}"
@@ -197,27 +201,35 @@ class MpcdfProvider(Provider):
         sessions.call(lambda: sessions.stop_endpoint(user_id, self.preset_name))
         progress("endpoint stopped")
 
-    def rerank_credentials(self, request, refresh: bool = False) -> Optional[Credentials]:
+    def session_endpoint(self, user_id: Optional[int]) -> Optional[Credentials]:
         """The caller's running endpoint (credentials change at every renewal, so never cached)."""
+        if not self.per_user:
+            return None
+        sessions = self._sessions()
+        creds = sessions.call(lambda: sessions.credentials(user_id, self.preset_name))
+        if creds is None:
+            return None
+        return Credentials(base_url=creds.base_url, api_key=creds.api_key, user_id=user_id)
+
+    def session_activity(self, user_id: Optional[int]) -> None:
+        """Report use so the library keeps renewing the endpoint instead of idle-cancelling it."""
+        if self.per_user:
+            sessions = self._sessions()
+            sessions.call(lambda: sessions.touch(user_id, self.preset_name))
+
+    def rerank_credentials(self, request, refresh: bool = False) -> Optional[Credentials]:
         if not self.per_user:
             return super().rerank_credentials(request, refresh)
         from backend.services.mpcdf_sessions import SessionsUnavailable
         from backend.services.rerank import RerankerUnavailable
 
         try:
-            sessions = self._sessions()
-            creds = sessions.call(lambda: sessions.credentials(request.user_id, self.preset_name))
+            return self.session_endpoint(request.user_id)
         except (SessionsUnavailable, ProvisionError) as exc:
             raise RerankerUnavailable(str(exc)) from exc
-        if creds is None:
-            return None
-        return Credentials(base_url=creds.base_url, api_key=creds.api_key)
 
     def rerank_activity(self, request) -> None:
-        """Report use so the library keeps renewing the endpoint instead of idle-cancelling it."""
-        if self.per_user:
-            sessions = self._sessions()
-            sessions.call(lambda: sessions.touch(request.user_id, self.preset_name))
+        self.session_activity(request.user_id)
 
     def key_docs_url(self, env_var: str) -> Optional[str]:  # shared sides only
         # Every shared field of this provider (URL and key) comes from a job

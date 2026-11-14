@@ -287,6 +287,9 @@ class RemoteLLMService(LLMService):
         self.api_key = api_key
         self._provider = None
         self._resolved_base_url: Optional[str] = None
+        #: The caller's own endpoint (``SessionEndpoint``) for a provider that runs one per user session.
+        self._session: Any = None
+        self._session_key: Optional[str] = None
         self._model_name = model_name_override or self.llm_config.model_name
 
         # Initialize API clients
@@ -387,8 +390,19 @@ class RemoteLLMService(LLMService):
                     "(it is sent with each request, never read from the environment)."
                 )
             return self.api_key
+        if self._session_endpoint() is not None:
+            return self._session_key or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self.api_key or KEYLESS_API_KEY
+
+    def _session_endpoint(self):
+        """The ``SessionEndpoint`` of a provider that runs one endpoint per user session, else None."""
+        if self._session is None:
+            from backend.services.session_endpoint import SessionEndpoint, uses_session_endpoints
+
+            provider = self._llm_provider()
+            self._session = SessionEndpoint(provider) if uses_session_endpoints(provider) else False
+        return self._session or None
 
     def _llm_provider(self):
         if self._provider is None:
@@ -401,7 +415,9 @@ class RemoteLLMService(LLMService):
         return self._provider
 
     def _derives_endpoint(self) -> bool:
-        """True when this side's URL is found from the key rather than set in the preset."""
+        """True when this side's URL is found from the key (or the caller's session), not the preset."""
+        if self._session_endpoint() is not None:
+            return True
         kwargs = self.llm_config.model_kwargs
         provider = self._llm_provider()
         return bool(
@@ -413,6 +429,11 @@ class RemoteLLMService(LLMService):
 
     def _forget_endpoint(self) -> None:
         """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._session_endpoint() is not None:
+            self._resolved_base_url = None
+            self._session_key = None
+            self._openai_client = None
+            return
         if self._resolved_base_url and self._provider is not None:
             from backend.services.endpoint_cache import endpoint_cache
 
@@ -438,6 +459,9 @@ class RemoteLLMService(LLMService):
 
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._session_endpoint() is not None:
+            await self._ensure_session_endpoint()
+            return
         if self._openai_client is not None or self._resolved_base_url or not self._derives_endpoint():
             return
         import asyncio
@@ -448,6 +472,23 @@ class RemoteLLMService(LLMService):
         if not url:
             raise LLMEndpointUnavailableError(unavailable_message("llm", "The LLM endpoint is not provisioned."))
         self._resolved_base_url = url
+
+    async def _ensure_session_endpoint(self) -> None:
+        """Use the caller's own running endpoint (asked before every call: renewals change it)."""
+        from backend.services.session_endpoint import SessionEndpointError
+
+        try:
+            creds = await self._session_endpoint().resolve()
+        except SessionEndpointError as exc:
+            raise LLMEndpointUnavailableError(
+                unavailable_message("llm", f"The LLM endpoint is unavailable: {exc}.")
+            ) from exc
+        if creds is None or not creds.base_url:
+            raise LLMEndpointUnavailableError(unavailable_message("llm", "Your LLM endpoint is not running."))
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, self._session_key):
+            self._openai_client = None
+        self._resolved_base_url = creds.base_url
+        self._session_key = creds.api_key
 
     def _get_openai_client(self):
         """Lazy initialize OpenAI client."""
