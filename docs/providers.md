@@ -26,7 +26,7 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `google` | Google Gemini (OpenAI-compatible endpoint) | `user` or `managed` | Key documentation link; live list of Flash models (newest first, further filtered by the preset's `model_names` patterns); OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
-| `mpcdf` | MPCDF LLM Inference Service | `shared` | Ephemeral job URL and key set by the admin; health asks `/v1/models`. |
+| `mpcdf` | MPCDF LLM Inference Service | `shared` (embedding, LLM) or `user` | `shared`: ephemeral job URL and key set by the admin; health asks `/v1/models`. `user` (re-ranking side): each user logs in with their own MPCDF account and the endpoint runs as a job on it (see below). |
 | `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. |
 | `huggingface` | Hugging Face Inference Endpoints | `user` or `managed` | One endpoint per side in the token owner's namespace; readiness from the endpoint's `status.state`; pause/resume via the REST API; the URL is derived from the token. |
 
@@ -38,6 +38,8 @@ a preset picks one with `provider.scope`.
 - `user`: each user's own key, sent with their requests. Usage is per key; the user operates the resource (provision, pause).
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
 - `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
+
+A remote re-ranking side (`rerank`) always uses `user`.
 
 The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
 
@@ -54,7 +56,10 @@ renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
 `health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
-`provision(ctx, progress)`, `suspend(ctx, progress)`, `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
+`provision(ctx, progress)`, `suspend(ctx, progress)`, `rerank_credentials(request, refresh)` and
+`rerank_activity(request)` (the re-ranking side's endpoint for the calling user, and a report that it
+was used), `session_login(user_id, values)`, `session_logout(user_id)` and `session_status(user_id)`
+(for a provider whose endpoints run in the user's own login session), `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
 Providers never raise from display-only hooks (`health`, `parse_usage`).
 
 ## Adding a provider
@@ -82,6 +87,29 @@ be retried alone) and `bin/provision.py --preset <name>` does the same from the
 command line, including `--pause` and `--teardown`. Pausing keeps the resources
 and their URLs but stops billing and wake-ups; provisioning again resumes. A
 key typed in the plugin is sent with each management request, kept only in memory in the running Zotero and never stored by the backend.
+
+## Per-user sessions (MPCDF)
+
+Some services allow neither a shared admin key nor a long-lived personal key: the MPCDF LLM
+Inference Service needs each user's own login (username, password, one-time code) and runs each
+endpoint as a Slurm job of at most 8 hours on that user's account. A provider of this kind sets
+`provisioning_needs_key = False` and describes a login form (`provisioning.login` in the descriptor:
+a title and the fields with their HTML `type` and `autocomplete`), which the plugin renders in the
+side's section instead of a key field. The form posts to `POST /api/config/session/login`
+(`{side, values}`, five attempts per user per ten minutes); `GET /api/config/session?side=` and
+`POST /api/config/session/logout` answer for the caller only.
+
+For MPCDF this goes through the `mpcdf-llm` library
+(`uv pip install "mpcdf-llm @ git+https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git"`; the provider
+says so when it is missing). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero
+user in `<data_path>/system/mpcdf/<user-hash>/`; the session token and the user's Hugging Face
+token (every vLLM job there needs one) are sealed with `AUTOINDEX_SECRET`, and the password and
+one-time code are never stored. The library's supervisor renews a job shortly before it ends while
+it is used and cancels it after `idle_minutes` without a query; each re-ranking call reports use.
+The session lasts about 12 hours, and logging in to the MPCDF web interface ends it. Options of the
+`mpcdf` provider for a per-user side: `machine` (`Viper`), `gpu_type` (`mi300a`), `gpus` (1-2),
+`time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
+arguments without quotes, default `--enforce-eager`).
 
 ## Usage meters
 

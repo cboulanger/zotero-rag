@@ -147,11 +147,11 @@ class TestMpcdf(unittest.TestCase):
     def creds(self):
         return Credentials(api_key="secret", base_url=self.URL)
 
-    def test_scope_is_shared_only_and_default(self):
+    def test_scope_is_shared_by_default(self):
         provider = self.provider(FakeHTTP())
         self.assertEqual(provider.scope, "shared")
         with self.assertRaises(ProviderConfigError):
-            get_providers(preset_with("mpcdf", scope="user"))
+            get_providers(preset_with("mpcdf", scope="managed"))
 
     def test_does_not_provision(self):
         self.assertFalse(self.provider(FakeHTTP()).supports_provisioning)

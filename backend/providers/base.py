@@ -52,6 +52,8 @@ class Provider:
     #: True when ``endpoint_url()`` finds the side's URL from the key (no ``base_url`` in the preset).
     derives_endpoint_url: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False
+    #: False when provisioning runs in the caller's own login session instead of with a key.
+    provisioning_needs_key: ClassVar[bool] = True
     #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
     has_live_models: ClassVar[bool] = False
     #: Wire protocol of the LLM side; core implements the protocols, not vendors.
@@ -192,6 +194,23 @@ class Provider:
         if env and not api_key:
             return None
         return Credentials(api_key=api_key, base_url=base_url)
+
+    # -- per-user sessions --------------------------------------------------------
+
+    def session_login(self, user_id: Optional[int], values: dict[str, str]) -> dict:
+        """Log the caller in to the provider's per-user session (see ``SessionLoginDescriptor``).
+
+        Returns the session state (``{"state": "ok"|"login_required", ...}``, no
+        secrets). Only providers whose descriptor offers a login form implement it.
+        """
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_logout(self, user_id: Optional[int]) -> None:
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_status(self, user_id: Optional[int]) -> Optional[dict]:
+        """The caller's session state, or None when the provider has no sessions."""
+        return None
 
     # -- model list -----------------------------------------------------------
 

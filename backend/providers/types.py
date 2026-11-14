@@ -109,6 +109,8 @@ class Credentials(BaseModel):
 
     api_key: Optional[str] = None
     base_url: Optional[str] = None
+    #: Zotero user id of the caller, for a provider whose endpoints belong to a per-user session.
+    user_id: Optional[int] = None
 
 
 @dataclass
@@ -149,8 +151,34 @@ class CredentialDescriptor(BaseModel):
     optional: bool = True
 
 
+class SessionLoginField(BaseModel):
+    """One input of a session login form (rendered by the plugin as given)."""
+
+    name: str
+    label: str
+    #: HTML input type: ``text`` or ``password``.
+    type: Literal["text", "password"] = "text"
+    #: HTML ``autocomplete`` value, so password managers and one-time-code autofill work.
+    autocomplete: Optional[str] = None
+    optional: bool = False
+    help: str = ""
+
+
+class SessionLoginDescriptor(BaseModel):
+    """A provider whose endpoints run in a per-user session the user logs in to.
+
+    The plugin renders these fields instead of a key field and posts them to
+    ``POST /api/config/session/login``; ``GET /api/config/session`` reports the state.
+    """
+
+    title: str
+    fields: list[SessionLoginField]
+    help: str = ""
+
+
 class ProvisioningDescriptor(BaseModel):
     credential: Optional[CredentialDescriptor] = None
+    login: Optional[SessionLoginDescriptor] = None
     hint: Optional[str] = None
 
 
