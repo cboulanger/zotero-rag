@@ -280,6 +280,8 @@ and CLI scripts.
 container run it inside the container (`podman exec <container> python bin/provision.py --preset runpod`)
 so the data volume is shared (`--pause` stops an endpoint's billing without deleting it, `--teardown` deletes it; resuming is provisioning again). To copy provisioned credentials to another instance, `POST` the values to
 `/api/config/remote-fields` on it (it encrypts them with its own `AUTOINDEX_SECRET`).
+RunPod and MPCDF credentials are never admin-shared (their terms forbid sharing an account): `runpod` sides
+take each user's own key (the CLI prompts for it), and per-user MPCDF sides run in each user's own login session.
 
 ## Migrating Library RAG Data Between Instances
 
