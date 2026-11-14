@@ -244,8 +244,11 @@ matrix on a metered key.)
 
 ```bash
 uv run python skills/rag-quality-eval/scripts/run_eval.py --presets <active|all|name,name> \
-    [--models all|first|a,b] [--repeat 3] [--questions Q01,Q09] [--max-difficulty N] [--no-routing]
+    [--models all|first|a,b] [--repeat 3] [--questions Q01,Q09] [--max-difficulty N] [--no-routing] [--no-rerank]
 ```
+
+`--no-rerank` sends `enable_reranking: false`, so a preset with a `rerank` section can be compared
+with itself without the step (same preset, model and index; only the re-ranker differs).
 
 Output goes to `data/logs/rag_eval/<UTC timestamp>/`: `raw/` (one JSON per query:
 response + trace, no keys), `meta.json`, then `results.jsonl`, `report.json`,
