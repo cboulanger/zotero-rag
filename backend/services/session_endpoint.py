@@ -27,7 +27,8 @@ class SessionEndpointError(RuntimeError):
 
 def uses_session_endpoints(provider: Any) -> bool:
     """True when ``provider`` serves its side from per-user session endpoints."""
-    return bool(provider is not None and getattr(provider, "uses_session_endpoints", False))
+    # "is True": a MagicMock provider in tests must not count as session-based.
+    return provider is not None and getattr(provider, "uses_session_endpoints", False) is True
 
 
 class SessionEndpoint:
