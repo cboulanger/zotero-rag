@@ -253,6 +253,26 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issues, [])
 
 
+    async def test_session_based_embedding_side_is_skipped_with_issue(self):
+        """An embedding side that runs in the user's own login session (MPCDF
+        with a one-time password) cannot be indexed while the user is away."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp1 = store.add("KA", v1)
+        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        provider = MagicMock(uses_session_endpoints=True)
+        with patch("backend.providers.get_providers", return_value={"embedding": provider}), \
+             patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(return_value=v1)):
+            targets, issues = await resolve_targets(store)
+            listed, listed_issues = await resolve_targets(store, require_embedding_key=False)
+        self.assertEqual(targets, {})
+        self.assertEqual([i["kind"] for i in issues], ["session"])
+        self.assertFalse(issues[0]["pruned"])
+        # Callers that only need the target list (tag sync) still get it.
+        self.assertEqual(set(listed), {"users/1"})
+        self.assertEqual(listed_issues, [])
+
+
 class IsEmbeddingKeyUsableTest(unittest.TestCase):
     def test_ok_status_is_usable(self):
         self.assertTrue(is_embedding_key_usable("ok", None))

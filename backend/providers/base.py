@@ -54,6 +54,9 @@ class Provider:
     supports_suspend: ClassVar[bool] = False
     #: False when provisioning runs in the caller's own login session instead of with a key.
     provisioning_needs_key: ClassVar[bool] = True
+    #: True when each user runs their own endpoint for this side in a provider session
+    #: (see ``session_endpoint``); the side then has no fixed URL or shared key.
+    uses_session_endpoints: ClassVar[bool] = False
     #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
     has_live_models: ClassVar[bool] = False
     #: Wire protocol of the LLM side; core implements the protocols, not vendors.
@@ -210,6 +213,18 @@ class Provider:
 
     def session_status(self, user_id: Optional[int]) -> Optional[dict]:
         """The caller's session state, or None when the provider has no sessions."""
+        return None
+
+    def session_endpoint(self, user_id: Optional[int]) -> Optional[Credentials]:
+        """URL and key of the caller's running endpoint for this side, or None when it is not running.
+
+        Only providers with ``uses_session_endpoints`` implement it. Credentials
+        may change at any time (a job renewal), so callers ask before each use.
+        """
+        return None
+
+    def session_activity(self, user_id: Optional[int]) -> None:
+        """Report that the caller's endpoint is in use, so it is not stopped as idle."""
         return None
 
     # -- model list -----------------------------------------------------------
