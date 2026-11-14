@@ -172,6 +172,27 @@ class Provider:
         """
         return None
 
+    # -- re-ranking side -------------------------------------------------------
+
+    def rerank_credentials(self, request: Any, refresh: bool = False) -> Optional[Credentials]:
+        """URL and key of the calling user's ``/rerank`` endpoint, or None when there is none.
+
+        ``request`` is the per-query ``backend.services.rerank.RerankRequest``
+        (the caller's keys and user id). ``refresh`` asks for fresh values after
+        the endpoint rejected the previous ones. The generic implementation uses
+        the preset's fixed ``base_url`` and the caller's personal key; a provider
+        whose endpoints live in the user's account derives or looks them up.
+        """
+        kwargs = self.side_config.model_kwargs
+        base_url = kwargs.get("base_url")
+        if not base_url:
+            return None
+        env = kwargs.get("api_key_env")
+        api_key = request.client_keys.get(env) if env else None
+        if env and not api_key:
+            return None
+        return Credentials(api_key=api_key, base_url=base_url)
+
     # -- model list -----------------------------------------------------------
 
     def live_models(self, base_url: str, api_key: str) -> Optional[list[ModelInfo]]:

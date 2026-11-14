@@ -120,6 +120,12 @@ def get_client_api_keys(request: Request) -> dict[str, str]:
         val = request.headers.get(key_info["header_name"])
         if val:
             keys[key_info["key_name"]] = val
+    from backend.services.rerank import rerank_client_fields
+
+    for key_info in rerank_client_fields(preset.rerank):
+        val = request.headers.get(key_info["header_name"])
+        if val:
+            keys[key_info["key_name"]] = val
     return keys
 
 

@@ -116,7 +116,9 @@ class SearchResult(BaseModel):
     """Result from a vector similarity search."""
 
     chunk: DocumentChunk = Field(..., description="Matched chunk")
-    score: float = Field(..., description="Similarity score")
+    score: float = Field(..., description="Similarity score (the cross-encoder score after re-ranking)")
+    vector_score: Optional[float] = Field(None, description="Vector similarity score, set when the pool was re-ranked")
+    pre_rerank_rank: Optional[int] = Field(None, description="1-based rank before re-ranking, set when the pool was re-ranked")
 
 
 class DeduplicationRecord(BaseModel):

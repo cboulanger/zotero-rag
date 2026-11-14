@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from backend.config.presets import HardwarePreset
 
-Side = Literal["embedding", "llm"]
+Side = Literal["embedding", "llm", "rerank"]
 Scope = Literal["user", "shared", "managed"]
 HealthStatus = Literal["ready", "cold", "throttled", "paused", "unreachable"]
 

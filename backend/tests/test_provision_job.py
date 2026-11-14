@@ -316,7 +316,7 @@ class HealthEndpointTest(unittest.TestCase):
     def test_null_for_preset_whose_providers_have_no_health_concept(self):
         get_settings().model_preset = "remote-kisski"
         r = self.client.get("/api/config/health")
-        self.assertEqual(r.json(), {"embedding": None, "llm": None})
+        self.assertEqual(r.json(), {"embedding": None, "llm": None, "rerank": None})
 
     def test_runpod_reports_statuses(self):
         get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)

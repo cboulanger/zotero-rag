@@ -280,6 +280,28 @@ out or hits a gateway error is halved and retried down to single pages, and a si
 fails is skipped), `ocr_enabled`, `path` and `extra_options` (extra form fields or query parameters, e.g.
 `{"table_mode": "accurate"}` for docling-serve).
 
+#### The `rerank` section
+
+Any preset can add a re-ranking step (see [query-routing.md](query-routing.md#cross-encoder-re-ranking)).
+Without the section queries use the vector order. Fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `model_name` | (required) | Cross-encoder model, e.g. `BAAI/bge-reranker-v2-m3` |
+| `model_type` | `local` | `local` runs the model in the backend process (needs the `local-models` extra); `remote` calls a `/rerank` endpoint |
+| `pool_size` | `100` | How many candidates of the raw pool are rescored |
+| `max_length` | `512` | Token limit per (question, passage) pair (local only) |
+| `batch_size` | `16` | Pairs per forward pass (local only) |
+| `timeout_seconds` | `15` | Longest the step may take; after that the vector order is kept |
+| `model_kwargs` | `{}` | For `local`: extra `CrossEncoder` arguments. For `remote`: `base_url` and `api_key_env` |
+| `provider` | generic | The provider that serves a remote re-ranker; it must use scope `user` |
+
+A remote re-ranker always runs on each user's own account or key (scope `user`); its key is an
+optional field in Preferences, and a query without it runs without re-ranking. The endpoint must
+accept the Jina/Cohere request format (`POST {base_url}/rerank` with `model`, `query`,
+`documents`), which vLLM, Hugging Face TEI and Infinity serve. Users can switch the step off in
+Preferences and per query in the query dialog's advanced options.
+
 ---
 
 ### `remote-mpcdf` (MPCDF LLM Inference Service — temporary KISSKI workaround)
