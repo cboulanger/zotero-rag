@@ -29,6 +29,8 @@ dependencies = [
     "tqdm>=4.0.0",
     "huggingface-hub>=0.26.0",
     "pikepdf>=10.5.1",
+    # Per-user MPCDF endpoints (login sessions, job provisioning); source in [tool.uv.sources].
+    "mpcdf-llm>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -43,6 +45,10 @@ local-models = [
 eval = [
     "ir-datasets>=0.5.5",
 ]
+
+[tool.uv.sources]
+# From git: the GitLab instance sends archive downloads by scripts to its sign-in page.
+mpcdf-llm = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git", rev = "ad087f9930c231879b2c8badb80543bc87314431" }
 
 [project.scripts]
 # Short, stable names for the most-used debugging scripts (`uv run <name>`),

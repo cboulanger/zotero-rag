@@ -99,9 +99,8 @@ side's section instead of a key field. The form posts to `POST /api/config/sessi
 (`{side, values}`, five attempts per user per ten minutes); `GET /api/config/session?side=` and
 `POST /api/config/session/logout` answer for the caller only.
 
-For MPCDF this goes through the `mpcdf-llm` library
-(`uv pip install "mpcdf-llm @ git+https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git"`; the provider
-says so when it is missing). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero
+For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
+its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero
 user in `<data_path>/system/mpcdf/<user-hash>/`; the session token and the user's Hugging Face
 token (every vLLM job there needs one) are sealed with `AUTOINDEX_SECRET`, and the password and
 one-time code are never stored. The library's supervisor renews a job shortly before it ends while
