@@ -69,8 +69,11 @@ var ZoteroRAGDialog = {
 	/** True while the initial backend connectivity check is in flight. */
 	isConnecting: false,
 
-	/** @type {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null} Last GET /api/config/health */
+	/** @type {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null, rerank?: {status: string, detail?: string}|null}|null} Last GET /api/config/health */
 	endpointHealth: null,
+
+	/** @type {{model_type: string, provider: any, model_name?: string, pool_size?: number}|null} sides.rerank of GET /api/config/providers; null when the preset does not re-rank */
+	rerankInfo: null,
 	/** @type {any} Pending health re-check timer */
 	_healthTimer: null,
 	_healthClosed: false,
@@ -330,6 +333,18 @@ var ZoteroRAGDialog = {
 			} catch (_) {}
 		}
 
+		// Restore disable-reranking checkbox from prefs (shown once the preset is known to re-rank)
+		const disableRerankingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		if (disableRerankingCheckbox) {
+			try {
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				disableRerankingCheckbox.checked = !!Zotero.Prefs.get('extensions.zotero-rag.disableReranking', true);
+			} catch (_) {}
+			disableRerankingCheckbox.addEventListener('change', () => this.updateRerankNotice());
+		}
+		const rerankStartButton = document.getElementById('rerank-start-button');
+		if (rerankStartButton) rerankStartButton.addEventListener('click', () => this.startRerankEndpoint());
+
 		// Restore include-trace checkbox from prefs
 		const includeTraceCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('include-trace'));
 		if (includeTraceCheckbox) {
@@ -367,6 +382,7 @@ var ZoteroRAGDialog = {
 		this.isConnecting = false;
 		this.hideProgress();
 		this.loadPresetConfig();
+		this.loadRerankInfo();
 		this.refreshEndpointHealth();
 		this.refreshAutoindexButton();
 		this.populateLibraries();
@@ -769,6 +785,128 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * Whether the "Use re-ranking" switch in Preferences is on (default on).
+	 * @returns {boolean}
+	 */
+	rerankPrefEnabled() {
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			return Zotero.Prefs.get('extensions.zotero-rag.enableReranking', true) !== false;
+		} catch (_) {
+			return true;
+		}
+	},
+
+	/**
+	 * Whether this query asks the backend to re-rank (pure apart from the pref read):
+	 * on unless switched off in Preferences or with the dialog's checkbox.
+	 * @param {boolean} dialogDisabled - state of the "Disable re-ranking" checkbox
+	 * @returns {boolean}
+	 */
+	rerankEnabledForQuery(dialogDisabled) {
+		if (!this.rerankPrefEnabled()) return false;
+		return !(this.rerankInfo && dialogDisabled);
+	},
+
+	/**
+	 * Fetch whether the preset has a re-ranking step (GET /api/config/providers) and
+	 * show the dialog's "Disable re-ranking" option only then. Failures leave it hidden.
+	 * @returns {Promise<void>}
+	 */
+	async loadRerankInfo() {
+		if (!this.plugin) return;
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config/providers`, {
+				headers: this.plugin.getAuthHeaders(),
+			});
+			const body = response.ok ? await response.json() : null;
+			this.rerankInfo = body && body.sides && body.sides.rerank ? body.sides.rerank : null;
+		} catch (_) {
+			this.rerankInfo = null;
+		}
+		const row = document.getElementById('disable-reranking-row');
+		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		if (row) row.style.display = this.rerankInfo ? 'flex' : 'none';
+		if (checkbox && this.rerankInfo && !this.rerankPrefEnabled()) {
+			checkbox.checked = true;
+			checkbox.disabled = true;
+			checkbox.title = 'Re-ranking is switched off in the Zotero RAG preferences.';
+		}
+		this.updateRerankNotice();
+	},
+
+	/**
+	 * What to tell the user about a re-ranking endpoint that is not running (pure).
+	 * Re-ranking never blocks a question: the query then runs without it.
+	 * @param {{model_type: string, provider: {supports_provisioning: boolean, operable_by_caller: boolean}|null}|null|undefined} info - sides.rerank of GET /api/config/providers
+	 * @param {{status: string, detail?: string}|null|undefined} health - rerank of GET /api/config/health
+	 * @param {boolean} enabled - whether the user wants re-ranking
+	 * @returns {{message: string, canStart: boolean}|null} null when there is nothing to say
+	 */
+	describeRerankNotice(info, health, enabled) {
+		if (!info || !enabled || !health) return null;
+		const canStart = !!info.provider && info.provider.supports_provisioning && info.provider.operable_by_caller;
+		if (health.status === 'cold') {
+			return { message: 'The re-ranking endpoint is starting; it is used once it is up.', canStart: false };
+		}
+		if (health.status === 'paused' || health.status === 'unreachable') {
+			const detail = health.detail ? ` (${health.detail})` : '';
+			return {
+				message: `Re-ranking is skipped: its endpoint is not running${detail}.` +
+					(canStart ? '' : ' It can be set up in the Zotero RAG preferences.'),
+				canStart,
+			};
+		}
+		return null;
+	},
+
+	/** Paint the re-ranking notice from the last providers and health responses. */
+	updateRerankNotice() {
+		const notice = document.getElementById('rerank-notice');
+		if (!notice) return;
+		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		const enabled = this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
+		const health = this.endpointHealth ? this.endpointHealth.rerank : null;
+		const view = this.describeRerankNotice(this.rerankInfo, health, enabled);
+		const text = document.getElementById('rerank-notice-text');
+		const button = document.getElementById('rerank-start-button');
+		notice.style.display = view ? 'flex' : 'none';
+		if (text) text.textContent = view ? view.message : '';
+		if (button) button.hidden = !(view && view.canStart);
+	},
+
+	/**
+	 * Ask the backend to start the caller's re-ranking endpoint (POST /api/config/provision),
+	 * with the caller's own key from Preferences; health polling shows when it is up.
+	 * @returns {Promise<void>}
+	 */
+	async startRerankEndpoint() {
+		if (!this.plugin) return;
+		const text = document.getElementById('rerank-notice-text');
+		const button = /** @type {HTMLButtonElement|null} */ (document.getElementById('rerank-start-button'));
+		if (button) button.disabled = true;
+		if (text) text.textContent = 'Starting the re-ranking endpoint...';
+		try {
+			const response = await fetch(`${this.plugin.backendURL}/api/config/provision`, {
+				method: 'POST',
+				headers: this.plugin.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ sides: ['rerank'] }),
+			});
+			if (!response.ok) {
+				const data = await response.json().catch(() => ({}));
+				if (text) text.textContent = `Could not start re-ranking: ${data.detail || `HTTP ${response.status}`}`;
+				return;
+			}
+			if (text) text.textContent = 'Starting the re-ranking endpoint; this can take a few minutes.';
+			setTimeout(() => this.refreshEndpointHealth(), 5000);
+		} catch (e) {
+			if (text) text.textContent = `Could not start re-ranking: ${e}`;
+		} finally {
+			if (button) button.disabled = false;
+		}
+	},
+
+	/**
 	 * What keeps the current action from running because a remote endpoint it needs is
 	 * not ready (pure). Indexing needs the embedding side; a question needs both.
 	 * @param {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null}|null|undefined} health - GET /api/config/health
@@ -814,6 +952,7 @@ var ZoteroRAGDialog = {
 		} catch (_) {
 			this.endpointHealth = null; // an unreachable backend is reported elsewhere
 		}
+		this.updateRerankNotice();
 		const anyCold = !!this.endpointHealth && ['embedding', 'llm'].some((s) => this.endpointHealth[s]?.status === 'cold');
 		if (anyCold && !this._warmupSent) {
 			this._warmupSent = true;
@@ -826,8 +965,10 @@ var ZoteroRAGDialog = {
 		this.updateSubmitButtonState();
 		// Poll while either side is not ready, whichever action is selected: the user may switch.
 		const pending = this.describeEndpointBlock(this.endpointHealth, false);
-		if (pending && !this._healthClosed) {
-			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending.retryMs);
+		// A re-ranker that is starting does not block, but is watched until it is up.
+		const rerankStarting = !!this.rerankInfo && this.endpointHealth?.rerank?.status === 'cold';
+		if ((pending || rerankStarting) && !this._healthClosed) {
+			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending ? pending.retryMs : 10000);
 		}
 	},
 
@@ -1209,6 +1350,16 @@ var ZoteroRAGDialog = {
 			Zotero.Prefs.set('extensions.zotero-rag.disableRouting', !enableRouting, true);
 		} catch (_) {}
 
+		// Get disable-reranking checkbox and persist it (only while the preset re-ranks)
+		const disableRerankingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		if (disableRerankingCheckbox && this.rerankInfo && this.rerankPrefEnabled()) {
+			try {
+				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+				Zotero.Prefs.set('extensions.zotero-rag.disableReranking', disableRerankingCheckbox.checked, true);
+			} catch (_) {}
+		}
+		const enableReranking = this.rerankEnabledForQuery(disableRerankingCheckbox ? disableRerankingCheckbox.checked : false);
+
 		// Get include-trace checkbox and persist it
 		const includeTraceCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('include-trace'));
 		const includeTrace = includeTraceCheckbox ? includeTraceCheckbox.checked : false;
@@ -1267,6 +1418,7 @@ var ZoteroRAGDialog = {
 				topK: topK,
 				llmModel: llmModel,
 				enableRouting: enableRouting,
+				enableReranking: enableReranking,
 				includeTrace: includeTrace
 			}, (pct, label, message) => this.updateProgress(pct, label, message));
 
@@ -1275,7 +1427,7 @@ var ZoteroRAGDialog = {
 			// includeTrace deliberately excluded: a debug trace is only ever read from
 			// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
 			// so forwarding it on every follow-up would just waste backend computation.
-			this.queryOptions = { minScore, topK, llmModel, enableRouting };
+			this.queryOptions = { minScore, topK, llmModel, enableRouting, enableReranking };
 
 			this.updateProgress(100, 'Complete', 'Rendering result...');
 			this.switchToResultState();
