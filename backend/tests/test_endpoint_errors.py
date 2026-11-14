@@ -96,14 +96,16 @@ class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
         service.llm_config = preset.llm
         service._model_name = "m"
         service._provider = None
-        service._resolved_base_url = None
+        # A known URL and "not paused": no lookup reaches the real RunPod API.
+        service._resolved_base_url = "https://x/v1"
         service._openai_client = None
         service.api_key = "k"
         service._llm_api = lambda: "openai"
         service._generate_openai = AsyncMock(
             side_effect=APIConnectionError(request=httpx.Request("POST", "https://x/v1/chat/completions"))
         )
-        with patch("backend.config.settings.get_settings", return_value=settings):
+        with patch("backend.config.settings.get_settings", return_value=settings), \
+             patch("backend.services.endpoint_cache.paused_cache.is_paused", return_value=False):
             with self.assertRaises(LLMEndpointUnavailableError) as ctx:
                 await service.generate("hi")
         self.assertNotIn("(e.g. RunPod)", str(ctx.exception))  # core text is vendor-neutral
