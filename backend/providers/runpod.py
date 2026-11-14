@@ -239,21 +239,21 @@ class RunPodProvider(Provider):
             # then still replace it, since the placement cannot be verified.
             gpu_unverifiable = ctx.recreate and existing_gpus is None
             mismatched = existing.get("templateId") != template_id or gpu_mismatch or gpu_unverifiable
-            if not mismatched:
-                if existing.get("workersMax") == 0:  # paused: resume
+            if mismatched and ctx.recreate:
+                self._request(api_key, "DELETE", f"/endpoints/{existing['id']}")
+            else:
+                if mismatched:
+                    logger.warning(
+                        "Endpoint '%s' exists but its config differs from requested "
+                        "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
+                        "endpoint - re-run with recreate to replace it.",
+                        name, existing.get("templateId"), template_id, existing_gpus, gpus,
+                    )
+                if existing.get("workersMax") == 0:  # paused: resume (also a kept, differing one)
                     return self._request(
                         api_key, "PATCH", f"/endpoints/{existing['id']}", {"workersMax": opts.workers_max}
                     )
                 return existing
-            if not ctx.recreate:
-                logger.warning(
-                    "Endpoint '%s' exists but its config differs from requested "
-                    "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
-                    "endpoint - re-run with recreate to replace it.",
-                    name, existing.get("templateId"), template_id, existing_gpus, gpus,
-                )
-                return existing
-            self._request(api_key, "DELETE", f"/endpoints/{existing['id']}")
         body: dict[str, Any] = {
             "name": name,
             "templateId": template_id,
