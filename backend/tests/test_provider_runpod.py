@@ -294,13 +294,13 @@ class TestProvisionAndTeardown(unittest.TestCase):
 
 
 class TestPauseResume(unittest.TestCase):
-    def _live(self, workers_max):
+    def _live(self, workers_max, gpu="NVIDIA RTX A5000"):
         http = FakeHTTP()
         p = provider("llm", http=http)
         http.add("GET", r"/templates$", FakeResponse(200, [
             {"id": "tpl1", "name": "zotero-rag-llm", "imageName": runpod_module.DEFAULT_IMAGE, "env": p.template_env()}]))
         http.add("GET", r"/endpoints$", FakeResponse(200, [
-            {"id": "ep1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": ["NVIDIA RTX A5000"],
+            {"id": "ep1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": [gpu],
              "workersMax": workers_max}]))
         http.add("PATCH", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": 1}))
         return p, http
@@ -325,6 +325,13 @@ class TestPauseResume(unittest.TestCase):
         p.provision(ctx("llm", skip_warmup=True), lambda m: None)
         (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
         self.assertEqual(body, {"workersMax": 1})
+
+    def test_provision_resumes_a_paused_endpoint_whose_config_differs(self):
+        p, http = self._live(0, gpu="NVIDIA L4")  # kept as the owner set it up, but resumed
+        p.provision(ctx("llm", skip_warmup=True), lambda m: None)
+        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
+        self.assertEqual(body, {"workersMax": 1})
+        self.assertEqual(http.calls_matching("DELETE", r"/endpoints/ep1$"), [])
 
     def test_provision_leaves_a_running_endpoint_alone(self):
         p, http = self._live(1)
