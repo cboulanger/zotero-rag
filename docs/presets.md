@@ -312,6 +312,20 @@ accept the Jina/Cohere request format (`POST {base_url}/rerank` with `model`, `q
 `documents`), which vLLM, Hugging Face TEI and Infinity serve. Users can switch the step off in
 Preferences and per query in the query dialog's advanced options.
 
+Bundled presets with a re-ranking step:
+
+| Preset | Re-ranker | Pool |
+|---|---|---|
+| `cpu-only`, `high-memory`, `apple-silicon-32gb`, `cloud-server-kisski` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, local (about 1 s per 30 passages on 4 CPU cores) | 30 |
+| `runpod` | `BAAI/bge-reranker-v2-m3` on the user's own RunPod endpoint `zotero-rag-rerank` | 100 |
+| `remote-mpcdf` | `BAAI/bge-reranker-v2-m3` as a job on the user's own MPCDF account | 100 |
+
+The pools follow an offline comparison on the gold library: the small CPU model loses gold facts
+from the top 10 at larger pools, `bge-reranker-v2-m3` does not, but needs a GPU (about 37 s per
+100 passages on 4 CPU cores). Provisioning all sides of a preset leaves the re-ranking endpoint
+alone; it is started from its own section in Preferences or from the query dialog's prompt, and
+pausing all sides includes it.
+
 ---
 
 ### `remote-mpcdf` (MPCDF LLM Inference Service, on each user's own account)

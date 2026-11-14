@@ -427,7 +427,13 @@ class UserScopeProvisionTest(unittest.TestCase):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
+        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])  # re-ranking only on request
+
+    def test_the_rerank_side_is_provisioned_on_request(self):
+        r = self._post(7, body={"sides": ["rerank"]})
+        self.assertEqual(r.status_code, 202, r.text)
+        self._wait(7)
+        self.assertEqual(self.calls, [("rerank", "rpa_USER")])
 
     def test_without_the_users_key_it_is_a_400_naming_the_key(self):
         r = self._post(7, key=None)
@@ -517,8 +523,9 @@ class SuspendApiTest(UserScopeProvisionTest):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
-        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused"])
+        # Pausing everything includes the re-ranking endpoint (provisioning everything does not).
+        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER"), ("rerank", "rpa_USER")])
+        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused", "rerank: paused"])
 
     def test_sides_pauses_only_the_requested_side(self):
         self._suspend(7, body={"sides": ["llm"]})
