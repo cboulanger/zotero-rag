@@ -296,6 +296,16 @@ Without the section queries use the vector order. Fields:
 | `model_kwargs` | `{}` | For `local`: extra `CrossEncoder` arguments. For `remote`: `base_url` and `api_key_env` |
 | `provider` | generic | The provider that serves a remote re-ranker; it must use scope `user` |
 
+A re-ranker on the MPCDF service, on each user's own account:
+
+```json
+"rerank": {
+  "model_type": "remote",
+  "model_name": "BAAI/bge-reranker-v2-m3",
+  "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60}}
+}
+```
+
 A remote re-ranker always runs on each user's own account or key (scope `user`); its key is an
 optional field in Preferences, and a query without it runs without re-ranking. The endpoint must
 accept the Jina/Cohere request format (`POST {base_url}/rerank` with `model`, `query`,

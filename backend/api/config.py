@@ -544,7 +544,10 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
     if not base_url and api_key and provider.derives_endpoint_url:
         base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
-    health = provider.health(Credentials(api_key=api_key, base_url=base_url))
+    identity = get_zotero_identity(request) if request is not None else None
+    health = provider.health(Credentials(
+        api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None,
+    ))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
@@ -776,13 +779,16 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
     jobs = []
     for side in sides:
         credential, env = _side_credential(preset, side, body.keys, request)
-        if not credential:
+        if not credential and providers[side].provisioning_needs_key:
             raise HTTPException(
                 status_code=400,
                 detail=f"No API key is available for the {side} side"
                        + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
             )
-        ctx = ProvisionContext(side=side, preset=preset, credential=credential, data_path=settings.data_path)
+        ctx = ProvisionContext(
+            side=side, preset=preset, credential=credential, data_path=settings.data_path,
+            extra={"user_id": identity.user_id if identity else None},
+        )
         jobs.append(provisioning.SideJob(side=side, provider=providers[side], ctx=ctx))
 
     if provisioning.is_running(slot, sides):
@@ -1048,3 +1054,95 @@ async def get_version():
         "api_version": settings.version,
         "service": "Zotero RAG API"
     }
+
+
+# -- per-user provider sessions (e.g. an MPCDF account login) ---------------------
+
+
+class SessionLoginRequest(BaseModel):
+    """Body of POST /api/config/session/login: the side and the login form's values."""
+    side: str
+    #: Field values by the names the side's ``provisioning.login`` descriptor declares.
+    values: Dict[str, str] = {}
+
+
+class SessionSideRequest(BaseModel):
+    side: str
+
+
+def _session_provider(request: Request, side: str) -> Tuple[Provider, Optional[int]]:
+    """The caller's session-login provider for ``side`` and the caller's user id.
+
+    Raises:
+        HTTPException: 400 when the side has no login, 401 without a signed-in caller.
+    """
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    provider = providers.get(side)
+    descriptor = provider.describe() if provider is not None else None
+    if descriptor is None or descriptor.provisioning is None or descriptor.provisioning.login is None:
+        raise HTTPException(status_code=400, detail=f"The {side} side of preset '{preset.name}' has no account login.")
+    identity = get_zotero_identity(request)
+    if identity is None and not is_loopback(get_settings()):
+        raise HTTPException(status_code=401, detail="Missing or invalid Zotero API key.")
+    return provider, identity.user_id if identity else None
+
+
+def _session_error(exc: Exception) -> HTTPException:
+    """Map a session failure to an HTTP error without echoing anything the user typed."""
+    from backend.providers.types import ProvisionError
+    from backend.services.mpcdf_sessions import LoginRateLimited, SessionsUnavailable
+
+    name = type(exc).__name__
+    if isinstance(exc, LoginRateLimited):
+        return HTTPException(status_code=429, detail=str(exc))
+    if isinstance(exc, SecretsUnavailableError):
+        return HTTPException(status_code=503, detail="This server cannot store sessions (AUTOINDEX_SECRET is not set).")
+    if isinstance(exc, (SessionsUnavailable, ProvisionError)):
+        return HTTPException(status_code=503, detail=str(exc))
+    if name == "LoginFailed":
+        return HTTPException(status_code=401, detail="The login was rejected; check the username, password and one-time code.")
+    logger.warning("Session call failed: %s", name)
+    return HTTPException(status_code=502, detail=f"The provider could not be reached ({name}).")
+
+
+@router.post("/config/session/login")
+def session_login(body: SessionLoginRequest, request: Request) -> dict:
+    """Log the caller in to their own account at the side's provider.
+
+    The password and one-time code are passed on once and never stored; the
+    provider keeps only the resulting session, encrypted. Returns the session
+    state (``state``, ``username``, ``expires_at``, provider extras), no secrets.
+    Plain ``def``: the provider call blocks, so FastAPI runs it in a thread.
+    """
+    provider, user_id = _session_provider(request, body.side)
+    try:
+        return provider.session_login(user_id, body.values)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _session_error(exc)
+
+
+@router.post("/config/session/logout")
+def session_logout(body: SessionSideRequest, request: Request) -> dict:
+    """End the caller's session at the side's provider (running endpoints are not stopped)."""
+    provider, user_id = _session_provider(request, body.side)
+    try:
+        provider.session_logout(user_id)
+    except Exception as exc:
+        raise _session_error(exc)
+    return {"state": "login_required"}
+
+
+@router.get("/config/session")
+def session_state(side: str, request: Request) -> dict:
+    """The caller's session state at the side's provider."""
+    provider, user_id = _session_provider(request, side)
+    try:
+        return provider.session_status(user_id) or {"state": "login_required"}
+    except Exception as exc:
+        raise _session_error(exc)

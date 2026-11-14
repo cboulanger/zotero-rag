@@ -522,3 +522,61 @@ test('controller hides the rerank section when the preset has none', async () =>
 	await c.refresh();
 	assert.strictEqual(refs.rerank.section.hidden, false);
 });
+
+// --- account login (per-user session providers) -----------------------------------
+
+const loginDescriptor = {
+	title: 'Account', help: 'Runs on your own account.',
+	fields: [
+		{ name: 'username', label: 'User', autocomplete: 'username' },
+		{ name: 'password', label: 'Password', type: 'password', autocomplete: 'current-password' },
+		{ name: 'otp', label: 'Code', autocomplete: 'one-time-code' },
+	],
+};
+const sessionSide = () => ({ ...remote({ provisioning: { credential: null, login: loginDescriptor } }), model_name: 'm', pool_size: 100 });
+
+test('login: a session provider shows the form instead of a key field', () => {
+	const S = load();
+	const m = S.buildModel('rerank', sessionSide(), { status: 'unreachable', detail: 'log in first' }, idle, { state: 'login_required' });
+	assert.strictEqual(m.login.visible, true);
+	assert.strictEqual(m.login.loggedIn, false);
+	assert.strictEqual(m.credential.visible, false);
+	const ok = S.buildModel('rerank', sessionSide(), { status: 'ready', detail: '' }, idle, { state: 'ok', username: 'alice', expires_at: null });
+	assert.strictEqual(ok.login.text, 'Logged in as alice.');
+	assert.strictEqual(S.buildModel('embedding', remote(), undefined, idle).login.visible, false);
+});
+
+test('login: the form posts the values once and clears the secrets', async () => {
+	const S = load();
+	const posts = [];
+	let session = { state: 'login_required' };
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), {
+		onProvision() {}, onRetry() {},
+		onLogin: (side, values) => c.login(side, values),
+	});
+	const responses = {
+		'/api/config/providers': { sides: { embedding: local, llm: local, rerank: sessionSide() } },
+		'/api/config/health': { rerank: { status: 'unreachable', detail: '' } },
+		'/api/config/provision/status': idle,
+	};
+	const c = S.createController({
+		refs,
+		get: async (p) => (p.startsWith('/api/config/session') ? session : responses[p]),
+		post: async (path, body) => { posts.push([path, body]); session = { state: 'ok', username: 'alice' }; return { ok: true, status: 200, data: session }; },
+		pollMs: 0,
+	});
+	await c.refresh();
+	assert.strictEqual(refs.rerank.loginBox.hidden, false);
+	assert.strictEqual(refs.rerank.loginInputs.password.type, 'password');
+	assert.strictEqual(refs.rerank.loginInputs.otp.attrs.autocomplete, 'one-time-code');
+	refs.rerank.loginInputs.username.value = 'alice';
+	refs.rerank.loginInputs.password.value = 'pw';
+	refs.rerank.loginInputs.otp.value = '123456';
+	refs.rerank.loginButton.click();
+	await new Promise((r) => setTimeout(r, 10));
+	assert.strictEqual(JSON.stringify(posts[0]), JSON.stringify(['/api/config/session/login', { side: 'rerank', values: { username: 'alice', password: 'pw', otp: '123456' } }]));
+	assert.strictEqual(refs.rerank.loginInputs.password.value, '');
+	assert.strictEqual(refs.rerank.loginInputs.otp.value, '');
+	assert.strictEqual(refs.rerank.loginState.textContent, 'Logged in as alice.');
+	assert.strictEqual(refs.rerank.logoutButton.hidden, false);
+});

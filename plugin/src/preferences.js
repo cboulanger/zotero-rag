@@ -266,6 +266,8 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			onProvision: (side, key) => controller && controller.provision(side, key),
 			onRetry: (side, key) => controller && controller.provision(side, key),
 			onPause: (side, key) => controller && controller.pause(side, key),
+			onLogin: (side, values) => controller && controller.login(side, values),
+			onLogout: (side) => controller && controller.logout(side),
 			rerankEnabled: {
 				get: () => Zotero.Prefs.get(Sections.RERANK_PREF, true) !== false,
 				set: (enabled) => Zotero.Prefs.set(Sections.RERANK_PREF, enabled, true),

@@ -142,7 +142,19 @@ async def lifespan(app: FastAPI):
         app.state.health_check_task = health_check_task
         logger.info(f"Health check scheduler started (every {settings.health_check_interval_minutes} min)")
 
+    # Per-user MPCDF sessions (re-ranking endpoints on each user's own account).
+    from backend.services import mpcdf_sessions
+    mpcdf = mpcdf_sessions.get_sessions() if mpcdf_sessions.available() else None
+    if mpcdf is not None:
+        try:
+            await mpcdf.open()
+        except Exception as e:
+            logger.warning(f"Could not start MPCDF sessions: {e}")
+
     yield
+
+    if mpcdf is not None:
+        await mpcdf.close()
 
     if scheduler_task is not None:
         scheduler_task.cancel()
