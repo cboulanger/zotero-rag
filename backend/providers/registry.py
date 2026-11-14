@@ -11,7 +11,7 @@ import pkgutil
 from typing import Optional
 
 from backend.providers.base import PROVIDERS, Provider
-from backend.providers.types import SIDES, ProviderConfigError, Side
+from backend.providers.types import ProviderConfigError, Side, preset_sides, side_config
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,16 @@ def discover_providers() -> dict[str, type[Provider]]:
 
 
 def _side_config(preset, side: Side):
-    return preset.embedding if side == "embedding" else preset.llm
+    return side_config(preset, side)
+
+
+def _supported_sides(cls: type[Provider]) -> frozenset:
+    """Sides ``cls`` may serve. The generic provider (the base class itself, used for
+    every local side and for plain OpenAI-compatible endpoints) also serves the optional
+    re-ranking side; vendor subclasses opt in by listing ``"rerank"`` themselves."""
+    if cls is Provider:
+        return cls.supported_sides | {"rerank"}
+    return cls.supported_sides
 
 
 def _key_env_names(side_config) -> set[str]:
@@ -71,7 +80,7 @@ def get_providers(preset) -> dict[Side, Provider]:
     """
     registry = discover_providers()
     providers: dict[Side, Provider] = {}
-    for side in SIDES:
+    for side in preset_sides(preset):
         cfg = _side_config(preset, side)
         provider_cfg = cfg.provider
         cls = registry.get(provider_cfg.id)
@@ -84,16 +93,22 @@ def get_providers(preset) -> dict[Side, Provider]:
                 f"{side}: provider {provider_cfg.id!r} cannot serve a local model "
                 "(a local side needs no provider; remove the provider block)"
             )
-        if side not in cls.supported_sides:
+        if side not in _supported_sides(cls):
             raise ProviderConfigError(
                 f"{side}: provider {provider_cfg.id!r} does not support the {side} side "
-                f"(supports: {', '.join(sorted(cls.supported_sides))})"
+                f"(supports: {', '.join(sorted(_supported_sides(cls)))})"
             )
         scope = provider_cfg.scope or cls.default_scope
         if scope not in cls.key_scopes:
             raise ProviderConfigError(
                 f"{side}: provider {provider_cfg.id!r} does not allow scope {scope!r} "
                 f"(allowed: {', '.join(sorted(cls.key_scopes))})"
+            )
+        if side == "rerank" and cfg.model_type == "remote" and scope != "user":
+            # Provider terms forbid sharing one account between users.
+            raise ProviderConfigError(
+                f"rerank: a remote re-ranker runs on each user's own account; provider "
+                f"{provider_cfg.id!r} must use scope 'user' (got {scope!r})"
             )
         if cfg.model_type == "remote":
             _check_scope_matches_key_fields(side, provider_cfg.id, scope, cfg.model_kwargs)

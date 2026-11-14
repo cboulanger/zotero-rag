@@ -19,7 +19,24 @@ Side = Literal["embedding", "llm"]
 Scope = Literal["user", "shared", "managed"]
 HealthStatus = Literal["ready", "cold", "throttled", "paused", "unreachable"]
 
+#: The sides every preset has.
 SIDES: tuple[Side, ...] = ("embedding", "llm")
+#: Sides a preset may leave out (``preset.rerank`` is None when it has no re-ranking step).
+OPTIONAL_SIDES: tuple[Side, ...] = ("rerank",)
+
+
+def side_config(preset: "HardwarePreset", side: Side):
+    """The ``EmbeddingConfig``, ``LLMConfig`` or ``RerankConfig`` of one side (None for an absent optional side)."""
+    if side == "embedding":
+        return preset.embedding
+    if side == "llm":
+        return preset.llm
+    return getattr(preset, side, None)
+
+
+def preset_sides(preset: "HardwarePreset") -> tuple[Side, ...]:
+    """The sides ``preset`` actually has, in display order."""
+    return SIDES + tuple(s for s in OPTIONAL_SIDES if side_config(preset, s) is not None)
 
 
 class ProviderConfigError(ValueError):

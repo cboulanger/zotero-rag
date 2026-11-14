@@ -26,6 +26,7 @@ from backend.providers.types import (
     ProvisionContext,
     Scope,
     Side,
+    side_config,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -83,8 +84,8 @@ class Provider:
 
     @property
     def side_config(self):
-        """The ``EmbeddingConfig`` or ``LLMConfig`` this instance serves."""
-        return self.preset.embedding if self.side == "embedding" else self.preset.llm
+        """The ``EmbeddingConfig``, ``LLMConfig`` or ``RerankConfig`` this instance serves."""
+        return side_config(self.preset, self.side)
 
     def _http(self) -> Any:
         """Blocking ``httpx.Client`` for management-API calls (lazily created).
