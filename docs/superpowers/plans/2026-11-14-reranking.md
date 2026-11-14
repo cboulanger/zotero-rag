@@ -4,7 +4,7 @@
 
 **Status:** draft for review (2026-11-14). Nothing here is implemented.
 
-**Goal:** Add re-ranking as an official but optional retrieval step. A preset may declare a `rerank` section; the step then rescores the vector-search candidate pool with a multilingual cross-encoder before dedup and the per-document cap. It runs on the server's CPU (local) or on a GPU endpoint on MPCDF or RunPod that each user starts with their own credentials. Users can switch it off in Preferences or per query, and a query never waits for it.
+**Goal:** Add re-ranking as an official but optional retrieval step. A preset may declare a `rerank` section; the step then rescores the vector-search candidate pool with a multilingual cross-encoder before dedup and the per-document cap. It runs on the server's CPU (local) or on a GPU endpoint on MPCDF or RunPod that each user starts with their own credentials. Users can switch it off in Preferences or per query, and a query never waits for it. Along the way, the MPCDF and RunPod embedding and LLM sides move to per-user credentials as well (Phase 7), since the providers' terms forbid sharing accounts.
 
 **Background:** `docs/history/2026-11-14-reranking-brainstorm.md` (experiments so far, model and host options, latency estimates, evaluation method).
 
@@ -24,8 +24,9 @@
 
 1. **Default model and precision** are chosen by Phase 0's eval. The plan assumes `BAAI/bge-reranker-v2-m3`, with int8 ONNX on CPU if fp32 misses the 15 s budget.
 2. **Bundled presets:** add a `rerank` section to the existing CPU/KISSKI presets once Phase 0 passes, or ship separate `*-rerank` presets first? The plan assumes it is added to existing presets in Phase 6, after the judged run.
-3. **Shared MPCDF/managed RunPod sides for embedding and LLM:** the same terms argue for moving them to per-user too. Out of scope here (auto-indexing runs without a user present, which needs its own design); listed as a follow-up.
+3. **Shared MPCDF/managed RunPod sides for embedding and LLM:** decided 2026-11-14: they move to per-user credentials too (Phase 7). How auto-indexing gets an embedding endpoint without a user present is deferred; auto-indexing keeps using KISSKI embeddings for now.
 4. **Hybrid candidates** (whole-library BM25 nominees re-ranked together with the dense pool): included as an optional `bm25_candidates` setting in Phase 2, off by default, only if Phase 0 shows a gain.
+5. **Other `managed` providers:** `google` and `huggingface` also allow the `managed` scope. Phase 7 removes it only from `runpod`; should the scope go everywhere (and with it the admin-only operate path), or stay for providers whose terms allow an institutional account?
 
 ## File map
 
@@ -44,6 +45,9 @@
 | `plugin/src/dialog.xhtml`, `dialog.js` | "Disable re-ranking" checkbox; not-running prompt |
 | `docs/presets.md`, `docs/providers.md`, `docs/plugin-settings.md`, `docs/query-routing.md` | Document the step |
 | `skills/rag-quality-eval/` | Re-rank variants for retrieval-only runs |
+| `backend/config/default_presets/remote-mpcdf.json` | Phase 7: per-user `mpcdf` sides with endpoint options instead of admin-set URL/key fields |
+| `backend/services/autoindex_resolver.py`, `bin/index_libraries.py` | Phase 7: skip auto-indexing for a preset whose embedding side needs a per-user session, with an explicit issue |
+| `bin/provision.py`, `CLAUDE.md` | Phase 7: drop the admin (`managed`) RunPod path |
 
 ---
 
@@ -222,6 +226,43 @@ and `rerank: Optional[RerankConfig] = None` on `HardwarePreset`. An added option
 - [ ] Container smoke test (`uv run pytest -m container -v -s`) because of the new dependency.
 - [ ] Judged gold run with the shipped preset; publish to the HF archive.
 
-## Follow-up (not in this plan)
+## Phase 7: Per-user credentials for MPCDF and RunPod embedding and LLM sides
 
-- Move the shared MPCDF embedding/LLM sides and `managed` RunPod sides to per-user credentials (decision 3), including how auto-indexing gets an embedding endpoint without a user present.
+The provider terms that rule out sharing for re-ranking apply to the other sides as well. After this phase no `mpcdf` or `runpod` side uses an admin-set credential. Builds on Phase 4's per-user MPCDF sessions.
+
+**Deferred:** how auto-indexing reaches an embedding endpoint without a user present. Auto-indexing keeps using KISSKI embeddings (per-user keys from the auto-index key store) for now; a preset whose embedding side needs a per-user session is skipped by auto-indexing with an explicit issue, not indexed with someone else's credentials.
+
+### Task 7.1: MPCDF embedding and LLM sides per user
+
+**Files:** Modify `backend/providers/mpcdf.py`, `backend/config/default_presets/remote-mpcdf.json`, `backend/services/embeddings.py`, `backend/services/llm.py` (credential lookup only); tests.
+
+- [ ] Tests: a preset that gives an `mpcdf` side `shared_base_url_env`/`shared_api_key_env` or `scope: "shared"` is rejected with a message pointing to per-user sessions; an `mpcdf` side with `scope: "user"` resolves base URL and key from the caller's `ProvisioningManager` at request time; a caller without a session gets the "log in to MPCDF" hint, never another user's endpoint.
+- [ ] `MpcdfProvider.key_scopes = {"user"}`, `supports_provisioning = True` for all three sides; side `Options` describe the endpoint to start (model, framework, machine, GPU type and count, run time, `extra_args`), as for the rerank side.
+- [ ] Rewrite `remote-mpcdf.json`: embedding `intfloat/multilingual-e5-large-instruct` and an LLM side as per-user vLLM endpoints (one MPCDF job each; whether both can share one job is a manual check, not assumed).
+- [ ] The embedding and LLM services ask the provider for credentials per request (the same path `RemoteReranker` uses), refresh once after a 401/503/connection error, and call `touch()`.
+- [ ] Indexing from the plugin ("index now") runs with the requesting user's endpoint; that user's embedding endpoint must be ready, otherwise the plugin shows the same not-running prompt as Phase 4.4.
+
+### Task 7.2: Remove the admin-set MPCDF fields
+
+**Files:** Modify `backend/api/config.py` (`/config/remote-fields`, `/required-keys`), `backend/services/admin_settings_store.py` callers, `plugin/src/preferences.js`; tests.
+
+- [ ] No admin form for `MPCDF_*_BASE_URL`/`MPCDF_*_API_KEY` remains. Stored values under those names are ignored and dropped at the next write of the shared settings file.
+- [ ] Health and descriptor responses for `mpcdf` sides report the caller's own session state.
+
+### Task 7.3: RunPod without `managed`
+
+**Files:** Modify `backend/providers/runpod.py` (`key_scopes = {"user"}`), `backend/api/config.py` (`_caller_may_operate`, `_slot_for`: the global admin slot stays only if decision 5 keeps `managed` elsewhere), `backend/services/provisioning.py`, `bin/provision.py`, `CLAUDE.md` ("Secrets and Credentials": the `--preset runpod` admin provisioning path); tests.
+
+- [ ] Tests: a `runpod` side with `scope: "managed"` is rejected; provisioning, pause and health use only the caller's own key and slot.
+- [ ] `bin/provision.py`: drop the RunPod admin path, or keep it as a per-user CLI that takes the user's own key from the secret store (decide during the task; the bundled `runpod` preset is already `user` scope).
+
+### Task 7.4: Auto-indexing guard
+
+**Files:** Modify `backend/services/autoindex_resolver.py`, `bin/index_libraries.py`; tests.
+
+- [ ] When the active preset's embedding side is `user`-scoped on a provider that needs a per-user session (MPCDF) or a per-user endpoint (RunPod), the run indexes nothing and records one issue ("auto-indexing is not available with this preset; use KISSKI embeddings") in `cron_status.json`, shown in Preferences.
+- [ ] Docs: `docs/providers.md` scopes table (no `shared`; `managed` per decision 5), `docs/cron-indexing.md`, `docs/presets.md`.
+
+## Deferred
+
+- How auto-indexing gets an embedding endpoint without a user present when the preset embeds on MPCDF or RunPod. Until then auto-indexing uses KISSKI embeddings (decision 3, Task 7.4).
