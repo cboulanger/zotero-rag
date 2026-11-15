@@ -48,6 +48,8 @@ class MpcdfOptions(ProviderOptions):
     #: vLLM arguments after the model; no quotes (the service strips them).
     #: CUDA graph capture is very slow on the MI300A, hence ``--enforce-eager``.
     extra_args: list[str] = Field(default_factory=lambda: ["--enforce-eager"])
+    #: Environment variables of the job (empty: the service's defaults for the framework).
+    envs: dict[str, str] = Field(default_factory=dict)
 
 
 LOGIN = SessionLoginDescriptor(
@@ -113,6 +115,7 @@ class MpcdfProvider(Provider):
             model=model,
             image=o.image,
             extra_args=list(o.extra_args),
+            envs=dict(o.envs),
             machine=o.machine,
             gpu_type=o.gpu_type,
             gpus=o.gpus,

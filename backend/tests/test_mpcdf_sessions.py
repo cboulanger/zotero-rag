@@ -273,6 +273,12 @@ class MpcdfRerankProviderTest(unittest.TestCase):
         p = self.provider.library_preset()
         self.assertEqual((p.name, p.model, p.gpus, p.extra_args), ("zotero-rag-rerank", "BAAI/bge-reranker-v2-m3", 2, ["--enforce-eager"]))
 
+    @unittest.skipUnless(HAVE_LIB, "mpcdf-llm not installed")
+    def test_library_preset_passes_job_environment(self):
+        p = get_providers(rerank_preset(envs={"HF_HUB_OFFLINE": "1"}))["rerank"].library_preset()
+        self.assertEqual(p.envs, {"HF_HUB_OFFLINE": "1"})
+        self.assertEqual(self.provider.library_preset().envs, {})
+
     def test_missing_library_is_reported(self):
         with patch.object(mpcdf_sessions, "available", return_value=False):
             self.assertIn("not installed", self.provider.unavailable_hint())
