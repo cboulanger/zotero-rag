@@ -382,7 +382,7 @@ build and upload it) and `scripts/hf_store.py` (`status`, `init`, `pull-*`, `pus
   retrieval: `top_k`, thresholds, dedup/cap/MMR, reranking, prompts, models, routing. Provider calls
   (KISSKI, Hugging Face) work because the session's outbound proxy injects the credentials; `gold_env.py up`
   sends a placeholder key header, so no key is needed in the session.
-- **Cannot:** run Kreuzberg (`ghcr.io/kreuzberg-dev/kreuzberg` is denied by the proxy) or podman (only a
+- **Cannot:** run Kreuzberg (`ghcr.io/xberg-io/xberg` is denied by the proxy) or podman (only a
   manually started `dockerd` exists, and Qdrant's image pulls from Docker Hub, but embedded mode makes it
   unnecessary). Re-indexing under a Kreuzberg preset there falls back to the `legacy` extractor, whose chunks
   differ from production, so **never judge Kreuzberg chunking or extraction changes in the cloud**; do those

@@ -10,6 +10,7 @@ import psutil
 from backend.services.extraction.kreuzberg import (
     AttachmentTooLargeError,
     KreuzbergExtractor,
+    KreuzbergParsingError,
     KreuzbergUnavailableError,
     _compute_timeout,
 )
@@ -216,6 +217,83 @@ class TestKreuzbergConnectRetry(unittest.IsolatedAsyncioTestCase):
 
         mock_client.post.assert_awaited_once()
         mock_sleep.assert_not_awaited()
+
+
+def _client_returning(payload):
+    """An httpx.AsyncClient mock whose POST returns HTTP 200 with ``payload`` as JSON."""
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json = MagicMock(return_value=payload)
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+    return mock_client
+
+
+_CHUNKS = [
+    {"content": "first", "metadata": {"first_page": 1, "chunk_index": 0}},
+    {"content": "  ", "metadata": {"first_page": 1, "chunk_index": 1}},
+    {"content": "second", "metadata": {"first_page": 2, "chunk_index": 2}},
+]
+
+
+class TestResponseShapes(unittest.IsolatedAsyncioTestCase):
+    """The sidecar's /extract response: the xberg envelope and the bare list (#43).
+
+    ghcr.io/xberg-io/xberg answers with
+    ``{"results": [...], "errors": [...], "summary": {...}}`` and reports a
+    per-file failure as HTTP 200 with an ``errors`` entry; the kreuzberg image
+    answers with a bare list and an HTTP 4xx on failure.
+    """
+
+    async def _extract(self, payload):
+        with patch(
+            "backend.services.extraction.kreuzberg.httpx.AsyncClient",
+            return_value=_client_returning(payload),
+        ):
+            return await KreuzbergExtractor().extract_and_chunk(b"%PDF", "application/pdf")
+
+    async def test_envelope_results_are_parsed_into_chunks(self):
+        chunks = await self._extract(
+            {"results": [{"chunks": _CHUNKS}], "errors": [], "summary": {"inputs": 1, "results": 1, "errors": 0}}
+        )
+        self.assertEqual([c.text for c in chunks], ["first", "second"])
+        self.assertEqual([c.page_number for c in chunks], [1, 2])
+        self.assertEqual([c.chunk_index for c in chunks], [0, 2])
+
+    async def test_bare_list_response_is_parsed(self):
+        chunks = await self._extract([{"chunks": _CHUNKS}])
+        self.assertEqual([c.text for c in chunks], ["first", "second"])
+
+    async def test_envelope_parsing_error_raises_parsing_error(self):
+        with self.assertRaises(KreuzbergParsingError) as ctx:
+            await self._extract({
+                "results": [],
+                "errors": [{"index": 0, "code": 1001, "error_type": "parsing", "source": "document",
+                            "message": "Parsing error: Invalid cross-reference table"}],
+                "summary": {"inputs": 1, "results": 0, "errors": 1},
+            })
+        self.assertIn("Invalid cross-reference table", str(ctx.exception))
+
+    async def test_envelope_other_error_raises_runtime_error(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            await self._extract({
+                "results": [],
+                "errors": [{"index": 0, "code": 1010, "error_type": "unsupported_format", "source": "document",
+                            "message": "Unsupported format: application/x-foo"}],
+                "summary": {"inputs": 1, "results": 0, "errors": 1},
+            })
+        self.assertNotIsInstance(ctx.exception, KreuzbergParsingError)
+        self.assertIn("unsupported_format", str(ctx.exception))
+
+    async def test_empty_envelope_yields_no_chunks(self):
+        self.assertEqual(await self._extract({"results": [], "errors": [], "summary": {}}), [])
+
+    async def test_unrecognised_response_shape_raises(self):
+        with self.assertRaises(RuntimeError):
+            await self._extract({"unexpected": True})
 
 
 if __name__ == "__main__":
