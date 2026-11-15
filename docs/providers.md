@@ -113,7 +113,16 @@ it is used and cancels it after `idle_minutes` without a query; each re-ranking 
 The session lasts about 12 hours, and logging in to the MPCDF web interface ends it. Options of the
 `mpcdf` provider for a per-user side: `machine` (`Viper`), `gpu_type` (`mi300a`), `gpus` (1-2),
 `time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
-arguments without quotes, default `--enforce-eager`).
+arguments without quotes, default `--enforce-eager`) and `envs` (environment variables of the job).
+
+**Known limitation:** on the service's vLLM 0.30.0 ROCm image, embedding and re-ranking endpoints
+(vLLM's pooling models) answer only after about 50 seconds per request, whatever its size; requests
+that arrive meanwhile are answered together a cycle later. Text generation is not affected (a short
+chat completion takes 1-4 s). A `remote-mpcdf` query therefore takes one to two minutes, and the
+re-ranking call runs past its 15 s `timeout_seconds`, so the query goes on in vector order (trace
+status `timeout`). The delay does not depend on the attention backend (ROCM_ATTN or TRITON_ATTN),
+the executor (`--distributed-executor-backend mp`), the model runner, `HSA_XNACK`,
+`--gpu-memory-utilization`, the CPU thread count (`OMP_NUM_THREADS`) or the number of GPUs.
 
 A per-user side has no fixed URL or key: the provider sets `uses_session_endpoints` and answers
 `session_endpoint(user_id)` with the caller's running endpoint (or None) and `session_activity(user_id)`

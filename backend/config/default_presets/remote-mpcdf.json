@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "description": "Fully remote via the MPCDF LLM Inference Service (llm.mpcdf.mpg.de) on your own MPCDF account. Log in with your MPCDF username, password and one-time code in Preferences, which starts the embedding and LLM endpoints (re-ranking starts from its own section); each runs as a job (up to 8 hours, renewed while in use) on your account.",
+  "description": "Fully remote via the MPCDF LLM Inference Service (llm.mpcdf.mpg.de) on your own MPCDF account. Log in with your MPCDF username, password and one-time code in Preferences, which starts the embedding and LLM endpoints (re-ranking starts from its own section); each runs as a job (up to 8 hours, renewed while in use) on your account. Currently slow: the service's embedding and re-ranking endpoints take about 50 seconds per request, so a query takes one to two minutes and re-ranking runs past its time limit (the query then goes on without it).",
   "embedding": {
     "model_type": "remote",
     "model_name": "intfloat/multilingual-e5-large-instruct",
