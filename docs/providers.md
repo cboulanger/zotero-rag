@@ -149,14 +149,16 @@ The session lasts about 12 hours, and logging in to the MPCDF web interface ends
 `time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
 arguments without quotes, default `--enforce-eager`) and `envs` (environment variables of the job).
 
-**Known limitation:** on the service's vLLM 0.30.0 ROCm image, embedding and re-ranking endpoints
-(vLLM's pooling models) answer only after about 50 seconds per request, whatever its size; requests
-that arrive meanwhile are answered together a cycle later. Text generation is not affected (a short
-chat completion takes 1-4 s). A `remote-mpcdf` query therefore takes one to two minutes, and the
-re-ranking call runs past its 15 s `timeout_seconds`, so the query goes on in vector order (trace
-status `timeout`). The delay does not depend on the attention backend (ROCM_ATTN or TRITON_ATTN),
-the executor (`--distributed-executor-backend mp`), the model runner, `HSA_XNACK`,
-`--gpu-memory-utilization`, the CPU thread count (`OMP_NUM_THREADS`) or the number of GPUs.
+**Images for embedding and re-ranking:** the service's default vLLM image (`vllm/vllm-openai-rocm:v0.30.0`
+in 2026-11) answers embedding and re-ranking requests (vLLM's pooling models) only in fixed cycles of
+about 53 seconds, whatever the request size, while text generation on it is fast. The cause is in that
+image, not in the attention backend (ROCM_ATTN, TRITON_ATTN and FLEX_ATTENTION all show it), the
+executor, the model runner, the number of GPUs or ROCm settings (#111). `remote-mpcdf` therefore runs
+its embedding and re-ranking sides on `rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210` with
+`VLLM_ATTENTION_BACKEND=FLEX_ATTENTION` (that release's ROCm attention backend cannot run encoder-only
+models): re-ranking 100 candidates then takes about 1 s. The first start of a new image builds its
+container on the user's account first, hence `build_timeout_minutes` 60 for those sides; the first
+requests after a start take 10-20 s while kernels compile. The LLM side keeps the default image.
 
 A per-user side has no fixed URL or key: the provider sets `uses_session_endpoints` and answers
 `session_endpoint(user_id)` with the caller's running endpoint (or None) and `session_activity(user_id)`

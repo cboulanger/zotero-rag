@@ -48,7 +48,7 @@ eval = [
 
 [tool.uv.sources]
 # From git: the GitLab instance sends archive downloads by scripts to its sign-in page.
-mpcdf-llm = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git", rev = "ad087f9930c231879b2c8badb80543bc87314431" }
+mpcdf-llm = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git", rev = "bbb92e7b267bd9380af96ff1e477a3f7f57a2c5c" }
 
 [project.scripts]
 # Short, stable names for the most-used debugging scripts (`uv run <name>`),
