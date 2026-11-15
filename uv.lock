@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -1315,7 +1315,7 @@ wheels = [
 [[package]]
 name = "mpcdf-llm"
 version = "0.1.0"
-source = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git?rev=ad087f9930c231879b2c8badb80543bc87314431#ad087f9930c231879b2c8badb80543bc87314431" }
+source = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git?rev=bbb92e7b267bd9380af96ff1e477a3f7f57a2c5c#bbb92e7b267bd9380af96ff1e477a3f7f57a2c5c" }
 dependencies = [
     { name = "filelock" },
     { name = "httpx" },
@@ -3511,7 +3511,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "ir-datasets", marker = "extra == 'eval'", specifier = ">=0.5.5" },
     { name = "markdown-it-py", specifier = ">=4.0.0" },
-    { name = "mpcdf-llm", git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git?rev=ad087f9930c231879b2c8badb80543bc87314431" },
+    { name = "mpcdf-llm", git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git?rev=bbb92e7b267bd9380af96ff1e477a3f7f57a2c5c" },
     { name = "openai", specifier = ">=2.7.1" },
     { name = "pikepdf", specifier = ">=10.5.1" },
     { name = "psutil", specifier = ">=7.1.3" },
