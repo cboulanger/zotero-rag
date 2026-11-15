@@ -1,7 +1,8 @@
 """Build the "Configure preset" dialog's view model (see backend/providers/ui.py).
 
 One tab per side of the pipeline, in the order a document and a query run
-through it (extraction, embedding, retrieval, answering), and one account card
+through it (extraction, embedding, retrieval, re-ranking when the preset has
+it, answering), and one account card
 per service provider whose credentials those sides need. Remote sides are
 described by their provider's hooks (``Provider.side_facts``, ``side_messages``,
 ``side_actions``, ``account_fields``); extraction and retrieval are server
@@ -14,7 +15,7 @@ probe results first (they need the request and blocking I/O) and passes them in.
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from backend.providers.types import Health
+from backend.providers.types import OPTIONAL_SIDES, Health, preset_sides, side_config
 from backend.providers.ui import (
     AccountCard,
     PresetHeader,
@@ -32,8 +33,12 @@ TITLES = {
     "extraction": "Extraction",
     "embedding": "Embedding",
     "retrieval": "Retrieval",
+    "rerank": "Re-ranking",
     "llm": "Answering (LLM)",
 }
+
+#: Plugin preference behind the re-ranking switch (sent as ``enable_reranking`` with each query).
+RERANK_PREF = "enableReranking"
 
 #: Provider health -> tab indicator.
 _HEALTH_STATE: dict[str, SideState] = {
@@ -81,7 +86,7 @@ class ViewInputs:
     """Everything ``build_preset_view`` needs, collected by the API layer."""
 
     preset: Any
-    #: side -> Provider for "embedding" and "llm"; empty when the preset's providers are invalid.
+    #: side -> Provider for each side of ``preset_sides``; empty when the preset's providers are invalid.
     providers: dict
     health: dict  # side -> Optional[Health]
     operable: dict  # side -> bool
@@ -97,6 +102,8 @@ class ViewInputs:
     #: None means embedded vector store (in the backend process).
     vector_probe: Optional[Probe] = None
     vector_detail: str = ""
+    #: provider id -> the caller's ``session_status`` for providers with an account login.
+    sessions: dict = field(default_factory=dict)
 
 
 # -- sides --------------------------------------------------------------------
@@ -111,17 +118,31 @@ def _job_log(job: dict, side: str) -> list[str]:
     return [line[len(prefix):] for line in job.get("progress") or [] if line.startswith(prefix)]
 
 
+def _rerank_extras(view: SideView, cfg: Any) -> None:
+    """The re-ranking tab's switch and pool size (the switch is a per-user preference)."""
+    view.optional = True
+    view.fields.insert(0, UiField(
+        id=RERANK_PREF, label="Use re-ranking", type="toggle", default=True,
+        storage="client_pref", key=RERANK_PREF,
+        help="Rescores the best passages before the answer is written: more relevant sources, "
+             "a few seconds slower. Applies to your own queries; the Query dialog can also skip it once.",
+    ))
+    view.facts.append(UiFact(label="Rescored", value=f"the best {cfg.pool_size} passages per question"))
+
+
 def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideView:
-    """Embedding or answering side."""
-    cfg = inputs.preset.embedding if side == "embedding" else inputs.preset.llm
+    """Embedding, re-ranking or answering side."""
+    cfg = side_config(inputs.preset, side)
     provider = inputs.providers.get(side)
     view = SideView(side=side, title=TITLES[side])
     if cfg.model_type != "remote" or provider is None:
-        model = cfg.model_name
         view.state = "ready"
         view.summary = "Runs on this server"
-        view.facts = [UiFact(label="Model", value=str(model))]
-        view.messages = [UiMessage(level="ok", text="This model runs on the server; there is nothing to configure here.")]
+        view.facts = [UiFact(label="Model", value=str(cfg.model_name))]
+        if side in OPTIONAL_SIDES:
+            _rerank_extras(view, cfg)
+        else:
+            view.messages = [UiMessage(level="ok", text="This model runs on the server; there is nothing to configure here.")]
         return view
 
     health: Optional[Health] = inputs.health.get(side)
@@ -152,8 +173,12 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
         view.messages.insert(0, UiMessage(level="info", text="The last job finished; waiting for the endpoint to answer."))
     if provider.supports_provisioning and not operable and view.state == "down":
         view.messages.append(UiMessage(level="info", text="Ask the server admin to start this endpoint."))
-    if account and view.state == "down" and not any(a.workflow == "start" and a.enabled for a in view.actions):
-        view.messages.append(UiMessage(level="info", text="Check the credentials in the account card below."))
+    if side in OPTIONAL_SIDES:
+        _rerank_extras(view, cfg)
+        if view.state == "down":
+            view.messages.append(UiMessage(
+                level="info", text="Start all leaves this endpoint alone; start it here when you want re-ranking. "
+                                   "Until it is up, queries skip re-ranking."))
     return view
 
 
@@ -259,8 +284,10 @@ def _accounts(inputs: ViewInputs) -> list[AccountCard]:
     cards: dict[str, AccountCard] = {}
     providers: dict[str, Any] = {}
     operable: dict[str, bool] = {}
-    for side in ("embedding", "llm"):
-        cfg = inputs.preset.embedding if side == "embedding" else inputs.preset.llm
+    # Pipeline order, as the tabs (re-ranking runs before answering).
+    order = sorted(preset_sides(inputs.preset), key=lambda s: ("embedding", "rerank", "llm").index(s))
+    for side in order:
+        cfg = side_config(inputs.preset, side)
         provider = inputs.providers.get(side)
         if cfg.model_type != "remote" or provider is None:
             continue
@@ -280,8 +307,21 @@ def _accounts(inputs: ViewInputs) -> list[AccountCard]:
             target.fields.append(_credential_field(key, inputs))
 
     for pid, card in cards.items():
-        card.fields = providers[pid].account_fields(card.fields, operable[pid])
+        provider = providers[pid]
+        descriptor = provider.describe()
+        has_login = bool(descriptor.provisioning and descriptor.provisioning.login)
+        session = inputs.sessions.get(pid) if has_login else None
+        card.fields = provider.account_fields(card.fields, operable[pid], session)
         missing = [f for f in card.fields if f.storage in ("client_secret", "shared") and not f.optional and not f.is_set]
+        if has_login:
+            card.auto_start = False  # the login request starts the sides itself
+            messages, card.actions = provider.account_session(session)
+            card.messages.extend(messages)
+            logged_in = bool(session and session.get("state") == "ok")
+            card.state = "ready" if logged_in and not missing else "needs_input"
+            if missing:
+                card.messages.append(UiMessage(level="warn", text="Enter the missing key as well."))
+            continue
         card.state = "needs_input" if missing else "ready"
         if missing and any(not f.editable for f in missing):
             card.messages.append(UiMessage(level="warn", text="The server admin has not configured this service yet."))
@@ -313,20 +353,33 @@ def build_preset_view(inputs: ViewInputs) -> PresetView:
                 card.serves.insert(0, "extraction")
                 break
 
-    model_sides = {side: _model_side(inputs, side, by_side.get(side)) for side in ("embedding", "llm")}
+    model_sides = {side: _model_side(inputs, side, by_side.get(side)) for side in preset_sides(inputs.preset)}
     # A provider without a health check still cannot work while its credentials are missing.
     missing = {card.id for card in accounts if card.state == "needs_input"}
+    has_login = {card.id for card in accounts if any(a.sends_login for a in card.actions)}
     for view in model_sides.values():
         if view.state == "unknown" and view.account in missing:
             view.state = "down"
             view.summary = "Down: credentials missing"
         elif view.state == "unknown" and view.account:
             view.summary = "Credentials entered; this provider has no status check"
+        if view.account in missing:
+            # Starting needs the account first: say so instead of offering a start that fails.
+            reason = "Log in with the account card below first." if view.account in has_login \
+                else "Enter the missing credentials in the account card below first."
+            for action in view.actions:
+                if action.id in ("start", "retry") and action.enabled:
+                    action.enabled, action.reason = False, reason
+            if view.state == "down":
+                view.messages.append(UiMessage(level="info", text=reason))
+        elif view.account and view.state == "down" and not any(a.id in ("start", "retry") and a.enabled for a in view.actions):
+            view.messages.append(UiMessage(level="info", text="Check the credentials in the account card below."))
 
     sides = [
         _extraction_side(inputs, docling_account, docling_key_set),
         model_sides["embedding"],
         _retrieval_side(inputs),
+        *([model_sides["rerank"]] if "rerank" in model_sides else []),
         model_sides["llm"],
     ]
     header = PresetHeader(

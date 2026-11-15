@@ -14,7 +14,7 @@
  * @typedef {Object} UiField
  * @property {string} id
  * @property {string} label
- * @property {'text'|'secret'|'number'|'select'|'readonly'} type
+ * @property {'text'|'secret'|'number'|'select'|'readonly'|'toggle'} type
  * @property {any} [value]
  * @property {any} [default]
  * @property {string} [placeholder]
@@ -22,7 +22,7 @@
  * @property {string|null} [pattern]
  * @property {string[]} [options]
  * @property {number|null} [min]
- * @property {'none'|'client_pref'|'client_secret'|'shared'|'session'} storage
+ * @property {'none'|'client_pref'|'client_secret'|'shared'|'session'|'login'} storage
  * @property {string|null} [key]
  * @property {string|null} [header]
  * @property {boolean|null} [is_set]
@@ -44,6 +44,7 @@
  * @property {'start'|'pause'|null} [workflow]
  * @property {UiRequest|null} [request]
  * @property {string|null} [account]
+ * @property {boolean} [sends_login] - a card action that submits the card's `login` fields as `body.values`
  *
  * @typedef {Object} SideView
  * @property {string} side
@@ -68,6 +69,7 @@
  * @property {string} scope_note
  * @property {UiField[]} fields
  * @property {UiMessage[]} messages
+ * @property {UiAction[]} [actions] - log in / log out of a provider with an account login
  * @property {boolean} auto_start
  *
  * @typedef {Object} PresetView
@@ -131,6 +133,8 @@ var ZoteroRAGPresetDialog = {
 		const merged = new Map();
 		for (const side of view.sides) {
 			if (onlySides && !onlySides.includes(side.side)) continue;
+			// A switched-off side is never started; pausing it still stops its billing.
+			if (kind === 'start' && side.state === 'off') continue;
 			for (const action of side.actions) {
 				if (action.workflow !== kind || !action.enabled || !action.request) continue;
 				const { path, body } = action.request;
@@ -150,6 +154,50 @@ var ZoteroRAGPresetDialog = {
 			}
 		}
 		return [...merged.values()];
+	},
+
+	/**
+	 * Fill client-side settings (`client_pref` fields) from this Zotero's preferences and
+	 * mark an optional side whose switch (a `toggle` field) is off as `off`. Mutates `view`.
+	 * @param {PresetView} view
+	 * @param {(name: string) => any} getPref
+	 * @returns {PresetView}
+	 */
+	applyLocalState(view, getPref) {
+		for (const side of view.sides) {
+			for (const field of side.fields) {
+				if (field.storage !== 'client_pref' || !field.key) continue;
+				const stored = getPref(this.PREF_PREFIX + field.key);
+				if (field.type === 'toggle') {
+					field.value = stored === undefined || stored === null ? field.default !== false : stored !== false;
+					if (side.optional && field.value === false) {
+						side.enabled = false;
+						side.state = 'off';
+						side.summary = 'Off: switched off for your queries';
+					}
+				} else {
+					field.value = stored === undefined || stored === null ? '' : stored;
+				}
+			}
+		}
+		return view;
+	},
+
+	/**
+	 * The login form values typed into an account card, by field key (login fields only).
+	 * @param {AccountCard} card
+	 * @param {Record<string, string>} drafts
+	 * @returns {Record<string, string>}
+	 */
+	loginValues(card, drafts) {
+		/** @type {Record<string, string>} */
+		const values = {};
+		for (const field of card.fields) {
+			if (field.storage !== 'login' || !field.key) continue;
+			const draft = drafts[`account:${card.id}/${field.id}`];
+			if (draft !== undefined && draft.trim()) values[field.key] = draft.trim();
+		}
+		return values;
 	},
 
 	/**
@@ -291,7 +339,8 @@ ZoteroRAGPresetDialog._dot = function (el, state) {
  *   notes: Record<string, {level: string, text: string}>}} local
  * @param {{onTab: (side: string) => void, onToggleLog: (side: string) => void,
  *   onAction: (action: UiAction) => void, onFieldChange: (field: UiField, value: string, scope: string) => void,
- *   onSaveAccount: (card: AccountCard) => void, onDefaultChange: (name: string) => void}} handlers
+ *   onSaveAccount: (card: AccountCard) => void, onDefaultChange: (name: string) => void,
+ *   onCardAction?: (card: AccountCard, action: UiAction) => void}} handlers
  */
 ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 	const el = this._el(doc);
@@ -494,6 +543,11 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 		control = el('input', 'pd-input');
 		control.readOnly = true;
 		control.value = field.type === 'readonly' ? String(field.value ?? '') : (field.placeholder || '');
+	} else if (field.type === 'toggle') {
+		control = el('input', 'pd-toggle');
+		control.type = 'checkbox';
+		control.checked = field.value !== false;
+		control.addEventListener('change', () => handlers.onFieldChange(field, control.checked ? 'true' : 'false', scope));
 	} else if (field.type === 'select') {
 		control = el('select', 'pd-input');
 		for (const option of field.options || []) {
@@ -562,23 +616,36 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	serves.textContent = card.serves.map((s) => titles[s] || s).join(' · ');
 	head.append(title, serves);
 	node.appendChild(head);
+	const actions = card.actions || [];
+	const hasLogin = actions.some((a) => a.sends_login || a.id === 'logout');
 	const state = el('div', 'pd-card-state');
 	state.append(this._dot(el, card.state === 'ready' ? 'ready' : 'down'), el('span'));
-	state.children[1].textContent = ` ${card.state === 'ready' ? 'Credentials complete' : 'Credentials missing'}${card.scope_note ? ` (${card.scope_note})` : ''}`;
+	const stateText = hasLogin
+		? (card.state === 'ready' ? 'Logged in' : 'Not logged in')
+		: (card.state === 'ready' ? 'Credentials complete' : 'Credentials missing');
+	state.children[1].textContent = ` ${stateText}${card.scope_note ? ` (${card.scope_note})` : ''}`;
 	node.appendChild(state);
 	const scope = `account:${card.id}`;
 	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, handlers));
 	const note = local.notes[scope];
 	for (const message of note ? [note, ...card.messages] : card.messages) node.appendChild(this._message(el, message));
-	if (card.fields.some((f) => f.editable !== false && f.type !== 'readonly')) {
-		const save = el('button', 'pd-button pd-primary');
+	const row = el('div', 'pd-actions');
+	if (card.fields.some((f) => f.editable !== false && f.type !== 'readonly' && f.storage !== 'login')) {
+		const save = el('button', `pd-button${hasLogin ? '' : ' pd-primary'}`);
 		save.textContent = card.auto_start ? 'Save and start' : 'Save';
 		save.title = card.auto_start ? 'Save the entered values, then start the endpoints that use them' : '';
 		save.addEventListener('click', () => handlers.onSaveAccount(card));
-		const row = el('div', 'pd-actions');
 		row.appendChild(save);
-		node.appendChild(row);
 	}
+	for (const action of actions) {
+		const button = el('button', `pd-button${action.kind === 'primary' ? ' pd-primary' : action.kind === 'danger' ? ' pd-danger' : ''}`);
+		button.textContent = action.label;
+		button.disabled = action.enabled === false;
+		button.title = action.reason || '';
+		button.addEventListener('click', () => handlers.onCardAction && handlers.onCardAction(card, action));
+		row.appendChild(button);
+	}
+	if (row.children.length) node.appendChild(row);
 	return node;
 };
 
@@ -635,14 +702,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			return false;
 		}
 		// Client-side settings live in this Zotero's preferences, not on the server.
-		for (const side of view.sides) {
-			for (const field of side.fields) {
-				if (field.storage !== 'client_pref' || !field.key) continue;
-				const stored = deps.prefs.get(D.PREF_PREFIX + field.key);
-				field.value = stored === undefined || stored === null ? '' : stored;
-			}
-		}
-		state.view = view;
+		state.view = D.applyLocalState(view, deps.prefs.get);
 		if (state.local.notes.header && state.local.notes.header.level === 'error') delete state.local.notes.header;
 		repaint();
 		return true;
@@ -728,7 +788,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {string} raw
 	 * @param {string} scope
 	 */
-	const setSideField = (field, raw, scope) => {
+	const setSideField = async (field, raw, scope) => {
 		if (field.storage !== 'client_pref' || !field.key) return;
 		const error = D.validate(field, raw);
 		if (error) {
@@ -737,6 +797,12 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		}
 		const name = D.PREF_PREFIX + field.key;
 		const value = raw.trim();
+		if (field.type === 'toggle') {
+			deps.prefs.set(name, value === 'true');
+			note(scope, 'ok', `${field.label}: ${value === 'true' ? 'on' : 'off'}.`);
+			await refresh();
+			return;
+		}
 		if (!value) deps.prefs.clear(name);
 		else deps.prefs.set(name, field.type === 'number' ? Number(value) : value);
 		delete state.local.drafts[`${scope}/${field.id}`];
@@ -753,7 +819,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		const entered = [];
 		for (const field of card.fields) {
 			const draft = state.local.drafts[`${scope}/${field.id}`];
-			if (draft === undefined || field.editable === false) continue;
+			if (draft === undefined || field.editable === false || field.storage === 'login') continue;
 			const error = D.validate(field, draft);
 			if (error) {
 				note(scope, 'error', error);
@@ -793,6 +859,47 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	};
 
 	/**
+	 * Run an account card's action: log in (sends the login form once, then clears it) or log out.
+	 * @param {AccountCard} card
+	 * @param {UiAction} action
+	 */
+	const runCardAction = async (card, action) => {
+		if (!action.request) return;
+		const scope = `account:${card.id}`;
+		/** @type {Record<string, any>} */
+		let body = action.request.body || {};
+		if (action.sends_login) {
+			const values = D.loginValues(card, state.local.drafts);
+			const missing = card.fields.filter((f) => f.storage === 'login' && !f.optional && f.key && !values[f.key]);
+			if (missing.length) {
+				note(scope, 'error', `Enter ${missing.map((f) => f.label).join(', ')}.`);
+				return;
+			}
+			// The password and one-time code are sent once and never kept.
+			for (const field of card.fields) if (field.storage === 'login') delete state.local.drafts[`${scope}/${field.id}`];
+			body = { ...body, values };
+		}
+		note(scope, 'info', `${action.label}…`);
+		let result;
+		try {
+			result = await deps.post(action.request.path, body);
+		} catch (e) {
+			note(scope, 'error', `${action.label} failed: ${String(e)}`);
+			return;
+		}
+		if (!result.ok) {
+			note(scope, 'error', `${action.label} failed: ${result.data && result.data.detail ? result.data.detail : `HTTP ${result.status}`}`);
+			await refresh();
+			return;
+		}
+		const data = result.data || {};
+		if (data.provisioning_error) note(scope, 'warn', `Logged in, but the endpoints did not start: ${data.provisioning_error}`);
+		else if (action.sends_login) note(scope, 'ok', data.provisioning ? 'Logged in. Starting the endpoints…' : 'Logged in.');
+		else note(scope, 'ok', 'Done.');
+		await poll();
+	};
+
+	/**
 	 * Change the server default preset (admins).
 	 * @param {string} name
 	 */
@@ -813,7 +920,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** @param {string} side */
 	const toggleLog = (side) => { state.local.logOpen[side] = !state.local.logOpen[side]; repaint(); };
 
-	return { state, refresh, poll, runAction, runWorkflow, setSideField, saveAccount, setServerDefault, selectTab, toggleLog };
+	return { state, refresh, poll, runAction, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
 };
 
 if (typeof module !== 'undefined') module.exports = { ZoteroRAGPresetDialog };

@@ -15,6 +15,11 @@
     "temperature": 0.7,
     "model_kwargs": {"device_map": "auto"}
   },
+  "rerank": {
+    "model_type": "local",
+    "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "pool_size": 30
+  },
   "rag": {
     "top_k": 10,
     "score_threshold": 0.4,

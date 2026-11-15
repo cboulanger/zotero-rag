@@ -26,8 +26,8 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `google` | Google Gemini (OpenAI-compatible endpoint) | `user` or `managed` | Key documentation link; live list of Flash models (newest first, further filtered by the preset's `model_names` patterns); OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
-| `mpcdf` | MPCDF LLM Inference Service | `shared` | Ephemeral job URL and key set by the admin; health asks `/v1/models`. |
-| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. |
+| `mpcdf` | MPCDF LLM Inference Service | `user` | Every side (embedding, LLM, re-ranking): each user logs in with their own MPCDF account and the endpoint runs as a job on it (see below). |
+| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. A re-ranking side (`zotero-rag-rerank`, scope `user`) runs vLLM's `/v1/rerank` on `worker-v1-vllm`; the platform's OpenAI route does not pass `/rerank` through, so calls go to `/runsync` with the worker's route proxy, and a call during a cold start counts as "not ready" (the query runs without re-ranking and the call wakes the worker). |
 | `huggingface` | Hugging Face Inference Endpoints | `user` or `managed` | One endpoint per side in the token owner's namespace; readiness from the endpoint's `status.state`; pause/resume via the REST API; the URL is derived from the token. |
 
 ## Credential scopes
@@ -37,7 +37,9 @@ a preset picks one with `provider.scope`.
 
 - `user`: each user's own key, sent with their requests. Usage is per key; the user operates the resource (provision, pause).
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
-- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
+- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example an institution's own OpenAI-compatible gateway with the `generic` provider).
+
+A remote re-ranking side (`rerank`) always uses `user`.
 
 The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
 
@@ -54,7 +56,10 @@ renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
 `health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
-`provision(ctx, progress)`, `suspend(ctx, progress)`, `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
+`provision(ctx, progress)`, `suspend(ctx, progress)`, `rerank_credentials(request, refresh)` and
+`rerank_activity(request)` (the re-ranking side's endpoint for the calling user, and a report that it
+was used), `session_login(user_id, values)`, `session_logout(user_id)` and `session_status(user_id)`
+(for a provider whose endpoints run in the user's own login session), `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
 Providers never raise from display-only hooks (`health`, `parse_usage`).
 
 The plugin's "Configure preset" dialog is fed by four more hooks, all with
@@ -66,11 +71,18 @@ defaults in the base class (see `backend/providers/ui.py` for the data shapes an
 - `side_actions(health, job_status, operable)`: the side's buttons. Each action carries the request
   to make (`path` and `body`), whether it belongs to the header's **Start all** or **Pause all**, and
   the account whose one-time credentials go with it. The default offers start or resume, retry after
-  a failed job, wake for a cold endpoint and pause, as the capability flags allow.
-- `account_fields(fields, operable)`: the fields of the provider's account card in the dialog's
-  footer. Core passes the credentials the preset declares for the sides this provider serves; the
-  default adds the one-time provisioning credential. Override it to ask for something else, such as
-  a sign-in.
+  a failed job, wake for a cold endpoint and pause, as the capability flags allow. The optional
+  re-ranking side's start is not part of **Start all** (it is only ever started on its own); its
+  pause is part of **Pause all**.
+- `account_fields(fields, operable, session)`: the fields of the provider's account card in the
+  dialog's footer. Core passes the credentials the preset declares for the sides this provider
+  serves and, for a provider with an account login (`provisioning.login`), the caller's
+  `session_status`. The default adds the login form while the caller is logged out, and otherwise
+  the one-time provisioning credential.
+- `account_session(session)`: for a provider with an account login, the card's status messages and
+  its **Log in and start** / **Log out** actions. Logging in posts the form's values once to
+  `POST /api/config/session/login`, which also starts the sides that run in the session. Until the
+  caller is logged in, the start actions of the sides the card serves are disabled.
 
 These hooks return data, never markup: the dialog runs with Zotero's privileges, so the plugin
 renders every field, message and action itself.
@@ -100,6 +112,51 @@ be retried alone) and `bin/provision.py --preset <name>` does the same from the
 command line, including `--pause` and `--teardown`. Pausing keeps the resources
 and their URLs but stops billing and wake-ups; provisioning again resumes. A
 key typed in the plugin is sent with each management request, kept only in memory in the running Zotero and never stored by the backend.
+
+## Per-user sessions (MPCDF)
+
+Some services allow neither a shared admin key nor a long-lived personal key: the MPCDF LLM
+Inference Service needs each user's own login (username, password, one-time code) and runs each
+endpoint as a Slurm job of at most 8 hours on that user's account. A provider of this kind sets
+`provisioning_needs_key = False` and describes a login form (`provisioning.login` in the descriptor:
+a title and the fields with their HTML `type` and `autocomplete`), which the plugin renders in the
+side's section instead of a key field. The form posts to `POST /api/config/session/login`
+(`{side, values}`, five attempts per user per ten minutes); `GET /api/config/session?side=` and
+`POST /api/config/session/logout` answer for the caller only. A successful login starts the
+caller's endpoints for the active preset's sides that run in that session (the same background job as
+`POST /api/config/provision`; the response carries it as `provisioning`, or a reason it could not
+start as `provisioning_error`); the plugin follows that job until the endpoints are ready. The
+re-ranking side is not started this way: like everywhere else, it starts only from its own section
+or the query dialog's prompt.
+
+For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
+its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero
+user in `<data_path>/system/mpcdf/<user-hash>/`; the session token and the user's Hugging Face
+token (every vLLM job there needs one) are sealed with `AUTOINDEX_SECRET`, and the password and
+one-time code are never stored. The library's supervisor renews a job shortly before it ends while
+it is used and cancels it after `idle_minutes` without a query; each re-ranking call reports use.
+The session lasts about 12 hours, and logging in to the MPCDF web interface ends it. Options of the
+`mpcdf` provider for a per-user side: `machine` (`Viper`), `gpu_type` (`mi300a`), `gpus` (1-2),
+`time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
+arguments without quotes, default `--enforce-eager`) and `envs` (environment variables of the job).
+
+**Known limitation:** on the service's vLLM 0.30.0 ROCm image, embedding and re-ranking endpoints
+(vLLM's pooling models) answer only after about 50 seconds per request, whatever its size; requests
+that arrive meanwhile are answered together a cycle later. Text generation is not affected (a short
+chat completion takes 1-4 s). A `remote-mpcdf` query therefore takes one to two minutes, and the
+re-ranking call runs past its 15 s `timeout_seconds`, so the query goes on in vector order (trace
+status `timeout`). The delay does not depend on the attention backend (ROCM_ATTN or TRITON_ATTN),
+the executor (`--distributed-executor-backend mp`), the model runner, `HSA_XNACK`,
+`--gpu-memory-utilization`, the CPU thread count (`OMP_NUM_THREADS`) or the number of GPUs.
+
+A per-user side has no fixed URL or key: the provider sets `uses_session_endpoints` and answers
+`session_endpoint(user_id)` with the caller's running endpoint (or None) and `session_activity(user_id)`
+when it is used. The embedding and LLM services ask for it before every call, because a renewal changes
+both URL and key, and report use at most once a minute; the caller is the Zotero user of the request
+(`backend/services/caller_context.py`, bound by the auth middleware). A side whose endpoint is not running
+fails with "endpoint unavailable" and the provider's hint, and never falls back to another URL.
+Automatic indexing skips a user whose embedding side is such a session (issue kind `session`), since
+nobody is there to log in.
 
 ## Usage meters
 

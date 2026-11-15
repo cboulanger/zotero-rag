@@ -44,7 +44,9 @@ DEFAULT_IMAGE = "runpod/worker-v1-vllm:v2.28.0"
 DEFAULT_GPU = "NVIDIA RTX A5000"
 #: MAX_MODEL_LEN of the embedding worker: the model's own position-embedding limit.
 EMBEDDING_MAX_MODEL_LEN = "512"
-CONTAINER_DISK_GB = {"embedding": 20, "llm": 40}
+CONTAINER_DISK_GB = {"embedding": 20, "llm": 40, "rerank": 20}
+#: MAX_MODEL_LEN of the re-ranking worker: one (question, passage) pair.
+RERANK_MAX_MODEL_LEN = "1024"
 
 WARMUP_MAX_SECONDS = 180
 WARMUP_RETRY_INTERVAL_SECONDS = 5
@@ -77,11 +79,13 @@ class RunPodProvider(Provider):
     id = "runpod"
     label = "RunPod"
     Options = RunPodOptions
-    key_scopes = frozenset({"user", "managed"})
+    #: Each user's own key only: RunPod's terms do not allow sharing an account.
+    key_scopes = frozenset({"user"})
     default_scope = "user"
     supports_provisioning = True
     supports_suspend = True
     derives_endpoint_url = True
+    supported_sides = frozenset({"embedding", "llm", "rerank"})
     http_timeout = 30.0
 
     # -- naming -----------------------------------------------------------------
@@ -95,12 +99,14 @@ class RunPodProvider(Provider):
     def model(self) -> str:
         """The model this side serves: the preset's own model name."""
         cfg = self.side_config
-        return cfg.model_name if self.side == "embedding" else cfg.model_names[0]
+        return cfg.model_names[0] if self.side == "llm" else cfg.model_name
 
     def template_env(self) -> dict[str, str]:
         env = {"MODEL_NAME": self.model}
         if self.side == "embedding":
             env["MAX_MODEL_LEN"] = EMBEDDING_MAX_MODEL_LEN
+        elif self.side == "rerank":
+            env["MAX_MODEL_LEN"] = RERANK_MAX_MODEL_LEN
         return env
 
     # -- configuration and description ------------------------------------------
@@ -233,21 +239,21 @@ class RunPodProvider(Provider):
             # then still replace it, since the placement cannot be verified.
             gpu_unverifiable = ctx.recreate and existing_gpus is None
             mismatched = existing.get("templateId") != template_id or gpu_mismatch or gpu_unverifiable
-            if not mismatched:
-                if existing.get("workersMax") == 0:  # paused: resume
+            if mismatched and ctx.recreate:
+                self._request(api_key, "DELETE", f"/endpoints/{existing['id']}")
+            else:
+                if mismatched:
+                    logger.warning(
+                        "Endpoint '%s' exists but its config differs from requested "
+                        "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
+                        "endpoint - re-run with recreate to replace it.",
+                        name, existing.get("templateId"), template_id, existing_gpus, gpus,
+                    )
+                if existing.get("workersMax") == 0:  # paused: resume (also a kept, differing one)
                     return self._request(
                         api_key, "PATCH", f"/endpoints/{existing['id']}", {"workersMax": opts.workers_max}
                     )
                 return existing
-            if not ctx.recreate:
-                logger.warning(
-                    "Endpoint '%s' exists but its config differs from requested "
-                    "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
-                    "endpoint - re-run with recreate to replace it.",
-                    name, existing.get("templateId"), template_id, existing_gpus, gpus,
-                )
-                return existing
-            self._request(api_key, "DELETE", f"/endpoints/{existing['id']}")
         body: dict[str, Any] = {
             "name": name,
             "templateId": template_id,
@@ -266,6 +272,8 @@ class RunPodProvider(Provider):
 
     def _warmup_request(self, base_url: str) -> tuple[str, dict]:
         """URL and JSON body of the cheapest request that triggers a cold start."""
+        if self.side == "rerank":
+            return self.rerank_http(base_url, {"model": self.model, "query": "ping", "documents": ["ping"]})
         if self.side == "embedding":
             return f"{base_url}/embeddings", {"model": self.model, "input": "ping"}
         return f"{base_url}/chat/completions", {
@@ -354,6 +362,50 @@ class RunPodProvider(Provider):
         progress(f"{self.side.capitalize()} endpoint ready: {base_url}")
         url_env = self.side_config.model_kwargs.get("shared_base_url_env")
         return {url_env: base_url} if url_env else {}
+
+    # -- re-ranking side ------------------------------------------------------------
+
+    def rerank_credentials(self, request, refresh: bool = False) -> Optional[Credentials]:
+        """The caller's own endpoint, found from their key (cached per key)."""
+        from backend.services.endpoint_cache import endpoint_cache
+
+        env = self.side_config.model_kwargs.get("api_key_env") or "RUNPOD_API_KEY"
+        api_key = request.client_keys.get(env)
+        if not api_key:
+            return None
+        if refresh:
+            endpoint_cache.invalidate(self.id, self.side, api_key)
+        base_url = endpoint_cache.resolve(self, self.side, api_key)
+        return Credentials(api_key=api_key, base_url=base_url) if base_url else None
+
+    def rerank_http(self, base_url: str, body: dict) -> tuple[str, dict]:
+        """The worker's platform route does not pass ``/rerank`` through, so the request goes
+        through ``/runsync`` with the worker's generic route proxy (worker-v1-vllm handler)."""
+        match = _ENDPOINT_ID_RE.search(base_url + "/")
+        endpoint = match.group(1) if match else base_url.rstrip("/").rsplit("/", 1)[-1]
+        return f"{DATA_PLANE_URL}/{endpoint}/runsync", {"input": {"route": "/v1/rerank", "body": body}}
+
+    def rerank_unwrap(self, data: Any) -> Any:
+        """The vLLM ``/rerank`` response inside a ``/runsync`` result.
+
+        Raises RerankerUnavailable while the job still waits for a worker (cold start)
+        and ValueError for a worker error.
+        """
+        from backend.services.rerank import RerankerUnavailable
+
+        if not isinstance(data, dict):
+            raise ValueError("unexpected /runsync response")
+        status = data.get("status")
+        if status in ("IN_QUEUE", "IN_PROGRESS"):
+            raise RerankerUnavailable("the re-ranking endpoint is starting")
+        if status not in (None, "COMPLETED"):
+            raise ValueError(f"RunPod job {status}: {str(data.get('error') or '')[:200]}")
+        output = data.get("output")
+        if isinstance(output, list):  # the worker aggregates its (single) yield
+            output = output[0] if output else None
+        if isinstance(output, dict) and "error" in output and "results" not in output:
+            raise ValueError(f"worker error: {str(output['error'])[:200]}")
+        return output
 
     def endpoint_url(self, api_key: str) -> Optional[str]:
         """OpenAI-compatible base URL of this side's endpoint in the key owner's account.

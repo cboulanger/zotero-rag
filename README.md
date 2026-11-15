@@ -74,7 +74,7 @@ small local models to fully hosted setups, and each side of the pipeline
 OpenAI-compatible API, OpenAI, Anthropic, KISSKI or MPCDF for closed or
 institutionally hosted models, or open-weight models on endpoints that the
 plugin provisions for you on **Hugging Face Inference Endpoints** or
-**RunPod** (create, pause and resume them from Preferences, with live
+**RunPod** (create, pause and resume them from the Configure preset dialog, with live
 readiness and quota meters). Each user can use their own account and keys, or
 an administrator can provide shared ones. See [Presets](docs/presets.md) and
 [Providers](docs/providers.md).

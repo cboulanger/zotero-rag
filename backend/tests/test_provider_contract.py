@@ -34,19 +34,25 @@ def build_preset(provider_id: str, side: str, fixture, options: dict, scope=None
         kwargs["api_key_env" if side_scope == "user" else "shared_api_key_env"] = env
         return kwargs
 
-    own_scope = scope or PROVIDERS[provider_id].default_scope
+    # A remote re-ranker always runs on the user's own account.
+    own_scope = scope or ("user" if side == "rerank" else PROVIDERS[provider_id].default_scope)
     emb_scope = own_scope if side == "embedding" else "user"
     llm_scope = own_scope if side == "llm" else "user"
     emb = {"model_type": "remote", "model_name": "m", "model_kwargs": remote("CONTRACT_EMB_KEY", emb_scope)}
     llm = {"model_type": "remote", "model_names": ["m"], "model_kwargs": remote("CONTRACT_LLM_KEY", llm_scope)}
     provider_block = {"id": provider_id, "options": options}
-    if scope:
-        provider_block["scope"] = scope
-    (emb if side == "embedding" else llm)["provider"] = provider_block
-    return HardwarePreset.model_validate({
+    if scope or side == "rerank":
+        provider_block["scope"] = own_scope
+    data = {
         "name": "contract", "description": "c", "version": 2,
         "embedding": emb, "llm": llm, "rag": {}, "memory_budget_gb": 1.0,
-    })
+    }
+    if side == "rerank":
+        data["rerank"] = {"model_type": "remote", "model_name": "m",
+                          "model_kwargs": remote("CONTRACT_RERANK_KEY", own_scope), "provider": provider_block}
+    else:
+        (emb if side == "embedding" else llm)["provider"] = provider_block
+    return HardwarePreset.model_validate(data)
 
 
 def cases():
@@ -98,7 +104,7 @@ class TestProviderContract(unittest.TestCase):
             cls = PROVIDERS[pid]
             for scope in ("user", "shared", "managed"):
                 preset = build_preset(pid, side, fixture, fixture.valid_options[0], scope=scope)
-                if scope in cls.key_scopes:
+                if scope in cls.key_scopes and (side != "rerank" or scope == "user"):
                     self.assertEqual(get_providers(preset)[side].scope, scope)
                 else:
                     with self.assertRaises(ProviderConfigError):
@@ -131,7 +137,10 @@ class TestProviderContract(unittest.TestCase):
             self.assertIn(d.key_scope, ("user", "shared", "managed"))
             self.assertEqual(d.supports_provisioning, provider.supports_provisioning)
             self.assertEqual(d.supports_suspend, provider.supports_suspend)
-            blob = d.model_dump_json().lower()
+            # A login form names its password field (it holds no value), so it is checked apart.
+            blob = d.model_dump_json(exclude={"provisioning": {"login"}}).lower()
+            if d.provisioning is not None and d.provisioning.login is not None:
+                self.assertNotIn("bearer ", d.provisioning.login.model_dump_json().lower())
             for forbidden in ("bearer ", "secret", "password"):
                 self.assertNotIn(forbidden, blob)
             if provider.supports_provisioning:

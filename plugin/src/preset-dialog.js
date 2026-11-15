@@ -85,6 +85,7 @@ var ZoteroRAGPresetDialogWindow = {
 				},
 				onFieldChange: (field, value, scope) => controller.setSideField(field, value, scope),
 				onSaveAccount: (card) => controller.saveAccount(card),
+				onCardAction: (card, action) => controller.runCardAction(card, action),
 				onDefaultChange: (name) => controller.setServerDefault(name),
 			}),
 		});

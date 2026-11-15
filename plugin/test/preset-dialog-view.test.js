@@ -288,3 +288,68 @@ test('a field the caller may not change is shown read-only, and a card without e
 	assert.strictEqual(input.readOnly, true);
 	assert.strictEqual(input.value, 'Set by the server admin');
 });
+
+// -- re-ranking switch and account login ---------------------------------------------
+
+const toggleField = () => ({ id: 'enableReranking', label: 'Use re-ranking', type: 'toggle', default: true, storage: 'client_pref', key: 'enableReranking' });
+const rerankSide = (over = {}) => side('rerank', { optional: true, state: 'down', fields: [toggleField()],
+	actions: [start('rerank', { workflow: null }), pause('rerank')], ...over });
+
+test('a switched-off optional side is shown as off, ignored by Start all but still paused by Pause all', async () => {
+	const v = view([side('embedding', { actions: [start('embedding')] }), rerankSide()]);
+	const { controller, prefs, D, posts } = setup({ views: [v] });
+	await controller.refresh();
+	assert.strictEqual(controller.state.view.sides[1].state, 'down');
+	assert.strictEqual(controller.state.view.sides[1].fields[0].value, true);
+	await controller.setSideField(controller.state.view.sides[1].fields[0], 'false', 'side:rerank');
+	assert.strictEqual(prefs.store['extensions.zotero-rag.enableReranking'], false);
+	assert.strictEqual(controller.state.view.sides[1].state, 'off');
+	const off = controller.state.view;
+	assert.deepStrictEqual([...D.workflowRequests(off, 'start').map((r) => [...r.body.sides])], [['embedding']]);
+	assert.deepStrictEqual([...D.workflowRequests(off, 'pause').map((r) => [...r.body.sides])], [['rerank']]);
+	assert.strictEqual(posts.length, 0);
+});
+
+const loginCard = (over = {}) => ({
+	id: 'p2', label: 'Provider Two', serves: ['embedding', 'llm'], state: 'needs_input', scope_note: '', auto_start: false,
+	fields: [
+		{ id: 'login:username', label: 'Username', type: 'text', storage: 'login', key: 'username' },
+		{ id: 'login:password', label: 'Password', type: 'secret', storage: 'login', key: 'password' },
+		{ id: 'login:token', label: 'Token', type: 'secret', storage: 'login', key: 'token', optional: true },
+	],
+	messages: [],
+	actions: [{ id: 'login', label: 'Log in and start', kind: 'primary', enabled: true, reason: '', sends_login: true,
+		request: { method: 'POST', path: '/api/config/session/login', body: { side: 'embedding' } } }],
+	...over,
+});
+
+test('logging in sends the form once, clears it and reports a start that did not begin', async () => {
+	const v = view([side('embedding', { account: 'p2', state: 'down' })], [loginCard()]);
+	const { controller, posts, painted } = setup({ views: [v], postReply: { ok: true, status: 200, data: { state: 'ok', provisioning: null, provisioning_error: 'no capacity' } } });
+	await controller.refresh();
+	const c = controller.state.view.accounts[0];
+	controller.state.local.drafts['account:p2/login:username'] = 'me';
+	await controller.runCardAction(c, c.actions[0]);
+	assert.strictEqual(posts.length, 0); // password missing
+	assert.match(painted.at(-1).notes['account:p2'].text, /Password/);
+	controller.state.local.drafts['account:p2/login:password'] = 'pw';
+	await controller.runCardAction(c, c.actions[0]);
+	assert.deepStrictEqual(posts, [['/api/config/session/login', { side: 'embedding', values: { username: 'me', password: 'pw' } }]]);
+	assert.deepStrictEqual(Object.keys(controller.state.local.drafts), []);
+	assert.ok(painted.some((p) => p.notes['account:p2'] && /did not start: no capacity/.test(p.notes['account:p2'].text)));
+});
+
+test('Save ignores login fields, and a login card shows its actions instead of Save and start', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const root = fakeNode('div');
+	const refs = D.mount(doc, root);
+	const v = view([side('embedding', { account: 'p2' })], [loginCard()]);
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+	D.paint(doc, refs, v, local, { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {}, onCardAction() {} });
+	const cardNode = refs.cards.children[0];
+	const text = JSON.stringify(cardNode, (k, val) => (k === 'parentNode' ? undefined : val));
+	assert.match(text, /Log in and start/);
+	assert.match(text, /Not logged in/);
+	assert.doesNotMatch(text, /Save and start/);
+});

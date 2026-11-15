@@ -182,9 +182,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	/** One dot per side plus a summary line, from the dialog's own view model. */
 	const refreshPresetSummary = async () => {
 		if (!presetSummary) return;
-		const view = await fetchJson('/api/config/preset-view');
+		const fetched = await fetchJson('/api/config/preset-view');
 		presetSummary.textContent = '';
-		if (!view) return;
+		if (!fetched) return;
+		const view = ZoteroRAGPresetDialog.applyLocalState(fetched, (name) => Zotero.Prefs.get(name, true));
 		for (const side of view.sides) {
 			const dot = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
 			dot.className = `preset-dot ${side.state}`;

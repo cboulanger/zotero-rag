@@ -246,6 +246,8 @@ def main() -> int:
     parser.add_argument("--max-difficulty", type=int, default=None, help="only questions up to this difficulty")
     parser.add_argument("--repeat", type=int, default=1, help="repetitions per question (stability; router/LLM are non-deterministic)")
     parser.add_argument("--no-routing", action="store_true", help="bypass the router (pure RAG agent)")
+    parser.add_argument("--no-rerank", action="store_true",
+                        help="skip the preset's re-ranking step (enable_reranking=false), for paired comparisons")
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--min-score", type=float, default=None)
     parser.add_argument("--url", default=DEFAULT_URL)
@@ -365,6 +367,8 @@ def main() -> int:
                             "question": q["question"], "library_ids": [library_id],
                             "enable_routing": not args.no_routing, "include_trace": True,
                         }
+                        if args.no_rerank:
+                            payload["enable_reranking"] = False
                         if model:
                             payload["llm_model"] = model
                         if args.top_k is not None:

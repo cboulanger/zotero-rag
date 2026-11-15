@@ -22,7 +22,9 @@ SideState = Literal["ready", "starting", "down", "unknown", "off"]
 #: every request (``key`` is the key name). ``shared``: an admin-set server value, saved
 #: through POST /api/config/remote-fields. ``session``: a one-time credential kept in
 #: memory until Zotero closes and sent in the ``keys`` of provisioning requests.
-FieldStorage = Literal["none", "client_pref", "client_secret", "shared", "session"]
+#: ``login``: an input of an account login form, sent once in ``body.values`` of the
+#: card action that has ``sends_login`` and then cleared (never stored).
+FieldStorage = Literal["none", "client_pref", "client_secret", "shared", "session", "login"]
 
 
 class UiField(BaseModel):
@@ -30,7 +32,7 @@ class UiField(BaseModel):
 
     id: str
     label: str
-    type: Literal["text", "secret", "number", "select", "readonly"] = "text"
+    type: Literal["text", "secret", "number", "select", "readonly", "toggle"] = "text"
     value: Optional[Any] = None
     default: Optional[Any] = None
     placeholder: str = ""
@@ -91,6 +93,8 @@ class UiAction(BaseModel):
     request: Optional[UiRequest] = None
     #: Account card whose ``session`` credentials go into ``request.body.keys``.
     account: Optional[str] = None
+    #: A card action that submits the card's ``login`` fields as ``request.body.values``.
+    sends_login: bool = False
 
 
 class SideProvider(BaseModel):
@@ -120,7 +124,9 @@ class SideView(BaseModel):
 class AccountCard(BaseModel):
     """One card in the dialog's footer: the credentials of one service provider.
 
-    Saving a card's fields starts the sides it ``serves`` (``auto_start``).
+    Saving a card's fields starts the sides it ``serves`` (``auto_start``). A provider
+    with an account login instead has a login form (``login`` fields) and ``actions``
+    (log in, log out); its login request starts the sides itself.
     """
 
     id: str
@@ -130,6 +136,7 @@ class AccountCard(BaseModel):
     scope_note: str = ""
     fields: list[UiField] = Field(default_factory=list)
     messages: list[UiMessage] = Field(default_factory=list)
+    actions: list[UiAction] = Field(default_factory=list)
     auto_start: bool = True
 
 

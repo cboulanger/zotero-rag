@@ -55,8 +55,10 @@ class PresetViewApiTest(unittest.TestCase):
 
     def test_sides_follow_the_pipeline_order(self):
         body = self._get("cpu-only")
-        self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "llm"])
+        self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "rerank", "llm"])
         self.assertEqual(body["preset"]["name"], "cpu-only")
+        no_rerank = self._get("remote-kisski", headers={"X-Kisski-Api-Key": "k"})
+        self.assertNotIn("rerank", [s["side"] for s in no_rerank["sides"]])
 
     def test_local_models_are_ready_and_need_no_account(self):
         body = self._get("cpu-only")
@@ -74,7 +76,7 @@ class PresetViewApiTest(unittest.TestCase):
             self.assertEqual(start["account"], "runpod")
         self.assertEqual(len(body["accounts"]), 1)
         card = body["accounts"][0]
-        self.assertEqual((card["id"], card["serves"], card["state"]), ("runpod", ["embedding", "llm"], "ready"))
+        self.assertEqual((card["id"], card["serves"], card["state"]), ("runpod", ["embedding", "rerank", "llm"], "ready"))
         storages = {f["id"]: (f["storage"], f["is_set"]) for f in card["fields"]}
         self.assertEqual(storages["RUNPOD_API_KEY"], ("client_secret", True))
         self.assertEqual(storages["session:RUNPOD_API_KEY"][0], "session")
@@ -102,20 +104,103 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertTrue(body["busy"])
         self.assertFalse(next(a for a in side["actions"] if a["id"] == "start")["enabled"])
 
+    SHARED_PRESET = {
+        "version": 2,
+        "description": "Admin-shared gateway (test)",
+        "embedding": {"model_type": "remote", "model_name": "e5", "batch_size": 8,
+                      "provider": {"id": "generic", "scope": "shared"},
+                      "model_kwargs": {"shared_base_url_env": "TEST_EMB_URL", "shared_api_key_env": "TEST_EMB_API_KEY"}},
+        "llm": {"model_type": "remote", "model_names": ["m"], "max_context_length": 8192,
+                "provider": {"id": "generic", "scope": "shared"},
+                "model_kwargs": {"shared_base_url_env": "TEST_LLM_URL", "shared_api_key_env": "TEST_LLM_API_KEY"}},
+        "rag": {"top_k": 10, "score_threshold": 0.35, "max_chunk_size": 800},
+        "memory_budget_gb": 0.5, "platform": "any",
+    }
+
+    def _write_shared_preset(self):
+        (self.settings.data_path / "presets" / "shared-test.json").write_text(json.dumps(self.SHARED_PRESET))
+
     def test_shared_credentials_are_read_only_for_non_admins(self):
-        body = self._get("remote-mpcdf", loopback=False, user_id=6)  # admin role is cached per user
+        self._write_shared_preset()
+        body = self._get("shared-test", loopback=False, user_id=6)  # admin role is cached per user
         card = body["accounts"][0]
         self.assertEqual(card["serves"], ["embedding", "llm"])
         self.assertTrue(all(f["storage"] == "shared" and not f["editable"] for f in card["fields"]))
         self.assertEqual(card["state"], "needs_input")
-        self.assertEqual(self._side(body, "llm")["actions"], [])
         self.assertEqual(body["preset"]["default_options"], [])
 
     def test_admins_can_edit_shared_credentials_and_get_the_default_chooser(self):
-        body = self._get("remote-mpcdf", admin=True, loopback=False, user_id=7)
+        self._write_shared_preset()
+        body = self._get("shared-test", admin=True, loopback=False, user_id=7)
         self.assertTrue(all(f["editable"] for f in body["accounts"][0]["fields"]))
         self.assertTrue(body["preset"]["is_admin"])
         self.assertIn(body["preset"]["default_preset"], body["preset"]["default_options"])
+
+    def _get_mpcdf(self, session, health=UNPROVISIONED):
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=session), \
+             patch("backend.providers.mpcdf.MpcdfProvider.health", return_value=health):
+            return self._get("remote-mpcdf", user_id=8)
+
+    def test_session_provider_card_offers_the_login_form_until_logged_in(self):
+        body = self._get_mpcdf({"state": "login_required"})
+        card = body["accounts"][0]
+        self.assertEqual(card["id"], "mpcdf")
+        self.assertEqual(card["serves"], ["embedding", "rerank", "llm"])
+        self.assertEqual(card["state"], "needs_input")
+        self.assertFalse(card["auto_start"])
+        logins = [f["key"] for f in card["fields"] if f["storage"] == "login"]
+        self.assertEqual(logins, ["username", "password", "otp", "hf_token"])
+        login = next(a for a in card["actions"] if a["sends_login"])
+        self.assertEqual(login["request"]["path"], "/api/config/session/login")
+        self.assertIn("side", login["request"]["body"])
+        # Starting needs the login first.
+        start = next(a for a in self._side(body, "llm")["actions"] if a["id"] == "start")
+        self.assertFalse(start["enabled"])
+        self.assertIn("Log in", start["reason"])
+
+    def test_logged_in_session_card_shows_logout_and_enables_start(self):
+        body = self._get_mpcdf({"state": "ok", "username": "cb", "expires_at": "2026-11-16T08:00:00Z", "hf_token_set": True})
+        card = body["accounts"][0]
+        self.assertEqual(card["state"], "ready")
+        self.assertFalse([f for f in card["fields"] if f["storage"] == "login"])
+        self.assertEqual([a["id"] for a in card["actions"]], ["logout"])
+        self.assertIn("cb", card["messages"][0]["text"])
+        start = next(a for a in self._side(body, "embedding")["actions"] if a["id"] == "start")
+        self.assertTrue(start["enabled"])
+        self.assertEqual(start["workflow"], "start")
+
+    def test_session_status_failure_falls_back_to_the_login_form(self):
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", side_effect=RuntimeError("down")), \
+             patch("backend.providers.mpcdf.MpcdfProvider.health", return_value=UNPROVISIONED):
+            body = self._get("remote-mpcdf", user_id=9)
+        self.assertEqual(body["accounts"][0]["state"], "needs_input")
+
+    def test_remote_reranker_is_an_optional_tab_left_out_of_start_all(self):
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
+        self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "rerank", "llm"])
+        rerank = self._side(body, "rerank")
+        self.assertTrue(rerank["optional"])
+        self.assertEqual(rerank["state"], "down")
+        toggle = rerank["fields"][0]
+        self.assertEqual((toggle["type"], toggle["storage"], toggle["key"], toggle["default"]),
+                         ("toggle", "client_pref", "enableReranking", True))
+        start = next(a for a in rerank["actions"] if a["id"] == "start")
+        self.assertIsNone(start["workflow"])
+        self.assertEqual(start["request"]["body"], {"sides": ["rerank"]})
+        self.assertIn("rerank", body["accounts"][0]["serves"])
+
+    def test_remote_reranker_pause_joins_pause_all(self):
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="ready"))
+        pause = next(a for a in self._side(body, "rerank")["actions"] if a["id"] == "pause")
+        self.assertEqual(pause["workflow"], "pause")
+
+    def test_local_reranker_runs_on_the_server(self):
+        body = self._get("cpu-only")
+        rerank = self._side(body, "rerank")
+        self.assertEqual((rerank["state"], rerank["optional"]), ("ready", True))
+        facts = {f["label"]: f["value"] for f in rerank["facts"]}
+        self.assertIn("mMiniLM", facts["Model"])
+        self.assertIn("30", facts["Rescored"])
 
     def test_docling_extraction_joins_the_account_of_its_key(self):
         body = self._get("kisski-docling")

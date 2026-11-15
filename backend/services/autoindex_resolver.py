@@ -19,6 +19,10 @@ e.g. remote-mpcdf) — there, every caller uses the same server-wide credential,
 so there is no per-user key to validate, and a status left over from a
 previously-active personal-key preset must not be reused to gate an unrelated
 shared-key preset.
+
+A user whose embedding side runs in their own provider session (an MPCDF job
+they start after logging in with a one-time password) cannot be indexed while
+nobody is present, so their slugs are skipped with a ``"session"`` issue.
 """
 
 import logging
@@ -32,6 +36,18 @@ from backend.services.zotero_identity import ZoteroIdentity
 from backend.zotero.key_validator import validate_key
 
 logger = logging.getLogger(__name__)
+
+
+def _uses_session_endpoint(preset) -> bool:
+    """True when the preset's embedding side runs in the caller's own provider session."""
+    from backend.providers import ProviderConfigError, get_providers
+    from backend.services.session_endpoint import uses_session_endpoints
+
+    try:
+        return uses_session_endpoints(get_providers(preset)["embedding"])
+    except (ProviderConfigError, KeyError, AttributeError, TypeError) as exc:
+        logger.debug("No embedding provider for auto-index preset: %s", exc)
+        return False
 
 
 def is_embedding_key_usable(status: Optional[str], rate_limit_until_str: Optional[str]) -> bool:
@@ -68,7 +84,8 @@ async def resolve_targets(
              deduplicated across all valid keys.
     issues:  list of {fingerprint, user, reason, pruned, kind} — "kind" is
              "zotero_key" for Zotero-key problems (unchanged from before) or
-             "embedding_key" for a missing/invalid/rate-limited embedding key.
+             "embedding_key" for a missing/invalid/rate-limited embedding key,
+             "session" for an embedding side that runs in the user's own session.
 
     only_fingerprint: re-validate and resolve just this stored key, leaving every
         other user's key untouched (no api.zotero.org round trip, no pruning).
@@ -135,6 +152,17 @@ async def resolve_targets(
             })
             logger.warning("Pruned auto-index key %s (%s): %s",
                            fp, entry.get("username"), validation.reason)
+            continue
+
+        if require_embedding_key and _uses_session_endpoint(user_preset):
+            issues.append({
+                "fingerprint": fp,
+                "user": entry.get("username"),
+                "reason": "The embedding endpoint runs in your own login session, "
+                          "so automatic indexing cannot run while you are away; auto-indexing skipped.",
+                "pruned": False,
+                "kind": "session",
+            })
             continue
 
         if not requires_embedding_key:

@@ -17,6 +17,7 @@ from backend.config.settings import get_settings
 from backend.db.vector_store import VectorStore
 from backend.dependencies import make_vector_store, resolve_zotero_identity
 from backend.services.access_gate import assert_safe_to_start
+from backend.services.caller_context import use_caller
 from backend.services.effective_preset import get_user_preset, use_preset
 from backend.utils.log_rotation import RotatingLogHandler
 from backend.api import config, libraries, indexing, query, document_upload, registration, rate_limits, public_query, autoindex, auth, migration, admin_settings, indexed_tags
@@ -142,7 +143,19 @@ async def lifespan(app: FastAPI):
         app.state.health_check_task = health_check_task
         logger.info(f"Health check scheduler started (every {settings.health_check_interval_minutes} min)")
 
+    # Per-user MPCDF sessions (re-ranking endpoints on each user's own account).
+    from backend.services import mpcdf_sessions
+    mpcdf = mpcdf_sessions.get_sessions() if mpcdf_sessions.available() else None
+    if mpcdf is not None:
+        try:
+            await mpcdf.open()
+        except Exception as e:
+            logger.warning(f"Could not start MPCDF sessions: {e}")
+
     yield
+
+    if mpcdf is not None:
+        await mpcdf.close()
 
     if scheduler_task is not None:
         scheduler_task.cancel()
@@ -211,7 +224,8 @@ async def api_key_middleware(request: Request, call_next):
         # Run the whole request on the caller's own preset (their choice, else the default).
         # Only a user's own preset is bound; everyone else follows the live default.
         preset = await asyncio.to_thread(get_user_preset, get_settings(), request.state.zotero_identity)
-        with use_preset(preset):
+        identity = request.state.zotero_identity
+        with use_preset(preset), use_caller(identity.user_id if identity is not None else None):
             return await call_next(request)
     return await call_next(request)
 

@@ -66,6 +66,7 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .pd-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; }
 .pd-card { background: var(--pd-bg); border: 1px solid var(--pd-line); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .pd-card-needs { border-color: var(--pd-bad); }
+.pd-toggle { justify-self: start; margin: 0; }
 .pd-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .pd-card-state { font-size: 12px; display: flex; align-items: center; gap: 4px; }
 .pd-card .pd-field { grid-template-columns: 140px minmax(0, 1fr) auto; }

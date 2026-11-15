@@ -479,6 +479,11 @@ class RemoteEmbeddingService(EmbeddingService):
         self._provider = provider
         self._resolved_base_url: Optional[str] = None
         self._api_key = api_key  # explicit override; falls back to env-var lookup
+        from backend.services.session_endpoint import SessionEndpoint, uses_session_endpoints
+
+        #: The caller's own endpoint, for a provider that runs one per user session.
+        self._session: Optional[SessionEndpoint] = SessionEndpoint(provider) if uses_session_endpoints(provider) else None
+        self._session_key: Optional[str] = None
         # Resolves shared-field admin settings (base_url/API key) in _get_client().
         # Falls back to the global settings singleton when not provided, so
         # callers that don't care (e.g. the cron indexer, which wants the same
@@ -573,11 +578,19 @@ class RemoteEmbeddingService(EmbeddingService):
                     "(it is sent with each request, never read from the environment)."
                 )
             return self._api_key
+        if self._session_obj() is not None:
+            return getattr(self, "_session_key", None) or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self._api_key or KEYLESS_API_KEY
 
+    def _session_obj(self):
+        # getattr: tests build services with __new__ and skip __init__.
+        return getattr(self, "_session", None)
+
     def _derives_endpoint(self) -> bool:
-        """True when this side's URL is found from the key rather than set in the preset."""
+        """True when this side's URL is found from the key (or the caller's session), not the preset."""
+        if self._session_obj() is not None:
+            return True
         kwargs = self.config.model_kwargs
         return bool(
             self._provider is not None
@@ -588,6 +601,11 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _forget_endpoint(self) -> None:
         """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._session_obj() is not None:
+            self._resolved_base_url = None
+            self._session_key = None
+            self._client = None
+            return
         if self._resolved_base_url and self._provider is not None:
             from backend.services.endpoint_cache import endpoint_cache
 
@@ -618,6 +636,9 @@ class RemoteEmbeddingService(EmbeddingService):
 
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._session_obj() is not None:
+            await self._ensure_session_endpoint()
+            return
         if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
             return
         import asyncio
@@ -631,6 +652,25 @@ class RemoteEmbeddingService(EmbeddingService):
                 unavailable_message("embedding", "The embedding endpoint is not provisioned.")
             )
         self._resolved_base_url = url
+
+    async def _ensure_session_endpoint(self) -> None:
+        """Use the caller's own running endpoint (asked before every call: renewals change it)."""
+        from backend.services.session_endpoint import SessionEndpointError
+
+        try:
+            creds = await self._session.resolve()
+        except SessionEndpointError as exc:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", f"The embedding endpoint is unavailable: {exc}.")
+            ) from exc
+        if creds is None or not creds.base_url:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "Your embedding endpoint is not running.")
+            )
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, getattr(self, "_session_key", None)):
+            self._client = None
+        self._resolved_base_url = creds.base_url
+        self._session_key = creds.api_key
 
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""

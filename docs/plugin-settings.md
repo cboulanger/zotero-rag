@@ -64,13 +64,26 @@ Opened with **Configure preset…** next to the preset chooser. Everything about
 
 **Header.** The preset's name and description, an overall status and three buttons that act on every side at once: **Start all** starts, wakes or resumes every endpoint that is not running, **Pause all** pauses every endpoint that can be paused (stops billing), and **Check now** checks again. Server admins also get **Server default**, which sets the preset everyone starts on.
 
-**Tabs.** One tab per step of the pipeline, in the order a document and a question pass through it: **Extraction**, **Embedding**, **Retrieval** and **Answering (LLM)**. The dot on each tab shows whether the service behind it is ready (green), starting (yellow: being created, woken or resumed), down (red: not running, paused, out of capacity or missing credentials) or has no status check (grey). Each tab has the same three sections:
+**Tabs.** One tab per step of the pipeline, in the order a document and a question pass through it: **Extraction**, **Embedding**, **Retrieval**, **Re-ranking** (only when the preset has that step) and **Answering (LLM)**. The dot on each tab shows whether the service behind it is ready (green), starting (yellow: being created, woken or resumed), down (red: not running, paused, out of capacity or missing credentials) has no status check (grey) or is switched off (hollow, re-ranking only). Each tab has the same three sections:
 
 - **Configuration**: the settings of that step only. Credentials are not entered here but in the account cards below.
 - **Status**: a summary line, messages (for example what to do while the endpoint is down), short facts such as the model, and **Show log** with the progress of the last start or pause.
 - **Actions**: for example **Start endpoint**, **Resume**, **Retry**, **Wake up** or **Pause**. A disabled button says why.
 
 **Service accounts.** The footer has one card per provider your preset uses, listing which tabs it serves. It holds that provider's keys: your own personal keys, which are stored in Zotero and sent with your requests (never stored on the server), and keys the server admin sets for everyone, which only admins can change. For providers whose endpoints you start yourself, an optional management key can be entered; it is kept in memory until Zotero quits and never saved. **Save and start** saves what you entered and starts the endpoints that use it.
+
+A provider whose endpoints run in your own login session (MPCDF) has a login form in its card instead: your username, password, one-time code and, for MPCDF, a Hugging Face token. **Log in and start** sends them once (the password and code are never stored, and the form is cleared), keeps the session on the server encrypted and starts the embedding and answering endpoints in it. Until you log in, the tabs it serves say so and their **Start endpoint** is disabled. While you are logged in the card shows the session and **Log out**.
+
+### Re-ranking tab
+
+Shown only when your preset has a re-ranking step. A re-ranker reads your question together with
+each candidate passage and puts the most relevant ones first before the answer is written, which
+costs a few seconds per question. The tab names the model and how many passages it rescores, and
+has the **Use re-ranking** switch (on by default; switched off, the tab's dot is hollow). A
+re-ranker that runs on the server needs nothing else. One that runs on your own provider account
+shows its live status and **Start endpoint** / **Resume** here. **Start all** leaves it alone,
+since it is an optional extra cost; **Pause all** includes it. If it is not running when you ask
+a question, the question is answered without re-ranking.
 
 ### Retrieval tab
 
@@ -95,7 +108,7 @@ after adjusting a setting, the trace shows exactly what was used.
 
 Collapsed by default in the search dialog, under the library list. These apply to
 the query you're about to run, not saved as a persistent preference (with the
-exception of the LLM model and routing choices, which are remembered for your next
+exception of the LLM model, routing and re-ranking choices, which are remembered for your next
 query).
 
 | Setting | What it does |
@@ -104,6 +117,7 @@ query).
 | **Similarity** | How closely a passage must match your question to be considered — lower values cast a wider net but pull in less relevant material. |
 | **Sources** | How many passages to retrieve before answering (this is `top_k` in the API; see also the [Retrieval tab](#retrieval-tab) of Configure preset) — higher values search more broadly but take longer and cost more per query. |
 | **Disable query routing** | Skips the routing step that decides between content search, catalog search, and citation search, going straight to a content search. Faster, but loses metadata-filter extraction, catalog listings, and citation/mentions questions. See [Query Routing & Agent System](query-routing.md) for what routing normally does. |
+| **Disable re-ranking** | Only shown when the preset has a re-ranking step. Answers this question with the passages in plain similarity order, a few seconds faster. Checked and locked when re-ranking is switched off in the [Re-ranking tab](#re-ranking-tab). When the preset's re-ranking endpoint is not running, the dialog says so and, if you can start it, offers **Start re-ranking**. |
 | **Include debugging information in note** | Attaches the full execution trace (routing decision, retrieval scores, every LLM call and prompt) to the saved result note and makes it available for export from the result view. Useful when reporting an answer-quality issue. |
 
 ## See also

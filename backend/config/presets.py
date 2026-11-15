@@ -45,7 +45,7 @@ import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List, Literal, Optional, Protocol, TypeVar
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _HasId(Protocol):
@@ -192,6 +192,34 @@ class RAGConfig(BaseModel):
     max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
 
 
+class RerankConfig(BaseModel):
+    """Optional re-ranking step: a cross-encoder rescores the vector-search candidate
+    pool before dedup and the per-document cap (see backend/services/rerank.py).
+
+    A preset without this section has no re-ranking step. ``local`` runs the model
+    in the backend process (sentence-transformers ``CrossEncoder``); ``remote`` calls a
+    ``/rerank`` endpoint served by the side's provider, which must use the ``user``
+    credential scope (each user's own account).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_type: Literal["local", "remote"] = "local"
+    model_name: str = Field(..., description="Cross-encoder model id, e.g. BAAI/bge-reranker-v2-m3")
+    pool_size: int = Field(default=100, ge=1, le=500, description="Candidates rescored per query (the rest keep their order after them)")
+    max_length: int = Field(default=512, ge=16, description="Token limit per question+chunk pair (local models)")
+    batch_size: int = Field(default=16, ge=1, description="Pairs scored per forward pass (local models)")
+    timeout_seconds: float = Field(default=15.0, gt=0, description="Re-ranking gives up after this and keeps the vector order")
+    model_kwargs: dict = Field(
+        default_factory=dict,
+        description="Local: extra CrossEncoder keyword arguments (e.g. {\"backend\": \"onnx\"}); remote: endpoint fields",
+    )
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving a remote re-ranker (see backend.providers).",
+    )
+
+
 class ExtractionConfig(BaseModel):
     """Which document extractor indexes documents for this preset.
 
@@ -219,6 +247,10 @@ class HardwarePreset(BaseModel):
     extraction: Optional[ExtractionConfig] = Field(
         default=None,
         description="Document extractor for indexing; None uses the server's EXTRACTOR_BACKEND.",
+    )
+    rerank: Optional[RerankConfig] = Field(
+        default=None,
+        description="Optional re-ranking step; None means no re-ranking.",
     )
     memory_budget_gb: float = Field(..., description="Estimated memory usage in GB")
     platform: Literal["any", "darwin", "linux", "windows"] = Field(

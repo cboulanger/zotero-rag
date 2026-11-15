@@ -23,10 +23,12 @@ from backend.providers.types import (
     Meter,
     ModelInfo,
     NoOptions,
+    OPTIONAL_SIDES,
     ProviderDescriptor,
     ProvisionContext,
     Scope,
     Side,
+    side_config,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -52,6 +54,11 @@ class Provider:
     #: True when ``endpoint_url()`` finds the side's URL from the key (no ``base_url`` in the preset).
     derives_endpoint_url: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False
+    #: False when provisioning runs in the caller's own login session instead of with a key.
+    provisioning_needs_key: ClassVar[bool] = True
+    #: True when each user runs their own endpoint for this side in a provider session
+    #: (see ``session_endpoint``); the side then has no fixed URL or shared key.
+    uses_session_endpoints: ClassVar[bool] = False
     #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
     has_live_models: ClassVar[bool] = False
     #: Wire protocol of the LLM side; core implements the protocols, not vendors.
@@ -84,8 +91,8 @@ class Provider:
 
     @property
     def side_config(self):
-        """The ``EmbeddingConfig`` or ``LLMConfig`` this instance serves."""
-        return self.preset.embedding if self.side == "embedding" else self.preset.llm
+        """The ``EmbeddingConfig``, ``LLMConfig`` or ``RerankConfig`` this instance serves."""
+        return side_config(self.preset, self.side)
 
     def _http(self) -> Any:
         """Blocking ``httpx.Client`` for management-API calls (lazily created).
@@ -150,7 +157,7 @@ class Provider:
     def side_facts(self) -> list[UiFact]:
         """Short facts for this side's Status section (model, provider, credential owner)."""
         cfg = self.side_config
-        model = cfg.model_name if self.side == "embedding" else (cfg.literal_model_names or [cfg.model_name])[0]
+        model = (getattr(cfg, "literal_model_names", None) or [cfg.model_name])[0]
         facts = [UiFact(label="Model", value=str(model))]
         note = self.SCOPE_NOTES.get(self.scope)
         if note:
@@ -175,20 +182,22 @@ class Provider:
         status = health.status if health else ""
         running = job_status in ("running", "pending")
         busy = "A job for this endpoint is already running." if running else ""
+        # The optional re-ranking endpoint is only ever started on its own, never by Start all.
+        start_workflow = None if self.side in OPTIONAL_SIDES else "start"
         actions: list[UiAction] = []
         if self.supports_provisioning and operable:
             if status in ("unreachable", "throttled", "paused"):
                 actions.append(UiAction(
                     id="start", label="Resume" if status == "paused" else "Start endpoint", kind="primary",
-                    enabled=not running, reason=busy, workflow="start", account=self.id,
+                    enabled=not running, reason=busy, workflow=start_workflow, account=self.id,
                     request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
                 ))
             elif job_status == "failed":
                 actions.append(UiAction(
-                    id="retry", label="Retry", kind="primary", workflow="start", account=self.id,
+                    id="retry", label="Retry", kind="primary", workflow=start_workflow, account=self.id,
                     request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
                 ))
-        if status == "cold":
+        if status == "cold" and self.side not in OPTIONAL_SIDES:  # warmup wakes embedding and llm
             actions.append(UiAction(
                 id="wake", label="Wake up", workflow="start",
                 request=UiRequest(path="/api/config/warmup"),
@@ -200,16 +209,29 @@ class Provider:
             ))
         return actions
 
-    def account_fields(self, fields: list[UiField], operable: bool) -> list[UiField]:
+    def account_fields(self, fields: list[UiField], operable: bool, session: Optional[dict] = None) -> list[UiField]:
         """The fields of this provider's account card.
 
         ``fields`` are the credentials the preset declares for the sides this provider
         serves (personal keys and admin-set shared values), already built by core.
-        The default adds the one-time provisioning credential when the caller may
-        provision or pause. Override to ask for something else, e.g. a sign-in.
+        ``session`` is the caller's ``session_status`` for a provider with an account
+        login (None otherwise). The default adds the login form while the caller is not
+        logged in, else the one-time provisioning credential when the caller may
+        provision or pause.
         """
         credential = None
         descriptor = self.describe()
+        login = descriptor.provisioning.login if descriptor.provisioning else None
+        if login is not None:
+            if session and session.get("state") == "ok":
+                return fields
+            return [*fields, *(
+                UiField(
+                    id=f"login:{f.name}", label=f.label, type="secret" if f.type == "password" else "text",
+                    help=f.help, optional=f.optional, storage="login", key=f.name,
+                )
+                for f in login.fields
+            )]
         if operable and descriptor.provisioning and descriptor.provisioning.credential:
             credential = descriptor.provisioning.credential
         if credential is None:
@@ -219,6 +241,29 @@ class Provider:
             help=credential.help, pattern=credential.pattern, optional=credential.optional,
             storage="session", key=credential.env,
             placeholder="Optional, kept in memory only" if credential.optional else "",
+        )]
+
+    def account_session(self, session: Optional[dict]) -> tuple[list[UiMessage], list[UiAction]]:
+        """Status line and actions (log in, log out) of an account card with a login.
+
+        Only called for a provider whose descriptor has ``provisioning.login``; the
+        log-in request also starts the sides that run in the session.
+        """
+        descriptor = self.describe()
+        login = descriptor.provisioning.login if descriptor.provisioning else None
+        if session and session.get("state") == "ok":
+            who = f" as {session['username']}" if session.get("username") else ""
+            until = f" until {session['expires_at']}" if session.get("expires_at") else ""
+            return (
+                [UiMessage(level="ok", text=f"Logged in{who}{until}.")],
+                [UiAction(id="logout", label="Log out",
+                          request=UiRequest(path="/api/config/session/logout", body={"side": self.side}))],
+            )
+        messages = [UiMessage(level="info", text=login.help)] if login and login.help else []
+        messages.append(UiMessage(level="warn", text="Not logged in. Logging in starts the endpoints."))
+        return messages, [UiAction(
+            id="login", label="Log in and start", kind="primary", sends_login=True,
+            request=UiRequest(path="/api/config/session/login", body={"side": self.side}),
         )]
 
     # -- credentials and endpoints -------------------------------------------
@@ -253,6 +298,56 @@ class Provider:
         Appended to "endpoint unavailable" errors and shown in the Configure preset dialog.
         Core text stays vendor-neutral.
         """
+        return None
+
+    # -- re-ranking side -------------------------------------------------------
+
+    def rerank_credentials(self, request: Any, refresh: bool = False) -> Optional[Credentials]:
+        """URL and key of the calling user's ``/rerank`` endpoint, or None when there is none.
+
+        ``request`` is the per-query ``backend.services.rerank.RerankRequest``
+        (the caller's keys and user id). ``refresh`` asks for fresh values after
+        the endpoint rejected the previous ones. The generic implementation uses
+        the preset's fixed ``base_url`` and the caller's personal key; a provider
+        whose endpoints live in the user's account derives or looks them up.
+        """
+        kwargs = self.side_config.model_kwargs
+        base_url = kwargs.get("base_url")
+        if not base_url:
+            return None
+        env = kwargs.get("api_key_env")
+        api_key = request.client_keys.get(env) if env else None
+        if env and not api_key:
+            return None
+        return Credentials(api_key=api_key, base_url=base_url)
+
+    # -- per-user sessions --------------------------------------------------------
+
+    def session_login(self, user_id: Optional[int], values: dict[str, str]) -> dict:
+        """Log the caller in to the provider's per-user session (see ``SessionLoginDescriptor``).
+
+        Returns the session state (``{"state": "ok"|"login_required", ...}``, no
+        secrets). Only providers whose descriptor offers a login form implement it.
+        """
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_logout(self, user_id: Optional[int]) -> None:
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_status(self, user_id: Optional[int]) -> Optional[dict]:
+        """The caller's session state, or None when the provider has no sessions."""
+        return None
+
+    def session_endpoint(self, user_id: Optional[int]) -> Optional[Credentials]:
+        """URL and key of the caller's running endpoint for this side, or None when it is not running.
+
+        Only providers with ``uses_session_endpoints`` implement it. Credentials
+        may change at any time (a job renewal), so callers ask before each use.
+        """
+        return None
+
+    def session_activity(self, user_id: Optional[int]) -> None:
+        """Report that the caller's endpoint is in use, so it is not stopped as idle."""
         return None
 
     # -- model list -----------------------------------------------------------
