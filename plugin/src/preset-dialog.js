@@ -29,15 +29,27 @@ var ZoteroRAGPresetDialogWindow = {
 		const D = ZoteroRAGPresetDialog;
 		const refs = D.mount(document, root);
 
+		/** Why the last GET failed, shown in the dialog's header. */
+		let lastError = '';
 		/** @param {string} path */
 		const get = async (path) => {
+			lastError = '';
+			let response;
 			try {
-				const response = await fetch(`${plugin.backendURL}${path}`, { headers: plugin.getAuthHeaders() });
-				return response.ok ? await response.json() : null;
+				response = await fetch(`${plugin.backendURL}${path}`, { headers: plugin.getAuthHeaders() });
 			} catch (e) {
 				plugin.log(`Could not fetch ${path}: ${e}`);
+				lastError = `The server at ${plugin.backendURL} did not answer. Check the server URL in Settings.`;
 				return null;
 			}
+			if (response.ok) return await response.json();
+			const data = await response.json().catch(() => ({}));
+			const detail = data && typeof data.detail === 'string' ? `: ${data.detail}` : '';
+			plugin.log(`GET ${path} failed: HTTP ${response.status}${detail}`);
+			lastError = response.status === 404
+				? 'This server does not have the Configure preset dialog yet (HTTP 404). Update and restart the backend.'
+				: `The server answered HTTP ${response.status}${detail}.`;
+			return null;
 		};
 		/** @param {string} path @param {any} body */
 		const post = async (path, body) => {
@@ -51,6 +63,7 @@ var ZoteroRAGPresetDialogWindow = {
 
 		const controller = D.createController({
 			get,
+			lastError: () => lastError,
 			post,
 			prefs: {
 				get: (name) => Zotero.Prefs.get(name, true),

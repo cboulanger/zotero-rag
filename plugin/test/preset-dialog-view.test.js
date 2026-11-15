@@ -353,3 +353,9 @@ test('Save ignores login fields, and a login card shows its actions instead of S
 	assert.match(text, /Not logged in/);
 	assert.doesNotMatch(text, /Save and start/);
 });
+
+test('a failed load shows why the server refused instead of the generic message', async () => {
+	const { controller, painted } = setup({ views: [null], extra: { lastError: () => 'This server does not have the Configure preset dialog yet (HTTP 404).' } });
+	await controller.refresh();
+	assert.match(painted.at(-1).notes.header.text, /HTTP 404/);
+});

@@ -655,6 +655,7 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
  * Drives the dialog against the backend. Every dependency is injected.
  * @param {{
  *   get: (path: string) => Promise<any>,
+ *   lastError?: () => string,
  *   post: (path: string, body: any) => Promise<{ok: boolean, status: number, data: any}>,
  *   prefs: {get: (name: string) => any, set: (name: string, value: any) => void, clear: (name: string) => void},
  *   saveShared: (keyName: string, value: string) => Promise<{ok: boolean, error?: string}>,
@@ -698,7 +699,8 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	const refresh = async () => {
 		const view = await deps.get('/api/config/preset-view');
 		if (!view) {
-			note('header', 'error', 'The server did not answer. Check the server URL in Settings.');
+			const why = deps.lastError ? deps.lastError() : '';
+			note('header', 'error', why || 'The server did not answer. Check the server URL in Settings.');
 			return false;
 		}
 		// Client-side settings live in this Zotero's preferences, not on the server.
