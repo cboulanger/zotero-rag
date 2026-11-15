@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "description": "Fully remote via your own RunPod serverless endpoints (embedding + LLM, pay-per-use, scale-to-zero). Enter your RunPod API key, then click \"Provision endpoints\" to create or wake both endpoints in your account.",
+  "description": "Fully remote via your own RunPod serverless endpoints (embedding, LLM and re-ranking, pay-per-use, scale-to-zero). Enter your RunPod API key, then click \"Provision endpoints\" to create or wake the endpoints in your account.",
   "embedding": {
     "model_type": "remote",
     "model_name": "intfloat/multilingual-e5-large-instruct",
@@ -38,6 +38,13 @@
         "idle_timeout": 60
       }
     }
+  },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "model_kwargs": {"api_key_env": "RUNPOD_API_KEY"},
+    "provider": {"id": "runpod", "scope": "user", "options": {"gpu": "NVIDIA RTX A5000", "workers_max": 1, "idle_timeout": 60}}
   },
   "rag": {
     "top_k": 10,

@@ -25,6 +25,11 @@
       "extra_body": {"chat_template_kwargs": {"enable_thinking": false}}
     }
   },
+  "rerank": {
+    "model_type": "local",
+    "model_name": "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1",
+    "pool_size": 30
+  },
   "rag": {
     "top_k": 10,
     "score_threshold": 0.3,

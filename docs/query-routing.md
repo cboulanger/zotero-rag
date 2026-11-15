@@ -422,6 +422,22 @@ built to fix, and doesn't offset the specific regressions above. Raising it
 further is not expected to help: the failure mode is score dilution, not an
 insufficient blend ratio.
 
+### Cross-encoder re-ranking
+
+A preset with a `rerank` section (see [presets.md](presets.md#the-rerank-section)) rescores the
+first `pool_size` candidates of the raw pool with a cross-encoder, which reads the question and
+each passage together. It runs after the lexical blend and before embedding MMR, near-duplicate
+removal, the per-document cap and the `top_k` cut, so all of those work on the cross-encoder score.
+The vector score stays in the result (`vector_score`, with `pre_rerank_rank`, in the trace's
+chunks). A retrieval escalation in the same query scores only the candidates it adds. Implemented
+in `backend/services/rerank.py`.
+
+The step never blocks a query. When the user switched it off (Preferences, or the query dialog's
+advanced options, which send `enable_reranking: false`), when a remote endpoint is not running or
+the caller has no key for it, or when scoring fails or takes longer than `timeout_seconds`, the
+pool keeps its vector order. The trace's `retrieval.rerank` entry says what happened (`ran`,
+`disabled`, `not_ready`, `timeout`, `error`), how many passages were scored and how long it took.
+
 ### Embedding near-duplicate removal
 
 `RETRIEVAL_NEAR_DUP_THRESHOLD` (0-1, default 0 = off) drops every raw candidate

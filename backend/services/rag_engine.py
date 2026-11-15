@@ -21,12 +21,14 @@ from backend.services.llm import LLMService
 from backend.services.lexical_rerank import fuse_lexical
 from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
 from backend.services.near_dup_filter import drop_near_duplicates
+from backend.services.rerank import RerankOutcome, rerank_pool
 from backend.services.query_decomposition import (
     build_decomposition_prompt,
     fuse_ranked_lists,
     parse_sub_queries,
 )
 from backend.db.vector_store import VectorStore
+from backend.config.presets import RerankConfig
 from backend.config.settings import Settings
 
 if TYPE_CHECKING:
@@ -618,6 +620,21 @@ class QueryResult(BaseModel):
     source_refs: list[str] = []   # union of every contributing source's chunk_id
 
 
+def _merge_rerank_outcomes(outcomes: list) -> Optional[dict]:
+    """One trace entry for every re-ranking pass of a query (None when none ran).
+
+    Status, model and provider come from the last pass; ``scored`` and
+    ``duration_ms`` add up across passes (an escalation only scores new chunks).
+    """
+    if not outcomes:
+        return None
+    last = outcomes[-1].model_dump()
+    last["passes"] = len(outcomes)
+    last["scored"] = sum(o.scored for o in outcomes)
+    last["duration_ms"] = sum(o.duration_ms for o in outcomes)
+    return last
+
+
 class RAGEngine:
     """
     RAG query engine for answering questions based on indexed documents.
@@ -673,6 +690,24 @@ class RAGEngine:
         one when settings.retrieval_near_dup_threshold > 0; no-op otherwise."""
         threshold = self._near_dup_threshold()
         return drop_near_duplicates(results, threshold) if threshold else results
+
+    async def _prepare_pool(
+        self, question: str, results: list, rerank_cache: dict, outcome: list
+    ) -> list:
+        """Lexical blend, optional cross-encoder re-ranking, then embedding MMR.
+
+        The re-ranker (the preset's ``rerank`` section, see backend.services.rerank)
+        runs between the two blends so MMR diversifies by the sharper score.
+        ``rerank_cache`` holds scores already computed in this query; the
+        outcome of the pass is appended to ``outcome`` for the trace.
+        """
+        results = self._apply_lexical_fusion(question, results)
+        preset = self.settings.get_hardware_preset()
+        # isinstance, not "is not None": tests pass mock settings whose attributes are mocks.
+        if isinstance(getattr(preset, "rerank", None), RerankConfig):
+            results, result_outcome = await rerank_pool(question, results, preset, cache=rerank_cache)
+            outcome.append(result_outcome)
+        return self._apply_embedding_mmr(results)
 
     async def _search_with_sub_queries(
         self, question: str, results: list, search_kwargs: dict
@@ -825,8 +860,9 @@ class RAGEngine:
                 sources=[]
             )
 
-        raw_results = self._apply_lexical_fusion(question, raw_results)
-        raw_results = self._apply_embedding_mmr(raw_results)
+        rerank_cache: dict[str, float] = {}
+        rerank_outcomes: list[RerankOutcome] = []
+        raw_results = await self._prepare_pool(question, raw_results, rerank_cache, rerank_outcomes)
 
         capped_pool = _dedup_and_cap_chunks_per_document(
             self._apply_near_dup_filter(raw_results), max_chunks_per_document
@@ -878,9 +914,9 @@ class RAGEngine:
                     with_vectors=fetch_vectors,
                 )
                 if len(escalated_raw_results) > len(raw_results):
-                    raw_results = escalated_raw_results
-                    raw_results = self._apply_lexical_fusion(question, raw_results)
-                    raw_results = self._apply_embedding_mmr(raw_results)
+                    raw_results = await self._prepare_pool(
+                        question, escalated_raw_results, rerank_cache, rerank_outcomes
+                    )
                     capped_pool = _dedup_and_cap_chunks_per_document(
                         self._apply_near_dup_filter(raw_results), max_chunks_per_document
                     )
@@ -965,11 +1001,11 @@ class RAGEngine:
             )
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
+                retry_pool = await self._prepare_pool(
+                    question, retry_raw_results, rerank_cache, rerank_outcomes
+                )
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
-                    self._apply_near_dup_filter(
-                        self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results))
-                    ),
-                    max_chunks_per_document,
+                    self._apply_near_dup_filter(retry_pool), max_chunks_per_document,
                 )
                 retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
@@ -1043,6 +1079,8 @@ class RAGEngine:
                     page_number=r.chunk.metadata.page_number,
                     score=r.score,
                     text_preview=r.chunk.metadata.text_preview,
+                    vector_score=r.vector_score,
+                    pre_rerank_rank=r.pre_rerank_rank,
                 )
                 for r in search_results
             ]
@@ -1064,6 +1102,7 @@ class RAGEngine:
                 },
                 documents_grouped=len(sorted_doc_keys),
                 chunks=chunk_traces,
+                rerank=_merge_rerank_outcomes(rerank_outcomes),
             )
             trace.record(AgentExecutionTrace(
                 agent_name="rag",

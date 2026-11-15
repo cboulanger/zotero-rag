@@ -233,7 +233,9 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         # Setup: Create mock LLM service
         mock_llm = Mock(spec=RemoteLLMService)
         mock_llm.generate = AsyncMock(
-            return_value="Machine learning is a subset of artificial intelligence that enables computers to learn from data."
+            # Cites [S1]: an answer without an [SN] citation triggers the engine's one-time
+            # quality retry, i.e. a second generate() call.
+            return_value="Machine learning is a subset of artificial intelligence that enables computers to learn from data [S1]."
         )
 
         # Mock settings with preset

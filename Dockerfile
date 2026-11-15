@@ -6,6 +6,8 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 ARG INSTALL_LOCAL_MODELS=false
 
 WORKDIR /app
+# git: mpcdf-llm is installed from its git repository.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock ./
 ENV UV_HTTP_TIMEOUT=120
 RUN if [ "$INSTALL_LOCAL_MODELS" = "true" ]; then \

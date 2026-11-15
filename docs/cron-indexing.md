@@ -529,5 +529,7 @@ reason (revoked, expired, or downgraded to write scope).
 
 Each user's provider keys are stored per key name in the encrypted key store (`<data_path>/system/autoindex_keys.json`), so a user can hold, say, a KISSKI key and a Hugging Face token and switch presets without re-entering either. Every run indexes each owner's libraries on that owner's preset (their own choice, else the server default) with that owner's key for it; a preset with an admin-set key (`managed`/`shared` scope) needs no personal key. Keys are only pruned when they are permanently invalid.
 
+When the owner's embedding side runs in their own login session (a per-user MPCDF side, see [providers.md](providers.md), "Per-user sessions"), their libraries are skipped with an issue of kind `session`: such an endpoint needs the user to log in with a one-time code, so it cannot be started while they are away.
+
 When the owner has paused their embedding endpoint (see [presets.md](presets.md), "Pause and resume"), their libraries are skipped with the reason `embedding_paused` and no call is made to the endpoint, no queued upload's attempt count advances and their key's status is left alone. Other owners' libraries are indexed as usual, and a paused LLM does not affect indexing.
 

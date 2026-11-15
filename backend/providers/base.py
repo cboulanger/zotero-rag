@@ -26,6 +26,7 @@ from backend.providers.types import (
     ProvisionContext,
     Scope,
     Side,
+    side_config,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -51,6 +52,11 @@ class Provider:
     #: True when ``endpoint_url()`` finds the side's URL from the key (no ``base_url`` in the preset).
     derives_endpoint_url: ClassVar[bool] = False
     supports_suspend: ClassVar[bool] = False
+    #: False when provisioning runs in the caller's own login session instead of with a key.
+    provisioning_needs_key: ClassVar[bool] = True
+    #: True when each user runs their own endpoint for this side in a provider session
+    #: (see ``session_endpoint``); the side then has no fixed URL or shared key.
+    uses_session_endpoints: ClassVar[bool] = False
     #: True when ``live_models()`` can return a list (so a per-request model name is accepted).
     has_live_models: ClassVar[bool] = False
     #: Wire protocol of the LLM side; core implements the protocols, not vendors.
@@ -83,8 +89,8 @@ class Provider:
 
     @property
     def side_config(self):
-        """The ``EmbeddingConfig`` or ``LLMConfig`` this instance serves."""
-        return self.preset.embedding if self.side == "embedding" else self.preset.llm
+        """The ``EmbeddingConfig``, ``LLMConfig`` or ``RerankConfig`` this instance serves."""
+        return side_config(self.preset, self.side)
 
     def _http(self) -> Any:
         """Blocking ``httpx.Client`` for management-API calls (lazily created).
@@ -169,6 +175,56 @@ class Provider:
         Appended to "endpoint unavailable" errors and shown in Preferences.
         Core text stays vendor-neutral.
         """
+        return None
+
+    # -- re-ranking side -------------------------------------------------------
+
+    def rerank_credentials(self, request: Any, refresh: bool = False) -> Optional[Credentials]:
+        """URL and key of the calling user's ``/rerank`` endpoint, or None when there is none.
+
+        ``request`` is the per-query ``backend.services.rerank.RerankRequest``
+        (the caller's keys and user id). ``refresh`` asks for fresh values after
+        the endpoint rejected the previous ones. The generic implementation uses
+        the preset's fixed ``base_url`` and the caller's personal key; a provider
+        whose endpoints live in the user's account derives or looks them up.
+        """
+        kwargs = self.side_config.model_kwargs
+        base_url = kwargs.get("base_url")
+        if not base_url:
+            return None
+        env = kwargs.get("api_key_env")
+        api_key = request.client_keys.get(env) if env else None
+        if env and not api_key:
+            return None
+        return Credentials(api_key=api_key, base_url=base_url)
+
+    # -- per-user sessions --------------------------------------------------------
+
+    def session_login(self, user_id: Optional[int], values: dict[str, str]) -> dict:
+        """Log the caller in to the provider's per-user session (see ``SessionLoginDescriptor``).
+
+        Returns the session state (``{"state": "ok"|"login_required", ...}``, no
+        secrets). Only providers whose descriptor offers a login form implement it.
+        """
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_logout(self, user_id: Optional[int]) -> None:
+        raise NotImplementedError(f"{self.id} has no per-user session")
+
+    def session_status(self, user_id: Optional[int]) -> Optional[dict]:
+        """The caller's session state, or None when the provider has no sessions."""
+        return None
+
+    def session_endpoint(self, user_id: Optional[int]) -> Optional[Credentials]:
+        """URL and key of the caller's running endpoint for this side, or None when it is not running.
+
+        Only providers with ``uses_session_endpoints`` implement it. Credentials
+        may change at any time (a job renewal), so callers ask before each use.
+        """
+        return None
+
+    def session_activity(self, user_id: Optional[int]) -> None:
+        """Report that the caller's endpoint is in use, so it is not stopped as idle."""
         return None
 
     # -- model list -----------------------------------------------------------
