@@ -211,6 +211,13 @@ class RemoteReranker(Reranker):
         if retry:
             creds = await asyncio.to_thread(self._credentials, True)
             resp = await self._post(creds, question, texts)
+        if resp.status_code >= 400:
+            # A paused or cold endpoint is "not running" (the query goes on without
+            # re-ranking, and the dialog offers to start it), not a failure.
+            classify = getattr(self.provider, "classify_http_error", None)
+            state = classify(resp.status_code, resp.text) if classify is not None else None
+            if state in ("paused", "cold"):
+                raise RerankerUnavailable(f"the re-ranking endpoint is {state}")
         resp.raise_for_status()
         touch = getattr(self.provider, "rerank_activity", None)
         if touch is not None:
