@@ -204,7 +204,7 @@ class MpcdfProvider(Provider):
 
         if not mpcdf_sessions.available():
             return "This server cannot start MPCDF jobs (the mpcdf-llm library is not installed)."
-        return "Log in with your MPCDF account and start the endpoint; it runs as a job on your own account."
+        return "Log in with your MPCDF account (which starts the endpoints); each runs as a job on your own account."
 
     def health(self, creds: Credentials) -> Optional[Health]:
         """Readiness of the caller's endpoint, from their session.

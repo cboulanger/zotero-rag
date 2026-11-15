@@ -1114,21 +1114,54 @@ def _session_error(exc: Exception) -> HTTPException:
 
 
 @router.post("/config/session/login")
-def session_login(body: SessionLoginRequest, request: Request) -> dict:
-    """Log the caller in to their own account at the side's provider.
+async def session_login(body: SessionLoginRequest, request: Request) -> dict:
+    """Log the caller in to their own account at the side's provider, then start its endpoints.
 
     The password and one-time code are passed on once and never stored; the
     provider keeps only the resulting session, encrypted. Returns the session
-    state (``state``, ``username``, ``expires_at``, provider extras), no secrets.
-    Plain ``def``: the provider call blocks, so FastAPI runs it in a thread.
+    state (``state``, ``username``, ``expires_at``, provider extras), no secrets,
+    plus ``provisioning``: the provisioning job started for the preset's sides that
+    run in this session (the same job as POST /api/config/provision; re-ranking is
+    left out, it is only ever started on its own), or None. A provider start that
+    cannot begin does not fail the login; its reason is in ``provisioning_error``.
     """
     provider, user_id = _session_provider(request, body.side)
     try:
-        return provider.session_login(user_id, body.values)
+        result = await asyncio.to_thread(provider.session_login, user_id, body.values)
     except HTTPException:
         raise
     except Exception as exc:
         raise _session_error(exc)
+    result = dict(result or {})
+    result["provisioning"], result["provisioning_error"] = await _provision_session_sides(request, provider)
+    return result
+
+
+async def _provision_session_sides(request: Request, provider: Provider) -> Tuple[Optional[dict], Optional[str]]:
+    """Start provisioning the active preset's sides served by ``provider``'s session (not rerank).
+
+    Returns ``(job state, None)``, or ``(None, reason)`` when nothing was started. A job
+    that is already running is reported as such, not as an error.
+    """
+    preset = get_settings().get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError as exc:
+        return None, str(exc)
+    sides = [
+        s for s in preset_sides(preset)
+        if s != "rerank" and providers[s].id == provider.id
+        and providers[s].supports_provisioning and providers[s].uses_session_endpoints
+    ]
+    if not sides:
+        return None, None
+    try:
+        return await _start_job(request, ProvisionRequest(sides=sides), "provision"), None
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return None, None  # a job for these endpoints is already running
+        logger.warning("Provisioning after login did not start: %s", exc.detail)
+        return None, str(exc.detail)
 
 
 @router.post("/config/session/logout")

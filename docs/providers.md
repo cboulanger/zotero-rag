@@ -97,7 +97,12 @@ endpoint as a Slurm job of at most 8 hours on that user's account. A provider of
 a title and the fields with their HTML `type` and `autocomplete`), which the plugin renders in the
 side's section instead of a key field. The form posts to `POST /api/config/session/login`
 (`{side, values}`, five attempts per user per ten minutes); `GET /api/config/session?side=` and
-`POST /api/config/session/logout` answer for the caller only.
+`POST /api/config/session/logout` answer for the caller only. A successful login starts the
+caller's endpoints for the active preset's sides that run in that session (the same background job as
+`POST /api/config/provision`; the response carries it as `provisioning`, or a reason it could not
+start as `provisioning_error`); the plugin follows that job until the endpoints are ready. The
+re-ranking side is not started this way: like everywhere else, it starts only from its own section
+or the query dialog's prompt.
 
 For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
 its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero

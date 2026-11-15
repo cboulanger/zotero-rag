@@ -580,3 +580,32 @@ test('login: the form posts the values once and clears the secrets', async () =>
 	assert.strictEqual(refs.rerank.loginState.textContent, 'Logged in as alice.');
 	assert.strictEqual(refs.rerank.logoutButton.hidden, false);
 });
+
+test('login: follows the provisioning job the backend starts, and shows a start that failed', async () => {
+	const S = load();
+	const gets = [];
+	let job = { status: 'running', sides: {} };
+	const refs = S.ensureSections({ createElementNS }, fakeNode(), {
+		onProvision() {}, onRetry() {},
+		onLogin: (side, values) => c.login(side, values),
+	});
+	const c = S.createController({
+		refs,
+		get: async (p) => {
+			gets.push(p);
+			if (p === '/api/config/provision/status') {
+				const now = job;
+				job = idle; // the job finishes after the first poll
+				return now;
+			}
+			if (p.startsWith('/api/config/session')) return { state: 'ok', username: 'alice' };
+			if (p === '/api/config/providers') return { sides: { embedding: local, llm: local, rerank: sessionSide() } };
+			return { rerank: { status: 'cold', detail: '' } };
+		},
+		post: async () => ({ ok: true, status: 200, data: { state: 'ok', username: 'alice', provisioning: null, provisioning_error: 'no HF token' } }),
+		sleep: async () => {},
+	});
+	await c.login('rerank', { username: 'alice', password: 'pw', otp: '1' });
+	assert.ok(gets.filter((p) => p === '/api/config/provision/status').length >= 2, 'polls while the job runs');
+	assert.strictEqual(refs.rerank.status.textContent, 'Starting the endpoints failed: no HF token');
+});

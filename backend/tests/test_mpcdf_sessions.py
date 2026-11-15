@@ -320,6 +320,38 @@ class SessionApiTest(unittest.TestCase):
         self.assertEqual(self.fake.logins, [(None, "alice")])  # loopback: the single local user
         self.assertEqual(self.client.get("/api/config/session", params={"side": "rerank"}).json()["state"], "ok")
 
+    def test_login_starts_the_session_sides_but_not_rerank(self):
+        self.settings.model_preset = "remote-mpcdf"  # embedding, LLM and re-ranking on MPCDF
+        with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
+            r = self.client.post("/api/config/session/login", json={
+                "side": "llm", "values": {"username": "alice", "password": "pw", "otp": "123456"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["state"], "ok")
+        self.assertIsNotNone(r.json()["provisioning"])
+        self.assertIsNone(r.json()["provisioning_error"])
+        run_job.assert_called_once()
+        self.assertEqual([j.side for j in run_job.call_args.args[0]], ["embedding", "llm"])
+
+    def test_login_with_only_a_rerank_session_side_starts_nothing(self):
+        with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
+            r = self.client.post("/api/config/session/login", json={
+                "side": "rerank", "values": {"username": "alice", "password": "pw", "otp": "123456"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNone(r.json()["provisioning"])
+        run_job.assert_not_called()
+
+    def test_failed_login_starts_nothing(self):
+        class LoginFailed(Exception):
+            pass
+
+        self.settings.model_preset = "remote-mpcdf"
+        self.fake.login = AsyncMock(side_effect=LoginFailed("no"))
+        with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
+            r = self.client.post("/api/config/session/login", json={
+                "side": "llm", "values": {"username": "a", "password": "x", "otp": "1"}})
+        self.assertEqual(r.status_code, 401)
+        run_job.assert_not_called()
+
     def test_side_without_login_is_rejected(self):
         r = self.client.post("/api/config/session/login", json={"side": "llm", "values": {}})
         self.assertEqual(r.status_code, 400)

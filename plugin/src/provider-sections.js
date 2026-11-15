@@ -612,8 +612,12 @@ ZoteroRAGProviderSections.createController = function (deps) {
 				return;
 			}
 			state.sessions[side] = result.data;
+			// The backend starts this session's endpoints right after the login; a start that
+			// could not begin is reported here, the running job by polling until it is done.
 			show('');
-			await refresh();
+			await poll();
+			// After polling: a refresh repaints the status line.
+			if (result.data && result.data.provisioning_error) show(`Starting the endpoints failed: ${result.data.provisioning_error}`);
 		} catch (e) {
 			show(`Login failed: ${e}`);
 		}
