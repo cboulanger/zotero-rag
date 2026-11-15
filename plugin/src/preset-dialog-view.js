@@ -46,6 +46,9 @@
  * @property {string|null} [account]
  * @property {boolean} [sends_login] - a card action that submits the card's `login` fields as `body.values`
  *
+ * @typedef {{id: string, unit: string, period?: string|null, limit: number, remaining: number, resets_at?: string|null}} QuotaMeter
+ * @typedef {{used_pct: number, level: 'ok'|'warn'|'error', text: string, meters: QuotaMeter[]}} UiQuota
+ *
  * @typedef {Object} SideView
  * @property {string} side
  * @property {string} title
@@ -60,6 +63,7 @@
  * @property {UiFact[]} facts
  * @property {string[]} log
  * @property {UiAction[]} actions
+ * @property {UiQuota|null} [quota] - combined by the provider; `meters` are the details
  *
  * @typedef {Object} AccountCard
  * @property {string} id
@@ -71,6 +75,7 @@
  * @property {UiMessage[]} messages
  * @property {UiAction[]} [actions] - log in / log out of a provider with an account login
  * @property {boolean} auto_start
+ * @property {UiQuota|null} [quota] - the most used quota of the sides it serves
  *
  * @typedef {Object} PresetView
  * @property {{name: string, description: string, is_admin: boolean, default_options: string[], default_preset: string}} preset
@@ -219,6 +224,19 @@ var ZoteroRAGPresetDialog = {
 			}
 		}
 		return keys;
+	},
+
+	/**
+	 * Bar and label of one quota meter (pure). Amber from 75 % used, red from 95 %.
+	 * @param {QuotaMeter} meter
+	 * @returns {{usedPct: number, level: 'ok'|'warn'|'error', text: string}|null}
+	 */
+	describeMeter(meter) {
+		if (!meter || !meter.limit) return null;
+		const usedPct = Math.max(0, Math.min(100, Math.round((meter.limit - meter.remaining) / meter.limit * 100)));
+		const level = usedPct >= 95 ? 'error' : usedPct >= 75 ? 'warn' : 'ok';
+		const per = meter.period ? ` per ${meter.period}` : '';
+		return { usedPct, level, text: `${meter.remaining} of ${meter.limit} ${meter.unit} left${per}` };
 	},
 
 	/**
@@ -458,6 +476,7 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 		}
 		statusBody.appendChild(facts);
 	}
+	if (side.quota) statusBody.appendChild(this._quota(el, side.quota));
 	if (side.log.length) {
 		const toggle = el('button', 'pd-link');
 		const open = !!local.logOpen[side.side];
@@ -490,6 +509,33 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 		row.appendChild(why);
 	}
 	actionsBody.appendChild(row);
+};
+
+/**
+ * A side's quota: the provider's combined value and one bar per meter.
+ * @param {(tag: string, cls?: string) => any} el
+ * @param {UiQuota} quota
+ * @returns {any}
+ */
+ZoteroRAGPresetDialog._quota = function (el, quota) {
+	const box = el('div', 'pd-quota');
+	const head = el('div', `pd-quota-head pd-msg-${quota.level}`);
+	head.textContent = `Quota: ${quota.text}`;
+	box.appendChild(head);
+	for (const meter of quota.meters || []) {
+		const info = this.describeMeter(meter);
+		if (!info) continue;
+		const row = el('div', 'pd-quota-row');
+		const track = el('div', 'pd-quota-track');
+		const bar = el('div', `pd-quota-bar pd-quota-${info.level}`);
+		bar.style.width = `${info.usedPct}%`;
+		track.appendChild(bar);
+		const label = el('span', 'pd-muted');
+		label.textContent = info.text;
+		row.append(track, label);
+		box.appendChild(row);
+	}
+	return box;
 };
 
 /**
@@ -625,6 +671,12 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 		: (card.state === 'ready' ? 'Credentials complete' : 'Credentials missing');
 	state.children[1].textContent = ` ${stateText}${card.scope_note ? ` (${card.scope_note})` : ''}`;
 	node.appendChild(state);
+	if (card.quota) {
+		const quota = el('div', `pd-card-quota pd-msg-${card.quota.level}`);
+		quota.append(this._dot(el, card.quota.level === 'ok' ? 'ready' : card.quota.level === 'warn' ? 'starting' : 'down'), el('span'));
+		quota.children[1].textContent = ` Quota: ${card.quota.text}`;
+		node.appendChild(quota);
+	}
 	const scope = `account:${card.id}`;
 	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, handlers));
 	const note = local.notes[scope];

@@ -5,7 +5,7 @@ Configuration API endpoints.
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import logging
 import os
@@ -491,6 +491,9 @@ async def update_config(
     set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
+    from backend.services import side_probe
+
+    side_probe.reset()
     try:
         store = get_key_store()
         if store.enabled:
@@ -526,6 +529,19 @@ def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[
     return request.headers.get(env_var_to_header(key_env)) or None
 
 
+def _side_credentials(preset: HardwarePreset, side: str, provider: Provider, request: Optional[Request]) -> Credentials:
+    """Key, URL and user of one side, following its credential scope (see ``_check_side``)."""
+    kwargs = _side_kwargs(preset, side)
+    url_env = kwargs.get("shared_base_url_env")
+    key_env = kwargs.get("shared_api_key_env")
+    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
+    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
+    if not base_url and api_key and provider.derives_endpoint_url:
+        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
+    identity = get_zotero_identity(request) if request is not None else None
+    return Credentials(api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None)
+
+
 def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = None) -> Optional[EndpointHealth]:
     """Health of one side from its provider; None when the provider has no health concept.
 
@@ -539,17 +555,7 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
         provider = get_providers(preset)[side]
     except ProviderConfigError:
         return None
-    kwargs = _side_kwargs(preset, side)
-    url_env = kwargs.get("shared_base_url_env")
-    key_env = kwargs.get("shared_api_key_env")
-    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
-    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
-    if not base_url and api_key and provider.derives_endpoint_url:
-        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
-    identity = get_zotero_identity(request) if request is not None else None
-    health = provider.health(Credentials(
-        api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None,
-    ))
+    health = provider.health(_side_credentials(preset, side, provider, request))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
@@ -1064,6 +1070,33 @@ async def get_preset_view(request: Request) -> PresetView:
                 logger.info("Session state of %s unavailable: %s", provider.id, type(exc).__name__)
                 sessions[provider.id] = None
 
+    # Sides without a status check get a (cached) test request; every remote side its quota meters.
+    from backend.services.side_probe import probe_side
+
+    client_keys = get_client_api_keys(request)
+    required = [k.model_dump() for k in await asyncio.to_thread(_required_keys, settings, preset)]
+
+    def _has_credentials(side: str) -> bool:
+        """No test request while a non-optional key of the side is missing (the card says so)."""
+        for key in required:
+            if side not in (key.get("sides") or []) or key.get("optional"):
+                continue
+            if key["kind"] == "api_key" and not request.headers.get(key.get("header_name") or ""):
+                return False
+            if key["kind"] in ("shared_api_key", "shared_base_url") and not key.get("is_set"):
+                return False
+        return True
+
+    probes: Dict[str, Any] = {}
+    availability: Dict[str, Optional[str]] = {}
+    for side in ("embedding", "llm"):
+        if side not in health:
+            continue
+        probes[side] = await probe_side(preset, side, client_keys,
+                                        send=health[side] is None and _has_credentials(side))
+        availability[side] = await asyncio.to_thread(
+            lambda s=side: providers[s].model_availability(_side_credentials(preset, s, providers[s], request)))
+
     loopback = is_loopback(settings)
     try:
         await require_authorized_group_admin(request)
@@ -1096,7 +1129,7 @@ async def get_preset_view(request: Request) -> PresetView:
         health=health,
         operable=operable,
         job=get_provisioning_status(request),
-        required_keys=[k.model_dump() for k in await asyncio.to_thread(_required_keys, settings, preset)],
+        required_keys=required,
         header_present=lambda name: bool(name and request.headers.get(name)),
         is_admin=is_admin,
         default_options=default_options,
@@ -1106,6 +1139,8 @@ async def get_preset_view(request: Request) -> PresetView:
         vector_probe=vector_probe,
         vector_detail="Qdrant server" if settings.qdrant_url else "embedded Qdrant",
         sessions=sessions,
+        probes=probes,
+        availability=availability,
     )
     return build_preset_view(inputs)
 

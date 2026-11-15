@@ -359,3 +359,24 @@ test('a failed load shows why the server refused instead of the generic message'
 	await controller.refresh();
 	assert.match(painted.at(-1).notes.header.text, /HTTP 404/);
 });
+
+test('quota: the tab shows one bar per meter and the card the combined value', () => {
+	const D = load();
+	assert.deepStrictEqual({ ...D.describeMeter({ id: 'requests/hour', unit: 'requests', period: 'hour', limit: 100, remaining: 20 }) },
+		{ usedPct: 80, level: 'warn', text: '20 of 100 requests left per hour' });
+	assert.strictEqual(D.describeMeter({ id: 'x', unit: 'requests', limit: 0, remaining: 0 }), null);
+	const quota = { used_pct: 80, level: 'warn', text: '80 % of the daily quota used', meters: [
+		{ id: 'requests/hour', unit: 'requests', period: 'hour', limit: 100, remaining: 90 },
+		{ id: 'requests/day', unit: 'requests', period: 'day', limit: 1000, remaining: 200 },
+	] };
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	const v = view([side('llm', { quota })], [card({ quota })]);
+	D.paint(doc, refs, v, { tab: 'llm', logOpen: {}, drafts: {}, notes: {} },
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
+	const dump = (n) => JSON.stringify(n, (k, val) => (k === 'parentNode' ? undefined : val));
+	const panel = dump(refs.panel);
+	assert.match(panel, /90 of 100 requests left per hour/);
+	assert.match(panel, /"width":"80%"/);
+	assert.match(dump(refs.cards), /Quota: 80 % of the daily quota used/);
+});

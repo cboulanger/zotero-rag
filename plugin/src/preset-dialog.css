@@ -72,3 +72,12 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .pd-card .pd-field { grid-template-columns: 140px minmax(0, 1fr) auto; }
 .pd-buttons { display: flex; justify-content: flex-end; padding: 8px 16px; border-top: 1px solid var(--pd-line); }
 [hidden] { display: none !important; }
+
+.pd-quota { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+.pd-quota-row { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 12px; }
+.pd-quota-track { height: 6px; border-radius: 3px; background: var(--pd-line); overflow: hidden; }
+.pd-quota-bar { height: 100%; }
+.pd-quota-ok { background: var(--pd-ok); }
+.pd-quota-warn { background: var(--pd-warn); }
+.pd-quota-error { background: var(--pd-bad); }
+.pd-card-quota { font-size: 12px; display: flex; align-items: center; gap: 4px; }

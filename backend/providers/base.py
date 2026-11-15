@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal, Mapping, Opt
 
 from pydantic import BaseModel
 
-from backend.providers.ui import UiAction, UiFact, UiField, UiMessage, UiRequest
+from backend.providers.ui import UiAction, UiFact, UiField, UiMessage, UiQuota, UiRequest
 from backend.providers.types import (
     Credentials,
     Health,
@@ -243,6 +243,31 @@ class Provider:
             placeholder="Optional, kept in memory only" if credential.optional else "",
         )]
 
+    def quota_summary(self, meters: list[Meter]) -> Optional[UiQuota]:
+        """One value for how much of this side's quota is used, from its meters.
+
+        The default takes the meter closest to running out. Override to combine the
+        periods that matter for the provider (e.g. hourly and daily). None without meters.
+        """
+        return quota_from(meters, "")
+
+    def model_availability(self, creds: Credentials) -> Optional[str]:
+        """``available``, ``busy`` or ``very busy`` for this side's model; None when unknown.
+
+        The default asks ``live_models`` (providers with ``has_live_models``) for the
+        answering side's model. Blocking; never raises.
+        """
+        if not self.has_live_models or self.side != "llm" or not creds.base_url or not creds.api_key:
+            return None
+        try:
+            models = self.live_models(creds.base_url, creds.api_key) or []
+        except Exception:
+            return None
+        cfg = self.side_config
+        wanted = (getattr(cfg, "literal_model_names", None) or [cfg.model_name])[0]
+        found = next((m for m in models if m.id == wanted), None)
+        return found.availability if found else None
+
     def account_session(self, session: Optional[dict]) -> tuple[list[UiMessage], list[UiAction]]:
         """Status line and actions (log in, log out) of an account card with a login.
 
@@ -424,3 +449,18 @@ def _utc_now() -> str:
 # __init_subclass__ only fires for subclasses.
 PROVIDERS[Provider.id] = Provider
 GenericProvider = Provider
+
+
+def quota_from(meters: list[Meter], note: str) -> Optional[UiQuota]:
+    """A :class:`UiQuota` from the meter closest to running out (``note`` explains the combination)."""
+    usable = [m for m in meters if m.limit > 0]
+    if not usable:
+        return None
+    worst = max(usable, key=lambda m: (m.limit - m.remaining) / m.limit)
+    used_pct = round((worst.limit - worst.remaining) * 100 / worst.limit)
+    level = "error" if worst.remaining <= 0 or used_pct >= 95 else "warn" if used_pct >= 75 else "ok"
+    period = {"minute": " per-minute", "hour": " hourly", "day": " daily", "month": " monthly"}.get(worst.period or "", "")
+    text = f"{used_pct} % of the{period} quota used ({worst.remaining} {worst.unit} left)"
+    if note:
+        text += f"; {note}"
+    return UiQuota(used_pct=used_pct, level=level, text=text, meters=[m.model_dump() for m in usable])

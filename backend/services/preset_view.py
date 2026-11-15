@@ -15,7 +15,7 @@ probe results first (they need the request and blocking I/O) and passes them in.
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from backend.providers.types import OPTIONAL_SIDES, Health, preset_sides, side_config
+from backend.providers.types import OPTIONAL_SIDES, Health, Meter, preset_sides, side_config
 from backend.providers.ui import (
     AccountCard,
     PresetHeader,
@@ -104,6 +104,11 @@ class ViewInputs:
     vector_detail: str = ""
     #: provider id -> the caller's ``session_status`` for providers with an account login.
     sessions: dict = field(default_factory=dict)
+    #: side -> ``backend.services.side_probe.SideProbe``: test request (for sides without a
+    #: status check) and quota meters.
+    probes: dict = field(default_factory=dict)
+    #: side -> ``available`` / ``busy`` / ``very busy`` of its model, when the provider knows.
+    availability: dict = field(default_factory=dict)
 
 
 # -- sides --------------------------------------------------------------------
@@ -156,9 +161,17 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
     view.actions = provider.side_actions(health, job_status, operable)
     view.log = _job_log(inputs.job, side)
 
+    probe = inputs.probes.get(side)
     if job_status in ("running", "pending"):
         view.state = "starting"
         view.summary = "Starting: " + (view.log[-1] if view.log else "job running")
+    elif health is None and probe is not None and probe.ok is not None:
+        # No status check of its own: a test request tells whether the model answers.
+        view.state = "ready" if probe.ok else "down"
+        view.summary = "Ready: answered a test request" if probe.ok else f"Down: {probe.detail or 'the test request failed'}"
+        if not probe.ok and not probe.rate_limited:
+            view.messages.append(UiMessage(level="error", text=f"A test request failed ({probe.detail}). "
+                                                                "Check the key in the account card below."))
     elif health is None:
         view.state = "unknown"
         view.summary = "No status check for this provider"
@@ -173,6 +186,19 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
         view.messages.insert(0, UiMessage(level="info", text="The last job finished; waiting for the endpoint to answer."))
     if provider.supports_provisioning and not operable and view.state == "down":
         view.messages.append(UiMessage(level="info", text="Ask the server admin to start this endpoint."))
+    if probe is not None and probe.meters:
+        view.quota = provider.quota_summary([Meter(**m) for m in probe.meters])
+        if view.quota and view.quota.level == "error" and view.state == "ready" and view.quota.used_pct >= 100:
+            view.state = "down"
+            view.summary = "Down: quota exhausted"
+        if view.quota and view.quota.level != "ok":
+            view.messages.append(UiMessage(level=view.quota.level, text=f"Quota: {view.quota.text}."))
+    availability = inputs.availability.get(side)
+    if availability:
+        view.facts.append(UiFact(label="Demand", value=availability))
+        if availability == "very busy":
+            view.messages.append(UiMessage(level="warn", text="The model is very busy right now; answers may be slow "
+                                                              "or fail. Another model of the preset may respond faster."))
     if side in OPTIONAL_SIDES:
         _rerank_extras(view, cfg)
         if view.state == "down":
@@ -374,6 +400,11 @@ def build_preset_view(inputs: ViewInputs) -> PresetView:
                 view.messages.append(UiMessage(level="info", text=reason))
         elif view.account and view.state == "down" and not any(a.id in ("start", "retry") and a.enabled for a in view.actions):
             view.messages.append(UiMessage(level="info", text="Check the credentials in the account card below."))
+
+    for card in accounts:
+        quotas = [v.quota for v in model_sides.values() if v.account == card.id and v.quota]
+        if quotas:
+            card.quota = max(quotas, key=lambda q: q.used_pct)
 
     sides = [
         _extraction_side(inputs, docling_account, docling_key_set),

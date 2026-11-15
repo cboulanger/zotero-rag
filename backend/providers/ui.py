@@ -97,6 +97,17 @@ class UiAction(BaseModel):
     sends_login: bool = False
 
 
+class UiQuota(BaseModel):
+    """How much of a provider's quota is used, combined into one value by the provider
+    (``Provider.quota_summary``), with the meters behind it for a detailed display."""
+
+    used_pct: int
+    level: Literal["ok", "warn", "error"] = "ok"
+    text: str
+    #: ``backend.providers.types.Meter`` dumps (the plugin's rate-limit widget draws them).
+    meters: list[dict] = Field(default_factory=list)
+
+
 class SideProvider(BaseModel):
     id: str
     label: str
@@ -119,6 +130,7 @@ class SideView(BaseModel):
     facts: list[UiFact] = Field(default_factory=list)
     log: list[str] = Field(default_factory=list)
     actions: list[UiAction] = Field(default_factory=list)
+    quota: Optional[UiQuota] = None
 
 
 class AccountCard(BaseModel):
@@ -138,6 +150,8 @@ class AccountCard(BaseModel):
     messages: list[UiMessage] = Field(default_factory=list)
     actions: list[UiAction] = Field(default_factory=list)
     auto_start: bool = True
+    #: The most used quota of the sides this account serves.
+    quota: Optional[UiQuota] = None
 
 
 class PresetHeader(BaseModel):

@@ -13,6 +13,7 @@ from backend.config.settings import get_settings, reset_settings
 from backend.providers.types import Health
 from backend.services import provisioning
 from backend.services.preset_view import Probe
+from backend.services.side_probe import SideProbe
 from backend.services.zotero_identity import ZoteroIdentity
 
 UNPROVISIONED = Health(status="unreachable", detail="not provisioned")
@@ -209,7 +210,8 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual(self._side(body, "extraction")["state"], "down")
         # No status check and no key: the side cannot work.
         self.assertEqual(self._side(body, "llm")["state"], "down")
-        with_key = self._get("kisski-docling", headers={"X-Kisski-Api-Key": "k"})
+        with patch("backend.services.side_probe.probe_side", new=AsyncMock(return_value=SideProbe())):
+            with_key = self._get("kisski-docling", headers={"X-Kisski-Api-Key": "k"})
         self.assertEqual(self._side(with_key, "llm")["state"], "unknown")
         self.assertEqual(with_key["accounts"][0]["state"], "ready")
 
@@ -241,6 +243,58 @@ class PresetViewApiTest(unittest.TestCase):
     def test_no_secret_value_is_echoed(self):
         body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_secretvalue"})
         self.assertNotIn("rpa_secretvalue", json.dumps(body))
+
+    # -- test requests, quota and demand -------------------------------------------
+
+    def _kisski(self, probe, availability=None, headers=None):
+        mock = AsyncMock(return_value=probe)
+        with patch("backend.services.side_probe.probe_side", new=mock), \
+             patch("backend.providers.kisski.KisskiProvider.model_availability", return_value=availability):
+            body = self._get("remote-kisski", headers={"X-Kisski-Api-Key": "k"} if headers is None else headers)
+        return body, mock
+
+    def test_a_side_without_status_check_is_ready_when_a_test_request_answers(self):
+        body, mock = self._kisski(SideProbe(ok=True))
+        side = self._side(body, "embedding")
+        self.assertEqual(side["state"], "ready")
+        self.assertIn("test request", side["summary"])
+        self.assertTrue(all(call.kwargs["send"] for call in mock.await_args_list))
+
+    def test_a_failed_test_request_marks_the_side_down_with_the_reason(self):
+        body, _ = self._kisski(SideProbe(ok=False, detail="HTTP 401: invalid key"))
+        side = self._side(body, "llm")
+        self.assertEqual(side["state"], "down")
+        self.assertIn("HTTP 401", side["summary"])
+
+    def test_no_test_request_while_the_key_is_missing(self):
+        body, mock = self._kisski(SideProbe(), headers={})
+        self.assertFalse(any(call.kwargs["send"] for call in mock.await_args_list))
+        self.assertEqual(self._side(body, "llm")["state"], "down")
+
+    def test_kisski_quota_combines_hour_and_day_and_shows_on_the_card(self):
+        meters = [
+            {"id": "requests/hour", "side": "llm", "unit": "requests", "period": "hour", "limit": 100, "remaining": 90},
+            {"id": "requests/day", "side": "llm", "unit": "requests", "period": "day", "limit": 1000, "remaining": 200},
+            {"id": "requests/month", "side": "llm", "unit": "requests", "period": "month", "limit": 10, "remaining": 0},
+        ]
+        body, _ = self._kisski(SideProbe(ok=True, meters=meters))
+        quota = self._side(body, "llm")["quota"]
+        self.assertEqual((quota["used_pct"], quota["level"]), (80, "warn"))
+        self.assertIn("daily", quota["text"])
+        self.assertIn("hourly and daily quota combined", quota["text"])
+        self.assertEqual(body["accounts"][0]["quota"]["used_pct"], 80)
+
+    def test_exhausted_quota_marks_the_side_down(self):
+        meters = [{"id": "requests/hour", "side": "llm", "unit": "requests", "period": "hour", "limit": 100, "remaining": 0}]
+        body, _ = self._kisski(SideProbe(ok=True, meters=meters))
+        self.assertEqual(self._side(body, "llm")["state"], "down")
+        self.assertEqual(body["accounts"][0]["quota"]["level"], "error")
+
+    def test_a_very_busy_model_is_reported(self):
+        body, _ = self._kisski(SideProbe(ok=True), availability="very busy")
+        side = self._side(body, "llm")
+        self.assertIn({"label": "Demand", "value": "very busy"}, side["facts"])
+        self.assertTrue(any("very busy" in m["text"] for m in side["messages"]))
 
 
 if __name__ == "__main__":

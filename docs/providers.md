@@ -79,10 +79,19 @@ defaults in the base class (see `backend/providers/ui.py` for the data shapes an
   serves and, for a provider with an account login (`provisioning.login`), the caller's
   `session_status`. The default adds the login form while the caller is logged out, and otherwise
   the one-time provisioning credential.
+- `quota_summary(meters)`: one combined value for a side's quota (the account card shows the
+  highest of its sides; the tab shows every meter). The default takes the meter closest to running
+  out; KISSKI combines its hourly and daily limits.
+- `model_availability(creds)`: `available`, `busy` or `very busy` for the answering model, from
+  `live_models` (KISSKI); the tab warns while the model is very busy.
 - `account_session(session)`: for a provider with an account login, the card's status messages and
   its **Log in and start** / **Log out** actions. Logging in posts the form's values once to
   `POST /api/config/session/login`, which also starts the sides that run in the session. Until the
   caller is logged in, the start actions of the sides the card serves are disabled.
+
+A side whose provider has no `health` check is checked with a minimal test request through the
+caller's key (`backend/services/side_probe.py`, cached per side and key), so the tab can still say
+whether the model answers.
 
 These hooks return data, never markup: the dialog runs with Zotero's privileges, so the plugin
 renders every field, message and action itself.

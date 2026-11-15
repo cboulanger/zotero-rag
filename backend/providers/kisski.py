@@ -14,6 +14,7 @@ from typing import Literal, Mapping, Optional
 
 from backend.providers.base import Provider, _utc_now
 from backend.providers.types import Meter, ModelInfo, ProviderOptions
+from backend.providers.ui import UiQuota
 from backend.providers.usage import lowercase_headers, make_meter
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,13 @@ class KisskiProvider(Provider):
             return None
         models.sort(key=lambda m: m.demand if m.demand is not None else 0)
         return models
+
+    def quota_summary(self, meters: list[Meter]) -> Optional[UiQuota]:
+        """KISSKI limits requests per hour and per day; the one closer to running out counts."""
+        from backend.providers.base import quota_from
+
+        periods = [m for m in meters if m.period in ("hour", "day")]
+        return quota_from(periods, "hourly and daily quota combined") if periods else super().quota_summary(meters)
 
     def parse_usage(
         self,
