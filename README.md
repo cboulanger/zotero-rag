@@ -163,9 +163,9 @@ The first time the plugin connects to a backend it isn't already configured for,
 
 - **Server URL** — the full URL of the remote server (e.g. `https://rag.example.com`)
 - **Zotero API Key** — your own personal key from <https://www.zotero.org/settings/keys>- Do not reuse an existing key, generate a new key, which **must** be read-only and should only cover the libraries that you want to query. A local server (`localhost`) needs none of this and skips straight past it; a remote server uses this key to identify you and check that you're authorized to use that instance (e.g. membership in a designated Zotero group). The Preferences pane shows a live status (username + accessible library count) once a valid key is entered.
-- **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI, RunPod, Hugging Face), enter your own key here so the plugin can pass it to the server with your requests. Keys of self-provisioned endpoints can also be managed from the **Models** section (provision, pause, resume), where a separate management token is kept in memory only
+- **Service API Keys** — if the backend preset uses a remote LLM or embedding service (e.g. OpenAI, KISSKI, RunPod, Hugging Face), enter your own key so the plugin can pass it to the server with your requests. Afterwards, keys live in the account cards of **Model preset → Configure preset…**, which also shows whether each step of the pipeline is ready and starts, pauses or resumes self-provisioned endpoints (a separate management key is kept in memory only)
 
-See the [Plugin Settings Reference](docs/plugin-settings.md) for every other setting available in this pane (automatic indexing, retrieval tuning, library visibility, and more) and in the query dialog's advanced options.
+See the [Plugin Settings Reference](docs/plugin-settings.md) for every other setting available in this pane (the Configure preset dialog with retrieval tuning, automatic indexing, library visibility, and more) and in the query dialog's advanced options.
 
 ### 6. Using the Plugin
 

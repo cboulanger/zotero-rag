@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "description": "Fully remote via your own Hugging Face Inference Endpoints (embedding + LLM, pay-per-use, scale-to-zero, billed to your own Hugging Face account). Enter your Hugging Face token, then click \"Provision endpoint\" for each side to create or wake it.",
+  "description": "Fully remote via your own Hugging Face Inference Endpoints (embedding + LLM, pay-per-use, scale-to-zero, billed to your own Hugging Face account). Enter your Hugging Face token, then use \"Start all\" in the Configure preset dialog to create or wake both endpoints.",
   "embedding": {
     "model_type": "remote",
     "model_name": "intfloat/multilingual-e5-large-instruct",

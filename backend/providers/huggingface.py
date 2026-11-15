@@ -238,7 +238,7 @@ class HuggingFaceProvider(Provider):
     def unavailable_hint(self) -> Optional[str]:
         return (
             "This preset uses a Hugging Face Inference Endpoint, which may be starting, scaled to zero "
-            "or paused - check its status and provision or resume it from Preferences."
+            "or paused - check its status and start or resume it in the Configure preset dialog."
         )
 
     def classify_http_error(self, status: int, body: str) -> Optional[str]:
@@ -376,7 +376,7 @@ class HuggingFaceProvider(Provider):
         """Create, resume or wake this side's endpoint (idempotent, by name). The URL is derived, so ``{}``."""
         token = ctx.credential
         if not token:
-            raise ProvisionError("No Hugging Face token available. Enter one in Preferences or set the shared token.")
+            raise ProvisionError("No Hugging Face token available. Enter one in the Configure preset dialog or set the shared token.")
         progress(f"Checking the {self.side} endpoint")
         endpoint = self._get_endpoint(token)
         if endpoint is not None:

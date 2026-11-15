@@ -35,7 +35,9 @@ from backend.services.usage_meters import recorder as usage_recorder
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers
-from backend.providers.types import ModelInfo
+from backend.providers.types import Health, ModelInfo
+from backend.providers.ui import PresetView
+from backend.services.preset_view import Probe, ViewInputs, build_preset_view
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -948,7 +950,11 @@ async def get_required_api_keys():
     POST /api/config/provision, so its `shared_base_url` entry is omitted.
     """
     settings = get_settings()
-    preset = settings.get_hardware_preset()
+    return RequiredKeysResponse(keys=_required_keys(settings, settings.get_hardware_preset()))
+
+
+def _required_keys(settings, preset: HardwarePreset) -> List[ApiKeyRequirement]:
+    """The client-configurable fields of ``preset`` (see GET /api/required-keys)."""
     try:
         providers = get_providers(preset)
     except ProviderConfigError:
@@ -975,10 +981,96 @@ async def get_required_api_keys():
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
         _merge(key_info, "embedding")
-    for key_info in RemoteLLMService.required_client_fields(settings):
+    for key_info in RemoteLLMService.required_client_fields_for_config(preset.llm):
         _merge(key_info, "llm")
 
-    return RequiredKeysResponse(keys=list(seen.values()))
+    return list(seen.values())
+
+
+async def _probe(url: Optional[str]) -> Optional[Probe]:
+    """GET ``url`` with a short timeout; None when there is nothing to probe."""
+    if not url:
+        return None
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url)
+    except httpx.TimeoutException:
+        return Probe(ok=False, detail="no answer within 3 s")
+    except Exception as exc:  # any failure means "not reachable" for the dialog
+        return Probe(ok=False, detail=f"not reachable ({type(exc).__name__})")
+    if resp.is_success:
+        return Probe(ok=True)
+    return Probe(ok=False, detail=f"HTTP {resp.status_code}")
+
+
+@router.get("/config/preset-view", response_model=PresetView)
+async def get_preset_view(request: Request) -> PresetView:
+    """Everything the plugin's "Configure preset" dialog shows for the caller's effective preset.
+
+    One tab per side of the pipeline (state, configuration fields, status messages, a job
+    log and actions) and one account card per service provider (its credential fields,
+    which report only whether a value is set). Built from the providers' hooks, so the
+    plugin needs no vendor knowledge; see backend/providers/ui.py.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        providers = {}
+
+    health: Dict[str, Optional[Health]] = {}
+    operable: Dict[str, bool] = {}
+    for side, provider in providers.items():
+        checked = await asyncio.to_thread(_check_side, preset, side, request)
+        health[side] = Health(status=checked.status, detail=checked.detail) if checked else None
+        operable[side] = await _caller_may_operate(request, provider)
+
+    loopback = is_loopback(settings)
+    try:
+        await require_authorized_group_admin(request)
+        is_admin = True
+    except HTTPException:
+        is_admin = False
+
+    default_options: List[str] = []
+    default_name = ""
+    if is_admin and not loopback:  # on a loopback server the Settings chooser is the default
+        default = settings.get_default_preset()
+        default_name = default.name
+
+        def _options() -> List[str]:
+            available = list_presets(settings.data_path, platform=current_platform())
+            compatible = _compatible_presets(default, settings.data_path, available)
+            return [p.name for p in _switchable_presets(default, compatible, settings, request)]
+
+        default_options = await asyncio.to_thread(_options)
+
+    extractor = effective_extractor_backend(settings, preset)
+    extraction_probe = None
+    if extractor == "kreuzberg":
+        extraction_probe = await _probe(f"{settings.kreuzberg_url.rstrip('/')}/health" if settings.kreuzberg_url else None)
+    vector_probe = await _probe(settings.qdrant_url)
+
+    inputs = ViewInputs(
+        preset=preset,
+        providers=providers,
+        health=health,
+        operable=operable,
+        job=get_provisioning_status(request),
+        required_keys=[k.model_dump() for k in await asyncio.to_thread(_required_keys, settings, preset)],
+        header_present=lambda name: bool(name and request.headers.get(name)),
+        is_admin=is_admin,
+        default_options=default_options,
+        default_preset=default_name,
+        extractor_backend=extractor,
+        extraction_probe=extraction_probe,
+        vector_probe=vector_probe,
+        vector_detail="Qdrant server" if settings.qdrant_url else "embedded Qdrant",
+    )
+    return build_preset_view(inputs)
 
 
 class ModelStatus(BaseModel):

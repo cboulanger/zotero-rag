@@ -1,0 +1,162 @@
+"""GET /api/config/preset-view: the "Configure preset" dialog's view model."""
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+from fastapi.testclient import TestClient
+
+from backend.config.presets import ensure_default_presets
+from backend.config.settings import get_settings, reset_settings
+from backend.providers.types import Health
+from backend.services import provisioning
+from backend.services.preset_view import Probe
+from backend.services.zotero_identity import ZoteroIdentity
+
+UNPROVISIONED = Health(status="unreachable", detail="not provisioned")
+
+
+class PresetViewApiTest(unittest.TestCase):
+    def setUp(self):
+        from backend.main import app
+        reset_settings()
+        provisioning.reset_job_state()
+        self.addCleanup(provisioning.reset_job_state)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(reset_settings)
+        self.settings = get_settings()
+        self.settings.data_path = Path(self.tmp.name)
+        self.settings.qdrant_url = None
+        ensure_default_presets(self.settings.data_path)
+        self.client = TestClient(app)
+        self.client.__enter__()
+        self.addCleanup(self.client.__exit__, None, None, None)
+
+    def _get(self, preset, headers=None, admin=False, loopback=True, health=UNPROVISIONED, probe=Probe(ok=True), user_id=5):
+        self.settings.model_preset = preset
+        if not loopback:
+            self.settings.api_host = "rag.example.com"
+            self.settings.authorized_group_id = 999
+        ident = ZoteroIdentity(user_id=user_id, username="u", targets=[f"users/{user_id}"])
+        with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=ident)), \
+             patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=admin)), \
+             patch("backend.providers.runpod.RunPodProvider.health", return_value=health), \
+             patch("backend.api.config._probe", new=AsyncMock(return_value=probe)):
+            r = self.client.get("/api/config/preset-view", headers={"X-Zotero-API-Key": "Z", **(headers or {})})
+        self.assertEqual(r.status_code, 200, r.text)
+        return r.json()
+
+    @staticmethod
+    def _side(body, name):
+        return next(s for s in body["sides"] if s["side"] == name)
+
+    def test_sides_follow_the_pipeline_order(self):
+        body = self._get("cpu-only")
+        self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "llm"])
+        self.assertEqual(body["preset"]["name"], "cpu-only")
+
+    def test_local_models_are_ready_and_need_no_account(self):
+        body = self._get("cpu-only")
+        self.assertEqual(self._side(body, "embedding")["state"], "ready")
+        self.assertEqual(self._side(body, "llm")["state"], "ready")
+        self.assertEqual(body["accounts"], [])
+
+    def test_unprovisioned_endpoints_are_down_with_a_start_action_and_one_account_card(self):
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_secretvalue"})
+        for name in ("embedding", "llm"):
+            side = self._side(body, name)
+            self.assertEqual((side["state"], side["account"]), ("down", "runpod"))
+            start = next(a for a in side["actions"] if a["workflow"] == "start")
+            self.assertEqual(start["request"], {"method": "POST", "path": "/api/config/provision", "body": {"sides": [name]}})
+            self.assertEqual(start["account"], "runpod")
+        self.assertEqual(len(body["accounts"]), 1)
+        card = body["accounts"][0]
+        self.assertEqual((card["id"], card["serves"], card["state"]), ("runpod", ["embedding", "llm"], "ready"))
+        storages = {f["id"]: (f["storage"], f["is_set"]) for f in card["fields"]}
+        self.assertEqual(storages["RUNPOD_API_KEY"], ("client_secret", True))
+        self.assertEqual(storages["session:RUNPOD_API_KEY"][0], "session")
+
+    def test_a_missing_personal_key_marks_the_card(self):
+        body = self._get("runpod")
+        card = body["accounts"][0]
+        self.assertEqual(card["state"], "needs_input")
+        self.assertTrue(card["messages"])
+
+    def test_a_ready_endpoint_offers_pause(self):
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="ready"))
+        side = self._side(body, "llm")
+        self.assertEqual(side["state"], "ready")
+        self.assertEqual([a["id"] for a in side["actions"]], ["pause"])
+        self.assertEqual(side["actions"][0]["request"]["path"], "/api/config/suspend")
+
+    def test_a_running_job_shows_starting_and_its_log(self):
+        provisioning.mark_running(["llm"], provisioning.user_slot(5))
+        provisioning._add_progress(provisioning.user_slot(5), "llm", "creating endpoint")
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
+        side = self._side(body, "llm")
+        self.assertEqual(side["state"], "starting")
+        self.assertEqual(side["log"], ["creating endpoint"])
+        self.assertTrue(body["busy"])
+        self.assertFalse(next(a for a in side["actions"] if a["id"] == "start")["enabled"])
+
+    def test_shared_credentials_are_read_only_for_non_admins(self):
+        body = self._get("remote-mpcdf", loopback=False, user_id=6)  # admin role is cached per user
+        card = body["accounts"][0]
+        self.assertEqual(card["serves"], ["embedding", "llm"])
+        self.assertTrue(all(f["storage"] == "shared" and not f["editable"] for f in card["fields"]))
+        self.assertEqual(card["state"], "needs_input")
+        self.assertEqual(self._side(body, "llm")["actions"], [])
+        self.assertEqual(body["preset"]["default_options"], [])
+
+    def test_admins_can_edit_shared_credentials_and_get_the_default_chooser(self):
+        body = self._get("remote-mpcdf", admin=True, loopback=False, user_id=7)
+        self.assertTrue(all(f["editable"] for f in body["accounts"][0]["fields"]))
+        self.assertTrue(body["preset"]["is_admin"])
+        self.assertIn(body["preset"]["default_preset"], body["preset"]["default_options"])
+
+    def test_docling_extraction_joins_the_account_of_its_key(self):
+        body = self._get("kisski-docling")
+        card = body["accounts"][0]
+        self.assertEqual(card["serves"], ["extraction", "embedding", "llm"])
+        self.assertEqual(self._side(body, "extraction")["state"], "down")
+        # No status check and no key: the side cannot work.
+        self.assertEqual(self._side(body, "llm")["state"], "down")
+        with_key = self._get("kisski-docling", headers={"X-Kisski-Api-Key": "k"})
+        self.assertEqual(self._side(with_key, "llm")["state"], "unknown")
+        self.assertEqual(with_key["accounts"][0]["state"], "ready")
+
+    def test_unreachable_extraction_service_is_down(self):
+        self.settings.extractor_backend = "kreuzberg"
+        body = self._get("cpu-only", probe=Probe(ok=False, detail="not reachable (ConnectError)"))
+        side = self._side(body, "extraction")
+        self.assertEqual(side["state"], "down")
+        self.assertIn("not reachable", side["summary"])
+
+    def test_retrieval_tuning_fields_are_client_preferences_with_server_defaults(self):
+        from backend.services import rag_engine
+
+        body = self._get("cpu-only")
+        fields = {f["id"]: f for f in self._side(body, "retrieval")["fields"]}
+        self.assertEqual(fields["diversityFloor"]["storage"], "client_pref")
+        self.assertEqual(fields["diversityFloor"]["default"], rag_engine._DIVERSITY_FLOOR)
+        self.assertEqual(fields["maxChunksPerDocument"]["default"], rag_engine._MAX_CHUNKS_PER_DOCUMENT)
+        self.assertEqual(fields["top_k"]["type"], "readonly")
+
+    def test_retrieval_tuning_matches_the_plugin_list(self):
+        """The plugin sends these preferences with each query (DIVERSITY_TUNING_FIELDS)."""
+        from backend.services.preset_view import RETRIEVAL_TUNING
+
+        source = (Path(__file__).resolve().parents[2] / "plugin" / "src" / "zotero-rag.js").read_text()
+        for pref, *_ in RETRIEVAL_TUNING:
+            self.assertIn(f"prefKey: '{pref}'", source)
+
+    def test_no_secret_value_is_echoed(self):
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_secretvalue"})
+        self.assertNotIn("rpa_secretvalue", json.dumps(body))
+
+
+if __name__ == "__main__":
+    unittest.main()

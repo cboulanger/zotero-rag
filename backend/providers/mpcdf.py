@@ -34,7 +34,7 @@ class MpcdfProvider(Provider):
     def unavailable_hint(self) -> Optional[str]:
         return (
             f"Start a new job in the MPCDF LLM Inference Service ({SERVICE_URL}) and paste "
-            "its URL and key into Service API Keys."
+            "its URL and key into the MPCDF card of the Configure preset dialog."
         )
 
     def health(self, creds: Credentials) -> Optional[Health]:

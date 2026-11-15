@@ -29,7 +29,7 @@ class TestMessages(unittest.TestCase):
             msg = endpoint_errors.unavailable_message("llm", "LLM down.", "paused")
         self.assertIn("LLM down.", msg)
         self.assertIn("paused", msg)
-        self.assertIn("Preferences", msg)  # the RunPod provider's own advice
+        self.assertIn("Configure preset", msg)  # the RunPod provider's own advice
 
     def test_generic_provider_adds_no_vendor_text(self):
         with patch("backend.config.settings.get_settings", return_value=_settings(make_preset())):
@@ -107,4 +107,4 @@ class TestLLMUnavailable(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(LLMEndpointUnavailableError) as ctx:
                 await service.generate("hi")
         self.assertNotIn("(e.g. RunPod)", str(ctx.exception))  # core text is vendor-neutral
-        self.assertIn("Preferences", str(ctx.exception))
+        self.assertIn("Configure preset", str(ctx.exception))

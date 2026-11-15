@@ -47,7 +47,8 @@
     </html:div>
   </html:fieldset>
 
-  <!-- Model preset: the caller's own choice and (admins) the server default -->
+  <!-- Model preset: the caller's own choice; everything about its endpoints, credentials
+       and tuning is in the "Configure preset" dialog (preset-dialog.xhtml). -->
   <html:fieldset class="settings-group" id="zotero-rag-preset-group">
     <html:legend>Model preset</html:legend>
     <html:div class="setting-row" id="zotero-rag-preset-row">
@@ -55,26 +56,11 @@
       <html:select id="zotero-rag-preset-select" class="setting-input">
         <html:option value="">(not connected)</html:option>
       </html:select>
+      <html:button id="zotero-rag-configure-preset">Configure preset…</html:button>
     </html:div>
-    <html:div class="setting-description" id="zotero-rag-preset-description"></html:div>
+    <html:div class="setting-description" id="zotero-rag-preset-summary"></html:div>
     <html:div id="zotero-rag-preset-keys"></html:div>
-    <html:div class="setting-row" id="zotero-rag-default-row" hidden="hidden">
-      <html:label for="zotero-rag-default-select">Server default:</html:label>
-      <html:select id="zotero-rag-default-select" class="setting-input"></html:select>
-    </html:div>
-    <html:div class="setting-description" id="zotero-rag-default-help" hidden="hidden">
-      The preset every user runs on until they choose their own (admins only).
-    </html:div>
     <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>
-  </html:fieldset>
-
-  <!-- Per-side model configuration (rendered from the backend's provider descriptors) -->
-  <html:fieldset class="settings-group" id="zotero-rag-provider-group">
-    <html:legend>Models</html:legend>
-    <html:div id="zotero-rag-provider-sections"></html:div>
-    <html:div class="setting-description" id="zotero-rag-service-keys-placeholder">
-      No API keys required for this backend configuration, or not yet connected.
-    </html:div>
   </html:fieldset>
 
   <!-- Automatic indexing -->
@@ -161,21 +147,6 @@
 
     <html:div class="setting-description">
       Maximum number of simultaneous queries allowed (1-10)
-    </html:div>
-  </html:fieldset>
-
-  <!-- Retrieval Tuning -->
-  <html:fieldset class="settings-group">
-    <html:legend>Retrieval Tuning</html:legend>
-
-    <html:div class="setting-description">
-      Advanced knobs controlling how broadly the backend searches when an answer looks too
-      narrow, and when it retries one that cites only a single source. Leave a field blank to
-      reset it to its default.
-    </html:div>
-
-    <html:div id="zotero-rag-diversity-tuning-container">
-      <!-- Populated dynamically by preferences.js from DIVERSITY_TUNING_FIELDS -->
     </html:div>
   </html:fieldset>
 

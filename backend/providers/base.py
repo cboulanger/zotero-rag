@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal, Mapping, Opt
 
 from pydantic import BaseModel
 
+from backend.providers.ui import UiAction, UiFact, UiField, UiMessage, UiRequest
 from backend.providers.types import (
     Credentials,
     Health,
@@ -137,6 +138,89 @@ class Provider:
             unavailable_hint=self.unavailable_hint(),
         )
 
+    # -- configuration dialog (see backend/providers/ui.py) ---------------------
+
+    #: How the dialog describes who owns the credentials, by scope.
+    SCOPE_NOTES: ClassVar[dict[str, str]] = {
+        "user": "your own account",
+        "managed": "operated by the server admin",
+        "shared": "provided by your institution",
+    }
+
+    def side_facts(self) -> list[UiFact]:
+        """Short facts for this side's Status section (model, provider, credential owner)."""
+        cfg = self.side_config
+        model = cfg.model_name if self.side == "embedding" else (cfg.literal_model_names or [cfg.model_name])[0]
+        facts = [UiFact(label="Model", value=str(model))]
+        note = self.SCOPE_NOTES.get(self.scope)
+        if note:
+            facts.append(UiFact(label="Account", value=note))
+        return facts
+
+    def side_messages(self, health: Optional[Health]) -> list[UiMessage]:
+        """Status messages for a side; by default the provider's advice while it is not ready."""
+        if health is None or health.status == "ready":
+            return []
+        hint = self.unavailable_hint()
+        return [UiMessage(level="warn", text=hint)] if hint else []
+
+    def side_actions(self, health: Optional[Health], job_status: Optional[str], operable: bool) -> list[UiAction]:
+        """The Actions section of this side's tab.
+
+        ``job_status`` is the status of this side's provisioning job (``running``,
+        ``pending``, ``failed``, ``succeeded``) or None. ``operable`` says whether the
+        caller may provision or pause this side. The default offers start (create,
+        wake or resume), retry after a failure and pause, as the capability flags allow.
+        """
+        status = health.status if health else ""
+        running = job_status in ("running", "pending")
+        busy = "A job for this endpoint is already running." if running else ""
+        actions: list[UiAction] = []
+        if self.supports_provisioning and operable:
+            if status in ("unreachable", "throttled", "paused"):
+                actions.append(UiAction(
+                    id="start", label="Resume" if status == "paused" else "Start endpoint", kind="primary",
+                    enabled=not running, reason=busy, workflow="start", account=self.id,
+                    request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
+                ))
+            elif job_status == "failed":
+                actions.append(UiAction(
+                    id="retry", label="Retry", kind="primary", workflow="start", account=self.id,
+                    request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
+                ))
+        if status == "cold":
+            actions.append(UiAction(
+                id="wake", label="Wake up", workflow="start",
+                request=UiRequest(path="/api/config/warmup"),
+            ))
+        if self.supports_suspend and operable and status in ("ready", "cold"):
+            actions.append(UiAction(
+                id="pause", label="Pause", enabled=not running, reason=busy, workflow="pause", account=self.id,
+                request=UiRequest(path="/api/config/suspend", body={"sides": [self.side]}),
+            ))
+        return actions
+
+    def account_fields(self, fields: list[UiField], operable: bool) -> list[UiField]:
+        """The fields of this provider's account card.
+
+        ``fields`` are the credentials the preset declares for the sides this provider
+        serves (personal keys and admin-set shared values), already built by core.
+        The default adds the one-time provisioning credential when the caller may
+        provision or pause. Override to ask for something else, e.g. a sign-in.
+        """
+        credential = None
+        descriptor = self.describe()
+        if operable and descriptor.provisioning and descriptor.provisioning.credential:
+            credential = descriptor.provisioning.credential
+        if credential is None:
+            return fields
+        return [*fields, UiField(
+            id=f"session:{credential.env}", label=credential.label, type="secret",
+            help=credential.help, pattern=credential.pattern, optional=credential.optional,
+            storage="session", key=credential.env,
+            placeholder="Optional, kept in memory only" if credential.optional else "",
+        )]
+
     # -- credentials and endpoints -------------------------------------------
 
     def endpoint_url(self, api_key: str) -> Optional[str]:
@@ -166,7 +250,7 @@ class Provider:
     def unavailable_hint(self) -> Optional[str]:
         """Provider-specific advice for a side that is not ready.
 
-        Appended to "endpoint unavailable" errors and shown in Preferences.
+        Appended to "endpoint unavailable" errors and shown in the Configure preset dialog.
         Core text stays vendor-neutral.
         """
         return None
