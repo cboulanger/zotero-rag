@@ -34,7 +34,7 @@ LOG_FILE = LOG_DIR / "server.log"
 PLUGIN_LOG_FILE = LOG_DIR / "plugin.log"
 
 # Kreuzberg sidecar configuration
-KREUZBERG_IMAGE = "ghcr.io/kreuzberg-dev/kreuzberg:4.9.5"
+KREUZBERG_IMAGE = "ghcr.io/xberg-io/xberg:1.3.9"
 KREUZBERG_CONTAINER = "zotero-rag-kreuzberg"
 KREUZBERG_PORT = 8100          # host-side port for kreuzberg sidecar
 KREUZBERG_CONTAINER_PORT = 8000  # kreuzberg listens on 8000 inside the container

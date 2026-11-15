@@ -60,7 +60,7 @@ import { Command } from 'commander';
 
 const APP_NAME = 'zotero-rag';
 const REGISTRY = 'docker.io/cboulanger/zotero-rag';
-const KREUZBERG_IMAGE = 'ghcr.io/kreuzberg-dev/kreuzberg:latest';
+const KREUZBERG_IMAGE = 'ghcr.io/xberg-io/xberg:1.3.9';
 const KREUZBERG_PORT = 8000;
 const _defaultKreuzbergConfig = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..', 'config', 'kreuzberg.toml');
 const KREUZBERG_CONFIG_PATH = process.env.KREUZBERG_CONFIG || (fs.existsSync(_defaultKreuzbergConfig) ? _defaultKreuzbergConfig : null);

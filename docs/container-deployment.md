@@ -7,7 +7,7 @@ The Zotero RAG backend runs as three containers:
 | Container | Image | Purpose |
 | --------- | ----- | ------- |
 | `zotero-rag` | `cboulanger/zotero-rag` | FastAPI backend (port 8119) |
-| `kreuzberg` | `ghcr.io/kreuzberg-dev/kreuzberg` | Document extraction sidecar (internal) |
+| `kreuzberg` | `ghcr.io/xberg-io/xberg` | Document extraction sidecar (internal) |
 | `qdrant` | `docker.io/qdrant/qdrant:v1.15` | Vector database sidecar (internal) |
 
 All three containers communicate over a shared Docker bridge network. The

@@ -7,10 +7,14 @@ dependency from the main image.
 
 Kreuzberg HTTP API (POST /extract):
   - multipart body: `file` (bytes) + optional `config` (JSON string)
-  - response:  {"chunks": [{"content": str, "metadata": {...}}, ...]}
+  - response:  {"results": [{"chunks": [{"content": str, "metadata": {...}}, ...]}],
+                "errors": [{"error_type": str, "code": int, "message": str}],
+                "summary": {...}}
+    (ghcr.io/xberg-io/xberg; a failed document is HTTP 200 with an `errors`
+    entry). The kreuzberg image's bare list of results is accepted too.
   - chunk metadata keys:  "first_page" (1-based int | null), "chunk_index" (int)
 
-See https://docs.kreuzberg.dev/guides/docker/ for full API reference.
+The full API reference is the sidecar's own `GET /openapi.json`.
 """
 
 import asyncio
@@ -89,6 +93,41 @@ class AttachmentTooLargeError(RuntimeError):
     fallback path, which otherwise sends the whole original file as one part when
     splitting itself fails, bypassing the size-based splitting entirely.
     """
+
+
+def _unwrap_results(payload: Any, mime_type: str) -> list[dict[str, Any]]:
+    """Return the per-document results of an ``/extract`` response.
+
+    The xberg sidecar answers with an envelope
+    ``{"results": [...], "errors": [...], "summary": {...}}`` and reports a
+    failed document as HTTP 200 with an ``errors`` entry, so errors are raised
+    here with the same exception types the HTTP-status path uses: a
+    ``parsing`` error becomes KreuzbergParsingError (the document is broken,
+    not the sidecar), anything else a RuntimeError. The kreuzberg image
+    answers with a bare list of results and is accepted as well, so a host
+    still running that image keeps working.
+
+    Raises:
+        KreuzbergParsingError: The sidecar could not parse the document.
+        RuntimeError: Any other per-document error, or an unrecognised response.
+    """
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict) or "results" not in payload:
+        raise RuntimeError(
+            f"Unrecognised kreuzberg response for mime={mime_type}: {str(payload)[:500]}"
+        )
+    errors = payload.get("errors") or []
+    if errors:
+        error = errors[0]
+        message = (
+            f"kreuzberg sidecar reported error_type={error.get('error_type')} "
+            f"(code {error.get('code')}) for mime={mime_type}: {error.get('message')}"
+        )
+        if error.get("error_type") == "parsing":
+            raise KreuzbergParsingError(message)
+        raise RuntimeError(message)
+    return payload.get("results") or []
 
 
 class KreuzbergExtractor(DocumentExtractor):
@@ -269,8 +308,8 @@ class KreuzbergExtractor(DocumentExtractor):
         except Exception as exc:
             raise RuntimeError(f"Failed to parse kreuzberg response as JSON: {exc}") from exc
 
-        # Response is a list of ExtractionResult objects (one per file sent)
-        if not results or not isinstance(results, list):
+        results = _unwrap_results(results, mime_type)
+        if not results:
             logger.debug(f"kreuzberg returned empty result list for mime={mime_type}")
             return []
 
