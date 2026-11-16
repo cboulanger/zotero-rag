@@ -4,10 +4,45 @@ Free presets are offered before paid ones. This module holds the cost ranking
 that the offer logic builds on.
 """
 
-from typing import Literal
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal, Optional
 
-from backend.config.presets import HardwarePreset
-from backend.providers import PROVIDERS, discover_providers
+from backend.config.presets import HardwarePreset, current_platform, get_preset, list_presets
+from backend.providers import PROVIDERS, ProviderConfigError, discover_providers, get_providers
+from backend.services.effective_preset import is_compatible
+
+logger = logging.getLogger(__name__)
+
+#: A quota is only worth a stand-in when it stays exhausted at least this long.
+MIN_STANDIN_SECONDS = 900
+
+#: Session states of a per-user login that mean "logged in".
+_ACTIVE_SESSION_STATES = ("ok", "active")
+
+
+@dataclass
+class ExhaustedSide:
+    """One side of the pipeline whose provider quota is used up."""
+
+    side: str
+    provider: str
+    available_at: datetime
+
+
+@dataclass
+class StandIn:
+    """A preset offered in place of the current one, with what it needs first."""
+
+    preset: str
+    cost: str
+    label: str
+    needs: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready form for the API response."""
+        return {"preset": self.preset, "cost": self.cost, "label": self.label, "needs": list(self.needs)}
 
 
 def preset_cost(preset: HardwarePreset) -> Literal["free", "paid"]:
@@ -30,3 +65,82 @@ def preset_cost(preset: HardwarePreset) -> Literal["free", "paid"]:
         if provider_cls is None or provider_cls.cost != "free":
             return "paid"
     return "free"
+
+
+def _sides(preset: HardwarePreset) -> list[tuple[str, Any]]:
+    """The (name, side config) pairs of a preset's present sides."""
+    sides = [("embedding", preset.embedding), ("llm", preset.llm)]
+    if preset.rerank is not None:
+        sides.append(("rerank", preset.rerank))
+    return sides
+
+
+def _label(preset: HardwarePreset) -> str:
+    """The first sentence of the preset's description (its name when it has none)."""
+    text = (preset.description or "").strip()
+    if not text:
+        return preset.name
+    first = text.split(". ")[0].strip()
+    return first.rstrip(".") if first else preset.name
+
+
+def _needs(preset: HardwarePreset, providers: dict, client_keys: dict[str, str],
+           user_id: Optional[int]) -> list[str]:
+    """``login:<provider>`` needs first, then ``key:<NAME>`` needs."""
+    logins: list[str] = []
+    keys: list[str] = []
+    for side, config in _sides(preset):
+        if config.model_type != "remote":
+            continue
+        provider = providers.get(side)
+        if provider is not None and provider.id not in logins:
+            descriptor = provider.describe()
+            if descriptor.provisioning and descriptor.provisioning.login:
+                try:
+                    status = provider.session_status(user_id)
+                except Exception as exc:  # unknown session: ask for a login
+                    logger.info("Session state of %s unavailable: %s", provider.id, type(exc).__name__)
+                    status = None
+                if not status or status.get("state") not in _ACTIVE_SESSION_STATES:
+                    logins.append(provider.id)
+        kwargs = config.model_kwargs or {}
+        if kwargs.get("shared_api_key_env"):
+            continue  # admin-shared: never needs a key from the caller
+        name = kwargs.get("api_key_env")
+        if name and not client_keys.get(name) and f"key:{name}" not in keys:
+            keys.append(f"key:{name}")
+    return [f"login:{p}" for p in logins] + keys
+
+
+def find_standins(settings, current: HardwarePreset, exhausted: list[ExhaustedSide],
+                  client_keys: dict[str, str], user_id: Optional[int]) -> list[StandIn]:
+    """Presets that can replace ``current`` while the ``exhausted`` sides' quotas are used up.
+
+    A candidate must differ from ``current``, allow stand-ins, run on this platform,
+    be compatible with the server default (same vector store), and serve each
+    exhausted side by another provider. Sorted free first, then by descending
+    ``standin_priority``, then by name. Unusable presets are skipped.
+    """
+    data_path = settings.data_path
+    default = settings.get_default_preset()
+    found: list[tuple[HardwarePreset, StandIn]] = []
+    for name in list_presets(data_path):
+        if name == current.name:
+            continue
+        try:
+            candidate = get_preset(name, data_path)
+            providers = get_providers(candidate)
+        except (ValueError, ProviderConfigError) as exc:
+            logger.debug("Preset %r skipped as stand-in: %s", name, exc)
+            continue
+        if not candidate.standin or candidate.platform not in ("any", current_platform()):
+            continue
+        if not is_compatible(default, candidate):
+            continue
+        if any(providers.get(e.side) is not None and providers[e.side].id == e.provider for e in exhausted):
+            continue
+        found.append((candidate, StandIn(
+            preset=candidate.name, cost=preset_cost(candidate), label=_label(candidate),
+            needs=_needs(candidate, providers, client_keys, user_id))))
+    found.sort(key=lambda pair: (pair[1].cost != "free", -pair[0].standin_priority, pair[0].name))
+    return [standin for _, standin in found]
