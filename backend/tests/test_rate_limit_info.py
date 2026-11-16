@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 import backend.services.embeddings as emb
 from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.usage_meters import key_fingerprint, recorder
-from backend.tests.test_providers_registry import make_preset
+from backend.providers.testing import make_preset
 
 HEADERS = {"x-ratelimit-limit-hour": "100", "x-ratelimit-remaining-hour": "40"}
 OPENAI_HEADERS = {"x-ratelimit-limit-requests": "60", "x-ratelimit-remaining-requests": "10"}

@@ -8,8 +8,8 @@ from openai import APIConnectionError, BadRequestError
 
 from backend.services import endpoint_errors
 from backend.services.embeddings import EmbeddingEndpointUnavailableError, RemoteEmbeddingService
-from backend.tests.test_provider_runpod import runpod_preset
-from backend.tests.test_providers_registry import make_preset
+from backend.tests.runpod_variants import runpod_preset
+from backend.providers.testing import make_preset
 
 
 def _settings(preset):

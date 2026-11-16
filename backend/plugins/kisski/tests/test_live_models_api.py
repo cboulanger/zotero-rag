@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from backend.config.presets import ensure_default_presets
 from backend.config.settings import get_settings, reset_settings
 from backend.plugins.kisski.provider import KisskiProvider
-from backend.tests.provider_fakes import FakeHTTP, FakeResponse
+from backend.providers.testing import FakeHTTP, FakeResponse
 
 MODELS = {"data": [
     # busy/free are entries of the bundled remote-kisski preset's model_names;

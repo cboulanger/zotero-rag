@@ -3,7 +3,6 @@
 import copy
 import unittest
 
-from backend.config.presets import HardwarePreset
 from backend.providers import (
     PROVIDERS,
     GenericProvider,
@@ -17,25 +16,7 @@ from backend.providers import (
     register_provider,
 )
 from backend.providers.base import Provider as BaseProvider
-
-
-def make_preset(**overrides) -> HardwarePreset:
-    data = {
-        "name": "t",
-        "description": "t",
-        "version": 2,
-        "embedding": {"model_type": "remote", "model_name": "m", "model_kwargs": {"api_key_env": "K"}},
-        "llm": {"model_type": "remote", "model_names": ["m"], "model_kwargs": {"api_key_env": "K"}},
-        "rag": {},
-        "memory_budget_gb": 1.0,
-    }
-    for key, value in overrides.items():
-        side, _, field = key.partition("__")
-        if field:
-            data[side][field] = value
-        else:
-            data[key] = value
-    return HardwarePreset.model_validate(data)
+from backend.providers.testing import make_preset
 
 
 class _DemoOptions(ProviderOptions):

@@ -111,7 +111,7 @@ renders every field, message and action itself.
 
 1. Create a backend plugin (`backend/plugins/<name>/` for a shipped one, or a package in a directory listed in `BACKEND_PLUGIN_DIRS`) with a `Provider` subclass with a unique `id`, and list the class in an `InferenceProvider` capability returned by the plugin's `register()` (see [Backend plugins](backend-plugins.md)). Nothing in core needs to change.
 2. Override only what differs from a plain OpenAI-compatible API.
-3. Register a `ContractFixture` for it with `register_fixture` in `backend/tests/provider_fakes.py`. `test_provider_contract.py` then checks every registered provider against the same rules (descriptor shape, validation, display hooks never raising, scope handling). Add vendor tests next to `test_provider_runpod.py` using `FakeHTTP`.
+3. Add the plugin's tests to its own `tests/` package: run `ProviderContractSuite` with a `ContractFixture` in `tests/test_contract.py` (descriptor shape, validation, display hooks never raising, scope handling), and add vendor tests using `FakeHTTP` from `backend.providers.testing` (see `backend/plugins/runpod/tests/`).
 4. Point a preset at it with `"provider": {"id": "<name>"}`.
 
 ## Invalid configurations

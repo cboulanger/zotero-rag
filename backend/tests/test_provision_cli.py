@@ -10,7 +10,7 @@ _SPEC = importlib.util.spec_from_file_location("provision_cli", _PATH)
 cli = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(cli)
 
-from backend.tests.test_provider_runpod import runpod_preset  # noqa: E402
+from backend.tests.runpod_variants import runpod_preset  # noqa: E402
 
 
 def run(argv, preset=None, stored_key=None, prompt_value="typed-key"):

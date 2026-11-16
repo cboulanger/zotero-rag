@@ -4,8 +4,8 @@ import unittest
 
 from backend.providers import ProviderConfigError, get_providers
 from backend.plugins.kisski.provider import KisskiProvider
-from backend.tests.provider_fakes import FakeHTTP, FakeResponse
-from backend.tests.test_providers_registry import make_preset
+from backend.providers.testing import FakeHTTP, FakeResponse
+from backend.providers.testing import make_preset
 
 BASE = "https://chat-ai.academiccloud.de/v1"
 
@@ -124,6 +124,25 @@ class TestUsage(unittest.TestCase):
     def test_header_names_are_case_insensitive(self):
         meters = llm_provider().parse_usage({"X-RateLimit-Limit-Hour": "5", "X-RateLimit-Remaining-Hour": "5"})
         self.assertEqual([m.period for m in meters], ["hour"])
+
+
+class TestBundledPresetPicksUpProviderDefaults(unittest.TestCase):
+    """get_preset() runs the provider's apply_defaults(), so the services read model_kwargs only."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_path = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_remote_kisski_keeps_its_key_and_gets_the_portal_link(self):
+        from backend.config.presets import get_preset
+        from backend.services.llm import RemoteLLMService
+        preset = get_preset("remote-kisski", self.data_path)
+        (field,) = RemoteLLMService.required_client_fields_for_config(preset.llm)
+        self.assertEqual((field["key_name"], field["kind"]), ("KISSKI_API_KEY", "api_key"))
+        self.assertEqual(field["docs_url"], "https://saia.gwdg.de/dashboard")
 
 
 if __name__ == "__main__":

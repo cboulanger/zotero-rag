@@ -8,10 +8,10 @@ from backend.services.embeddings import (
     DEFAULT_QUERY_INSTRUCTIONS,
     MockEmbeddingService,
     RemoteEmbeddingService,
+    create_embedding_service,
     format_query_for_embedding,
     resolve_query_instruction,
 )
-from backend.plugins.local_torch.embedding import LocalEmbeddingService
 
 E5 = "multilingual-e5-large-instruct"
 E5_INSTRUCTION = DEFAULT_QUERY_INSTRUCTIONS[E5]
@@ -58,7 +58,7 @@ class TestEmbedQuery(unittest.IsolatedAsyncioTestCase):
 
     async def test_local_service_without_instruction_embeds_bare(self):
         name = "sentence-transformers/all-MiniLM-L6-v2"
-        service = LocalEmbeddingService(EmbeddingConfig(model_name=name))
+        service = create_embedding_service(EmbeddingConfig(model_name=name))  # the local engine's service
         service.embed_text = AsyncMock(return_value=[0.5])
         await service.embed_query("Who uses Zotero?")
         service.embed_text.assert_awaited_once_with("Who uses Zotero?")

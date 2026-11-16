@@ -129,6 +129,34 @@ offer (for example only those that can run on this platform). Startup and
 shutdown hooks run only in the API server, not in command-line tools, and a
 failing hook is logged without stopping the server.
 
+## Tests
+
+A plugin's tests ship with the plugin, in `<plugin>/tests/` (a package with
+`test_*.py` files); core tests in `backend/tests` never test a plugin's own code.
+`uv run pytest` collects `backend/tests` and every shipped plugin's tests, and a
+core test checks that each shipped plugin has a `tests` package.
+
+Core supplies what plugin tests need, so they import nothing from `backend/tests`:
+
+- `backend.providers.testing`: `FakeHTTP`, `FakeResponse` and `DeadHTTP` (stand-ins
+  for a provider's management-API client), `make_preset()` and `preset_with()`
+  (minimal presets), and `ProviderContractSuite` with `ContractFixture`, the
+  contract every provider must pass. A plugin that registers a provider runs it
+  in `tests/test_contract.py`:
+
+  ```python
+  class TestContract(ProviderContractSuite, unittest.TestCase):
+      fixture = ContractFixture(provider_id="acme", model_kwargs={"api_key_env": "ACME_API_KEY"})
+  ```
+
+- `backend.pytest_plugin`: the test environment (testing mode, a throwaway
+  `AUTOINDEX_SECRET`, `.env.test`) and shared fixtures. Shipped plugins get it
+  through `backend/conftest.py`; run an external plugin's tests with
+  `uv run pytest -p backend.pytest_plugin /path/to/my_plugins/acme/tests`. The
+  host imports an external plugin as `zotero_rag_plugins.<directory>`, so in its
+  tests look registered classes up through the registry (`PROVIDERS["acme"]`)
+  rather than comparing them with a separately imported class.
+
 ## Status routes
 
 - `GET /status` lists `plugins` (id, name, version, status `loaded`, `disabled`

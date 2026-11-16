@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from backend.providers import get_providers
 from backend.services.embeddings import EmbeddingEndpointUnavailableError, RemoteEmbeddingService
 from backend.services.endpoint_cache import FOUND_TTL_SECONDS, MISSING_TTL_SECONDS, EndpointCache
-from backend.tests.test_provider_runpod import provider as runpod_provider, runpod_preset
+from backend.tests.runpod_variants import provider as runpod_provider, runpod_preset
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 
 

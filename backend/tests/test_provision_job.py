@@ -340,35 +340,6 @@ class HealthEndpointTest(unittest.TestCase):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
 
-    def test_mpcdf_reports_the_callers_endpoint_state(self):
-        get_settings().model_preset = "remote-mpcdf"
-        from backend.plugins.mpcdf import sessions as mpcdf_sessions
-        from backend.plugins.mpcdf.sessions import EndpointCredentials
-        from backend.tests.test_mpcdf_sessions import FakeSessions
-
-        fake = FakeSessions()
-        fake.creds[(None, "zotero-rag-embedding")] = EndpointCredentials("https://job1/v1", "k", "m")
-        with patch.object(mpcdf_sessions, "available", return_value=True), \
-             patch.object(mpcdf_sessions, "get_sessions", return_value=fake):
-            r = self.client.get("/api/config/health").json()
-        self.assertEqual(r["embedding"]["status"], "ready")
-        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
-
-    def test_a_side_whose_start_job_runs_is_reported_as_starting(self):
-        get_settings().model_preset = "remote-mpcdf"
-        from backend.plugins.mpcdf import sessions as mpcdf_sessions
-        from backend.services import provisioning
-        from backend.tests.test_mpcdf_sessions import FakeSessions
-
-        provisioning.reset_job_state()
-        self.addCleanup(provisioning.reset_job_state)
-        provisioning.mark_running(["rerank"], provisioning.user_slot(None))
-        with patch.object(mpcdf_sessions, "available", return_value=True), \
-             patch.object(mpcdf_sessions, "get_sessions", return_value=FakeSessions()):
-            r = self.client.get("/api/config/health").json()
-        self.assertEqual(r["rerank"], {"status": "cold", "detail": "starting"})
-        self.assertEqual(r["llm"], {"status": "unreachable", "detail": "not running"})
-
 
 if __name__ == "__main__":
     unittest.main()
