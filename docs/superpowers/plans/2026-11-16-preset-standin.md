@@ -155,3 +155,38 @@
 - [ ] **Step 2: Live check.** The backend's rate-limit state can only be set by a real 429 inside the backend process, so the server side is covered end to end by `backend/tests/test_standin_api.py` (TestClient on the real app). In the running dev Zotero, open the query dialog and, via `zotero_execute_js`, feed the notice a sample `quota_exhausted` detail (the dialog's error path with a `QuotaExhaustedError`), then check that it renders the choices and that **Use** sends `PUT /api/config/my-preset/standin` to the dev backend (expected answer there: 409, since no quota is exhausted). Write in the PR what was exercised live and what only by tests.
 - [ ] **Step 3: Run** `uv run pytest backend/tests -q` and `node --test plugin/test/*.test.js` — all pass.
 - [ ] **Step 4: Commit** `docs: stand-in presets`.
+
+## Follow-up (found in live use, 2026-11-16)
+
+The offer only appeared on a failed query, but the query dialog's open-time pipeline check stops the user before that: a quota-exhausted side shows as "down", the dialog sends the user to Configure preset, and that dialog says "Check the credentials in the account card below." The offer must appear where the user meets the exhausted quota. Separately, account cards of providers that cannot start endpoints (KISSKI) offer "Save and start".
+
+### Task 8: Offer on request, quota-aware status, honest card button
+
+**Files:**
+- Modify: `backend/services/standin.py`, `backend/api/config.py`, `backend/services/preset_view.py`, `backend/providers/ui.py` (if a field is needed)
+- Test: `backend/tests/test_standin.py`, `backend/tests/test_standin_api.py`, `backend/tests/test_preset_view_api.py`
+
+**Interfaces:**
+- Produces: `standin_offer(settings, preset, exhausted: list[ExhaustedSide], client_keys, user_id, now=None) -> Optional[dict]` in `standin.py` (the 503 detail shape; `quota_error_detail` becomes a thin wrapper over it); `GET /api/config/standins` (sync `def`) → `{"offer": <detail dict> | null}` for the caller's own current preset (null while a stand-in is active or nothing is exhausted ≥ 15 min); in the preset view, a side whose probe failed for an exhausted quota carries the message "<Provider label>'s <side> quota is used up until HH:MM UTC." instead of "Check the credentials in the account card below." and an action `{"id": "standin", "label": "Use a stand-in until HH:MM", enabled}`; `AccountCard.auto_start` is False when the card's provider has `supports_provisioning = False`.
+
+- [ ] **Step 1: Write the failing tests:** `standin_offer` with two exhausted sides lists stand-ins valid for both; `GET /api/config/standins` returns the offer when the recorder holds a ≥ 15 min limit for the caller's key, `{"offer": null}` otherwise and while a stand-in is active; preset view of `kisski-rerank-mpcdf` with an embedding probe failed for quota shows the quota message and the `standin` action and not the credentials message; the KISSKI account card has `auto_start == False`, an MPCDF/RunPod card keeps its current value.
+- [ ] **Step 2: Run** — FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `uv run pytest backend/tests -q` — all pass.
+- [ ] **Step 5: Commit** `feat(standin): offer stand-ins on request and report exhausted quotas in the preset view`.
+
+### Task 9: Plugin: offer where the quota is met
+
+**Files:**
+- Modify: `plugin/src/dialog.js` (`checkPipelineOnOpen`), `plugin/src/zotero-rag.js` (`fetchStandinOffer`), `plugin/src/preset-dialog-view.js` / `plugin/src/preset-dialog.js` (the `standin` action)
+- Test: `plugin/test/dialog.test.js`, `plugin/test/zotero-rag.test.js`, `plugin/test/preset-dialog-view.test.js`
+
+**Interfaces:**
+- Consumes: `GET /api/config/standins`, the preset view's `standin` action (Task 8); existing `showStandinOffer`, `useStandin`, `describeStandinOffer`.
+- Produces: `plugin.fetchStandinOffer(): Promise<object|null>`.
+
+- [ ] **Step 1: Write the failing tests:** `checkPipelineOnOpen` with a quota-blocked side and a non-null offer shows the stand-in offer and neither alerts nor opens the Configure preset dialog; with a null offer it behaves as today; the Configure preset dialog's `standin` action fetches the offer, lists the choices with **Use**, and **Use** calls `useStandin` then refreshes the view; the account card button reads "Save" when `auto_start` is false (existing behaviour, assert it).
+- [ ] **Step 2: Run** `node --test plugin/test/*.test.js` — new tests FAIL.
+- [ ] **Step 3: Implement.** While the offer is shown in the query dialog, the question input stays usable; after **Use** the dialog reloads its config and health (no question to re-send at open time).
+- [ ] **Step 4: Run** the node tests and the type check (≤ the count before the task).
+- [ ] **Step 5: Commit** `feat(plugin): offer stand-ins when the dialogs find an exhausted quota`.
