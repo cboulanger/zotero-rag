@@ -115,7 +115,8 @@ The backend is organized into a layered architecture with clear separation of co
 - `GET /api/config` - Available presets, the server default and the compatible/switchable ones
 - `POST /api/config` - Admin: switch the server default preset (credentials are not required; the preset is simply not ready until they are set)
 - `GET /PUT /api/config/my-preset` - The caller's own preset choice among compatible presets
-- `GET /api/config/providers` - Per-side provider descriptors that drive the plugin's Models section
+- `GET /api/config/providers` - Per-side provider descriptors (capabilities, credential scope, provisioning credential)
+- `GET /api/config/preset-view` - The "Configure preset" dialog's view model: one tab per side (extraction, embedding, retrieval, answering) with state, fields, messages, job log and actions, and one account card per service provider (`backend/services/preset_view.py`, types in `backend/providers/ui.py`)
 - `GET /api/config/health` - Readiness of each remote side (`ready` / `cold` / `throttled` / `paused` / `unreachable`)
 - `POST /api/config/provision`, `POST /api/config/suspend` - Create/resume and pause an endpoint (background jobs, one per side and slot)
 - `POST /api/config/warmup` - Wake the caller's cold endpoints (called when the question dialog opens)
@@ -301,7 +302,8 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
 - Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
-- Model preset group (server default for admins, "My preset" for users) and one **Models** section per side ([plugin/src/provider-sections.js](../plugin/src/provider-sections.js)) rendered entirely from the provider descriptors: key fields, health, Provision / Resume / Retry / Pause, and the in-memory management-token field (never saved)
+- Model preset group: the preset chooser ("My preset" for users), a one-line status per side and the **Configure preset…** button
+- **Configure preset** dialog ([plugin/src/preset-dialog.xhtml](../plugin/src/preset-dialog.xhtml), rendering and logic in [plugin/src/preset-dialog-view.js](../plugin/src/preset-dialog-view.js)): renders `GET /api/config/preset-view` without any provider knowledge. Header: preset description, server default (admins), Start all / Pause all / Check now. One tab per side with a red/yellow/green indicator and Configuration, Status (with a log hidden by default) and Actions sections. Footer: one account card per provider holding its keys; saving a card starts the sides it serves. One-time management credentials are kept in memory only (never saved)
 - Zotero API key configuration (`extensions.zotero-rag.zoteroApiKey`), with live identity status (username + accessible library count)
 - Max concurrent queries setting
 - HTML-based preferences pane

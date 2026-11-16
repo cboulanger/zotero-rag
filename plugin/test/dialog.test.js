@@ -1077,3 +1077,97 @@ test('rerankEnabledForQuery: the dialog checkbox only counts while the preset re
 	assert.strictEqual(D.rerankEnabledForQuery.call({ ...self, rerankInfo: null }, true), true);
 	assert.strictEqual(D.rerankEnabledForQuery.call({ ...self, rerankPrefEnabled: () => false }, false), false);
 });
+
+// --- describePipelineProblems / checkPipelineOnOpen: the check when the dialog opens ---
+
+test('describePipelineProblems: ready, starting, busy and unchecked sides need nothing', () => {
+	const D = loadDialogMethods();
+	assert.deepStrictEqual([...D.describePipelineProblems(null, true).lines], []);
+	const health = { embedding: null, llm: { status: 'ready' }, rerank: { status: 'cold' } };
+	assert.deepStrictEqual([...D.describePipelineProblems(health, true).lines], []);
+	assert.deepStrictEqual([...D.describePipelineProblems({ llm: { status: 'throttled' } }, true).lines], []);
+});
+
+test('describePipelineProblems: paused and not running sides are listed in pipeline order', () => {
+	const D = loadDialogMethods();
+	const health = {
+		embedding: { status: 'paused' },
+		llm: { status: 'unreachable', detail: 'the MPCDF session ended; log in again' },
+		rerank: { status: 'unreachable' },
+	};
+	const result = D.describePipelineProblems(health, true);
+	assert.deepStrictEqual([...result.lines], [
+		'The embedding endpoint is paused.',
+		'The re-ranking endpoint is not running.',
+		'The answering endpoint is not running (the MPCDF session ended; log in again).',
+	]);
+	assert.strictEqual(result.rerankOnly, false);
+});
+
+test('describePipelineProblems: a stopped re-ranker counts only when the query would use it', () => {
+	const D = loadDialogMethods();
+	const health = { embedding: null, llm: null, rerank: { status: 'unreachable' } };
+	assert.deepStrictEqual([...D.describePipelineProblems(health, false).lines], []);
+	const result = D.describePipelineProblems(health, true);
+	assert.strictEqual(result.lines.length, 1);
+	assert.strictEqual(result.rerankOnly, true);
+});
+
+/**
+ * Load dialog.js with a recording Services.prompt.alert, and a fake `this` for
+ * checkPipelineOnOpen with the given health and re-ranking info.
+ * @param {any} health
+ * @param {any} rerankInfo
+ */
+function pipelineCheckSetup(health, rerankInfo) {
+	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
+	const alerts = [];
+	const opened = [];
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: () => null },
+		window: { name: 'query-dialog' },
+		Services: { prompt: { alert: (_win, _title, text) => alerts.push(text) } },
+		Zotero: { Prefs: { get: () => true } },
+		console,
+	};
+	vm.createContext(context);
+	vm.runInContext(src, context, { filename: 'dialog.js' });
+	const D = context.ZoteroRAGDialog;
+	const self = Object.assign(Object.create(D), {
+		plugin: { openPresetDialog: (win) => opened.push(win) },
+		_healthClosed: false,
+		rerankInfo: null,
+		endpointHealth: null,
+		loadRerankInfo: async function () { this.rerankInfo = rerankInfo; },
+		refreshEndpointHealth: async function () { this.endpointHealth = health; },
+	});
+	return { self, alerts, opened, context };
+}
+
+test('checkPipelineOnOpen: warns and opens the Configure preset dialog for a stopped re-ranker', async () => {
+	const { self, alerts, opened, context } = pipelineCheckSetup(
+		{ embedding: null, llm: null, rerank: { status: 'unreachable', detail: 'the MPCDF session ended; log in again' } },
+		{ model_type: 'remote', provider: null });
+	await self.checkPipelineOnOpen();
+	assert.strictEqual(alerts.length, 1);
+	assert.match(alerts[0], /re-ranking endpoint is not running \(the MPCDF session ended; log in again\)/);
+	assert.match(alerts[0], /answered without re-ranking until it is up/);
+	assert.deepStrictEqual(opened, [context.window]);
+});
+
+test('checkPipelineOnOpen: says nothing when every side is usable or re-ranking is not part of the preset', async () => {
+	const ready = pipelineCheckSetup({ embedding: { status: 'ready' }, llm: null, rerank: { status: 'ready' } }, { model_type: 'remote' });
+	await ready.self.checkPipelineOnOpen();
+	const noRerank = pipelineCheckSetup({ embedding: null, llm: null, rerank: { status: 'unreachable' } }, null);
+	await noRerank.self.checkPipelineOnOpen();
+	assert.deepStrictEqual([...ready.alerts, ...noRerank.alerts], []);
+	assert.deepStrictEqual([...ready.opened, ...noRerank.opened], []);
+});
+
+test('checkPipelineOnOpen: a stopped answering model is reported as blocking questions', async () => {
+	const { self, alerts, opened } = pipelineCheckSetup({ embedding: { status: 'paused' }, llm: { status: 'unreachable' } }, null);
+	await self.checkPipelineOnOpen();
+	assert.match(alerts[0], /cannot be answered until they are up/);
+	assert.match(alerts[0], /start them or log in/);
+	assert.strictEqual(opened.length, 1);
+});

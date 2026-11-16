@@ -62,6 +62,40 @@ was used), `session_login(user_id, values)`, `session_logout(user_id)` and `sess
 (for a provider whose endpoints run in the user's own login session), `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
 Providers never raise from display-only hooks (`health`, `parse_usage`).
 
+The plugin's "Configure preset" dialog is fed by four more hooks, all with
+defaults in the base class (see `backend/providers/ui.py` for the data shapes and
+`backend/services/preset_view.py` for how core assembles them):
+
+- `side_facts()`: short label/value pairs for a side's Status section (model, account owner).
+- `side_messages(health)`: status messages; by default `unavailable_hint()` while the side is not ready.
+- `side_actions(health, job_status, operable)`: the side's buttons. Each action carries the request
+  to make (`path` and `body`), whether it belongs to the header's **Start all** or **Pause all**, and
+  the account whose one-time credentials go with it. The default offers start or resume, retry after
+  a failed job, wake for a cold endpoint and pause, as the capability flags allow. The optional
+  re-ranking side's start is not part of **Start all** (it is only ever started on its own); its
+  pause is part of **Pause all**.
+- `account_fields(fields, operable, session)`: the fields of the provider's account card in the
+  dialog's footer. Core passes the credentials the preset declares for the sides this provider
+  serves and, for a provider with an account login (`provisioning.login`), the caller's
+  `session_status`. The default adds the login form while the caller is logged out, and otherwise
+  the one-time provisioning credential.
+- `quota_summary(meters)`: one combined value for a side's quota (the account card shows the
+  highest of its sides; the tab shows every meter). The default takes the meter closest to running
+  out; KISSKI combines its hourly and daily limits.
+- `model_availability(creds)`: `available`, `busy` or `very busy` for the answering model, from
+  `live_models` (KISSKI); the tab warns while the model is very busy.
+- `account_session(session)`: for a provider with an account login, the card's status messages and
+  its **Log in and start** / **Log out** actions. Logging in posts the form's values once to
+  `POST /api/config/session/login`, which also starts the sides that run in the session. Until the
+  caller is logged in, the start actions of the sides the card serves are disabled.
+
+A side whose provider has no `health` check is checked with a minimal test request through the
+caller's key (`backend/services/side_probe.py`, cached per side and key), so the tab can still say
+whether the model answers.
+
+These hooks return data, never markup: the dialog runs with Zotero's privileges, so the plugin
+renders every field, message and action itself.
+
 ## Adding a provider
 
 1. Create `backend/providers/<name>.py` with a `Provider` subclass and a unique `id`; importing it registers it (`__init_subclass__`), so add it to `backend/providers/__init__.py`.
@@ -101,8 +135,9 @@ side's section instead of a key field. The form posts to `POST /api/config/sessi
 caller's endpoints for the active preset's sides that run in that session (the same background job as
 `POST /api/config/provision`; the response carries it as `provisioning`, or a reason it could not
 start as `provisioning_error`); the plugin follows that job until the endpoints are ready. The
-re-ranking side is not started this way: like everywhere else, it starts only from its own section
-or the query dialog's prompt.
+re-ranking side is included unless the request says `"start_rerank": false`, which the plugin sends
+when the user has switched re-ranking off; the login is the one start of the re-ranker besides its
+own tab and the query dialog's prompt.
 
 For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
 its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero

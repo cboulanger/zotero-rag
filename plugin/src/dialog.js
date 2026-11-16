@@ -382,8 +382,7 @@ var ZoteroRAGDialog = {
 		this.isConnecting = false;
 		this.hideProgress();
 		this.loadPresetConfig();
-		this.loadRerankInfo();
-		this.refreshEndpointHealth();
+		this.checkPipelineOnOpen();
 		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
@@ -785,7 +784,7 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Whether the "Use re-ranking" switch in Preferences is on (default on).
+	 * Whether the "Use re-ranking" switch in the Configure preset dialog is on (default on).
 	 * @returns {boolean}
 	 */
 	rerankPrefEnabled() {
@@ -799,7 +798,7 @@ var ZoteroRAGDialog = {
 
 	/**
 	 * Whether this query asks the backend to re-rank (pure apart from the pref read):
-	 * on unless switched off in Preferences or with the dialog's checkbox.
+	 * on unless switched off in the Configure preset dialog or with the dialog's checkbox.
 	 * @param {boolean} dialogDisabled - state of the "Disable re-ranking" checkbox
 	 * @returns {boolean}
 	 */
@@ -830,7 +829,7 @@ var ZoteroRAGDialog = {
 		if (checkbox && this.rerankInfo && !this.rerankPrefEnabled()) {
 			checkbox.checked = true;
 			checkbox.disabled = true;
-			checkbox.title = 'Re-ranking is switched off in the Zotero RAG preferences.';
+			checkbox.title = 'Re-ranking is switched off in the Re-ranking tab of the Configure preset dialog.';
 		}
 		this.updateRerankNotice();
 	},
@@ -933,6 +932,62 @@ var ZoteroRAGDialog = {
 			return { message: `Starting the ${cold.join(' and ')} model${cold.length > 1 ? 's' : ''} - this can take a minute or two...`, retryMs: 5000 };
 		}
 		return null;
+	},
+
+	/**
+	 * The pipeline sides the user has to act on before asking (pure): a paused or not running
+	 * embedding or answering endpoint, and the re-ranking one when the query would use it.
+	 * A starting (cold) or busy endpoint needs no action; a side without health is fine.
+	 * @param {{embedding?: {status: string, detail?: string}|null, llm?: {status: string, detail?: string}|null, rerank?: {status: string, detail?: string}|null}|null|undefined} health - GET /api/config/health
+	 * @param {boolean} rerankWanted - whether the preset re-ranks and re-ranking is switched on
+	 * @returns {{lines: string[], rerankOnly: boolean}} one line per side; no lines when all are usable
+	 */
+	describePipelineProblems(health, rerankWanted) {
+		/** @type {string[]} */
+		const lines = [];
+		/** @type {string[]} */
+		const sides = [];
+		if (!health) return { lines, rerankOnly: false };
+		/** @type {Array<['embedding'|'rerank'|'llm', string]>} */
+		const order = [['embedding', 'embedding'], ['rerank', 're-ranking'], ['llm', 'answering']];
+		for (const [side, name] of order) {
+			if (side === 'rerank' && !rerankWanted) continue;
+			const h = health[side];
+			if (!h) continue;
+			if (h.status === 'paused') {
+				lines.push(`The ${name} endpoint is paused.`);
+				sides.push(side);
+			} else if (h.status === 'unreachable') {
+				lines.push(`The ${name} endpoint is not running${h.detail ? ` (${h.detail})` : ''}.`);
+				sides.push(side);
+			}
+		}
+		return { lines, rerankOnly: sides.length === 1 && sides[0] === 'rerank' };
+	},
+
+	/**
+	 * When the dialog opens: load the preset's re-ranking info and the endpoint health, and
+	 * if a side of the pipeline needs the user (paused, or not running), say so and open the
+	 * Configure preset dialog, where it can be started or its account logged in to.
+	 * @returns {Promise<void>}
+	 */
+	async checkPipelineOnOpen() {
+		await Promise.all([this.loadRerankInfo(), this.refreshEndpointHealth()]);
+		if (!this.plugin || this._healthClosed) return;
+		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
+		const { lines, rerankOnly } = this.describePipelineProblems(this.endpointHealth, rerankWanted);
+		if (!lines.length) return;
+		const [it, is] = lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
+		const consequence = rerankOnly
+			? 'Questions are answered without re-ranking until it is up.'
+			: `Questions cannot be answered until ${is} up.`;
+		// @ts-ignore - Services is available in Zotero plugin context
+		Services.prompt.alert(window, 'Zotero RAG', [
+			...lines, consequence, '',
+			`The Configure preset dialog opens next, so you can start ${it} or log in.`,
+		].join('\n'));
+		this.plugin.openPresetDialog(window);
 	},
 
 	/**

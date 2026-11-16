@@ -5,7 +5,7 @@ Configuration API endpoints.
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import logging
 import os
@@ -35,7 +35,9 @@ from backend.services.usage_meters import recorder as usage_recorder
 from backend.services.llm import RemoteLLMService
 from backend.services.zotero_identity import ZoteroIdentity
 from backend.providers import Credentials, Provider, ProviderConfigError, ProvisionContext, get_providers, preset_sides, side_config
-from backend.providers.types import ModelInfo
+from backend.providers.types import Health, ModelInfo
+from backend.providers.ui import PresetView
+from backend.services.preset_view import Probe, ViewInputs, build_preset_view
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -489,6 +491,9 @@ async def update_config(
     set_default_preset(settings.data_path, update.preset_name)
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
+    from backend.services import side_probe
+
+    side_probe.reset()
     try:
         store = get_key_store()
         if store.enabled:
@@ -524,6 +529,19 @@ def _caller_key(request: Optional[Request], key_env: Optional[str]) -> Optional[
     return request.headers.get(env_var_to_header(key_env)) or None
 
 
+def _side_credentials(preset: HardwarePreset, side: str, provider: Provider, request: Optional[Request]) -> Credentials:
+    """Key, URL and user of one side, following its credential scope (see ``_check_side``)."""
+    kwargs = _side_kwargs(preset, side)
+    url_env = kwargs.get("shared_base_url_env")
+    key_env = kwargs.get("shared_api_key_env")
+    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
+    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
+    if not base_url and api_key and provider.derives_endpoint_url:
+        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
+    identity = get_zotero_identity(request) if request is not None else None
+    return Credentials(api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None)
+
+
 def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = None) -> Optional[EndpointHealth]:
     """Health of one side from its provider; None when the provider has no health concept.
 
@@ -537,17 +555,7 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
         provider = get_providers(preset)[side]
     except ProviderConfigError:
         return None
-    kwargs = _side_kwargs(preset, side)
-    url_env = kwargs.get("shared_base_url_env")
-    key_env = kwargs.get("shared_api_key_env")
-    api_key = resolve_shared_value(key_env) if key_env else _caller_key(request, kwargs.get("api_key_env"))
-    base_url = resolve_shared_value(url_env) if url_env else kwargs.get("base_url")
-    if not base_url and api_key and provider.derives_endpoint_url:
-        base_url = endpoint_cache.resolve(provider, side, api_key)  # may be None: the provider decides what that means
-    identity = get_zotero_identity(request) if request is not None else None
-    health = provider.health(Credentials(
-        api_key=api_key, base_url=base_url, user_id=identity.user_id if identity else None,
-    ))
+    health = provider.health(_side_credentials(preset, side, provider, request))
     if health is None:
         return None
     return EndpointHealth(status=health.status, detail=health.detail)
@@ -787,7 +795,7 @@ async def _start_job(request: Request, body: ProvisionRequest, capability: str) 
             raise HTTPException(
                 status_code=400,
                 detail=f"No API key is available for the {side} side"
-                       + (f" ({env}); enter your key in Preferences or one for this run." if env else "."),
+                       + (f" ({env}); enter your key in the Configure preset dialog or one for this run." if env else "."),
             )
         ctx = ProvisionContext(
             side=side, preset=preset, credential=credential, data_path=settings.data_path,
@@ -968,7 +976,11 @@ async def get_required_api_keys():
     POST /api/config/provision, so its `shared_base_url` entry is omitted.
     """
     settings = get_settings()
-    preset = settings.get_hardware_preset()
+    return RequiredKeysResponse(keys=_required_keys(settings, settings.get_hardware_preset()))
+
+
+def _required_keys(settings, preset: HardwarePreset) -> List[ApiKeyRequirement]:
+    """The client-configurable fields of ``preset`` (see GET /api/required-keys)."""
     try:
         providers = get_providers(preset)
     except ProviderConfigError:
@@ -995,14 +1007,147 @@ async def get_required_api_keys():
 
     for key_info in RemoteEmbeddingService.required_client_fields(preset.embedding):
         _merge(key_info, "embedding")
-    for key_info in RemoteLLMService.required_client_fields(settings):
+    for key_info in RemoteLLMService.required_client_fields_for_config(preset.llm):
         _merge(key_info, "llm")
     from backend.services.rerank import rerank_client_fields
 
     for key_info in rerank_client_fields(preset.rerank):
         _merge(key_info, "rerank")
 
-    return RequiredKeysResponse(keys=list(seen.values()))
+    return list(seen.values())
+
+
+async def _probe(url: Optional[str]) -> Optional[Probe]:
+    """GET ``url`` with a short timeout; None when there is nothing to probe."""
+    if not url:
+        return None
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(url)
+    except httpx.TimeoutException:
+        return Probe(ok=False, detail="no answer within 3 s")
+    except Exception as exc:  # any failure means "not reachable" for the dialog
+        return Probe(ok=False, detail=f"not reachable ({type(exc).__name__})")
+    if resp.is_success:
+        return Probe(ok=True)
+    return Probe(ok=False, detail=f"HTTP {resp.status_code}")
+
+
+@router.get("/config/preset-view", response_model=PresetView)
+async def get_preset_view(request: Request) -> PresetView:
+    """Everything the plugin's "Configure preset" dialog shows for the caller's effective preset.
+
+    One tab per side of the pipeline (state, configuration fields, status messages, a job
+    log and actions) and one account card per service provider (its credential fields,
+    which report only whether a value is set). Built from the providers' hooks, so the
+    plugin needs no vendor knowledge; see backend/providers/ui.py.
+    """
+    settings = get_settings()
+    preset = settings.get_hardware_preset()
+    try:
+        providers = get_providers(preset)
+    except ProviderConfigError:
+        providers = {}
+
+    health: Dict[str, Optional[Health]] = {}
+    operable: Dict[str, bool] = {}
+    sessions: Dict[str, Optional[dict]] = {}
+    identity = get_zotero_identity(request)
+    for side, provider in providers.items():
+        if side_config(preset, side).model_type != "remote":
+            continue
+        checked = await asyncio.to_thread(_check_side, preset, side, request)
+        health[side] = Health(status=checked.status, detail=checked.detail) if checked else None
+        operable[side] = await _caller_may_operate(request, provider)
+        descriptor = provider.describe()
+        if provider.id not in sessions and descriptor.provisioning and descriptor.provisioning.login:
+            try:
+                sessions[provider.id] = await asyncio.to_thread(
+                    provider.session_status, identity.user_id if identity else None)
+            except Exception as exc:  # the card then offers the login form
+                logger.info("Session state of %s unavailable: %s", provider.id, type(exc).__name__)
+                sessions[provider.id] = None
+
+    # Sides without a status check get a (cached) test request; every remote side its quota meters.
+    from backend.services.side_probe import probe_side
+
+    client_keys = get_client_api_keys(request)
+    required = [k.model_dump() for k in await asyncio.to_thread(_required_keys, settings, preset)]
+
+    def _has_credentials(side: str) -> bool:
+        """No test request while a non-optional key of the side is missing (the card says so)."""
+        for key in required:
+            if side not in (key.get("sides") or []) or key.get("optional"):
+                continue
+            if key["kind"] == "api_key" and not request.headers.get(key.get("header_name") or ""):
+                return False
+            if key["kind"] in ("shared_api_key", "shared_base_url") and not key.get("is_set"):
+                return False
+        return True
+
+    probes: Dict[str, Any] = {}
+    availability: Dict[str, Optional[str]] = {}
+    # Test the answering model the caller's key can use (the provider's live list, as the
+    # query dialog's model menu offers), not the preset's static default, which a key may
+    # have no access to.
+    live = await asyncio.to_thread(_live_llm_models, request, preset, require_key=True) if "llm" in health else None
+    for side in ("embedding", "llm"):
+        if side not in health:
+            continue
+        probes[side] = await probe_side(preset, side, client_keys,
+                                        send=health[side] is None and _has_credentials(side),
+                                        model=live[0].id if side == "llm" and live else None)
+        availability[side] = await asyncio.to_thread(
+            lambda s=side: providers[s].model_availability(_side_credentials(preset, s, providers[s], request)))
+
+    loopback = is_loopback(settings)
+    try:
+        await require_authorized_group_admin(request)
+        is_admin = True
+    except HTTPException:
+        is_admin = False
+
+    default_options: List[str] = []
+    default_name = ""
+    if is_admin and not loopback:  # on a loopback server the Settings chooser is the default
+        default = settings.get_default_preset()
+        default_name = default.name
+
+        def _options() -> List[str]:
+            available = list_presets(settings.data_path, platform=current_platform())
+            compatible = _compatible_presets(default, settings.data_path, available)
+            return [p.name for p in _switchable_presets(default, compatible, settings, request)]
+
+        default_options = await asyncio.to_thread(_options)
+
+    extractor = effective_extractor_backend(settings, preset)
+    extraction_probe = None
+    if extractor == "kreuzberg":
+        extraction_probe = await _probe(f"{settings.kreuzberg_url.rstrip('/')}/health" if settings.kreuzberg_url else None)
+    vector_probe = await _probe(settings.qdrant_url)
+
+    inputs = ViewInputs(
+        preset=preset,
+        providers=providers,
+        health=health,
+        operable=operable,
+        job=get_provisioning_status(request),
+        required_keys=required,
+        header_present=lambda name: bool(name and request.headers.get(name)),
+        is_admin=is_admin,
+        default_options=default_options,
+        default_preset=default_name,
+        extractor_backend=extractor,
+        extraction_probe=extraction_probe,
+        vector_probe=vector_probe,
+        vector_detail="Qdrant server" if settings.qdrant_url else "embedded Qdrant",
+        sessions=sessions,
+        probes=probes,
+        availability=availability,
+    )
+    return build_preset_view(inputs)
 
 
 class ModelStatus(BaseModel):
@@ -1068,6 +1213,9 @@ class SessionLoginRequest(BaseModel):
     side: str
     #: Field values by the names the side's ``provisioning.login`` descriptor declares.
     values: Dict[str, str] = {}
+    #: Also start the re-ranking endpoint when this account serves it (the caller's
+    #: "Use re-ranking" switch, a plugin preference the server cannot see).
+    start_rerank: bool = True
 
 
 class SessionSideRequest(BaseModel):
@@ -1121,9 +1269,9 @@ async def session_login(body: SessionLoginRequest, request: Request) -> dict:
     provider keeps only the resulting session, encrypted. Returns the session
     state (``state``, ``username``, ``expires_at``, provider extras), no secrets,
     plus ``provisioning``: the provisioning job started for the preset's sides that
-    run in this session (the same job as POST /api/config/provision; re-ranking is
-    left out, it is only ever started on its own), or None. A provider start that
-    cannot begin does not fail the login; its reason is in ``provisioning_error``.
+    run in this session (the same job as POST /api/config/provision; re-ranking only
+    when ``start_rerank``), or None. A provider start that cannot begin does not fail
+    the login; its reason is in ``provisioning_error``.
     """
     provider, user_id = _session_provider(request, body.side)
     try:
@@ -1133,12 +1281,18 @@ async def session_login(body: SessionLoginRequest, request: Request) -> dict:
     except Exception as exc:
         raise _session_error(exc)
     result = dict(result or {})
-    result["provisioning"], result["provisioning_error"] = await _provision_session_sides(request, provider)
+    result["provisioning"], result["provisioning_error"] = await _provision_session_sides(
+        request, provider, include_rerank=body.start_rerank)
     return result
 
 
-async def _provision_session_sides(request: Request, provider: Provider) -> Tuple[Optional[dict], Optional[str]]:
-    """Start provisioning the active preset's sides served by ``provider``'s session (not rerank).
+async def _provision_session_sides(
+    request: Request, provider: Provider, include_rerank: bool = True,
+) -> Tuple[Optional[dict], Optional[str]]:
+    """Start provisioning the active preset's sides served by ``provider``'s session.
+
+    The re-ranking side is included unless ``include_rerank`` is false (the caller
+    switched re-ranking off), so a login starts every endpoint the queries will use.
 
     Returns ``(job state, None)``, or ``(None, reason)`` when nothing was started. A job
     that is already running is reported as such, not as an error.
@@ -1150,7 +1304,7 @@ async def _provision_session_sides(request: Request, provider: Provider) -> Tupl
         return None, str(exc)
     sides = [
         s for s in preset_sides(preset)
-        if s != "rerank" and providers[s].id == provider.id
+        if (include_rerank or s != "rerank") and providers[s].id == provider.id
         and providers[s].supports_provisioning and providers[s].uses_session_endpoints
     ]
     if not sides:

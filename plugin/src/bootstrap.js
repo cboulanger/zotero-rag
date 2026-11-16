@@ -74,6 +74,8 @@ async function startup({ id, version, rootURI }) {
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'provider-sections.js');
+	// Pure helpers of the "Configure preset" dialog; the Preferences pane uses them for its summary.
+	Services.scriptloader.loadSubScript(rootURI + 'preset-dialog-view.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;

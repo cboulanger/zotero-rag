@@ -14,9 +14,9 @@
   "llm": {
     "model_type": "remote",
     "model_names": [
+      "gemma-4-31b-it",
       "mistral-large-3-675b-instruct-2512",
       "qwen3.5-122b-a10b",
-      "gemma-4-31b-it",
       "deepseek-r1-distill-llama-70b",
       "qwen3-30b-a3b-instruct-2507"
     ],

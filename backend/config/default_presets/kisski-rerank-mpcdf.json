@@ -1,0 +1,66 @@
+{
+  "version": 2,
+  "description": "KISSKI/SAIA Academic Cloud for embeddings and answers, with re-ranking (bge-reranker-v2-m3) as a job on your own MPCDF account. Log in with your MPCDF username, password and one-time code in the Configure preset dialog, which starts the re-ranker; until it is up, queries run without re-ranking.",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "multilingual-e5-large-instruct",
+    "batch_size": 256,
+    "provider": {
+      "id": "kisski"
+    },
+    "model_kwargs": {
+      "base_url": "https://chat-ai.academiccloud.de/v1",
+      "api_key_env": "KISSKI_API_KEY"
+    }
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": [
+      "gemma-4-31b-it",
+      "mistral-large-3-675b-instruct-2512",
+      "qwen3.5-122b-a10b",
+      "deepseek-r1-distill-llama-70b",
+      "qwen3-30b-a3b-instruct-2507"
+    ],
+    "max_context_length": 128000,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "provider": {
+      "id": "kisski"
+    },
+    "model_kwargs": {
+      "base_url": "https://chat-ai.academiccloud.de/v1",
+      "api_key_env": "KISSKI_API_KEY",
+      "extra_body": {
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      }
+    }
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any",
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "provider": {
+      "id": "mpcdf",
+      "scope": "user",
+      "options": {
+        "gpus": 1,
+        "idle_minutes": 60,
+        "image": "rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210",
+        "envs": {
+          "VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION"
+        },
+        "build_timeout_minutes": 60
+      }
+    }
+  }
+}

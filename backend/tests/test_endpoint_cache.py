@@ -127,7 +127,7 @@ class TestServiceWiring(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(EmbeddingEndpointUnavailableError) as ctx:
                 await service._ensure_endpoint()
         self.assertIn("not provisioned", str(ctx.exception))
-        self.assertIn("Preferences", str(ctx.exception))
+        self.assertIn("Configure preset", str(ctx.exception))
 
     async def test_a_preset_url_wins_and_no_lookup_happens(self):
         preset = derived_preset()

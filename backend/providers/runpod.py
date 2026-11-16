@@ -151,7 +151,7 @@ class RunPodProvider(Provider):
     def unavailable_hint(self) -> Optional[str]:
         return (
             "This preset uses a RunPod serverless endpoint, which may be cold or not yet "
-            "provisioned - check its status and provision or wake it from Preferences."
+            "provisioned - check its status and start or wake it in the Configure preset dialog."
         )
 
     def classify_http_error(self, status: int, body: str) -> Optional[str]:
@@ -350,7 +350,7 @@ class RunPodProvider(Provider):
         """
         api_key = ctx.credential
         if not api_key:
-            raise ProvisionError("No RunPod API key available. Enter one in Preferences or set the shared key.")
+            raise ProvisionError("No RunPod API key available. Enter one in the Configure preset dialog or set the shared key.")
         progress(f"Checking the {self.side} template")
         template = self._ensure_template(api_key, ctx)
         ctx.check_deadline()

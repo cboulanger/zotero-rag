@@ -119,57 +119,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
-	// Retrieval Tuning section — one compact row per DIVERSITY_TUNING_FIELDS entry
-	// (defined in zotero-rag.js, shared with getDiversityTuningPayload()).
-	const diversityContainer = doc.getElementById('zotero-rag-diversity-tuning-container');
-	if (diversityContainer) {
-		for (const field of DIVERSITY_TUNING_FIELDS) {
-			const prefKey = `extensions.zotero-rag.${field.prefKey}`;
-			const inputId = `zotero-rag-diversity-${field.prefKey}`;
-
-			const row = doc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
-			row.className = 'diversity-tuning-row';
-
-			const label = doc.createElementNS('http://www.w3.org/1999/xhtml', 'label');
-			label.setAttribute('for', inputId);
-			label.textContent = `${field.label}:`;
-
-			const input = /** @type {HTMLInputElement} */ (doc.createElementNS('http://www.w3.org/1999/xhtml', 'input'));
-			input.id = inputId;
-			input.type = 'number';
-			input.min = '1';
-			input.className = 'setting-input-small';
-			input.placeholder = String(field.default);
-			const stored = Zotero.Prefs.get(prefKey, true);
-			input.value = stored !== undefined && stored !== null && stored !== '' ? String(stored) : '';
-
-			const description = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
-			description.className = 'diversity-tuning-description';
-			description.textContent = field.description;
-
-			input.addEventListener('change', () => {
-				const raw = input.value.trim();
-				if (raw === '') {
-					Zotero.Prefs.clear(prefKey, true);
-					return;
-				}
-				const value = parseInt(raw, 10);
-				if (Number.isFinite(value) && value >= 1) {
-					Zotero.Prefs.set(prefKey, value, true);
-				} else {
-					// Invalid entry — revert the field rather than store garbage
-					input.value = '';
-					Zotero.Prefs.clear(prefKey, true);
-				}
-			});
-
-			row.appendChild(label);
-			row.appendChild(input);
-			row.appendChild(description);
-			diversityContainer.appendChild(row);
-		}
-	}
-
 	// External links inside the preferences pane don't open in the system browser
 	// on their own (target="_blank" is a no-op here). Route http(s) links through
 	// Zotero.launchURL so they open in the user's default browser.
@@ -183,97 +132,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		}
 	});
 
-	const serviceKeysPlaceholder = doc.getElementById('zotero-rag-service-keys-placeholder');
-
-	/**
-	 * Show a per-field validation status message directly under a service API
-	 * key's own input field — in addition to the broader Automatic Indexing
-	 * status banner — so a rejected/unverified key is visible right where the
-	 * user would look to fix it, not only in a separate section.
-	 * @param {string} keyName
-	 * @param {string|undefined} status - 'ok' | 'invalid' | 'unverified' | undefined
-	 * @param {string} [errorMessage]
-	 * @returns {void}
-	 */
-	const setServiceKeyStatus = (keyName, status, errorMessage) => {
-		const el = doc.getElementById(`zotero-rag-key-status-${keyName}`);
-		if (!el) return;
-		if (status === 'invalid') {
-			setIconStatus(el, '✗', 'status-icon-error', `Rejected: ${errorMessage || 'invalid credentials'}`,
-				'service-key-status status-error');
-		} else if (status === 'unverified') {
-			setIconStatus(el, '⚠', 'status-icon-warn', 'Could not be verified right now; will be retried automatically.',
-				'service-key-status status-warn');
-		} else if (status === 'ok') {
-			setIconStatus(el, '✓', 'status-icon-ok', 'Key accepted.',
-				'service-key-status status-ok');
-		} else {
-			setIconStatus(el, null, '', '', 'service-key-status');
-		}
-	};
-
-	/**
-	 * Re-sync the server-stored embedding key when the user edits it locally,
-	 * so the cron auto-indexer's copy stays in sync without needing to toggle
-	 * auto-indexing off and on again. autoindexToggle/setAutoindexStatus are
-	 * declared further down in this same function but are safe to reference
-	 * here since this callback only runs later, after user interaction.
-	 * @param {{key_name: string, header_name: string, description: string, docs_url?: string|null, required_for: string[]}} keyInfo
-	 * @param {string} value
-	 * @returns {Promise<void>}
-	 */
-	const onServiceKeyChange = async (keyInfo, value) => {
-		if (!keyInfo.required_for.includes('indexing')) return;
-		if (!autoindexToggle || !autoindexToggle.checked) return;
-		setAutoindexStatus('Updating embedding API key...', 'ok');
-		try {
-			const response = await fetch(`${this.backendURL}/api/autoindex/keys`, {
-				method: 'POST',
-				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-				body: JSON.stringify({ api_key: this.zoteroApiKey, embedding_api_key: value }),
-			});
-			if (!response.ok) {
-				const err = await response.json().catch(() => ({}));
-				setAutoindexStatus(`Error updating embedding API key: ${err.detail || response.status}`, 'error');
-				return;
-			}
-			/** @type {{embedding_key_status?: string, embedding_key_error?: string}} */
-			const data = await response.json();
-			setServiceKeyStatus(keyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
-			if (data.embedding_key_status === 'invalid') {
-				setAutoindexStatus(`Embedding API key rejected: ${data.embedding_key_error || 'invalid credentials'}.`, 'warn');
-			} else if (data.embedding_key_status === 'unverified') {
-				setAutoindexStatus('Embedding API key could not be verified right now but was saved; it will be retried on the next run.', 'warn');
-			} else if (!data.embedding_key_status) {
-				setAutoindexStatus('Embedding key field cleared; nothing was synced to the server.', 'warn');
-			} else if (data.embedding_key_status === 'ok') {
-				setAutoindexStatus('Embedding API key updated.', 'ok');
-			} else {
-				setAutoindexStatus(`Embedding API key updated, but returned an unexpected status "${data.embedding_key_status}".`, 'warn');
-			}
-		} catch (e) {
-			setAutoindexStatus(`Error updating embedding API key: ${e}`, 'error');
-		}
-	};
-
-	// --- Per-side model sections -------------------------------------------------
-	// Everything vendor-specific comes from the backend's provider descriptors
-	// (GET /api/config/providers); see provider-sections.js for the rendering.
-	const Sections = ZoteroRAGProviderSections;
-	const sectionsContainer = doc.getElementById('zotero-rag-provider-sections');
-	const sectionRefs = sectionsContainer
-		? Sections.ensureSections(doc, sectionsContainer, {
-			onProvision: (side, key) => controller && controller.provision(side, key),
-			onRetry: (side, key) => controller && controller.provision(side, key),
-			onPause: (side, key) => controller && controller.pause(side, key),
-			onLogin: (side, values) => controller && controller.login(side, values),
-			onLogout: (side) => controller && controller.logout(side),
-			rerankEnabled: {
-				get: () => Zotero.Prefs.get(Sections.RERANK_PREF, true) !== false,
-				set: (enabled) => Zotero.Prefs.set(Sections.RERANK_PREF, enabled, true),
-			},
-		})
-		: null;
 	/**
 	 * GET a backend JSON endpoint; null on any failure (the UI then keeps what it has).
 	 * @param {string} path
@@ -288,64 +146,22 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			return null;
 		}
 	};
-	/** @type {ReturnType<typeof ZoteroRAGProviderSections.createController> | null} */
-	const controller = sectionRefs
-		? Sections.createController({
-			refs: sectionRefs,
-			get: fetchJson,
-			post: async (path, body) => {
-				const response = await fetch(`${this.backendURL}${path}`, {
-					method: 'POST',
-					headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
-					body: JSON.stringify(body),
-				});
-				return { ok: response.ok, status: response.status, data: await response.json().catch(() => ({})) };
-			},
-			// Management tokens live on the plugin object: kept while Zotero runs, never written anywhere.
-			sessionKeys: {
-				get: (env) => (this._sessionKeys && this._sessionKeys[env]) || '',
-				set: (env, value) => { this._sessionKeys = { ...(this._sessionKeys || {}), [env]: value }; },
-				forget: (env) => { if (this._sessionKeys) delete this._sessionKeys[env]; },
-			},
-		})
-		: null;
-	const pollJob = async () => { if (controller) await controller.poll(); };
-	const headerForKey = Sections.headerForKey;
-
-	/** Render each required key under the first side that uses it. */
-	const renderSideKeys = () => {
-		if (!sectionRefs) return;
-		const keys = this.requiredApiKeys || [];
-		for (const side of Sections.SIDES) {
-			const forSide = keys.filter((k) => {
-				const sides = k.sides && k.sides.length ? k.sides : ['embedding'];
-				return Sections.SIDES.find((s) => sides.includes(s)) === side;
-			});
-			this.renderServiceApiKeyFields(doc, sectionRefs[side].keys, null, forSide, onServiceKeyChange);
-		}
-		if (serviceKeysPlaceholder) serviceKeysPlaceholder.style.display = keys.length ? 'none' : '';
-	};
-
-	// Render from cache immediately so fields appear without needing a server round-trip
-	try {
-		this.requiredApiKeys = JSON.parse(Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]');
-	} catch (_) {}
-	renderSideKeys();
-	// Refresh from server in background and re-render if the list has changed
-	this.fetchRequiredApiKeys().then(renderSideKeys);
 
 	// --- Model preset group -------------------------------------------------------
+	// Only the choice of preset lives here. Its endpoints, credentials, the server default
+	// and retrieval tuning are in the "Configure preset" dialog (preset-dialog.xhtml).
+	const Sections = ZoteroRAGProviderSections;
 	const presetSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-preset-select'));
 	const presetLabel = doc.getElementById('zotero-rag-preset-label');
-	const presetDescription = doc.getElementById('zotero-rag-preset-description');
+	const presetSummary = doc.getElementById('zotero-rag-preset-summary');
 	const presetStatus = doc.getElementById('zotero-rag-preset-status');
 	const presetKeys = doc.getElementById('zotero-rag-preset-keys');
-	const defaultRow = doc.getElementById('zotero-rag-default-row');
-	const defaultHelp = doc.getElementById('zotero-rag-default-help');
-	const defaultSelect = /** @type {HTMLSelectElement | null} */ (doc.getElementById('zotero-rag-default-select'));
-	/** What the preset controls currently show: 'loopback' (one control, changes the default) or 'user'. */
+	const configureButton = doc.getElementById('zotero-rag-configure-preset');
+	/** What the preset control currently does: 'loopback' (changes the server default) or 'user'. */
 	let presetMode = 'user';
 	const setPresetStatus = (/** @type {string} */ text) => { if (presetStatus) presetStatus.textContent = text; };
+
+	if (configureButton) configureButton.addEventListener('click', () => this.openPresetDialog(_window));
 
 	/**
 	 * @param {HTMLSelectElement} select
@@ -363,8 +179,25 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		select.value = selected;
 	};
 
+	/** One dot per side plus a summary line, from the dialog's own view model. */
+	const refreshPresetSummary = async () => {
+		if (!presetSummary) return;
+		const fetched = await fetchJson('/api/config/preset-view');
+		presetSummary.textContent = '';
+		if (!fetched) return;
+		const view = ZoteroRAGPresetDialog.applyLocalState(fetched, (name) => Zotero.Prefs.get(name, true));
+		for (const side of view.sides) {
+			const dot = doc.createElementNS('http://www.w3.org/1999/xhtml', 'span');
+			dot.className = `preset-dot ${side.state}`;
+			dot.title = `${side.title}: ${side.summary}`;
+			presetSummary.appendChild(dot);
+		}
+		const overall = ZoteroRAGPresetDialog.overall(view.sides);
+		presetSummary.appendChild(doc.createTextNode(` ${overall.text}. Endpoints, keys and tuning: Configure preset.`));
+	};
+
 	/**
-	 * Re-fetch the caller's preset state and repopulate both preset controls.
+	 * Re-fetch the caller's preset state and repopulate the preset control.
 	 * @returns {Promise<void>}
 	 */
 	const refreshPresetState = async () => {
@@ -374,10 +207,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 		presetMode = view.mode;
 		if (presetLabel) presetLabel.textContent = view.label;
 		if (presetSelect) fillSelect(presetSelect, view.options, view.selected);
-		if (presetDescription) presetDescription.textContent = cfg.preset_description || '';
-		if (defaultRow) defaultRow.hidden = !view.showDefault;
-		if (defaultHelp) defaultHelp.hidden = !view.showDefault;
-		if (defaultSelect && view.showDefault) fillSelect(defaultSelect, view.defaultOptions, view.defaultSelected);
 		if (view.note) setPresetStatus(view.note);
 	};
 
@@ -385,17 +214,16 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const applyPresetSwitch = async () => {
 		await refreshPresetState();
 		await this.fetchRequiredApiKeys();
-		renderSideKeys();
-		await pollJob();
+		await refreshPresetSummary();
 	};
 
 	/**
-	 * POST /api/config (changes the server default). Admins only.
+	 * POST /api/config (changes the server default; the loopback server's only control).
 	 * @param {string} name
 	 * @returns {Promise<boolean>}
 	 */
 	const setServerDefault = async (name) => {
-		setPresetStatus('Switching\u2026');
+		setPresetStatus('Switching…');
 		try {
 			const response = await fetch(`${this.backendURL}/api/config`, {
 				method: 'POST',
@@ -423,10 +251,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	 * @returns {Promise<boolean>}
 	 */
 	const chooseMyPreset = async (name, keys) => {
-		setPresetStatus('Switching\u2026');
+		setPresetStatus('Switching…');
 		/** @type {Record<string,string>} */
 		const extra = { 'Content-Type': 'application/json' };
-		for (const [keyName, value] of Object.entries(keys)) extra[headerForKey(keyName)] = value;
+		for (const [keyName, value] of Object.entries(keys)) extra[Sections.headerForKey(keyName)] = value;
 		try {
 			const response = await fetch(`${this.backendURL}/api/config/my-preset`, {
 				method: 'PUT',
@@ -494,7 +322,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	};
 
 	if (presetSelect) {
-		// A switch from the auto-index status dialog must show up here too.
+		// A switch or a new key from the dialog (or the auto-index status dialog) must show up here too.
 		this.observePresetChanged(_window, 'preferences', () => {
 			setPresetStatus('');
 			applyPresetSwitch();
@@ -508,7 +336,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				return;
 			}
 			const my = await fetchJson('/api/config/my-preset');
-			const entry = my && (my.selectable || []).find((p) => p.name === selected);
+			const entry = my && (my.selectable || []).find((/** @type {any} */ p) => p.name === selected);
 			if (entry && entry.credentials === 'missing') {
 				promptForMissingKeys(selected, entry.missing_keys || []);
 				return;
@@ -521,23 +349,12 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 			}
 		});
 	}
-	if (defaultSelect) {
-		defaultSelect.addEventListener('change', async (e) => {
-			const selected = /** @type {HTMLSelectElement} */ (e.target).value;
-			if (await setServerDefault(selected)) await applyPresetSwitch();
-			else await refreshPresetState();
-		});
-	}
+	// Cached key list first so headers are right, then the live state.
+	try {
+		this.requiredApiKeys = JSON.parse(Zotero.Prefs.get('extensions.zotero-rag.requiredApiKeys', true) || '[]');
+	} catch (_) {}
+	this.fetchRequiredApiKeys().then(() => refreshPresetSummary());
 	refreshPresetState();
-	pollJob();
-	// A saved shared value (e.g. a new provider API key) can change endpoint health and
-	// which presets have credentials: re-check right away.
-	if (sectionsContainer) {
-		sectionsContainer.addEventListener('zotero-rag-shared-field-saved', () => {
-			refreshPresetState();
-			pollJob();
-		});
-	}
 
 	// Library visibility section
 	const populateLibraryVisibilityList = () => {
@@ -711,14 +528,10 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 				setAutoindexStatus('', 'ok');
 			} else {
 				const own = data.keys[0];
-				const embeddingKeyInfo = this.requiredApiKeys.find(k => k.kind === 'api_key' && k.required_for.includes('indexing'));
-				if (embeddingKeyInfo) {
-					setServiceKeyStatus(embeddingKeyInfo.key_name, own.embedding_key_status);
-				}
 				if (!own.has_embedding_key) {
-					setAutoindexStatus('Automatic indexing is enabled, but no embedding API key is configured — indexing will be skipped until you add one above.', 'warn');
+					setAutoindexStatus('Automatic indexing is enabled, but no embedding API key is configured — indexing will be skipped until you add one under Configure preset.', 'warn');
 				} else if (own.embedding_key_status === 'invalid') {
-					setAutoindexStatus('Automatic indexing is enabled, but your embedding API key was rejected — indexing will be skipped until you add a valid key above.', 'warn');
+					setAutoindexStatus('Automatic indexing is enabled, but your embedding API key was rejected — indexing will be skipped until you add a valid key under Configure preset.', 'warn');
 				} else if (own.embedding_key_status === 'unverified') {
 					setAutoindexStatus('Automatic indexing is enabled. Your embedding API key could not be verified yet; it will be retried on the next run.', 'warn');
 				} else if (own.embedding_key_status === 'ok') {
@@ -762,9 +575,6 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					const data = await response.json();
 					const count = Array.isArray(data.targets) ? data.targets.length : 0;
 					const libraryText = count === 1 ? 'Auto-indexing enabled for 1 library.' : `Auto-indexing enabled for ${count} libraries.`;
-					if (embeddingKeyInfo) {
-						setServiceKeyStatus(embeddingKeyInfo.key_name, data.embedding_key_status, data.embedding_key_error);
-					}
 					// Fail closed: only 'ok' (or an absent status, e.g. no key was submitted)
 					// gets plain success messaging. Any other truthy value — known
 					// (invalid/unverified) or a status this plugin doesn't recognize yet —
@@ -774,7 +584,7 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 					} else if (data.embedding_key_status === 'unverified') {
 						setAutoindexStatus(`${libraryText} Your embedding API key could not be verified right now but was saved; it will be retried on the next run.`, 'warn');
 					} else if (!data.embedding_key_status) {
-						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured above — indexing will be skipped until you add one.`, 'warn');
+						setAutoindexStatus(`${libraryText} Warning: no embedding API key configured — indexing will be skipped until you add one under Configure preset.`, 'warn');
 					} else if (data.embedding_key_status === 'ok') {
 						setAutoindexStatus(libraryText, 'ok');
 					} else {

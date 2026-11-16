@@ -211,6 +211,12 @@ class ZoteroRAGPlugin {
 		/** @type {Window|null} */
 		this._autoindexStatusWindow = null;
 
+		/** @type {Window|null} */
+		this._presetDialogWindow = null;
+
+		/** @type {Record<string, string>|undefined} One-time provisioning credentials, memory only. */
+		this._sessionKeys = undefined;
+
 		// Set by dialog.js's init() to the live ZoteroRAGDialog object (not just its
 		// window), so other windows (e.g. the autoindex-status dialog) can read its
 		// isOperationInProgress flag without reaching into window internals themselves.
@@ -2266,6 +2272,58 @@ class ZoteroRAGPlugin {
 			'chrome,centerscreen,resizable=yes,width=520,height=480',
 			{ plugin: this }
 		);
+	}
+
+	/**
+	 * Open the "Configure preset" dialog (endpoints, credentials and tuning of the
+	 * caller's preset), focusing an existing instance instead of opening a duplicate.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openPresetDialog(win) {
+		if (this._presetDialogWindow && !this._presetDialogWindow.closed) {
+			this._presetDialogWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._presetDialogWindow = win.openDialog(
+			'chrome://zotero-rag/content/preset-dialog.xhtml',
+			'zotero-rag-preset-dialog',
+			'chrome,centerscreen,resizable=yes,width=780,height=720',
+			{ plugin: this }
+		);
+	}
+
+	/**
+	 * Keep the auto-indexer's copy of the caller's embedding key in step with the one
+	 * just entered locally: when automatic indexing is on for this user, re-submit the
+	 * registration with the new key. Does nothing when automatic indexing is off.
+	 * @param {string} value - the new embedding key ('' when cleared)
+	 * @returns {Promise<{synced: boolean, status?: string, error?: string}>}
+	 */
+	async syncAutoindexEmbeddingKey(value) {
+		if (!this.zoteroApiKey) return { synced: false };
+		try {
+			const current = await fetch(`${this.backendURL}/api/autoindex/keys`, { headers: this.getAuthHeaders() });
+			if (!current.ok) return { synced: false };
+			/** @type {{keys?: unknown[]}} */
+			const registered = await current.json();
+			if (!Array.isArray(registered.keys) || registered.keys.length === 0) return { synced: false };
+			const response = await fetch(`${this.backendURL}/api/autoindex/keys`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ api_key: this.zoteroApiKey, embedding_api_key: value }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				return { synced: false, error: err.detail || `HTTP ${response.status}` };
+			}
+			/** @type {{embedding_key_status?: string, embedding_key_error?: string}} */
+			const data = await response.json();
+			return { synced: true, status: data.embedding_key_status, error: data.embedding_key_error };
+		} catch (e) {
+			return { synced: false, error: String(e) };
+		}
 	}
 
 	/**

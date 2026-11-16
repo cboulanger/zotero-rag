@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal, Mapping, Opt
 
 from pydantic import BaseModel
 
+from backend.providers.ui import UiAction, UiFact, UiField, UiMessage, UiQuota, UiRequest
 from backend.providers.types import (
     Credentials,
     Health,
     Meter,
     ModelInfo,
     NoOptions,
+    OPTIONAL_SIDES,
     ProviderDescriptor,
     ProvisionContext,
     Scope,
@@ -143,6 +145,152 @@ class Provider:
             unavailable_hint=self.unavailable_hint(),
         )
 
+    # -- configuration dialog (see backend/providers/ui.py) ---------------------
+
+    #: How the dialog describes who owns the credentials, by scope.
+    SCOPE_NOTES: ClassVar[dict[str, str]] = {
+        "user": "your own account",
+        "managed": "operated by the server admin",
+        "shared": "provided by your institution",
+    }
+
+    def side_facts(self) -> list[UiFact]:
+        """Short facts for this side's Status section (model, provider, credential owner)."""
+        cfg = self.side_config
+        model = (getattr(cfg, "literal_model_names", None) or [cfg.model_name])[0]
+        facts = [UiFact(label="Model", value=str(model))]
+        note = self.SCOPE_NOTES.get(self.scope)
+        if note:
+            facts.append(UiFact(label="Account", value=note))
+        return facts
+
+    def side_messages(self, health: Optional[Health]) -> list[UiMessage]:
+        """Status messages for a side; by default the provider's advice while it is not ready."""
+        if health is None or health.status == "ready":
+            return []
+        hint = self.unavailable_hint()
+        return [UiMessage(level="warn", text=hint)] if hint else []
+
+    def side_actions(self, health: Optional[Health], job_status: Optional[str], operable: bool) -> list[UiAction]:
+        """The Actions section of this side's tab.
+
+        ``job_status`` is the status of this side's provisioning job (``running``,
+        ``pending``, ``failed``, ``succeeded``) or None. ``operable`` says whether the
+        caller may provision or pause this side. The default offers start (create,
+        wake or resume), retry after a failure and pause, as the capability flags allow.
+        """
+        status = health.status if health else ""
+        running = job_status in ("running", "pending")
+        busy = "A job for this endpoint is already running." if running else ""
+        # The optional re-ranking endpoint is only ever started on its own, never by Start all.
+        start_workflow = None if self.side in OPTIONAL_SIDES else "start"
+        actions: list[UiAction] = []
+        if self.supports_provisioning and operable:
+            if status in ("unreachable", "throttled", "paused"):
+                actions.append(UiAction(
+                    id="start", label="Resume" if status == "paused" else "Start endpoint", kind="primary",
+                    enabled=not running, reason=busy, workflow=start_workflow, account=self.id,
+                    request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
+                ))
+            elif job_status == "failed":
+                actions.append(UiAction(
+                    id="retry", label="Retry", kind="primary", workflow=start_workflow, account=self.id,
+                    request=UiRequest(path="/api/config/provision", body={"sides": [self.side]}),
+                ))
+        if status == "cold" and self.side not in OPTIONAL_SIDES:  # warmup wakes embedding and llm
+            actions.append(UiAction(
+                id="wake", label="Wake up", workflow="start",
+                request=UiRequest(path="/api/config/warmup"),
+            ))
+        if self.supports_suspend and operable and status in ("ready", "cold"):
+            actions.append(UiAction(
+                id="pause", label="Pause", enabled=not running, reason=busy, workflow="pause", account=self.id,
+                request=UiRequest(path="/api/config/suspend", body={"sides": [self.side]}),
+            ))
+        return actions
+
+    def account_fields(self, fields: list[UiField], operable: bool, session: Optional[dict] = None) -> list[UiField]:
+        """The fields of this provider's account card.
+
+        ``fields`` are the credentials the preset declares for the sides this provider
+        serves (personal keys and admin-set shared values), already built by core.
+        ``session`` is the caller's ``session_status`` for a provider with an account
+        login (None otherwise). The default adds the login form while the caller is not
+        logged in, else the one-time provisioning credential when the caller may
+        provision or pause.
+        """
+        credential = None
+        descriptor = self.describe()
+        login = descriptor.provisioning.login if descriptor.provisioning else None
+        if login is not None:
+            if session and session.get("state") == "ok":
+                return fields
+            return [*fields, *(
+                UiField(
+                    id=f"login:{f.name}", label=f.label, type="secret" if f.type == "password" else "text",
+                    help=f.help, optional=f.optional, storage="login", key=f.name,
+                )
+                for f in login.fields
+            )]
+        if operable and descriptor.provisioning and descriptor.provisioning.credential:
+            credential = descriptor.provisioning.credential
+        if credential is None:
+            return fields
+        return [*fields, UiField(
+            id=f"session:{credential.env}", label=credential.label, type="secret",
+            help=credential.help, pattern=credential.pattern, optional=credential.optional,
+            storage="session", key=credential.env,
+            placeholder="Optional, kept in memory only" if credential.optional else "",
+        )]
+
+    def quota_summary(self, meters: list[Meter]) -> Optional[UiQuota]:
+        """One value for how much of this side's quota is used, from its meters.
+
+        The default takes the meter closest to running out. Override to combine the
+        periods that matter for the provider (e.g. hourly and daily). None without meters.
+        """
+        return quota_from(meters, "")
+
+    def model_availability(self, creds: Credentials) -> Optional[str]:
+        """``available``, ``busy`` or ``very busy`` for this side's model; None when unknown.
+
+        The default asks ``live_models`` (providers with ``has_live_models``) for the
+        answering side's model. Blocking; never raises.
+        """
+        if not self.has_live_models or self.side != "llm" or not creds.base_url or not creds.api_key:
+            return None
+        try:
+            models = self.live_models(creds.base_url, creds.api_key) or []
+        except Exception:
+            return None
+        cfg = self.side_config
+        wanted = (getattr(cfg, "literal_model_names", None) or [cfg.model_name])[0]
+        found = next((m for m in models if m.id == wanted), None)
+        return found.availability if found else None
+
+    def account_session(self, session: Optional[dict]) -> tuple[list[UiMessage], list[UiAction]]:
+        """Status line and actions (log in, log out) of an account card with a login.
+
+        Only called for a provider whose descriptor has ``provisioning.login``; the
+        log-in request also starts the sides that run in the session.
+        """
+        descriptor = self.describe()
+        login = descriptor.provisioning.login if descriptor.provisioning else None
+        if session and session.get("state") == "ok":
+            who = f" as {session['username']}" if session.get("username") else ""
+            until = f" until {session['expires_at']}" if session.get("expires_at") else ""
+            return (
+                [UiMessage(level="ok", text=f"Logged in{who}{until}.")],
+                [UiAction(id="logout", label="Log out",
+                          request=UiRequest(path="/api/config/session/logout", body={"side": self.side}))],
+            )
+        messages = [UiMessage(level="info", text=login.help)] if login and login.help else []
+        messages.append(UiMessage(level="warn", text="Not logged in. Logging in starts the endpoints."))
+        return messages, [UiAction(
+            id="login", label="Log in and start", kind="primary", sends_login=True,
+            request=UiRequest(path="/api/config/session/login", body={"side": self.side}),
+        )]
+
     # -- credentials and endpoints -------------------------------------------
 
     def endpoint_url(self, api_key: str) -> Optional[str]:
@@ -172,7 +320,7 @@ class Provider:
     def unavailable_hint(self) -> Optional[str]:
         """Provider-specific advice for a side that is not ready.
 
-        Appended to "endpoint unavailable" errors and shown in Preferences.
+        Appended to "endpoint unavailable" errors and shown in the Configure preset dialog.
         Core text stays vendor-neutral.
         """
         return None
@@ -301,3 +449,18 @@ def _utc_now() -> str:
 # __init_subclass__ only fires for subclasses.
 PROVIDERS[Provider.id] = Provider
 GenericProvider = Provider
+
+
+def quota_from(meters: list[Meter], note: str) -> Optional[UiQuota]:
+    """A :class:`UiQuota` from the meter closest to running out (``note`` explains the combination)."""
+    usable = [m for m in meters if m.limit > 0]
+    if not usable:
+        return None
+    worst = max(usable, key=lambda m: (m.limit - m.remaining) / m.limit)
+    used_pct = round((worst.limit - worst.remaining) * 100 / worst.limit)
+    level = "error" if worst.remaining <= 0 or used_pct >= 95 else "warn" if used_pct >= 75 else "ok"
+    period = {"minute": " per-minute", "hour": " hourly", "day": " daily", "month": " monthly"}.get(worst.period or "", "")
+    text = f"{used_pct} % of the{period} quota used ({worst.remaining} {worst.unit} left)"
+    if note:
+        text += f"; {note}"
+    return UiQuota(used_pct=used_pct, level=level, text=text, meters=[m.model_dump() for m in usable])
