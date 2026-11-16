@@ -441,10 +441,10 @@ class RunPodRerankTest(unittest.IsolatedAsyncioTestCase):
         })
         return get_providers(preset)["rerank"]
 
-    def test_side_names_and_template(self):
+    def test_side_names_and_worker_env(self):
         p = self._provider()
         self.assertEqual(p.resource_name, "zotero-rag-rerank")
-        self.assertEqual(p.template_env(), {"MODEL_NAME": "BAAI/bge-reranker-v2-m3", "MAX_MODEL_LEN": "1024"})
+        self.assertEqual(p.worker_env(), {"MODEL_NAME": "BAAI/bge-reranker-v2-m3", "MAX_MODEL_LEN": "1024"})
         url, body = p._warmup_request("https://api.runpod.ai/v2/abc123/openai/v1")
         self.assertEqual(url, "https://api.runpod.ai/v2/abc123/runsync")
         self.assertEqual(body["input"]["route"], "/v1/rerank")

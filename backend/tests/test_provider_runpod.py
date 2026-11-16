@@ -43,26 +43,53 @@ def ctx(side="llm", **kw):
                             data_path=Path("."), **kw)
 
 
+#: GET /v2/catalog/gpus: two pools of the real catalog (abridged).
+CATALOG = {"gpus": [
+    {"id": "NVIDIA GeForce RTX 3090", "name": "RTX 3090", "pool": "AMPERE_24"},
+    {"id": "NVIDIA L4", "name": "L4", "pool": "AMPERE_24"},
+    {"id": "NVIDIA RTX A5000", "name": "RTX A5000", "pool": "AMPERE_24"},
+    {"id": "NVIDIA A40", "name": "A40", "pool": "AMPERE_48"},
+    {"id": "NVIDIA RTX A6000", "name": "RTX A6000", "pool": "AMPERE_48"},
+    {"id": "NVIDIA B200", "name": "B200", "pool": None},
+]}
+#: The ``gpu`` of an endpoint on an RTX A5000 only (as RunPod migrated the v1 ones).
+A5000 = {"pools": ["AMPERE_24"], "excludedTypes": ["NVIDIA GeForce RTX 3090", "NVIDIA L4"], "count": 1}
+
+
+def listing(key, *items, next_cursor=None):
+    """One page of a v2 listing: ``{key: [...], "pagination": {...}}``."""
+    return FakeResponse(200, {key: list(items), "pagination": {"nextCursor": next_cursor, "hasNextPage": next_cursor is not None}})
+
+
+def endpoint(p, id="ep1", workers_max=1, **over):
+    """An endpoint as GET /v2/serverless reports it, matching provider ``p``'s settings."""
+    body = {"id": id, "name": p.resource_name, "type": "QUEUE", "image": runpod_module.DEFAULT_IMAGE,
+            "env": p.worker_env(), "disk": runpod_module.CONTAINER_DISK_GB[p.side], "gpu": dict(A5000),
+            "workers": {"min": 0, "max": workers_max, "idleTimeout": 60}}
+    body.update(over)
+    return body
+
+
 def empty_account(http, **extra):
-    http.add("GET", r"/templates$", FakeResponse(200, []))
-    http.add("GET", r"/endpoints$", FakeResponse(200, []))
-    http.add("POST", r"/templates$", FakeResponse(200, {"id": "tpl1", "name": "n"}))
-    http.add("POST", r"/endpoints$", FakeResponse(200, {"id": "ep1", "name": "n"}))
+    http.add("GET", r"/v2/serverless$", listing("endpoints"))
+    http.add("GET", r"/v2/templates$", listing("templates"))
+    http.add("GET", r"/v2/catalog/gpus$", FakeResponse(200, CATALOG))
+    http.add("POST", r"/v2/serverless$", FakeResponse(201, {"id": "ep1", "name": "n"}))
     http.add("POST", r"/purge-queue$", FakeResponse(200, {}))
     for (m, pat), resp in extra.items():
         http.add(m, pat, resp)
 
 
-class TestNamesAndTemplates(unittest.TestCase):
+class TestNames(unittest.TestCase):
     def test_resource_names_and_model_per_side(self):
         emb, llm = provider("embedding"), provider("llm")
         self.assertEqual((emb.resource_name, llm.resource_name), ("zotero-rag-embedding", "zotero-rag-llm"))
         self.assertEqual(emb.model, "intfloat/multilingual-e5-large-instruct")
         self.assertEqual(llm.model, "Qwen/Qwen2.5-7B-Instruct")
-        self.assertEqual(emb.template_env(), {"MODEL_NAME": emb.model, "MAX_MODEL_LEN": "512"})
-        self.assertEqual(llm.template_env(), {"MODEL_NAME": llm.model})
+        self.assertEqual(emb.worker_env(), {"MODEL_NAME": emb.model, "MAX_MODEL_LEN": "512"})
+        self.assertEqual(llm.worker_env(), {"MODEL_NAME": llm.model})
 
-    def test_name_option_renames_template_and_endpoint(self):
+    def test_name_option_renames_the_endpoint(self):
         """A second preset on the same account (e.g. a larger LLM) needs its own endpoint."""
         llm = provider("llm", options={"name": "zotero-rag-llm-gemma"})
         self.assertEqual(llm.resource_name, "zotero-rag-llm-gemma")
@@ -71,7 +98,7 @@ class TestNamesAndTemplates(unittest.TestCase):
         """Without it vLLM sizes the KV cache for the model's full context, which does
         not fit a 31B model on a 48 GB GPU."""
         llm = provider("llm", options={"max_model_len": 16384})
-        self.assertEqual(llm.template_env(), {"MODEL_NAME": llm.model, "MAX_MODEL_LEN": "16384"})
+        self.assertEqual(llm.worker_env(), {"MODEL_NAME": llm.model, "MAX_MODEL_LEN": "16384"})
 
     def test_options_defaults_and_validation(self):
         o = provider().options
@@ -81,88 +108,77 @@ class TestNamesAndTemplates(unittest.TestCase):
             with self.assertRaises(ProviderConfigError):
                 get_providers(runpod_preset(bad))
 
-    def test_creates_template_when_missing_with_side_specific_disk(self):
-        http = FakeHTTP(); empty_account(http)
-        p = provider("embedding", http=http)
-        self.assertEqual(p._ensure_template("k", ctx("embedding"))["id"], "tpl1")
-        (_, _, body), = http.calls_matching("POST", r"/templates$")
-        self.assertEqual(body["containerDiskInGb"], 20)
-        self.assertEqual(body["imageName"], runpod_module.DEFAULT_IMAGE)
-        self.assertTrue(body["isServerless"])
 
-    def test_reuses_matching_existing_template(self):
-        http = FakeHTTP()
-        p = provider("llm", http=http)
-        http.add("GET", r"/templates$", FakeResponse(200, [
-            {"id": "t9", "name": "zotero-rag-llm", "imageName": runpod_module.DEFAULT_IMAGE, "env": p.template_env()}]))
-        self.assertEqual(p._ensure_template("k", ctx())["id"], "t9")
-        self.assertEqual(http.calls_matching("POST", r"/templates"), [])
+class TestGpu(unittest.TestCase):
+    def spec(self, gpu):
+        http = FakeHTTP({("GET", r"/v2/catalog/gpus$"): FakeResponse(200, CATALOG)})
+        return provider("llm", {"gpu": gpu}, http)._gpu_spec("k")
 
-    def test_keeps_mismatched_template_with_a_warning_unless_recreate(self):
-        http = FakeHTTP()
-        p = provider("llm", http=http)
-        http.add("GET", r"/templates$", FakeResponse(200, [
-            {"id": "t9", "name": "zotero-rag-llm", "imageName": "old:image", "env": {}}]))
-        with self.assertLogs(runpod_module.logger, level="WARNING") as logs:
-            self.assertEqual(p._ensure_template("k", ctx())["id"], "t9")
-        self.assertIn("differs", logs.output[0])
-        self.assertEqual(http.calls_matching("DELETE", r"."), [])
+    def test_a_gpu_type_is_its_pool_with_the_pools_other_types_excluded(self):
+        self.assertEqual(self.spec("NVIDIA RTX A5000"), A5000)
+        self.assertEqual(self.spec("NVIDIA RTX A6000"), {"pools": ["AMPERE_48"], "excludedTypes": ["NVIDIA A40"], "count": 1})
 
-    def test_recreate_deletes_the_referencing_endpoint_before_the_template(self):
-        http = FakeHTTP()
-        p = provider("llm", http=http)
-        http.add("GET", r"/templates$", FakeResponse(200, [
-            {"id": "t9", "name": "zotero-rag-llm", "imageName": "old:image", "env": {}}]))
-        http.add("GET", r"/endpoints$", FakeResponse(200, [{"id": "e9", "name": "zotero-rag-llm"}]))
-        http.add("DELETE", r"/endpoints/e9$", FakeResponse(204, None))
-        http.add("DELETE", r"/templates/t9$", FakeResponse(204, None))
-        http.add("POST", r"/templates$", FakeResponse(200, {"id": "t10"}))
-        self.assertEqual(p._ensure_template("k", ctx(recreate=True))["id"], "t10")
-        deletes = [c[1] for c in http.calls if c[0] == "DELETE"]
-        self.assertTrue(deletes[0].endswith("/endpoints/e9") and deletes[1].endswith("/templates/t9"))
+    def test_the_catalogs_short_name_works_too(self):
+        self.assertEqual(self.spec("RTX A5000"), A5000)
+
+    def test_an_unknown_or_poolless_gpu_type_is_a_provision_error_naming_it(self):
+        for gpu in ("NVIDIA RTX 9999", "NVIDIA B200"):
+            with self.assertRaisesRegex(ProvisionError, gpu):
+                self.spec(gpu)
 
 
 class TestEndpoints(unittest.TestCase):
-    def test_creates_with_at_least_one_worker_and_scale_to_zero(self):
+    def test_creates_the_endpoint_with_its_worker_settings_inline(self):
         http = FakeHTTP(); empty_account(http)
         p = provider("llm", {"workers_max": 2, "idle_timeout": 30, "data_centers": ["EU-RO-1"]}, http)
-        self.assertEqual(p._ensure_endpoint("k", ctx(), "tpl1")["id"], "ep1")
-        (_, _, body), = http.calls_matching("POST", r"/endpoints$")
-        self.assertEqual(body["templateId"], "tpl1")
-        self.assertEqual((body["workersMin"], body["workersMax"], body["idleTimeout"]), (0, 2, 30))
-        self.assertEqual(body["gpuTypeIds"], ["NVIDIA RTX A5000"])
-        self.assertEqual(body["dataCenterIds"], ["EU-RO-1"])
+        self.assertEqual(p._ensure_endpoint("k", ctx())["id"], "ep1")
+        (_, _, body), = http.calls_matching("POST", r"/v2/serverless$")
+        self.assertEqual(body, {
+            "name": "zotero-rag-llm", "type": "QUEUE", "image": runpod_module.DEFAULT_IMAGE,
+            "env": {"MODEL_NAME": "Qwen/Qwen2.5-7B-Instruct"}, "disk": 40, "gpu": A5000,
+            # Scale to zero: no worker runs (or bills) until a request arrives.
+            "workers": {"min": 0, "max": 2, "idleTimeout": 30},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4}, "flashboot": "FLASHBOOT",
+            "dataCenterIds": ["EU-RO-1"],
+        })
+        self.assertEqual(http.calls_matching("POST", r"/templates"), [])
 
     def test_omits_data_centers_when_unset(self):
         http = FakeHTTP(); empty_account(http)
-        provider("llm", http=http)._ensure_endpoint("k", ctx(), "tpl1")
-        (_, _, body), = http.calls_matching("POST", r"/endpoints$")
+        provider("embedding", http=http)._ensure_endpoint("k", ctx("embedding"))
+        (_, _, body), = http.calls_matching("POST", r"/v2/serverless$")
         self.assertNotIn("dataCenterIds", body)
+        self.assertEqual(body["disk"], 20)
 
     def test_reuses_matching_endpoint(self):
-        http = FakeHTTP()
-        http.add("GET", r"/endpoints$", FakeResponse(200, [
-            {"id": "e1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": ["NVIDIA RTX A5000"]}]))
-        self.assertEqual(provider("llm", http=http)._ensure_endpoint("k", ctx(), "tpl1")["id"], "e1")
-        self.assertEqual(http.calls_matching("POST", r"."), [])
+        http = FakeHTTP(); empty_account(http)
+        p = provider("llm", http=http)
+        http.add("GET", r"/v2/serverless$", listing("endpoints", endpoint(p, "e1")))
+        self.assertEqual(p._ensure_endpoint("k", ctx())["id"], "e1")
+        self.assertEqual([c for c in http.calls if c[0] != "GET"], [])
 
-    def test_gpu_mismatch_warns_and_keeps_unless_recreate(self):
-        existing = {"id": "e1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": ["NVIDIA A100"]}
-        http = FakeHTTP({("GET", r"/endpoints$"): FakeResponse(200, [existing])})
-        with self.assertLogs(runpod_module.logger, level="WARNING"):
-            self.assertEqual(provider("llm", http=http)._ensure_endpoint("k", ctx(), "tpl1")["id"], "e1")
-        empty_account(http := FakeHTTP())
-        http.add("GET", r"/endpoints$", FakeResponse(200, [existing]))
-        http.add("DELETE", r"/endpoints/e1$", FakeResponse(204, None))
-        self.assertEqual(provider("llm", http=http)._ensure_endpoint("k", ctx(recreate=True), "tpl1")["id"], "ep1")
-        self.assertTrue(http.calls_matching("DELETE", r"/endpoints/e1$"))
+    def test_finds_an_endpoint_on_a_later_page(self):
+        http = FakeHTTP(); empty_account(http)
+        p = provider("llm", http=http)
+        http.add("GET", r"/v2/serverless$", listing("endpoints", {"id": "x", "name": "other"}, next_cursor="c2"))
+        http.add("GET", r"/v2/serverless\?cursor=c2$", listing("endpoints", endpoint(p, "e2")))
+        self.assertEqual(p._ensure_endpoint("k", ctx())["id"], "e2")
 
-    def test_recreate_replaces_an_endpoint_whose_gpus_are_not_reported(self):
-        empty_account(http := FakeHTTP())
-        http.add("GET", r"/endpoints$", FakeResponse(200, [{"id": "e1", "name": "zotero-rag-llm", "templateId": "tpl1"}]))
-        http.add("DELETE", r"/endpoints/e1$", FakeResponse(204, None))
-        provider("llm", http=http)._ensure_endpoint("k", ctx(recreate=True), "tpl1")
-        self.assertTrue(http.calls_matching("DELETE", r"/endpoints/e1$"))
+    def test_a_differing_endpoint_is_kept_with_a_warning_unless_recreate(self):
+        for differs in ({"image": "old:image"}, {"env": {"MODEL_NAME": "other"}},
+                        {"gpu": {"pools": ["AMPERE_48"], "excludedTypes": [], "count": 1}},
+                        {"gpu": {"pools": ["AMPERE_24"], "excludedTypes": ["NVIDIA RTX A5000"], "count": 1}}):
+            http = FakeHTTP(); empty_account(http)
+            p = provider("llm", http=http)
+            http.add("GET", r"/v2/serverless$", listing("endpoints", endpoint(p, "e1", **differs)))
+            with self.assertLogs(runpod_module.logger, level="WARNING") as logs:
+                self.assertEqual(p._ensure_endpoint("k", ctx())["id"], "e1")
+            self.assertIn("differs", logs.output[0])
+            self.assertEqual(http.calls_matching("DELETE", r"."), [], differs)
+
+            http.add("DELETE", r"/v2/serverless/e1$", FakeResponse(204, None))
+            self.assertEqual(p._ensure_endpoint("k", ctx(recreate=True))["id"], "ep1")
+            self.assertTrue(http.calls_matching("DELETE", r"/v2/serverless/e1$"), differs)
 
 
 class TestWarmUp(unittest.TestCase):
@@ -246,26 +262,22 @@ class TestWarmUp(unittest.TestCase):
 
 
 class TestProvisionAndTeardown(unittest.TestCase):
-    def test_provision_creates_both_resources_and_returns_the_shared_url(self):
+    def test_provision_creates_the_endpoint_and_returns_the_shared_url(self):
         http = FakeHTTP(); empty_account(http)
         p = provider("llm", http=http)
         messages = []
         result = p.provision(ctx("llm", skip_warmup=True), messages.append)
         self.assertEqual(result, {LLM_URL_ENV: "https://api.runpod.ai/v2/ep1/openai/v1"})
         self.assertTrue(any("ready" in m for m in messages))
-        order = [c[0] + " " + c[1].rsplit("/", 1)[-1] for c in http.calls]
-        self.assertLess(order.index("POST templates"), order.index("POST endpoints"))
+        self.assertEqual(len(http.calls_matching("POST", r"/v2/serverless$")), 1)
 
     def test_provision_is_idempotent_a_second_run_creates_nothing(self):
-        http = FakeHTTP()
+        http = FakeHTTP(); empty_account(http)
         p = provider("llm", http=http)
-        http.add("GET", r"/templates$", FakeResponse(200, [
-            {"id": "tpl1", "name": "zotero-rag-llm", "imageName": runpod_module.DEFAULT_IMAGE, "env": p.template_env()}]))
-        http.add("GET", r"/endpoints$", FakeResponse(200, [
-            {"id": "ep1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": ["NVIDIA RTX A5000"]}]))
+        http.add("GET", r"/v2/serverless$", listing("endpoints", endpoint(p)))
         result = p.provision(ctx("llm", skip_warmup=True), lambda m: None)
         self.assertEqual(result, {LLM_URL_ENV: "https://api.runpod.ai/v2/ep1/openai/v1"})
-        self.assertEqual(http.calls_matching("POST", r"."), [])
+        self.assertEqual([c for c in http.calls if c[0] != "GET"], [])
 
     def test_provision_returns_nothing_to_store_without_a_shared_url_field(self):
         http = FakeHTTP(); empty_account(http)
@@ -278,76 +290,75 @@ class TestProvisionAndTeardown(unittest.TestCase):
             provider("llm").provision(ctx("llm", credential=None), lambda m: None)
 
     def test_api_errors_become_provision_errors(self):
-        http = FakeHTTP({("GET", r"/templates$"): FakeResponse(401, None, text="invalid API key")})
+        http = FakeHTTP({("GET", r"/v2/serverless$"): FakeResponse(401, None, text="invalid API key")})
         with self.assertRaisesRegex(ProvisionError, "401"):
             provider("llm", http=http).provision(ctx("llm", skip_warmup=True), lambda m: None)
 
-    def test_a_204_with_no_body_is_fine(self):
-        http = FakeHTTP({("DELETE", r"/endpoints/e1$"): FakeResponse(204, None)})
-        self.assertIsNone(provider("llm", http=http)._request("k", "DELETE", "/endpoints/e1"))
+    def test_an_unreachable_api_is_a_provision_error_naming_it(self):
+        http = FakeHTTP({("GET", r"/v2/serverless$"): OSError("[Errno 8] nodename nor servname provided, or not known")})
+        with self.assertRaisesRegex(ProvisionError, r"Could not reach the RunPod API \(api\.runpod\.io\)"):
+            provider("llm", http=http).provision(ctx("llm", skip_warmup=True), lambda m: None)
 
-    def test_teardown_deletes_this_sides_endpoint_then_template(self):
+    def test_a_204_with_no_body_is_fine(self):
+        http = FakeHTTP({("DELETE", r"/v2/serverless/e1$"): FakeResponse(204, None)})
+        self.assertIsNone(provider("llm", http=http)._request("k", "DELETE", "/serverless/e1"))
+
+    def test_teardown_deletes_this_sides_endpoint_and_a_leftover_template(self):
         http = FakeHTTP({
-            ("GET", r"/endpoints$"): FakeResponse(200, [{"id": "e1", "name": "zotero-rag-llm"},
-                                                         {"id": "e2", "name": "zotero-rag-embedding"}]),
-            ("GET", r"/templates$"): FakeResponse(200, [{"id": "t1", "name": "zotero-rag-llm"}]),
-            ("DELETE", r"/endpoints/e1$"): FakeResponse(204, None),
-            ("DELETE", r"/templates/t1$"): FakeResponse(204, None),
+            ("GET", r"/v2/serverless$"): listing("endpoints", {"id": "e1", "name": "zotero-rag-llm"},
+                                                 {"id": "e2", "name": "zotero-rag-embedding"}),
+            ("GET", r"/v2/templates$"): listing("templates", {"id": "t1", "name": "zotero-rag-llm"}),
+            ("DELETE", r"/v2/serverless/e1$"): FakeResponse(204, None),
+            ("DELETE", r"/v2/templates/t1$"): FakeResponse(204, None),
         })
         provider("llm", http=http).teardown(ctx("llm"))
         self.assertEqual([c[1].rsplit("/", 2)[-2:] for c in http.calls if c[0] == "DELETE"],
-                         [["endpoints", "e1"], ["templates", "t1"]])
+                         [["serverless", "e1"], ["templates", "t1"]])
 
     def test_teardown_of_absent_resources_is_a_no_op(self):
-        http = FakeHTTP({("GET", r"/endpoints$"): FakeResponse(200, []), ("GET", r"/templates$"): FakeResponse(200, [])})
+        http = FakeHTTP({("GET", r"/v2/serverless$"): listing("endpoints"), ("GET", r"/v2/templates$"): listing("templates")})
         provider("llm", http=http).teardown(ctx("llm"))
         self.assertEqual(http.calls_matching("DELETE", r"."), [])
 
 
 class TestPauseResume(unittest.TestCase):
-    def _live(self, workers_max, gpu="NVIDIA RTX A5000"):
-        http = FakeHTTP()
+    def _live(self, workers_max, **over):
+        http = FakeHTTP(); empty_account(http)
         p = provider("llm", http=http)
-        http.add("GET", r"/templates$", FakeResponse(200, [
-            {"id": "tpl1", "name": "zotero-rag-llm", "imageName": runpod_module.DEFAULT_IMAGE, "env": p.template_env()}]))
-        http.add("GET", r"/endpoints$", FakeResponse(200, [
-            {"id": "ep1", "name": "zotero-rag-llm", "templateId": "tpl1", "gpuTypeIds": [gpu],
-             "workersMax": workers_max}]))
-        http.add("PATCH", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": 1}))
+        http.add("GET", r"/v2/serverless$", listing("endpoints", endpoint(p, workers_max=workers_max, **over)))
+        http.add("PATCH", r"/v2/serverless/ep1$", FakeResponse(200, endpoint(p)))
         return p, http
 
-    def test_suspend_sets_workers_max_to_zero(self):
+    def test_suspend_sets_max_workers_to_zero(self):
         p, http = self._live(1)
         msgs = []
         p.suspend(ctx("llm"), msgs.append)
-        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
-        self.assertEqual(body, {"workersMax": 0})
+        (_, _, body), = http.calls_matching("PATCH", r"/v2/serverless/ep1$")
+        self.assertEqual(body, {"workers": {"min": 0, "max": 0}})
         self.assertTrue(msgs)
 
     def test_suspend_without_endpoint_raises(self):
-        http = FakeHTTP()
-        http.add("GET", r"/endpoints$", FakeResponse(200, []))
-        p = provider("llm", http=http)
+        http = FakeHTTP({("GET", r"/v2/serverless$"): listing("endpoints")})
         with self.assertRaises(ProvisionError):
-            p.suspend(ctx("llm"), lambda m: None)
+            provider("llm", http=http).suspend(ctx("llm"), lambda m: None)
 
     def test_provision_resumes_a_paused_endpoint(self):
         p, http = self._live(0)
         p.provision(ctx("llm", skip_warmup=True), lambda m: None)
-        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
-        self.assertEqual(body, {"workersMax": 1})
+        (_, _, body), = http.calls_matching("PATCH", r"/v2/serverless/ep1$")
+        self.assertEqual(body, {"workers": {"min": 0, "max": 1, "idleTimeout": 60}})
 
     def test_provision_resumes_a_paused_endpoint_whose_config_differs(self):
-        p, http = self._live(0, gpu="NVIDIA L4")  # kept as the owner set it up, but resumed
-        p.provision(ctx("llm", skip_warmup=True), lambda m: None)
-        (_, _, body), = http.calls_matching("PATCH", r"/endpoints/ep1$")
-        self.assertEqual(body, {"workersMax": 1})
-        self.assertEqual(http.calls_matching("DELETE", r"/endpoints/ep1$"), [])
+        p, http = self._live(0, image="old:image")  # kept as the owner set it up, but resumed
+        with self.assertLogs(runpod_module.logger, level="WARNING"):
+            p.provision(ctx("llm", skip_warmup=True), lambda m: None)
+        self.assertEqual(len(http.calls_matching("PATCH", r"/v2/serverless/ep1$")), 1)
+        self.assertEqual(http.calls_matching("DELETE", r"."), [])
 
     def test_provision_leaves_a_running_endpoint_alone(self):
         p, http = self._live(1)
         p.provision(ctx("llm", skip_warmup=True), lambda m: None)
-        self.assertEqual(http.calls_matching("PATCH", r"/endpoints/ep1$"), [])
+        self.assertEqual(http.calls_matching("PATCH", r"."), [])
 
 
 class TestHealth(unittest.TestCase):
@@ -442,8 +453,9 @@ class TestPaused(unittest.TestCase):
 
     def _http(self, workers_max):
         http = FakeHTTP()
-        http.add("GET", r"/endpoints/ep1$", FakeResponse(200, {"id": "ep1", "workersMax": workers_max}))
-        http.add("GET", r"/endpoints$", FakeResponse(200, [{"id": "ep1", "name": "zotero-rag-llm", "workersMax": workers_max}]))
+        http.add("GET", r"/v2/serverless/ep1$", FakeResponse(200, {"id": "ep1", "workers": {"min": 0, "max": workers_max}}))
+        http.add("GET", r"/v2/serverless$", listing("endpoints", {"id": "ep1", "name": "zotero-rag-llm",
+                                                                  "workers": {"min": 0, "max": workers_max}}))
         http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"idle": 0, "ready": 1, "running": 0}, "jobs": {}}))
         return http
 
@@ -454,11 +466,11 @@ class TestPaused(unittest.TestCase):
 
     def test_a_key_that_cannot_read_the_management_api_falls_back_to_the_data_plane(self):
         http = FakeHTTP()
-        http.add("GET", r"/endpoints/ep1$", FakeResponse(403, {"error": "forbidden"}))
+        http.add("GET", r"/v2/serverless/ep1$", FakeResponse(403, {"error": "forbidden"}))
         http.add("GET", r"/ep1/health$", FakeResponse(200, {"workers": {"ready": 1}, "jobs": {}}))
         self.assertEqual(provider("llm", http=http).health(Credentials(api_key="k", base_url=self.BASE)).status, "ready")
 
-    def test_is_paused_follows_workers_max(self):
+    def test_is_paused_follows_max_workers(self):
         self.assertTrue(provider("llm", http=self._http(0)).is_paused("k"))
         self.assertFalse(provider("llm", http=self._http(1)).is_paused("k"))
         self.assertFalse(provider("llm", http=FakeHTTP()).is_paused("k"))  # unreachable: not paused
