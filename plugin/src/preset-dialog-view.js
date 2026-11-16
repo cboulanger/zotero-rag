@@ -22,6 +22,7 @@
  * @property {string|null} [pattern]
  * @property {string[]} [options]
  * @property {number|null} [min]
+ * @property {number|null} [max]
  * @property {'none'|'client_pref'|'client_secret'|'shared'|'session'|'login'} storage
  * @property {string|null} [key]
  * @property {string|null} [header]
@@ -252,6 +253,7 @@ var ZoteroRAGPresetDialog = {
 			const n = Number(value);
 			if (!Number.isFinite(n) || !Number.isInteger(n)) return `${field.label} must be a whole number.`;
 			if (field.min !== undefined && field.min !== null && n < field.min) return `${field.label} must be at least ${field.min}.`;
+			if (field.max !== undefined && field.max !== null && n > field.max) return `${field.label} must be at most ${field.max}.`;
 		}
 		if (field.pattern && !new RegExp(`^(?:${field.pattern})$`).test(value)) {
 			return `${field.label} does not have the expected format.`;
@@ -608,6 +610,7 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 		control = el('input', 'pd-input');
 		control.type = field.type === 'secret' ? 'password' : field.type === 'number' ? 'number' : 'text';
 		if (field.min !== undefined && field.min !== null) control.min = String(field.min);
+		if (field.max !== undefined && field.max !== null) control.max = String(field.max);
 		const draftKey = `${scope}/${field.id}`;
 		control.value = local.drafts[draftKey] !== undefined ? local.drafts[draftKey]
 			: field.value !== undefined && field.value !== null ? String(field.value) : '';

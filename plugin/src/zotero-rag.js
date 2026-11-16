@@ -1407,6 +1407,18 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * The re-ranking pool size set in the preset dialog's Re-ranking tab
+	 * (`rerankPoolSize` preference), or undefined to use the preset's own value.
+	 * @returns {number|undefined}
+	 */
+	getRerankPoolSize() {
+		const stored = Zotero.Prefs.get('extensions.zotero-rag.rerankPoolSize', true);
+		const value = Number(stored);
+		return stored !== undefined && stored !== null && stored !== '' && Number.isInteger(value)
+			&& value >= 1 && value <= 500 ? value : undefined;
+	}
+
+	/**
 	 * Submit a query to the backend.
 	 * @param {string} question - Question to ask
 	 * @param {Array<string>} libraryIDs - Library IDs to query
@@ -1449,6 +1461,9 @@ class ZoteroRAGPlugin {
 			}
 			if (options.enableReranking === false) {
 				payload.enable_reranking = false;
+			} else {
+				const poolSize = this.getRerankPoolSize();
+				if (poolSize !== undefined) payload.rerank_pool_size = poolSize;
 			}
 			if (options.includeTrace) {
 				payload.include_trace = true;

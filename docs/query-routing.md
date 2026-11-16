@@ -426,7 +426,15 @@ insufficient blend ratio.
 
 A preset with a `rerank` section (see [presets.md](presets.md#the-rerank-section)) rescores the
 first `pool_size` candidates of the raw pool with a cross-encoder, which reads the question and
-each passage together. It runs after the lexical blend and before embedding MMR, near-duplicate
+each passage together. The pool grows with the searched libraries' chunk count (from their
+index metadata): in a large index the vector scores of the top candidates lie close together,
+so a relevant passage can rank a few hundred places down and only a larger pool lets the
+re-ranker see it, while in a small index a larger pool mostly adds generic passages. Up to
+`pool_reference_chunks` (default 50,000) the preset's `pool_size` applies, above it
+`pool_size × (1 + log10(chunks / pool_reference_chunks))`, up to 500. A query may instead set its
+own `rerank_pool_size` (1-500; the plugin sends the Re-ranking tab's **Passages to rescore**).
+The vector search fetches at least as many candidates as are rescored, so the pool can exceed
+the engine's default candidate pool of 100. It runs after the lexical blend and before embedding MMR, near-duplicate
 removal, the per-document cap and the `top_k` cut, so all of those work on the cross-encoder score.
 The vector score stays in the result (`vector_score`, with `pre_rerank_rank`, in the trace's
 chunks). A retrieval escalation in the same query scores only the candidates it adds. Implemented

@@ -80,6 +80,9 @@ test('validation: numbers must be whole and at least min; patterns are anchored'
 	assert.strictEqual(D.validate(num, '3'), '');
 	assert.match(D.validate(num, '0'), /at least 1/);
 	assert.match(D.validate(num, '2.5'), /whole number/);
+	const bounded = { label: 'Pool', type: 'number', min: 1, max: 500 };
+	assert.strictEqual(D.validate(bounded, '500'), '');
+	assert.match(D.validate(bounded, '501'), /at most 500/);
 	const key = { label: 'Key', type: 'secret', pattern: 'k_[a-z]+' };
 	assert.strictEqual(D.validate(key, 'k_abc'), '');
 	assert.match(D.validate(key, 'xk_abc'), /expected format/);

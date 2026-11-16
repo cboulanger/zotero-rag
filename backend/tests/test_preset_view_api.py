@@ -201,7 +201,11 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual((rerank["state"], rerank["optional"]), ("ready", True))
         facts = {f["label"]: f["value"] for f in rerank["facts"]}
         self.assertIn("mMiniLM", facts["Model"])
-        self.assertIn("30", facts["Rescored"])
+        self.assertIn("30", facts["Rescored by default"])
+        pool = next(f for f in rerank["fields"] if f["id"] == "rerankPoolSize")
+        self.assertEqual((pool["type"], pool["storage"], pool["key"]), ("number", "client_pref", "rerankPoolSize"))
+        self.assertEqual((pool["min"], pool["max"]), (1, 500))
+        self.assertIn("30", pool["placeholder"])
 
     def test_docling_extraction_joins_the_account_of_its_key(self):
         body = self._get("kisski-docling")

@@ -21,7 +21,7 @@ from backend.services.llm import LLMService
 from backend.services.lexical_rerank import fuse_lexical
 from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
 from backend.services.near_dup_filter import drop_near_duplicates
-from backend.services.rerank import RerankOutcome, rerank_pool
+from backend.services.rerank import RerankOutcome, current_rerank_request, effective_pool_size, rerank_pool
 from backend.services.query_decomposition import (
     build_decomposition_prompt,
     fuse_ranked_lists,
@@ -692,7 +692,8 @@ class RAGEngine:
         return drop_near_duplicates(results, threshold) if threshold else results
 
     async def _prepare_pool(
-        self, question: str, results: list, rerank_cache: dict, outcome: list
+        self, question: str, results: list, rerank_cache: dict, outcome: list,
+        pool_size: Optional[int] = None,
     ) -> list:
         """Lexical blend, optional cross-encoder re-ranking, then embedding MMR.
 
@@ -700,14 +701,47 @@ class RAGEngine:
         runs between the two blends so MMR diversifies by the sharper score.
         ``rerank_cache`` holds scores already computed in this query; the
         outcome of the pass is appended to ``outcome`` for the trace.
+        ``pool_size`` is the pool resolved for this query (:meth:`_rerank_pool_size`).
         """
         results = self._apply_lexical_fusion(question, results)
         preset = self.settings.get_hardware_preset()
         # isinstance, not "is not None": tests pass mock settings whose attributes are mocks.
         if isinstance(getattr(preset, "rerank", None), RerankConfig):
-            results, result_outcome = await rerank_pool(question, results, preset, cache=rerank_cache)
+            results, result_outcome = await rerank_pool(
+                question, results, preset, cache=rerank_cache, pool_size=pool_size or None
+            )
             outcome.append(result_outcome)
         return self._apply_embedding_mmr(results)
+
+    def _searched_chunk_count(self, library_ids: List[str]) -> int:
+        """Total chunks of the searched libraries, from their index metadata (0 when unknown)."""
+        total = 0
+        for library_id in library_ids:
+            try:
+                count = getattr(self.vector_store.get_library_metadata(library_id), "total_chunks", 0)
+            except Exception as exc:  # the count only tunes the pool; never fail a query over it
+                logger.debug(f"No chunk count for library {library_id}: {exc}")
+                continue
+            if isinstance(count, int) and not isinstance(count, bool):
+                total += count
+        return total
+
+    async def _rerank_pool_size(self, library_ids: List[str]) -> int:
+        """The re-ranking pool size for this query when re-ranking runs, else 0.
+
+        The caller's ``rerank_pool_size``, else the preset's ``pool_size`` scaled to the
+        searched libraries' chunk count (``backend.services.rerank.scaled_pool_size``).
+        The vector search must fetch at least that many candidates: the re-ranker only
+        rescores what the search returned, so a pool above the engine's own candidate
+        pool would otherwise have no effect.
+        """
+        cfg = getattr(self.settings.get_hardware_preset(), "rerank", None)
+        if not isinstance(cfg, RerankConfig) or not current_rerank_request().enabled:
+            return 0
+        if current_rerank_request().pool_size is not None:
+            return effective_pool_size(cfg)
+        chunks = await asyncio.to_thread(self._searched_chunk_count, library_ids or [])
+        return effective_pool_size(cfg, chunks)
 
     async def _search_with_sub_queries(
         self, question: str, results: list, search_kwargs: dict
@@ -827,7 +861,8 @@ class RAGEngine:
         # near-duplicate/high-scoring chunks can occupy the entire window and crowd
         # out a genuinely relevant, less-chunked document (see #87 and
         # _SEARCH_CANDIDATE_POOL_SIZE above).
-        candidate_pool_size = max(top_k, search_candidate_pool_size)
+        rerank_pool_size = await self._rerank_pool_size(library_ids)
+        candidate_pool_size = max(top_k, search_candidate_pool_size, rerank_pool_size)
         logger.debug(
             f"Searching for top {top_k} chunks (candidate pool {candidate_pool_size}) "
             f"in libraries: {library_ids}"
@@ -862,7 +897,9 @@ class RAGEngine:
 
         rerank_cache: dict[str, float] = {}
         rerank_outcomes: list[RerankOutcome] = []
-        raw_results = await self._prepare_pool(question, raw_results, rerank_cache, rerank_outcomes)
+        raw_results = await self._prepare_pool(
+            question, raw_results, rerank_cache, rerank_outcomes, rerank_pool_size
+        )
 
         capped_pool = _dedup_and_cap_chunks_per_document(
             self._apply_near_dup_filter(raw_results), max_chunks_per_document
@@ -915,7 +952,7 @@ class RAGEngine:
                 )
                 if len(escalated_raw_results) > len(raw_results):
                     raw_results = await self._prepare_pool(
-                        question, escalated_raw_results, rerank_cache, rerank_outcomes
+                        question, escalated_raw_results, rerank_cache, rerank_outcomes, rerank_pool_size
                     )
                     capped_pool = _dedup_and_cap_chunks_per_document(
                         self._apply_near_dup_filter(raw_results), max_chunks_per_document
@@ -1002,7 +1039,7 @@ class RAGEngine:
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
                 retry_pool = await self._prepare_pool(
-                    question, retry_raw_results, rerank_cache, rerank_outcomes
+                    question, retry_raw_results, rerank_cache, rerank_outcomes, rerank_pool_size
                 )
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
                     self._apply_near_dup_filter(retry_pool), max_chunks_per_document,
