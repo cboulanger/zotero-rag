@@ -130,6 +130,36 @@ class RerankPoolTest(unittest.IsolatedAsyncioTestCase):
         out, outcome = await rerank_pool("q", self.pool, preset, FakeScorer(["b", "a"]), pool_size=2)
         self.assertEqual((outcome.scored, outcome.pool_size), (2, 2))
 
+    async def test_extra_question_keeps_the_higher_score(self):
+        class ByQuestion(Reranker):
+            """'de q' prefers a, 'en q' rates b far higher than anything 'de q' gives."""
+            model_name, provider_id = "fake", None
+            def __init__(self):
+                self.questions = []
+            async def score(self, question, texts):
+                self.questions.append(question)
+                table = {"de q": {"a": 0.5}, "en q": {"b": 0.9}}[question]
+                return [table.get(t, 0.1) for t in texts]
+
+        scorer = ByQuestion()
+        out, outcome = await rerank_pool(
+            "de q", self.pool, _preset({"model_name": "x"}), scorer, extra_questions=["en q"]
+        )
+        self.assertEqual(_keys(out)[:2], ["B", "A"])
+        self.assertEqual([r.score for r in out[:2]], [0.9, 0.5])
+        self.assertEqual(outcome.scored, 3)  # passages, not passage x question pairs
+        self.assertEqual(scorer.questions, ["de q", "en q"])
+
+    async def test_disabled_with_extra_questions_keeps_order(self):
+        token = set_rerank_request(RerankRequest(enabled=False))
+        self.addCleanup(reset_rerank_request, token)
+        scorer = FakeScorer()
+        out, outcome = await rerank_pool(
+            "q", self.pool, _preset({"model_name": "x"}), scorer, extra_questions=["en q"]
+        )
+        self.assertIs(out, self.pool)
+        self.assertEqual((outcome.status, scorer.calls), ("disabled", []))
+
     async def test_cache_scores_only_new_candidates(self):
         preset = _preset({"model_name": "x"})
         scorer = FakeScorer(["d", "c", "b", "a"])

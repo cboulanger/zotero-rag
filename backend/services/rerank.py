@@ -34,7 +34,7 @@ import time
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 
 from pydantic import BaseModel
 
@@ -329,6 +329,17 @@ def build_reranker(preset: Any) -> Optional[Reranker]:
     return RemoteReranker(get_provider(preset, "rerank"), cfg.model_name, cfg.timeout_seconds)
 
 
+async def _max_over_questions(scorer: Reranker, questions: list[str], texts: list[str]) -> list[float]:
+    """Per passage, the highest score over all question versions."""
+    best: list[float] = []
+    for question in questions:
+        scores = await scorer.score(question, texts)
+        if len(scores) != len(texts):
+            raise ValueError(f"re-ranker returned {len(scores)} scores for {len(texts)} passages")
+        best = list(scores) if not best else [max(a, b) for a, b in zip(best, scores)]
+    return best
+
+
 async def rerank_pool(
     question: str,
     results: list,
@@ -336,6 +347,7 @@ async def rerank_pool(
     reranker: Optional[Reranker] = None,
     cache: Optional[dict[str, float]] = None,
     pool_size: Optional[int] = None,
+    extra_questions: Sequence[str] = (),
 ) -> tuple[list, RerankOutcome]:
     """Rescore the first ``pool_size`` of ``results`` and sort them by the new score.
 
@@ -348,6 +360,11 @@ async def rerank_pool(
     order, with their scores scaled below the lowest rescored one so every later
     score-based step (MMR cap, proximity escalation) stays consistent. On any
     failure the input is returned unchanged.
+
+    ``extra_questions`` are other versions of the question (an English translation,
+    see ``backend.services.query_translation``): each passage is scored against every
+    version and keeps the highest score, so a passage in another language than the
+    question is judged against the version in its own language.
 
     ``cache`` maps chunk ids to scores already computed for this question, so a
     retrieval escalation within the same query only scores the new candidates;
@@ -374,10 +391,9 @@ async def rerank_pool(
         fresh: list[float] = []
         if todo:
             fresh = await asyncio.wait_for(
-                scorer.score(question, [head[i].chunk.text for i in todo]), timeout=cfg.timeout_seconds
+                _max_over_questions(scorer, [question, *extra_questions], [head[i].chunk.text for i in todo]),
+                timeout=cfg.timeout_seconds,
             )
-            if len(fresh) != len(todo):
-                raise ValueError(f"re-ranker returned {len(fresh)} scores for {len(todo)} passages")
         new_scores = dict(zip(todo, fresh))
         scores = [new_scores[i] if i in new_scores else known[ids[i]] for i in range(len(head))]
         for i, value in new_scores.items():
