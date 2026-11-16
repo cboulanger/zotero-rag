@@ -83,7 +83,13 @@ A provider whose endpoints run in your own login session (MPCDF) has a login for
 Shown only when your preset has a re-ranking step. A re-ranker reads your question together with
 each candidate passage and puts the most relevant ones first before the answer is written, which
 costs a few seconds per question. The tab names the model and how many passages it rescores, and
-has the **Use re-ranking** switch (on by default; switched off, the tab's dot is hollow). A
+has the **Use re-ranking** switch (on by default; switched off, the tab's dot is hollow) and
+**Passages to rescore**: how many of the best-matching passages the re-ranker reads per question
+(at most 500). Left empty, the size of the searched libraries decides: the preset's value (usually
+100) for libraries up to 50,000 passages, more for larger ones (about 260 at two million). Large
+libraries profit from a higher value, because a relevant passage can rank low in the first,
+vector-only search; in a small library a higher value mostly adds generic passages. Each
+additional 100 passages costs a fraction of a second. A
 re-ranker that runs on the server needs nothing else. One that runs on your own provider account
 shows its live status and **Start endpoint** / **Resume** here. **Start all** leaves it alone,
 since it is an optional extra cost; **Pause all** includes it. If it is not running when you ask

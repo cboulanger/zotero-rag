@@ -987,6 +987,34 @@ test('submitQuery includes force_fresh_retrieval only when true', async () => {
 	assert.strictEqual(capturedBody.force_fresh_retrieval, true);
 });
 
+test('submitQuery sends rerank_pool_size from Preferences only when set and re-ranking is on', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	/** @type {Record<string, any>} */
+	const stored = {};
+	const zotero = { Libraries: { userLibraryID: 1 }, Prefs: { get: (/** @type {string} */ key) => stored[key] } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+
+	stored['extensions.zotero-rag.rerankPoolSize'] = 300;
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, 300);
+
+	await plugin.submitQuery('Q', ['1'], { enableReranking: false });
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+
+	stored['extensions.zotero-rag.rerankPoolSize'] = 'abc';
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+});
+
 test('getIndexSnapshotsEnabled fetches and caches the value, defaulting to false on error', async () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	let fetchCalls = 0;

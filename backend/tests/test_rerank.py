@@ -18,10 +18,12 @@ from backend.services.rerank import (
     RerankerUnavailable,
     RerankRequest,
     current_rerank_request,
+    effective_pool_size,
     parse_rerank_response,
     rerank_client_fields,
     rerank_pool,
     reset_rerank_request,
+    scaled_pool_size,
     set_rerank_request,
 )
 
@@ -114,6 +116,49 @@ class RerankPoolTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(out[2].score, out[1].score)
         self.assertEqual(out[2].pre_rerank_rank, 3)
         self.assertEqual(outcome.scored, 2)
+
+    async def test_request_pool_size_overrides_the_preset(self):
+        token = set_rerank_request(RerankRequest(pool_size=2))
+        self.addCleanup(reset_rerank_request, token)
+        preset = _preset({"model_name": "x", "pool_size": 100})
+        out, outcome = await rerank_pool("q", self.pool, preset, FakeScorer(["b", "a"]))
+        self.assertEqual(_keys(out), ["B", "A", "C"])
+        self.assertEqual((outcome.scored, outcome.pool_size), (2, 2))
+
+    async def test_explicit_pool_size_argument_wins(self):
+        preset = _preset({"model_name": "x", "pool_size": 100})
+        out, outcome = await rerank_pool("q", self.pool, preset, FakeScorer(["b", "a"]), pool_size=2)
+        self.assertEqual((outcome.scored, outcome.pool_size), (2, 2))
+
+    async def test_extra_question_keeps_the_higher_score(self):
+        class ByQuestion(Reranker):
+            """'de q' prefers a, 'en q' rates b far higher than anything 'de q' gives."""
+            model_name, provider_id = "fake", None
+            def __init__(self):
+                self.questions = []
+            async def score(self, question, texts):
+                self.questions.append(question)
+                table = {"de q": {"a": 0.5}, "en q": {"b": 0.9}}[question]
+                return [table.get(t, 0.1) for t in texts]
+
+        scorer = ByQuestion()
+        out, outcome = await rerank_pool(
+            "de q", self.pool, _preset({"model_name": "x"}), scorer, extra_questions=["en q"]
+        )
+        self.assertEqual(_keys(out)[:2], ["B", "A"])
+        self.assertEqual([r.score for r in out[:2]], [0.9, 0.5])
+        self.assertEqual(outcome.scored, 3)  # passages, not passage x question pairs
+        self.assertEqual(scorer.questions, ["de q", "en q"])
+
+    async def test_disabled_with_extra_questions_keeps_order(self):
+        token = set_rerank_request(RerankRequest(enabled=False))
+        self.addCleanup(reset_rerank_request, token)
+        scorer = FakeScorer()
+        out, outcome = await rerank_pool(
+            "q", self.pool, _preset({"model_name": "x"}), scorer, extra_questions=["en q"]
+        )
+        self.assertIs(out, self.pool)
+        self.assertEqual((outcome.status, scorer.calls), ("disabled", []))
 
     async def test_cache_scores_only_new_candidates(self):
         preset = _preset({"model_name": "x"})
@@ -233,6 +278,42 @@ class EngineRerankTest(unittest.IsolatedAsyncioTestCase):
         result = await self._engine(_preset()).query("q", ["1"], top_k=1, search_candidate_pool_size=2)
         self.assertEqual(result.sources[0].item_id, "GEN")
 
+    async def _first_search_limit(self, preset, enabled=True) -> int:
+        token = set_rerank_request(RerankRequest(enabled=enabled))
+        self.addCleanup(reset_rerank_request, token)
+        engine = self._engine(preset)
+        with patch("backend.services.rerank.build_reranker", return_value=FakeScorer()):
+            await engine.query("q", ["1"], top_k=1, search_candidate_pool_size=2)
+        return engine.vector_store.search.call_args_list[0].kwargs["limit"]
+
+    async def test_search_fetches_the_whole_rerank_pool(self):
+        """A pool_size above the engine's candidate pool must reach the vector search,
+        otherwise the re-ranker can never see more than that fixed pool."""
+        self.assertEqual(await self._first_search_limit(_preset({"model_name": "x", "pool_size": 300})), 300)
+
+    async def test_request_pool_size_overrides_the_preset(self):
+        token = set_rerank_request(RerankRequest(pool_size=250))
+        self.addCleanup(reset_rerank_request, token)
+        engine = self._engine(_preset({"model_name": "x", "pool_size": 100}))
+        with patch("backend.services.rerank.build_reranker", return_value=FakeScorer()):
+            await engine.query("q", ["1"], top_k=1, search_candidate_pool_size=2)
+        self.assertEqual(engine.vector_store.search.call_args_list[0].kwargs["limit"], 250)
+
+    async def test_pool_scales_with_the_searched_libraries_chunk_count(self):
+        engine = self._engine(_preset({"model_name": "x", "pool_size": 100}))
+        sizes = {"big": 2_000_000, "small": 150_000}
+        engine.vector_store.get_library_metadata = Mock(side_effect=lambda lid: Mock(total_chunks=sizes[lid]))
+        with patch("backend.services.rerank.build_reranker", return_value=FakeScorer()):
+            await engine.query("q", ["big", "small"], top_k=1, search_candidate_pool_size=2)
+        # 2.15M chunks in total -> 100 * (1 + log10(43)) = 263
+        self.assertEqual(engine.vector_store.search.call_args_list[0].kwargs["limit"], 263)
+
+    async def test_rerank_pool_does_not_widen_search_when_off(self):
+        self.assertEqual(await self._first_search_limit(_preset()), 2)
+        self.assertEqual(
+            await self._first_search_limit(_preset({"model_name": "x", "pool_size": 300}), enabled=False), 2
+        )
+
     def test_merge_outcomes(self):
         from backend.services.rerank import RerankOutcome
 
@@ -244,9 +325,41 @@ class EngineRerankTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((merged["passes"], merged["scored"], merged["duration_ms"]), (2, 4, 15))
 
 
+class ScaledPoolSizeTest(unittest.TestCase):
+    """The pool grows with the searched library size, from the preset's pool_size up to 500."""
+
+    def _cfg(self, **kw):
+        return _preset({"model_name": "x", **kw}).rerank
+
+    def test_up_to_the_reference_size_the_preset_value_applies(self):
+        cfg = self._cfg(pool_size=100)
+        for chunks in (0, 12_000, 50_000):
+            self.assertEqual(scaled_pool_size(cfg, chunks), 100)
+
+    def test_grows_logarithmically_above_the_reference(self):
+        cfg = self._cfg(pool_size=100)
+        self.assertEqual(scaled_pool_size(cfg, 500_000), 200)
+        self.assertEqual(scaled_pool_size(cfg, 2_150_000), 263)
+
+    def test_capped_at_500(self):
+        self.assertEqual(scaled_pool_size(self._cfg(pool_size=300), 50_000_000), 500)
+
+    def test_scales_a_small_preset_value_from_its_own_floor(self):
+        self.assertEqual(scaled_pool_size(self._cfg(pool_size=30), 500_000), 60)
+
+    def test_scaling_off(self):
+        self.assertEqual(scaled_pool_size(self._cfg(pool_size=100, pool_reference_chunks=None), 2_150_000), 100)
+
+    def test_caller_override_beats_scaling(self):
+        token = set_rerank_request(RerankRequest(pool_size=40))
+        self.addCleanup(reset_rerank_request, token)
+        self.assertEqual(effective_pool_size(self._cfg(pool_size=100), 2_150_000), 40)
+
+
 class RequestContextTest(unittest.TestCase):
     def test_default_is_enabled(self):
         self.assertTrue(current_rerank_request().enabled)
+        self.assertIsNone(current_rerank_request().pool_size)
 
 
 class RerankApiTest(unittest.TestCase):
@@ -302,6 +415,17 @@ class RerankApiTest(unittest.TestCase):
 
         self.assertTrue(QueryRequest(question="q", library_ids=["1"]).enable_reranking)
 
+    def test_query_request_pool_size_is_optional_and_bounded(self):
+        from pydantic import ValidationError
+
+        from backend.api.query import QueryRequest
+
+        self.assertIsNone(QueryRequest(question="q", library_ids=["1"]).rerank_pool_size)
+        self.assertEqual(QueryRequest(question="q", library_ids=["1"], rerank_pool_size=300).rerank_pool_size, 300)
+        for bad in (0, 501):
+            with self.assertRaises(ValidationError):
+                QueryRequest(question="q", library_ids=["1"], rerank_pool_size=bad)
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -317,10 +441,10 @@ class RunPodRerankTest(unittest.IsolatedAsyncioTestCase):
         })
         return get_providers(preset)["rerank"]
 
-    def test_side_names_and_template(self):
+    def test_side_names_and_worker_env(self):
         p = self._provider()
         self.assertEqual(p.resource_name, "zotero-rag-rerank")
-        self.assertEqual(p.template_env(), {"MODEL_NAME": "BAAI/bge-reranker-v2-m3", "MAX_MODEL_LEN": "1024"})
+        self.assertEqual(p.worker_env(), {"MODEL_NAME": "BAAI/bge-reranker-v2-m3", "MAX_MODEL_LEN": "1024"})
         url, body = p._warmup_request("https://api.runpod.ai/v2/abc123/openai/v1")
         self.assertEqual(url, "https://api.runpod.ai/v2/abc123/runsync")
         self.assertEqual(body["input"]["route"], "/v1/rerank")

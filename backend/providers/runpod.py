@@ -1,16 +1,19 @@
-"""RunPod serverless provider (``https://rest.runpod.io/v1``).
+"""RunPod serverless provider (management API ``https://api.runpod.io/v2``).
 
-Each side owns one template and one endpoint in the key owner's RunPod
-account, named ``zotero-rag-embedding`` / ``zotero-rag-llm``. The logic is the
-former ``bin/provision_runpod_endpoints.py``, per side: ensure the template and
-endpoint exist (idempotent, by name), send a warm-up request, report the
-endpoint's OpenAI-compatible base URL. Plain ``httpx`` REST; no RunPod SDK.
+Each side owns one endpoint in the key owner's RunPod account, named
+``zotero-rag-embedding`` / ``zotero-rag-llm`` / ``zotero-rag-rerank``, with its
+worker image, environment and disk set on the endpoint itself (v2 copies a
+template into an endpoint only once, at creation, so none is kept). Per side:
+ensure the endpoint exists (idempotent, by name), send a warm-up request, report
+the endpoint's OpenAI-compatible base URL. Plain ``httpx`` REST; no RunPod SDK.
 
 Facts established in the Phase 0 spike (docs/history/implementation/
-provider-layer-phase-0-spike.md): an endpoint cannot be created with
-``workersMax=0`` (HTTP 500); the data-plane ``/health`` does not show a paused
-endpoint, only the management API does.
+provider-layer-phase-0-spike.md): an endpoint cannot be created with at most 0
+workers (HTTP 500); the data-plane ``/health`` does not show a paused endpoint,
+only the management API does.
 """
+
+import urllib.parse
 
 import logging
 import re
@@ -33,7 +36,7 @@ from backend.providers.types import (
 
 logger = logging.getLogger(__name__)
 
-REST_BASE_URL = "https://rest.runpod.io/v1"
+REST_BASE_URL = "https://api.runpod.io/v2"
 DATA_PLANE_URL = "https://api.runpod.ai/v2"
 
 # runpod/worker-infinity-embedding bundles a PyTorch that crashes on Blackwell
@@ -41,6 +44,9 @@ DATA_PLANE_URL = "https://api.runpod.ai/v2"
 # worker-v1-vllm serves /openai/v1/embeddings for this (XLM-RoBERTa) model in
 # pooling mode and supports current GPU generations. Pin a version.
 DEFAULT_IMAGE = "runpod/worker-v1-vllm:v2.28.0"
+#: A GPU type id (or the catalog's short name) of GET /v2/catalog/gpus. v2 places an
+#: endpoint on a pool of GPU types; the type's pool with its other types excluded keeps
+#: the endpoint on that type.
 DEFAULT_GPU = "NVIDIA RTX A5000"
 #: MAX_MODEL_LEN of the embedding worker: the model's own position-embedding limit.
 EMBEDDING_MAX_MODEL_LEN = "512"
@@ -108,7 +114,7 @@ class RunPodProvider(Provider):
         cfg = self.side_config
         return cfg.model_names[0] if self.side == "llm" else cfg.model_name
 
-    def template_env(self) -> dict[str, str]:
+    def worker_env(self) -> dict[str, str]:
         env = {"MODEL_NAME": self.model}
         if self.side == "embedding":
             env["MAX_MODEL_LEN"] = EMBEDDING_MAX_MODEL_LEN
@@ -164,7 +170,7 @@ class RunPodProvider(Provider):
         )
 
     def classify_http_error(self, status: int, body: str) -> Optional[str]:
-        # RunPod rejects every request to an endpoint whose workersMax is 0.
+        # RunPod rejects every request to an endpoint paused at 0 workers.
         if status == 409 and "ENDPOINT_PAUSED" in (body or ""):
             return "paused"
         return None
@@ -172,110 +178,106 @@ class RunPodProvider(Provider):
     # -- REST helpers --------------------------------------------------------------
 
     def _request(self, api_key: str, method: str, path: str, json_body: Optional[dict] = None) -> Any:
-        """Authenticated call against the RunPod REST API; parsed JSON (None for no body).
+        """Authenticated call against the RunPod management API; parsed JSON (None for no body).
 
-        Raises ProvisionError on a non-2xx response.
+        Raises ProvisionError on a non-2xx response or when the API cannot be reached.
         """
-        response = self._http().request(
-            method,
-            f"{REST_BASE_URL}{path}",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=json_body,
-            timeout=self.http_timeout,
-        )
+        try:
+            response = self._http().request(
+                method,
+                f"{REST_BASE_URL}{path}",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=json_body,
+                timeout=self.http_timeout,
+            )
+        except OSError as exc:  # DNS, refused, reset, TLS: say which service, not just errno
+            host = urllib.parse.urlsplit(REST_BASE_URL).hostname
+            raise ProvisionError(f"Could not reach the RunPod API ({host}): {exc}") from exc
         if not (200 <= response.status_code < 300):
             raise ProvisionError(f"RunPod API {method} {path} failed: {response.status_code} {response.text}")
         if response.status_code == 204 or not response.text:
             return None
         return response.json()
 
-    def _find_by_name(self, api_key: str, resource: str, name: str) -> Optional[dict]:
-        for item in self._request(api_key, "GET", f"/{resource}") or []:
-            if item.get("name") == name:
-                return item
-        return None
+    def _list(self, api_key: str, resource: str, key: str) -> list[dict]:
+        """Every item of a paginated v2 listing (``{key: [...], "pagination": {...}}``)."""
+        items: list[dict] = []
+        path = f"/{resource}"
+        while True:
+            page = self._request(api_key, "GET", path) or {}
+            items.extend(page.get(key) or [])
+            cursor = (page.get("pagination") or {}).get("nextCursor")
+            if not cursor:
+                return items
+            path = f"/{resource}?cursor={urllib.parse.quote(cursor, safe='')}"
 
-    def _ensure_template(self, api_key: str, ctx: ProvisionContext) -> dict:
-        """Find the template by name or create it.
+    def _find_endpoint(self, api_key: str) -> Optional[dict]:
+        """This side's endpoint (by name), or None."""
+        return next((e for e in self._list(api_key, "serverless", "endpoints") if e.get("name") == self.resource_name), None)
 
-        A template whose image/env differs is kept with a warning unless
-        ``ctx.recreate`` is set (deleting an in-use template is destructive
-        and costs money to respin).
+    def _gpu_spec(self, api_key: str) -> dict:
+        """The ``gpu`` of this side's endpoint: the configured type's pool, its other types excluded."""
+        wanted = self.options.gpu
+        gpus = (self._request(api_key, "GET", "/catalog/gpus") or {}).get("gpus") or []
+        match = next((g for g in gpus if wanted in (g.get("id"), g.get("name"))), None)
+        if match is None or not match.get("pool"):
+            raise ProvisionError(
+                f"RunPod serverless has no GPU type '{wanted}'. Set provider option 'gpu' to a GPU type id "
+                "of RunPod's catalog, e.g. 'NVIDIA RTX A5000'.")
+        pool = match["pool"]
+        others = sorted(g["id"] for g in gpus if g.get("pool") == pool and g.get("id") != match["id"])
+        return {"pools": [pool], "excludedTypes": others, "count": 1}
+
+    @staticmethod
+    def _max_workers(endpoint: dict) -> Optional[int]:
+        return (endpoint.get("workers") or {}).get("max")
+
+    def _ensure_endpoint(self, api_key: str, ctx: ProvisionContext) -> dict:
+        """Find this side's endpoint by name or create it; resume it when paused.
+
+        One whose image, environment or GPU differs is kept with a warning unless
+        ``ctx.recreate`` is set (replacing an endpoint in use costs a cold start).
         """
         name, opts = self.resource_name, self.options
-        image, env = opts.image, self.template_env()
-        existing = self._find_by_name(api_key, "templates", name)
+        image, env, disk = opts.image, self.worker_env(), opts.container_disk_gb or CONTAINER_DISK_GB[self.side]
+        existing = self._find_endpoint(api_key)
+        gpu = self._gpu_spec(api_key)
         if existing is not None:
-            image_differs = existing.get("imageName") != image
-            env_differs = existing.get("env") != env
-            if not (image_differs or env_differs):
-                return existing
-            if not ctx.recreate:
-                diffs = []
-                if image_differs:
-                    diffs.append(f"image={existing.get('imageName')!r} vs {image!r}")
-                if env_differs:
-                    diffs.append(f"env={existing.get('env')!r} vs {env!r}")
-                logger.warning(
-                    "Template '%s' exists but its config differs from requested (%s). "
-                    "Keeping existing template - re-run with recreate to replace it.",
-                    name, "; ".join(diffs),
-                )
-                return existing
-            # RunPod refuses to delete a template still associated with an
-            # endpoint; the endpoint referencing it is the one with the same name.
-            referencing = self._find_by_name(api_key, "endpoints", name)
-            if referencing is not None:
-                self._request(api_key, "DELETE", f"/endpoints/{referencing['id']}")
-            self._request(api_key, "DELETE", f"/templates/{existing['id']}")
-        return self._request(api_key, "POST", "/templates", {
-            "name": name,
-            "imageName": image,
-            "env": env,
-            "containerDiskInGb": opts.container_disk_gb or CONTAINER_DISK_GB[self.side],
-            "isServerless": True,
-        })
-
-    def _ensure_endpoint(self, api_key: str, ctx: ProvisionContext, template_id: str) -> dict:
-        """Find the endpoint by name or create it referencing ``template_id``."""
-        name, opts = self.resource_name, self.options
-        existing = self._find_by_name(api_key, "endpoints", name)
-        gpus = [opts.gpu]
-        if existing is not None:
-            existing_gpus = existing.get("gpuTypeIds")
-            gpu_mismatch = existing_gpus is not None and set(existing_gpus) != set(gpus)
-            # The listing may not report gpuTypeIds; an explicit recreate must
-            # then still replace it, since the placement cannot be verified.
-            gpu_unverifiable = ctx.recreate and existing_gpus is None
-            mismatched = existing.get("templateId") != template_id or gpu_mismatch or gpu_unverifiable
-            if mismatched and ctx.recreate:
-                self._request(api_key, "DELETE", f"/endpoints/{existing['id']}")
+            have_gpu = existing.get("gpu") or {}
+            diffs = []
+            if existing.get("image") != image:
+                diffs.append(f"image={existing.get('image')!r} vs {image!r}")
+            if existing.get("env") != env:
+                diffs.append(f"env={existing.get('env')!r} vs {env!r}")
+            if have_gpu.get("pools") != gpu["pools"] or opts.gpu in (have_gpu.get("excludedTypes") or []):
+                diffs.append(f"gpu={have_gpu!r} vs {gpu!r}")
+            if diffs and ctx.recreate:
+                self._request(api_key, "DELETE", f"/serverless/{existing['id']}")
             else:
-                if mismatched:
+                if diffs:
                     logger.warning(
-                        "Endpoint '%s' exists but its config differs from requested "
-                        "(template_id=%r vs %r, gpuTypeIds=%r vs %r). Keeping existing "
-                        "endpoint - re-run with recreate to replace it.",
-                        name, existing.get("templateId"), template_id, existing_gpus, gpus,
-                    )
-                if existing.get("workersMax") == 0:  # paused: resume (also a kept, differing one)
-                    return self._request(
-                        api_key, "PATCH", f"/endpoints/{existing['id']}", {"workersMax": opts.workers_max}
-                    )
+                        "Endpoint '%s' exists but its config differs from requested (%s). Keeping the "
+                        "existing endpoint - re-run with recreate to replace it.", name, "; ".join(diffs))
+                if self._max_workers(existing) == 0:  # paused: resume (also a kept, differing one)
+                    return self._request(api_key, "PATCH", f"/serverless/{existing['id']}", {
+                        "workers": {"min": 0, "max": opts.workers_max, "idleTimeout": opts.idle_timeout}})
                 return existing
         body: dict[str, Any] = {
             "name": name,
-            "templateId": template_id,
-            "gpuTypeIds": gpus,
-            # RunPod rejects creation with workersMax=0 (HTTP 500), so create
-            # with at least 1; a pause is a later PATCH.
-            "workersMin": 0,
-            "workersMax": opts.workers_max,
-            "idleTimeout": opts.idle_timeout,
+            "type": "QUEUE",
+            "image": image,
+            "env": env,
+            "disk": disk,
+            "gpu": gpu,
+            # Scale to zero: no worker runs (or bills) until a request arrives. RunPod rejects
+            # creation with at most 0 workers, so a pause is a later PATCH.
+            "workers": {"min": 0, "max": opts.workers_max, "idleTimeout": opts.idle_timeout},
+            "scaling": {"type": "QUEUE_DELAY", "queueDelay": 4},
+            "flashboot": "FLASHBOOT",
         }
         if opts.data_centers:
             body["dataCenterIds"] = list(opts.data_centers)
-        return self._request(api_key, "POST", "/endpoints", body)
+        return self._request(api_key, "POST", "/serverless", body)
 
     # -- warm-up --------------------------------------------------------------------
 
@@ -360,11 +362,9 @@ class RunPodProvider(Provider):
         api_key = ctx.credential
         if not api_key:
             raise ProvisionError("No RunPod API key available. Enter one in the Configure preset dialog or set the shared key.")
-        progress(f"Checking the {self.side} template")
-        template = self._ensure_template(api_key, ctx)
-        ctx.check_deadline()
         progress(f"Checking the {self.side} endpoint")
-        endpoint = self._ensure_endpoint(api_key, ctx, template["id"])
+        endpoint = self._ensure_endpoint(api_key, ctx)
+        ctx.check_deadline()
         base_url = endpoint_base_url(endpoint["id"])
         if not ctx.skip_warmup:
             self._warm_up(api_key, ctx, base_url, endpoint["id"], progress)
@@ -423,49 +423,51 @@ class RunPodProvider(Provider):
         endpoint, the key cannot list endpoints, or RunPod cannot be reached.
         """
         try:
-            endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+            endpoint = self._find_endpoint(api_key)
         except Exception as exc:
             logger.warning("Could not look up the RunPod %s endpoint: %s", self.side, exc)
             return None
         return endpoint_base_url(endpoint["id"]) if endpoint else None
 
     def suspend(self, ctx: ProvisionContext, progress: Callable[[str], None]) -> None:
-        """Pause the endpoint by setting ``workersMax`` to 0 (requests then get 409)."""
+        """Pause the endpoint by setting its maximum workers to 0 (requests then get 409)."""
         api_key = ctx.credential
         if not api_key:
             raise ProvisionError("No RunPod API key available.")
-        endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        endpoint = self._find_endpoint(api_key)
         if endpoint is None:
             raise ProvisionError(f"No endpoint '{self.resource_name}' to pause.")
-        self._request(api_key, "PATCH", f"/endpoints/{endpoint['id']}", {"workersMax": 0})
+        self._request(api_key, "PATCH", f"/serverless/{endpoint['id']}", {"workers": {"min": 0, "max": 0}})
         progress(f"Paused {self.side} endpoint {endpoint['id']}")
 
     def teardown(self, ctx: ProvisionContext) -> None:
-        """Delete this side's endpoint and template; absent ones are a no-op."""
+        """Delete this side's endpoint, and a template of the same name an earlier version
+        created; absent ones are a no-op."""
         api_key = ctx.credential
         if not api_key:
             raise ProvisionError("No RunPod API key available.")
-        endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+        endpoint = self._find_endpoint(api_key)
         if endpoint is not None:
-            self._request(api_key, "DELETE", f"/endpoints/{endpoint['id']}")
+            self._request(api_key, "DELETE", f"/serverless/{endpoint['id']}")
             logger.info("Deleted endpoint '%s' (%s)", self.resource_name, endpoint["id"])
-        template = self._find_by_name(api_key, "templates", self.resource_name)
+        templates = self._list(api_key, "templates", "templates")
+        template = next((t for t in templates if t.get("name") == self.resource_name), None)
         if template is not None:
             self._request(api_key, "DELETE", f"/templates/{template['id']}")
             logger.info("Deleted template '%s' (%s)", self.resource_name, template["id"])
 
     def is_paused(self, api_key: str) -> bool:
-        """True when the endpoint's ``workersMax`` is 0 (read from the management API only)."""
+        """True when the endpoint's maximum workers is 0 (read from the management API only)."""
         try:
-            endpoint = self._find_by_name(api_key, "endpoints", self.resource_name)
+            endpoint = self._find_endpoint(api_key)
         except Exception:
             return False
-        return bool(endpoint) and endpoint.get("workersMax") == 0
+        return bool(endpoint) and self._max_workers(endpoint) == 0
 
     def health(self, creds: Credentials) -> Optional[Health]:
         """Readiness from RunPod's data-plane ``/health`` (worker and job counts).
 
-        A paused endpoint (``workersMax`` 0) is invisible to ``/health``, so the management
+        A paused endpoint (maximum workers 0) is invisible to ``/health``, so the management
         API is asked first; if that is not allowed for the key, the data plane decides.
 
         ``cold`` means scaled to zero or a worker initializing (it wakes on the
@@ -481,8 +483,8 @@ class RunPodProvider(Provider):
             return Health(status="unreachable", detail=f"Not a RunPod endpoint URL: {creds.base_url!r}")
         endpoint_id = match.group(1)
         try:
-            managed = self._request(creds.api_key, "GET", f"/endpoints/{endpoint_id}")
-            if managed and managed.get("workersMax") == 0:
+            managed = self._request(creds.api_key, "GET", f"/serverless/{endpoint_id}")
+            if managed and self._max_workers(managed) == 0:
                 return Health(status="paused", detail="paused; resume it to use it again")
         except Exception:
             pass  # a restricted key may not read the management API: fall back to the data plane

@@ -300,7 +300,8 @@ Without the section queries use the vector order. Fields:
 |---|---|---|
 | `model_name` | (required) | Cross-encoder model, e.g. `BAAI/bge-reranker-v2-m3` |
 | `model_type` | `local` | `local` runs the model in the backend process (needs the `local-models` extra); `remote` calls a `/rerank` endpoint |
-| `pool_size` | `100` | How many candidates of the raw pool are rescored |
+| `pool_size` | `100` | How many candidates are rescored (1-500) in libraries up to `pool_reference_chunks`; the vector search fetches at least as many as are rescored. A query's `rerank_pool_size` overrides the pool |
+| `pool_reference_chunks` | `50000` | Above this many chunks in the searched libraries the pool grows as `pool_size × (1 + log10(chunks / pool_reference_chunks))`, up to 500 (e.g. 100 → 200 at 500k chunks, 263 at 2.15M). `null` keeps `pool_size` fixed |
 | `max_length` | `512` | Token limit per (question, passage) pair (local only) |
 | `batch_size` | `16` | Pairs per forward pass (local only) |
 | `timeout_seconds` | `15` | Longest the step may take; after that the vector order is kept |
@@ -396,7 +397,7 @@ RunPod's terms do not allow one account to serve other people, so the `runpod` p
 
 A preset can add a re-ranking side on the same account (`"rerank": {"model_type": "remote", "model_name": "BAAI/bge-reranker-v2-m3", "model_kwargs": {"api_key_env": "RUNPOD_API_KEY"}, "provider": {"id": "runpod", "scope": "user"}}`, endpoint `zotero-rag-rerank`).
 
-Per-side tuning lives in the preset: `embedding.provider.options` / `llm.provider.options` accept `gpu`, `workers_max` (at least 1), `idle_timeout`, `data_centers`, `image` and `container_disk_gb`. A paused endpoint (`workersMax` 0, which RunPod answers with HTTP 409 `ENDPOINT_PAUSED`) stops all billing and wake-ups until it is provisioned again; provisioning resumes it.
+Per-side tuning lives in the preset: `embedding.provider.options` / `llm.provider.options` accept `gpu`, `workers_max` (at least 1), `idle_timeout`, `data_centers`, `image` and `container_disk_gb`. `gpu` is a GPU type id of RunPod's GPU catalog (`GET https://api.runpod.io/v2/catalog/gpus`, e.g. `NVIDIA RTX A5000`) or its short name (`RTX A5000`); the endpoint is placed on that type's pool with the pool's other types excluded. The worker image, environment and disk are set on the endpoint itself (RunPod management API v2); an endpoint whose image, environment or GPU differs from the preset is kept as it is unless it is provisioned with `--recreate`. A paused endpoint (at most 0 workers, which RunPod answers with HTTP 409 `ENDPOINT_PAUSED`) stops all billing and wake-ups until it is provisioned again; provisioning resumes it.
 
 `uv run python bin/provision.py --preset runpod` does the same from the command line (`--side llm` for one side, `--pause` to stop billing, `--teardown` to delete the resources, `--recreate`, `--yes`, `--skip-warmup`). It asks for your own RunPod key at a hidden prompt (used for that run only) and never touches `.env`. It is idempotent and finds existing endpoints by name. In a container, run it inside the container (`podman exec <container> python bin/provision.py --preset runpod`) so the data volume is shared with the backend.
 

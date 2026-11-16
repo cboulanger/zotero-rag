@@ -207,6 +207,11 @@ class RerankConfig(BaseModel):
     model_type: Literal["local", "remote"] = "local"
     model_name: str = Field(..., description="Cross-encoder model id, e.g. BAAI/bge-reranker-v2-m3")
     pool_size: int = Field(default=100, ge=1, le=500, description="Candidates rescored per query (the rest keep their order after them)")
+    pool_reference_chunks: Optional[int] = Field(
+        default=50_000, ge=1,
+        description="Chunk count of the searched libraries up to which pool_size applies; above it the pool "
+                    "grows as pool_size * (1 + log10(chunks / this)), up to 500. None keeps pool_size fixed.",
+    )
     max_length: int = Field(default=512, ge=16, description="Token limit per question+chunk pair (local models)")
     batch_size: int = Field(default=16, ge=1, description="Pairs scored per forward pass (local models)")
     timeout_seconds: float = Field(default=15.0, gt=0, description="Re-ranking gives up after this and keeps the vector order")
