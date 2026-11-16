@@ -209,6 +209,12 @@ def _fell_back_choice(settings, identity: Optional[ZoteroIdentity], effective: H
     return chosen
 
 
+def _active_standin(settings, identity: Optional[ZoteroIdentity], effective: HardwarePreset) -> Optional[dict]:
+    """The caller's stand-in, only when it is the preset actually in use."""
+    standin = get_standin(settings.data_path, identity.user_id if identity else None)
+    return standin if standin and standin["preset"] == effective.name else None
+
+
 class SwitchablePreset(BaseModel):
     """A preset the admin may switch the default to, or a user may choose for themselves."""
     name: str
@@ -360,7 +366,7 @@ def get_config(request: Request):
         default_preset=default.name,
         selectable_presets=selectable,
         preset_fell_back=_fell_back_choice(settings, identity, preset),
-        standin=get_standin(settings.data_path, identity.user_id if identity else None),
+        standin=_active_standin(settings, identity, preset),
         extractor_backend=effective_extractor_backend(settings, preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
@@ -1014,7 +1020,7 @@ async def set_remote_fields(
 
 
 @router.get("/required-keys", response_model=RequiredKeysResponse)
-async def get_required_api_keys():
+async def get_required_api_keys(request: Request):
     """
     List the client-configurable fields required by the current backend preset.
 
@@ -1030,13 +1036,28 @@ async def get_required_api_keys():
 
     A side whose provider can provision gets its base URL from
     POST /api/config/provision, so its `shared_base_url` entry is omitted.
+
+    While the caller runs on a stand-in, the personal keys of the preset it replaces
+    are listed too, so the client keeps sending them (the server needs them to tell
+    which quota is exhausted and to resume the own preset when the stand-in ends).
     """
     settings = get_settings()
-    return RequiredKeysResponse(keys=_required_keys(settings, settings.get_hardware_preset()))
+    preset = settings.get_hardware_preset()
+    identity = get_zotero_identity(request)
+    standin = get_standin(settings.data_path, identity.user_id if identity else None)
+    replaced: Optional[HardwarePreset] = None
+    if standin and standin["preset"] == preset.name and standin.get("replaces") not in (None, preset.name):
+        try:
+            replaced = get_preset(standin["replaces"], settings.data_path)
+        except ValueError:
+            replaced = None
+    return RequiredKeysResponse(keys=_required_keys(settings, preset, replaced))
 
 
-def _required_keys(settings, preset: HardwarePreset) -> List[ApiKeyRequirement]:
-    """The client-configurable fields of ``preset`` (see GET /api/required-keys)."""
+def _required_keys(settings, preset: HardwarePreset, also_personal_of: Optional[HardwarePreset] = None) -> List[ApiKeyRequirement]:
+    """The client-configurable fields of ``preset`` (see GET /api/required-keys).
+
+    ``also_personal_of`` adds the personal (``api_key``) fields of another preset."""
     try:
         providers = get_providers(preset)
     except ProviderConfigError:
@@ -1069,6 +1090,13 @@ def _required_keys(settings, preset: HardwarePreset) -> List[ApiKeyRequirement]:
 
     for key_info in rerank_client_fields(preset.rerank):
         _merge(key_info, "rerank")
+
+    if also_personal_of is not None:
+        other = [("embedding", f) for f in RemoteEmbeddingService.required_client_fields(also_personal_of.embedding)]
+        other += [("llm", f) for f in RemoteLLMService.required_client_fields_for_config(also_personal_of.llm)]
+        for side, key_info in other:
+            if key_info["kind"] == "api_key" and key_info["key_name"] not in seen:
+                _merge(key_info, side)
 
     return list(seen.values())
 

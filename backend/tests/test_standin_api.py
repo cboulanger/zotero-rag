@@ -126,6 +126,23 @@ class StandinApiTest(unittest.TestCase):
         set_standin(d, 7, "remote-mpcdf", datetime.now(timezone.utc) - timedelta(minutes=1), "runpod")
         self.assertEqual(_fell_back_choice(self.settings, identity(7), mpcdf), "runpod")
 
+    def test_switching_between_standins_keeps_the_own_keys(self):
+        self.exhaust()
+        self.call("PUT", json={"preset_name": "remote-mpcdf"})
+        # The client now only sends what /api/required-keys lists for the active stand-in.
+        r = self.client.get("/api/required-keys", headers={"X-Zotero-API-Key": "Z"})
+        names = [k["key_name"] for k in r.json()["keys"]]
+        self.assertIn("KISSKI_API_KEY", names)
+        r = self.client.put(URL, headers={"X-Zotero-API-Key": "Z", **HEADERS}, json={"preset_name": "runpod"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(get_standin(self.settings.data_path, None)["preset"], "runpod")
+
+    def test_unusable_standin_is_not_reported(self):
+        set_standin(self.settings.data_path, None, "no-such-preset", self.until, "remote-kisski")
+        cfg = self.call("GET", "/api/config").json()
+        self.assertEqual(cfg["preset_name"], "remote-kisski")
+        self.assertIsNone(cfg["standin"])
+
     def test_index_route_ignores_standin(self):
         self.exhaust()
         self.call("PUT", json={"preset_name": "remote-mpcdf"})
