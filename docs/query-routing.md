@@ -479,6 +479,28 @@ parts rank the answer passage *lower* than the question does (Q05's EndNote
 result: 28 -> 70-125), and only a sub-query that already guesses the answer's
 wording helps (Q09's "Zotero does not provide an API" passage: 1942 -> 57).
 
+### Query translation
+
+`RETRIEVAL_QUERY_TRANSLATION` (default `true`) helps questions in another language
+than the documents. A question that looks non-English (an accented letter, or at least
+two German, French or Spanish function words) is translated into English by the answering
+LLM (one short call). The engine searches with both versions, fuses the two ranked lists
+by reciprocal rank, and the re-ranker scores the union of each list's own top
+`pool_size` passages against both versions, keeping each passage's higher score.
+English questions are not translated and cost nothing extra. Implemented in
+`backend/services/query_translation.py`; the trace's `retrieval.translated_query` shows
+the translation.
+
+Why both steps are needed: a German question embeds close to German passages and far
+from English ones, and the cross-encoder scores an on-topic English passage near zero
+against a German question (0.004 against 0.40 for its translation). On 17 questions with
+known answers in a 2.15M-chunk library, translation raised the share of targets in the
+final top 10 from 9 to 13 of 17; every German question about an English work had missed
+its target in the top 500 vector hits. On the gold set (gemma-4-31b-it, 3 repetitions)
+the judged recall rose from 80% to 83% and the German cloud-storage question (Q06)
+from 3 to 5 of 5. A translated question costs one LLM call and up to twice the passages,
+each scored twice, in the re-ranker.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored

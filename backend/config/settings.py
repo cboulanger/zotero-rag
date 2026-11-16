@@ -74,7 +74,7 @@ class Settings(BaseSettings):
                     "answer passages are worded far from the question."
     )
     retrieval_query_translation: bool = Field(
-        default=False,
+        default=True,
         description="Translate questions that look non-English into English with the answering LLM, "
                     "search with both versions and re-rank each passage against both "
                     "(backend/services/query_translation.py). Costs one short LLM call and one extra "
