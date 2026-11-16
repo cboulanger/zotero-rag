@@ -65,6 +65,7 @@ Every preset also declares a `platform` field: `"any"` (the default — visible 
 | `cloud-server-kisski` | Yes (~500 MB) | `KISSKI_API_KEY` | any |
 | `windows-test` | **No** | `KISSKI_API_KEY` | `windows` |
 | `remote-mpcdf` | **No** | each user's own MPCDF login (username, password, one-time code) and a Hugging Face token | any |
+| `kisski-rerank-mpcdf` | **No** | `KISSKI_API_KEY`; for re-ranking each user's own MPCDF login and a Hugging Face token | any |
 | `runpod` | **No** | `RUNPOD_API_KEY` (each user's own) | any |
 | `huggingface` | **No** | `HF_TOKEN` (each user's own) | any |
 
@@ -318,13 +319,16 @@ Bundled presets with a re-ranking step:
 |---|---|---|
 | `cpu-only`, `high-memory`, `apple-silicon-32gb`, `cloud-server-kisski` | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1`, local (about 1 s per 30 passages on 4 CPU cores) | 30 |
 | `runpod` | `BAAI/bge-reranker-v2-m3` on the user's own RunPod endpoint `zotero-rag-rerank` | 100 |
-| `remote-mpcdf` | `BAAI/bge-reranker-v2-m3` as a job on the user's own MPCDF account | 100 |
+| `remote-mpcdf`, `kisski-rerank-mpcdf` | `BAAI/bge-reranker-v2-m3` as a job on the user's own MPCDF account | 100 |
 
 The pools follow an offline comparison on the gold library: the small CPU model loses gold facts
 from the top 10 at larger pools, `bge-reranker-v2-m3` does not, but needs a GPU (about 37 s per
 100 passages on 4 CPU cores). Provisioning all sides of a preset leaves the re-ranking endpoint
-alone (so does the dialog's Start all); it is started from its Re-ranking tab or from the query
-dialog's prompt, and pausing all sides (Pause all) includes it.
+alone (so does the dialog's Start all); it is started from its Re-ranking tab, by logging in to an
+account that serves it (MPCDF, unless re-ranking is switched off) or from the query dialog's prompt,
+and pausing all sides (Pause all) includes it. When the query dialog opens and a side the question
+needs (re-ranking included, if it is switched on) is paused or not running, it says so and opens the
+Configure preset dialog.
 
 ---
 
@@ -339,7 +343,7 @@ dialog's prompt, and pausing all sides (Pause all) includes it.
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 800 characters
 
-**How it works:** the `mpcdf` provider has credential scope `user` only, because the service's terms do not allow one account to serve other people. Each user logs in in the MPCDF account card of the Configure preset dialog with their MPCDF username, password and one-time code (plus a Hugging Face token, which every vLLM job there needs) which starts the embedding and answering endpoints; each runs as a Slurm job of up to 8 hours on their account, renewed while it is in use and cancelled after `idle_minutes` without a request. The backend asks the user's session for the current URL and key before every call (see [providers.md](providers.md), "Per-user sessions"). Health shows `cold` while a job starts and `unreachable` ("not running") when there is none.
+**How it works:** the `mpcdf` provider has credential scope `user` only, because the service's terms do not allow one account to serve other people. Each user logs in in the MPCDF account card of the Configure preset dialog with their MPCDF username, password and one-time code (plus a Hugging Face token, which every vLLM job there needs), which starts the embedding, answering and re-ranking endpoints (re-ranking unless it is switched off); each runs as a Slurm job of up to 8 hours on their account, renewed while it is in use and cancelled after `idle_minutes` without a request. The backend asks the user's session for the current URL and key before every call (see [providers.md](providers.md), "Per-user sessions"). Health shows `cold` while a job starts and `unreachable` ("not running") when there is none.
 
 **Advantages:**
 
@@ -347,6 +351,21 @@ dialog's prompt, and pausing all sides (Pause all) includes it.
 - No local GPU or large Python dependencies.
 
 **Trade-offs:** Requires an MPCDF account with access to the LLM Inference Service; starting a job takes a few minutes in the queue plus loading the model, and the login session lasts about 12 hours. Automatic indexing skips users on this preset, since nobody is there to log in.
+
+### `kisski-rerank-mpcdf` (KISSKI, with re-ranking on each user's own MPCDF account)
+
+**Best for:** MPCDF users on a server without the hardware for a local re-ranker: KISSKI embeds and
+answers as in `remote-kisski`, and `BAAI/bge-reranker-v2-m3` re-ranks the top 100 candidates as a job
+on the user's own MPCDF account (1 GPU).
+
+**How it works:** logging in to MPCDF in the Configure preset dialog starts the re-ranking job (unless
+re-ranking is switched off); it is renewed while in use and cancelled after an hour without a request.
+While it is not running, queries skip re-ranking rather than fail, and the query dialog says so when
+it opens. The index is the same as `remote-kisski`'s, so switching between the two needs no
+re-indexing, and automatic indexing works as for `remote-kisski`.
+
+**Trade-offs:** Each user needs an MPCDF account; a stopped re-ranker takes a few minutes to start
+again.
 
 ---
 

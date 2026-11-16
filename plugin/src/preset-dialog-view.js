@@ -931,7 +931,10 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			}
 			// The password and one-time code are sent once and never kept.
 			for (const field of card.fields) if (field.storage === 'login') delete state.local.drafts[`${scope}/${field.id}`];
-			body = { ...body, values };
+			// The login also starts the account's re-ranking endpoint unless the "Use re-ranking"
+			// switch (a client preference the server cannot see) is off.
+			const startRerank = deps.prefs.get(D.PREF_PREFIX + 'enableReranking') !== false;
+			body = { ...body, values, start_rerank: startRerank };
 		}
 		note(scope, 'info', `${action.label}…`);
 		let result;

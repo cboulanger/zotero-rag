@@ -1208,6 +1208,9 @@ class SessionLoginRequest(BaseModel):
     side: str
     #: Field values by the names the side's ``provisioning.login`` descriptor declares.
     values: Dict[str, str] = {}
+    #: Also start the re-ranking endpoint when this account serves it (the caller's
+    #: "Use re-ranking" switch, a plugin preference the server cannot see).
+    start_rerank: bool = True
 
 
 class SessionSideRequest(BaseModel):
@@ -1261,9 +1264,9 @@ async def session_login(body: SessionLoginRequest, request: Request) -> dict:
     provider keeps only the resulting session, encrypted. Returns the session
     state (``state``, ``username``, ``expires_at``, provider extras), no secrets,
     plus ``provisioning``: the provisioning job started for the preset's sides that
-    run in this session (the same job as POST /api/config/provision; re-ranking is
-    left out, it is only ever started on its own), or None. A provider start that
-    cannot begin does not fail the login; its reason is in ``provisioning_error``.
+    run in this session (the same job as POST /api/config/provision; re-ranking only
+    when ``start_rerank``), or None. A provider start that cannot begin does not fail
+    the login; its reason is in ``provisioning_error``.
     """
     provider, user_id = _session_provider(request, body.side)
     try:
@@ -1273,12 +1276,18 @@ async def session_login(body: SessionLoginRequest, request: Request) -> dict:
     except Exception as exc:
         raise _session_error(exc)
     result = dict(result or {})
-    result["provisioning"], result["provisioning_error"] = await _provision_session_sides(request, provider)
+    result["provisioning"], result["provisioning_error"] = await _provision_session_sides(
+        request, provider, include_rerank=body.start_rerank)
     return result
 
 
-async def _provision_session_sides(request: Request, provider: Provider) -> Tuple[Optional[dict], Optional[str]]:
-    """Start provisioning the active preset's sides served by ``provider``'s session (not rerank).
+async def _provision_session_sides(
+    request: Request, provider: Provider, include_rerank: bool = True,
+) -> Tuple[Optional[dict], Optional[str]]:
+    """Start provisioning the active preset's sides served by ``provider``'s session.
+
+    The re-ranking side is included unless ``include_rerank`` is false (the caller
+    switched re-ranking off), so a login starts every endpoint the queries will use.
 
     Returns ``(job state, None)``, or ``(None, reason)`` when nothing was started. A job
     that is already running is reported as such, not as an error.
@@ -1290,7 +1299,7 @@ async def _provision_session_sides(request: Request, provider: Provider) -> Tupl
         return None, str(exc)
     sides = [
         s for s in preset_sides(preset)
-        if s != "rerank" and providers[s].id == provider.id
+        if (include_rerank or s != "rerank") and providers[s].id == provider.id
         and providers[s].supports_provisioning and providers[s].uses_session_endpoints
     ]
     if not sides:

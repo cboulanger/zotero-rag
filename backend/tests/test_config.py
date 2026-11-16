@@ -40,6 +40,7 @@ EXPECTED_BUNDLED_PRESET_NAMES = {
     "cloud-server-kisski",
     "windows-test",
     "remote-mpcdf",
+    "kisski-rerank-mpcdf",
     "huggingface",
     "runpod",
 }

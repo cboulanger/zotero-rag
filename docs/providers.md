@@ -135,8 +135,9 @@ side's section instead of a key field. The form posts to `POST /api/config/sessi
 caller's endpoints for the active preset's sides that run in that session (the same background job as
 `POST /api/config/provision`; the response carries it as `provisioning`, or a reason it could not
 start as `provisioning_error`); the plugin follows that job until the endpoints are ready. The
-re-ranking side is not started this way: like everywhere else, it starts only from its own section
-or the query dialog's prompt.
+re-ranking side is included unless the request says `"start_rerank": false`, which the plugin sends
+when the user has switched re-ranking off; the login is the one start of the re-ranker besides its
+own tab and the query dialog's prompt.
 
 For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
 its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero

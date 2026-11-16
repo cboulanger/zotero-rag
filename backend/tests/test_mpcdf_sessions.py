@@ -307,6 +307,10 @@ class SessionApiTest(unittest.TestCase):
                           "provider": {"id": "mpcdf", "scope": "user"}}
         (self.settings.data_path / "presets" / "kisski-mpcdf-rerank.json").write_text(json.dumps(data))
         self.settings.model_preset = "kisski-mpcdf-rerank"
+        # A mocked start never finishes, so its job would block the next test's start (409).
+        from backend.services import provisioning
+        provisioning.reset_job_state()
+        self.addCleanup(provisioning.reset_job_state)
         self.fake = FakeSessions()
         for p in (patch.object(mpcdf_sessions, "available", return_value=True),
                   patch.object(mpcdf_sessions, "get_sessions", return_value=self.fake)):
@@ -326,7 +330,7 @@ class SessionApiTest(unittest.TestCase):
         self.assertEqual(self.fake.logins, [(None, "alice")])  # loopback: the single local user
         self.assertEqual(self.client.get("/api/config/session", params={"side": "rerank"}).json()["state"], "ok")
 
-    def test_login_starts_the_session_sides_but_not_rerank(self):
+    def test_login_starts_every_session_side_including_rerank(self):
         self.settings.model_preset = "remote-mpcdf"  # embedding, LLM and re-ranking on MPCDF
         with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
             r = self.client.post("/api/config/session/login", json={
@@ -336,12 +340,33 @@ class SessionApiTest(unittest.TestCase):
         self.assertIsNotNone(r.json()["provisioning"])
         self.assertIsNone(r.json()["provisioning_error"])
         run_job.assert_called_once()
+        self.assertEqual([j.side for j in run_job.call_args.args[0]], ["embedding", "llm", "rerank"])
+
+    def test_login_leaves_rerank_alone_when_the_caller_switched_it_off(self):
+        self.settings.model_preset = "remote-mpcdf"
+        with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
+            r = self.client.post("/api/config/session/login", json={
+                "side": "llm", "values": {"username": "alice", "password": "pw", "otp": "123456"},
+                "start_rerank": False})
+        self.assertEqual(r.status_code, 200, r.text)
+        run_job.assert_called_once()
         self.assertEqual([j.side for j in run_job.call_args.args[0]], ["embedding", "llm"])
 
-    def test_login_with_only_a_rerank_session_side_starts_nothing(self):
+    def test_login_with_only_a_rerank_session_side_starts_the_reranker(self):
+        # KISSKI embedding and answering, re-ranking on the caller's MPCDF account.
         with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
             r = self.client.post("/api/config/session/login", json={
                 "side": "rerank", "values": {"username": "alice", "password": "pw", "otp": "123456"}})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertIsNotNone(r.json()["provisioning"])
+        run_job.assert_called_once()
+        self.assertEqual([j.side for j in run_job.call_args.args[0]], ["rerank"])
+
+    def test_login_with_only_a_rerank_side_switched_off_starts_nothing(self):
+        with patch("backend.services.provisioning.run_job", new=AsyncMock()) as run_job:
+            r = self.client.post("/api/config/session/login", json={
+                "side": "rerank", "values": {"username": "alice", "password": "pw", "otp": "123456"},
+                "start_rerank": False})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertIsNone(r.json()["provisioning"])
         run_job.assert_not_called()

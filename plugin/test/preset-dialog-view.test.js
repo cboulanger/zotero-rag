@@ -334,9 +334,22 @@ test('logging in sends the form once, clears it and reports a start that did not
 	assert.match(painted.at(-1).notes['account:p2'].text, /Password/);
 	controller.state.local.drafts['account:p2/login:password'] = 'pw';
 	await controller.runCardAction(c, c.actions[0]);
-	assert.deepStrictEqual(posts, [['/api/config/session/login', { side: 'embedding', values: { username: 'me', password: 'pw' } }]]);
+	assert.deepStrictEqual(posts, [['/api/config/session/login', { side: 'embedding', values: { username: 'me', password: 'pw' }, start_rerank: true }]]);
 	assert.deepStrictEqual(Object.keys(controller.state.local.drafts), []);
 	assert.ok(painted.some((p) => p.notes['account:p2'] && /did not start: no capacity/.test(p.notes['account:p2'].text)));
+});
+
+test('logging in asks the server not to start re-ranking when the switch is off', async () => {
+	const v = view([side('embedding', { account: 'p2', state: 'down' })], [loginCard()]);
+	const { controller, posts, prefs } = setup({ views: [v], postReply: { ok: true, status: 200, data: { state: 'ok', provisioning: null } } });
+	prefs.store['extensions.zotero-rag.enableReranking'] = false;
+	await controller.refresh();
+	const c = controller.state.view.accounts[0];
+	controller.state.local.drafts['account:p2/login:username'] = 'me';
+	controller.state.local.drafts['account:p2/login:password'] = 'pw';
+	await controller.runCardAction(c, c.actions[0]);
+	assert.strictEqual(posts.length, 1);
+	assert.strictEqual(posts[0][1].start_rerank, false);
 });
 
 test('Save ignores login fields, and a login card shows its actions instead of Save and start', () => {
