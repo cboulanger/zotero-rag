@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 from backend.config.presets import ensure_default_presets
 from backend.config.settings import get_settings, reset_settings
 from backend.services.zotero_identity import ZoteroIdentity
-from backend.tests.runpod_variants import write_managed_runpod_preset
 from backend.tests.shared_gateway import write_shared_gateway_preset
+from backend.tests import fakes
 
 
 class DescriptorsApiTest(unittest.TestCase):
@@ -42,15 +42,15 @@ class DescriptorsApiTest(unittest.TestCase):
         return r.json()
 
     def test_user_scope_provider_is_operable_by_any_signed_in_user(self):
-        body = self._get("runpod", loopback=False)
+        body = self._get("test-cloud", loopback=False)
         for side in ("embedding", "llm"):
             d = body["sides"][side]["provider"]
-            self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("runpod", "user", True))
+            self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("testcloud", "user", True))
             self.assertTrue(d["supports_provisioning"] and d["supports_suspend"])
-            self.assertEqual(d["provisioning"]["credential"]["env"], "RUNPOD_API_KEY")
+            self.assertEqual(d["provisioning"]["credential"]["env"], "TESTCLOUD_API_KEY")
 
     def test_managed_scope_is_operable_by_admins_only(self):
-        name = write_managed_runpod_preset(self.settings.data_path)
+        name = fakes.write_managed_cloud_preset(self.settings.data_path)
         self.assertTrue(self._get(name, admin=True, loopback=False)["sides"]["llm"]["provider"]["operable_by_caller"])
         self.assertFalse(self._get(name, admin=False, user_id=6, loopback=False)["sides"]["llm"]["provider"]["operable_by_caller"])  # admin role is cached per user
 
@@ -58,17 +58,17 @@ class DescriptorsApiTest(unittest.TestCase):
         body = self._get(write_shared_gateway_preset(self.settings.data_path))
         d = body["sides"]["llm"]["provider"]
         self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("generic", "shared", False))
-        kisski = self._get("remote-kisski")["sides"]["llm"]["provider"]
-        self.assertFalse(kisski["operable_by_caller"])
-        self.assertFalse(kisski["supports_provisioning"])
+        vendor = self._get("test-remote")["sides"]["llm"]["provider"]
+        self.assertFalse(vendor["operable_by_caller"])
+        self.assertFalse(vendor["supports_provisioning"])
 
-    def test_mpcdf_sides_are_per_user_with_a_login_form(self):
-        body = self._get("remote-mpcdf", loopback=False)
+    def test_session_sides_are_per_user_with_a_login_form(self):
+        body = self._get("test-session", loopback=False)
         for side in ("embedding", "llm"):
             d = body["sides"][side]["provider"]
-            self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("mpcdf", "user", True))
+            self.assertEqual((d["id"], d["key_scope"], d["operable_by_caller"]), ("testsession", "user", True))
             self.assertIsNotNone(d["provisioning"]["login"])
-            self.assertIn("MPCDF", d["unavailable_hint"])
+            self.assertIn("test account", d["unavailable_hint"])
 
     def test_local_side_has_no_provider(self):
         body = self._get("cpu-only")
@@ -76,15 +76,15 @@ class DescriptorsApiTest(unittest.TestCase):
 
     def test_mixed_preset_describes_each_side_by_its_own_provider(self):
         path = self.settings.data_path / "presets" / "mixed.json"
-        data = json.loads((self.settings.data_path / "presets" / "remote-kisski.json").read_text())
-        data["llm"]["provider"] = {"id": "anthropic"}
+        data = json.loads((self.settings.data_path / "presets" / "test-remote.json").read_text())
+        data["llm"]["provider"] = {"id": "testmessages"}
         data["llm"]["model_names"] = ["claude-sonnet-4"]
         data["llm"]["model_kwargs"] = {}
         data.pop("name", None)
         path.write_text(json.dumps(data))
         body = self._get("mixed")
         self.assertEqual((body["sides"]["embedding"]["provider"]["id"], body["sides"]["llm"]["provider"]["id"]),
-                         ("kisski", "anthropic"))
+                         ("testvendor", "testmessages"))
 
     def test_no_secret_material_in_any_descriptor(self):
         def walk(node):
@@ -96,17 +96,17 @@ class DescriptorsApiTest(unittest.TestCase):
                 for v in node:
                     yield from walk(v)
 
-        for name in ("runpod", "remote-kisski", "remote-mpcdf", "remote-openai"):
+        for name in ("test-cloud", "test-remote", "test-session", "test-other-embedding"):
             keys = set(walk(self._get(name)))
             self.assertFalse({k for k in keys if "secret" in k or "token" in k or k in ("api_key", "key", "value")}, name)
 
 
 class RequiredKeysSidesTest(DescriptorsApiTest):
     def test_each_key_lists_the_sides_that_use_it(self):
-        self.settings.model_preset = "remote-kisski"
+        self.settings.model_preset = "test-remote"
         keys = self.client.get("/api/required-keys").json()["keys"]
-        (kisski,) = [k for k in keys if k["key_name"] == "KISSKI_API_KEY"]
-        self.assertEqual(sorted(kisski["sides"]), ["embedding", "llm"])  # one key serves both sides
+        (vendor,) = [k for k in keys if k["key_name"] == "TESTVENDOR_API_KEY"]
+        self.assertEqual(sorted(vendor["sides"]), ["embedding", "llm"])  # one key serves both sides
 
     def test_a_side_with_its_own_key_is_listed_separately(self):
         self.settings.model_preset = write_shared_gateway_preset(self.settings.data_path)
@@ -114,8 +114,8 @@ class RequiredKeysSidesTest(DescriptorsApiTest):
         self.assertEqual(keys["GATEWAY_EMBEDDING_API_KEY"], ["embedding"])
         self.assertEqual(keys["GATEWAY_LLM_API_KEY"], ["llm"])
 
-    def test_per_user_mpcdf_needs_no_key(self):
-        self.settings.model_preset = "remote-mpcdf"
+    def test_per_user_session_sides_need_no_key(self):
+        self.settings.model_preset = "test-session"
         self.assertEqual(self.client.get("/api/required-keys").json()["keys"], [])
 
 

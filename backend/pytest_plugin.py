@@ -50,6 +50,22 @@ if _env_path.exists():
             os.environ[key] = value
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip the bundled tests of a shipped plugin that ``DISABLED_BACKEND_PLUGINS`` turns off."""
+    from backend.pluginhost.host import SHIPPED_PLUGIN_DIR, disabled_plugin_ids
+
+    disabled = disabled_plugin_ids()
+    if not disabled:
+        return
+    for item in items:
+        try:
+            plugin_id = Path(str(item.fspath)).resolve().relative_to(SHIPPED_PLUGIN_DIR).parts[0]
+        except ValueError:
+            continue
+        if plugin_id in disabled:
+            item.add_marker(pytest.mark.skip(reason=f"backend plugin {plugin_id!r} is disabled"))
+
+
 @pytest.fixture(autouse=True)
 def _isolated_failed_store(tmp_path, monkeypatch):
     """Keep rag-failed records (and their events) out of the real data directory."""

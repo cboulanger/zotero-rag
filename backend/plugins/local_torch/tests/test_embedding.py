@@ -1,7 +1,7 @@
 """Local sentence-transformers embeddings (skipped without the local-models extra)."""
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 
@@ -20,6 +20,15 @@ class TestFactoryUsesTorch(unittest.TestCase):
     def test_a_local_embedding_side_gets_the_torch_service(self):
         service = create_embedding_service(EmbeddingConfig(model_type="local", model_name="test-model"))
         self.assertIsInstance(service, LocalEmbeddingService)
+
+
+class TestQueryInstruction(unittest.IsolatedAsyncioTestCase):
+    async def test_local_service_without_instruction_embeds_bare(self):
+        name = "sentence-transformers/all-MiniLM-L6-v2"
+        service = create_embedding_service(EmbeddingConfig(model_name=name))
+        service.embed_text = AsyncMock(return_value=[0.5])
+        await service.embed_query("Who uses Zotero?")
+        service.embed_text.assert_awaited_once_with("Who uses Zotero?")
 
 
 @unittest.skipUnless(HAS_SENTENCE_TRANSFORMERS, "sentence_transformers not installed")

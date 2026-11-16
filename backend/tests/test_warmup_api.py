@@ -22,7 +22,7 @@ class WarmupApiTest(unittest.TestCase):
         self.addCleanup(reset_settings)
         settings = get_settings()
         settings.data_path = Path(self.tmp.name)
-        settings.model_preset = "runpod"
+        settings.model_preset = "test-cloud"
         ensure_default_presets(settings.data_path)
         config_api._last_warmup.clear()
         self.client = TestClient(app)

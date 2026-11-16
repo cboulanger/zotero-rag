@@ -17,6 +17,35 @@ _project_root = Path(__file__).parent.parent.parent
 # The test environment (TESTING, a throwaway AUTOINDEX_SECRET, .env.test/.env)
 # and the shared fixtures come from backend/conftest.py (backend.pytest_plugin).
 
+# Core tests run on the test-only plugin in fake_plugins/ (fake providers and
+# presets), so they pass with every shipped vendor plugin removed or disabled.
+FAKE_PLUGIN_DIR = Path(__file__).resolve().parent / "fake_plugins"
+#: The preset core tests run on unless a test chooses another (the real one is
+#: kept for the integration tests' server, which needs real providers).
+CORE_TEST_PRESET = "test-remote"
+ORIGINAL_MODEL_PRESET = os.environ.get("MODEL_PRESET")
+_dirs = [d for d in os.environ.get("BACKEND_PLUGIN_DIRS", "").split(os.pathsep) if d]
+if str(FAKE_PLUGIN_DIR) not in _dirs:
+    os.environ["BACKEND_PLUGIN_DIRS"] = os.pathsep.join([*_dirs, str(FAKE_PLUGIN_DIR)])
+os.environ["MODEL_PRESET"] = CORE_TEST_PRESET
+
+
+def _load_plugins_now() -> None:
+    """Load the plugin host while the environment above is in place.
+
+    Loading is lazy, and a test that clears ``os.environ`` (``patch.dict(..., clear=True)``)
+    must not be the first to trigger it. When plugin tests collected first already
+    loaded the host, the fakes are added to it.
+    """
+    from backend.pluginhost import get_plugin_host
+
+    host = get_plugin_host()
+    if "testvendor" not in {r.id for r in host.plugins()}:
+        host._load_directory(FAKE_PLUGIN_DIR, set())
+
+
+_load_plugins_now()
+
 # Import shared environment validation
 from backend.tests.test_environment import validate_test_environment
 
@@ -189,6 +218,13 @@ def test_server():
 
     # Create test environment - ensure .env.test settings take precedence
     test_env = {**os.environ}
+    # The test server runs on real providers, not on the core tests' fakes.
+    test_env.pop("MODEL_PRESET", None)
+    if ORIGINAL_MODEL_PRESET:
+        test_env["MODEL_PRESET"] = ORIGINAL_MODEL_PRESET
+    test_env["BACKEND_PLUGIN_DIRS"] = os.pathsep.join(
+        d for d in test_env.get("BACKEND_PLUGIN_DIRS", "").split(os.pathsep) if d and d != str(FAKE_PLUGIN_DIR)
+    )
 
     # Override MODEL_PRESET for tests (avoid cpu-only which uses local models)
     if "MODEL_PRESET" not in test_env or test_env["MODEL_PRESET"] == "cpu-only":

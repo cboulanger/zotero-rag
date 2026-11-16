@@ -183,10 +183,10 @@ class TestSaiaFlavour(_HttpTestCase):
         rec = _Recorder()
         self.mock_http(rec)
         extractor = DoclingExtractor(url="https://saia.test", api_flavor="saia", api_key=None,
-                                     api_key_name="KISSKI_API_KEY")
+                                     api_key_name="TESTVENDOR_API_KEY")
         with self.assertRaises(KreuzbergUnavailableError) as ctx:
             await extractor.extract_and_chunk(b"%PDF", "application/pdf")
-        self.assertIn("KISSKI_API_KEY", str(ctx.exception))
+        self.assertIn("TESTVENDOR_API_KEY", str(ctx.exception))
         self.assertEqual(rec.requests, [])
 
     async def test_unsupported_and_plain_text_need_no_request(self):
@@ -336,7 +336,7 @@ class TestConfiguredExtractor(unittest.TestCase):
         defaults.update(kw)
         return MagicMock(**defaults)
 
-    def preset(self, extraction=None, key_env="KISSKI_API_KEY") -> MagicMock:
+    def preset(self, extraction=None, key_env="TESTVENDOR_API_KEY") -> MagicMock:
         preset = MagicMock()
         preset.extraction = extraction
         preset.embedding.model_kwargs = {"api_key_env": key_env}
@@ -351,7 +351,7 @@ class TestConfiguredExtractor(unittest.TestCase):
     def test_preset_extraction_wins_and_reuses_the_embedding_key(self):
         extraction = ExtractionConfig(backend="docling", options={
             "api_flavor": "saia", "url": "https://chat-ai.academiccloud.de",
-            "api_key_env": "KISSKI_API_KEY", "min_request_interval_seconds": 1.1,
+            "api_key_env": "TESTVENDOR_API_KEY", "min_request_interval_seconds": 1.1,
         })
         embedding = MagicMock(api_key="sk-user")
         extractor = create_configured_extractor(self.settings(), self.preset(extraction), embedding,
@@ -377,21 +377,6 @@ class TestConfiguredExtractor(unittest.TestCase):
         self.assertEqual(extractor._url, "http://ds:5001")
         self.assertTrue(extractor._async_mode)
         self.assertIsNone(extractor._api_key)
-
-
-class TestBundledPreset(unittest.TestCase):
-    def test_kisski_docling_preset_loads(self):
-        import tempfile
-        from pathlib import Path
-
-        from backend.config.presets import get_preset
-
-        with tempfile.TemporaryDirectory() as tmp:
-            preset = get_preset("kisski-docling", Path(tmp))
-        self.assertEqual(preset.extraction.backend, "docling")
-        self.assertEqual(preset.extraction.options["api_flavor"], "saia")
-        self.assertEqual(preset.embedding.model_name, "multilingual-e5-large-instruct")
-        json.dumps(preset.model_dump())  # serialisable for the config API
 
 
 if __name__ == "__main__":

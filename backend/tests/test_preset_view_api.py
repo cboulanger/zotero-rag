@@ -15,6 +15,7 @@ from backend.services import provisioning
 from backend.services.preset_view import Probe
 from backend.services.side_probe import SideProbe
 from backend.services.zotero_identity import ZoteroIdentity
+from backend.tests import fakes
 
 UNPROVISIONED = Health(status="unreachable", detail="not provisioned")
 
@@ -44,7 +45,7 @@ class PresetViewApiTest(unittest.TestCase):
         ident = ZoteroIdentity(user_id=user_id, username="u", targets=[f"users/{user_id}"])
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=ident)), \
              patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=admin)), \
-             patch("backend.plugins.runpod.provider.RunPodProvider.health", return_value=health), \
+             patch.object(fakes.cloud_cls(), "health", return_value=health), \
              patch("backend.api.config._probe", new=AsyncMock(return_value=probe)):
             r = self.client.get("/api/config/preset-view", headers={"X-Zotero-API-Key": "Z", **(headers or {})})
         self.assertEqual(r.status_code, 200, r.text)
@@ -58,7 +59,7 @@ class PresetViewApiTest(unittest.TestCase):
         body = self._get("cpu-only")
         self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "rerank", "llm"])
         self.assertEqual(body["preset"]["name"], "cpu-only")
-        no_rerank = self._get("remote-kisski", headers={"X-Kisski-Api-Key": "k"})
+        no_rerank = self._get("test-remote", headers={"X-Testvendor-Api-Key": "k"})
         self.assertNotIn("rerank", [s["side"] for s in no_rerank["sides"]])
 
     def test_local_models_are_ready_and_need_no_account(self):
@@ -68,28 +69,28 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual(body["accounts"], [])
 
     def test_unprovisioned_endpoints_are_down_with_a_start_action_and_one_account_card(self):
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_secretvalue"})
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_secretvalue"})
         for name in ("embedding", "llm"):
             side = self._side(body, name)
-            self.assertEqual((side["state"], side["account"]), ("down", "runpod"))
+            self.assertEqual((side["state"], side["account"]), ("down", "testcloud"))
             start = next(a for a in side["actions"] if a["workflow"] == "start")
             self.assertEqual(start["request"], {"method": "POST", "path": "/api/config/provision", "body": {"sides": [name]}})
-            self.assertEqual(start["account"], "runpod")
+            self.assertEqual(start["account"], "testcloud")
         self.assertEqual(len(body["accounts"]), 1)
         card = body["accounts"][0]
-        self.assertEqual((card["id"], card["serves"], card["state"]), ("runpod", ["embedding", "rerank", "llm"], "ready"))
+        self.assertEqual((card["id"], card["serves"], card["state"]), ("testcloud", ["embedding", "rerank", "llm"], "ready"))
         storages = {f["id"]: (f["storage"], f["is_set"]) for f in card["fields"]}
-        self.assertEqual(storages["RUNPOD_API_KEY"], ("client_secret", True))
-        self.assertEqual(storages["session:RUNPOD_API_KEY"][0], "session")
+        self.assertEqual(storages["TESTCLOUD_API_KEY"], ("client_secret", True))
+        self.assertEqual(storages["session:TESTCLOUD_API_KEY"][0], "session")
 
     def test_a_missing_personal_key_marks_the_card(self):
-        body = self._get("runpod")
+        body = self._get("test-cloud")
         card = body["accounts"][0]
         self.assertEqual(card["state"], "needs_input")
         self.assertTrue(card["messages"])
 
     def test_a_ready_endpoint_offers_pause(self):
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="ready"))
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=Health(status="ready"))
         side = self._side(body, "llm")
         self.assertEqual(side["state"], "ready")
         self.assertEqual([a["id"] for a in side["actions"]], ["pause"])
@@ -98,7 +99,7 @@ class PresetViewApiTest(unittest.TestCase):
     def test_a_running_job_shows_starting_and_its_log(self):
         provisioning.mark_running(["llm"], provisioning.user_slot(5))
         provisioning._add_progress(provisioning.user_slot(5), "llm", "creating endpoint")
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"})
         side = self._side(body, "llm")
         self.assertEqual(side["state"], "starting")
         self.assertEqual(side["log"], ["creating endpoint"])
@@ -107,7 +108,7 @@ class PresetViewApiTest(unittest.TestCase):
 
     def test_a_running_job_drops_the_advice_on_how_to_start_it(self):
         provisioning.mark_running(["llm"], provisioning.user_slot(5))
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="unreachable"))
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=Health(status="unreachable"))
         texts = [m["text"] for m in self._side(body, "llm")["messages"]]
         self.assertFalse([t for t in texts if "RunPod serverless endpoint" in t], texts)
 
@@ -143,20 +144,20 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertTrue(body["preset"]["is_admin"])
         self.assertIn(body["preset"]["default_preset"], body["preset"]["default_options"])
 
-    def _get_mpcdf(self, session, health=UNPROVISIONED):
-        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=session), \
-             patch("backend.plugins.mpcdf.provider.MpcdfProvider.health", return_value=health):
-            return self._get("remote-mpcdf", user_id=8)
+    def _get_session(self, session, health=UNPROVISIONED):
+        with patch.object(fakes.session_cls(), "session_status", return_value=session), \
+             patch.object(fakes.session_cls(), "health", return_value=health):
+            return self._get("test-session", user_id=8)
 
     def test_session_provider_card_offers_the_login_form_until_logged_in(self):
-        body = self._get_mpcdf({"state": "login_required"})
+        body = self._get_session({"state": "login_required"})
         card = body["accounts"][0]
-        self.assertEqual(card["id"], "mpcdf")
+        self.assertEqual(card["id"], "testsession")
         self.assertEqual(card["serves"], ["embedding", "rerank", "llm"])
         self.assertEqual(card["state"], "needs_input")
         self.assertFalse(card["auto_start"])
         logins = [f["key"] for f in card["fields"] if f["storage"] == "login"]
-        self.assertEqual(logins, ["username", "password", "otp", "hf_token"])
+        self.assertEqual(logins, ["username", "password"])
         login = next(a for a in card["actions"] if a["sends_login"])
         self.assertEqual(login["request"]["path"], "/api/config/session/login")
         self.assertIn("side", login["request"]["body"])
@@ -166,7 +167,7 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn("Log in", start["reason"])
 
     def test_logged_in_session_card_shows_logout_and_enables_start(self):
-        body = self._get_mpcdf({"state": "ok", "username": "cb", "expires_at": "2026-11-16T08:00:00Z", "hf_token_set": True})
+        body = self._get_session({"state": "ok", "username": "cb", "expires_at": "2026-11-16T08:00:00Z", "hf_token_set": True})
         card = body["accounts"][0]
         self.assertEqual(card["state"], "ready")
         self.assertFalse([f for f in card["fields"] if f["storage"] == "login"])
@@ -177,13 +178,13 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual(start["workflow"], "start")
 
     def test_session_status_failure_falls_back_to_the_login_form(self):
-        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", side_effect=RuntimeError("down")), \
-             patch("backend.plugins.mpcdf.provider.MpcdfProvider.health", return_value=UNPROVISIONED):
-            body = self._get("remote-mpcdf", user_id=9)
+        with patch.object(fakes.session_cls(), "session_status", side_effect=RuntimeError("down")), \
+             patch.object(fakes.session_cls(), "health", return_value=UNPROVISIONED):
+            body = self._get("test-session", user_id=9)
         self.assertEqual(body["accounts"][0]["state"], "needs_input")
 
     def test_remote_reranker_is_an_optional_tab_left_out_of_start_all(self):
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"})
         self.assertEqual([s["side"] for s in body["sides"]], ["extraction", "embedding", "retrieval", "rerank", "llm"])
         rerank = self._side(body, "rerank")
         self.assertTrue(rerank["optional"])
@@ -197,7 +198,7 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn("rerank", body["accounts"][0]["serves"])
 
     def test_remote_reranker_pause_joins_pause_all(self):
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="ready"))
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"}, health=Health(status="ready"))
         pause = next(a for a in self._side(body, "rerank")["actions"] if a["id"] == "pause")
         self.assertEqual(pause["workflow"], "pause")
 
@@ -214,14 +215,14 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn("30", pool["placeholder"])
 
     def test_docling_extraction_joins_the_account_of_its_key(self):
-        body = self._get("kisski-docling")
+        body = self._get("test-docling")
         card = body["accounts"][0]
         self.assertEqual(card["serves"], ["extraction", "embedding", "llm"])
         self.assertEqual(self._side(body, "extraction")["state"], "down")
         # No status check and no key: the side cannot work.
         self.assertEqual(self._side(body, "llm")["state"], "down")
         with patch("backend.services.side_probe.probe_side", new=AsyncMock(return_value=SideProbe())):
-            with_key = self._get("kisski-docling", headers={"X-Kisski-Api-Key": "k"})
+            with_key = self._get("test-docling", headers={"X-Testvendor-Api-Key": "k"})
         self.assertEqual(self._side(with_key, "llm")["state"], "unknown")
         self.assertEqual(with_key["accounts"][0]["state"], "ready")
 
@@ -251,27 +252,27 @@ class PresetViewApiTest(unittest.TestCase):
             self.assertIn(f"prefKey: '{pref}'", source)
 
     def test_no_secret_value_is_echoed(self):
-        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_secretvalue"})
-        self.assertNotIn("rpa_secretvalue", json.dumps(body))
+        body = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_secretvalue"})
+        self.assertNotIn("tck_secretvalue", json.dumps(body))
 
     # -- test requests, quota and demand -------------------------------------------
 
-    def _kisski(self, probe, availability=None, headers=None):
+    def _vendor(self, probe, availability=None, headers=None):
         mock = AsyncMock(return_value=probe)
         with patch("backend.services.side_probe.probe_side", new=mock), \
-             patch("backend.plugins.kisski.provider.KisskiProvider.model_availability", return_value=availability):
-            body = self._get("remote-kisski", headers={"X-Kisski-Api-Key": "k"} if headers is None else headers)
+             patch.object(fakes.vendor_cls(), "model_availability", return_value=availability):
+            body = self._get("test-remote", headers={"X-Testvendor-Api-Key": "k"} if headers is None else headers)
         return body, mock
 
     def test_a_side_without_status_check_is_ready_when_a_test_request_answers(self):
-        body, mock = self._kisski(SideProbe(ok=True))
+        body, mock = self._vendor(SideProbe(ok=True))
         side = self._side(body, "embedding")
         self.assertEqual(side["state"], "ready")
         self.assertIn("test request", side["summary"])
         self.assertTrue(all(call.kwargs["send"] for call in mock.await_args_list))
 
     def test_a_failed_test_request_marks_the_side_down_with_the_reason(self):
-        body, _ = self._kisski(SideProbe(ok=False, detail="HTTP 401: invalid key"))
+        body, _ = self._vendor(SideProbe(ok=False, detail="HTTP 401: invalid key"))
         side = self._side(body, "llm")
         self.assertEqual(side["state"], "down")
         self.assertIn("HTTP 401", side["summary"])
@@ -282,7 +283,7 @@ class PresetViewApiTest(unittest.TestCase):
 
         live = [ModelInfo(id="gemma-4-31b-it", demand=0, availability="available")]
         with patch("backend.api.config._live_llm_models", return_value=live):
-            body, mock = self._kisski(SideProbe(ok=True, model="gemma-4-31b-it"))
+            body, mock = self._vendor(SideProbe(ok=True, model="gemma-4-31b-it"))
         llm_calls = [c for c in mock.await_args_list if c.args[1] == "llm"]
         self.assertEqual(llm_calls[0].kwargs["model"], "gemma-4-31b-it")
         embedding_calls = [c for c in mock.await_args_list if c.args[1] == "embedding"]
@@ -290,17 +291,17 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn({"label": "Model", "value": "gemma-4-31b-it"}, self._side(body, "llm")["facts"])
 
     def test_no_test_request_while_the_key_is_missing(self):
-        body, mock = self._kisski(SideProbe(), headers={})
+        body, mock = self._vendor(SideProbe(), headers={})
         self.assertFalse(any(call.kwargs["send"] for call in mock.await_args_list))
         self.assertEqual(self._side(body, "llm")["state"], "down")
 
-    def test_kisski_quota_combines_hour_and_day_and_shows_on_the_card(self):
+    def test_provider_quota_combines_hour_and_day_and_shows_on_the_card(self):
         meters = [
             {"id": "requests/hour", "side": "llm", "unit": "requests", "period": "hour", "limit": 100, "remaining": 90},
             {"id": "requests/day", "side": "llm", "unit": "requests", "period": "day", "limit": 1000, "remaining": 200},
             {"id": "requests/month", "side": "llm", "unit": "requests", "period": "month", "limit": 10, "remaining": 0},
         ]
-        body, _ = self._kisski(SideProbe(ok=True, meters=meters))
+        body, _ = self._vendor(SideProbe(ok=True, meters=meters))
         quota = self._side(body, "llm")["quota"]
         self.assertEqual((quota["used_pct"], quota["level"]), (80, "warn"))
         self.assertIn("daily", quota["text"])
@@ -309,21 +310,21 @@ class PresetViewApiTest(unittest.TestCase):
 
     def test_exhausted_quota_marks_the_side_down(self):
         meters = [{"id": "requests/hour", "side": "llm", "unit": "requests", "period": "hour", "limit": 100, "remaining": 0}]
-        body, _ = self._kisski(SideProbe(ok=True, meters=meters))
+        body, _ = self._vendor(SideProbe(ok=True, meters=meters))
         self.assertEqual(self._side(body, "llm")["state"], "down")
         self.assertEqual(body["accounts"][0]["quota"]["level"], "error")
 
     def _quota_view(self):
         probe = SideProbe(ok=False, detail="quota exhausted until 23:00 UTC", rate_limited=True)
         with patch("backend.services.side_probe.probe_side", new=AsyncMock(return_value=probe)), \
-             patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value={"state": "ok"}):
-            return self._get("kisski-rerank-mpcdf", headers={"X-Kisski-Api-Key": "k"})
+             patch.object(fakes.session_cls(), "session_status", return_value={"state": "ok"}):
+            return self._get("test-remote-rerank", headers={"X-Testvendor-Api-Key": "k"})
 
     def test_an_exhausted_quota_is_reported_with_a_standin_action(self):
         side = self._side(self._quota_view(), "embedding")
         self.assertEqual(side["state"], "down")
         texts = [m["text"] for m in side["messages"]]
-        self.assertIn("KISSKI's embedding quota is used up until 23:00 UTC.", texts)
+        self.assertIn("Test vendor's embedding quota is used up until 23:00 UTC.", texts)
         self.assertNotIn("Check the credentials in the account card below.", texts)
         action = next(a for a in side["actions"] if a["id"] == "standin")
         self.assertEqual((action["label"], action["enabled"]), ("Use a stand-in until 23:00 UTC", True))
@@ -331,18 +332,18 @@ class PresetViewApiTest(unittest.TestCase):
 
     def test_an_exhausted_llm_quota_is_called_answering(self):
         texts = [m["text"] for m in self._side(self._quota_view(), "llm")["messages"]]
-        self.assertIn("KISSKI's answering (LLM) quota is used up until 23:00 UTC.", texts)
+        self.assertIn("Test vendor's answering (LLM) quota is used up until 23:00 UTC.", texts)
 
-    def test_kisski_card_only_saves_and_others_keep_auto_start(self):
+    def test_key_only_card_only_saves_and_others_keep_auto_start(self):
         body = self._quota_view()
         cards = {c["id"]: c for c in body["accounts"]}
-        self.assertFalse(cards["kisski"]["auto_start"])
-        self.assertFalse(cards["mpcdf"]["auto_start"])
-        runpod = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
-        self.assertTrue(runpod["accounts"][0]["auto_start"])
+        self.assertFalse(cards["testvendor"]["auto_start"])
+        self.assertFalse(cards["testsession"]["auto_start"])
+        cloud = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"})
+        self.assertTrue(cloud["accounts"][0]["auto_start"])
 
     def test_a_very_busy_model_is_reported(self):
-        body, _ = self._kisski(SideProbe(ok=True), availability="very busy")
+        body, _ = self._vendor(SideProbe(ok=True), availability="very busy")
         side = self._side(body, "llm")
         self.assertIn({"label": "Demand", "value": "very busy"}, side["facts"])
         self.assertTrue(any("very busy" in m["text"] for m in side["messages"]))

@@ -29,14 +29,19 @@ offers is unavailable, and its error names the missing provider or engine.
 
 | Plugin | Capabilities | Notes |
 |---|---|---|
-| `kisski` | `inference.provider:kisski` | KISSKI / SAIA (GWDG Academic Cloud). |
-| `mpcdf` | `inference.provider:mpcdf` | MPCDF LLM Inference Service; opens the per-user sessions at startup and closes them at shutdown. Needs the optional `mpcdf-llm` library. |
-| `runpod` | `inference.provider:runpod` | RunPod serverless endpoints. |
-| `huggingface` | `inference.provider:huggingface` | Hugging Face Inference Endpoints. |
-| `google` | `inference.provider:google` | Google Gemini. |
-| `openai` | `inference.provider:openai` | OpenAI. |
+| `kisski` | `inference.provider:kisski`, `presets:kisski` | KISSKI / SAIA (GWDG Academic Cloud). |
+| `mpcdf` | `inference.provider:mpcdf`, `presets:mpcdf` | MPCDF LLM Inference Service; opens the per-user sessions at startup and closes them at shutdown. Needs the optional `mpcdf-llm` library. |
+| `runpod` | `inference.provider:runpod`, `presets:runpod` | RunPod serverless endpoints. |
+| `huggingface` | `inference.provider:huggingface`, `presets:huggingface` | Hugging Face Inference Endpoints. |
+| `google` | `inference.provider:google`, `presets:google` | Google Gemini. |
+| `openai` | `inference.provider:openai`, `presets:openai` | OpenAI. |
 | `anthropic` | `inference.provider:anthropic` | Anthropic (answering side only). |
 | `local_torch` | `inference.local:torch:embedding`, `torch:llm`, `torch:rerank` | In-process inference with torch (sentence-transformers, transformers); CPU, CUDA or Apple MPS. Needs the `local-models` extra. |
+
+Each vendor plugin also ships the bundled presets that need its provider (its
+`presets` capability); core ships only the provider-free presets (`cpu-only`,
+`high-memory`, `apple-silicon-32gb`). Removing or disabling a plugin therefore
+also removes its presets.
 
 The generic provider for any OpenAI-compatible endpoint (a local Ollama,
 llama.cpp or vLLM server as much as a remote gateway) is part of core and listed
@@ -84,6 +89,18 @@ anyway, so its own error (for example a missing package) reaches the user.
 
 Local inference through a separate server needs no plugin: point a `remote` side
 at its OpenAI-compatible URL with the `generic` provider.
+
+### `presets`
+
+A `PresetDirectory(path=<directory>)` adds the `*.json` presets in that directory
+to the bundled presets, which are seeded into `<data_path>/presets` at startup
+like core's own (see [Presets](presets.md)). A preset belongs to the plugin whose
+provider it needs. A name that core or an earlier plugin already ships is skipped
+with a warning.
+
+```python
+PresetDirectory(id="acme", path=Path(__file__).parent / "presets")
+```
 
 ### New kinds
 
@@ -155,7 +172,22 @@ Core supplies what plugin tests need, so they import nothing from `backend/tests
   `uv run pytest -p backend.pytest_plugin /path/to/my_plugins/acme/tests`. The
   host imports an external plugin as `zotero_rag_plugins.<directory>`, so in its
   tests look registered classes up through the registry (`PROVIDERS["acme"]`)
-  rather than comparing them with a separately imported class.
+  rather than comparing them with a separately imported class. It also skips
+  the tests of a shipped plugin that `DISABLED_BACKEND_PLUGINS` turns off.
+
+Core tests never use a shipped plugin. They run on a test-only plugin,
+`backend/tests/fake_plugins/testvendor`, which `backend/tests/conftest.py` adds to
+`BACKEND_PLUGIN_DIRS`: fake providers in the shapes of real vendors (`testvendor`
+free with per-user keys and quotas, `testother` paid, `testmessages` on the
+Anthropic protocol, `testsession` with per-user login sessions, `testcloud`
+with provisioned endpoints) and presets that combine them (`test-remote` is the
+core tests' default preset). `backend/tests/fakes.py` has the helpers. CI runs
+`backend/tests` a second time with every shipped plugin disabled, so core keeps
+working without any of them:
+
+```bash
+DISABLED_BACKEND_PLUGINS=kisski,mpcdf,runpod,huggingface,google,openai,anthropic,local_torch uv run pytest backend/tests
+```
 
 ## Status routes
 

@@ -75,13 +75,13 @@ class TestRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             register_provider(_Dup)
 
-    def test_vendor_providers_come_from_plugins(self):
+    def test_providers_other_than_generic_come_from_plugins(self):
         from backend.pluginhost import get_plugin_host
 
         owners = {c.id: c.plugin_id for c in get_plugin_host().capabilities("inference.provider")}
         self.assertEqual(owners["generic"], "core")
-        for pid in ("kisski", "mpcdf", "runpod", "huggingface", "google", "openai", "anthropic"):
-            self.assertEqual(owners[pid], pid)
+        for pid in ("testvendor", "testother", "testmessages", "testsession", "testcloud"):  # the core tests' fake plugin
+            self.assertEqual(owners[pid], "testvendor")
 
 
 class TestGetProviders(unittest.TestCase):

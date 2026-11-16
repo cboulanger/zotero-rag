@@ -56,13 +56,6 @@ class TestEmbedQuery(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await service.embed_query("Who uses Zotero?"), [0.5])
         service.embed_text.assert_awaited_once_with(f"Instruct: {E5_INSTRUCTION}\nQuery: Who uses Zotero?")
 
-    async def test_local_service_without_instruction_embeds_bare(self):
-        name = "sentence-transformers/all-MiniLM-L6-v2"
-        service = create_embedding_service(EmbeddingConfig(model_name=name))  # the local engine's service
-        service.embed_text = AsyncMock(return_value=[0.5])
-        await service.embed_query("Who uses Zotero?")
-        service.embed_text.assert_awaited_once_with("Who uses Zotero?")
-
     async def test_preset_can_turn_it_off(self):
         config = EmbeddingConfig(model_type="remote", model_name=E5, query_instruction="")
         service = RemoteEmbeddingService(config, api_key="k")

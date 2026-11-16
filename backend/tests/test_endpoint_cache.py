@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 from backend.providers import get_providers
 from backend.services.embeddings import EmbeddingEndpointUnavailableError, RemoteEmbeddingService
 from backend.services.endpoint_cache import FOUND_TTL_SECONDS, MISSING_TTL_SECONDS, EndpointCache
-from backend.tests.runpod_variants import provider as runpod_provider, runpod_preset
+from backend.tests.fakes import cloud_preset
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 
 
@@ -69,28 +69,11 @@ class TestEndpointCache(unittest.TestCase):
         self.assertIsNone(EndpointCache(Clock()).resolve(p, "llm", "k"))
 
 
-class TestRunPodEndpointUrl(unittest.TestCase):
-    def test_finds_the_endpoint_by_name(self):
-        http = FakeHTTP()
-        http.add("GET", r"/v2/serverless$", FakeResponse(200, {"endpoints": [
-            {"id": "other", "name": "something-else"}, {"id": "ep9", "name": "zotero-rag-llm"}],
-            "pagination": {"nextCursor": None, "hasNextPage": False}}))
-        self.assertEqual(runpod_provider("llm", http=http).endpoint_url("k"), "https://api.runpod.ai/v2/ep9/openai/v1")
-
-    def test_none_when_absent_or_on_any_error(self):
-        http = FakeHTTP()
-        http.add("GET", r"/v2/serverless$", FakeResponse(200, {"endpoints": [], "pagination": {"nextCursor": None, "hasNextPage": False}}))
-        self.assertIsNone(runpod_provider("llm", http=http).endpoint_url("k"))
-        http = FakeHTTP()
-        http.add("GET", r"/v2/serverless$", FakeResponse(403, {"error": "no"}))
-        self.assertIsNone(runpod_provider("llm", http=http).endpoint_url("k"))
-
-
 def derived_preset():
-    """A runpod preset in the per-key shape: the user's own key, no URL in the preset."""
-    preset = runpod_preset(scope="user")
+    """A cloud preset in the per-key shape: the user's own key, no URL in the preset."""
+    preset = cloud_preset(scope="user")
     for side in (preset.embedding, preset.llm):
-        side.model_kwargs = {"api_key_env": "RUNPOD_API_KEY"}
+        side.model_kwargs = {"api_key_env": "TESTCLOUD_API_KEY"}
     return preset
 
 

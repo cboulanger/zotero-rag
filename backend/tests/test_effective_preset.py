@@ -32,48 +32,48 @@ class EffectivePresetTest(unittest.TestCase):
         self.settings = get_settings()
         self.settings.data_path = Path(self.tmp.name)
         ensure_default_presets(self.settings.data_path)
-        self.settings.model_preset = "remote-kisski"
+        self.settings.model_preset = "test-remote"
 
     def test_identity_basename_normalisation(self):
         self.assertEqual(embedding_model_identity("intfloat/multilingual-e5-large-instruct"),
                          embedding_model_identity("multilingual-e5-large-instruct"))
 
     def test_a_valid_compatible_choice_wins(self):
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
-        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "runpod")
-        self.assertEqual(get_user_preset(self.settings, identity(1)).name, "runpod")
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
+        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "test-cloud")
+        self.assertEqual(get_user_preset(self.settings, identity(1)).name, "test-cloud")
 
     def test_no_choice_or_the_default_itself_means_the_default(self):
-        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "remote-kisski")
-        set_preferred_preset(self.settings.data_path, 1, "remote-kisski")
+        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "test-remote")
+        set_preferred_preset(self.settings.data_path, 1, "test-remote")
         self.assertIsNone(get_user_preset(self.settings, identity(1)))
 
     def test_no_identity_gets_the_default_even_if_users_have_choices(self):
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
-        self.assertEqual(get_effective_preset(self.settings, None).name, "remote-kisski")
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
+        self.assertEqual(get_effective_preset(self.settings, None).name, "test-remote")
 
     def test_removed_incompatible_or_unknown_choices_fall_back(self):
-        for choice in ("no-such-preset", "remote-openai", "cpu-only"):  # unknown / other embedding model / local
+        for choice in ("no-such-preset", "test-other-embedding", "cpu-only"):  # unknown / other embedding model / local
             set_preferred_preset(self.settings.data_path, 1, choice)
-            self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "remote-kisski", choice)
+            self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "test-remote", choice)
 
     def test_a_local_default_admits_nothing_else(self):
         self.settings.model_preset = "cpu-only"
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
         self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "cpu-only")
 
     def test_is_compatible_requires_same_embedding_model_and_remote_sides(self):
         from backend.config.presets import get_preset
         d = self.settings.data_path
-        kisski, runpod, openai = (get_preset(n, d) for n in ("remote-kisski", "runpod", "remote-openai"))
-        self.assertTrue(is_compatible(kisski, runpod))
-        self.assertFalse(is_compatible(kisski, openai))
-        self.assertTrue(is_compatible(kisski, kisski))
+        free, cloud, other = (get_preset(n, d) for n in ("test-remote", "test-cloud", "test-other-embedding"))
+        self.assertTrue(is_compatible(free, cloud))
+        self.assertFalse(is_compatible(free, other))
+        self.assertTrue(is_compatible(free, free))
 
     def test_two_identities_get_different_presets_in_the_same_process(self):
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
-        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "runpod")
-        self.assertEqual(get_effective_preset(self.settings, identity(2)).name, "remote-kisski")
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
+        self.assertEqual(get_effective_preset(self.settings, identity(1)).name, "test-cloud")
+        self.assertEqual(get_effective_preset(self.settings, identity(2)).name, "test-remote")
 
 
 class RequestBindingTest(unittest.IsolatedAsyncioTestCase):
@@ -85,43 +85,43 @@ class RequestBindingTest(unittest.IsolatedAsyncioTestCase):
         self.settings = get_settings()
         self.settings.data_path = Path(self.tmp.name)
         ensure_default_presets(self.settings.data_path)
-        self.settings.model_preset = "remote-kisski"
+        self.settings.model_preset = "test-remote"
 
     async def test_the_bound_preset_is_seen_in_threads_and_tasks_but_not_outside(self):
         from backend.config.presets import get_preset
-        runpod = get_preset("runpod", self.settings.data_path)
-        with use_preset(runpod):
-            self.assertEqual(self.settings.get_hardware_preset().name, "runpod")
-            self.assertEqual((await asyncio.to_thread(self.settings.get_hardware_preset)).name, "runpod")
-            self.assertEqual((await asyncio.create_task(self._name())), "runpod")
-        self.assertEqual(self.settings.get_hardware_preset().name, "remote-kisski")
+        cloud = get_preset("test-cloud", self.settings.data_path)
+        with use_preset(cloud):
+            self.assertEqual(self.settings.get_hardware_preset().name, "test-cloud")
+            self.assertEqual((await asyncio.to_thread(self.settings.get_hardware_preset)).name, "test-cloud")
+            self.assertEqual((await asyncio.create_task(self._name())), "test-cloud")
+        self.assertEqual(self.settings.get_hardware_preset().name, "test-remote")
 
     async def _name(self):
         return self.settings.get_hardware_preset().name
 
     async def test_concurrent_requests_do_not_leak_into_each_other(self):
         from backend.config.presets import get_preset
-        runpod = get_preset("runpod", self.settings.data_path)
+        cloud = get_preset("test-cloud", self.settings.data_path)
 
         async def request(preset):
             with use_preset(preset):
                 await asyncio.sleep(0.01)
                 return self.settings.get_hardware_preset().name
 
-        names = await asyncio.gather(request(runpod), request(None), request(runpod), request(None))
-        self.assertEqual(names, ["runpod", "remote-kisski", "runpod", "remote-kisski"])
+        names = await asyncio.gather(request(cloud), request(None), request(cloud), request(None))
+        self.assertEqual(names, ["test-cloud", "test-remote", "test-cloud", "test-remote"])
 
     def test_the_middleware_binds_each_users_own_preset(self):
         from fastapi.testclient import TestClient
         from backend.main import app
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
         seen = {}
 
         for uid in (1, 2):
             with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity(uid))), \
                  TestClient(app) as client:
                 seen[uid] = client.get("/api/config", headers={"X-Zotero-API-Key": "Z"}).json()["preset_name"]
-        self.assertEqual(seen, {1: "runpod", 2: "remote-kisski"})
+        self.assertEqual(seen, {1: "test-cloud", 2: "test-remote"})
 
 
 if __name__ == "__main__":
@@ -141,7 +141,7 @@ class MyPresetApiTest(unittest.TestCase):
         self.settings = get_settings()
         self.settings.data_path = Path(self.tmp.name)
         ensure_default_presets(self.settings.data_path)
-        self.settings.model_preset = "remote-kisski"
+        self.settings.model_preset = "test-remote"
         self.client = TestClient(app)
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
@@ -151,24 +151,24 @@ class MyPresetApiTest(unittest.TestCase):
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity(user_id))):
             return self.client.request(method, path, headers=h, **kw)
 
-    RUNPOD_KEY = {"X-Runpod-Api-Key": "rpa_x"}
+    RUNPOD_KEY = {"X-Testcloud-Api-Key": "tck_x"}
 
     def test_a_user_can_choose_a_compatible_preset_they_have_a_key_for(self):
-        r = self._call("PUT", 1, headers=self.RUNPOD_KEY, json={"preset_name": "runpod"})
+        r = self._call("PUT", 1, headers=self.RUNPOD_KEY, json={"preset_name": "test-cloud"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual((r.json()["default"], r.json()["effective"]), ("remote-kisski", "runpod"))
+        self.assertEqual((r.json()["default"], r.json()["effective"]), ("test-remote", "test-cloud"))
         cfg = self._call("GET", 1, path="/api/config", headers=self.RUNPOD_KEY).json()
-        self.assertEqual((cfg["preset_name"], cfg["default_preset"]), ("runpod", "remote-kisski"))
+        self.assertEqual((cfg["preset_name"], cfg["default_preset"]), ("test-cloud", "test-remote"))
         other = self._call("GET", 2, path="/api/config").json()  # another user is unaffected
-        self.assertEqual(other["preset_name"], "remote-kisski")
+        self.assertEqual(other["preset_name"], "test-remote")
 
     def test_selectable_lists_compatible_presets_with_the_keys_still_missing(self):
         by_name = {p["name"]: p for p in self._call("GET", 1).json()["selectable"]}
-        self.assertEqual(by_name["runpod"]["credentials"], "missing")
-        self.assertEqual(by_name["runpod"]["missing_keys"], ["RUNPOD_API_KEY"])
-        self.assertNotIn("remote-openai", by_name)  # incompatible embedding model: not offered
+        self.assertEqual(by_name["test-cloud"]["credentials"], "missing")
+        self.assertEqual(by_name["test-cloud"]["missing_keys"], ["TESTCLOUD_API_KEY"])
+        self.assertNotIn("test-other-embedding", by_name)  # incompatible embedding model: not offered
         with_key = {p["name"]: p for p in self._call("GET", 1, headers=self.RUNPOD_KEY).json()["selectable"]}
-        self.assertEqual((with_key["runpod"]["credentials"], with_key["runpod"]["missing_keys"]), ("ok", []))
+        self.assertEqual((with_key["test-cloud"]["credentials"], with_key["test-cloud"]["missing_keys"]), ("ok", []))
 
     def test_other_users_stored_keys_do_not_count_as_the_callers_credentials(self):
         from backend.services.autoindex_key_store import AutoIndexKeyStore
@@ -178,46 +178,46 @@ class MyPresetApiTest(unittest.TestCase):
         s.autoindex_secret = Fernet.generate_key().decode()
         store = AutoIndexKeyStore(s.autoindex_keys_path, s.autoindex_secret)
         fp = store.add("zk", KeyValidation(user_id=2, username="u2", targets=["users/2"], read_only=True))
-        store.set_embedding_key(fp, "someone-elses", "RUNPOD_API_KEY")
-        r = self._call("PUT", 1, json={"preset_name": "runpod"})
+        store.set_embedding_key(fp, "someone-elses", "TESTCLOUD_API_KEY")
+        r = self._call("PUT", 1, json={"preset_name": "test-cloud"})
         self.assertEqual(r.status_code, 400)
 
     def test_choice_without_credentials_is_refused_and_names_the_key(self):
-        r = self._call("PUT", 1, json={"preset_name": "runpod"})
+        r = self._call("PUT", 1, json={"preset_name": "test-cloud"})
         self.assertEqual(r.status_code, 400)
-        self.assertIn("RUNPOD_API_KEY", r.json()["detail"])
+        self.assertIn("TESTCLOUD_API_KEY", r.json()["detail"])
 
     def test_incompatible_or_unknown_presets_are_refused(self):
-        self.assertEqual(self._call("PUT", 1, json={"preset_name": "remote-openai"}).status_code, 400)
+        self.assertEqual(self._call("PUT", 1, json={"preset_name": "test-other-embedding"}).status_code, 400)
         self.assertEqual(self._call("PUT", 1, json={"preset_name": "nope"}).status_code, 400)
 
     def test_null_returns_the_user_to_the_default(self):
-        self._call("PUT", 1, headers=self.RUNPOD_KEY, json={"preset_name": "runpod"})
+        self._call("PUT", 1, headers=self.RUNPOD_KEY, json={"preset_name": "test-cloud"})
         r = self._call("PUT", 1, json={"preset_name": None})
-        self.assertEqual(r.json()["effective"], "remote-kisski")
+        self.assertEqual(r.json()["effective"], "test-remote")
 
     def test_a_saved_choice_that_stops_being_valid_is_reported_as_fallen_back(self):
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
-        (self.settings.data_path / "presets" / "runpod.json").unlink()
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
+        (self.settings.data_path / "presets" / "test-cloud.json").unlink()
         cfg = self._call("GET", 1, path="/api/config").json()
-        self.assertEqual((cfg["preset_name"], cfg["preset_fell_back"]), ("remote-kisski", "runpod"))
+        self.assertEqual((cfg["preset_name"], cfg["preset_fell_back"]), ("test-remote", "test-cloud"))
 
     def test_no_identity_cannot_choose(self):
-        r = self.client.put("/api/config/my-preset", json={"preset_name": "runpod"})  # loopback: no identity
+        r = self.client.put("/api/config/my-preset", json={"preset_name": "test-cloud"})  # loopback: no identity
         self.assertEqual(r.status_code, 400)
 
     def test_the_admin_default_switch_changes_only_the_default(self):
         from backend.dependencies import require_authorized_group_admin
         from backend.main import app
-        self.settings.model_preset = "remote-kisski"
-        set_preferred_preset(self.settings.data_path, 1, "runpod")
+        self.settings.model_preset = "test-remote"
+        set_preferred_preset(self.settings.data_path, 1, "test-cloud")
         app.dependency_overrides[require_authorized_group_admin] = lambda: identity(9)
         self.addCleanup(app.dependency_overrides.clear)
         from backend.services.admin_settings_store import update_remote_config
         update_remote_config({"MPCDF_EMBEDDING_BASE_URL": "https://e/v1", "MPCDF_EMBEDDING_API_KEY": "k",
                               "MPCDF_LLM_BASE_URL": "https://l/v1", "MPCDF_LLM_API_KEY": "k"},
                              data_path=self.settings.data_path)
-        r = self._call("POST", 9, path="/api/config", json={"preset_name": "remote-mpcdf"})
+        r = self._call("POST", 9, path="/api/config", json={"preset_name": "test-session"})
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self._call("GET", 2, path="/api/config").json()["preset_name"], "remote-mpcdf")
-        self.assertEqual(self._call("GET", 1, path="/api/config").json()["preset_name"], "runpod")
+        self.assertEqual(self._call("GET", 2, path="/api/config").json()["preset_name"], "test-session")
+        self.assertEqual(self._call("GET", 1, path="/api/config").json()["preset_name"], "test-cloud")

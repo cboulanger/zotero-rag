@@ -136,14 +136,11 @@ class CapabilityTest(unittest.TestCase):
 class ShippedPluginsTest(unittest.TestCase):
     def test_every_shipped_plugin_loads(self):
         records = {r.id: r for r in get_plugin_host().plugins()}
-        shipped = sorted(p.name for p in SHIPPED_PLUGIN_DIR.iterdir() if (p / "__init__.py").is_file())
-        for name in shipped:
-            self.assertEqual(records[name].status, "loaded", records[name].error)
+        from backend.pluginhost.host import disabled_plugin_ids
 
-    def test_local_torch_serves_every_side(self):
-        for side in ("embedding", "llm", "rerank"):
-            self.assertEqual(select_local_engine(side).plugin_id, "local_torch")
-            self.assertEqual(select_local_engine(side, "torch").engine, "torch")
+        shipped = sorted(p.name for p in SHIPPED_PLUGIN_DIR.iterdir() if (p / "__init__.py").is_file())
+        for name in sorted(set(shipped) - disabled_plugin_ids()):
+            self.assertEqual(records[name].status, "loaded", records[name].error)
 
     def test_unknown_engine_is_an_error(self):
         with self.assertRaises(LocalEngineUnavailable):

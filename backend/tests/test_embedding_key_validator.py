@@ -12,7 +12,7 @@ def _config():
     return EmbeddingConfig(
         model_type="remote",
         model_name="multilingual-e5-large-instruct",
-        model_kwargs={"api_key_env": "KISSKI_API_KEY", "base_url": "https://example.test/v1"},
+        model_kwargs={"api_key_env": "TESTVENDOR_API_KEY", "base_url": "https://example.test/v1"},
     )
 
 
@@ -24,7 +24,7 @@ class ValidateEmbeddingKeyTest(unittest.IsolatedAsyncioTestCase):
             mock_create.return_value = mock_service
             result = await validate_embedding_key("GOODKEY", _config())
         self.assertEqual(result.status, "ok")
-        self.assertEqual(result.key_name, "KISSKI_API_KEY")
+        self.assertEqual(result.key_name, "TESTVENDOR_API_KEY")
 
     async def test_auth_error_returns_invalid(self):
         with patch("backend.services.embedding_key_validator.create_embedding_service") as mock_create:
@@ -69,8 +69,8 @@ class DerivedEndpointTest(unittest.IsolatedAsyncioTestCase):
         from backend.providers import get_providers
         from backend.config.presets import get_preset
 
-        preset = get_preset("huggingface")
+        preset = get_preset("test-cloud")  # endpoints derived from the user's key
         provider = get_providers(preset)["embedding"]
         with patch("backend.services.endpoint_cache.endpoint_cache.resolve", return_value=None):
-            result = await validate_embedding_key("hf_" + "a" * 34, preset.embedding, provider)
+            result = await validate_embedding_key("tck_" + "a" * 34, preset.embedding, provider)
         self.assertEqual(result.status, "unverified")

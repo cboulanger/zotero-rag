@@ -52,6 +52,13 @@ jobs:
       - name: Run unit tests
         run: uv run pytest backend/tests/ backend/plugins/ -v
 
+      # Core must not depend on any shipped backend plugin: run its tests with all of them disabled.
+      - name: Run core tests without the shipped backend plugins
+        run: |
+          DISABLED_BACKEND_PLUGINS=$(find backend/plugins -mindepth 1 -maxdepth 1 -type d ! -name '_*' -exec test -f '{}/__init__.py' ';' -printf '%f\n' | paste -sd, -)
+          echo "Disabled: $DISABLED_BACKEND_PLUGINS"
+          DISABLED_BACKEND_PLUGINS="$DISABLED_BACKEND_PLUGINS" uv run pytest backend/tests/ -q
+
   build-plugin:
     name: Build Plugin
     runs-on: ubuntu-latest

@@ -111,7 +111,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="gpt-4o-mini",
                 temperature=0.7,
-                provider=ProviderConfig(id="openai"),
+                provider=ProviderConfig(id="testother"),
                 model_kwargs={"api_key_env": "OPENAI_API_KEY"},
             ),
             rag=RAGConfig(),
@@ -129,7 +129,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="claude-3-5-sonnet-20241022",
                 temperature=0.7,
-                provider=ProviderConfig(id="anthropic"),
+                provider=ProviderConfig(id="testmessages"),
                 model_kwargs={"api_key_env": "ANTHROPIC_API_KEY"},
             ),
             rag=RAGConfig(),
@@ -374,7 +374,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
     async def test_protocol_comes_from_the_provider_not_the_model_name(self):
         """A Claude-named model on an OpenAI-compatible provider uses the OpenAI
-        protocol; an unfamiliar model name on the anthropic provider uses Anthropic's."""
+        protocol; an unfamiliar model name on an Anthropic-protocol provider uses Anthropic's."""
         def settings_for(provider_id, model_name):
             preset = HardwarePreset(
                 name="t", description="t",
@@ -388,9 +388,9 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             settings.get_hardware_preset.return_value = preset
             return settings
 
-        openai_service = RemoteLLMService(settings_for("openai", "claude-3-opus"), api_key="k")
+        openai_service = RemoteLLMService(settings_for("testother", "claude-3-opus"), api_key="k")
         self.assertEqual(openai_service._llm_api(), "openai")
-        anthropic_service = RemoteLLMService(settings_for("anthropic", "totally-unknown-model"), api_key="k")
+        anthropic_service = RemoteLLMService(settings_for("testmessages", "totally-unknown-model"), api_key="k")
         self.assertEqual(anthropic_service._llm_api(), "anthropic")
 
         mock_openai = AsyncMock()
@@ -479,7 +479,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_names="qwen3.5-397b-a17b",
                 temperature=0.7,
                 model_kwargs={
-                    "base_url": "https://chat-ai.academiccloud.de/v1",
+                    "base_url": "https://testvendor.invalid/v1",
                     "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
                 },
             ),
@@ -579,7 +579,7 @@ class TestLLMRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="gpt-4o-mini",
                 temperature=0.7,
-                provider=ProviderConfig(id="openai"),
+                provider=ProviderConfig(id="testother"),
                 model_kwargs={"api_key_env": "OPENAI_API_KEY"},
             ),
             rag=RAGConfig(),

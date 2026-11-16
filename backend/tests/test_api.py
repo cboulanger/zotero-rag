@@ -310,11 +310,11 @@ class TestRootEndpoints(unittest.TestCase):
         self.assertIn("enabled", data["cron_indexing"])
         plugins = {p["id"]: p for p in data["plugins"]}
         self.assertTrue(plugins["core"]["builtin"])
-        self.assertEqual(plugins["kisski"]["status"], "loaded")
-        self.assertIn("inference.provider:kisski", plugins["kisski"]["capabilities"])
+        self.assertEqual(plugins["testvendor"]["status"], "loaded")
+        self.assertIn("inference.provider:testvendor", plugins["testvendor"]["capabilities"])
         kinds = {(c["kind"], c["id"]) for c in data["capabilities"]}
         self.assertIn(("inference.provider", "generic"), kinds)
-        self.assertIn(("inference.local", "torch:embedding"), kinds)
+        self.assertIn(("presets", "testvendor"), kinds)
 
     def test_sides(self):
         """GET /sides: one entry per side of the default preset, with what serves it."""

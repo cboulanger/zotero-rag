@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "description": "Fully remote in your own test session",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "intfloat/multilingual-e5-large-instruct",
+    "batch_size": 64,
+    "provider": {
+      "id": "testsession",
+      "scope": "user"
+    },
+    "model_kwargs": {}
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": [
+      "session-llm"
+    ],
+    "max_context_length": 131072,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "provider": {
+      "id": "testsession",
+      "scope": "user"
+    },
+    "model_kwargs": {}
+  },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "provider": {
+      "id": "testsession",
+      "scope": "user"
+    },
+    "model_kwargs": {}
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any"
+}
