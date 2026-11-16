@@ -1506,3 +1506,14 @@ test('checkPipelineOnOpen reports whether a problem keeps questions from being a
 	const ready = pipelineCheckSetup({ embedding: { status: 'ready' }, llm: { status: 'ready' } }, null);
 	assert.strictEqual(await ready.self.checkPipelineOnOpen(), false);
 });
+
+test('checkPipelineOnOpen: an offer already holding a pending retry is not replaced', async () => {
+	const offer = {
+		code: 'quota_exhausted', message: 'used up', side: 'embedding', provider: 'kisski',
+		standins: [{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: [] }],
+	};
+	const t = pipelineCheckSetup({ embedding: null, llm: null, rerank: null }, null, offer);
+	t.self._standinRetry = { question: 'q', libraryIds: [1], options: {}, followUp: null };
+	assert.strictEqual(await t.self.checkPipelineOnOpen(), true);
+	assert.strictEqual(t.offered.length, 0);
+});

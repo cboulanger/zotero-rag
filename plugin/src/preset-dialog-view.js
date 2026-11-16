@@ -870,7 +870,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		const offer = deps.fetchStandinOffer ? await deps.fetchStandinOffer().catch(() => null) : null;
 		if (!offer || !offer.standins || !offer.standins.length) {
 			state.local.standins = null;
-			note(scope, 'info', 'The quota resets soon; no stand-in is needed.');
+			note(scope, 'info', 'No stand-in is on offer right now.');
 			return;
 		}
 		const hasKey = (/** @type {string} */ name) => !!deps.prefs.get(D.SECRET_PREFIX + name);

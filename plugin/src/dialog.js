@@ -1007,7 +1007,9 @@ var ZoteroRAGDialog = {
 		// A used-up quota: offer the stand-ins here, where the user meets it, instead of
 		// sending them to the Configure preset dialog. Nothing to send again yet.
 		if (offer && Array.isArray(offer.standins) && offer.standins.length) {
-			this.showStandinOffer(offer, null);
+			// A query submitted before this check finished may already show the offer with
+			// the question as its retry; replacing it would drop that retry.
+			if (!this._standinRetry) this.showStandinOffer(offer, null);
 			return lines.length ? !rerankOnly : true;
 		}
 		if (!lines.length) return false;

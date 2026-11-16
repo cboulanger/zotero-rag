@@ -316,7 +316,7 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn("KISSKI's embedding quota is used up until 23:00 UTC.", texts)
         self.assertNotIn("Check the credentials in the account card below.", texts)
         action = next(a for a in side["actions"] if a["id"] == "standin")
-        self.assertEqual((action["label"], action["enabled"]), ("Use a stand-in until 23:00", True))
+        self.assertEqual((action["label"], action["enabled"]), ("Use a stand-in until 23:00 UTC", True))
         self.assertIsNone(action["request"])
 
     def test_kisski_card_only_saves_and_others_keep_auto_start(self):

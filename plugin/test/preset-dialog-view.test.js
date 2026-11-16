@@ -445,7 +445,7 @@ test('the standin action with no offer says so plainly and lists nothing', async
 	await controller.refresh();
 	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
 	assert.ok(!controller.state.local.standins);
-	assert.match(painted.at(-1).notes['side:embedding'].text, /resets soon; no stand-in is needed/);
+	assert.match(painted.at(-1).notes['side:embedding'].text, /No stand-in is on offer right now\./);
 });
 
 test('Use switches to the stand-in and refreshes the view, which then shows the stand-in preset', async () => {
