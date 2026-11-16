@@ -146,6 +146,32 @@ def find_standins(settings, current: HardwarePreset, exhausted: list[ExhaustedSi
     return [standin for _, standin in found]
 
 
+def current_exhausted_sides(settings, preset: HardwarePreset, client_keys: dict[str, str],
+                            now: Optional[datetime] = None) -> list[ExhaustedSide]:
+    """Remote sides of ``preset`` whose recorded rate limit lasts at least ``MIN_STANDIN_SECONDS`` more.
+
+    The key per side mirrors the services' own resolution (the caller's key for
+    ``api_key_env``, else the admin-shared value), so the fingerprint matches the
+    one the rate limit was recorded under. Keys are never logged or returned.
+    """
+    from backend.services.admin_settings_store import resolve_shared_value
+    from backend.services.usage_meters import key_fingerprint, recorder
+
+    now = now or datetime.now(timezone.utc)
+    result: list[ExhaustedSide] = []
+    for side, config in (("embedding", preset.embedding), ("llm", preset.llm)):
+        if config.model_type != "remote":
+            continue
+        kwargs = config.model_kwargs or {}
+        key = client_keys.get(kwargs["api_key_env"]) if kwargs.get("api_key_env") else None
+        if not key and kwargs.get("shared_api_key_env"):
+            key = resolve_shared_value(kwargs["shared_api_key_env"], settings.data_path)
+        until = recorder.rate_limited_until(side, key_fingerprint(key))
+        if until is not None and (until - now).total_seconds() >= MIN_STANDIN_SECONDS:
+            result.append(ExhaustedSide(side, config.provider.id, until))
+    return result
+
+
 def quota_error_detail(settings, preset: HardwarePreset, side: str, available_at: datetime,
                        message: str, client_keys: dict[str, str], user_id: Optional[int],
                        now: Optional[datetime] = None) -> Optional[dict[str, Any]]:
