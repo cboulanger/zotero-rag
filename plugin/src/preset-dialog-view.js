@@ -84,6 +84,17 @@
  * @property {boolean} busy
  *
  * @typedef {{get: (env: string) => string, set: (env: string, value: string) => void, forget: (env: string) => void}} SessionKeys
+ *
+ * @typedef {{preset: string, cost: string, label: string, needs: string[]}} StandinOption
+ * @typedef {{provider: string, standins: StandinOption[]}} StandinOffer - GET /api/config/standins `offer` (fields used here)
+ * @typedef {{side: string, provider: string, choices: Array<{preset: string, text: string}>}} StandinList - the offer shown on a side
+ *
+ * @typedef {Object} LocalState - what the dialog keeps between refreshes
+ * @property {string} tab
+ * @property {Record<string, boolean>} logOpen
+ * @property {Record<string, string>} drafts
+ * @property {Record<string, {level: string, text: string}>} notes
+ * @property {StandinList|null} [standins]
  */
 
 var ZoteroRAGPresetDialog = {
@@ -227,6 +238,24 @@ var ZoteroRAGPresetDialog = {
 	},
 
 	/**
+	 * One stand-in of an offer as a line: preset, free/paid, label and what it still needs
+	 * (pure). A `key:<NAME>` need is dropped when the user has that key stored.
+	 * @param {StandinOption} choice
+	 * @param {(keyName: string) => boolean} hasKey
+	 * @returns {string}
+	 */
+	describeStandin(choice, hasKey) {
+		const needs = (choice.needs || [])
+			.filter((n) => !(n.startsWith('key:') && hasKey(n.slice(4))))
+			.map((n) => {
+				const cut = n.indexOf(':');
+				const [kind, what] = [n.slice(0, cut), n.slice(cut + 1)];
+				return kind === 'login' ? `${what.toUpperCase()} login` : what;
+			});
+		return `${choice.preset} (${choice.cost}): ${choice.label}; ${needs.length ? `needs ${needs.join(', ')}` : 'ready'}`;
+	},
+
+	/**
 	 * Bar and label of one quota meter (pure). Amber from 75 % used, red from 95 %.
 	 * @param {QuotaMeter} meter
 	 * @returns {{usedPct: number, level: 'ok'|'warn'|'error', text: string}|null}
@@ -353,12 +382,11 @@ ZoteroRAGPresetDialog._dot = function (el, state) {
  * @param {Document} doc
  * @param {Record<string, any>} refs
  * @param {PresetView} view
- * @param {{tab: string, logOpen: Record<string, boolean>, drafts: Record<string, string>,
- *   notes: Record<string, {level: string, text: string}>}} local
+ * @param {LocalState} local
  * @param {{onTab: (side: string) => void, onToggleLog: (side: string) => void,
  *   onAction: (action: UiAction) => void, onFieldChange: (field: UiField, value: string, scope: string) => void,
  *   onSaveAccount: (card: AccountCard) => void, onDefaultChange: (name: string) => void,
- *   onCardAction?: (card: AccountCard, action: UiAction) => void}} handlers
+ *   onCardAction?: (card: AccountCard, action: UiAction) => void, onUseStandin?: (preset: string) => void}} handlers
  */
 ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 	const el = this._el(doc);
@@ -423,7 +451,7 @@ ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
  * @param {Document} doc
  * @param {any} panel
  * @param {SideView} side
- * @param {{logOpen: Record<string, boolean>, drafts: Record<string, string>, notes: Record<string, {level: string, text: string}>}} local
+ * @param {LocalState} local
  * @param {any} handlers
  * @param {(node: any) => boolean} hasFocus
  */
@@ -509,6 +537,22 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 		row.appendChild(why);
 	}
 	actionsBody.appendChild(row);
+	// The stand-ins the "standin" action fetched for this side, each with Use.
+	const offer = local.standins;
+	if (offer && offer.side === side.side) {
+		const list = el('div', 'pd-standins');
+		for (const choice of offer.choices) {
+			const item = el('div', 'pd-standin');
+			const label = el('span');
+			label.textContent = choice.text;
+			const use = el('button', 'pd-button');
+			use.textContent = 'Use';
+			use.addEventListener('click', () => { if (handlers.onUseStandin) handlers.onUseStandin(choice.preset); });
+			item.append(label, use);
+			list.appendChild(item);
+		}
+		actionsBody.appendChild(list);
+	}
 };
 
 /**
@@ -714,6 +758,8 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
  *   sessionKeys: SessionKeys,
  *   onKeysChanged?: (fields: UiField[]) => Promise<void>,
  *   onPresetChanged?: () => void,
+ *   fetchStandinOffer?: () => Promise<StandinOffer|null>,
+ *   useStandin?: (preset: string, provider: string) => Promise<void>,
  *   paint: (view: PresetView, local: any) => void,
  *   sleep?: (ms: number) => Promise<void>,
  *   pollMs?: number,
@@ -725,8 +771,8 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	const pollMs = deps.pollMs === undefined ? 5000 : deps.pollMs;
 	/** Refreshes while something is starting, after which polling stops (about 10 minutes). */
 	const MAX_POLLS = 120;
-	/** @type {{view: PresetView|null, local: {tab: string, logOpen: Record<string, boolean>, drafts: Record<string, string>, notes: Record<string, {level: string, text: string}>}}} */
-	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {} } };
+	/** @type {{view: PresetView|null, local: LocalState}} */
+	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {}, standins: null } };
 	let polling = false;
 
 	/** @type {PresetView} Shown until the backend has answered once. */
@@ -805,10 +851,54 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {UiAction} action
 	 */
 	const runAction = async (side, action) => {
+		if (action.id === 'standin') return showStandins(side);
 		if (!action.request) return;
 		note(`side:${side}`, 'info', `${action.label}…`);
 		const error = await send({ path: action.request.path, body: action.request.body, accounts: action.account ? [action.account] : [] });
 		note(`side:${side}`, error ? 'error' : 'info', error ? `${action.label} failed: ${error}` : '');
+		await poll();
+	};
+
+	/**
+	 * The "standin" action of a side down for a used-up quota: fetch the offer and list
+	 * its stand-ins on that side. The offer is gone when the quota resets soon.
+	 * @param {string} side
+	 */
+	const showStandins = async (side) => {
+		const scope = `side:${side}`;
+		note(scope, 'info', 'Looking for stand-ins…');
+		const offer = deps.fetchStandinOffer ? await deps.fetchStandinOffer().catch(() => null) : null;
+		if (!offer || !offer.standins || !offer.standins.length) {
+			state.local.standins = null;
+			note(scope, 'info', 'The quota resets soon; no stand-in is needed.');
+			return;
+		}
+		const hasKey = (/** @type {string} */ name) => !!deps.prefs.get(D.SECRET_PREFIX + name);
+		state.local.standins = {
+			side, provider: offer.provider,
+			choices: offer.standins.map((c) => ({ preset: c.preset, text: D.describeStandin(c, hasKey) })),
+		};
+		note(scope, 'info', 'Choose a stand-in to use until the quota resets.');
+	};
+
+	/**
+	 * Use one of the listed stand-ins, then show it (the view follows the stand-in). A
+	 * refusal (e.g. the quota is no longer used up) is shown and nothing is switched.
+	 * @param {string} preset
+	 */
+	const useStandin = async (preset) => {
+		const offer = state.local.standins;
+		if (!offer || !deps.useStandin) return;
+		const scope = `side:${offer.side}`;
+		note(scope, 'info', `Switching to ${preset}…`);
+		try {
+			await deps.useStandin(preset, offer.provider);
+		} catch (e) {
+			note(scope, 'error', e && typeof (/** @type {any} */ (e)).message === 'string' ? /** @type {any} */ (e).message : String(e));
+			return;
+		}
+		state.local.standins = null;
+		note(scope, 'info', '');
 		await poll();
 	};
 
@@ -977,7 +1067,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** @param {string} side */
 	const toggleLog = (side) => { state.local.logOpen[side] = !state.local.logOpen[side]; repaint(); };
 
-	return { state, refresh, poll, runAction, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
+	return { state, refresh, poll, runAction, useStandin, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
 };
 
 if (typeof module !== 'undefined') module.exports = { ZoteroRAGPresetDialog };

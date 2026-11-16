@@ -89,6 +89,9 @@ var ZoteroRAGPresetDialogWindow = {
 				plugin.notifyPresetChanged('preset-dialog');
 			},
 			onPresetChanged: () => plugin.notifyPresetChanged('preset-dialog'),
+			fetchStandinOffer: () => plugin.fetchStandinOffer(),
+			// Throws the server's message on a refusal (409), which the controller shows.
+			useStandin: (preset, provider) => plugin.useStandin(preset, provider),
 			paint: (view, local) => D.paint(document, refs, view, local, {
 				onTab: (side) => controller.selectTab(side),
 				onToggleLog: (side) => controller.toggleLog(side),
@@ -100,6 +103,7 @@ var ZoteroRAGPresetDialogWindow = {
 				onSaveAccount: (card) => controller.saveAccount(card),
 				onCardAction: (card, action) => controller.runCardAction(card, action),
 				onDefaultChange: (name) => controller.setServerDefault(name),
+				onUseStandin: (preset) => controller.useStandin(preset),
 			}),
 		});
 		this.controller = controller;

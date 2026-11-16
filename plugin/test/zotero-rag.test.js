@@ -2219,3 +2219,13 @@ test('endStandin forgets the exhausted provider', async () => {
 	await plugin.endStandin();
 	assert.strictEqual(plugin.standinProvider, null);
 });
+
+test('fetchStandinOffer returns the offer, null when there is none, and null when the server cannot say', async () => {
+	const withOffer = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: QUOTA_DETAIL } } });
+	assert.deepStrictEqual(await withOffer.plugin.fetchStandinOffer(), QUOTA_DETAIL);
+	assert.deepStrictEqual(withOffer.calls.map((c) => `${c.method} ${c.path}`), ['GET /api/config/standins']);
+	const none = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: null } } });
+	assert.strictEqual(await none.plugin.fetchStandinOffer(), null);
+	const old = standinPlugin({}); // 404: a backend without the endpoint
+	assert.strictEqual(await old.plugin.fetchStandinOffer(), null);
+});

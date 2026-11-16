@@ -1124,10 +1124,13 @@ test('describePipelineProblems: a stopped re-ranker counts only when the query w
  * @param {any} health
  * @param {any} rerankInfo
  */
-function pipelineCheckSetup(health, rerankInfo) {
+function pipelineCheckSetup(health, rerankInfo, offer = null) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	const alerts = [];
 	const opened = [];
+	/** @type {any[]} */
+	const offered = [];
+	let offerFetches = 0;
 	const context = {
 		document: { readyState: 'loading', addEventListener() {}, getElementById: () => null },
 		window: { name: 'query-dialog' },
@@ -1139,14 +1142,18 @@ function pipelineCheckSetup(health, rerankInfo) {
 	vm.runInContext(src, context, { filename: 'dialog.js' });
 	const D = context.ZoteroRAGDialog;
 	const self = Object.assign(Object.create(D), {
-		plugin: { openPresetDialog: (win) => opened.push(win) },
+		plugin: {
+			openPresetDialog: (win) => opened.push(win),
+			fetchStandinOffer: async () => { offerFetches++; return offer; },
+		},
 		_healthClosed: false,
 		rerankInfo: null,
 		endpointHealth: null,
 		loadRerankInfo: async function () { this.rerankInfo = rerankInfo; },
 		refreshEndpointHealth: async function () { this.endpointHealth = health; },
+		showStandinOffer: (...args) => offered.push(args),
 	});
-	return { self, alerts, opened, context };
+	return { self, alerts, opened, offered, context, fetches: () => offerFetches };
 }
 
 test('checkPipelineOnOpen: warns and opens the Configure preset dialog for a stopped re-ranker', async () => {
@@ -1175,6 +1182,75 @@ test('checkPipelineOnOpen: a stopped answering model is reported as blocking que
 	assert.match(alerts[0], /cannot be answered until they are up/);
 	assert.match(alerts[0], /start them or log in/);
 	assert.strictEqual(opened.length, 1);
+});
+
+test('checkPipelineOnOpen: a down side with stand-ins on offer shows the offer instead of the alert and Configure preset', async () => {
+	const offer = {
+		code: 'quota_exhausted', message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+		side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+		standins: [{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] }],
+	};
+	const { self, alerts, opened, offered } = pipelineCheckSetup({ embedding: { status: 'unreachable', detail: 'quota used up' }, llm: null }, null, offer);
+	assert.strictEqual(await self.checkPipelineOnOpen(), true);
+	assert.deepStrictEqual(alerts, []);
+	assert.deepStrictEqual(opened, []);
+	assert.strictEqual(offered.length, 1);
+	assert.strictEqual(offered[0][0], offer);
+	// Nothing to send again at open time.
+	assert.strictEqual(offered[0][1], null);
+});
+
+test('checkPipelineOnOpen: without an offer (or one with no stand-ins) it alerts and opens Configure preset as before', async () => {
+	const none = pipelineCheckSetup({ embedding: { status: 'unreachable' }, llm: null }, null, null);
+	assert.strictEqual(await none.self.checkPipelineOnOpen(), true);
+	assert.strictEqual(none.fetches(), 1);
+	assert.strictEqual(none.alerts.length, 1);
+	assert.strictEqual(none.opened.length, 1);
+	assert.deepStrictEqual(none.offered, []);
+	const empty = pipelineCheckSetup({ embedding: { status: 'unreachable' }, llm: null }, null, { code: 'quota_exhausted', standins: [] });
+	await empty.self.checkPipelineOnOpen();
+	assert.strictEqual(empty.alerts.length, 1);
+	assert.deepStrictEqual(empty.offered, []);
+	// No problem: no offer is asked for.
+	const ready = pipelineCheckSetup({ embedding: { status: 'ready' }, llm: null }, null, null);
+	await ready.self.checkPipelineOnOpen();
+	assert.strictEqual(ready.fetches(), 0);
+});
+
+test('Use on an offer shown at open time switches, reloads config and health, and sends nothing', async () => {
+	const { self, steps, sent, statuses } = standinRetrySetup(async () => {});
+	self._standinRetry = null;
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.deepStrictEqual(steps, ['use remote-mpcdf kisski', 'hide', 'check', 'config']);
+	assert.deepStrictEqual(sent, []);
+	assert.deepStrictEqual(statuses, []);
+});
+
+test('a refused stand-in at open time shows the server message', async () => {
+	const { self, sent, statuses } = standinRetrySetup(async () => { throw new Error('No quota is exhausted any more.'); });
+	self._standinRetry = null;
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.deepStrictEqual(sent, []);
+	assert.deepStrictEqual(statuses, ['No quota is exhausted any more.']);
+});
+
+test('showStandinOffer at open time shows the choices and keeps nothing to send again', () => {
+	const { fakeNode } = require('./fake-dom.js');
+	const nodes = { 'standin-offer': fakeNode(), 'standin-offer-text': fakeNode(), 'standin-offer-list': fakeNode() };
+	nodes['standin-offer'].style.display = 'none';
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => nodes[id] || null, createElement: (/** @type {string} */ t) => fakeNode(t) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const D = context.ZoteroRAGDialog;
+	const self = Object.assign(Object.create(D), { _resultStateActive: false, hasStoredKey: () => false, _standinRetry: { question: 'old' } });
+	self.showStandinOffer(QUOTA_DETAIL, null);
+	assert.strictEqual(nodes['standin-offer'].style.display, '');
+	assert.strictEqual(nodes['standin-offer-list'].children.length, 2);
+	assert.strictEqual(self._standinRetry, null);
+	assert.strictEqual(self._standinOffer, QUOTA_DETAIL);
 });
 
 // ── Stand-in presets ────────────────────────────────────────────────────────

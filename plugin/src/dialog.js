@@ -987,7 +987,8 @@ var ZoteroRAGDialog = {
 	/**
 	 * When the dialog opens: load the preset's re-ranking info and the endpoint health, and
 	 * if a side of the pipeline needs the user (paused, or not running), say so and open the
-	 * Configure preset dialog, where it can be started or its account logged in to.
+	 * Configure preset dialog, where it can be started or its account logged in to. When the
+	 * server has stand-ins on offer for a used-up quota, offer those instead.
 	 * @returns {Promise<boolean>} True when a problem keeps questions from being answered
 	 */
 	async checkPipelineOnOpen() {
@@ -997,7 +998,14 @@ var ZoteroRAGDialog = {
 		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
 		const { lines, rerankOnly } = this.describePipelineProblems(this.endpointHealth, rerankWanted);
 		if (!lines.length) return false;
-		const [it, is] = lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
+		// A side down for a used-up quota: offer the stand-ins here, where the user meets it,
+		// instead of sending them to the Configure preset dialog. Nothing to send again yet.
+		const offer = await this.plugin.fetchStandinOffer().catch(() => null);
+		if (offer && Array.isArray(offer.standins) && offer.standins.length) {
+			this.showStandinOffer(offer, null);
+			return !rerankOnly;
+		}
+		const [it, is] =lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
 		const consequence = rerankOnly
 			? 'Questions are answered without re-ranking until it is up.'
 			: `Questions cannot be answered until ${is} up.`;
@@ -1101,15 +1109,16 @@ var ZoteroRAGDialog = {
 	/**
 	 * Offer the stand-ins of a used-up quota in place of the plain error.
 	 * @param {QuotaExhaustedDetail} detail
-	 * @param {string} question - The question to send again once a stand-in is chosen
-	 * @param {Array<string>} libraryIds
-	 * @param {QueryOptions} options
+	 * @param {string|null} question - The question to send again once a stand-in is chosen;
+	 *   null when offered as the dialog opens (nothing to send again)
+	 * @param {Array<string>} [libraryIds]
+	 * @param {QueryOptions} [options]
 	 * @param {boolean} [followUp] - A follow-up in the result view (sent again as a follow-up)
 	 * @returns {void}
 	 */
-	showStandinOffer(detail, question, libraryIds, options, followUp = false) {
+	showStandinOffer(detail, question, libraryIds = [], options = /** @type {QueryOptions} */ ({}), followUp = false) {
 		this._standinOffer = detail;
-		this._standinRetry = { question, libraryIds, options, followUp };
+		this._standinRetry = question === null ? null : { question, libraryIds, options, followUp };
 		const { text, choices } = this.describeStandinOffer(detail, new Date(), (k) => this.hasStoredKey(k));
 		const id = this._standinOfferId();
 		const box = document.getElementById(id);

@@ -393,3 +393,109 @@ test('quota: the tab shows one bar per meter and the card the combined value', (
 	assert.match(panel, /"width":"80%"/);
 	assert.match(dump(refs.cards), /Quota: 80 % of the daily quota used/);
 });
+
+// -- stand-ins for an exhausted quota -------------------------------------------------
+
+const standinAction = () => ({ id: 'standin', label: 'Use a stand-in until 23:00', kind: 'normal', enabled: true, reason: '',
+	workflow: null, request: null, account: null, sends_login: false });
+const OFFER = {
+	code: 'quota_exhausted', message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY'] },
+	],
+};
+const quotaSide = () => side('embedding', { state: 'down', summary: 'Down',
+	messages: [{ level: 'info', text: OFFER.message }], actions: [standinAction()] });
+
+function standinSetup({ offer, useStandin }) {
+	const used = [];
+	let fetches = 0;
+	const kisski = view([quotaSide()]);
+	const mpcdf = view([side('embedding')], [card()], { preset: { name: 'remote-mpcdf', description: '', is_admin: false, default_options: [], default_preset: '' } });
+	const t = setup({
+		views: [kisski, mpcdf],
+		extra: {
+			fetchStandinOffer: async () => { fetches++; return offer; },
+			useStandin: async (preset, provider) => { used.push([preset, provider]); if (useStandin) await useStandin(preset); },
+		},
+	});
+	return { ...t, used, fetches: () => fetches };
+}
+
+test('the standin action fetches the offer and lists the choices without posting anything', async () => {
+	const { controller, posts, used, fetches, prefs } = standinSetup({ offer: OFFER });
+	prefs.set('extensions.zotero-rag.serviceApiKey.RUNPOD_API_KEY', 'k');
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	assert.strictEqual(fetches(), 1);
+	assert.deepStrictEqual(posts, []);
+	assert.deepStrictEqual(used, []);
+	const offer = controller.state.local.standins;
+	assert.strictEqual(offer.side, 'embedding');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(offer.choices)), [
+		{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login' },
+		{ preset: 'runpod', text: 'runpod (paid): RunPod; ready' },
+	]);
+});
+
+test('the standin action with no offer says so plainly and lists nothing', async () => {
+	const { controller, painted } = standinSetup({ offer: null });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	assert.ok(!controller.state.local.standins);
+	assert.match(painted.at(-1).notes['side:embedding'].text, /resets soon; no stand-in is needed/);
+});
+
+test('Use switches to the stand-in and refreshes the view, which then shows the stand-in preset', async () => {
+	const { controller, used } = standinSetup({ offer: OFFER });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	await controller.useStandin('remote-mpcdf');
+	assert.deepStrictEqual(used, [['remote-mpcdf', 'kisski']]);
+	assert.ok(!controller.state.local.standins);
+	assert.strictEqual(controller.state.view.preset.name, 'remote-mpcdf');
+});
+
+test('a refused stand-in (409) shows the server message and keeps the choices', async () => {
+	const { controller, painted } = standinSetup({ offer: OFFER, useStandin: async () => { throw new Error('No quota is exhausted any more.'); } });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	await controller.useStandin('remote-mpcdf');
+	assert.strictEqual(controller.state.view.preset.name, 'main');
+	assert.match(painted.at(-1).notes['side:embedding'].text, /No quota is exhausted any more\./);
+	assert.ok(controller.state.local.standins);
+});
+
+test('the side panel lists the stand-ins with a Use button each', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	const local = { tab: 'embedding', logOpen: {}, drafts: {}, notes: {}, standins: { side: 'embedding', provider: 'kisski', text: OFFER.message,
+		choices: [{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login' }, { preset: 'runpod', text: 'runpod (paid): RunPod; ready' }] } };
+	const picked = [];
+	D.paint(doc, refs, view([quotaSide()]), local,
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {}, onUseStandin: (p) => picked.push(p) });
+	const dump = JSON.stringify(refs.panel, (k, val) => (k === 'parentNode' || k === 'listeners' ? undefined : val));
+	assert.match(dump, /remote-mpcdf \(free\): MPCDF; needs MPCDF login/);
+	assert.match(dump, /runpod \(paid\): RunPod; ready/);
+	/** Find the buttons labelled Use. */
+	const uses = [];
+	const walk = (n) => { if (n && typeof n === 'object') { if (n.tag === 'button' && n.textContent === 'Use') uses.push(n); (n.children || []).forEach(walk); } };
+	walk(refs.panel);
+	assert.strictEqual(uses.length, 2);
+	uses[1].click();
+	assert.deepStrictEqual(picked, ['runpod']);
+});
+
+test('an account card of a provider that cannot start endpoints reads Save, not Save and start', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	D.paint(doc, refs, view([side('embedding')], [card({ auto_start: false })]), { tab: '', logOpen: {}, drafts: {}, notes: {} },
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
+	const dump = JSON.stringify(refs.cards, (k, val) => (k === 'parentNode' || k === 'listeners' ? undefined : val));
+	assert.match(dump, /"textContent":"Save"/);
+	assert.doesNotMatch(dump, /Save and start/);
+});

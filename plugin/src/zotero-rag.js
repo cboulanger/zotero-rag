@@ -795,6 +795,24 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * The stand-ins on offer for a used-up quota, asked for outside a failed query (the
+	 * dialogs ask when they find a side down). Null when nothing is on offer: no quota is
+	 * used up for long, a stand-in already answers, or the server cannot say.
+	 * @returns {Promise<QuotaExhaustedDetail|null>}
+	 */
+	async fetchStandinOffer() {
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/standins`, { headers: this.getAuthHeaders() });
+			if (!response.ok) return null;
+			const data = /** @type {{offer?: QuotaExhaustedDetail|null}} */ (await response.json());
+			return data && data.offer ? data.offer : null;
+		} catch (e) {
+			this.log('Could not fetch the stand-in offer: ' + e);
+			return null;
+		}
+	}
+
+	/**
 	 * End the active stand-in now, so the user's own preset (and keys) apply again.
 	 * @returns {Promise<void>}
 	 * @throws {Error} When the server refuses
