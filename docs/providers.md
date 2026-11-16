@@ -43,6 +43,10 @@ A remote re-ranking side (`rerank`) always uses `user`.
 
 The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
 
+## Cost class
+
+Every provider declares `cost`, `"free"` or `"paid"`. `kisski` and `mpcdf` are `free`; `runpod`, `huggingface`, `openai`, `google`, `anthropic` and `generic` (unknown cost counts as paid) are `paid`. A preset is free when each of its sides is local or served by a free provider; a preset can override this with its own `cost` field. The class orders the stand-in presets offered when a quota is exhausted, free ones first (see [presets.md](presets.md#stand-in-presets)).
+
 ## What a provider can define
 
 Class attributes: `id`, `label`, `Options` (a `ProviderOptions` model with

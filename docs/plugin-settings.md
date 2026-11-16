@@ -25,6 +25,10 @@ setting.
 
 Below the chooser, one dot per side shows whether its service is ready (green), starting (yellow) or down (red). **Configure preset…** opens the dialog described in [Configure preset](#configure-preset).
 
+When a query fails because a provider's quota is used up until a time at least 15 minutes away, the query dialog offers stand-in presets instead of the plain error: it names the side and provider that ran out and when it resets, and lists the alternatives with their cost ("free" or "paid") and what each needs first (a login, a started endpoint or a key). **Use** switches you to that preset until the reset and sends the question again; a stand-in that needs a login or a start opens the Configure preset dialog first, and the question is sent again when the preset is ready. **Not now** dismisses the offer; nothing is switched automatically. Indexing and uploads keep using your own preset.
+
+While a stand-in is active, the query dialog and this pane show "Using *preset* until *time* (*provider* quota) — **End now**". **End now** returns to your own preset immediately; otherwise it applies again by itself after the reset. Choosing a preset by hand also ends the stand-in.
+
 ### Automatic indexing
 
 A single toggle: **Enable automatic indexing of my libraries**. When on, the backend
