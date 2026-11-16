@@ -1185,7 +1185,7 @@ const QUOTA_DETAIL = {
 	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
 	standins: [
 		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
-		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY', 'start:llm'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY', 'login:runpod'] },
 	],
 };
 
@@ -1210,17 +1210,17 @@ test('describeStandinOffer: keeps the server order and drops a key need the user
 	const { choices } = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T19:00:00Z'), (/** @type {string} */ name) => name === 'RUNPOD_API_KEY');
 	assert.deepStrictEqual(JSON.parse(JSON.stringify(choices)), [
 		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
-		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['start:llm'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['login:runpod'] },
 	]);
 	const none = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T19:00:00Z'), () => false);
-	assert.deepStrictEqual([...none.choices[1].needs], ['key:RUNPOD_API_KEY', 'start:llm']);
+	assert.deepStrictEqual([...none.choices[1].needs], ['key:RUNPOD_API_KEY', 'login:runpod']);
 });
 
 test('describeStandinNeeds: names what must happen first, or that it is ready', () => {
 	const D = loadDialogMethods();
 	assert.strictEqual(D.describeStandinNeeds([]), 'ready');
-	assert.strictEqual(D.describeStandinNeeds(['login:mpcdf', 'key:RUNPOD_API_KEY', 'start:llm']),
-		'needs MPCDF login, RUNPOD_API_KEY, start of the llm endpoint');
+	assert.strictEqual(D.describeStandinNeeds(['login:mpcdf', 'key:RUNPOD_API_KEY', 'login:runpod']),
+		'needs MPCDF login, RUNPOD_API_KEY, RUNPOD login');
 });
 
 /**
@@ -1362,6 +1362,47 @@ test('rememberModelChoice does not save a stand-in model as the user\'s own choi
 	self.activeStandin = null;
 	self.rememberModelChoice('own-model');
 	assert.deepStrictEqual(prefs, { 'extensions.zotero-rag.llmModel': 'own-model' });
+});
+
+/** A fake `this` for currentLlmModel with a model select of two options. */
+function llmModelSetup(/** @type {any} */ standin) {
+	const rendered = [];
+	let reloads = 0;
+	/** @type {Record<string, any>} */
+	const prefs = {};
+	const context = {
+		document: {
+			readyState: 'loading', addEventListener() {},
+			getElementById: (/** @type {string} */ id) => id === 'llm-model-select' ? { options: [1, 2], value: 'picked' } : null,
+		},
+		window: {}, console,
+		Zotero: { Prefs: { set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const self = Object.create(context.ZoteroRAGDialog);
+	self.activeStandin = standin;
+	self.plugin = null;
+	self.loadPresetConfig = async () => { reloads++; };
+	return { self, prefs, reloads: () => reloads, rendered };
+}
+
+test('currentLlmModel sends no model while a stand-in answers', async () => {
+	const t = llmModelSetup({ preset: 'remote-mpcdf', until: new Date(Date.now() + 3600e3).toISOString(), replaces: 'kisski' });
+	assert.strictEqual(await t.self.currentLlmModel(), undefined);
+	assert.deepStrictEqual(t.prefs, {});
+});
+
+test('currentLlmModel ends an expired stand-in, refreshes the config and sends the own model', async () => {
+	const t = llmModelSetup({ preset: 'remote-mpcdf', until: new Date(Date.now() - 1000).toISOString(), replaces: 'kisski' });
+	assert.strictEqual(await t.self.currentLlmModel(), 'picked');
+	assert.strictEqual(t.self.activeStandin, null);
+	assert.strictEqual(t.reloads(), 1);
+});
+
+test('currentLlmModel sends the selected model without a stand-in', async () => {
+	const t = llmModelSetup(null);
+	assert.strictEqual(await t.self.currentLlmModel(), 'picked');
 });
 
 test('checkPipelineOnOpen reports whether a problem keeps questions from being answered', async () => {

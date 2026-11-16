@@ -221,8 +221,9 @@ async def api_key_middleware(request: Request, call_next):
             request.state.zotero_identity = await resolve_zotero_identity(request)
         except HTTPException as exc:
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-        # Run the whole request on the caller's own preset (their choice, else the default).
-        # Only a user's own preset is bound; everyone else follows the live default.
+        # Run the whole request on the caller's own preset (a stand-in on the routes that allow
+        # one, else their choice, else the default). A loopback caller can have a stand-in too.
+        # Only a non-default preset is bound; everyone else follows the live default.
         preset = await asyncio.to_thread(
             get_user_preset, get_settings(), request.state.zotero_identity,
             allow_standin=standin_applies(request.url.path),

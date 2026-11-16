@@ -137,6 +137,14 @@ class StandinApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(get_standin(self.settings.data_path, None)["preset"], "runpod")
 
+    def test_standin_equal_to_server_default_is_effective(self):
+        d = self.settings.data_path
+        set_preferred_preset(d, 7, "kisski-rerank-mpcdf")
+        set_standin(d, 7, "remote-kisski", self.until, "kisski-rerank-mpcdf")
+        cfg = self.call("GET", "/api/config", user_id=7).json()
+        self.assertEqual(cfg["preset_name"], "remote-kisski")
+        self.assertEqual(cfg["standin"]["preset"], "remote-kisski")
+
     def test_unusable_standin_is_not_reported(self):
         set_standin(self.settings.data_path, None, "no-such-preset", self.until, "remote-kisski")
         cfg = self.call("GET", "/api/config").json()

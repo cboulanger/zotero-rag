@@ -89,7 +89,7 @@
  * @property {string} preset - Preset name
  * @property {'free'|'paid'|string} cost - What using it costs
  * @property {string} label - Short description of the preset
- * @property {string[]} needs - What must happen first: `login:<provider>`, `key:<KEY_NAME>`, `start:<side>`
+ * @property {string[]} needs - What must happen first: `login:<provider>`, `key:<KEY_NAME>`
  */
 
 /**

@@ -5,7 +5,8 @@ else ``remote-kisski``). A signed-in user may choose another one, stored by
 :mod:`backend.services.user_settings`. A choice is honoured only while it is
 compatible with the default (see :func:`is_compatible`); a removed, incompatible
 or invalid one silently falls back to the default. A request without an identity
-(loopback, public query) always runs on the default.
+(public query) runs on the default; a loopback caller has no own choice but may
+have a temporary stand-in (see :func:`get_user_preset`).
 
 The auth middleware calls :func:`get_user_preset` once per request and, when the
 user runs on their own preset, binds it with :func:`use_preset`; ``Settings.get_hardware_preset()`` then returns
@@ -95,7 +96,9 @@ def get_user_preset(settings, identity, allow_standin: bool = False) -> Optional
     who = "Loopback" if identity is None else f"User {user_id}"
     if allow_standin:
         standin = get_standin(settings.data_path, user_id)
-        if standin and standin["preset"] != default.name:
+        if standin and standin["preset"] == default.name:
+            return None  # the stand-in is the server default: run on it, not on the own choice
+        if standin:
             candidate = _usable(settings, default, standin["preset"], who)
             if candidate is not None:
                 return candidate

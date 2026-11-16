@@ -166,10 +166,6 @@ class QuotaDetailTest(unittest.TestCase):
         self.assertIsNone(self.detail(datetime(2026, 11, 16, 19, 5, tzinfo=timezone.utc)))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class StoredStandinTest(unittest.TestCase):
     """Storage and request-scoped resolution of a temporary stand-in."""
 
@@ -245,3 +241,15 @@ class StoredStandinTest(unittest.TestCase):
         set_preferred_preset(self.dp, 7, "kisski-rerank-mpcdf")
         set_standin(self.dp, 7, "remote-mpcdf", self._in(hours=1), "kisski-rerank-mpcdf")
         self.assertEqual(get_effective_preset(self.settings, self._ident(7)).name, "kisski-rerank-mpcdf")
+
+    def test_standin_equal_to_default_runs_on_default(self):
+        from backend.services.effective_preset import get_user_preset
+        from backend.services.user_settings import set_preferred_preset, set_standin
+        set_preferred_preset(self.dp, 7, "kisski-rerank-mpcdf")
+        set_standin(self.dp, 7, "remote-kisski", self._in(hours=1), "kisski-rerank-mpcdf")
+        self.assertIsNone(get_user_preset(self.settings, self._ident(7), allow_standin=True))
+        self.assertEqual(get_user_preset(self.settings, self._ident(7)).name, "kisski-rerank-mpcdf")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1071,7 +1071,7 @@ var ZoteroRAGDialog = {
 
 	/**
 	 * What a stand-in needs before it can answer, in a few words.
-	 * @param {string[]} needs - `login:<provider>`, `key:<KEY_NAME>`, `start:<side>`
+	 * @param {string[]} needs - `login:<provider>`, `key:<KEY_NAME>`
 	 * @returns {string}
 	 */
 	describeStandinNeeds(needs) {
@@ -1079,7 +1079,6 @@ var ZoteroRAGDialog = {
 		const parts = needs.map((n) => {
 			const [kind, what] = [n.slice(0, n.indexOf(':')), n.slice(n.indexOf(':') + 1)];
 			if (kind === 'login') return `${what.toUpperCase()} login`;
-			if (kind === 'start') return `start of the ${what} endpoint`;
 			return what;
 		});
 		return `needs ${parts.join(', ')}`;
@@ -1216,6 +1215,25 @@ var ZoteroRAGDialog = {
 		this.activeStandin = standin;
 		if (!this.plugin) return;
 		this.plugin.renderStandinLine(document.getElementById('standin-line'), document.getElementById('standin-line-text'), standin);
+	},
+
+	/**
+	 * The answering model to send with a question, or undefined to let the server pick.
+	 * While a stand-in answers nothing is sent (its models are not the user's own and
+	 * would be rejected once it ends); a stand-in whose time has passed is ended first.
+	 * @returns {Promise<string|undefined>}
+	 */
+	async currentLlmModel() {
+		const standin = this.activeStandin;
+		if (standin && standin.until && Date.parse(standin.until) <= Date.now()) {
+			this.renderActiveStandin(null);
+			try { await this.loadPresetConfig(); } catch (_) {}
+		}
+		if (this.activeStandin) return undefined;
+		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
+		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
+		this.rememberModelChoice(llmModel);
+		return llmModel;
 	},
 
 	/**
@@ -1644,10 +1662,7 @@ var ZoteroRAGDialog = {
 		);
 		const topK = sourcesSlider ? parseInt(sourcesSlider.value, 10) : 10;
 
-		// Get selected LLM model (only when multiple options are available)
-		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
-		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
-		this.rememberModelChoice(llmModel);
+		const llmModel = await this.currentLlmModel();
 
 		// Get disable-routing checkbox and persist it
 		const disableRoutingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-routing'));

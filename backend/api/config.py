@@ -550,7 +550,7 @@ async def update_config(
     # Credentials are deliberately not required here: the preset's own sections ask for
     # the keys and endpoints, and its health shows "not ready" until they are set.
     set_default_preset(settings.data_path, update.preset_name)
-    clear_standin(settings.data_path, None)  # a loopback stand-in replaced the old default
+    await asyncio.to_thread(clear_standin, settings.data_path, None)  # a loopback stand-in replaced the old default
     # Rate-limit headers and rate-limit skips belong to the previous provider.
     usage_recorder.reset()
     from backend.services import side_probe
@@ -1020,7 +1020,7 @@ async def set_remote_fields(
 
 
 @router.get("/required-keys", response_model=RequiredKeysResponse)
-async def get_required_api_keys(request: Request):
+def get_required_api_keys(request: Request):  # plain def: blocking file reads run in the thread pool
     """
     List the client-configurable fields required by the current backend preset.
 
