@@ -27,12 +27,12 @@ from backend.services.embeddings import (
     EmbeddingEndpointUnavailableError,
     EmbeddingRateLimitExhaustedError,
     EmbeddingService,
-    LocalEmbeddingService,
     MockEmbeddingService,
     RemoteEmbeddingService,
     _extract_error_detail,
     create_embedding_service,
 )
+from backend.plugins.local_torch.embedding import LocalEmbeddingService
 
 try:
     import sentence_transformers  # noqa: F401

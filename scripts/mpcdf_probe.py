@@ -33,7 +33,7 @@ from pathlib import Path
 import httpx
 
 from backend.config.settings import get_settings
-from backend.services.mpcdf_sessions import SealedSessionStore, user_key
+from backend.plugins.mpcdf.sessions import SealedSessionStore, user_key
 
 try:
     from mpcdf_llm.client import MpcdfClient

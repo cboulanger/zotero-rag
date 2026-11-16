@@ -11,7 +11,7 @@ from backend.config.presets import ensure_default_presets, get_preset
 from backend.config.settings import get_settings, reset_settings
 from backend.providers import Provider, ProvisionContext, ProvisionError
 from backend.tests.runpod_variants import write_managed_runpod_preset
-from backend.providers.runpod import RunPodProvider
+from backend.plugins.runpod.provider import RunPodProvider
 from backend.services import provisioning
 from backend.services.admin_settings_store import get_remote_config_value, update_remote_config
 from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
@@ -342,8 +342,8 @@ class HealthEndpointTest(unittest.TestCase):
 
     def test_mpcdf_reports_the_callers_endpoint_state(self):
         get_settings().model_preset = "remote-mpcdf"
-        from backend.services import mpcdf_sessions
-        from backend.services.mpcdf_sessions import EndpointCredentials
+        from backend.plugins.mpcdf import sessions as mpcdf_sessions
+        from backend.plugins.mpcdf.sessions import EndpointCredentials
         from backend.tests.test_mpcdf_sessions import FakeSessions
 
         fake = FakeSessions()
@@ -356,7 +356,8 @@ class HealthEndpointTest(unittest.TestCase):
 
     def test_a_side_whose_start_job_runs_is_reported_as_starting(self):
         get_settings().model_preset = "remote-mpcdf"
-        from backend.services import mpcdf_sessions, provisioning
+        from backend.plugins.mpcdf import sessions as mpcdf_sessions
+        from backend.services import provisioning
         from backend.tests.test_mpcdf_sessions import FakeSessions
 
         provisioning.reset_job_state()

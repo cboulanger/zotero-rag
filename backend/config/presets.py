@@ -121,6 +121,11 @@ class EmbeddingConfig(BaseModel):
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
     )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
+    )
 
 
 class LLMConfig(BaseModel):
@@ -136,6 +141,11 @@ class LLMConfig(BaseModel):
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
     @field_validator("model_names", mode="before")
@@ -197,7 +207,8 @@ class RerankConfig(BaseModel):
     pool before dedup and the per-document cap (see backend/services/rerank.py).
 
     A preset without this section has no re-ranking step. ``local`` runs the model
-    in the backend process (sentence-transformers ``CrossEncoder``); ``remote`` calls a
+    in the backend process with a local engine from a backend plugin (the shipped
+    ``local_torch`` plugin: a sentence-transformers ``CrossEncoder``); ``remote`` calls a
     ``/rerank`` endpoint served by the side's provider, which must use the ``user``
     credential scope (each user's own account).
     """
@@ -222,6 +233,11 @@ class RerankConfig(BaseModel):
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving a remote re-ranker (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
 

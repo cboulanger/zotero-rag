@@ -3,7 +3,7 @@
 import unittest
 
 from backend.providers import ProviderConfigError, get_providers
-from backend.providers.kisski import KisskiProvider
+from backend.plugins.kisski.provider import KisskiProvider
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 from backend.tests.test_providers_registry import make_preset
 

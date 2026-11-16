@@ -10,7 +10,8 @@ RunPod subclass that allows ``managed``, so the RunPod fakes can be reused.
 import json
 from pathlib import Path
 
-from backend.providers.runpod import RunPodProvider
+from backend.plugins.runpod.provider import RunPodProvider
+from backend.providers import register_provider
 
 MANAGED_NAME = "runpod-managed"
 MANAGED_PROVIDER_ID = "demo-test-only-managed-runpod"
@@ -21,6 +22,9 @@ class ManagedRunPodTestProvider(RunPodProvider):
 
     id = MANAGED_PROVIDER_ID
     key_scopes = frozenset({"user", "managed"})
+
+
+register_provider(ManagedRunPodTestProvider)
 
 
 def write_managed_runpod_preset(data_path: Path) -> str:

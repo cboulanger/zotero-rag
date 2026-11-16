@@ -13,7 +13,7 @@ from pathlib import Path
 
 from backend.services.document_processor import DocumentProcessor
 from backend.services.rag_engine import RAGEngine
-from backend.services.embeddings import LocalEmbeddingService
+from backend.plugins.local_torch.embedding import LocalEmbeddingService
 from backend.services.llm import RemoteLLMService
 from backend.db.vector_store import VectorStore
 from backend.zotero.local_api import ZoteroLocalAPI

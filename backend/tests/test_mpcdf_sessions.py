@@ -18,8 +18,8 @@ from cryptography.fernet import Fernet
 from backend.config.presets import HardwarePreset
 from backend.config.settings import get_settings
 from backend.providers import get_providers
-from backend.services import mpcdf_sessions
-from backend.services.mpcdf_sessions import EndpointCredentials, MpcdfSessions, user_key
+from backend.plugins.mpcdf import sessions as mpcdf_sessions
+from backend.plugins.mpcdf.sessions import EndpointCredentials, MpcdfSessions, user_key
 from backend.services.rerank import RerankerUnavailable, RerankRequest
 
 HAVE_LIB = mpcdf_sessions.available()

@@ -7,8 +7,10 @@ HTTP API" (``/v1/embeddings``, ``/v1/chat/completions``, bearer-key auth), so
 Vendor providers subclass it and override only what differs, calling
 ``super()`` for the rest.
 
-See docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md
-(section A2) for the contract and docs/providers.md for how to add one.
+Vendor providers live in backend plugins (``backend/plugins/`` and the directories
+in ``BACKEND_PLUGIN_DIRS``), which register them as ``inference.provider``
+capabilities. See docs/superpowers/specs/2026-10-10-huggingface-preset-and-provisioner-adapters-design.md
+(section A2) for the contract and docs/providers.md and docs/backend-plugins.md for how to add one.
 """
 
 from datetime import datetime, timezone
@@ -34,7 +36,9 @@ from backend.providers.types import (
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from backend.config.presets import HardwarePreset
 
-#: Registry of provider classes by id, filled by ``Provider.__init_subclass__``.
+#: Registry of provider classes by id, filled by the plugin host from the
+#: ``inference.provider`` capabilities of the loaded backend plugins (see
+#: ``backend.pluginhost``) through :func:`register_provider`.
 PROVIDERS: dict[str, type["Provider"]] = {}
 
 
@@ -67,14 +71,6 @@ class Provider:
     http_timeout: ClassVar[float] = 30.0
     #: Whether using this provider costs the user money. Unknown cost counts as ``paid``.
     cost: ClassVar[Literal["free", "paid"]] = "paid"
-
-    def __init_subclass__(cls, **kwargs) -> None:
-        super().__init_subclass__(**kwargs)
-        # Only register a class that declares its own id.
-        if "id" in cls.__dict__:
-            if cls.id in PROVIDERS and PROVIDERS[cls.id] is not cls:
-                raise ValueError(f"Duplicate provider id {cls.id!r}")
-            PROVIDERS[cls.id] = cls
 
     def __init__(
         self,
@@ -447,9 +443,27 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# The base class is the generic provider; register it explicitly because
-# __init_subclass__ only fires for subclasses.
-PROVIDERS[Provider.id] = Provider
+def register_provider(cls: type[Provider]) -> type[Provider]:
+    """Add a provider class to the registry under its own ``id`` (idempotent).
+
+    Plugins do not call this themselves: they list the class in an
+    ``InferenceProvider`` capability and the plugin host registers it.
+
+    Raises:
+        ValueError: another class already uses the id, or the class declares none.
+    """
+    if "id" not in cls.__dict__ and cls is not Provider:
+        raise ValueError(f"{cls.__name__} declares no provider id of its own")
+    existing = PROVIDERS.get(cls.id)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"Duplicate provider id {cls.id!r}")
+    PROVIDERS[cls.id] = cls
+    return cls
+
+
+# The base class is the generic provider, part of core (the plugin host lists it
+# under the built-in plugin "core").
+register_provider(Provider)
 GenericProvider = Provider
 
 

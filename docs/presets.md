@@ -39,6 +39,10 @@ Instruction-tuned embedding models expect a search query to be embedded as `Inst
 
 On the gold library this raised the share of questions whose source passage is among the first ten results from 0.67 to 0.74 (Docling) and 0.75 (Kreuzberg), measured on retrieval only (Hugging Face dataset `evaluations/retrieval-improvements-20261113`).
 
+### Local engine: `engine`
+
+A side with `"model_type": "local"` runs in the backend process on a local inference engine contributed by a [backend plugin](backend-plugins.md) (the shipped `local_torch` plugin provides `torch` for every side). `"engine": "<name>"` on the `embedding`, `llm` or `rerank` section picks one; unset, the best engine available on the machine is used. A preset naming an engine no loaded plugin provides fails when that side is first used.
+
 ### Preset schema versions
 
 | Version | Change |
@@ -307,6 +311,7 @@ Without the section queries use the vector order. Fields:
 | `timeout_seconds` | `15` | Longest the step may take; after that the vector order is kept |
 | `model_kwargs` | `{}` | For `local`: extra `CrossEncoder` arguments. For `remote`: `base_url` and `api_key_env` |
 | `provider` | generic | The provider that serves a remote re-ranker; it must use scope `user` |
+| `engine` | best available | For `local`: the local inference engine (see below) |
 
 A re-ranker on the MPCDF service, on each user's own account:
 

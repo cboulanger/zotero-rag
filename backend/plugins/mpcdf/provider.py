@@ -4,7 +4,7 @@ Each endpoint is an ephemeral Slurm job of up to 8 hours. Every side is per user
 (scope ``user``): each user logs in with their own MPCDF account (username,
 password, one-time code) and the endpoint runs as a job on that account, started,
 renewed and idle-cancelled through the ``mpcdf-llm`` library
-(``backend.services.mpcdf_sessions``). The service's terms do not allow one
+(``backend.plugins.mpcdf.sessions``). The service's terms do not allow one
 account to serve other people, so there is no admin-shared variant.
 """
 
@@ -95,7 +95,7 @@ class MpcdfProvider(Provider):
         return f"zotero-rag-{self.side}"
 
     def _sessions(self):
-        from backend.services import mpcdf_sessions
+        from backend.plugins.mpcdf import sessions as mpcdf_sessions
 
         if not mpcdf_sessions.available():
             raise ProvisionError("the mpcdf-llm library is not installed on this server")
@@ -192,7 +192,7 @@ class MpcdfProvider(Provider):
         sessions.call(lambda: sessions.touch(user_id, self.preset_name))
 
     def rerank_credentials(self, request, refresh: bool = False) -> Optional[Credentials]:
-        from backend.services.mpcdf_sessions import SessionsUnavailable
+        from backend.plugins.mpcdf.sessions import SessionsUnavailable
         from backend.services.rerank import RerankerUnavailable
 
         try:
@@ -204,7 +204,7 @@ class MpcdfProvider(Provider):
         self.session_activity(request.user_id)
 
     def unavailable_hint(self) -> Optional[str]:
-        from backend.services import mpcdf_sessions
+        from backend.plugins.mpcdf import sessions as mpcdf_sessions
 
         if not mpcdf_sessions.available():
             return "This server cannot start MPCDF jobs (the mpcdf-llm library is not installed)."

@@ -5,8 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from backend.providers import Credentials, ProvisionContext, ProvisionError, ProvisionTimeout, get_providers
-from backend.providers import runpod as runpod_module
-from backend.providers.runpod import RunPodProvider, endpoint_base_url
+from backend.plugins.runpod import provider as runpod_module
+from backend.plugins.runpod.provider import RunPodProvider, endpoint_base_url
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 from backend.tests.test_providers_registry import make_preset
 

@@ -55,6 +55,18 @@ class ProvisionTimeout(ProvisionError):
     """The job ran past its deadline."""
 
 
+class SessionsUnavailable(RuntimeError):
+    """A provider's per-user sessions cannot be used here (a library is missing, or the server is not running)."""
+
+
+class LoginRateLimited(RuntimeError):
+    """Too many session login attempts for one user in a short time."""
+
+
+class SessionLoginFailed(RuntimeError):
+    """The provider rejected a session login (wrong username, password or one-time code)."""
+
+
 class ProviderOptions(BaseModel):
     """Base of every provider's ``Options`` model: an unknown option is an error.
 

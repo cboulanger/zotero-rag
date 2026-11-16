@@ -44,7 +44,7 @@ class PresetViewApiTest(unittest.TestCase):
         ident = ZoteroIdentity(user_id=user_id, username="u", targets=[f"users/{user_id}"])
         with patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=ident)), \
              patch("backend.zotero.group_roles.is_group_admin", new=AsyncMock(return_value=admin)), \
-             patch("backend.providers.runpod.RunPodProvider.health", return_value=health), \
+             patch("backend.plugins.runpod.provider.RunPodProvider.health", return_value=health), \
              patch("backend.api.config._probe", new=AsyncMock(return_value=probe)):
             r = self.client.get("/api/config/preset-view", headers={"X-Zotero-API-Key": "Z", **(headers or {})})
         self.assertEqual(r.status_code, 200, r.text)
@@ -144,8 +144,8 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertIn(body["preset"]["default_preset"], body["preset"]["default_options"])
 
     def _get_mpcdf(self, session, health=UNPROVISIONED):
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=session), \
-             patch("backend.providers.mpcdf.MpcdfProvider.health", return_value=health):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=session), \
+             patch("backend.plugins.mpcdf.provider.MpcdfProvider.health", return_value=health):
             return self._get("remote-mpcdf", user_id=8)
 
     def test_session_provider_card_offers_the_login_form_until_logged_in(self):
@@ -177,8 +177,8 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual(start["workflow"], "start")
 
     def test_session_status_failure_falls_back_to_the_login_form(self):
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", side_effect=RuntimeError("down")), \
-             patch("backend.providers.mpcdf.MpcdfProvider.health", return_value=UNPROVISIONED):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", side_effect=RuntimeError("down")), \
+             patch("backend.plugins.mpcdf.provider.MpcdfProvider.health", return_value=UNPROVISIONED):
             body = self._get("remote-mpcdf", user_id=9)
         self.assertEqual(body["accounts"][0]["state"], "needs_input")
 
@@ -259,7 +259,7 @@ class PresetViewApiTest(unittest.TestCase):
     def _kisski(self, probe, availability=None, headers=None):
         mock = AsyncMock(return_value=probe)
         with patch("backend.services.side_probe.probe_side", new=mock), \
-             patch("backend.providers.kisski.KisskiProvider.model_availability", return_value=availability):
+             patch("backend.plugins.kisski.provider.KisskiProvider.model_availability", return_value=availability):
             body = self._get("remote-kisski", headers={"X-Kisski-Api-Key": "k"} if headers is None else headers)
         return body, mock
 
@@ -316,7 +316,7 @@ class PresetViewApiTest(unittest.TestCase):
     def _quota_view(self):
         probe = SideProbe(ok=False, detail="quota exhausted until 23:00 UTC", rate_limited=True)
         with patch("backend.services.side_probe.probe_side", new=AsyncMock(return_value=probe)), \
-             patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value={"state": "ok"}):
+             patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value={"state": "ok"}):
             return self._get("kisski-rerank-mpcdf", headers={"X-Kisski-Api-Key": "k"})
 
     def test_an_exhausted_quota_is_reported_with_a_standin_action(self):

@@ -704,20 +704,37 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Fetch root endpoint and log service configuration and vector DB statistics.
+	 * Fetch the status and sides endpoints and log the service configuration,
+	 * vector DB statistics and the backend plugins that are loaded.
 	 * @returns {Promise<void>}
 	 */
 	async logServerInfo() {
-		const response = await fetch(`${this.backendURL}/`, { headers: this.getAuthHeaders() });
-		if (!response.ok) return;
-		/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, embedding:{model_type:string,model_name:string,base_url:string|null,embedding_dim:number,distance:string}, llm:{model_type:string,model_name:string,base_url:string|null,max_context_length:number,temperature:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string,chunks:number,indexed_documents:number,libraries_count:number}}} */
-		const info = await response.json();
-		const { preset, embedding, llm, rag, vector_db } = info;
-		this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
-		this.log(`Embedding: [${embedding.model_type}] ${embedding.model_name}${embedding.base_url ? ` @ ${embedding.base_url}` : ''} (${embedding.embedding_dim}-dim, ${embedding.distance})`);
-		this.log(`LLM: [${llm.model_type}] ${llm.model_name}${llm.base_url ? ` @ ${llm.base_url}` : ''} (ctx ${llm.max_context_length}, temp ${llm.temperature})`);
-		this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
-		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
+		const headers = this.getAuthHeaders();
+		const [statusResponse, sidesResponse] = await Promise.all([
+			fetch(`${this.backendURL}/status`, { headers }),
+			fetch(`${this.backendURL}/sides`, { headers }),
+		]);
+		if (statusResponse.ok) {
+			/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string|null,chunks:number,indexed_documents:number,libraries_count:number}, plugins:Array<{id:string,status:string,version?:string,error?:string}>}} */
+			const info = await statusResponse.json();
+			const { preset, rag, vector_db, plugins } = info;
+			this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
+			this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
+			this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
+			this.log(`Backend plugins: ${(plugins || []).map((p) => `${p.id}${p.status === 'loaded' ? '' : ` (${p.status})`}`).join(', ')}`);
+		}
+		if (sidesResponse.ok) {
+			/** @type {{preset:string, sides:Record<string, {model_type:string, model_name:string, base_url:string|null, embedding_dim?:number|null, distance?:string|null, max_context_length?:number, temperature?:number, served_by:{plugin:string|null, available:boolean}}>}} */
+			const data = await sidesResponse.json();
+			for (const [side, cfg] of Object.entries(data.sides || {})) {
+				const where = cfg.base_url ? ` @ ${cfg.base_url}` : '';
+				const via = cfg.served_by && cfg.served_by.plugin ? ` via ${cfg.served_by.plugin}` : '';
+				let extra = '';
+				if (side === 'embedding') extra = ` (${cfg.embedding_dim}-dim, ${cfg.distance})`;
+				else if (side === 'llm') extra = ` (ctx ${cfg.max_context_length}, temp ${cfg.temperature})`;
+				this.log(`${side}: [${cfg.model_type}] ${cfg.model_name}${where}${via}${extra}`);
+			}
+		}
 	}
 
 	/**

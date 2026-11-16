@@ -14,10 +14,17 @@ a frontier LLM, or one vendor for embeddings and another for answers).
 "llm":       { "provider": { "id": "anthropic" }, "...": "..." }
 ```
 
-Code lives in `backend/providers/`; the registry resolves a preset with
-`get_providers(preset)`, which validates it and returns one instance per side.
+The interface and the generic provider live in `backend/providers/`; every vendor
+provider is a [backend plugin](backend-plugins.md) under `backend/plugins/<id>/`
+(or in an external plugin directory) that registers its class as an
+`inference.provider` capability. The registry resolves a preset with
+`get_providers(preset)`, which validates it and returns one instance per side. A
+preset that names a provider no loaded plugin provides is unavailable, and the
+message says so.
 
 ## Bundled providers
+
+`generic` is part of core; each of the others is a shipped plugin of the same id.
 
 | id | For | Credential scope | Notes |
 |---|---|---|---|
@@ -102,7 +109,7 @@ renders every field, message and action itself.
 
 ## Adding a provider
 
-1. Create `backend/providers/<name>.py` with a `Provider` subclass and a unique `id`; importing it registers it (`__init_subclass__`), so add it to `backend/providers/__init__.py`.
+1. Create a backend plugin (`backend/plugins/<name>/` for a shipped one, or a package in a directory listed in `BACKEND_PLUGIN_DIRS`) with a `Provider` subclass with a unique `id`, and list the class in an `InferenceProvider` capability returned by the plugin's `register()` (see [Backend plugins](backend-plugins.md)). Nothing in core needs to change.
 2. Override only what differs from a plain OpenAI-compatible API.
 3. Register a `ContractFixture` for it with `register_fixture` in `backend/tests/provider_fakes.py`. `test_provider_contract.py` then checks every registered provider against the same rules (descriptor shape, validation, display hooks never raising, scope handling). Add vendor tests next to `test_provider_runpod.py` using `FakeHTTP`.
 4. Point a preset at it with `"provider": {"id": "<name>"}`.
@@ -144,7 +151,7 @@ when the user has switched re-ranking off; the login is the one start of the re-
 own tab and the query dialog's prompt.
 
 For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
-its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/services/mpcdf_sessions.py` keeps one manager per Zotero
+its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/plugins/mpcdf/sessions.py` keeps one manager per Zotero
 user in `<data_path>/system/mpcdf/<user-hash>/`; the session token and the user's Hugging Face
 token (every vLLM job there needs one) are sealed with `AUTOINDEX_SECRET`, and the password and
 one-time code are never stored. The library's supervisor renews a job shortly before it ends while

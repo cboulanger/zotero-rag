@@ -36,6 +36,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
+from backend.providers.types import LoginRateLimited as _LoginRateLimited
+from backend.providers.types import SessionsUnavailable as _SessionsUnavailable
+
 logger = logging.getLogger(__name__)
 
 SESSION_FILE = "session.sealed.json"
@@ -44,11 +47,11 @@ LOGIN_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 600.0
 
 
-class SessionsUnavailable(RuntimeError):
+class SessionsUnavailable(_SessionsUnavailable):
     """MPCDF sessions cannot be used here (library missing, or the server is not running)."""
 
 
-class LoginRateLimited(RuntimeError):
+class LoginRateLimited(_LoginRateLimited):
     """Too many login attempts for one user in a short time."""
 
 

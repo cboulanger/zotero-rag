@@ -16,10 +16,10 @@ from backend.services.llm import (
     LLMEndpointUnavailableError,
     LLMRateLimitExhaustedError,
     LLMService,
-    LocalLLMService,
     RemoteLLMService,
     create_llm_service,
 )
+from backend.plugins.local_torch.llm import LocalLLMService
 from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, ProviderConfig, RAGConfig
 from backend.services.usage_meters import recorder

@@ -1370,8 +1370,7 @@ def _session_provider(request: Request, side: str) -> Tuple[Provider, Optional[i
 
 def _session_error(exc: Exception) -> HTTPException:
     """Map a session failure to an HTTP error without echoing anything the user typed."""
-    from backend.providers.types import ProvisionError
-    from backend.services.mpcdf_sessions import LoginRateLimited, SessionsUnavailable
+    from backend.providers.types import LoginRateLimited, ProvisionError, SessionLoginFailed, SessionsUnavailable
 
     name = type(exc).__name__
     if isinstance(exc, LoginRateLimited):
@@ -1380,7 +1379,8 @@ def _session_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=503, detail="This server cannot store sessions (AUTOINDEX_SECRET is not set).")
     if isinstance(exc, (SessionsUnavailable, ProvisionError)):
         return HTTPException(status_code=503, detail=str(exc))
-    if name == "LoginFailed":
+    # ``LoginFailed`` is how provider client libraries (e.g. mpcdf-llm) name a rejected login.
+    if isinstance(exc, SessionLoginFailed) or name == "LoginFailed":
         return HTTPException(status_code=401, detail="The login was rejected; check the username, password and one-time code.")
     logger.warning("Session call failed: %s", name)
     return HTTPException(status_code=502, detail=f"The provider could not be reached ({name}).")

@@ -6,12 +6,12 @@ from unittest.mock import AsyncMock
 from backend.config.presets import EmbeddingConfig
 from backend.services.embeddings import (
     DEFAULT_QUERY_INSTRUCTIONS,
-    LocalEmbeddingService,
     MockEmbeddingService,
     RemoteEmbeddingService,
     format_query_for_embedding,
     resolve_query_instruction,
 )
+from backend.plugins.local_torch.embedding import LocalEmbeddingService
 
 E5 = "multilingual-e5-large-instruct"
 E5_INSTRUCTION = DEFAULT_QUERY_INSTRUCTIONS[E5]

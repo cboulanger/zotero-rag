@@ -76,8 +76,10 @@ institutionally hosted models, or open-weight models on endpoints that the
 plugin provisions for you on **Hugging Face Inference Endpoints** or
 **RunPod** (create, pause and resume them from the Configure preset dialog, with live
 readiness and quota meters). Each user can use their own account and keys, or
-an administrator can provide shared ones. See [Presets](docs/presets.md) and
-[Providers](docs/providers.md).
+an administrator can provide shared ones. Each provider and local inference
+engine is a backend plugin that can be added or removed without changing core.
+See [Presets](docs/presets.md), [Providers](docs/providers.md) and
+[Backend plugins](docs/backend-plugins.md).
 
 ## Quick Start
 

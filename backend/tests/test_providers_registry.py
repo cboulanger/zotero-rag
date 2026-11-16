@@ -14,6 +14,7 @@ from backend.providers import (
     get_provider,
     get_providers,
     provider_config_error,
+    register_provider,
 )
 from backend.providers.base import Provider as BaseProvider
 
@@ -55,7 +56,7 @@ def setUpModule():
         supported_sides = frozenset({"llm"})
         key_scopes = frozenset({"user", "managed"})
 
-    DEMO = _DemoProvider
+    DEMO = register_provider(_DemoProvider)
 
 
 def tearDownModule():
@@ -73,19 +74,33 @@ class TestRegistry(unittest.TestCase):
         self.assertIs(PROVIDERS["generic"], BaseProvider)
         self.assertIs(GenericProvider, BaseProvider)
 
-    def test_subclass_registers_by_its_own_id_only(self):
+    def test_registration_needs_an_own_id(self):
         self.assertIs(PROVIDERS["demo-test-only"], DEMO)
 
-        class _NoOwnId(DEMO):  # inherits the id, must not re-register
+        class _NoOwnId(DEMO):  # inherits the id, must not replace the registered class
             pass
 
+        with self.assertRaises(ValueError):
+            register_provider(_NoOwnId)
         self.assertIs(PROVIDERS["demo-test-only"], DEMO)
 
-    def test_duplicate_id_is_rejected(self):
-        with self.assertRaises(ValueError):
+    def test_registration_is_idempotent(self):
+        self.assertIs(register_provider(DEMO), DEMO)
 
-            class _Dup(Provider):
-                id = "demo-test-only"
+    def test_duplicate_id_is_rejected(self):
+        class _Dup(Provider):
+            id = "demo-test-only"
+
+        with self.assertRaises(ValueError):
+            register_provider(_Dup)
+
+    def test_vendor_providers_come_from_plugins(self):
+        from backend.pluginhost import get_plugin_host
+
+        owners = {c.id: c.plugin_id for c in get_plugin_host().capabilities("inference.provider")}
+        self.assertEqual(owners["generic"], "core")
+        for pid in ("kisski", "mpcdf", "runpod", "huggingface", "google", "openai", "anthropic"):
+            self.assertEqual(owners[pid], pid)
 
 
 class TestGetProviders(unittest.TestCase):

@@ -41,7 +41,7 @@ class StandinApiTest(unittest.TestCase):
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)
         self.until = datetime.now(timezone.utc) + timedelta(hours=3)
-        patcher = patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None)
+        patcher = patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None)
         patcher.start()
         self.addCleanup(patcher.stop)
 

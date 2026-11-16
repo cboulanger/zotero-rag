@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from backend.providers import Credentials, ProviderConfigError, ProvisionContext, ProvisionError, ProvisionTimeout, get_providers
-from backend.providers import huggingface as hf
+from backend.plugins.huggingface import provider as hf
 from backend.tests.provider_fakes import FakeHTTP, FakeResponse
 from backend.tests.test_providers_registry import make_preset
 

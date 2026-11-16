@@ -75,7 +75,7 @@ class FindStandinsTest(unittest.TestCase):
 
     def find(self, current: str, side: str, provider: str, keys=None, default="remote-kisski"):
         exhausted = [ExhaustedSide(side, provider, self.when)]
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None):
             return find_standins(self.settings(default), self.preset(current), exhausted, keys or {}, 1)
 
     def names(self, standins):
@@ -121,7 +121,7 @@ class FindStandinsTest(unittest.TestCase):
         exhausted = [ExhaustedSide("embedding", "kisski", self.when)]
         for status, expected in ((None, ["login:mpcdf"]), ({"state": "login_required"}, ["login:mpcdf"]),
                                  ({"state": "ok"}, []), ({"state": "active"}, [])):
-            with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=status):
+            with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=status):
                 result = find_standins(self.settings(), self.preset("remote-kisski"), exhausted, {}, 1)
             by = {s.preset: s for s in result}
             self.assertEqual([n for n in by["remote-mpcdf"].needs if n.startswith("login:")], expected, status)
@@ -146,7 +146,7 @@ class QuotaDetailTest(unittest.TestCase):
 
     def detail(self, available_at):
         preset = get_preset("remote-kisski", self.data_path)
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None):
             return quota_error_detail(
                 self.settings, preset, "embedding", available_at, "raw", {}, 1, now=self.now)
 
@@ -164,7 +164,7 @@ class QuotaDetailTest(unittest.TestCase):
 
     def test_message_calls_the_llm_side_answering(self):
         preset = get_preset("remote-kisski", self.data_path)
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None):
             detail = quota_error_detail(self.settings, preset, "llm",
                                         datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc), "raw", {}, 1, now=self.now)
         self.assertEqual(detail["message"], "KISSKI's answering (LLM) quota is used up until 23:00 UTC.")
@@ -186,7 +186,7 @@ class StandinOfferTest(unittest.TestCase):
 
     def offer(self, exhausted):
         preset = get_preset("remote-kisski", self.data_path)
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None):
             return preset, standin_offer(self.settings, preset, exhausted, {}, 1, now=self.now)
 
     def test_two_exhausted_sides_list_standins_valid_for_both(self):
@@ -194,7 +194,7 @@ class StandinOfferTest(unittest.TestCase):
         exhausted = [ExhaustedSide("embedding", "kisski", at), ExhaustedSide("llm", "kisski", at)]
         preset, offer = self.offer(exhausted)
         self.assertTrue(offer["standins"])
-        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+        with patch("backend.plugins.mpcdf.provider.MpcdfProvider.session_status", return_value=None):
             expected = [s.to_dict() for s in find_standins(self.settings, preset, exhausted, {}, 1)]
         self.assertEqual(offer["standins"], expected)
         self.assertEqual(offer["code"], "quota_exhausted")

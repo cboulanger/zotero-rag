@@ -117,9 +117,16 @@ The backend is organized into a layered architecture with clear separation of co
 **Entry Point:** [backend/main.py](../backend/main.py)
 
 - FastAPI application setup
-- Zotero-key identity middleware on every `/api/*` request except `/`, `/health`, `/api/version` — see [Security & Privacy](#security--privacy)
+- Zotero-key identity middleware on every `/api/*` request except `/api/version` (routes outside `/api/` are unauthenticated) — see [Security & Privacy](#security--privacy)
 - Configurable CORS (`ALLOWED_ORIGINS` env var)
-- Lifespan context management
+- Lifespan context management, including loading the [backend plugins](backend-plugins.md) and running their startup and shutdown hooks
+
+**Service routes:** [backend/api/status.py](../backend/api/status.py), unauthenticated, for the server's default preset
+
+- `GET /status` - Version, preset, retrieval settings, vector store counts, auto-indexing state, and the loaded backend plugins with the capabilities they registered (`plugins`, `capabilities`, `plugin_dirs`)
+- `GET /sides` - Each side of the default preset (embedding, answering, optional re-ranking): model, endpoint URL, side-specific settings and `served_by` (the capability and plugin serving it, and whether it is available)
+- `GET /health` - Reachability of the Kreuzberg and Qdrant sidecars
+- `GET /` - Service name, version and links to the routes above
 
 **Configuration API:** [backend/api/config.py](../backend/api/config.py)
 
@@ -202,11 +209,11 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 - Device-aware (CPU, CUDA, MPS)
 - OpenAI-compatible API support
 
-**Providers:** [backend/providers/](../backend/providers/) — see [Providers](providers.md)
+**Providers:** [backend/providers/](../backend/providers/) (interface and generic provider) and the vendor plugins in [backend/plugins/](../backend/plugins/) — see [Providers](providers.md) and [Backend plugins](backend-plugins.md)
 
 - One small class per vendor owns everything vendor-specific about a side: credential scope, endpoint URL, usage meters, health, error classification, provisioning and pausing
 - The core never branches on a vendor name; services and API routes ask the side's provider
-- Supporting services: `endpoint_cache.py` (key-derived endpoint and paused-state caches), `provisioning.py` (background provision/pause jobs), `usage_meters.py` (quota bars), `effective_preset.py` (the per-request preset), `mpcdf_sessions.py` (per-user login sessions)
+- Supporting services: `endpoint_cache.py` (key-derived endpoint and paused-state caches), `provisioning.py` (background provision/pause jobs), `usage_meters.py` (quota bars), `effective_preset.py` (the per-request preset); per-user MPCDF login sessions live in the `mpcdf` plugin (`backend/plugins/mpcdf/sessions.py`)
 
 **Query Orchestration:** [backend/services/query_orchestrator.py](../backend/services/query_orchestrator.py) — see [Query Routing & Agent Architecture](query-routing.md)
 
@@ -275,6 +282,7 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
   - Local presets (`apple-silicon-32gb`, `high-memory`, `cpu-only`), remote presets (`remote-openai`, `remote-kisski`, `remote-gemini`, `kisski-gemini`, `kisski-docling`, `remote-mpcdf`, `kisski-rerank-mpcdf`, `cloud-server-kisski`, `windows-test`) and self-provisioned ones (`runpod`, `huggingface`); see [Presets](presets.md)
   - Model configurations, retrieval and re-ranking parameters, memory budgets, quantization settings, and stand-in fields (`cost`, `standin`, `standin_priority`)
 - **Providers:** [backend/providers/](../backend/providers/), [Providers](providers.md)
+- **Backend plugins:** [backend/plugins/](../backend/plugins/), [backend/pluginhost/](../backend/pluginhost/), [Backend plugins](backend-plugins.md)
   - Validated per preset by `get_providers(preset)`; an invalid preset is not listed and cannot be activated
 - **Settings:** [backend/config/settings.py](../backend/config/settings.py)
   - Environment variable configuration (paths, deployment and access settings, `MODEL_PRESET`)
@@ -439,7 +447,7 @@ sequenceDiagram
 
 ### Presets and Providers
 
-A preset is a JSON file that describes the sides of the pipeline (embedding model, LLM, and optionally an extraction service and a re-ranker), the retrieval parameters and, for each remote side, a **provider** (a small Python class under `backend/providers/`). The full catalogue, the per-preset requirements and the schema are in [Presets](presets.md); the provider contract is in [Providers](providers.md).
+A preset is a JSON file that describes the sides of the pipeline (embedding model, LLM, and optionally an extraction service and a re-ranker), the retrieval parameters and, for each remote side, a **provider** (a small Python class contributed by a [backend plugin](backend-plugins.md)). The full catalogue, the per-preset requirements and the schema are in [Presets](presets.md); the provider contract is in [Providers](providers.md).
 
 **Credential scopes** (per side): `user` (each user's own key, sent with their requests), `managed` (an admin's key, the institution pays, admins operate the endpoint) and `shared` (set once by an admin for everyone). Keys are never read from the environment; users enter theirs in the plugin and admins set shared ones through `POST /api/config/remote-fields`. Secrets are encrypted at rest by `backend/services/secret_store.py`.
 

@@ -208,9 +208,9 @@ class AutoIndexApiTest(unittest.TestCase):
         self.assertEqual(r.status_code, 409)
         self.assertIn("already running", r.json()["detail"])
 
-    def test_root_reports_scheduler_subobject(self):
+    def test_status_reports_scheduler_subobject(self):
         get_settings().autoindex_interval_minutes = 30
-        r = self.client.get("/")
+        r = self.client.get("/status")
         scheduler = r.json()["cron_indexing"]["scheduler"]
         self.assertTrue(scheduler["active"])
         self.assertEqual(scheduler["interval_minutes"], 30)
