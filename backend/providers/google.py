@@ -24,6 +24,7 @@ _EXCLUDED_KEYWORDS = ("tts", "image", "live", "audio", "embedding")
 
 class GoogleProvider(Provider):
     id = "google"
+    cost = "paid"
     label = "Google Gemini"
     key_scopes = frozenset({"user", "managed"})
     default_scope = "user"

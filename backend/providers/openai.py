@@ -13,6 +13,7 @@ from backend.providers.base import Provider
 
 class OpenAIProvider(Provider):
     id = "openai"
+    cost = "paid"
     label = "OpenAI"
     key_scopes = frozenset({"user", "managed"})
     default_scope = "user"

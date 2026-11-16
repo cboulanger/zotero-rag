@@ -12,6 +12,7 @@ from backend.providers.base import Provider
 
 class AnthropicProvider(Provider):
     id = "anthropic"
+    cost = "paid"
     label = "Anthropic"
     supported_sides = frozenset({"llm"})
     key_scopes = frozenset({"user", "managed"})

@@ -58,6 +58,7 @@ class KisskiProvider(Provider):
     """KISSKI Chat-AI (SAIA): per-user key, live model list, hour/day/month quotas."""
 
     id = "kisski"
+    cost = "free"
     label = "KISSKI"
     Options = KisskiOptions
     key_scopes = frozenset({"user"})
