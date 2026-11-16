@@ -125,6 +125,28 @@ class EngineTranslationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._vectors(engine), [[0.1], [0.2], [0.1], [0.2]])
         self.assertEqual(self.translation_calls, 1)
 
+    async def test_reranker_scores_the_union_of_both_searches_tops(self):
+        """With two searches the rescored pool is each list's top pool_size, not the first
+        pool_size of the fused list (which holds only about half of each list's depth)."""
+        from unittest.mock import patch
+
+        from backend.tests.test_rerank import FakeScorer, _preset, _result
+
+        scored = []
+
+        class Recording(FakeScorer):
+            async def score(self, question, texts):
+                scored.append((question, sorted(texts)))
+                return await super().score(question, texts)
+
+        engine = self._engine(preset=_preset({"model_name": "x", "pool_size": 2, "pool_reference_chunks": None}))
+        de = [_result(k, k.lower(), s) for k, s in (("A", 0.9), ("B", 0.8), ("C", 0.7))]
+        en = [_result(k, k.lower(), s) for k, s in (("D", 0.9), ("E", 0.8), ("F", 0.7))]
+        engine.vector_store.search = Mock(side_effect=lambda **kw: (en if kw["query_vector"] == [0.2] else de)[: kw["limit"]])
+        with patch("backend.services.rerank.build_reranker", return_value=Recording()):
+            await engine.query(DE, ["1"], top_k=1, search_candidate_pool_size=3, diversity_floor=1)
+        self.assertEqual(scored, [(DE, ["a", "b", "d", "e"]), (EN, ["a", "b", "d", "e"])])
+
     async def test_reranker_sees_both_versions(self):
         from unittest.mock import patch
 

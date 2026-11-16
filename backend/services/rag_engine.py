@@ -768,13 +768,37 @@ class RAGEngine:
             logger.warning(f"Embedding the translated question failed ({type(exc).__name__}: {exc})")
             return None, None
 
-    async def _search_variants(self, vectors: list[list[float]], **search_kwargs) -> list:
-        """One vector search per question version; several lists are fused by reciprocal rank."""
+    async def _search_variants(
+        self, vectors: list[list[float]], head_size: int = 0, **search_kwargs
+    ) -> tuple[list, int]:
+        """One vector search per question version; returns ``(results, rerank_head)``.
+
+        Several lists are fused by reciprocal rank. The re-ranker then has to see each
+        list's own top ``head_size`` (the re-ranking pool), not just the first
+        ``head_size`` of the fused list, which interleaves the lists and so holds only
+        about half of each one's depth: a passage at rank 204 of the question's own
+        search would otherwise never be rescored (spot check, 2.15M-chunk library).
+        The union of those tops is moved to the front, in fused order, and its size is
+        returned as the pool to rescore. With one list (or no re-ranking) the results
+        are unchanged and ``head_size`` is returned as is.
+        """
         lists = [
             await asyncio.to_thread(self.vector_store.search, query_vector=vector, **search_kwargs)
             for vector in vectors
         ]
-        return lists[0] if len(lists) == 1 else fuse_ranked_lists(lists)
+        if len(lists) == 1:
+            return lists[0], head_size
+        fused = fuse_ranked_lists(lists)
+        if head_size <= 0:
+            return fused, head_size
+        keep = {
+            r.chunk.metadata.chunk_id
+            for results in lists
+            for r in sorted(results, key=lambda r: r.score, reverse=True)[:head_size]
+        }
+        head = [r for r in fused if r.chunk.metadata.chunk_id in keep]
+        tail = [r for r in fused if r.chunk.metadata.chunk_id not in keep]
+        return head + tail, len(head)
 
     async def _search_with_sub_queries(
         self, question: str, results: list, search_kwargs: dict
@@ -905,8 +929,9 @@ class RAGEngine:
         )
         active_filters = filters if filters and not filters.is_empty() else None
         fetch_vectors = self._use_embedding_mmr() or self._near_dup_threshold() > 0
-        raw_results = await self._search_variants(
+        raw_results, rerank_head = await self._search_variants(
             search_vectors,
+            head_size=rerank_pool_size,
             limit=candidate_pool_size,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
@@ -933,7 +958,7 @@ class RAGEngine:
         rerank_cache: dict[str, float] = {}
         rerank_outcomes: list[RerankOutcome] = []
         raw_results = await self._prepare_pool(
-            question, raw_results, rerank_cache, rerank_outcomes, rerank_pool_size, extra_questions
+            question, raw_results, rerank_cache, rerank_outcomes, rerank_head, extra_questions
         )
 
         capped_pool = _dedup_and_cap_chunks_per_document(
@@ -976,8 +1001,9 @@ class RAGEngine:
                     f"Retrieval escalation triggered ({reason}); "
                     f"escalating to top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size})"
                 )
-                escalated_raw_results = await self._search_variants(
+                escalated_raw_results, escalated_head = await self._search_variants(
                     search_vectors,
+                    head_size=rerank_pool_size,
                     limit=escalated_candidate_pool_size,
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
@@ -986,7 +1012,7 @@ class RAGEngine:
                 )
                 if len(escalated_raw_results) > len(raw_results):
                     raw_results = await self._prepare_pool(
-                        question, escalated_raw_results, rerank_cache, rerank_outcomes, rerank_pool_size, extra_questions
+                        question, escalated_raw_results, rerank_cache, rerank_outcomes, escalated_head, extra_questions
                     )
                     capped_pool = _dedup_and_cap_chunks_per_document(
                         self._apply_near_dup_filter(raw_results), max_chunks_per_document
@@ -1061,8 +1087,9 @@ class RAGEngine:
                 f"Thin context coverage detected; escalating retrieval to "
                 f"top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size}) and regenerating once"
             )
-            retry_raw_results = await self._search_variants(
+            retry_raw_results, retry_head = await self._search_variants(
                 search_vectors,
+                head_size=rerank_pool_size,
                 limit=escalated_candidate_pool_size,
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
@@ -1072,7 +1099,7 @@ class RAGEngine:
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
                 retry_pool = await self._prepare_pool(
-                    question, retry_raw_results, rerank_cache, rerank_outcomes, rerank_pool_size, extra_questions
+                    question, retry_raw_results, rerank_cache, rerank_outcomes, retry_head, extra_questions
                 )
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
                     self._apply_near_dup_filter(retry_pool), max_chunks_per_document,
