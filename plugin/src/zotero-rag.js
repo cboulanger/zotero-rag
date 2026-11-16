@@ -775,10 +775,12 @@ class ZoteroRAGPlugin {
 	 * how long), then refresh the required-keys cache so the stand-in's keys are sent.
 	 * @param {string} presetName
 	 * @param {string|null} [provider] - The provider whose quota ran out, shown in the active-stand-in line
+	 * @param {boolean} [startEndpoints] - Also start the stand-in's endpoints (when nothing, such as a
+	 *   login, has to happen first). A start the server refuses or already runs is left to the dialogs.
 	 * @returns {Promise<void>}
 	 * @throws {Error} With the server's message when it refuses (e.g. 409: no quota is exhausted any more)
 	 */
-	async useStandin(presetName, provider = null) {
+	async useStandin(presetName, provider = null, startEndpoints = false) {
 		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
 			method: 'PUT',
 			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -791,6 +793,14 @@ class ZoteroRAGPlugin {
 		this._setStandinPref(presetName);
 		this.standinProvider = provider;
 		await this.fetchRequiredApiKeys();
+		if (startEndpoints) {
+			try {
+				const started = await fetch(`${this.backendURL}/api/config/provision`, { method: 'POST', headers: this.getAuthHeaders() });
+				if (!started.ok) this.log(`Starting the endpoints of ${presetName}: HTTP ${started.status}`);
+			} catch (e) {
+				this.log(`Could not start the endpoints of ${presetName}: ${e}`);
+			}
+		}
 		this._notifyStandinChanged();
 	}
 

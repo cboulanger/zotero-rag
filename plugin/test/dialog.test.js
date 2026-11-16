@@ -1331,7 +1331,10 @@ function standinRetrySetup(useStandin, opts = {}) {
 	const statuses = [];
 	const self = Object.assign(Object.create(D), {
 		plugin: {
-			useStandin: async (/** @type {string} */ p, /** @type {string} */ provider) => { steps.push(`use ${p} ${provider}`); await useStandin(p); },
+			useStandin: async (/** @type {string} */ p, /** @type {string} */ provider, /** @type {boolean} */ start) => {
+				steps.push(`use ${p} ${provider}${start ? ' and start' : ''}`);
+				await useStandin(p);
+			},
 			openPresetDialog: () => { steps.push('configure'); },
 		},
 		_standinRetry: { question: 'What is Zotero?', libraryIds: ['u1'], options: { minScore: 0.3, topK: 10, llmModel: 'old-model', enableRouting: true }, followUp: !!opts.followUp },
@@ -1516,4 +1519,11 @@ test('checkPipelineOnOpen: an offer already holding a pending retry is not repla
 	t.self._standinRetry = { question: 'q', libraryIds: [1], options: {}, followUp: null };
 	assert.strictEqual(await t.self.checkPipelineOnOpen(), true);
 	assert.strictEqual(t.offered.length, 0);
+});
+
+test('a stand-in whose needs are all met starts its endpoints as it is switched to', async () => {
+	const { self, steps } = standinRetrySetup(async () => {}, { storedKeys: ['HF_TOKEN'] });
+	self._standinOffer = { ...QUOTA_DETAIL, standins: [{ preset: 'huggingface', cost: 'paid', label: 'HF', needs: ['key:HF_TOKEN'] }] };
+	await self.useStandinAndRetry('huggingface');
+	assert.strictEqual(steps[0], 'use huggingface kisski and start');
 });

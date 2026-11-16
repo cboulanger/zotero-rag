@@ -105,6 +105,12 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertTrue(body["busy"])
         self.assertFalse(next(a for a in side["actions"] if a["id"] == "start")["enabled"])
 
+    def test_a_running_job_drops_the_advice_on_how_to_start_it(self):
+        provisioning.mark_running(["llm"], provisioning.user_slot(5))
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="unreachable"))
+        texts = [m["text"] for m in self._side(body, "llm")["messages"]]
+        self.assertFalse([t for t in texts if "RunPod serverless endpoint" in t], texts)
+
     SHARED_PRESET = {
         "version": 2,
         "description": "Admin-shared gateway (test)",

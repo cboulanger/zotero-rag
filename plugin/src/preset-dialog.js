@@ -91,7 +91,7 @@ var ZoteroRAGPresetDialogWindow = {
 			onPresetChanged: () => plugin.notifyPresetChanged('preset-dialog'),
 			fetchStandinOffer: () => plugin.fetchStandinOffer(),
 			// Throws the server's message on a refusal (409), which the controller shows.
-			useStandin: (preset, provider) => plugin.useStandin(preset, provider),
+			useStandin: (preset, provider, startEndpoints) => plugin.useStandin(preset, provider, startEndpoints),
 			paint: (view, local) => D.paint(document, refs, view, local, {
 				onTab: (side) => controller.selectTab(side),
 				onToggleLog: (side) => controller.toggleLog(side),

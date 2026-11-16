@@ -1192,8 +1192,11 @@ var ZoteroRAGDialog = {
 		if (!this.plugin) return;
 		const retry = this._standinRetry;
 		const offer = this._standinOffer;
+		const choice = offer ? (offer.standins || []).find((c) => c.preset === presetName) : undefined;
+		// Nothing to do first (keys it needs are stored): start its endpoints with the switch.
+		const ready = !!choice && choice.needs.every((n) => n.startsWith('key:') && this.hasStoredKey(n.slice(4)));
 		try {
-			await this.plugin.useStandin(presetName, offer ? offer.provider : null);
+			await this.plugin.useStandin(presetName, offer ? offer.provider : null, ready);
 		} catch (error) {
 			this.showStatus(this.errorText(error), 'error');
 			return;
@@ -1205,7 +1208,6 @@ var ZoteroRAGDialog = {
 			const { llmModel: _old, ...rest } = this.queryOptions;
 			this.queryOptions = rest;
 		}
-		const choice = offer ? (offer.standins || []).find((c) => c.preset === presetName) : undefined;
 		const missingKey = !!choice && choice.needs.some((n) => n.startsWith('key:') && !this.hasStoredKey(n.slice(4)));
 		const pipelineBlocked = await this.checkPipelineOnOpen();
 		if (missingKey) this.plugin.openPresetDialog(window); // asks for the key

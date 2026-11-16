@@ -87,7 +87,7 @@
  *
  * @typedef {{preset: string, cost: string, label: string, needs: string[]}} StandinOption
  * @typedef {{provider: string, message: string, standins: StandinOption[]}} StandinOffer - GET /api/config/standins `offer` (fields used here)
- * @typedef {{side: string, provider: string, choices: Array<{preset: string, text: string}>}} StandinList - the offer shown on a side
+ * @typedef {{side: string, provider: string, choices: Array<{preset: string, text: string, ready?: boolean}>}} StandinList - the offer shown on a side
  *
  * @typedef {Object} LocalState - what the dialog keeps between refreshes
  * @property {string} tab
@@ -782,7 +782,7 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
  *   onKeysChanged?: (fields: UiField[]) => Promise<void>,
  *   onPresetChanged?: () => void,
  *   fetchStandinOffer?: () => Promise<StandinOffer|null>,
- *   useStandin?: (preset: string, provider: string) => Promise<void>,
+ *   useStandin?: (preset: string, provider: string, startEndpoints: boolean) => Promise<void>,
  *   paint: (view: PresetView, local: any) => void,
  *   sleep?: (ms: number) => Promise<void>,
  *   pollMs?: number,
@@ -870,6 +870,8 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		try {
 			const result = await deps.post(request.path, body);
 			if (result.ok) return '';
+			// Starting what is already starting is what was asked for: no failure to report.
+			if (result.status === 409 && request.path === '/api/config/provision') return '';
 			// A one-time credential the provider refused is not worth keeping.
 			if (result.status === 401 || result.status === 403) for (const env of Object.keys(keys)) deps.sessionKeys.forget(env);
 			return result.data && result.data.detail ? String(result.data.detail) : `HTTP ${result.status}`;
@@ -910,7 +912,11 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		const hasKey = (/** @type {string} */ name) => !!deps.prefs.get(D.SECRET_PREFIX + name);
 		state.local.standins = {
 			side, provider: offer.provider,
-			choices: offer.standins.map((c) => ({ preset: c.preset, text: D.describeStandin(c, hasKey) })),
+			choices: offer.standins.map((c) => ({
+				preset: c.preset, text: D.describeStandin(c, hasKey),
+				// Nothing to do first (keys it needs are stored): its endpoints can start right away.
+				ready: c.needs.every((n) => n.startsWith('key:') && hasKey(n.slice(4))),
+			})),
 		};
 		note(scope, 'info', 'Choose a stand-in to use until the quota resets.');
 		return offer;
@@ -927,13 +933,15 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		const scope = `side:${offer.side}`;
 		note(scope, 'info', `Switching to ${preset}…`);
 		try {
-			await deps.useStandin(preset, offer.provider);
+			const choice = offer.choices.find((c) => c.preset === preset);
+			await deps.useStandin(preset, offer.provider, !!choice && !!choice.ready);
 		} catch (e) {
 			note(scope, 'error', e && typeof (/** @type {any} */ (e)).message === 'string' ? /** @type {any} */ (e).message : String(e));
 			return;
 		}
 		state.local.standins = null;
 		note(scope, 'info', '');
+		note('header', 'info', ''); // the used-up quota is no longer the caller's concern
 		await poll();
 	};
 

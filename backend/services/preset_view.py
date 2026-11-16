@@ -160,7 +160,8 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
     view.provider = SideProvider(id=provider.id, label=provider.label)
     view.account = account
     view.facts = provider.side_facts()
-    view.messages = provider.side_messages(health)
+    # The provider's advice says how to get the side going; while a job does that, it is noise.
+    view.messages = [] if job_status in ("running", "pending") else provider.side_messages(health)
     view.actions = provider.side_actions(health, job_status, operable)
     view.log = _job_log(inputs.job, side)
 

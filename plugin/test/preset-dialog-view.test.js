@@ -418,7 +418,7 @@ function standinSetup({ offer, useStandin }) {
 		views: [kisski, mpcdf],
 		extra: {
 			fetchStandinOffer: async () => { fetches++; return offer; },
-			useStandin: async (preset, provider) => { used.push([preset, provider]); if (useStandin) await useStandin(preset); },
+			useStandin: async (preset, provider, start) => { used.push([preset, provider, start]); if (useStandin) await useStandin(preset); },
 		},
 	});
 	return { ...t, used, fetches: () => fetches };
@@ -436,8 +436,8 @@ test('the standin action fetches the offer and lists the choices without posting
 	const offer = controller.state.local.standins;
 	assert.strictEqual(offer.side, 'embedding');
 	assert.deepStrictEqual(JSON.parse(JSON.stringify(offer.choices)), [
-		{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login' },
-		{ preset: 'runpod', text: 'runpod (paid): RunPod; ready' },
+		{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login', ready: false },
+		{ preset: 'runpod', text: 'runpod (paid): RunPod; ready', ready: true },
 	]);
 });
 
@@ -454,7 +454,8 @@ test('Use switches to the stand-in and refreshes the view, which then shows the 
 	await controller.refresh();
 	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
 	await controller.useStandin('remote-mpcdf');
-	assert.deepStrictEqual(used, [['remote-mpcdf', 'kisski']]);
+	// remote-mpcdf needs a login here, so its endpoints are not started yet.
+	assert.deepStrictEqual(used, [['remote-mpcdf', 'kisski', false]]);
 	assert.ok(!controller.state.local.standins);
 	assert.strictEqual(controller.state.view.preset.name, 'remote-mpcdf');
 });
@@ -537,4 +538,23 @@ test('Save of an account card stays disabled until a value is typed', () => {
 	input.value = 'new-key';
 	input.listeners.input.forEach((fn) => fn({ target: input }));
 	assert.strictEqual(save.disabled, false);
+});
+
+test('Use on a ready stand-in starts its endpoints and clears the quota note in the header', async () => {
+	const { controller, used, painted, prefs } = standinSetup({ offer: OFFER });
+	prefs.set('extensions.zotero-rag.serviceApiKey.RUNPOD_API_KEY', 'k'); // its only need is met
+	await controller.refresh();
+	assert.ok(painted.at(-1).notes.header);
+	await controller.useStandin('runpod');
+	assert.deepStrictEqual(used, [['runpod', 'kisski', true]]);
+	assert.ok(!painted.at(-1).notes.header, 'the note about the used-up quota is gone');
+});
+
+test('starting an endpoint whose job already runs is not reported as a failure', async () => {
+	const v = view([side('llm', { state: 'down', actions: [start('llm')] })]);
+	const { controller, painted } = setup({ views: [v], postReply: { ok: false, status: 409, data: { detail: 'A job for this endpoint is already running.' } } });
+	await controller.refresh();
+	await controller.runAction('llm', v.sides[0].actions[0]);
+	const notes = painted.map((p) => p.notes['side:llm']).filter(Boolean);
+	assert.ok(!notes.some((n) => n.level === 'error'), JSON.stringify(notes));
 });

@@ -2114,7 +2114,7 @@ function standinPlugin(routes) {
 		Libraries: { userLibraryID: 1 },
 		Prefs: { get: (/** @type {string} */ k) => prefs[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } },
 	};
-	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: { console: { logStringMessage() {} } } });
 	plugin.backendURL = 'http://localhost:8119';
 	return { plugin, calls, prefs };
 }
@@ -2147,6 +2147,19 @@ test('useStandin PUTs the preset name and refreshes required keys', async () => 
 	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['PUT /api/config/my-preset/standin', 'GET /api/required-keys']);
 	assert.deepStrictEqual(calls[0].body, { preset_name: 'runpod' });
 	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['RUNPOD_API_KEY']);
+});
+
+test('useStandin with startEndpoints starts the stand-in endpoints, and a refused start is not an error', async () => {
+	for (const status of [202, 409, 400]) {
+		const { plugin, calls } = standinPlugin({
+			'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+			'GET /api/required-keys': { status: 200, body: { keys: [] } },
+			'POST /api/config/provision': { status, body: { detail: 'x' } },
+		});
+		await plugin.useStandin('runpod', 'kisski', true);
+		assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`),
+			['PUT /api/config/my-preset/standin', 'GET /api/required-keys', 'POST /api/config/provision']);
+	}
 });
 
 test('useStandin throws the server message on a 409 and does not refresh keys', async () => {
