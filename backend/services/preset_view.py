@@ -162,6 +162,8 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
     view.log = _job_log(inputs.job, side)
 
     probe = inputs.probes.get(side)
+    if probe is not None and getattr(probe, "model", None):  # the model actually tested
+        view.facts = [UiFact(label="Model", value=probe.model) if f.label == "Model" else f for f in view.facts]
     if job_status in ("running", "pending"):
         view.state = "starting"
         view.summary = "Starting: " + (view.log[-1] if view.log else "job running")

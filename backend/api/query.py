@@ -180,7 +180,15 @@ async def query_libraries(
                 status_code=400,
                 detail=f"Model '{query.llm_model}' not in preset model list: {preset.llm.model_names}"
             )
-        llm_service = make_llm_service(client_keys, model_name_override=query.llm_model or None)
+        llm_model = query.llm_model or None
+        if llm_model is None:
+            # No model named: the first one the caller's key can use (the provider's live
+            # list), since a key may have no access to the preset's static default.
+            from backend.api.config import _live_llm_models
+
+            live = await asyncio.to_thread(_live_llm_models, http_request, preset, require_key=True)
+            llm_model = live[0].id if live else None
+        llm_service = make_llm_service(client_keys, model_name_override=llm_model)
 
         # Use preset defaults if not specified in request
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k

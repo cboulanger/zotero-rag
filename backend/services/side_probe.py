@@ -35,9 +35,11 @@ class SideProbe:
     rate_limited: bool = False
     checked_at: float = 0.0
     meters: list[dict] = field(default_factory=list)
+    #: The model the request was sent to (answering side; None: the preset's default).
+    model: Optional[str] = None
 
 
-_cache: dict[tuple[str, Optional[str]], SideProbe] = {}
+_cache: dict[tuple[str, Optional[str], Optional[str]], SideProbe] = {}
 
 
 def reset() -> None:
@@ -45,13 +47,13 @@ def reset() -> None:
     _cache.clear()
 
 
-def _service(side: str, client_keys: dict[str, str]) -> tuple[Any, Optional[str]]:
+def _service(side: str, client_keys: dict[str, str], model: Optional[str] = None) -> tuple[Any, Optional[str]]:
     from backend.dependencies import make_embedding_service, make_llm_service
 
     if side == "embedding":
         service = make_embedding_service(client_keys)
         return service, getattr(service, "_fingerprint", None)
-    service = make_llm_service(client_keys)
+    service = make_llm_service(client_keys, model_name_override=model)
     resolve = getattr(service, "_resolve_api_key", None)
     return service, key_fingerprint(resolve()) if callable(resolve) else None
 
@@ -84,29 +86,35 @@ def _describe(exc: BaseException) -> tuple[str, bool]:
     return (f"HTTP {status}: {text}" if status else text), False
 
 
-async def probe_side(preset: Any, side: str, client_keys: dict[str, str], *, send: bool) -> SideProbe:
-    """The side's meters and, with ``send``, the outcome of a (cached) test request. Never raises."""
+async def probe_side(
+    preset: Any, side: str, client_keys: dict[str, str], *, send: bool, model: Optional[str] = None,
+) -> SideProbe:
+    """The side's meters and, with ``send``, the outcome of a (cached) test request. Never raises.
+
+    ``model`` picks the answering model to test (one the caller's key can use, from the
+    provider's live list); None tests the preset's default.
+    """
     try:
-        service, fingerprint = _service(side, client_keys)
+        service, fingerprint = _service(side, client_keys, model)
     except Exception as exc:  # a misconfigured side: report it, do not fail the view
         return SideProbe(ok=False if send else None, detail=_describe(exc)[0], checked_at=time.time())
 
-    result = SideProbe()
+    result = SideProbe(model=model)
     if send:
-        cached = _cache.get((side, fingerprint))
+        cached = _cache.get((side, fingerprint, model))
         now = time.time()
         if cached and now - cached.checked_at < (OK_TTL if cached.ok else FAIL_TTL):
             result = SideProbe(ok=cached.ok, detail=cached.detail, rate_limited=cached.rate_limited,
-                               checked_at=cached.checked_at)
+                               checked_at=cached.checked_at, model=model)
         else:
             try:
                 await asyncio.wait_for(_request(side, service), timeout=PROBE_TIMEOUT)
-                result = SideProbe(ok=True, checked_at=now)
+                result = SideProbe(ok=True, checked_at=now, model=model)
             except Exception as exc:
                 detail, limited = _describe(exc)
                 logger.info("Test request of the %s side failed: %s", side, detail)
-                result = SideProbe(ok=False, detail=detail, rate_limited=limited, checked_at=now)
-            _cache[(side, fingerprint)] = SideProbe(ok=result.ok, detail=result.detail,
+                result = SideProbe(ok=False, detail=detail, rate_limited=limited, checked_at=now, model=model)
+            _cache[(side, fingerprint, model)] = SideProbe(ok=result.ok, detail=result.detail,
                                                     rate_limited=result.rate_limited, checked_at=result.checked_at)
     if fingerprint is not None:  # without a key, latest() would return someone else's numbers
         headers, captured_at = recorder.latest(side, fingerprint)

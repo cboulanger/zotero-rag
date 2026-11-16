@@ -53,6 +53,16 @@ class SideProbeTest(unittest.TestCase):
         self.assertTrue(result.rate_limited)
         self.assertIn("21:00", result.detail)
 
+    def test_the_named_model_is_tested_and_cached_separately(self):
+        llm = _FakeLLM()
+        with patch.object(side_probe, "_service", return_value=(llm, "fp1")) as service:
+            first = asyncio.run(side_probe.probe_side(None, "llm", {}, send=True, model="gemma-4-31b-it"))
+            asyncio.run(side_probe.probe_side(None, "llm", {}, send=True, model="gemma-4-31b-it"))
+            asyncio.run(side_probe.probe_side(None, "llm", {}, send=True, model="qwen3-30b-a3b-instruct-2507"))
+        self.assertEqual(service.call_args_list[0].args[2], "gemma-4-31b-it")
+        self.assertEqual(first.model, "gemma-4-31b-it")
+        self.assertEqual(llm.calls, 2)  # one per model; the repeat came from the cache
+
     def test_meters_come_from_the_callers_own_key_only(self):
         recorder.record("llm", {"x-ratelimit-limit-requests": "10", "x-ratelimit-remaining-requests": "3"}, "other")
         with patch.object(side_probe, "meters_from_headers", side_effect=lambda p, s, h, **kw: [h] if h else []):

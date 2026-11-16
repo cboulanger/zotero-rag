@@ -1089,11 +1089,16 @@ async def get_preset_view(request: Request) -> PresetView:
 
     probes: Dict[str, Any] = {}
     availability: Dict[str, Optional[str]] = {}
+    # Test the answering model the caller's key can use (the provider's live list, as the
+    # query dialog's model menu offers), not the preset's static default, which a key may
+    # have no access to.
+    live = await asyncio.to_thread(_live_llm_models, request, preset, require_key=True) if "llm" in health else None
     for side in ("embedding", "llm"):
         if side not in health:
             continue
         probes[side] = await probe_side(preset, side, client_keys,
-                                        send=health[side] is None and _has_credentials(side))
+                                        send=health[side] is None and _has_credentials(side),
+                                        model=live[0].id if side == "llm" and live else None)
         availability[side] = await asyncio.to_thread(
             lambda s=side: providers[s].model_availability(_side_credentials(preset, s, providers[s], request)))
 

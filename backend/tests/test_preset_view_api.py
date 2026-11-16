@@ -266,6 +266,19 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual(side["state"], "down")
         self.assertIn("HTTP 401", side["summary"])
 
+    def test_the_test_request_uses_a_model_the_key_can_use(self):
+        # The preset's first model is not in the key's live list; the test and the tab use the live default.
+        from backend.providers.types import ModelInfo
+
+        live = [ModelInfo(id="gemma-4-31b-it", demand=0, availability="available")]
+        with patch("backend.api.config._live_llm_models", return_value=live):
+            body, mock = self._kisski(SideProbe(ok=True, model="gemma-4-31b-it"))
+        llm_calls = [c for c in mock.await_args_list if c.args[1] == "llm"]
+        self.assertEqual(llm_calls[0].kwargs["model"], "gemma-4-31b-it")
+        embedding_calls = [c for c in mock.await_args_list if c.args[1] == "embedding"]
+        self.assertIsNone(embedding_calls[0].kwargs["model"])
+        self.assertIn({"label": "Model", "value": "gemma-4-31b-it"}, self._side(body, "llm")["facts"])
+
     def test_no_test_request_while_the_key_is_missing(self):
         body, mock = self._kisski(SideProbe(), headers={})
         self.assertFalse(any(call.kwargs["send"] for call in mock.await_args_list))
