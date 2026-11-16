@@ -133,3 +133,80 @@ class FindStandinsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StoredStandinTest(unittest.TestCase):
+    """Storage and request-scoped resolution of a temporary stand-in."""
+
+    def setUp(self):
+        from backend.config.settings import get_settings, reset_settings
+        reset_settings()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(reset_settings)
+        self.settings = get_settings()
+        self.settings.data_path = Path(self.tmp.name)
+        ensure_default_presets(self.settings.data_path)
+        self.settings.model_preset = "remote-kisski"
+        self.dp = self.settings.data_path
+
+    @staticmethod
+    def _ident(user_id):
+        from backend.services.zotero_identity import ZoteroIdentity
+        return ZoteroIdentity(user_id=user_id, username=f"u{user_id}", targets=[f"users/{user_id}"])
+
+    @staticmethod
+    def _in(**kw):
+        from datetime import timedelta
+        return datetime.now(timezone.utc) + timedelta(**kw)
+
+    def test_active_standin_is_used(self):
+        from backend.services.effective_preset import get_user_preset
+        from backend.services.user_settings import set_preferred_preset, set_standin
+        set_preferred_preset(self.dp, 7, "kisski-rerank-mpcdf")
+        set_standin(self.dp, 7, "remote-mpcdf", self._in(hours=1), "kisski-rerank-mpcdf")
+        self.assertEqual(get_user_preset(self.settings, self._ident(7), allow_standin=True).name, "remote-mpcdf")
+        self.assertEqual(get_user_preset(self.settings, self._ident(7)).name, "kisski-rerank-mpcdf")
+
+    def test_expired_standin_is_dropped(self):
+        from backend.services.effective_preset import get_user_preset
+        from backend.services.user_settings import get_standin, set_preferred_preset, set_standin
+        set_preferred_preset(self.dp, 7, "kisski-rerank-mpcdf")
+        set_standin(self.dp, 7, "remote-mpcdf", self._in(seconds=-1), "kisski-rerank-mpcdf")
+        self.assertEqual(get_user_preset(self.settings, self._ident(7), allow_standin=True).name, "kisski-rerank-mpcdf")
+        self.assertIsNone(get_standin(self.dp, 7))
+
+    def test_incompatible_standin_is_ignored(self):
+        from backend.services.effective_preset import get_user_preset
+        from backend.services.user_settings import set_standin
+        set_standin(self.dp, 7, "remote-openai", self._in(hours=1), "remote-kisski")
+        self.assertIsNone(get_user_preset(self.settings, self._ident(7), allow_standin=True))
+
+    def test_loopback_standin(self):
+        from backend.services.effective_preset import get_user_preset
+        from backend.services.user_settings import get_standin, set_standin
+        set_standin(self.dp, None, "remote-mpcdf", self._in(hours=1), "remote-kisski")
+        self.assertEqual(get_standin(self.dp, None)["preset"], "remote-mpcdf")
+        self.assertEqual(get_user_preset(self.settings, None, allow_standin=True).name, "remote-mpcdf")
+        self.assertIsNone(get_user_preset(self.settings, None))
+
+    def test_clear_standin(self):
+        from backend.services.user_settings import clear_standin, get_standin, set_standin
+        set_standin(self.dp, 7, "remote-mpcdf", self._in(hours=1), "remote-kisski")
+        clear_standin(self.dp, 7)
+        self.assertIsNone(get_standin(self.dp, 7))
+
+    def test_standin_applies(self):
+        from backend.services.effective_preset import standin_applies
+        for p in ("/api/query", "/api/config", "/api/config/preset-view", "/api/required-keys"):
+            self.assertTrue(standin_applies(p), p)
+        for p in ("/api/index/library/1", "/api/index/document", "/api/autoindex/scheduler/run-now",
+                  "/api/configuration"):
+            self.assertFalse(standin_applies(p), p)
+
+    def test_resolver_ignores_standins(self):
+        from backend.services.effective_preset import get_effective_preset
+        from backend.services.user_settings import set_preferred_preset, set_standin
+        set_preferred_preset(self.dp, 7, "kisski-rerank-mpcdf")
+        set_standin(self.dp, 7, "remote-mpcdf", self._in(hours=1), "kisski-rerank-mpcdf")
+        self.assertEqual(get_effective_preset(self.settings, self._ident(7)).name, "kisski-rerank-mpcdf")

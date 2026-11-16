@@ -21,7 +21,7 @@ from typing import Iterator, Optional
 from backend.config import settings as settings_module
 from backend.config.presets import HardwarePreset, current_platform, get_preset
 from backend.providers import ProviderConfigError, get_providers
-from backend.services.user_settings import get_preferred_preset
+from backend.services.user_settings import get_preferred_preset, get_standin
 
 logger = logging.getLogger(__name__)
 
@@ -58,27 +58,53 @@ def is_compatible(default: HardwarePreset, candidate: HardwarePreset) -> bool:
     )
 
 
-def get_user_preset(settings, identity) -> Optional[HardwarePreset]:
-    """The user's own valid, compatible preset, or None when they run on the default."""
-    if identity is None:
-        return None
-    default = settings.get_default_preset()
-    chosen = get_preferred_preset(settings.data_path, identity.user_id)
-    if not chosen or chosen == default.name:
-        return None
+def standin_applies(path: str) -> bool:
+    """True for the request paths that may run on a stand-in preset.
+
+    Only queries and configuration reads; indexing, uploads and the auto-index
+    scheduler never use a stand-in (their vectors/records belong to the user's own preset).
+    """
+    return path in ("/api/query", "/api/config", "/api/required-keys") or path.startswith("/api/config/")
+
+
+def _usable(settings, default: HardwarePreset, name: str, who: str) -> Optional[HardwarePreset]:
+    """The named preset if it loads, has providers, fits this platform and is compatible; else None."""
     try:
-        candidate = get_preset(chosen, settings.data_path)
+        candidate = get_preset(name, settings.data_path)
         get_providers(candidate)
     except (ValueError, ProviderConfigError) as exc:
-        logger.warning("User %s's preset %r is unavailable (%s); using the default", identity.user_id, chosen, exc)
+        logger.warning("%s's preset %r is unavailable (%s); ignoring it", who, name, exc)
         return None
     if candidate.platform not in ("any", current_platform()):
         return None
     if not is_compatible(default, candidate):
-        logger.warning("User %s's preset %r is not compatible with the default %r; using the default",
-                       identity.user_id, chosen, default.name)
+        logger.warning("%s's preset %r is not compatible with the default %r; ignoring it", who, name, default.name)
         return None
     return candidate
+
+
+def get_user_preset(settings, identity, allow_standin: bool = False) -> Optional[HardwarePreset]:
+    """The caller's own valid, compatible preset, or None when they run on the default.
+
+    With ``allow_standin`` an active, usable stand-in takes precedence over the
+    own choice. A loopback caller (``identity`` None) has no own choice but may
+    have a stand-in.
+    """
+    default = settings.get_default_preset()
+    user_id = identity.user_id if identity is not None else None
+    who = "Loopback" if identity is None else f"User {user_id}"
+    if allow_standin:
+        standin = get_standin(settings.data_path, user_id)
+        if standin and standin["preset"] != default.name:
+            candidate = _usable(settings, default, standin["preset"], who)
+            if candidate is not None:
+                return candidate
+    if identity is None:
+        return None
+    chosen = get_preferred_preset(settings.data_path, identity.user_id)
+    if not chosen or chosen == default.name:
+        return None
+    return _usable(settings, default, chosen, who)
 
 
 def get_effective_preset(settings, identity) -> HardwarePreset:
