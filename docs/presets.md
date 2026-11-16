@@ -456,7 +456,7 @@ Two admin-only capabilities exist alongside `MODEL_PRESET` (which still requires
 
 ### Stand-in presets
 
-A preset can stand in for the caller's preset when a quota is exhausted if it is not the same preset, has not opted out with `standin: false`, runs on this platform, is compatible with the server default (fully remote, same embedding model, so the same vector store), and serves the exhausted side with a different provider (other sides may still use it). Offers are ordered free before paid, then by `standin_priority` (higher first), then by name. Each offer lists what it needs before it can answer: `login:<provider>` (no session), `key:<KEY_NAME>` (a personal key the server has not seen) or `start:<side>`.
+A preset can stand in for the caller's preset when a quota is exhausted if it is not the same preset, has not opted out with `standin: false`, runs on this platform, is compatible with the server default (fully remote, same embedding model, so the same vector store), and serves the exhausted side with a different provider (other sides may still use it). Offers are ordered free before paid, then by `standin_priority` (higher first), then by name. Each offer lists what it needs before it can answer: `login:<provider>` (no session) or `key:<KEY_NAME>` (a personal key the server has not seen). An endpoint that is not running is not listed: the query dialog's pipeline check notices it after the switch.
 
 `POST /api/query` offers stand-ins only when the quota's reset is at least 15 minutes away; shorter throttles keep the plain error. The server takes the exhausted side and the reset time from its own rate-limit state, never from the client.
 
