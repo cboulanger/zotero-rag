@@ -89,6 +89,7 @@ def endpoint_base_url(endpoint_id: str) -> str:
 
 class RunPodProvider(Provider):
     id = "runpod"
+    cost = "paid"
     label = "RunPod"
     Options = RunPodOptions
     #: Each user's own key only: RunPod's terms do not allow sharing an account.

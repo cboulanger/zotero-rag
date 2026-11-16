@@ -266,6 +266,20 @@ class HardwarePreset(BaseModel):
                     "preset) is hidden from listings shown to a client on any other "
                     "platform — see current_platform() and list_presets()'s platform= arg.",
     )
+    cost: Optional[Literal["free", "paid"]] = Field(
+        default=None,
+        description="Overrides the cost class derived from the providers (e.g. an institutional "
+                    "account that is free for its users); None derives it, see "
+                    "backend.services.standin.preset_cost.",
+    )
+    standin: bool = Field(
+        default=True,
+        description="False keeps this preset out of every stand-in offer (test or experimental presets).",
+    )
+    standin_priority: int = Field(
+        default=0,
+        description="Orders stand-in offers of the same cost class; higher comes first.",
+    )
 
 
 def current_platform() -> str:

@@ -12,10 +12,12 @@ components and are described here. Nothing in this module knows a vendor.
 probe results first (they need the request and blocking I/O) and passes them in.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from backend.providers.types import OPTIONAL_SIDES, Health, Meter, preset_sides, side_config
+from backend.services.standin import side_noun
 from backend.providers.ui import (
     AccountCard,
     PresetHeader,
@@ -24,6 +26,7 @@ from backend.providers.ui import (
     SideState,
     SideView,
     UiFact,
+    UiAction,
     UiField,
     UiMessage,
 )
@@ -173,7 +176,8 @@ def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideVi
     view.provider = SideProvider(id=provider.id, label=provider.label)
     view.account = account
     view.facts = provider.side_facts()
-    view.messages = provider.side_messages(health)
+    # The provider's advice says how to get the side going; while a job does that, it is noise.
+    view.messages = [] if job_status in ("running", "pending") else provider.side_messages(health)
     view.actions = provider.side_actions(health, job_status, operable)
     view.log = _job_log(inputs.job, side)
 
@@ -354,6 +358,8 @@ def _accounts(inputs: ViewInputs) -> list[AccountCard]:
         provider = providers[pid]
         descriptor = provider.describe()
         has_login = bool(descriptor.provisioning and descriptor.provisioning.login)
+        if not provider.supports_provisioning:
+            card.auto_start = False  # nothing to start: the button only saves
         session = inputs.sessions.get(pid) if has_login else None
         card.fields = provider.account_fields(card.fields, operable[pid], session)
         missing = [f for f in card.fields if f.storage in ("client_secret", "shared") and not f.optional and not f.is_set]
@@ -416,6 +422,14 @@ def build_preset_view(inputs: ViewInputs) -> PresetView:
                     action.enabled, action.reason = False, reason
             if view.state == "down":
                 view.messages.append(UiMessage(level="info", text=reason))
+        elif view.state == "down" and (probe := inputs.probes.get(view.side)) is not None and probe.rate_limited:
+            # The credentials are fine: the provider's quota is used up. Offer the way out.
+            match = re.search(r"until (\d{2}:\d{2}) UTC", probe.detail or "")
+            when = match.group(1) if match else ""
+            who = view.provider.label if view.provider else "The provider"
+            view.messages.append(UiMessage(
+                level="info", text=f"{who}'s {side_noun(view.side)} quota is used up" + (f" until {when} UTC." if when else ".")))
+            view.actions.append(UiAction(id="standin", label=f"Use a stand-in until {when} UTC" if when else "Use a stand-in"))
         elif view.account and view.state == "down" and not any(a.id in ("start", "retry") and a.enabled for a in view.actions):
             view.messages.append(UiMessage(level="info", text="Check the credentials in the account card below."))
 

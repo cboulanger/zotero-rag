@@ -105,6 +105,12 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertTrue(body["busy"])
         self.assertFalse(next(a for a in side["actions"] if a["id"] == "start")["enabled"])
 
+    def test_a_running_job_drops_the_advice_on_how_to_start_it(self):
+        provisioning.mark_running(["llm"], provisioning.user_slot(5))
+        body = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"}, health=Health(status="unreachable"))
+        texts = [m["text"] for m in self._side(body, "llm")["messages"]]
+        self.assertFalse([t for t in texts if "RunPod serverless endpoint" in t], texts)
+
     SHARED_PRESET = {
         "version": 2,
         "description": "Admin-shared gateway (test)",
@@ -306,6 +312,34 @@ class PresetViewApiTest(unittest.TestCase):
         body, _ = self._kisski(SideProbe(ok=True, meters=meters))
         self.assertEqual(self._side(body, "llm")["state"], "down")
         self.assertEqual(body["accounts"][0]["quota"]["level"], "error")
+
+    def _quota_view(self):
+        probe = SideProbe(ok=False, detail="quota exhausted until 23:00 UTC", rate_limited=True)
+        with patch("backend.services.side_probe.probe_side", new=AsyncMock(return_value=probe)), \
+             patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value={"state": "ok"}):
+            return self._get("kisski-rerank-mpcdf", headers={"X-Kisski-Api-Key": "k"})
+
+    def test_an_exhausted_quota_is_reported_with_a_standin_action(self):
+        side = self._side(self._quota_view(), "embedding")
+        self.assertEqual(side["state"], "down")
+        texts = [m["text"] for m in side["messages"]]
+        self.assertIn("KISSKI's embedding quota is used up until 23:00 UTC.", texts)
+        self.assertNotIn("Check the credentials in the account card below.", texts)
+        action = next(a for a in side["actions"] if a["id"] == "standin")
+        self.assertEqual((action["label"], action["enabled"]), ("Use a stand-in until 23:00 UTC", True))
+        self.assertIsNone(action["request"])
+
+    def test_an_exhausted_llm_quota_is_called_answering(self):
+        texts = [m["text"] for m in self._side(self._quota_view(), "llm")["messages"]]
+        self.assertIn("KISSKI's answering (LLM) quota is used up until 23:00 UTC.", texts)
+
+    def test_kisski_card_only_saves_and_others_keep_auto_start(self):
+        body = self._quota_view()
+        cards = {c["id"]: c for c in body["accounts"]}
+        self.assertFalse(cards["kisski"]["auto_start"])
+        self.assertFalse(cards["mpcdf"]["auto_start"])
+        runpod = self._get("runpod", headers={"X-Runpod-Api-Key": "rpa_x"})
+        self.assertTrue(runpod["accounts"][0]["auto_start"])
 
     def test_a_very_busy_model_is_reported(self):
         body, _ = self._kisski(SideProbe(ok=True), availability="very busy")

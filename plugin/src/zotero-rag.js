@@ -83,6 +83,34 @@
  * @property {boolean} [forceFreshRetrieval] - Ignore conversationHistory for this turn's routing
  */
 
+/**
+ * A preset that can stand in while a provider's quota is used up (POST /api/query 503).
+ * @typedef {Object} StandinChoice
+ * @property {string} preset - Preset name
+ * @property {'free'|'paid'|string} cost - What using it costs
+ * @property {string} label - Short description of the preset
+ * @property {string[]} needs - What must happen first: `login:<provider>`, `key:<KEY_NAME>`
+ */
+
+/**
+ * The structured detail of a `quota_exhausted` 503 from POST /api/query.
+ * @typedef {Object} QuotaExhaustedDetail
+ * @property {'quota_exhausted'} code
+ * @property {string} message - Human-readable message (reset time in UTC)
+ * @property {string} side - Exhausted side, e.g. `embedding` or `llm`
+ * @property {string} provider - Provider id
+ * @property {string} available_at - ISO datetime when the quota resets
+ * @property {StandinChoice[]} standins - Ranked stand-ins, in the server's order
+ */
+
+/**
+ * The caller's active stand-in as reported by GET /api/config.
+ * @typedef {Object} ActiveStandin
+ * @property {string} preset - The stand-in preset now answering queries
+ * @property {string} until - ISO datetime when it ends
+ * @property {string} replaces - The preset it replaces
+ */
+
 
 /**
  * @typedef {Object} BackendVersion
@@ -151,6 +179,23 @@ function errorDiag(err, includeDiagnostics) {
 	return { backendDiag: (err && err.diagnostics) ?? null, pluginDiag: (err && err.pluginDiag) ?? null };
 }
 
+/**
+ * Thrown by submitQuery when a provider's quota is used up for a while; `detail`
+ * lists the presets that can stand in until it resets.
+ */
+class QuotaExhaustedError extends Error {
+	/** @param {QuotaExhaustedDetail} detail */
+	constructor(detail) {
+		super(detail.message);
+		this.name = 'QuotaExhaustedError';
+		/** @type {QuotaExhaustedDetail} */
+		this.detail = detail;
+	}
+}
+
+/** Pref holding the stand-in preset the required-keys cache was last filled for. */
+const STANDIN_PREF = 'extensions.zotero-rag.activeStandin';
+
 /** Observer topic for cross-window preset-switch notifications. */
 const PRESET_CHANGED_TOPIC = 'zotero-rag:preset-changed';
 
@@ -182,6 +227,9 @@ class ZoteroRAGPlugin {
 
 		/** @type {Set<string>} */
 		this.activeQueries = new Set();
+
+		/** @type {string|null} Provider whose used-up quota the active stand-in covers (known once chosen here) */
+		this.standinProvider = null;
 
 		/** @type {number} */
 		this.maxConcurrentQueries = 5;
@@ -720,6 +768,144 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			this.log('Could not fetch required API keys: ' + e);
 		}
+	}
+
+	/**
+	 * Use `presetName` as a stand-in until the exhausted quota resets (the server decides
+	 * how long), then refresh the required-keys cache so the stand-in's keys are sent.
+	 * @param {string} presetName
+	 * @param {string|null} [provider] - The provider whose quota ran out, shown in the active-stand-in line
+	 * @param {boolean} [startEndpoints] - Also start the stand-in's endpoints (when nothing, such as a
+	 *   login, has to happen first). A start the server refuses or already runs is left to the dialogs.
+	 * @returns {Promise<void>}
+	 * @throws {Error} With the server's message when it refuses (e.g. 409: no quota is exhausted any more)
+	 */
+	async useStandin(presetName, provider = null, startEndpoints = false) {
+		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
+			method: 'PUT',
+			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ preset_name: presetName }),
+		});
+		if (!response.ok) {
+			const data = /** @type {any} */ (await response.json().catch(() => ({})));
+			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+		}
+		this._setStandinPref(presetName);
+		this.standinProvider = provider;
+		await this.fetchRequiredApiKeys();
+		if (startEndpoints) {
+			try {
+				const started = await fetch(`${this.backendURL}/api/config/provision`, { method: 'POST', headers: this.getAuthHeaders() });
+				if (!started.ok) this.log(`Starting the endpoints of ${presetName}: HTTP ${started.status}`);
+			} catch (e) {
+				this.log(`Could not start the endpoints of ${presetName}: ${e}`);
+			}
+		}
+		this._notifyStandinChanged();
+	}
+
+	/**
+	 * The stand-ins on offer for a used-up quota, asked for outside a failed query (the
+	 * dialogs ask when they find a side down). Null when nothing is on offer: no quota is
+	 * used up for long, a stand-in already answers, or the server cannot say.
+	 * @returns {Promise<QuotaExhaustedDetail|null>}
+	 */
+	async fetchStandinOffer() {
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/standins`, { headers: this.getAuthHeaders() });
+			if (!response.ok) return null;
+			const data = /** @type {{offer?: QuotaExhaustedDetail|null}} */ (await response.json());
+			return data && data.offer ? data.offer : null;
+		} catch (e) {
+			this.log('Could not fetch the stand-in offer: ' + e);
+			return null;
+		}
+	}
+
+	/**
+	 * End the active stand-in now, so the user's own preset (and keys) apply again.
+	 * @returns {Promise<void>}
+	 * @throws {Error} When the server refuses
+	 */
+	async endStandin() {
+		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
+			method: 'DELETE',
+			headers: this.getAuthHeaders(),
+		});
+		if (!response.ok) {
+			const data = /** @type {any} */ (await response.json().catch(() => ({})));
+			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+		}
+		this._setStandinPref('');
+		this.standinProvider = null;
+		await this.fetchRequiredApiKeys();
+		this._notifyStandinChanged();
+	}
+
+	/**
+	 * Bring the required-keys cache in step with the stand-in GET /api/config reports:
+	 * when it started or ended elsewhere (e.g. it expired on the server), refetch the keys.
+	 * Does nothing when `standin` is undefined (the server did not say).
+	 * @param {ActiveStandin|null|undefined} standin
+	 * @returns {Promise<boolean>} true when the cache was refreshed
+	 */
+	async syncStandinState(standin) {
+		if (standin === undefined) return false;
+		const current = standin ? standin.preset : '';
+		/** @type {string} */
+		let known = '';
+		try { known = String(Zotero.Prefs.get(STANDIN_PREF, true) || ''); } catch (_) {}
+		if (known === current) return false;
+		this._setStandinPref(current);
+		this.standinProvider = null;
+		await this.fetchRequiredApiKeys();
+		return true;
+	}
+
+	/**
+	 * The line shown while a stand-in answers queries (query dialog and Preferences).
+	 * @param {ActiveStandin} standin
+	 * @param {string|null} provider - The provider whose quota ran out, when known
+	 * @returns {string}
+	 */
+	describeActiveStandin(standin, provider) {
+		const until = new Date(standin.until);
+		const clock = `${String(until.getHours()).padStart(2, '0')}:${String(until.getMinutes()).padStart(2, '0')}`;
+		const reason = provider ? `${provider.toUpperCase()} quota` : `instead of ${standin.replaces}`;
+		return `Using ${standin.preset} until ${clock} (${reason})`;
+	}
+
+	/**
+	 * Show the active stand-in in `line`/`text`, or hide the line when there is none.
+	 * @param {HTMLElement|null} line - Container, shown as flex
+	 * @param {HTMLElement|null} text - Element that gets the description
+	 * @param {ActiveStandin|null} standin
+	 * @returns {void}
+	 */
+	renderStandinLine(line, text, standin) {
+		if (!line || !text) return;
+		if (!standin) {
+			line.style.display = 'none';
+			return;
+		}
+		text.textContent = this.describeActiveStandin(standin, this.standinProvider);
+		line.style.display = 'flex';
+	}
+
+	/**
+	 * @param {string} presetName - '' when no stand-in is active
+	 * @returns {void}
+	 */
+	_setStandinPref(presetName) {
+		try { Zotero.Prefs.set(STANDIN_PREF, presetName, true); } catch (_) {}
+	}
+
+	/**
+	 * Tell other open windows (Configure preset, Preferences) that the active preset changed.
+	 * @returns {void}
+	 */
+	_notifyStandinChanged() {
+		try { this.notifyPresetChanged('standin'); } catch (_) {}
 	}
 
 	/**
@@ -1492,6 +1678,9 @@ class ZoteroRAGPlugin {
 				const errorData = ct.includes('application/json')
 					? /** @type {any} */ (await response.json().catch(() => ({})))
 					: { detail: (await response.text().catch(() => '')).slice(0, 300) };
+				if (errorData.detail && typeof errorData.detail === 'object' && errorData.detail.code === 'quota_exhausted') {
+					throw new QuotaExhaustedError(/** @type {QuotaExhaustedDetail} */ (errorData.detail));
+				}
 				throw new Error(`POST /api/query: HTTP ${response.status}${errorData.detail ? ` — ${errorData.detail}` : ''}`);
 			}
 

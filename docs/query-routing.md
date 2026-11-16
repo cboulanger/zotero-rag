@@ -547,8 +547,24 @@ Also accepts five optional retrieval/answer-diversity tuning fields —
 
 | Status | Cause |
 | --- | --- |
+| `503` | A provider's quota is used up for at least 15 minutes (structured `quota_exhausted` detail, below) or another service is unavailable (string detail) |
 | `504` | The Qdrant search backend did not respond within its configured timeout (`VectorStoreTimeoutError`) |
 | `500` | Any other unhandled error |
+
+A quota that stays used up for at least 15 minutes (the `available_at` of the rate limit) is answered with `503` and a structured detail instead of a string:
+
+```json
+{"detail": {
+  "code": "quota_exhausted",
+  "message": "KISSKI's embedding quota is used up until 23:00 UTC.",
+  "side": "embedding", "provider": "kisski", "available_at": "2026-11-16T23:00:00Z",
+  "standins": [
+    {"preset": "remote-mpcdf", "cost": "free", "label": "...", "needs": ["login:mpcdf"]}
+  ]
+}}
+```
+
+`needs` is empty for a stand-in that is ready. The user can switch to one with `PUT /api/config/my-preset/standin`; see [Stand-in presets](presets.md#stand-in-presets). Other `503` responses keep a string detail.
 
 ### `POST /api/index/items/metadata`
 

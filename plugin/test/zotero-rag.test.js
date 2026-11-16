@@ -2104,3 +2104,169 @@ test('_dropBackendIndexed marks rows the server answered for as unindexed and ch
 	assert.strictEqual(kept.length, 449);
 	assert.ok(kept.every((/** @type {any} */ r) => r.serverIndexState === 'unindexed'));
 });
+
+// ── Stand-in presets ────────────────────────────────────────────────────────
+
+const QUOTA_DETAIL = {
+	code: 'quota_exhausted',
+	message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY'] },
+	],
+};
+
+/**
+ * A plugin whose fetch answers by "METHOD path" from `routes` and records each call.
+ * @param {Record<string, {status: number, body: any}>} routes
+ */
+function standinPlugin(routes) {
+	/** @type {Array<{method: string, path: string, body: any}>} */
+	const calls = [];
+	/** @type {Record<string, any>} */
+	const prefs = {};
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ opts = {}) => {
+		const method = opts.method || 'GET';
+		const p = url.replace('http://localhost:8119', '');
+		calls.push({ method, path: p, body: opts.body ? JSON.parse(opts.body) : undefined });
+		const r = routes[`${method} ${p}`] || { status: 404, body: { detail: 'Not Found' } };
+		return {
+			ok: r.status < 400, status: r.status,
+			headers: { get: () => 'application/json' },
+			json: async () => r.body,
+			text: async () => JSON.stringify(r.body),
+		};
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Prefs: { get: (/** @type {string} */ k) => prefs[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } },
+	};
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: { console: { logStringMessage() {} } } });
+	plugin.backendURL = 'http://localhost:8119';
+	return { plugin, calls, prefs };
+}
+
+test('submitQuery throws QuotaExhaustedError with the structured detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: QUOTA_DETAIL } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'QuotaExhaustedError');
+		assert.deepStrictEqual(err.detail, QUOTA_DETAIL);
+		assert.strictEqual(err.message, QUOTA_DETAIL.message);
+		return true;
+	});
+});
+
+test('submitQuery still throws a plain Error for a 503 with a string detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: 'Embedding service down' } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'Error');
+		assert.match(err.message, /HTTP 503 — Embedding service down/);
+		return true;
+	});
+});
+
+test('useStandin PUTs the preset name and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'RUNPOD_API_KEY', header_name: 'X-Runpod-Api-Key' }] } },
+	});
+	await plugin.useStandin('runpod');
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['PUT /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(calls[0].body, { preset_name: 'runpod' });
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['RUNPOD_API_KEY']);
+});
+
+test('useStandin with startEndpoints starts the stand-in endpoints, and a refused start is not an error', async () => {
+	for (const status of [202, 409, 400]) {
+		const { plugin, calls } = standinPlugin({
+			'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+			'GET /api/required-keys': { status: 200, body: { keys: [] } },
+			'POST /api/config/provision': { status, body: { detail: 'x' } },
+		});
+		await plugin.useStandin('runpod', 'kisski', true);
+		assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`),
+			['PUT /api/config/my-preset/standin', 'GET /api/required-keys', 'POST /api/config/provision']);
+	}
+});
+
+test('useStandin throws the server message on a 409 and does not refresh keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 409, body: { detail: 'No quota is exhausted any more.' } },
+	});
+	await assert.rejects(plugin.useStandin('runpod'), /No quota is exhausted any more\./);
+	assert.deepStrictEqual(calls.map((c) => c.method), ['PUT']);
+});
+
+test('endStandin DELETEs the stand-in and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'KISSKI_API_KEY', header_name: 'X-Kisski-Api-Key' }] } },
+	});
+	await plugin.endStandin();
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['DELETE /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['KISSKI_API_KEY']);
+});
+
+test('syncStandinState refreshes required keys only when the stand-in changed', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('runpod');
+	calls.length = 0;
+	assert.strictEqual(await plugin.syncStandinState({ preset: 'runpod', until: 'x', replaces: 'kisski' }), false);
+	assert.deepStrictEqual(calls, []);
+	// The stand-in expired on the server: the user's own keys must be sent again.
+	assert.strictEqual(await plugin.syncStandinState(null), true);
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['GET /api/required-keys']);
+	assert.strictEqual(await plugin.syncStandinState(undefined), false);
+});
+
+test('describeActiveStandin names the stand-in, its end and the exhausted provider when known', () => {
+	const { plugin } = standinPlugin({});
+	const standin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
+	const d = new Date(standin.until);
+	const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+	assert.strictEqual(plugin.describeActiveStandin(standin, 'kisski'), `Using remote-mpcdf until ${hhmm} (KISSKI quota)`);
+	assert.strictEqual(plugin.describeActiveStandin(standin, null), `Using remote-mpcdf until ${hhmm} (instead of kisski)`);
+});
+
+test('renderStandinLine (shared by the query dialog and Preferences) shows and hides the line', async () => {
+	const { fakeNode } = require('./fake-dom.js');
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	const line = fakeNode();
+	const text = fakeNode('span');
+	plugin.renderStandinLine(line, text, { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' });
+	assert.strictEqual(line.style.display, 'flex');
+	assert.match(text.textContent, /^Using remote-mpcdf until \d\d:\d\d \(KISSKI quota\)$/);
+	plugin.renderStandinLine(line, text, null);
+	assert.strictEqual(line.style.display, 'none');
+	plugin.renderStandinLine(null, null, null); // missing markup is ignored
+});
+
+test('endStandin forgets the exhausted provider', async () => {
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	assert.strictEqual(plugin.standinProvider, 'kisski');
+	await plugin.endStandin();
+	assert.strictEqual(plugin.standinProvider, null);
+});
+
+test('fetchStandinOffer returns the offer, null when there is none, and null when the server cannot say', async () => {
+	const withOffer = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: QUOTA_DETAIL } } });
+	assert.deepStrictEqual(await withOffer.plugin.fetchStandinOffer(), QUOTA_DETAIL);
+	assert.deepStrictEqual(withOffer.calls.map((c) => `${c.method} ${c.path}`), ['GET /api/config/standins']);
+	const none = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: null } } });
+	assert.strictEqual(await none.plugin.fetchStandinOffer(), null);
+	const old = standinPlugin({}); // 404: a backend without the endpoint
+	assert.strictEqual(await old.plugin.fetchStandinOffer(), null);
+});

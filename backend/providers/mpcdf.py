@@ -74,6 +74,7 @@ LOGIN = SessionLoginDescriptor(
 
 class MpcdfProvider(Provider):
     id = "mpcdf"
+    cost = "free"
     label = "MPCDF LLM Inference Service"
     key_scopes = frozenset({"user"})
     default_scope = "user"

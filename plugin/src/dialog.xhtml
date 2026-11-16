@@ -130,6 +130,10 @@
        which fills a fixed-height slot shared with the progress bar in input state),
        since the result state has no progress widget to share space with. */
     #result-status-section { flex-shrink: 0; margin-bottom: 10px; padding: 10px; background-color: #fff5f5; border: 1px solid #ffcccc; border-radius: 4px; box-sizing: border-box; }
+    .standin-offer { font-size: 12px; margin: 4px 0; padding: 8px; background-color: #fffbe6; border: 1px solid #f0d78c; border-radius: 4px; }
+    .standin-choice { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .standin-choice span { flex: 1; }
+    .standin-choice button { flex-shrink: 0; white-space: nowrap; }
   </style>
 </head>
 
@@ -221,6 +225,21 @@
         <button id="rerank-start-button" type="button" hidden="hidden" style="flex-shrink: 0; white-space: nowrap;">Start re-ranking</button>
       </div>
 
+      <!-- Shown while a stand-in preset answers queries (a provider's quota is used up) -->
+      <div id="standin-line" style="font-size: 12px; margin: 4px 0; display:none; align-items:center; gap:8px;">
+        <span id="standin-line-text" style="flex: 1;"></span>
+        <button id="standin-end-button" type="button" style="flex-shrink: 0; white-space: nowrap;">End now</button>
+      </div>
+
+      <!-- Offered in place of the error when a provider's quota is used up -->
+      <div id="standin-offer" class="standin-offer" style="display:none;">
+        <div id="standin-offer-text" style="margin-bottom: 6px;"></div>
+        <div id="standin-offer-list"></div>
+        <div style="text-align: right; margin-top: 6px;">
+          <button id="standin-offer-dismiss" type="button">Not now</button>
+        </div>
+      </div>
+
 
       <!-- Feedback container (fixed height) -->
       <div class="feedback-container">
@@ -277,6 +296,15 @@
       <div id="followup-loading" style="display: none; flex-shrink: 0; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 12px; color: #555;">
         <span class="progress-spinner"></span>
         <span>Processing query, please wait…</span>
+      </div>
+
+      <!-- Offered in place of a follow-up's error when a provider's quota is used up -->
+      <div id="result-standin-offer" class="standin-offer" style="display:none; flex-shrink: 0; margin-bottom: 10px;">
+        <div id="result-standin-offer-text" style="margin-bottom: 6px;"></div>
+        <div id="result-standin-offer-list"></div>
+        <div style="text-align: right; margin-top: 6px;">
+          <button id="result-standin-offer-dismiss" type="button">Not now</button>
+        </div>
       </div>
 
       <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/

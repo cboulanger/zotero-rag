@@ -157,11 +157,23 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const presetStatus = doc.getElementById('zotero-rag-preset-status');
 	const presetKeys = doc.getElementById('zotero-rag-preset-keys');
 	const configureButton = doc.getElementById('zotero-rag-configure-preset');
+	const standinLine = doc.getElementById('zotero-rag-standin-line');
+	const standinText = doc.getElementById('zotero-rag-standin-text');
+	const standinEnd = doc.getElementById('zotero-rag-standin-end');
 	/** What the preset control currently does: 'loopback' (changes the server default) or 'user'. */
 	let presetMode = 'user';
 	const setPresetStatus = (/** @type {string} */ text) => { if (presetStatus) presetStatus.textContent = text; };
 
 	if (configureButton) configureButton.addEventListener('click', () => this.openPresetDialog(_window));
+	if (standinEnd) standinEnd.addEventListener('click', async () => {
+		try {
+			await this.endStandin();
+		} catch (e) {
+			setPresetStatus(`Error: ${e instanceof Error ? e.message : e}`);
+			return;
+		}
+		await applyPresetSwitch();
+	});
 
 	/**
 	 * @param {HTMLSelectElement} select
@@ -203,6 +215,9 @@ ZoteroRAGPlugin.prototype.initPrefPane = function(_window) {
 	const refreshPresetState = async () => {
 		const [my, cfg] = await Promise.all([fetchJson('/api/config/my-preset'), fetchJson('/api/config')]);
 		if (!my || !cfg) return;
+		this.renderStandinLine(standinLine, standinText, cfg.standin || null);
+		// A stand-in that ended on the server (expired) means the user's own keys are needed again.
+		this.syncStandinState(cfg.standin).catch(() => {});
 		const view = Sections.buildPresetControls(my, cfg);
 		presetMode = view.mode;
 		if (presetLabel) presetLabel.textContent = view.label;

@@ -103,6 +103,7 @@ class HuggingFaceOptions(ProviderOptions):
 
 class HuggingFaceProvider(Provider):
     id = "huggingface"
+    cost = "paid"
     label = "Hugging Face"
     Options = HuggingFaceOptions
     key_scopes = frozenset({"user", "managed"})

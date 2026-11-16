@@ -85,6 +85,17 @@
  * @property {boolean} busy
  *
  * @typedef {{get: (env: string) => string, set: (env: string, value: string) => void, forget: (env: string) => void}} SessionKeys
+ *
+ * @typedef {{preset: string, cost: string, label: string, needs: string[]}} StandinOption
+ * @typedef {{provider: string, message: string, standins: StandinOption[]}} StandinOffer - GET /api/config/standins `offer` (fields used here)
+ * @typedef {{side: string, provider: string, choices: Array<{preset: string, text: string, ready?: boolean}>}} StandinList - the offer shown on a side
+ *
+ * @typedef {Object} LocalState - what the dialog keeps between refreshes
+ * @property {string} tab
+ * @property {Record<string, boolean>} logOpen
+ * @property {Record<string, string>} drafts
+ * @property {Record<string, {level: string, text: string}>} notes
+ * @property {StandinList|null} [standins]
  */
 
 var ZoteroRAGPresetDialog = {
@@ -228,6 +239,24 @@ var ZoteroRAGPresetDialog = {
 	},
 
 	/**
+	 * One stand-in of an offer as a line: preset, free/paid, label and what it still needs
+	 * (pure). A `key:<NAME>` need is dropped when the user has that key stored.
+	 * @param {StandinOption} choice
+	 * @param {(keyName: string) => boolean} hasKey
+	 * @returns {string}
+	 */
+	describeStandin(choice, hasKey) {
+		const needs = (choice.needs || [])
+			.filter((n) => !(n.startsWith('key:') && hasKey(n.slice(4))))
+			.map((n) => {
+				const cut = n.indexOf(':');
+				const [kind, what] = [n.slice(0, cut), n.slice(cut + 1)];
+				return kind === 'login' ? `${what.toUpperCase()} login` : what;
+			});
+		return `${choice.preset} (${choice.cost}): ${choice.label}; ${needs.length ? `needs ${needs.join(', ')}` : 'ready'}`;
+	},
+
+	/**
 	 * Bar and label of one quota meter (pure). Amber from 75 % used, red from 95 %.
 	 * @param {QuotaMeter} meter
 	 * @returns {{usedPct: number, level: 'ok'|'warn'|'error', text: string}|null}
@@ -355,12 +384,11 @@ ZoteroRAGPresetDialog._dot = function (el, state) {
  * @param {Document} doc
  * @param {Record<string, any>} refs
  * @param {PresetView} view
- * @param {{tab: string, logOpen: Record<string, boolean>, drafts: Record<string, string>,
- *   notes: Record<string, {level: string, text: string}>}} local
+ * @param {LocalState} local
  * @param {{onTab: (side: string) => void, onToggleLog: (side: string) => void,
  *   onAction: (action: UiAction) => void, onFieldChange: (field: UiField, value: string, scope: string) => void,
- *   onSaveAccount: (card: AccountCard) => void, onDefaultChange: (name: string) => void,
- *   onCardAction?: (card: AccountCard, action: UiAction) => void}} handlers
+ *   onSaveAccount: (card: AccountCard) => void, onDefaultChange: (name: string) => void, onDraft?: () => void,
+ *   onCardAction?: (card: AccountCard, action: UiAction) => void, onUseStandin?: (preset: string) => void}} handlers
  */
 ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
 	const el = this._el(doc);
@@ -425,7 +453,7 @@ ZoteroRAGPresetDialog.paint = function (doc, refs, view, local, handlers) {
  * @param {Document} doc
  * @param {any} panel
  * @param {SideView} side
- * @param {{logOpen: Record<string, boolean>, drafts: Record<string, string>, notes: Record<string, {level: string, text: string}>}} local
+ * @param {LocalState} local
  * @param {any} handlers
  * @param {(node: any) => boolean} hasFocus
  */
@@ -511,6 +539,22 @@ ZoteroRAGPresetDialog._paintSide = function (doc, panel, side, local, handlers, 
 		row.appendChild(why);
 	}
 	actionsBody.appendChild(row);
+	// The stand-ins the "standin" action fetched for this side, each with Use.
+	const offer = local.standins;
+	if (offer && offer.side === side.side) {
+		const list = el('div', 'pd-standins');
+		for (const choice of offer.choices) {
+			const item = el('div', 'pd-standin');
+			const label = el('span');
+			label.textContent = choice.text;
+			const use = el('button', 'pd-button');
+			use.textContent = 'Use';
+			use.addEventListener('click', () => { if (handlers.onUseStandin) handlers.onUseStandin(choice.preset); });
+			item.append(label, use);
+			list.appendChild(item);
+		}
+		actionsBody.appendChild(list);
+	}
 };
 
 /**
@@ -618,7 +662,10 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 			|| (field.default !== undefined && field.default !== null ? `Default: ${field.default}` : '')
 			|| (field.is_set ? 'Set; type to replace' : '');
 		if (field.pattern) control.title = `Expected format: ${field.pattern}`;
-		control.addEventListener('input', () => { local.drafts[draftKey] = control.value; });
+		control.addEventListener('input', () => {
+			local.drafts[draftKey] = control.value;
+			if (handlers.onDraft) handlers.onDraft();
+		});
 		// Side fields save on change; account fields wait for the card's Save button.
 		if (scope.startsWith('side:')) {
 			control.addEventListener('change', () => handlers.onFieldChange(field, control.value, scope));
@@ -643,6 +690,29 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 		row.appendChild(help);
 	}
 	return row;
+};
+
+/**
+ * The preset and each side's state as one comparable string.
+ * @param {PresetView} view
+ * @returns {string}
+ */
+ZoteroRAGPresetDialog.sideStates = function (view) {
+	return [view.preset.name, ...view.sides.map((s) => `${s.side}:${s.state}`)].join('|');
+};
+
+/**
+ * True when a value was typed into one of the card's savable fields (blanks do not count).
+ * @param {AccountCard} card
+ * @param {Record<string, string>} drafts
+ * @returns {boolean}
+ */
+ZoteroRAGPresetDialog.hasAccountInput = function (card, drafts) {
+	return card.fields.some((f) => {
+		if (f.editable === false || f.type === 'readonly' || f.storage === 'login') return false;
+		const draft = drafts[`account:${card.id}/${f.id}`];
+		return typeof draft === 'string' && draft.trim() !== '' && draft.trim() !== String(f.value ?? '');
+	});
 };
 
 /**
@@ -681,15 +751,21 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 		node.appendChild(quota);
 	}
 	const scope = `account:${card.id}`;
-	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, handlers));
+	/** @type {HTMLButtonElement|null} Enabled once a value is typed (see below). */
+	let save = null;
+	const updateSave = () => { if (save) save.disabled = !this.hasAccountInput(card, local.drafts); };
+	const fieldHandlers = { ...handlers, onDraft: updateSave };
+	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, fieldHandlers));
 	const note = local.notes[scope];
 	for (const message of note ? [note, ...card.messages] : card.messages) node.appendChild(this._message(el, message));
 	const row = el('div', 'pd-actions');
 	if (card.fields.some((f) => f.editable !== false && f.type !== 'readonly' && f.storage !== 'login')) {
-		const save = el('button', `pd-button${hasLogin ? '' : ' pd-primary'}`);
+		save = el('button', `pd-button${hasLogin ? '' : ' pd-primary'}`);
 		save.textContent = card.auto_start ? 'Save and start' : 'Save';
 		save.title = card.auto_start ? 'Save the entered values, then start the endpoints that use them' : '';
 		save.addEventListener('click', () => handlers.onSaveAccount(card));
+		// Nothing typed, nothing to save: an emptied key field must not clear a stored key.
+		updateSave();
 		row.appendChild(save);
 	}
 	for (const action of actions) {
@@ -717,6 +793,8 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
  *   sessionKeys: SessionKeys,
  *   onKeysChanged?: (fields: UiField[]) => Promise<void>,
  *   onPresetChanged?: () => void,
+ *   fetchStandinOffer?: () => Promise<StandinOffer|null>,
+ *   useStandin?: (preset: string, provider: string, startEndpoints: boolean) => Promise<void>,
  *   paint: (view: PresetView, local: any) => void,
  *   sleep?: (ms: number) => Promise<void>,
  *   pollMs?: number,
@@ -728,9 +806,12 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	const pollMs = deps.pollMs === undefined ? 5000 : deps.pollMs;
 	/** Refreshes while something is starting, after which polling stops (about 10 minutes). */
 	const MAX_POLLS = 120;
-	/** @type {{view: PresetView|null, local: {tab: string, logOpen: Record<string, boolean>, drafts: Record<string, string>, notes: Record<string, {level: string, text: string}>}}} */
-	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {} } };
+	/** @type {{view: PresetView|null, local: LocalState}} */
+	const state = { view: null, local: { tab: '', logOpen: {}, drafts: {}, notes: {}, standins: null } };
 	let polling = false;
+	// The stand-ins are offered by themselves once per dialog, the first time a side shows
+	// a used-up quota; afterwards only the side's button asks again.
+	let standinsOffered = false;
 
 	/** @type {PresetView} Shown until the backend has answered once. */
 	const EMPTY = {
@@ -759,9 +840,19 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			return false;
 		}
 		// Client-side settings live in this Zotero's preferences, not on the server.
+		const before = state.view ? D.sideStates(state.view) : null;
 		state.view = D.applyLocalState(view, deps.prefs.get);
+		// A side came up, went down or started: the query dialog follows at once.
+		if (before !== null && before !== D.sideStates(state.view) && deps.onPresetChanged) deps.onPresetChanged();
 		if (state.local.notes.header && state.local.notes.header.level === 'error') delete state.local.notes.header;
 		repaint();
+		const quotaSide = standinsOffered ? null : state.view.sides.find((s) => s.actions.some((a) => a.id === 'standin'));
+		if (quotaSide) {
+			standinsOffered = true;
+			state.local.tab = quotaSide.side;
+			const offer = await showStandins(quotaSide.side);
+			if (offer) note('header', 'info', `${offer.message} Choose a stand-in on the ${quotaSide.title} tab to use until then.`);
+		}
 		return true;
 	};
 
@@ -794,6 +885,8 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		try {
 			const result = await deps.post(request.path, body);
 			if (result.ok) return '';
+			// Starting what is already starting is what was asked for: no failure to report.
+			if (result.status === 409 && request.path === '/api/config/provision') return '';
 			// A one-time credential the provider refused is not worth keeping.
 			if (result.status === 401 || result.status === 403) for (const env of Object.keys(keys)) deps.sessionKeys.forget(env);
 			return result.data && result.data.detail ? String(result.data.detail) : `HTTP ${result.status}`;
@@ -808,10 +901,62 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	 * @param {UiAction} action
 	 */
 	const runAction = async (side, action) => {
+		if (action.id === 'standin') return showStandins(side);
 		if (!action.request) return;
 		note(`side:${side}`, 'info', `${action.label}…`);
 		const error = await send({ path: action.request.path, body: action.request.body, accounts: action.account ? [action.account] : [] });
 		note(`side:${side}`, error ? 'error' : 'info', error ? `${action.label} failed: ${error}` : '');
+		await poll();
+	};
+
+	/**
+	 * The "standin" action of a side down for a used-up quota: fetch the offer and list
+	 * its stand-ins on that side. The offer is gone when the quota resets soon.
+	 * @param {string} side
+	 * @returns {Promise<StandinOffer|null>} the offer listed, null when none is on offer
+	 */
+	const showStandins = async (side) => {
+		const scope = `side:${side}`;
+		note(scope, 'info', 'Looking for stand-ins…');
+		const offer = deps.fetchStandinOffer ? await deps.fetchStandinOffer().catch(() => null) : null;
+		if (!offer || !offer.standins || !offer.standins.length) {
+			state.local.standins = null;
+			note(scope, 'info', 'No stand-in is on offer right now.');
+			return null;
+		}
+		const hasKey = (/** @type {string} */ name) => !!deps.prefs.get(D.SECRET_PREFIX + name);
+		state.local.standins = {
+			side, provider: offer.provider,
+			choices: offer.standins.map((c) => ({
+				preset: c.preset, text: D.describeStandin(c, hasKey),
+				// Nothing to do first (keys it needs are stored): its endpoints can start right away.
+				ready: c.needs.every((n) => n.startsWith('key:') && hasKey(n.slice(4))),
+			})),
+		};
+		note(scope, 'info', 'Choose a stand-in to use until the quota resets.');
+		return offer;
+	};
+
+	/**
+	 * Use one of the listed stand-ins, then show it (the view follows the stand-in). A
+	 * refusal (e.g. the quota is no longer used up) is shown and nothing is switched.
+	 * @param {string} preset
+	 */
+	const useStandin = async (preset) => {
+		const offer = state.local.standins;
+		if (!offer || !deps.useStandin) return;
+		const scope = `side:${offer.side}`;
+		note(scope, 'info', `Switching to ${preset}…`);
+		try {
+			const choice = offer.choices.find((c) => c.preset === preset);
+			await deps.useStandin(preset, offer.provider, !!choice && !!choice.ready);
+		} catch (e) {
+			note(scope, 'error', e && typeof (/** @type {any} */ (e)).message === 'string' ? /** @type {any} */ (e).message : String(e));
+			return;
+		}
+		state.local.standins = null;
+		note(scope, 'info', '');
+		note('header', 'info', ''); // the used-up quota is no longer the caller's concern
 		await poll();
 	};
 
@@ -836,6 +981,17 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		}
 		note('header', errors.length ? 'error' : 'info', errors.length ? errors.join(' ') : '');
 		await poll();
+		// The job runs in the background: a side it failed on says so only in its own tab,
+		// which may not be the one shown. Name it here and show it.
+		const asked = new Set(requests.flatMap((r) => r.body.sides || []));
+		const failed = !errors.length && state.view
+			? state.view.sides.filter((s) => asked.has(s.side) && s.messages.some((m) => m.level === 'error' && m.text.startsWith('Last job failed')))
+			: [];
+		if (failed.length) {
+			const reason = /** @type {UiMessage} */ (failed[0].messages.find((m) => m.level === 'error' && m.text.startsWith('Last job failed')));
+			state.local.tab = failed[0].side;
+			note('header', 'error', `${kind === 'start' ? 'Starting' : 'Pausing'} ${failed.map((s) => s.title).join(', ')} failed. ${reason.text}`);
+		}
 		return requests.length;
 	};
 
@@ -980,7 +1136,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** @param {string} side */
 	const toggleLog = (side) => { state.local.logOpen[side] = !state.local.logOpen[side]; repaint(); };
 
-	return { state, refresh, poll, runAction, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
+	return { state, refresh, poll, runAction, useStandin, runWorkflow, setSideField, saveAccount, runCardAction, setServerDefault, selectTab, toggleLog };
 };
 
 if (typeof module !== 'undefined') module.exports = { ZoteroRAGPresetDialog };

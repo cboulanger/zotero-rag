@@ -58,6 +58,11 @@
       </html:select>
       <html:button id="zotero-rag-configure-preset">Configure preset…</html:button>
     </html:div>
+    <!-- Shown while a stand-in preset answers queries (a provider's quota is used up) -->
+    <html:div id="zotero-rag-standin-line" style="display: none; align-items: center; gap: 8px;">
+      <html:span class="setting-description" id="zotero-rag-standin-text" style="flex: 1;"></html:span>
+      <html:button id="zotero-rag-standin-end">End now</html:button>
+    </html:div>
     <html:div class="setting-description" id="zotero-rag-preset-summary"></html:div>
     <html:div id="zotero-rag-preset-keys"></html:div>
     <html:div class="setting-description" id="zotero-rag-preset-status"></html:div>

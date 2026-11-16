@@ -65,6 +65,8 @@ class Provider:
     llm_api: ClassVar[Literal["openai", "anthropic"]] = "openai"
     #: Timeout (seconds) of the management-API client created by ``_http()``.
     http_timeout: ClassVar[float] = 30.0
+    #: Whether using this provider costs the user money. Unknown cost counts as ``paid``.
+    cost: ClassVar[Literal["free", "paid"]] = "paid"
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)

@@ -396,3 +396,194 @@ test('quota: the tab shows one bar per meter and the card the combined value', (
 	assert.match(panel, /"width":"80%"/);
 	assert.match(dump(refs.cards), /Quota: 80 % of the daily quota used/);
 });
+
+// -- stand-ins for an exhausted quota -------------------------------------------------
+
+const standinAction = () => ({ id: 'standin', label: 'Use a stand-in until 23:00', kind: 'normal', enabled: true, reason: '',
+	workflow: null, request: null, account: null, sends_login: false });
+const OFFER = {
+	code: 'quota_exhausted', message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY'] },
+	],
+};
+const quotaSide = () => side('embedding', { state: 'down', summary: 'Down',
+	messages: [{ level: 'info', text: OFFER.message }], actions: [standinAction()] });
+
+function standinSetup({ offer, useStandin }) {
+	const used = [];
+	let fetches = 0;
+	const kisski = view([quotaSide()]);
+	const mpcdf = view([side('embedding')], [card()], { preset: { name: 'remote-mpcdf', description: '', is_admin: false, default_options: [], default_preset: '' } });
+	const t = setup({
+		views: [kisski, mpcdf],
+		extra: {
+			fetchStandinOffer: async () => { fetches++; return offer; },
+			useStandin: async (preset, provider, start) => { used.push([preset, provider, start]); if (useStandin) await useStandin(preset); },
+		},
+	});
+	return { ...t, used, fetches: () => fetches };
+}
+
+test('the standin action fetches the offer and lists the choices without posting anything', async () => {
+	const { controller, posts, used, fetches, prefs } = standinSetup({ offer: OFFER });
+	prefs.set('extensions.zotero-rag.serviceApiKey.RUNPOD_API_KEY', 'k');
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	// Once when the dialog first found the used-up quota, once for the button.
+	assert.strictEqual(fetches(), 2);
+	assert.deepStrictEqual(posts, []);
+	assert.deepStrictEqual(used, []);
+	const offer = controller.state.local.standins;
+	assert.strictEqual(offer.side, 'embedding');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(offer.choices)), [
+		{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login', ready: false },
+		{ preset: 'runpod', text: 'runpod (paid): RunPod; ready', ready: true },
+	]);
+});
+
+test('the standin action with no offer says so plainly and lists nothing', async () => {
+	const { controller, painted } = standinSetup({ offer: null });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	assert.ok(!controller.state.local.standins);
+	assert.match(painted.at(-1).notes['side:embedding'].text, /No stand-in is on offer right now\./);
+});
+
+test('Use switches to the stand-in and refreshes the view, which then shows the stand-in preset', async () => {
+	const { controller, used } = standinSetup({ offer: OFFER });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	await controller.useStandin('remote-mpcdf');
+	// remote-mpcdf needs a login here, so its endpoints are not started yet.
+	assert.deepStrictEqual(used, [['remote-mpcdf', 'kisski', false]]);
+	assert.ok(!controller.state.local.standins);
+	assert.strictEqual(controller.state.view.preset.name, 'remote-mpcdf');
+});
+
+test('a refused stand-in (409) shows the server message and keeps the choices', async () => {
+	const { controller, painted } = standinSetup({ offer: OFFER, useStandin: async () => { throw new Error('No quota is exhausted any more.'); } });
+	await controller.refresh();
+	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
+	await controller.useStandin('remote-mpcdf');
+	assert.strictEqual(controller.state.view.preset.name, 'main');
+	assert.match(painted.at(-1).notes['side:embedding'].text, /No quota is exhausted any more\./);
+	assert.ok(controller.state.local.standins);
+});
+
+test('the side panel lists the stand-ins with a Use button each', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	const local = { tab: 'embedding', logOpen: {}, drafts: {}, notes: {}, standins: { side: 'embedding', provider: 'kisski', text: OFFER.message,
+		choices: [{ preset: 'remote-mpcdf', text: 'remote-mpcdf (free): MPCDF; needs MPCDF login' }, { preset: 'runpod', text: 'runpod (paid): RunPod; ready' }] } };
+	const picked = [];
+	D.paint(doc, refs, view([quotaSide()]), local,
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {}, onUseStandin: (p) => picked.push(p) });
+	const dump = JSON.stringify(refs.panel, (k, val) => (k === 'parentNode' || k === 'listeners' ? undefined : val));
+	assert.match(dump, /remote-mpcdf \(free\): MPCDF; needs MPCDF login/);
+	assert.match(dump, /runpod \(paid\): RunPod; ready/);
+	/** Find the buttons labelled Use. */
+	const uses = [];
+	const walk = (n) => { if (n && typeof n === 'object') { if (n.tag === 'button' && n.textContent === 'Use') uses.push(n); (n.children || []).forEach(walk); } };
+	walk(refs.panel);
+	assert.strictEqual(uses.length, 2);
+	uses[1].click();
+	assert.deepStrictEqual(picked, ['runpod']);
+});
+
+test('an account card of a provider that cannot start endpoints reads Save, not Save and start', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	D.paint(doc, refs, view([side('embedding')], [card({ auto_start: false })]), { tab: '', logOpen: {}, drafts: {}, notes: {} },
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
+	const dump = JSON.stringify(refs.cards, (k, val) => (k === 'parentNode' || k === 'listeners' ? undefined : val));
+	assert.match(dump, /"textContent":"Save"/);
+	assert.doesNotMatch(dump, /Save and start/);
+});
+
+test('opening the dialog on a used-up quota offers the stand-ins at once, on that side, only once', async () => {
+	const other = side('extraction');
+	const kisski = view([other, quotaSide()]);
+	let fetches = 0;
+	const { controller, painted } = setup({ views: [kisski, kisski], extra: { fetchStandinOffer: async () => { fetches++; return OFFER; } } });
+	await controller.refresh();
+	assert.strictEqual(fetches, 1);
+	assert.strictEqual(controller.state.local.tab, 'embedding');
+	assert.strictEqual(controller.state.local.standins.choices.length, 2);
+	assert.match(painted.at(-1).notes.header.text, /quota is used up until 23:00 UTC\. Choose a stand-in/);
+	// Later refreshes (polling, Check now) do not ask again or move the user to another tab.
+	controller.selectTab('extraction');
+	await controller.refresh();
+	assert.strictEqual(fetches, 1);
+	assert.strictEqual(controller.state.local.tab, 'extraction');
+});
+
+test('Save of an account card stays disabled until a value is typed', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+	D.paint(doc, refs, view([side('embedding')], [card({ auto_start: false })]), local,
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
+	/** @returns {any[]} every node below `node` */
+	const all = (node) => [node, ...(node.children || []).filter((c) => typeof c === 'object').flatMap(all)];
+	const nodes = all(refs.cards);
+	const save = nodes.find((n) => n.tag === 'button' && n.textContent === 'Save');
+	const input = nodes.find((n) => n.tag === 'input');
+	assert.strictEqual(save.disabled, true);
+	input.value = '   ';
+	input.listeners.input.forEach((fn) => fn({ target: input }));
+	assert.strictEqual(save.disabled, true, 'blanks are not a value');
+	input.value = 'new-key';
+	input.listeners.input.forEach((fn) => fn({ target: input }));
+	assert.strictEqual(save.disabled, false);
+});
+
+test('Use on a ready stand-in starts its endpoints and clears the quota note in the header', async () => {
+	const { controller, used, painted, prefs } = standinSetup({ offer: OFFER });
+	prefs.set('extensions.zotero-rag.serviceApiKey.RUNPOD_API_KEY', 'k'); // its only need is met
+	await controller.refresh();
+	assert.ok(painted.at(-1).notes.header);
+	await controller.useStandin('runpod');
+	assert.deepStrictEqual(used, [['runpod', 'kisski', true]]);
+	assert.ok(!painted.at(-1).notes.header, 'the note about the used-up quota is gone');
+});
+
+test('starting an endpoint whose job already runs is not reported as a failure', async () => {
+	const v = view([side('llm', { state: 'down', actions: [start('llm')] })]);
+	const { controller, painted } = setup({ views: [v], postReply: { ok: false, status: 409, data: { detail: 'A job for this endpoint is already running.' } } });
+	await controller.refresh();
+	await controller.runAction('llm', v.sides[0].actions[0]);
+	const notes = painted.map((p) => p.notes['side:llm']).filter(Boolean);
+	assert.ok(!notes.some((n) => n.level === 'error'), JSON.stringify(notes));
+});
+
+test('a side changing state is announced to the other windows, an unchanged refresh is not', async () => {
+	const starting = view([side('rerank', { state: 'starting' })]);
+	const ready = view([side('rerank')]);
+	let announced = 0;
+	const { controller } = setup({ views: [starting, starting, ready], extra: { onPresetChanged: () => { announced++; } } });
+	await controller.refresh();
+	await controller.refresh();
+	assert.strictEqual(announced, 0);
+	await controller.refresh();
+	assert.strictEqual(announced, 1);
+});
+
+test('Start all that ends with a failed side says so in the header and shows that side', async () => {
+	const down = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')] })]);
+	const failed = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')],
+		messages: [{ level: 'error', text: 'Last job failed: no capacity' }] })]);
+	const { controller, painted } = setup({ views: [down, failed] });
+	await controller.refresh();
+	controller.selectTab('extraction');
+	await controller.runWorkflow('start');
+	assert.strictEqual(controller.state.local.tab, 'llm');
+	const header = painted.at(-1).notes.header;
+	assert.strictEqual(header.level, 'error');
+	assert.match(header.text, /llm.*Last job failed: no capacity/);
+});

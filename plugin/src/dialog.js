@@ -58,6 +58,15 @@ var ZoteroRAGDialog = {
 	/** @type {Set<string>} */
 	selectedLibraries: new Set(),
 
+	/** @type {QuotaExhaustedDetail|null} The used-up quota whose stand-ins are on offer */
+	_standinOffer: null,
+
+	/** @type {{question: string, libraryIds: Array<string>, options: QueryOptions, followUp: boolean}|null} The question to send again after a stand-in is chosen */
+	_standinRetry: null,
+
+	/** @type {ActiveStandin|null} The stand-in GET /api/config last reported */
+	activeStandin: null,
+
 	/** @type {Map<string, EventSource>} */
 
 	/** @type {Map<string, LibraryIndexMetadata|null>} */
@@ -342,6 +351,13 @@ var ZoteroRAGDialog = {
 			} catch (_) {}
 			disableRerankingCheckbox.addEventListener('change', () => this.updateRerankNotice());
 		}
+		const standinDismiss = document.getElementById('standin-offer-dismiss');
+		if (standinDismiss) standinDismiss.addEventListener('click', () => this.hideStandinOffer());
+		const resultStandinDismiss = document.getElementById('result-standin-offer-dismiss');
+		if (resultStandinDismiss) resultStandinDismiss.addEventListener('click', () => this.hideStandinOffer());
+		const standinEnd = document.getElementById('standin-end-button');
+		if (standinEnd) standinEnd.addEventListener('click', () => this.endStandinNow());
+
 		const rerankStartButton = document.getElementById('rerank-start-button');
 		if (rerankStartButton) rerankStartButton.addEventListener('click', () => this.startRerankEndpoint());
 
@@ -383,6 +399,7 @@ var ZoteroRAGDialog = {
 		this.hideProgress();
 		this.loadPresetConfig();
 		this.checkPipelineOnOpen();
+		this.plugin.observePresetChanged(window, 'query-dialog', () => { this.refreshAfterPresetChange(); });
 		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
@@ -427,7 +444,10 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[]}} */ (await response.json());
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null}} */ (await response.json());
+				this.renderActiveStandin(config.standin || null);
+				// A stand-in that ended on the server (expired) means the user's own keys are needed again.
+				this.plugin.syncStandinState(config.standin).catch(() => {});
 				const defaultMinScore = config.default_min_score || 0.3;
 
 				// Update slider and display
@@ -968,16 +988,32 @@ var ZoteroRAGDialog = {
 	/**
 	 * When the dialog opens: load the preset's re-ranking info and the endpoint health, and
 	 * if a side of the pipeline needs the user (paused, or not running), say so and open the
-	 * Configure preset dialog, where it can be started or its account logged in to.
-	 * @returns {Promise<void>}
+	 * Configure preset dialog, where it can be started or its account logged in to. When the
+	 * server has stand-ins on offer for a used-up quota, offer those instead, even when the
+	 * health shows no problem.
+	 * @returns {Promise<boolean>} True when a problem keeps questions from being answered
 	 */
 	async checkPipelineOnOpen() {
-		await Promise.all([this.loadRerankInfo(), this.refreshEndpointHealth()]);
-		if (!this.plugin || this._healthClosed) return;
+		// The offer is asked for whatever the health says: a provider without a status check
+		// reports no health, yet its quota can be used up.
+		const [, , offer] = await Promise.all([
+			this.loadRerankInfo(),
+			this.refreshEndpointHealth(),
+			this.plugin ? this.plugin.fetchStandinOffer().catch(() => null) : Promise.resolve(null),
+		]);
+		if (!this.plugin || this._healthClosed) return false;
 		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
 		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
 		const { lines, rerankOnly } = this.describePipelineProblems(this.endpointHealth, rerankWanted);
-		if (!lines.length) return;
+		// A used-up quota: offer the stand-ins here, where the user meets it, instead of
+		// sending them to the Configure preset dialog. Nothing to send again yet.
+		if (offer && Array.isArray(offer.standins) && offer.standins.length) {
+			// A query submitted before this check finished may already show the offer with
+			// the question as its retry; replacing it would drop that retry.
+			if (!this._standinRetry) this.showStandinOffer(offer, null);
+			return lines.length ? !rerankOnly : true;
+		}
+		if (!lines.length) return false;
 		const [it, is] = lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
 		const consequence = rerankOnly
 			? 'Questions are answered without re-ranking until it is up.'
@@ -988,6 +1024,265 @@ var ZoteroRAGDialog = {
 			`The Configure preset dialog opens next, so you can start ${it} or log in.`,
 		].join('\n'));
 		this.plugin.openPresetDialog(window);
+		return !rerankOnly;
+	},
+
+	/**
+	 * The structured detail of a used-up quota, or null for any other error. Checked by
+	 * shape, not `instanceof`: the error is created in the main window's scope.
+	 * @param {unknown} error
+	 * @returns {QuotaExhaustedDetail|null}
+	 */
+	quotaDetailOf(error) {
+		const e = /** @type {any} */ (error);
+		return e && e.name === 'QuotaExhaustedError' && e.detail && e.detail.code === 'quota_exhausted'
+			? /** @type {QuotaExhaustedDetail} */ (e.detail) : null;
+	},
+
+	/**
+	 * The message of an error thrown in another window's scope (where `instanceof Error` fails).
+	 * @param {unknown} error
+	 * @returns {string}
+	 */
+	errorText(error) {
+		const e = /** @type {any} */ (error);
+		return e && typeof e.message === 'string' ? e.message : String(error);
+	},
+
+	/**
+	 * Local wall-clock time of a date as HH:MM.
+	 * @param {Date} date
+	 * @returns {string}
+	 */
+	formatClock(date) {
+		return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+	},
+
+	/**
+	 * What the offer of stand-ins says, and which it offers. Pure.
+	 * @param {QuotaExhaustedDetail} detail - The 503 detail of POST /api/query
+	 * @param {Date} now
+	 * @param {(keyName: string) => boolean} [hasKey] - Whether the user has this personal key stored;
+	 *   a `key:<NAME>` need is dropped when they do, since the plugin sends it after the switch
+	 * @returns {{text: string, choices: StandinChoice[]}} `choices` in the server's order
+	 */
+	describeStandinOffer(detail, now, hasKey = () => false) {
+		const until = new Date(detail.available_at);
+		const minutes = Math.max(0, Math.round((until.getTime() - now.getTime()) / 60000));
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		const wait = h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+		// The server's message names the provider and side ("<Provider>'s embedding quota is
+		// used up until 23:00 UTC."); keep its wording and give the time in the user's own zone.
+		const cut = (detail.message || '').indexOf(' until ');
+		const head = cut > 0
+			? detail.message.slice(0, cut)
+			: `${String(detail.provider || '').toUpperCase()}'s ${detail.side} quota is used up`;
+		const text = `${head} until ${this.formatClock(until)} (in ${wait}).`;
+		const choices = (detail.standins || []).map((c) => ({
+			preset: c.preset, label: c.label, cost: c.cost,
+			needs: (c.needs || []).filter((n) => !(n.startsWith('key:') && hasKey(n.slice(4)))),
+		}));
+		return { text, choices };
+	},
+
+	/**
+	 * What a stand-in needs before it can answer, in a few words.
+	 * @param {string[]} needs - `login:<provider>`, `key:<KEY_NAME>`
+	 * @returns {string}
+	 */
+	describeStandinNeeds(needs) {
+		if (!needs.length) return 'ready';
+		const parts = needs.map((n) => {
+			const [kind, what] = [n.slice(0, n.indexOf(':')), n.slice(n.indexOf(':') + 1)];
+			if (kind === 'login') return `${what.toUpperCase()} login`;
+			return what;
+		});
+		return `needs ${parts.join(', ')}`;
+	},
+
+	/**
+	 * Whether the user has stored this personal API key in the plugin.
+	 * @param {string} keyName
+	 * @returns {boolean}
+	 */
+	hasStoredKey(keyName) {
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			return !!Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${keyName}`, true);
+		} catch (_) {
+			return false;
+		}
+	},
+
+	/**
+	 * Offer the stand-ins of a used-up quota in place of the plain error.
+	 * @param {QuotaExhaustedDetail} detail
+	 * @param {string|null} question - The question to send again once a stand-in is chosen;
+	 *   null when offered as the dialog opens (nothing to send again)
+	 * @param {Array<string>} [libraryIds]
+	 * @param {QueryOptions} [options]
+	 * @param {boolean} [followUp] - A follow-up in the result view (sent again as a follow-up)
+	 * @returns {void}
+	 */
+	showStandinOffer(detail, question, libraryIds = [], options = /** @type {QueryOptions} */ ({}), followUp = false) {
+		this._standinOffer = detail;
+		this._standinRetry = question === null ? null : { question, libraryIds, options, followUp };
+		const { text, choices } = this.describeStandinOffer(detail, new Date(), (k) => this.hasStoredKey(k));
+		const id = this._standinOfferId();
+		const box = document.getElementById(id);
+		const textEl = document.getElementById(`${id}-text`);
+		const list = document.getElementById(`${id}-list`);
+		if (!box || !textEl || !list) {
+			this.showStatus(`Error: ${text}`, 'error');
+			return;
+		}
+		textEl.textContent = `${text} Use a stand-in until then?`;
+		/** @type {HTMLButtonElement[]} */
+		const buttons = [];
+		const rows = choices.map((choice) => {
+			const row = document.createElement('div');
+			row.className = 'standin-choice';
+			const label = document.createElement('span');
+			label.textContent = `${choice.preset} (${choice.cost}): ${choice.label}; ${this.describeStandinNeeds(choice.needs)}`;
+			const use = /** @type {HTMLButtonElement} */ (document.createElement('button'));
+			use.type = 'button';
+			use.textContent = 'Use';
+			use.addEventListener('click', async () => {
+				buttons.forEach((b) => { b.disabled = true; });
+				await this.useStandinAndRetry(choice.preset);
+				buttons.forEach((b) => { b.disabled = false; });
+			});
+			buttons.push(use);
+			row.append(label, use);
+			return row;
+		});
+		list.replaceChildren(...rows);
+		box.style.display = '';
+	},
+
+	/**
+	 * The offer's element id in the current view (input or result).
+	 * @returns {string}
+	 */
+	_standinOfferId() {
+		return this._resultStateActive ? 'result-standin-offer' : 'standin-offer';
+	},
+
+	/**
+	 * Hide the offer of stand-ins (Not now, or a new question) in both views.
+	 * @returns {void}
+	 */
+	hideStandinOffer() {
+		for (const id of ['standin-offer', 'result-standin-offer']) {
+			const box = document.getElementById(id);
+			if (box) box.style.display = 'none';
+		}
+	},
+
+	/**
+	 * Use a stand-in: store it, let the user log in to, start or enter a key for it where
+	 * needed, and send the question again only when nothing blocks it (without the model
+	 * choice: the old preset's model may not exist in the stand-in). Otherwise the question
+	 * stays in its input and the user submits it again once the stand-in is ready. A refusal
+	 * (e.g. the quota is no longer used up) is shown, not resent.
+	 * @param {string} presetName
+	 * @returns {Promise<void>}
+	 */
+	async useStandinAndRetry(presetName) {
+		if (!this.plugin) return;
+		const retry = this._standinRetry;
+		const offer = this._standinOffer;
+		const choice = offer ? (offer.standins || []).find((c) => c.preset === presetName) : undefined;
+		// Nothing to do first (keys it needs are stored): start its endpoints with the switch.
+		const ready = !!choice && choice.needs.every((n) => n.startsWith('key:') && this.hasStoredKey(n.slice(4)));
+		try {
+			await this.plugin.useStandin(presetName, offer ? offer.provider : null, ready);
+		} catch (error) {
+			this.showStatus(this.errorText(error), 'error');
+			return;
+		}
+		this._standinRetry = null;
+		this.hideStandinOffer();
+		// The old preset's model may not exist in the stand-in: follow-ups use its default too.
+		if (this.queryOptions) {
+			const { llmModel: _old, ...rest } = this.queryOptions;
+			this.queryOptions = rest;
+		}
+		const missingKey = !!choice && choice.needs.some((n) => n.startsWith('key:') && !this.hasStoredKey(n.slice(4)));
+		const pipelineBlocked = await this.checkPipelineOnOpen();
+		if (missingKey) this.plugin.openPresetDialog(window); // asks for the key
+		await this.loadPresetConfig();
+		if (!retry) return;
+		if (pipelineBlocked || missingKey) {
+			this.showStatus(`Submit again once ${presetName} is ready.`, 'error');
+			return;
+		}
+		if (retry.followUp) {
+			await this.submitFollowUp(); // the question is still in #followup-input
+			return;
+		}
+		const { llmModel: _model, ...options } = retry.options;
+		await this.sendQuestion(retry.question, retry.libraryIds, options);
+	},
+
+	/**
+	 * Show or hide the line naming the active stand-in.
+	 * @param {ActiveStandin|null} standin
+	 * @returns {void}
+	 */
+	renderActiveStandin(standin) {
+		this.activeStandin = standin;
+		if (!this.plugin) return;
+		this.plugin.renderStandinLine(document.getElementById('standin-line'), document.getElementById('standin-line-text'), standin);
+	},
+
+	/**
+	 * The answering model to send with a question, or undefined to let the server pick.
+	 * While a stand-in answers nothing is sent (its models are not the user's own and
+	 * would be rejected once it ends); a stand-in whose time has passed is ended first.
+	 * @returns {Promise<string|undefined>}
+	 */
+	async currentLlmModel() {
+		const standin = this.activeStandin;
+		if (standin && standin.until && Date.parse(standin.until) <= Date.now()) {
+			this.renderActiveStandin(null);
+			try { await this.loadPresetConfig(); } catch (_) {}
+		}
+		if (this.activeStandin) return undefined;
+		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
+		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
+		this.rememberModelChoice(llmModel);
+		return llmModel;
+	},
+
+	/**
+	 * Save the chosen answering model as the user's own choice, except while a stand-in
+	 * answers: its models may not exist in the user's own preset once it ends.
+	 * @param {string|undefined} llmModel
+	 * @returns {void}
+	 */
+	rememberModelChoice(llmModel) {
+		if (!llmModel || this.activeStandin) return;
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			Zotero.Prefs.set('extensions.zotero-rag.llmModel', llmModel, true);
+		} catch (_) {}
+	},
+
+	/**
+	 * End the active stand-in now (End now), so the user's own preset and keys apply again.
+	 * @returns {Promise<void>}
+	 */
+	async endStandinNow() {
+		if (!this.plugin) return;
+		try {
+			await this.plugin.endStandin();
+		} catch (error) {
+			this.showStatus(this.errorText(error), 'error');
+			return;
+		}
+		await this.refreshAfterPresetChange();
 	},
 
 	/**
@@ -1020,11 +1315,38 @@ var ZoteroRAGDialog = {
 		this.updateSubmitButtonState();
 		// Poll while either side is not ready, whichever action is selected: the user may switch.
 		const pending = this.describeEndpointBlock(this.endpointHealth, false);
-		// A re-ranker that is starting does not block, but is watched until it is up.
-		const rerankStarting = !!this.rerankInfo && this.endpointHealth?.rerank?.status === 'cold';
-		if ((pending || rerankStarting) && !this._healthClosed) {
-			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending ? pending.retryMs : 10000);
+		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
+		const delay = this.healthPollDelay(this.endpointHealth, pending, rerankWanted);
+		if (delay && !this._healthClosed) {
+			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), delay);
 		}
+	},
+
+	/**
+	 * How long until the endpoints are checked again, 0 for not at all (pure). A blocking side
+	 * sets the pace; a wanted re-ranker that is not ready does not block, but is watched so
+	 * the notice follows it (sooner while it starts), e.g. when it is started elsewhere.
+	 * @param {{rerank?: {status: string}|null}|null|undefined} health
+	 * @param {{retryMs: number}|null|undefined} pending - describeEndpointBlock's result
+	 * @param {boolean} rerankWanted
+	 * @returns {number}
+	 */
+	healthPollDelay(health, pending, rerankWanted) {
+		if (pending) return pending.retryMs;
+		const rerank = health ? health.rerank : null;
+		if (!rerankWanted || !rerank || rerank.status === 'ready') return 0;
+		return rerank.status === 'cold' ? 10000 : 20000;
+	},
+
+	/**
+	 * Another window changed the preset or its endpoints (a stand-in, a start, a login):
+	 * follow it now instead of at the next check.
+	 * @returns {Promise<void>}
+	 */
+	async refreshAfterPresetChange() {
+		if (!this.plugin || this._healthClosed) return;
+		await Promise.all([this.loadPresetConfig(), this.loadRerankInfo(), this.refreshEndpointHealth()]);
 	},
 
 	/**
@@ -1387,15 +1709,7 @@ var ZoteroRAGDialog = {
 		);
 		const topK = sourcesSlider ? parseInt(sourcesSlider.value, 10) : 10;
 
-		// Get selected LLM model (only when multiple options are available)
-		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
-		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
-		if (llmModel) {
-			try {
-				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-				Zotero.Prefs.set('extensions.zotero-rag.llmModel', llmModel, true);
-			} catch (_) {}
-		}
+		const llmModel = await this.currentLlmModel();
 
 		// Get disable-routing checkbox and persist it
 		const disableRoutingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-routing'));
@@ -1440,6 +1754,10 @@ var ZoteroRAGDialog = {
 		const advancedDetails = /** @type {HTMLDetailsElement|null} */ (document.querySelector('.advanced-options'));
 		if (advancedDetails) advancedDetails.open = false;
 		this.showProgress('Processing request...', 'Submitting query...');
+		this.hideStandinOffer();
+
+		/** @type {QueryOptions} */
+		const queryOptions = { minScore, topK, llmModel, enableRouting, enableReranking, includeTrace };
 
 		try {
 			const libraryIds = Array.from(this.selectedLibraries);
@@ -1465,50 +1783,91 @@ var ZoteroRAGDialog = {
 			// If cancelled mid-indexing, bail — abortOperation() already cleaned up.
 			if (!this.isOperationInProgress) return;
 
-			// Update progress for query phase
-			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
-
-			const result = await this.runQuery(question, libraryIds, {
-				minScore: minScore,
-				topK: topK,
-				llmModel: llmModel,
-				enableRouting: enableRouting,
-				enableReranking: enableReranking,
-				includeTrace: includeTrace
-			}, (pct, label, message) => this.updateProgress(pct, label, message));
-
-			this.libraryIds = libraryIds;
-			this.turns = [{ question, result }];
-			// includeTrace deliberately excluded: a debug trace is only ever read from
-			// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
-			// so forwarding it on every follow-up would just waste backend computation.
-			this.queryOptions = { minScore, topK, llmModel, enableRouting, enableReranking };
-
-			this.updateProgress(100, 'Complete', 'Rendering result...');
-			this.switchToResultState();
-			this.renderResultContent();
-			this.updateExportButtonVisibility();
+			await this.answerQuestion(question, libraryIds, queryOptions);
 		} catch (error) {
 			// If cancelled, abortOperation() already cleaned up the UI — don't double-apply.
 			if (!this.isOperationInProgress) return;
+			await this.handleQueryError(error, question, Array.from(this.selectedLibraries), queryOptions);
+		}
+	},
 
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${errorMessage}`, 'error');
+	/**
+	 * Run the first question of a conversation and switch to the result view.
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async answerQuestion(question, libraryIds, options) {
+		this.updateProgress(0, 'Processing query', 'Sending query to backend...');
+		const result = await this.runQuery(question, libraryIds, options,
+			(pct, label, message) => this.updateProgress(pct, label, message));
 
-			// If the backend reports that a library has no indexed data, the vector
-			// store is out of sync (e.g. indexing ran but extracted 0 chunks).
-			// Clear the stale metadata so the UI reverts to "Index" mode.
-			if (errorMessage.includes('None of the specified libraries have been indexed')) {
-				this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
-				await this.clearLibraryIndexState(Array.from(this.selectedLibraries));
-				this.setSubmitEnabled(true);
-				this.setCancelMode('close');
-				this.hideProgress();
-				return;
-			}
+		this.libraryIds = libraryIds;
+		this.turns = [{ question, result }];
+		// includeTrace deliberately excluded: a debug trace is only ever read from
+		// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
+		// so forwarding it on every follow-up would just waste backend computation.
+		const { includeTrace: _trace, ...followUpOptions } = options;
+		this.queryOptions = followUpOptions;
+
+		this.updateProgress(100, 'Complete', 'Rendering result...');
+		this.switchToResultState();
+		this.renderResultContent();
+		this.updateExportButtonVisibility();
+	},
+
+	/**
+	 * Show why the first question failed and reset the buttons. A used-up quota offers
+	 * stand-in presets instead of the plain error.
+	 * @param {unknown} error
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async handleQueryError(error, question, libraryIds, options) {
+		const quota = this.quotaDetailOf(error);
+		if (quota && Array.isArray(quota.standins) && quota.standins.length) {
+			this.showStandinOffer(quota, question, libraryIds, options);
 			this.setSubmitEnabled(true);
 			this.setCancelMode('close');
 			this.hideProgress();
+			return;
+		}
+
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		this.showStatus(`Error: ${errorMessage}`, 'error');
+
+		// If the backend reports that a library has no indexed data, the vector
+		// store is out of sync (e.g. indexing ran but extracted 0 chunks).
+		// Clear the stale metadata so the UI reverts to "Index" mode.
+		if (errorMessage.includes('None of the specified libraries have been indexed')) {
+			this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
+			await this.clearLibraryIndexState(libraryIds);
+		}
+		this.setSubmitEnabled(true);
+		this.setCancelMode('close');
+		this.hideProgress();
+	},
+
+	/**
+	 * Send a question again from the input view (after a stand-in was chosen).
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async sendQuestion(question, libraryIds, options) {
+		this.clearStatusMessages();
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Processing request...', 'Submitting query...');
+		try {
+			await this.answerQuestion(question, libraryIds, options);
+		} catch (error) {
+			if (!this.isOperationInProgress) return;
+			await this.handleQueryError(error, question, libraryIds, options);
 		}
 	},
 
@@ -2024,6 +2383,7 @@ var ZoteroRAGDialog = {
 		const question = input.value.trim();
 		if (!question) return;
 		this.clearStatusMessages();
+		this.hideStandinOffer();
 
 		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
 		const loadingIndicator = document.getElementById('followup-loading');
@@ -2048,8 +2408,12 @@ var ZoteroRAGDialog = {
 				await note.saveTx();
 			}
 		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${msg}`, 'error');
+			const quota = this.quotaDetailOf(error);
+			if (quota && Array.isArray(quota.standins) && quota.standins.length) {
+				this.showStandinOffer(quota, question, this.libraryIds, this.queryOptions, true);
+			} else {
+				this.showStatus(`Error: ${this.errorText(error)}`, 'error');
+			}
 		} finally {
 			if (submitButton) submitButton.disabled = false;
 			input.disabled = false;
