@@ -177,7 +177,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Configuration:**
 
 - Embedding: `intfloat/multilingual-e5-small` (local, ~470 MB, multilingual)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- LLM: `gemma-4-31b-it` by default, and the other models of the preset your KISSKI key can use (KISSKI remote, 128k context)
 - Memory: ~2 GB
 - Top-k: 10 chunks / Max chunk: 768 tokens
 
@@ -200,7 +200,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Configuration:**
 
 - Embedding: `multilingual-e5-large-instruct` (KISSKI remote)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote)
+- LLM: `gemma-4-31b-it` by default, and the other models of the preset your KISSKI key can use (KISSKI remote)
 - Memory: ~0.5 GB (fully remote)
 - Top-k: 10 chunks / Max chunk: 1024 tokens
 
@@ -217,7 +217,7 @@ Presets marked **No** use only remote APIs for both embeddings and LLM inference
 **Configuration:**
 
 - Embedding: `multilingual-e5-large-instruct` (KISSKI remote, 1024-dim, multilingual)
-- LLM: `llama-3.3-70b-instruct` (KISSKI remote, 128k context)
+- LLM: `gemma-4-31b-it` by default, and the other models of the preset your KISSKI key can use (KISSKI remote, 128k context)
 - Memory: ~0.5 GB (no local models)
 - Top-k: 10 chunks / Max chunk: 1024 tokens
 
