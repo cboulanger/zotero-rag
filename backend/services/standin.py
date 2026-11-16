@@ -6,7 +6,7 @@ that the offer logic builds on.
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal, Optional
 
 from backend.config.presets import HardwarePreset, current_platform, get_preset, list_presets
@@ -144,3 +144,32 @@ def find_standins(settings, current: HardwarePreset, exhausted: list[ExhaustedSi
             needs=_needs(candidate, providers, client_keys, user_id))))
     found.sort(key=lambda pair: (pair[1].cost != "free", -pair[0].standin_priority, pair[0].name))
     return [standin for _, standin in found]
+
+
+def quota_error_detail(settings, preset: HardwarePreset, side: str, available_at: datetime,
+                       message: str, client_keys: dict[str, str], user_id: Optional[int],
+                       now: Optional[datetime] = None) -> Optional[dict[str, Any]]:
+    """Structured 503 detail offering stand-ins, or None when the reset is under 15 minutes away.
+
+    ``message`` is the fallback wording used when the provider's label is unknown.
+    May block (provider session checks): call it off the event loop.
+    """
+    now = now or datetime.now(timezone.utc)
+    if (available_at - now).total_seconds() < MIN_STANDIN_SECONDS:
+        return None
+    config = preset.embedding if side == "embedding" else preset.llm
+    provider_id = config.provider.id
+    discover_providers()
+    provider_cls = PROVIDERS.get(provider_id)
+    label = getattr(provider_cls, "label", None) or provider_id
+    until = available_at.astimezone(timezone.utc)
+    standins = find_standins(settings, preset, [ExhaustedSide(side, provider_id, available_at)],
+                             client_keys, user_id)
+    return {
+        "code": "quota_exhausted",
+        "message": f"{label}'s {side} quota is used up until {until:%H:%M} UTC." if provider_cls else message,
+        "side": side,
+        "provider": provider_id,
+        "available_at": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "standins": [s.to_dict() for s in standins],
+    }

@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from backend.config.presets import ensure_default_presets, get_preset
 from backend.providers import PROVIDERS, discover_providers
-from backend.services.standin import ExhaustedSide, find_standins, preset_cost
+from backend.services.standin import ExhaustedSide, find_standins, preset_cost, quota_error_detail
 
 
 class CostTest(unittest.TestCase):
@@ -129,6 +129,41 @@ class FindStandinsTest(unittest.TestCase):
     def test_to_dict(self):
         item = self.find("remote-kisski", "embedding", "kisski")[0]
         self.assertEqual(set(item.to_dict()), {"preset", "cost", "label", "needs"})
+
+
+class QuotaDetailTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data_path = Path(self._tmp.name)
+        ensure_default_presets(self.data_path)
+        self.now = datetime(2026, 11, 16, 19, 0, tzinfo=timezone.utc)
+        self.settings = SimpleNamespace(
+            data_path=self.data_path,
+            get_default_preset=lambda: get_preset("remote-kisski", self.data_path))
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def detail(self, available_at):
+        preset = get_preset("remote-kisski", self.data_path)
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+            return quota_error_detail(
+                self.settings, preset, "embedding", available_at, "raw", {}, 1, now=self.now)
+
+    def test_long_reset_offers_standins(self):
+        detail = self.detail(datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc))
+        self.assertEqual(detail["code"], "quota_exhausted")
+        self.assertEqual(detail["provider"], "kisski")
+        self.assertEqual(detail["side"], "embedding")
+        self.assertEqual(detail["available_at"], "2026-11-16T23:00:00Z")
+        self.assertTrue(detail["standins"])
+
+    def test_message_names_provider_and_time(self):
+        detail = self.detail(datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc))
+        self.assertEqual(detail["message"], "KISSKI's embedding quota is used up until 23:00 UTC.")
+
+    def test_short_reset_returns_none(self):
+        self.assertIsNone(self.detail(datetime(2026, 11, 16, 19, 5, tzinfo=timezone.utc)))
 
 
 if __name__ == "__main__":

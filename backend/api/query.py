@@ -367,6 +367,20 @@ async def query_libraries(
         # backend's point of view, an expected and already-classified
         # upstream failure mode.
         logger.warning(f"Query failed: {e}")
+        if isinstance(e, (EmbeddingRateLimitExhaustedError, LLMRateLimitExhaustedError)):
+            from backend.services.standin import quota_error_detail
+
+            side = "embedding" if isinstance(e, EmbeddingRateLimitExhaustedError) else "llm"
+            try:
+                detail = await asyncio.to_thread(
+                    quota_error_detail, get_settings(), get_settings().get_hardware_preset(), side,
+                    e.available_at, str(e), client_keys,
+                    identity.user_id if identity is not None else None)
+            except Exception:
+                logger.exception("Could not build stand-in offer; falling back to plain error")
+                detail = None
+            if detail is not None:
+                raise HTTPException(status_code=503, detail=detail)
         raise HTTPException(status_code=503, detail=str(e))
 
     except Exception as e:
