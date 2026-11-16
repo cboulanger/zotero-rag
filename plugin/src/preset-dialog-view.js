@@ -690,6 +690,15 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 };
 
 /**
+ * The preset and each side's state as one comparable string.
+ * @param {PresetView} view
+ * @returns {string}
+ */
+ZoteroRAGPresetDialog.sideStates = function (view) {
+	return [view.preset.name, ...view.sides.map((s) => `${s.side}:${s.state}`)].join('|');
+};
+
+/**
  * True when a value was typed into one of the card's savable fields (blanks do not count).
  * @param {AccountCard} card
  * @param {Record<string, string>} drafts
@@ -828,7 +837,10 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 			return false;
 		}
 		// Client-side settings live in this Zotero's preferences, not on the server.
+		const before = state.view ? D.sideStates(state.view) : null;
 		state.view = D.applyLocalState(view, deps.prefs.get);
+		// A side came up, went down or started: the query dialog follows at once.
+		if (before !== null && before !== D.sideStates(state.view) && deps.onPresetChanged) deps.onPresetChanged();
 		if (state.local.notes.header && state.local.notes.header.level === 'error') delete state.local.notes.header;
 		repaint();
 		const quotaSide = standinsOffered ? null : state.view.sides.find((s) => s.actions.some((a) => a.id === 'standin'));

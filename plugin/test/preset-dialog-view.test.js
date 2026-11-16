@@ -558,3 +558,15 @@ test('starting an endpoint whose job already runs is not reported as a failure',
 	const notes = painted.map((p) => p.notes['side:llm']).filter(Boolean);
 	assert.ok(!notes.some((n) => n.level === 'error'), JSON.stringify(notes));
 });
+
+test('a side changing state is announced to the other windows, an unchanged refresh is not', async () => {
+	const starting = view([side('rerank', { state: 'starting' })]);
+	const ready = view([side('rerank')]);
+	let announced = 0;
+	const { controller } = setup({ views: [starting, starting, ready], extra: { onPresetChanged: () => { announced++; } } });
+	await controller.refresh();
+	await controller.refresh();
+	assert.strictEqual(announced, 0);
+	await controller.refresh();
+	assert.strictEqual(announced, 1);
+});

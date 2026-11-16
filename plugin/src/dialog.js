@@ -399,6 +399,7 @@ var ZoteroRAGDialog = {
 		this.hideProgress();
 		this.loadPresetConfig();
 		this.checkPipelineOnOpen();
+		this.plugin.observePresetChanged(window, 'query-dialog', () => { this.refreshAfterPresetChange(); });
 		this.refreshAutoindexButton();
 		this.populateLibraries();
 	},
@@ -1281,7 +1282,7 @@ var ZoteroRAGDialog = {
 			this.showStatus(this.errorText(error), 'error');
 			return;
 		}
-		await Promise.all([this.loadPresetConfig(), this.loadRerankInfo(), this.refreshEndpointHealth()]);
+		await this.refreshAfterPresetChange();
 	},
 
 	/**
@@ -1314,11 +1315,38 @@ var ZoteroRAGDialog = {
 		this.updateSubmitButtonState();
 		// Poll while either side is not ready, whichever action is selected: the user may switch.
 		const pending = this.describeEndpointBlock(this.endpointHealth, false);
-		// A re-ranker that is starting does not block, but is watched until it is up.
-		const rerankStarting = !!this.rerankInfo && this.endpointHealth?.rerank?.status === 'cold';
-		if ((pending || rerankStarting) && !this._healthClosed) {
-			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), pending ? pending.retryMs : 10000);
+		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
+		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
+		const delay = this.healthPollDelay(this.endpointHealth, pending, rerankWanted);
+		if (delay && !this._healthClosed) {
+			this._healthTimer = setTimeout(() => this.refreshEndpointHealth(), delay);
 		}
+	},
+
+	/**
+	 * How long until the endpoints are checked again, 0 for not at all (pure). A blocking side
+	 * sets the pace; a wanted re-ranker that is not ready does not block, but is watched so
+	 * the notice follows it (sooner while it starts), e.g. when it is started elsewhere.
+	 * @param {{rerank?: {status: string}|null}|null|undefined} health
+	 * @param {{retryMs: number}|null|undefined} pending - describeEndpointBlock's result
+	 * @param {boolean} rerankWanted
+	 * @returns {number}
+	 */
+	healthPollDelay(health, pending, rerankWanted) {
+		if (pending) return pending.retryMs;
+		const rerank = health ? health.rerank : null;
+		if (!rerankWanted || !rerank || rerank.status === 'ready') return 0;
+		return rerank.status === 'cold' ? 10000 : 20000;
+	},
+
+	/**
+	 * Another window changed the preset or its endpoints (a stand-in, a start, a login):
+	 * follow it now instead of at the next check.
+	 * @returns {Promise<void>}
+	 */
+	async refreshAfterPresetChange() {
+		if (!this.plugin || this._healthClosed) return;
+		await Promise.all([this.loadPresetConfig(), this.loadRerankInfo(), this.refreshEndpointHealth()]);
 	},
 
 	/**

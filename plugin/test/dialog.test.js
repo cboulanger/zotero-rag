@@ -1527,3 +1527,15 @@ test('a stand-in whose needs are all met starts its endpoints as it is switched 
 	await self.useStandinAndRetry('huggingface');
 	assert.strictEqual(steps[0], 'use huggingface kisski and start');
 });
+
+test('health is checked again while a wanted re-ranker is not ready, sooner while it starts', () => {
+	const D = loadDialogMethods();
+	const ready = { status: 'ready', detail: '' };
+	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: ready }, null, true), 0);
+	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: { status: 'cold', detail: 'starting' } }, null, true), 10000);
+	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: { status: 'unreachable', detail: 'not running' } }, null, true), 20000);
+	// Not wanted (switched off for this question): not watched.
+	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: { status: 'unreachable', detail: '' } }, null, false), 0);
+	// A blocking side sets the pace.
+	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: null }, { retryMs: 5000 }, false), 5000);
+});

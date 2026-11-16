@@ -646,6 +646,24 @@ def _check_side(preset: HardwarePreset, side: str, request: Optional[Request] = 
     return EndpointHealth(status=health.status, detail=health.detail)
 
 
+def _with_running_job(preset: HardwarePreset, side: str, health: Optional[EndpointHealth],
+                      request: Request) -> Optional[EndpointHealth]:
+    """``health``, but ``cold``/"starting" while the caller's start job for the side runs.
+
+    The endpoint is coming, not down: the query dialog then waits for it instead of
+    offering to start it again. (The preset view reads the job itself.)
+    """
+    if health is None or health.status == "ready":
+        return health
+    try:
+        provider = get_providers(preset)[side]
+    except ProviderConfigError:
+        return health
+    if provisioning.is_running(_slot_for({side: provider}, [side], get_zotero_identity(request)), [side]):
+        return EndpointHealth(status="cold", detail="starting")
+    return health
+
+
 @router.get("/config/health", response_model=EndpointHealthResponse)
 def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     """
@@ -657,13 +675,13 @@ def get_endpoint_health(request: Request) -> EndpointHealthResponse:
     """
     settings = get_settings()
     preset = settings.get_hardware_preset()
+    def check(side: str) -> Optional[EndpointHealth]:
+        return _with_running_job(preset, side, _check_side(preset, side, request), request)
+
     return EndpointHealthResponse(
-        embedding=_check_side(preset, "embedding", request),
-        llm=_check_side(preset, "llm", request),
-        rerank=(
-            _check_side(preset, "rerank", request)
-            if preset.rerank is not None and preset.rerank.model_type == "remote" else None
-        ),
+        embedding=check("embedding"),
+        llm=check("llm"),
+        rerank=check("rerank") if preset.rerank is not None and preset.rerank.model_type == "remote" else None,
     )
 
 
