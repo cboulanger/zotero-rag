@@ -484,7 +484,8 @@ wording helps (Q09's "Zotero does not provide an API" passage: 1942 -> 57).
 `RETRIEVAL_QUERY_TRANSLATION` (default `true`) helps questions in another language
 than the documents. A question that looks non-English (an accented letter, or at least
 two German, French or Spanish function words) is translated into English by the answering
-LLM (one short call). The engine searches with both versions, fuses the two ranked lists
+LLM (one short call; without an answer within 10 s, or on any error, the question is
+searched alone). The engine searches with both versions, fuses the two ranked lists
 by reciprocal rank, and the re-ranker scores the union of each list's own top
 `pool_size` passages against both versions, keeping each passage's higher score.
 English questions are not translated and cost nothing extra. Implemented in

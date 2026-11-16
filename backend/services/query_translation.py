@@ -14,6 +14,7 @@ Unlike query decomposition (``query_decomposition.py``), which splits a question
 into parts and lowered recall on the gold set, this keeps the question whole.
 """
 
+import asyncio
 import logging
 import re
 from typing import Any, Optional
@@ -25,7 +26,12 @@ _TRANSLATION_PROMPT = """Translate this search question into English for a searc
 Question: {question}"""
 
 _MAX_TRANSLATION_CHARS = 300
-_LABEL = re.compile(r"^\s*(?:[-*•]|\d+[.)]|(?:english\s+)?translation\s*:)\s*", re.IGNORECASE)
+#: Longest wait for the translation; it only widens retrieval, so a busy model is not waited for.
+TRANSLATION_TIMEOUT_SECONDS = 10.0
+_LIST_MARKER = re.compile(r"^\s*(?:[-•]|\d+[.)])\s*")
+_EMPHASIS = re.compile(r"[*_`]+")
+#: Everything up to and including a "... translation:" label ("Here is the English translation:").
+_LABEL = re.compile(r"^.*?\btranslation\s*:\s*", re.IGNORECASE)
 
 
 def build_translation_prompt(question: str) -> str:
@@ -34,12 +40,16 @@ def build_translation_prompt(question: str) -> str:
 
 
 def parse_translation(text: str, question: str) -> Optional[str]:
-    """The translation from the LLM output: its first non-empty line without list
-    markers, a ``Translation:`` label or surrounding quotes. None when the output is
+    """The translation from the LLM output: its first non-empty line that is not a
+    preamble, without list markers, markdown emphasis, a ``... translation:`` label or
+    surrounding quotes. None when the output is
     empty, too long to be a question (degenerate output), or the same as ``question``.
     """
     for line in (text or "").splitlines():
-        candidate = _LABEL.sub("", line).strip().strip('"“”„\'').strip()
+        candidate = _LIST_MARKER.sub("", _EMPHASIS.sub("", line)).strip()
+        if candidate.endswith(":"):  # a preamble such as "Sure! Here's the translation:"
+            continue
+        candidate = _LABEL.sub("", candidate).strip().strip('"“”„\'').strip()
         if not candidate:
             continue
         if len(candidate) > _MAX_TRANSLATION_CHARS or candidate.casefold() == question.strip().casefold():
@@ -51,12 +61,14 @@ def parse_translation(text: str, question: str) -> Optional[str]:
 async def translate_question(llm_service: Any, question: str) -> Optional[str]:
     """English translation of ``question``, or None when there is none to use.
 
-    Any failure (provider error, timeout, unusable output) returns None: the
+    Any failure (provider error, no answer within ``TRANSLATION_TIMEOUT_SECONDS``,
+    unusable output) returns None: the
     translation only widens retrieval, so the query goes on with the question alone.
     """
     try:
-        text = await llm_service.generate(
-            prompt=build_translation_prompt(question), max_tokens=200, temperature=0.0
+        text = await asyncio.wait_for(
+            llm_service.generate(prompt=build_translation_prompt(question), max_tokens=200, temperature=0.0),
+            timeout=TRANSLATION_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         logger.warning(f"Query translation failed ({type(exc).__name__}: {exc}); using the question only")

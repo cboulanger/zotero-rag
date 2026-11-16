@@ -20,6 +20,12 @@ class ParseTranslationTest(unittest.TestCase):
         self.assertEqual(parse_translation(f"Translation: {EN}", DE), EN)
         self.assertEqual(parse_translation(f"- {EN}\nsome commentary", DE), EN)
 
+    def test_chat_preambles_are_not_taken_for_the_translation(self):
+        self.assertEqual(parse_translation(f"Here is the English translation:\n\n{EN}", DE), EN)
+        self.assertEqual(parse_translation(f"Sure! Here's the translation:\n{EN}", DE), EN)
+        self.assertEqual(parse_translation(f"**Translation:** {EN}", DE), EN)
+        self.assertEqual(parse_translation(f"English translation: *{EN}*", DE), EN)
+
     def test_identical_output_is_ignored(self):
         self.assertIsNone(parse_translation("what is zotero?", "What is Zotero?"))
 
@@ -38,6 +44,19 @@ class TranslateQuestionTest(unittest.IsolatedAsyncioTestCase):
         llm.generate = AsyncMock(return_value=EN)
         self.assertEqual(await translate_question(llm, DE), EN)
         self.assertEqual(llm.generate.await_args.kwargs["temperature"], 0.0)
+
+    async def test_slow_llm_is_abandoned(self):
+        import asyncio
+        from unittest.mock import patch
+
+        async def hang(**kwargs):
+            await asyncio.sleep(5)
+            return EN
+
+        llm = Mock()
+        llm.generate = AsyncMock(side_effect=hang)
+        with patch("backend.services.query_translation.TRANSLATION_TIMEOUT_SECONDS", 0.05):
+            self.assertIsNone(await translate_question(llm, DE))
 
     async def test_llm_error_returns_none(self):
         llm = Mock()
