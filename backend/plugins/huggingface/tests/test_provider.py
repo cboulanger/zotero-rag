@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from backend.config.presets import DEFAULT_PRESETS_DIR
+from backend.config.presets import bundled_preset_path
 from backend.providers import Credentials, ProviderConfigError, ProvisionContext, ProvisionError, ProvisionTimeout, get_providers
 from backend.plugins.huggingface import provider as hf
 from backend.providers.testing import FakeHTTP, FakeResponse
@@ -306,7 +306,7 @@ class TestConfigAndDescription(unittest.TestCase):
     def test_bundled_preset_loads_with_a_provider_on_each_side(self):
         import json
         from backend.config.presets import HardwarePreset
-        raw = json.loads((DEFAULT_PRESETS_DIR / "huggingface.json").read_text())
+        raw = json.loads(bundled_preset_path("huggingface").read_text())
         providers = get_providers(HardwarePreset(name="huggingface", **raw))
         self.assertEqual({p.id for p in providers.values()}, {"huggingface"})
         self.assertEqual((providers["embedding"].engine, providers["llm"].engine), ("tei", "vllm"))

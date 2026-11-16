@@ -91,11 +91,15 @@ def disabled_plugin_ids() -> set[str]:
 
 
 def _setting(attr: str, env: str) -> str:
-    """A plugin setting from the application settings (``.env`` included), else the environment."""
-    try:
-        from backend.config.settings import get_settings
+    """A plugin setting from the application settings (``.env`` included), else the environment.
 
-        value = getattr(get_settings(), attr, None)
+    Reads a fresh ``Settings()`` rather than ``get_settings()``: creating the global
+    settings seeds the bundled presets, which needs the plugins being loaded here.
+    """
+    try:
+        from backend.config.settings import Settings
+
+        value = getattr(Settings(), attr, None)
         if value is not None:
             return str(value)
     except Exception:  # pragma: no cover - settings unavailable (e.g. a broken .env)

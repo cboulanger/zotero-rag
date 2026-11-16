@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from backend.config import presets as presets_module
 from backend.config.presets import (
     DEFAULT_PRESETS_DIR,
+    bundled_preset_files,
     PRESET_SCHEMA_VERSION,
     EmbeddingConfig,
     HardwarePreset,
@@ -65,7 +66,7 @@ class TestProviderSchema(unittest.TestCase):
         self.assertEqual(HardwarePreset.model_validate(data).version, 1)
 
     def test_every_bundled_preset_declares_the_current_version(self):
-        for path in DEFAULT_PRESETS_DIR.glob("*.json"):
+        for path in bundled_preset_files():
             with self.subTest(preset=path.stem):
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self.assertEqual(data.get("version"), PRESET_SCHEMA_VERSION)

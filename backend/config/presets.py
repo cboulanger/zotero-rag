@@ -309,16 +309,41 @@ def current_platform() -> str:
     return _platform_module.system().lower()
 
 
+def bundled_preset_files() -> list[Path]:
+    """The bundled preset files: core's own, then those of the loaded backend plugins.
+
+    Core ships only presets that need no plugin provider; a preset that needs a
+    vendor's provider comes with that vendor's plugin (a ``presets`` capability).
+    A file name that is already taken is skipped with a warning.
+    """
+    files = {p.name: p for p in sorted(DEFAULT_PRESETS_DIR.glob("*.json"))}
+    from backend.pluginhost import PresetDirectory, get_plugin_host
+
+    for cap in get_plugin_host().capabilities(PresetDirectory.kind):
+        for path in cap.files():
+            if path.name in files:
+                logger.warning("Preset %s of plugin %s duplicates a bundled preset; skipped", path.name, cap.plugin_id)
+                continue
+            files[path.name] = path
+    return list(files.values())
+
+
+def bundled_preset_path(name: str) -> Optional[Path]:
+    """The bundled source file of preset ``name`` (core or plugin), or None."""
+    return next((p for p in bundled_preset_files() if p.stem == name), None)
+
+
 def _bundled_names() -> set[str]:
-    """File names (``<name>.json``) of the presets shipped with the backend."""
-    return {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+    """File names (``<name>.json``) of the bundled presets (core and loaded plugins)."""
+    return {p.name for p in bundled_preset_files()}
 
 
 def ensure_default_presets(data_path: Path) -> None:
     """
     Seed <data_path>/presets/ with the bundled default preset files.
 
-    Every file under DEFAULT_PRESETS_DIR is written to the data directory
+    Every bundled preset (core's ``default_presets/`` and the ``presets``
+    directories of the loaded backend plugins) is written to the data directory
     unless the bytes already there are identical. A bundled-name file whose
     content differs (a local edit, or an older schema) is overwritten and a
     WARNING names it; customise a preset by copying it to a new file name.
@@ -334,7 +359,7 @@ def ensure_default_presets(data_path: Path) -> None:
 
     presets_dir = resolved / "presets"
     presets_dir.mkdir(parents=True, exist_ok=True)
-    for default_file in DEFAULT_PRESETS_DIR.glob("*.json"):
+    for default_file in bundled_preset_files():
         target = presets_dir / default_file.name
         content = default_file.read_bytes()
         if target.exists():

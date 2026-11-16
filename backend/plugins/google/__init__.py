@@ -3,7 +3,9 @@
 Gemini models through Google's OpenAI-compatible endpoint.
 """
 
-from backend.pluginhost import BackendPlugin, InferenceProvider
+from pathlib import Path
+
+from backend.pluginhost import BackendPlugin, InferenceProvider, PresetDirectory
 
 from .provider import GoogleProvider
 
@@ -14,5 +16,8 @@ def register() -> BackendPlugin:
         name="Google Gemini",
         version="1.0",
         description="Gemini models through Google's OpenAI-compatible endpoint.",
-        capabilities=[InferenceProvider(provider=GoogleProvider)],
+        capabilities=[
+            InferenceProvider(provider=GoogleProvider),
+            PresetDirectory(id="google", path=Path(__file__).parent / "presets"),
+        ],
     )

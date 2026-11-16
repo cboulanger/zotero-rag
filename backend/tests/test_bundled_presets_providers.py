@@ -14,9 +14,9 @@ class TestBundledPresetsPickUpProviderDefaults(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def test_every_bundled_preset_has_valid_providers(self):
-        from backend.config.presets import DEFAULT_PRESETS_DIR, list_presets
+        from backend.config.presets import bundled_preset_files, list_presets
         self.assertEqual(
-            set(list_presets(self.data_path)), {p.stem for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+            set(list_presets(self.data_path)), {p.stem for p in bundled_preset_files()}
         )
 
 

@@ -14,6 +14,8 @@ from cryptography.fernet import Fernet
 
 from backend.config.presets import (
     DEFAULT_PRESETS_DIR,
+    bundled_preset_files,
+    bundled_preset_path,
     HardwarePreset,
     ensure_default_presets,
     get_preset,
@@ -29,20 +31,11 @@ from backend.zotero.group_roles import reset_admin_role_cache
 # the same glob the code under test reads would be circular and could never
 # fail that way.
 EXPECTED_BUNDLED_PRESET_NAMES = {
+    # Core ships only presets that need no vendor plugin; the others come with
+    # the plugin whose provider they need (backend/plugins/<id>/presets/).
     "apple-silicon-32gb",
     "high-memory",
     "cpu-only",
-    "remote-openai",
-    "remote-gemini",
-    "kisski-gemini",
-    "kisski-docling",
-    "remote-kisski",
-    "cloud-server-kisski",
-    "windows-test",
-    "remote-mpcdf",
-    "kisski-rerank-mpcdf",
-    "huggingface",
-    "runpod",
 }
 
 
@@ -55,7 +48,7 @@ GATEWAY_ENV = {
 
 
 class TestBundledDefaultPresets(unittest.TestCase):
-    """Validate the actual shipped files in backend/config/default_presets/
+    """Validate the actual shipped files (core's backend/config/default_presets/ and the loaded plugins' presets)
     directly against the schema — these are source code, not user data, so
     (unlike a user's own preset file) a broken one here should fail CI, not
     just log a warning at runtime (see list_presets()'s tolerant handling)."""
@@ -65,7 +58,7 @@ class TestBundledDefaultPresets(unittest.TestCase):
         self.assertEqual(names, EXPECTED_BUNDLED_PRESET_NAMES)
 
     def test_every_bundled_default_validates_against_hardware_preset(self):
-        for path in DEFAULT_PRESETS_DIR.glob("*.json"):
+        for path in bundled_preset_files():
             with self.subTest(preset=path.stem):
                 data = json.loads(path.read_text(encoding="utf-8"))
                 data["name"] = path.stem
@@ -179,9 +172,7 @@ class TestPresets(unittest.TestCase):
         presets = list_presets(self.data_path)
 
         self.assertIn("cpu-only", presets)
-        self.assertIn("remote-openai", presets)
-        self.assertIn("remote-kisski", presets)
-        expected_count = len(list(DEFAULT_PRESETS_DIR.glob("*.json")))
+        expected_count = len(bundled_preset_files())
         self.assertEqual(len(presets), expected_count)
 
     def test_get_preset_auto_seeds_a_data_path_whose_presets_dir_was_never_created(self):
@@ -201,7 +192,7 @@ class TestPresets(unittest.TestCase):
     def test_ensure_default_presets_copies_every_bundled_default(self):
         """Every bundled default file ends up in the (empty) target directory."""
         presets_dir = self.data_path / "presets"
-        bundled_names = {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+        bundled_names = {p.name for p in bundled_preset_files()}
         copied_names = {p.name for p in presets_dir.glob("*.json")}
         self.assertEqual(bundled_names, copied_names)
 
@@ -874,7 +865,7 @@ class TestBundledRunpodPreset(unittest.TestCase):
         import json
         from backend.providers import get_providers
         from backend.config.presets import HardwarePreset
-        raw = json.loads((Path(__file__).resolve().parents[1] / "config" / "default_presets" / "runpod.json").read_text())
+        raw = json.loads(bundled_preset_path("runpod").read_text())
         self.assertEqual(raw["version"], 2)
         for side in ("embedding", "llm"):
             self.assertEqual(raw[side]["provider"]["id"], "runpod")

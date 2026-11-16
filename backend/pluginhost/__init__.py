@@ -6,7 +6,7 @@ Plugin authors import from this package only (plus ``backend.providers`` for the
 
 from typing import Optional
 
-from backend.pluginhost.capabilities import Capability, InferenceProvider, LocalInference
+from backend.pluginhost.capabilities import Capability, InferenceProvider, LocalInference, PresetDirectory
 from backend.pluginhost.host import (
     CORE_PLUGIN_ID,
     SHIPPED_PLUGIN_DIR,
@@ -65,6 +65,7 @@ __all__ = [
     "LocalInference",
     "PluginHost",
     "PluginRecord",
+    "PresetDirectory",
     "SHIPPED_PLUGIN_DIR",
     "configured_plugin_dirs",
     "get_plugin_host",

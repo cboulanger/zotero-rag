@@ -3,7 +3,9 @@
 GWDG Academic Cloud Chat-AI: live model list, per-user keys and quotas.
 """
 
-from backend.pluginhost import BackendPlugin, InferenceProvider
+from pathlib import Path
+
+from backend.pluginhost import BackendPlugin, InferenceProvider, PresetDirectory
 
 from .provider import KisskiProvider
 
@@ -14,5 +16,8 @@ def register() -> BackendPlugin:
         name="KISSKI / SAIA",
         version="1.0",
         description="GWDG Academic Cloud Chat-AI: live model list, per-user keys and quotas.",
-        capabilities=[InferenceProvider(provider=KisskiProvider)],
+        capabilities=[
+            InferenceProvider(provider=KisskiProvider),
+            PresetDirectory(id="kisski", path=Path(__file__).parent / "presets"),
+        ],
     )

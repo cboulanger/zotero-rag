@@ -12,6 +12,10 @@ defines; it never imports a plugin module. Two kinds exist today:
   transformers on torch), selected by the side's ``engine`` key or, when it names
   none, by availability and ``priority`` on this machine.
 
+- ``presets`` (:class:`PresetDirectory`): a directory of bundled preset JSON files
+  that need the plugin's providers; they are seeded into ``<data_path>/presets``
+  next to core's provider-free presets only while the plugin is loaded.
+
 A new kind is a new :class:`Capability` subclass with its own ``kind`` string;
 the host stores and lists capabilities of any kind, so adding one needs no change
 to the loader.
@@ -145,3 +149,34 @@ class LocalInference(Capability):
 
     def describe(self) -> dict[str, Any]:
         return {**super().describe(), "side": self.side, "engine": self.engine, "priority": self.priority}
+
+
+@dataclass
+class PresetDirectory(Capability):
+    """Bundled presets (``*.json``) that come with a plugin, seeded like core's own.
+
+    A preset belongs to the plugin whose providers it needs, so removing the plugin
+    also stops shipping presets that could not run without it.
+    """
+
+    kind: ClassVar[str] = "presets"
+
+    id: str = ""
+    path: Any = None
+
+    def __post_init__(self) -> None:
+        from pathlib import Path
+
+        if self.path is None:
+            raise ValueError("PresetDirectory needs a path")
+        self.path = Path(self.path)
+        self.id = self.id or self.path.parent.name
+
+    def files(self) -> list:
+        return sorted(self.path.glob("*.json")) if self.path.is_dir() else []
+
+    def unavailable_reason(self) -> Optional[str]:
+        return None if self.path.is_dir() else f"preset directory {self.path} does not exist"
+
+    def describe(self) -> dict[str, Any]:
+        return {**super().describe(), "presets": [f.stem for f in self.files()]}

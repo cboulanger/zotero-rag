@@ -7,7 +7,9 @@ Needs the optional ``mpcdf-llm`` library; without it the provider stays
 registered and says why it cannot start endpoints.
 """
 
-from backend.pluginhost import BackendPlugin, InferenceProvider
+from pathlib import Path
+
+from backend.pluginhost import BackendPlugin, InferenceProvider, PresetDirectory
 
 from . import sessions
 from .provider import MpcdfProvider
@@ -36,7 +38,10 @@ def register() -> BackendPlugin:
         name="MPCDF LLM Inference Service",
         version="1.0",
         description="Endpoints as Slurm jobs on each user's own MPCDF account (login with one-time code).",
-        capabilities=[InferenceProvider(provider=MpcdfProvider)],
+        capabilities=[
+            InferenceProvider(provider=MpcdfProvider),
+            PresetDirectory(id="mpcdf", path=Path(__file__).parent / "presets"),
+        ],
         on_startup=_startup,
         on_shutdown=_shutdown,
     )

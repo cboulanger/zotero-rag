@@ -7,13 +7,13 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from backend.config.presets import HardwarePreset, ensure_default_presets, get_preset
+from backend.config.presets import HardwarePreset, bundled_preset_path, ensure_default_presets, get_preset
 from backend.config.settings import get_settings, reset_settings
 from backend.providers import get_providers
 
 
 def mixed(embedding_side, llm_side):
-    base = json.loads((Path(__file__).resolve().parents[1] / "config" / "default_presets" / "huggingface.json").read_text())
+    base = json.loads(bundled_preset_path("huggingface").read_text())
     base["embedding"] = {**base["embedding"], **embedding_side}
     base["llm"] = {**base["llm"], **llm_side}
     return base

@@ -3,7 +3,9 @@
 Dedicated Hugging Face Inference Endpoints, provisioned on demand.
 """
 
-from backend.pluginhost import BackendPlugin, InferenceProvider
+from pathlib import Path
+
+from backend.pluginhost import BackendPlugin, InferenceProvider, PresetDirectory
 
 from .provider import HuggingFaceProvider
 
@@ -14,5 +16,8 @@ def register() -> BackendPlugin:
         name="Hugging Face",
         version="1.0",
         description="Dedicated Hugging Face Inference Endpoints, provisioned on demand.",
-        capabilities=[InferenceProvider(provider=HuggingFaceProvider)],
+        capabilities=[
+            InferenceProvider(provider=HuggingFaceProvider),
+            PresetDirectory(id="huggingface", path=Path(__file__).parent / "presets"),
+        ],
     )
