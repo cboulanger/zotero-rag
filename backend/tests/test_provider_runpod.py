@@ -62,6 +62,17 @@ class TestNamesAndTemplates(unittest.TestCase):
         self.assertEqual(emb.template_env(), {"MODEL_NAME": emb.model, "MAX_MODEL_LEN": "512"})
         self.assertEqual(llm.template_env(), {"MODEL_NAME": llm.model})
 
+    def test_name_option_renames_template_and_endpoint(self):
+        """A second preset on the same account (e.g. a larger LLM) needs its own endpoint."""
+        llm = provider("llm", options={"name": "zotero-rag-llm-gemma"})
+        self.assertEqual(llm.resource_name, "zotero-rag-llm-gemma")
+
+    def test_max_model_len_option_reaches_the_llm_worker(self):
+        """Without it vLLM sizes the KV cache for the model's full context, which does
+        not fit a 31B model on a 48 GB GPU."""
+        llm = provider("llm", options={"max_model_len": 16384})
+        self.assertEqual(llm.template_env(), {"MODEL_NAME": llm.model, "MAX_MODEL_LEN": "16384"})
+
     def test_options_defaults_and_validation(self):
         o = provider().options
         self.assertEqual((o.gpu, o.workers_max, o.idle_timeout, o.data_centers), ("NVIDIA RTX A5000", 1, 60, None))

@@ -68,6 +68,12 @@ class RunPodOptions(ProviderOptions):
     data_centers: Optional[list[str]] = None
     image: str = DEFAULT_IMAGE
     container_disk_gb: Optional[int] = Field(default=None, ge=1)
+    #: Name of this side's template and endpoint; default ``zotero-rag-<side>``. Lets a
+    #: second preset on the same account (a larger LLM, say) keep its own endpoint.
+    name: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    #: ``MAX_MODEL_LEN`` of an LLM worker. Without it vLLM sizes the KV cache for the
+    #: model's full context, which a large model's GPU may not hold.
+    max_model_len: Optional[int] = Field(default=None, ge=256)
 
 
 def endpoint_base_url(endpoint_id: str) -> str:
@@ -93,7 +99,7 @@ class RunPodProvider(Provider):
     @property
     def resource_name(self) -> str:
         """Name shared by this side's template and endpoint."""
-        return f"zotero-rag-{self.side}"
+        return self.options.name or f"zotero-rag-{self.side}"
 
     @property
     def model(self) -> str:
@@ -107,6 +113,8 @@ class RunPodProvider(Provider):
             env["MAX_MODEL_LEN"] = EMBEDDING_MAX_MODEL_LEN
         elif self.side == "rerank":
             env["MAX_MODEL_LEN"] = RERANK_MAX_MODEL_LEN
+        elif self.options.max_model_len:
+            env["MAX_MODEL_LEN"] = str(self.options.max_model_len)
         return env
 
     # -- configuration and description ------------------------------------------
