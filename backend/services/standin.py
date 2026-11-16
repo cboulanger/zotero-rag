@@ -172,30 +172,45 @@ def current_exhausted_sides(settings, preset: HardwarePreset, client_keys: dict[
     return result
 
 
+def standin_offer(settings, preset: HardwarePreset, exhausted: list[ExhaustedSide],
+                  client_keys: dict[str, str], user_id: Optional[int],
+                  now: Optional[datetime] = None) -> Optional[dict[str, Any]]:
+    """Structured offer of stand-ins for ``exhausted`` sides, or None when none lasts 15 minutes.
+
+    The shape is the 503 ``quota_exhausted`` detail: ``side``/``provider``/``available_at``
+    describe the side that stays exhausted longest; ``standins`` are valid for every
+    long-exhausted side. May block (provider session checks): call it off the event loop.
+    """
+    now = now or datetime.now(timezone.utc)
+    long_lived = [e for e in exhausted if (e.available_at - now).total_seconds() >= MIN_STANDIN_SECONDS]
+    if not long_lived:
+        return None
+    main = max(long_lived, key=lambda e: e.available_at)
+    discover_providers()
+    provider_cls = PROVIDERS.get(main.provider)
+    label = getattr(provider_cls, "label", None) or main.provider
+    until = main.available_at.astimezone(timezone.utc)
+    standins = find_standins(settings, preset, long_lived, client_keys, user_id)
+    return {
+        "code": "quota_exhausted",
+        "message": f"{label}'s {main.side} quota is used up until {until:%H:%M} UTC.",
+        "side": main.side,
+        "provider": main.provider,
+        "available_at": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "standins": [s.to_dict() for s in standins],
+    }
+
+
 def quota_error_detail(settings, preset: HardwarePreset, side: str, available_at: datetime,
                        message: str, client_keys: dict[str, str], user_id: Optional[int],
                        now: Optional[datetime] = None) -> Optional[dict[str, Any]]:
     """Structured 503 detail offering stand-ins, or None when the reset is under 15 minutes away.
 
     ``message`` is the fallback wording used when the provider's label is unknown.
-    May block (provider session checks): call it off the event loop.
     """
-    now = now or datetime.now(timezone.utc)
-    if (available_at - now).total_seconds() < MIN_STANDIN_SECONDS:
-        return None
     config = preset.embedding if side == "embedding" else preset.llm
-    provider_id = config.provider.id
-    discover_providers()
-    provider_cls = PROVIDERS.get(provider_id)
-    label = getattr(provider_cls, "label", None) or provider_id
-    until = available_at.astimezone(timezone.utc)
-    standins = find_standins(settings, preset, [ExhaustedSide(side, provider_id, available_at)],
-                             client_keys, user_id)
-    return {
-        "code": "quota_exhausted",
-        "message": f"{label}'s {side} quota is used up until {until:%H:%M} UTC." if provider_cls else message,
-        "side": side,
-        "provider": provider_id,
-        "available_at": until.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "standins": [s.to_dict() for s in standins],
-    }
+    detail = standin_offer(settings, preset, [ExhaustedSide(side, config.provider.id, available_at)],
+                           client_keys, user_id, now)
+    if detail is not None and PROVIDERS.get(config.provider.id) is None:
+        detail["message"] = message
+    return detail

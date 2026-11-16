@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from backend.config.presets import ensure_default_presets, get_preset
 from backend.providers import PROVIDERS, discover_providers
-from backend.services.standin import ExhaustedSide, find_standins, preset_cost, quota_error_detail
+from backend.services.standin import ExhaustedSide, find_standins, preset_cost, quota_error_detail, standin_offer
 
 
 class CostTest(unittest.TestCase):
@@ -164,6 +164,38 @@ class QuotaDetailTest(unittest.TestCase):
 
     def test_short_reset_returns_none(self):
         self.assertIsNone(self.detail(datetime(2026, 11, 16, 19, 5, tzinfo=timezone.utc)))
+
+
+class StandinOfferTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_path = Path(self._tmp.name)
+        ensure_default_presets(self.data_path)
+        self.now = datetime(2026, 11, 16, 19, 0, tzinfo=timezone.utc)
+        self.settings = SimpleNamespace(
+            data_path=self.data_path,
+            get_default_preset=lambda: get_preset("remote-kisski", self.data_path))
+
+    def offer(self, exhausted):
+        preset = get_preset("remote-kisski", self.data_path)
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+            return preset, standin_offer(self.settings, preset, exhausted, {}, 1, now=self.now)
+
+    def test_two_exhausted_sides_list_standins_valid_for_both(self):
+        at = datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc)
+        exhausted = [ExhaustedSide("embedding", "kisski", at), ExhaustedSide("llm", "kisski", at)]
+        preset, offer = self.offer(exhausted)
+        self.assertTrue(offer["standins"])
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+            expected = [s.to_dict() for s in find_standins(self.settings, preset, exhausted, {}, 1)]
+        self.assertEqual(offer["standins"], expected)
+        self.assertEqual(offer["code"], "quota_exhausted")
+
+    def test_none_when_nothing_lasts_fifteen_minutes(self):
+        soon = datetime(2026, 11, 16, 19, 5, tzinfo=timezone.utc)
+        self.assertIsNone(self.offer([ExhaustedSide("embedding", "kisski", soon)])[1])
+        self.assertIsNone(self.offer([])[1])
 
 
 class StoredStandinTest(unittest.TestCase):

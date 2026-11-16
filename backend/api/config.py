@@ -21,7 +21,7 @@ from backend.services.extraction import effective_extractor_backend
 from backend.services.user_settings import (
     clear_standin, get_preferred_preset, get_standin, set_preferred_preset, set_standin,
 )
-from backend.services.standin import current_exhausted_sides, find_standins
+from backend.services.standin import current_exhausted_sides, find_standins, standin_offer
 from backend.services.admin_settings_store import (
     set_default_preset,
     update_remote_config,
@@ -486,6 +486,28 @@ def put_standin(update: StandinUpdate, request: Request, client_keys: Dict[str, 
     until = max(e.available_at for e in exhausted)
     set_standin(settings.data_path, user_id, update.preset_name, until, current.name)
     return {"standin": get_standin(settings.data_path, user_id)}
+
+
+@router.get("/config/standins")
+def get_standin_offer(request: Request, client_keys: Dict[str, str] = Depends(get_client_api_keys)) -> dict:
+    """Stand-ins on offer for the caller's own current preset: ``{"offer": <detail> | null}``.
+
+    The offer has the shape of the 503 ``quota_exhausted`` detail. It is null while a
+    stand-in is active or when no quota is exhausted for 15 minutes or more.
+    """
+    settings = get_settings()
+    identity = get_zotero_identity(request)
+    user_id = identity.user_id if identity else None
+    if get_standin(settings.data_path, user_id):
+        return {"offer": None}
+    current = get_user_preset(settings, identity, allow_standin=False) or settings.get_default_preset()
+    own_keys = dict(client_keys)
+    for side_config_ in (current.embedding, current.llm):
+        name = (side_config_.model_kwargs or {}).get("api_key_env")
+        if name and (value := _caller_key(request, name)):
+            own_keys[name] = value
+    exhausted = current_exhausted_sides(settings, current, own_keys)
+    return {"offer": standin_offer(settings, current, exhausted, client_keys, user_id)}
 
 
 @router.delete("/config/my-preset/standin")

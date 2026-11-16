@@ -92,6 +92,25 @@ class StandinApiTest(unittest.TestCase):
         self.exhaust(key="someone-elses-key")
         self.assertEqual(self.call("PUT", json={"preset_name": "remote-mpcdf"}).status_code, 409)
 
+    def test_get_standins_returns_the_offer(self):
+        self.exhaust()
+        offer = self.call("GET", "/api/config/standins").json()["offer"]
+        self.assertEqual((offer["code"], offer["side"], offer["provider"]), ("quota_exhausted", "embedding", "kisski"))
+        self.assertTrue(any(s["preset"] == "remote-mpcdf" for s in offer["standins"]))
+
+    def test_get_standins_is_null_without_a_long_exhaustion_or_for_another_key(self):
+        self.assertEqual(self.call("GET", "/api/config/standins").json(), {"offer": None})
+        self.exhaust(key="someone-elses-key")
+        self.assertEqual(self.call("GET", "/api/config/standins").json(), {"offer": None})
+        self.until = datetime.now(timezone.utc) + timedelta(minutes=5)
+        self.exhaust()
+        self.assertEqual(self.call("GET", "/api/config/standins").json(), {"offer": None})
+
+    def test_get_standins_is_null_while_a_standin_is_active(self):
+        self.exhaust()
+        self.call("PUT", json={"preset_name": "remote-mpcdf"})
+        self.assertEqual(self.call("GET", "/api/config/standins").json(), {"offer": None})
+
     def test_delete_standin_ends_it(self):
         self.exhaust()
         self.call("PUT", json={"preset_name": "remote-mpcdf"})
