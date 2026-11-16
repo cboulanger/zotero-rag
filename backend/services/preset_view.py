@@ -40,6 +40,9 @@ TITLES = {
 #: Plugin preference behind the re-ranking switch (sent as ``enable_reranking`` with each query).
 RERANK_PREF = "enableReranking"
 
+#: Plugin preference for the re-ranking pool size (sent as ``rerank_pool_size`` with each query).
+RERANK_POOL_PREF = "rerankPoolSize"
+
 #: Provider health -> tab indicator.
 _HEALTH_STATE: dict[str, SideState] = {
     "ready": "ready",
@@ -132,7 +135,20 @@ def _rerank_extras(view: SideView, cfg: Any) -> None:
         help="Rescores the best passages before the answer is written: more relevant sources, "
              "a few seconds slower. Applies to your own queries; the Query dialog can also skip it once.",
     ))
-    view.facts.append(UiFact(label="Rescored", value=f"the best {cfg.pool_size} passages per question"))
+    reference = cfg.pool_reference_chunks
+    automatic = (f"the best {cfg.pool_size} passages per question, more when the searched libraries "
+                 f"hold over {reference:,} passages (up to 500)") if reference else (
+                 f"the best {cfg.pool_size} passages per question")
+    view.fields.insert(1, UiField(
+        id=RERANK_POOL_PREF, label="Passages to rescore", type="number", min=1, max=500,
+        placeholder=f"Automatic ({cfg.pool_size}+)" if reference else f"{cfg.pool_size} (preset default)",
+        storage="client_pref", key=RERANK_POOL_PREF,
+        help="How many of the best-matching passages the re-ranker rescores per question. "
+             "Large libraries profit from more (relevant passages can rank low in the first search), "
+             "small ones may get more generic passages; each 100 adds a fraction of a second. "
+             "Leave empty to let the size of the searched libraries decide. Applies to your own queries.",
+    ))
+    view.facts.append(UiFact(label="Rescored by default", value=automatic))
 
 
 def _model_side(inputs: ViewInputs, side: str, account: Optional[str]) -> SideView:

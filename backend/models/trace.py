@@ -38,6 +38,7 @@ class RetrievalTrace(Trace):
     documents_grouped: int
     chunks: list[ChunkTrace]
     escalated: bool = False        # True if top_k was escalated due to low document diversity
+    translated_query: Optional[str] = None  # English translation searched alongside a non-English question
     rerank: Optional[dict] = None  # RerankOutcome of the last re-ranking pass (None when the preset has none)
 
 

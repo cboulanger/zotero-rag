@@ -34,7 +34,7 @@ import time
 from abc import ABC, abstractmethod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Sequence
 
 from pydantic import BaseModel
 
@@ -66,6 +66,8 @@ class RerankRequest:
     """Per-request re-ranking context, set by the query API."""
 
     enabled: bool = True
+    #: Caller's pool size (``rerank_pool_size`` of the query); None uses the preset's ``pool_size``.
+    pool_size: Optional[int] = None
     #: Personal keys sent by the client, by env-var name (as ``get_client_api_keys`` returns them).
     client_keys: dict[str, str] = field(default_factory=dict)
     #: Zotero user id of the caller (None for loopback/public callers).
@@ -86,6 +88,32 @@ def reset_rerank_request(token) -> None:
 
 def current_rerank_request() -> RerankRequest:
     return _request.get()
+
+
+#: Upper bound of any pool, the same as ``RerankConfig.pool_size``'s.
+MAX_POOL_SIZE = 500
+
+
+def scaled_pool_size(cfg: Any, total_chunks: int) -> int:
+    """The preset's ``pool_size`` scaled to the size of the searched libraries.
+
+    In a large index the vector scores of the top candidates lie close together, so a
+    relevant passage can rank far down the first, vector-only search and needs a larger
+    pool to reach the re-ranker. In a small one a larger pool mostly adds generic
+    passages. Up to ``pool_reference_chunks`` chunks the preset's value applies; above
+    it the pool grows logarithmically, up to :data:`MAX_POOL_SIZE`.
+    """
+    base = cfg.pool_size
+    reference = getattr(cfg, "pool_reference_chunks", None)
+    if not reference or total_chunks <= reference:
+        return base
+    return max(base, min(MAX_POOL_SIZE, round(base * (1 + math.log10(total_chunks / reference)))))
+
+
+def effective_pool_size(cfg: Any, total_chunks: int = 0) -> int:
+    """Candidates to rescore for this request: the caller's override, else the scaled preset value."""
+    override = current_rerank_request().pool_size
+    return override if override is not None else scaled_pool_size(cfg, total_chunks)
 
 
 class RerankerUnavailable(RuntimeError):
@@ -301,14 +329,30 @@ def build_reranker(preset: Any) -> Optional[Reranker]:
     return RemoteReranker(get_provider(preset, "rerank"), cfg.model_name, cfg.timeout_seconds)
 
 
+async def _max_over_questions(scorer: Reranker, questions: list[str], texts: list[str]) -> list[float]:
+    """Per passage, the highest score over all question versions."""
+    best: list[float] = []
+    for question in questions:
+        scores = await scorer.score(question, texts)
+        if len(scores) != len(texts):
+            raise ValueError(f"re-ranker returned {len(scores)} scores for {len(texts)} passages")
+        best = list(scores) if not best else [max(a, b) for a, b in zip(best, scores)]
+    return best
+
+
 async def rerank_pool(
     question: str,
     results: list,
     preset: Any,
     reranker: Optional[Reranker] = None,
     cache: Optional[dict[str, float]] = None,
+    pool_size: Optional[int] = None,
+    extra_questions: Sequence[str] = (),
 ) -> tuple[list, RerankOutcome]:
     """Rescore the first ``pool_size`` of ``results`` and sort them by the new score.
+
+    ``pool_size`` is the size the caller resolved for this query (see
+    :func:`effective_pool_size`); without it the request override or the preset's value applies.
 
     Each rescored ``SearchResult`` gets ``score`` = cross-encoder score (in [0, 1])
     and keeps its vector score in ``vector_score``; ``pre_rerank_rank`` is its
@@ -317,6 +361,11 @@ async def rerank_pool(
     score-based step (MMR cap, proximity escalation) stays consistent. On any
     failure the input is returned unchanged.
 
+    ``extra_questions`` are other versions of the question (an English translation,
+    see ``backend.services.query_translation``): each passage is scored against every
+    version and keeps the highest score, so a passage in another language than the
+    question is judged against the version in its own language.
+
     ``cache`` maps chunk ids to scores already computed for this question, so a
     retrieval escalation within the same query only scores the new candidates;
     it is filled in place.
@@ -324,7 +373,9 @@ async def rerank_pool(
     cfg = getattr(preset, "rerank", None)
     if cfg is None:
         return results, RerankOutcome(status="off")
-    base = {"model": cfg.model_name, "pool_size": cfg.pool_size}
+    if pool_size is None:
+        pool_size = effective_pool_size(cfg)
+    base = {"model": cfg.model_name, "pool_size": pool_size}
     if not current_rerank_request().enabled:
         return results, RerankOutcome(status="disabled", **base)
     if not results:
@@ -333,17 +384,16 @@ async def rerank_pool(
     try:
         scorer = reranker or build_reranker(preset)
         base["provider"] = getattr(scorer, "provider_id", None)
-        head, tail = results[: cfg.pool_size], results[cfg.pool_size:]
+        head, tail = results[:pool_size], results[pool_size:]
         known = cache if cache is not None else {}
         ids = [_chunk_id(r) for r in head]
         todo = [i for i, cid in enumerate(ids) if cid is None or cid not in known]
         fresh: list[float] = []
         if todo:
             fresh = await asyncio.wait_for(
-                scorer.score(question, [head[i].chunk.text for i in todo]), timeout=cfg.timeout_seconds
+                _max_over_questions(scorer, [question, *extra_questions], [head[i].chunk.text for i in todo]),
+                timeout=cfg.timeout_seconds,
             )
-            if len(fresh) != len(todo):
-                raise ValueError(f"re-ranker returned {len(fresh)} scores for {len(todo)} passages")
         new_scores = dict(zip(todo, fresh))
         scores = [new_scores[i] if i in new_scores else known[ids[i]] for i in range(len(head))]
         for i, value in new_scores.items():

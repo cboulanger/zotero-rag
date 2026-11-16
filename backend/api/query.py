@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
@@ -63,6 +63,9 @@ class QueryRequest(BaseModel):
     conversation_history: List[ChatTurn] = []  # prior turns of a follow-up chat conversation
     force_fresh_retrieval: bool = False        # ignore conversation_history for routing this turn
     enable_reranking: bool = True  # False skips the preset's re-ranking step (Preferences / query dialog)
+    # Passages the re-ranker rescores (and the vector search fetches at least);
+    # None uses the preset's rerank.pool_size. Same bounds as RerankConfig.pool_size.
+    rerank_pool_size: Optional[int] = Field(default=None, ge=1, le=500)
 
     # Retrieval/answer-diversity tuning — client-configurable (plugin Preferences),
     # not exposed in the query dialog itself. See rag_engine.py's module docstrings
@@ -266,11 +269,13 @@ async def query_libraries(
                 "low_diversity_available_floor": low_diversity_available_floor,
                 "enable_quality_self_review": query.enable_quality_self_review,
                 "enable_reranking": query.enable_reranking,
+                "rerank_pool_size": query.rerank_pool_size,
             },
         ) if query.include_trace else None
 
         rerank_token = set_rerank_request(RerankRequest(
             enabled=query.enable_reranking,
+            pool_size=query.rerank_pool_size,
             client_keys=client_keys,
             user_id=identity.user_id if identity is not None else None,
         ))

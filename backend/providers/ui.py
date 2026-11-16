@@ -40,6 +40,7 @@ class UiField(BaseModel):
     pattern: Optional[str] = None
     options: list[str] = Field(default_factory=list)
     min: Optional[float] = None
+    max: Optional[float] = None
     storage: FieldStorage = "none"
     #: Preference name, key name or env name, depending on ``storage``.
     key: Optional[str] = None
