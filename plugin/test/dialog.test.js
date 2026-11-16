@@ -1211,10 +1211,27 @@ test('checkPipelineOnOpen: without an offer (or one with no stand-ins) it alerts
 	await empty.self.checkPipelineOnOpen();
 	assert.strictEqual(empty.alerts.length, 1);
 	assert.deepStrictEqual(empty.offered, []);
-	// No problem: no offer is asked for.
+	// No problem and no offer: nothing is shown.
 	const ready = pipelineCheckSetup({ embedding: { status: 'ready' }, llm: null }, null, null);
-	await ready.self.checkPipelineOnOpen();
-	assert.strictEqual(ready.fetches(), 0);
+	assert.strictEqual(await ready.self.checkPipelineOnOpen(), false);
+	assert.strictEqual(ready.fetches(), 1);
+	assert.deepStrictEqual([...ready.alerts, ...ready.opened, ...ready.offered], []);
+});
+
+test('checkPipelineOnOpen: offers stand-ins when the health shows no problem (a provider without a status check)', async () => {
+	const offer = {
+		code: 'quota_exhausted', message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+		side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+		standins: [{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] }],
+	};
+	const t = pipelineCheckSetup({ embedding: null, llm: null, rerank: null }, null, offer);
+	assert.strictEqual(await t.self.checkPipelineOnOpen(), true);
+	assert.strictEqual(t.fetches(), 1);
+	assert.deepStrictEqual(t.alerts, []);
+	assert.deepStrictEqual(t.opened, []);
+	assert.strictEqual(t.offered.length, 1);
+	assert.strictEqual(t.offered[0][0], offer);
+	assert.strictEqual(t.offered[0][1], null);
 });
 
 test('Use on an offer shown at open time switches, reloads config and health, and sends nothing', async () => {

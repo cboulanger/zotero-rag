@@ -988,24 +988,30 @@ var ZoteroRAGDialog = {
 	 * When the dialog opens: load the preset's re-ranking info and the endpoint health, and
 	 * if a side of the pipeline needs the user (paused, or not running), say so and open the
 	 * Configure preset dialog, where it can be started or its account logged in to. When the
-	 * server has stand-ins on offer for a used-up quota, offer those instead.
+	 * server has stand-ins on offer for a used-up quota, offer those instead, even when the
+	 * health shows no problem.
 	 * @returns {Promise<boolean>} True when a problem keeps questions from being answered
 	 */
 	async checkPipelineOnOpen() {
-		await Promise.all([this.loadRerankInfo(), this.refreshEndpointHealth()]);
+		// The offer is asked for whatever the health says: a provider without a status check
+		// reports no health, yet its quota can be used up.
+		const [, , offer] = await Promise.all([
+			this.loadRerankInfo(),
+			this.refreshEndpointHealth(),
+			this.plugin ? this.plugin.fetchStandinOffer().catch(() => null) : Promise.resolve(null),
+		]);
 		if (!this.plugin || this._healthClosed) return false;
 		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
 		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
 		const { lines, rerankOnly } = this.describePipelineProblems(this.endpointHealth, rerankWanted);
-		if (!lines.length) return false;
-		// A side down for a used-up quota: offer the stand-ins here, where the user meets it,
-		// instead of sending them to the Configure preset dialog. Nothing to send again yet.
-		const offer = await this.plugin.fetchStandinOffer().catch(() => null);
+		// A used-up quota: offer the stand-ins here, where the user meets it, instead of
+		// sending them to the Configure preset dialog. Nothing to send again yet.
 		if (offer && Array.isArray(offer.standins) && offer.standins.length) {
 			this.showStandinOffer(offer, null);
-			return !rerankOnly;
+			return lines.length ? !rerankOnly : true;
 		}
-		const [it, is] =lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
+		if (!lines.length) return false;
+		const [it, is] = lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
 		const consequence = rerankOnly
 			? 'Questions are answered without re-ranking until it is up.'
 			: `Questions cannot be answered until ${is} up.`;
