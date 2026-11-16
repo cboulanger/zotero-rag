@@ -298,6 +298,15 @@
         <span>Processing query, please wait…</span>
       </div>
 
+      <!-- Offered in place of a follow-up's error when a provider's quota is used up -->
+      <div id="result-standin-offer" class="standin-offer" style="display:none; flex-shrink: 0; margin-bottom: 10px;">
+        <div id="result-standin-offer-text" style="margin-bottom: 6px;"></div>
+        <div id="result-standin-offer-list"></div>
+        <div style="text-align: right; margin-top: 6px;">
+          <button id="result-standin-offer-dismiss" type="button">Not now</button>
+        </div>
+      </div>
+
       <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/
            exportDebugInfo) — a separate element from #status-section because that one
            lives inside #input-content, which is hidden once switchToResultState() runs. -->

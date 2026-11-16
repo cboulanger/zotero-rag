@@ -2181,3 +2181,41 @@ test('syncStandinState refreshes required keys only when the stand-in changed', 
 	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['GET /api/required-keys']);
 	assert.strictEqual(await plugin.syncStandinState(undefined), false);
 });
+
+test('describeActiveStandin names the stand-in, its end and the exhausted provider when known', () => {
+	const { plugin } = standinPlugin({});
+	const standin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
+	const d = new Date(standin.until);
+	const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+	assert.strictEqual(plugin.describeActiveStandin(standin, 'kisski'), `Using remote-mpcdf until ${hhmm} (KISSKI quota)`);
+	assert.strictEqual(plugin.describeActiveStandin(standin, null), `Using remote-mpcdf until ${hhmm} (instead of kisski)`);
+});
+
+test('renderStandinLine (shared by the query dialog and Preferences) shows and hides the line', async () => {
+	const { fakeNode } = require('./fake-dom.js');
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	const line = fakeNode();
+	const text = fakeNode('span');
+	plugin.renderStandinLine(line, text, { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' });
+	assert.strictEqual(line.style.display, 'flex');
+	assert.match(text.textContent, /^Using remote-mpcdf until \d\d:\d\d \(KISSKI quota\)$/);
+	plugin.renderStandinLine(line, text, null);
+	assert.strictEqual(line.style.display, 'none');
+	plugin.renderStandinLine(null, null, null); // missing markup is ignored
+});
+
+test('endStandin forgets the exhausted provider', async () => {
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	assert.strictEqual(plugin.standinProvider, 'kisski');
+	await plugin.endStandin();
+	assert.strictEqual(plugin.standinProvider, null);
+});

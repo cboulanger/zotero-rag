@@ -228,6 +228,9 @@ class ZoteroRAGPlugin {
 		/** @type {Set<string>} */
 		this.activeQueries = new Set();
 
+		/** @type {string|null} Provider whose used-up quota the active stand-in covers (known once chosen here) */
+		this.standinProvider = null;
+
 		/** @type {number} */
 		this.maxConcurrentQueries = 5;
 
@@ -771,10 +774,11 @@ class ZoteroRAGPlugin {
 	 * Use `presetName` as a stand-in until the exhausted quota resets (the server decides
 	 * how long), then refresh the required-keys cache so the stand-in's keys are sent.
 	 * @param {string} presetName
+	 * @param {string|null} [provider] - The provider whose quota ran out, shown in the active-stand-in line
 	 * @returns {Promise<void>}
 	 * @throws {Error} With the server's message when it refuses (e.g. 409: no quota is exhausted any more)
 	 */
-	async useStandin(presetName) {
+	async useStandin(presetName, provider = null) {
 		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
 			method: 'PUT',
 			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -785,6 +789,7 @@ class ZoteroRAGPlugin {
 			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
 		}
 		this._setStandinPref(presetName);
+		this.standinProvider = provider;
 		await this.fetchRequiredApiKeys();
 		this._notifyStandinChanged();
 	}
@@ -804,6 +809,7 @@ class ZoteroRAGPlugin {
 			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
 		}
 		this._setStandinPref('');
+		this.standinProvider = null;
 		await this.fetchRequiredApiKeys();
 		this._notifyStandinChanged();
 	}
@@ -823,8 +829,39 @@ class ZoteroRAGPlugin {
 		try { known = String(Zotero.Prefs.get(STANDIN_PREF, true) || ''); } catch (_) {}
 		if (known === current) return false;
 		this._setStandinPref(current);
+		this.standinProvider = null;
 		await this.fetchRequiredApiKeys();
 		return true;
+	}
+
+	/**
+	 * The line shown while a stand-in answers queries (query dialog and Preferences).
+	 * @param {ActiveStandin} standin
+	 * @param {string|null} provider - The provider whose quota ran out, when known
+	 * @returns {string}
+	 */
+	describeActiveStandin(standin, provider) {
+		const until = new Date(standin.until);
+		const clock = `${String(until.getHours()).padStart(2, '0')}:${String(until.getMinutes()).padStart(2, '0')}`;
+		const reason = provider ? `${provider.toUpperCase()} quota` : `instead of ${standin.replaces}`;
+		return `Using ${standin.preset} until ${clock} (${reason})`;
+	}
+
+	/**
+	 * Show the active stand-in in `line`/`text`, or hide the line when there is none.
+	 * @param {HTMLElement|null} line - Container, shown as flex
+	 * @param {HTMLElement|null} text - Element that gets the description
+	 * @param {ActiveStandin|null} standin
+	 * @returns {void}
+	 */
+	renderStandinLine(line, text, standin) {
+		if (!line || !text) return;
+		if (!standin) {
+			line.style.display = 'none';
+			return;
+		}
+		text.textContent = this.describeActiveStandin(standin, this.standinProvider);
+		line.style.display = 'flex';
 	}
 
 	/**

@@ -675,6 +675,7 @@ test('submitFollowUp clears a stale result-status error before appending a turn 
 	/** @type {any[]} */
 	const submittedOptions = [];
 	const fakeThis = {
+		hideStandinOffer() {}, quotaDetailOf: ContextDialog.quotaDetailOf, errorText: ContextDialog.errorText,
 		plugin: {
 			submitQuery: async (/** @type {string} */ _q, /** @type {string[]} */ _libIds, /** @type {any} */ opts) => {
 				submittedOptions.push(opts);
@@ -733,6 +734,7 @@ test('submitFollowUp shows the "Processing query" indicator while awaiting the r
 	const ContextDialog = context.ZoteroRAGDialog;
 
 	const fakeThis = {
+		hideStandinOffer() {}, quotaDetailOf: ContextDialog.quotaDetailOf, errorText: ContextDialog.errorText,
 		plugin: {
 			submitQuery: async () => {
 				displayDuringRunQuery.push(loadingIndicator.style.display);
@@ -773,6 +775,7 @@ test('submitFollowUp hides the "Processing query" indicator even when the query 
 	const ContextDialog = context.ZoteroRAGDialog;
 
 	const fakeThis = {
+		hideStandinOffer() {}, quotaDetailOf: ContextDialog.quotaDetailOf, errorText: ContextDialog.errorText,
 		plugin: { submitQuery: async () => { throw new Error('boom'); } },
 		libraryIds: ['u1'],
 		turns: [{ question: 'Q0', result: { answer: 'A0' } }],
@@ -807,6 +810,7 @@ test('submitFollowUp regenerates the note from the full turn history when one ha
 	/** @type {any} */
 	let receivedTurns = null;
 	const fakeThis = {
+		hideStandinOffer() {}, quotaDetailOf: ContextDialog.quotaDetailOf, errorText: ContextDialog.errorText,
 		plugin: {
 			submitQuery: async () => ({ status: 'complete', answer: 'Follow-up answer.', sources: [] }),
 			formatNoteHTML: (/** @type {any} */ turns, /** @type {string[]} */ _libIds) => { receivedTurns = turns; return '<div>full regenerated html</div>'; },
@@ -841,7 +845,8 @@ test('submitFollowUp does nothing when the input is empty', async () => {
 	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
 	const ContextDialog = context.ZoteroRAGDialog;
 
-	const fakeThis = { plugin: { submitQuery: async () => { throw new Error('should not be called'); } }, turns: [] };
+	const fakeThis = {
+		hideStandinOffer() {}, quotaDetailOf: ContextDialog.quotaDetailOf, errorText: ContextDialog.errorText, plugin: { submitQuery: async () => { throw new Error('should not be called'); } }, turns: [] };
 	await ContextDialog.submitFollowUp.call(fakeThis);
 	assert.strictEqual(fakeThis.turns.length, 0);
 });
@@ -1218,20 +1223,12 @@ test('describeStandinNeeds: names what must happen first, or that it is ready', 
 		'needs MPCDF login, RUNPOD_API_KEY, start of the llm endpoint');
 });
 
-test('describeActiveStandin: names the stand-in, its end and the exhausted provider', () => {
-	const D = loadDialogMethods();
-	const standin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
-	assert.strictEqual(D.describeActiveStandin(standin, 'kisski'),
-		`Using remote-mpcdf until ${localClock(standin.until)} (KISSKI quota)`);
-	assert.strictEqual(D.describeActiveStandin(standin, null),
-		`Using remote-mpcdf until ${localClock(standin.until)} (instead of kisski)`);
-});
-
 /**
  * A fake `this` for useStandinAndRetry recording the order of the steps.
  * @param {(preset: string) => Promise<void>} useStandin
+ * @param {{blocked?: boolean, storedKeys?: string[], followUp?: boolean}} [opts]
  */
-function standinRetrySetup(useStandin) {
+function standinRetrySetup(useStandin, opts = {}) {
 	const D = loadDialogMethods();
 	/** @type {string[]} */
 	const steps = [];
@@ -1240,13 +1237,19 @@ function standinRetrySetup(useStandin) {
 	/** @type {string[]} */
 	const statuses = [];
 	const self = Object.assign(Object.create(D), {
-		plugin: { useStandin: async (/** @type {string} */ p) => { steps.push(`use ${p}`); await useStandin(p); } },
-		_standinRetry: { question: 'What is Zotero?', libraryIds: ['u1'], options: { minScore: 0.3, topK: 10, llmModel: 'old-model', enableRouting: true } },
+		plugin: {
+			useStandin: async (/** @type {string} */ p, /** @type {string} */ provider) => { steps.push(`use ${p} ${provider}`); await useStandin(p); },
+			openPresetDialog: () => { steps.push('configure'); },
+		},
+		_standinRetry: { question: 'What is Zotero?', libraryIds: ['u1'], options: { minScore: 0.3, topK: 10, llmModel: 'old-model', enableRouting: true }, followUp: !!opts.followUp },
 		_standinOffer: QUOTA_DETAIL,
+		queryOptions: { minScore: 0.3, topK: 10, llmModel: 'old-model', enableRouting: true },
+		hasStoredKey: (/** @type {string} */ k) => (opts.storedKeys || []).includes(k),
 		hideStandinOffer() { steps.push('hide'); },
-		checkPipelineOnOpen: async () => { steps.push('check'); },
+		checkPipelineOnOpen: async () => { steps.push('check'); return !!opts.blocked; },
 		loadPresetConfig: async () => { steps.push('config'); },
 		sendQuestion: async (/** @type {string} */ q, /** @type {string[]} */ ids, /** @type {any} */ opts) => { steps.push('send'); sent.push({ q, ids, opts }); },
+		submitFollowUp: async function () { steps.push('follow-up'); sent.push({ opts: this.queryOptions }); },
 		showStatus: (/** @type {string} */ m) => { statuses.push(m); },
 	});
 	return { self, steps, sent, statuses };
@@ -1255,13 +1258,12 @@ function standinRetrySetup(useStandin) {
 test('retry after a stand-in drops llmModel', async () => {
 	const { self, steps, sent } = standinRetrySetup(async () => {});
 	await self.useStandinAndRetry('remote-mpcdf');
-	assert.deepStrictEqual(steps, ['use remote-mpcdf', 'hide', 'check', 'config', 'send']);
+	assert.deepStrictEqual(steps, ['use remote-mpcdf kisski', 'hide', 'check', 'config', 'send']);
 	assert.strictEqual(sent.length, 1);
 	assert.strictEqual(sent[0].q, 'What is Zotero?');
 	assert.deepStrictEqual([...sent[0].ids], ['u1']);
 	assert.strictEqual('llmModel' in sent[0].opts, false);
 	assert.strictEqual(sent[0].opts.topK, 10);
-	assert.strictEqual(self._standinProvider, 'kisski');
 });
 
 test('a refused stand-in shows the server message and does not resend', async () => {
@@ -1270,4 +1272,103 @@ test('a refused stand-in shows the server message and does not resend', async ()
 	assert.deepStrictEqual(sent, []);
 	assert.ok(!steps.includes('check'));
 	assert.deepStrictEqual(statuses, ['No quota is exhausted any more.']);
+});
+
+test('a stand-in whose pipeline is not ready is not re-sent; the user is told to submit again', async () => {
+	const { self, steps, sent, statuses } = standinRetrySetup(async () => {}, { blocked: true });
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.deepStrictEqual(sent, []);
+	assert.ok(!steps.includes('send'));
+	assert.deepStrictEqual(statuses, ['Submit again once remote-mpcdf is ready.']);
+});
+
+test('a stand-in needing a key the user has not stored opens Configure preset and is not re-sent', async () => {
+	const { self, steps, sent, statuses } = standinRetrySetup(async () => {});
+	await self.useStandinAndRetry('runpod');
+	assert.ok(steps.includes('configure'));
+	assert.deepStrictEqual(sent, []);
+	assert.deepStrictEqual(statuses, ['Submit again once runpod is ready.']);
+});
+
+test('a stand-in needing a key the user has stored is re-sent', async () => {
+	const { self, sent } = standinRetrySetup(async () => {}, { storedKeys: ['RUNPOD_API_KEY'] });
+	await self.useStandinAndRetry('runpod');
+	assert.strictEqual(sent.length, 1);
+});
+
+test('a follow-up is re-sent as a follow-up without llmModel', async () => {
+	const { self, steps, sent } = standinRetrySetup(async () => {}, { followUp: true });
+	// The follow-up question stays in #followup-input after the failure; submitFollowUp sends it again.
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.ok(steps.includes('follow-up'));
+	assert.ok(!steps.includes('send'));
+	assert.strictEqual('llmModel' in sent[0].opts, false);
+	assert.strictEqual(sent[0].opts.topK, 10);
+});
+
+test('a follow-up that hits an exhausted quota shows the offer in the result view', async () => {
+	const { fakeNode } = require('./fake-dom.js');
+	const nodes = {
+		'followup-input': { value: 'Follow-up', disabled: false },
+		'result-submit-button': { disabled: false },
+		'result-standin-offer': fakeNode(),
+		'result-standin-offer-text': fakeNode(),
+		'result-standin-offer-list': fakeNode(),
+	};
+	nodes['result-standin-offer'].style.display = 'none';
+	const context = {
+		document: { readyState: 'loading', addEventListener() {}, getElementById: (/** @type {string} */ id) => nodes[id] || null, createElement: (/** @type {string} */ t) => fakeNode(t) },
+		window: {}, console,
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const D = context.ZoteroRAGDialog;
+	const err = Object.assign(new Error(QUOTA_DETAIL.message), { name: 'QuotaExhaustedError', detail: QUOTA_DETAIL });
+	/** @type {string[]} */
+	const statuses = [];
+	const self = Object.assign(Object.create(D), {
+		plugin: { submitQuery: async () => { throw err; } },
+		libraryIds: ['u1'], turns: [{ question: 'Q0', result: { answer: 'A0' } }], noteID: null,
+		queryOptions: { topK: 10, llmModel: 'old-model' },
+		_resultStateActive: true,
+		hasStoredKey: () => false,
+		showStatus: (/** @type {string} */ m) => { statuses.push(m); },
+		clearStatusMessages() {},
+	});
+	await self.submitFollowUp();
+	assert.strictEqual(nodes['result-standin-offer'].style.display, '');
+	assert.match(nodes['result-standin-offer-text'].textContent, /quota is used up until .* Use a stand-in until then\?$/);
+	assert.strictEqual(nodes['result-standin-offer-list'].children.length, 2);
+	assert.deepStrictEqual(statuses, []);
+	assert.strictEqual(self._standinRetry.followUp, true);
+	assert.strictEqual(self._standinRetry.question, 'Follow-up');
+	assert.strictEqual(nodes['followup-input'].value, 'Follow-up'); // kept for a later submit
+});
+
+test('rememberModelChoice does not save a stand-in model as the user\'s own choice', () => {
+	/** @type {Record<string, any>} */
+	const prefs = {};
+	const context = {
+		document: { readyState: 'loading', addEventListener() {} },
+		window: {}, console,
+		Zotero: { Prefs: { set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } } },
+	};
+	vm.createContext(context);
+	vm.runInContext(fs.readFileSync(SOURCE_PATH, 'utf8'), context, { filename: 'dialog.js' });
+	const self = Object.create(context.ZoteroRAGDialog);
+	self.activeStandin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
+	self.rememberModelChoice('standin-model');
+	assert.deepStrictEqual(prefs, {});
+	self.activeStandin = null;
+	self.rememberModelChoice('own-model');
+	assert.deepStrictEqual(prefs, { 'extensions.zotero-rag.llmModel': 'own-model' });
+});
+
+test('checkPipelineOnOpen reports whether a problem keeps questions from being answered', async () => {
+	const blocked = pipelineCheckSetup({ embedding: { status: 'paused' }, llm: null }, null);
+	assert.strictEqual(await blocked.self.checkPipelineOnOpen(), true);
+	const rerankOnly = pipelineCheckSetup({ embedding: null, llm: null, rerank: { status: 'unreachable' } }, { model_type: 'remote', provider: null });
+	assert.strictEqual(await rerankOnly.self.checkPipelineOnOpen(), false);
+	const ready = pipelineCheckSetup({ embedding: { status: 'ready' }, llm: { status: 'ready' } }, null);
+	assert.strictEqual(await ready.self.checkPipelineOnOpen(), false);
 });

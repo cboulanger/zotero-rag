@@ -61,11 +61,11 @@ var ZoteroRAGDialog = {
 	/** @type {QuotaExhaustedDetail|null} The used-up quota whose stand-ins are on offer */
 	_standinOffer: null,
 
-	/** @type {{question: string, libraryIds: Array<string>, options: QueryOptions}|null} The question to send again after a stand-in is chosen */
+	/** @type {{question: string, libraryIds: Array<string>, options: QueryOptions, followUp: boolean}|null} The question to send again after a stand-in is chosen */
 	_standinRetry: null,
 
-	/** @type {string|null} Provider whose quota the chosen stand-in replaces (known only in the dialog that chose it) */
-	_standinProvider: null,
+	/** @type {ActiveStandin|null} The stand-in GET /api/config last reported */
+	activeStandin: null,
 
 	/** @type {Map<string, EventSource>} */
 
@@ -353,6 +353,8 @@ var ZoteroRAGDialog = {
 		}
 		const standinDismiss = document.getElementById('standin-offer-dismiss');
 		if (standinDismiss) standinDismiss.addEventListener('click', () => this.hideStandinOffer());
+		const resultStandinDismiss = document.getElementById('result-standin-offer-dismiss');
+		if (resultStandinDismiss) resultStandinDismiss.addEventListener('click', () => this.hideStandinOffer());
 		const standinEnd = document.getElementById('standin-end-button');
 		if (standinEnd) standinEnd.addEventListener('click', () => this.endStandinNow());
 
@@ -986,15 +988,15 @@ var ZoteroRAGDialog = {
 	 * When the dialog opens: load the preset's re-ranking info and the endpoint health, and
 	 * if a side of the pipeline needs the user (paused, or not running), say so and open the
 	 * Configure preset dialog, where it can be started or its account logged in to.
-	 * @returns {Promise<void>}
+	 * @returns {Promise<boolean>} True when a problem keeps questions from being answered
 	 */
 	async checkPipelineOnOpen() {
 		await Promise.all([this.loadRerankInfo(), this.refreshEndpointHealth()]);
-		if (!this.plugin || this._healthClosed) return;
+		if (!this.plugin || this._healthClosed) return false;
 		const checkbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-reranking'));
 		const rerankWanted = !!this.rerankInfo && this.rerankEnabledForQuery(checkbox ? checkbox.checked : false);
 		const { lines, rerankOnly } = this.describePipelineProblems(this.endpointHealth, rerankWanted);
-		if (!lines.length) return;
+		if (!lines.length) return false;
 		const [it, is] = lines.length > 1 ? ['them', 'they are'] : ['it', 'it is'];
 		const consequence = rerankOnly
 			? 'Questions are answered without re-ranking until it is up.'
@@ -1005,6 +1007,7 @@ var ZoteroRAGDialog = {
 			`The Configure preset dialog opens next, so you can start ${it} or log in.`,
 		].join('\n'));
 		this.plugin.openPresetDialog(window);
+		return !rerankOnly;
 	},
 
 	/**
@@ -1083,17 +1086,6 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * The line shown while a stand-in answers queries.
-	 * @param {ActiveStandin} standin
-	 * @param {string|null} provider - The provider whose quota ran out, when this dialog knows it
-	 * @returns {string}
-	 */
-	describeActiveStandin(standin, provider) {
-		const reason = provider ? `${provider.toUpperCase()} quota` : `instead of ${standin.replaces}`;
-		return `Using ${standin.preset} until ${this.formatClock(new Date(standin.until))} (${reason})`;
-	},
-
-	/**
 	 * Whether the user has stored this personal API key in the plugin.
 	 * @param {string} keyName
 	 * @returns {boolean}
@@ -1113,15 +1105,17 @@ var ZoteroRAGDialog = {
 	 * @param {string} question - The question to send again once a stand-in is chosen
 	 * @param {Array<string>} libraryIds
 	 * @param {QueryOptions} options
+	 * @param {boolean} [followUp] - A follow-up in the result view (sent again as a follow-up)
 	 * @returns {void}
 	 */
-	showStandinOffer(detail, question, libraryIds, options) {
+	showStandinOffer(detail, question, libraryIds, options, followUp = false) {
 		this._standinOffer = detail;
-		this._standinRetry = { question, libraryIds, options };
+		this._standinRetry = { question, libraryIds, options, followUp };
 		const { text, choices } = this.describeStandinOffer(detail, new Date(), (k) => this.hasStoredKey(k));
-		const box = document.getElementById('standin-offer');
-		const textEl = document.getElementById('standin-offer-text');
-		const list = document.getElementById('standin-offer-list');
+		const id = this._standinOfferId();
+		const box = document.getElementById(id);
+		const textEl = document.getElementById(`${id}-text`);
+		const list = document.getElementById(`${id}-list`);
 		if (!box || !textEl || !list) {
 			this.showStatus(`Error: ${text}`, 'error');
 			return;
@@ -1151,36 +1145,64 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
-	 * Hide the offer of stand-ins (Not now, or a new question).
-	 * @returns {void}
+	 * The offer's element id in the current view (input or result).
+	 * @returns {string}
 	 */
-	hideStandinOffer() {
-		const box = document.getElementById('standin-offer');
-		if (box) box.style.display = 'none';
+	_standinOfferId() {
+		return this._resultStateActive ? 'result-standin-offer' : 'standin-offer';
 	},
 
 	/**
-	 * Use a stand-in: store it, let the user log in to or start it where needed, then send
-	 * the question again without the model choice (the old preset's model may not exist in
-	 * the stand-in). A refusal (e.g. the quota is no longer used up) is shown, not resent.
+	 * Hide the offer of stand-ins (Not now, or a new question) in both views.
+	 * @returns {void}
+	 */
+	hideStandinOffer() {
+		for (const id of ['standin-offer', 'result-standin-offer']) {
+			const box = document.getElementById(id);
+			if (box) box.style.display = 'none';
+		}
+	},
+
+	/**
+	 * Use a stand-in: store it, let the user log in to, start or enter a key for it where
+	 * needed, and send the question again only when nothing blocks it (without the model
+	 * choice: the old preset's model may not exist in the stand-in). Otherwise the question
+	 * stays in its input and the user submits it again once the stand-in is ready. A refusal
+	 * (e.g. the quota is no longer used up) is shown, not resent.
 	 * @param {string} presetName
 	 * @returns {Promise<void>}
 	 */
 	async useStandinAndRetry(presetName) {
 		if (!this.plugin) return;
 		const retry = this._standinRetry;
+		const offer = this._standinOffer;
 		try {
-			await this.plugin.useStandin(presetName);
+			await this.plugin.useStandin(presetName, offer ? offer.provider : null);
 		} catch (error) {
 			this.showStatus(this.errorText(error), 'error');
 			return;
 		}
-		this._standinProvider = this._standinOffer ? this._standinOffer.provider : null;
 		this._standinRetry = null;
 		this.hideStandinOffer();
-		await this.checkPipelineOnOpen();
+		// The old preset's model may not exist in the stand-in: follow-ups use its default too.
+		if (this.queryOptions) {
+			const { llmModel: _old, ...rest } = this.queryOptions;
+			this.queryOptions = rest;
+		}
+		const choice = offer ? (offer.standins || []).find((c) => c.preset === presetName) : undefined;
+		const missingKey = !!choice && choice.needs.some((n) => n.startsWith('key:') && !this.hasStoredKey(n.slice(4)));
+		const pipelineBlocked = await this.checkPipelineOnOpen();
+		if (missingKey) this.plugin.openPresetDialog(window); // asks for the key
 		await this.loadPresetConfig();
 		if (!retry) return;
+		if (pipelineBlocked || missingKey) {
+			this.showStatus(`Submit again once ${presetName} is ready.`, 'error');
+			return;
+		}
+		if (retry.followUp) {
+			await this.submitFollowUp(); // the question is still in #followup-input
+			return;
+		}
 		const { llmModel: _model, ...options } = retry.options;
 		await this.sendQuestion(retry.question, retry.libraryIds, options);
 	},
@@ -1191,15 +1213,23 @@ var ZoteroRAGDialog = {
 	 * @returns {void}
 	 */
 	renderActiveStandin(standin) {
-		const line = document.getElementById('standin-line');
-		const text = document.getElementById('standin-line-text');
-		if (!line || !text) return;
-		if (!standin) {
-			line.style.display = 'none';
-			return;
-		}
-		text.textContent = this.describeActiveStandin(standin, this._standinProvider);
-		line.style.display = 'flex';
+		this.activeStandin = standin;
+		if (!this.plugin) return;
+		this.plugin.renderStandinLine(document.getElementById('standin-line'), document.getElementById('standin-line-text'), standin);
+	},
+
+	/**
+	 * Save the chosen answering model as the user's own choice, except while a stand-in
+	 * answers: its models may not exist in the user's own preset once it ends.
+	 * @param {string|undefined} llmModel
+	 * @returns {void}
+	 */
+	rememberModelChoice(llmModel) {
+		if (!llmModel || this.activeStandin) return;
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			Zotero.Prefs.set('extensions.zotero-rag.llmModel', llmModel, true);
+		} catch (_) {}
 	},
 
 	/**
@@ -1214,7 +1244,6 @@ var ZoteroRAGDialog = {
 			this.showStatus(this.errorText(error), 'error');
 			return;
 		}
-		this._standinProvider = null;
 		await Promise.all([this.loadPresetConfig(), this.loadRerankInfo(), this.refreshEndpointHealth()]);
 	},
 
@@ -1618,12 +1647,7 @@ var ZoteroRAGDialog = {
 		// Get selected LLM model (only when multiple options are available)
 		const modelSelect = /** @type {HTMLSelectElement|null} */ (document.getElementById('llm-model-select'));
 		const llmModel = (modelSelect && modelSelect.options.length > 1) ? modelSelect.value : undefined;
-		if (llmModel) {
-			try {
-				// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
-				Zotero.Prefs.set('extensions.zotero-rag.llmModel', llmModel, true);
-			} catch (_) {}
-		}
+		this.rememberModelChoice(llmModel);
 
 		// Get disable-routing checkbox and persist it
 		const disableRoutingCheckbox = /** @type {HTMLInputElement|null} */ (document.getElementById('disable-routing'));
@@ -2297,6 +2321,7 @@ var ZoteroRAGDialog = {
 		const question = input.value.trim();
 		if (!question) return;
 		this.clearStatusMessages();
+		this.hideStandinOffer();
 
 		const submitButton = /** @type {HTMLButtonElement|null} */ (document.getElementById('result-submit-button'));
 		const loadingIndicator = document.getElementById('followup-loading');
@@ -2321,8 +2346,12 @@ var ZoteroRAGDialog = {
 				await note.saveTx();
 			}
 		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${msg}`, 'error');
+			const quota = this.quotaDetailOf(error);
+			if (quota && Array.isArray(quota.standins) && quota.standins.length) {
+				this.showStandinOffer(quota, question, this.libraryIds, this.queryOptions, true);
+			} else {
+				this.showStatus(`Error: ${this.errorText(error)}`, 'error');
+			}
 		} finally {
 			if (submitButton) submitButton.disabled = false;
 			input.disabled = false;
