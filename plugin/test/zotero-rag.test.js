@@ -2076,3 +2076,108 @@ test('_dropBackendIndexed marks rows the server answered for as unindexed and ch
 	assert.strictEqual(kept.length, 449);
 	assert.ok(kept.every((/** @type {any} */ r) => r.serverIndexState === 'unindexed'));
 });
+
+// ── Stand-in presets ────────────────────────────────────────────────────────
+
+const QUOTA_DETAIL = {
+	code: 'quota_exhausted',
+	message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY'] },
+	],
+};
+
+/**
+ * A plugin whose fetch answers by "METHOD path" from `routes` and records each call.
+ * @param {Record<string, {status: number, body: any}>} routes
+ */
+function standinPlugin(routes) {
+	/** @type {Array<{method: string, path: string, body: any}>} */
+	const calls = [];
+	/** @type {Record<string, any>} */
+	const prefs = {};
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ opts = {}) => {
+		const method = opts.method || 'GET';
+		const p = url.replace('http://localhost:8119', '');
+		calls.push({ method, path: p, body: opts.body ? JSON.parse(opts.body) : undefined });
+		const r = routes[`${method} ${p}`] || { status: 404, body: { detail: 'Not Found' } };
+		return {
+			ok: r.status < 400, status: r.status,
+			headers: { get: () => 'application/json' },
+			json: async () => r.body,
+			text: async () => JSON.stringify(r.body),
+		};
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Prefs: { get: (/** @type {string} */ k) => prefs[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } },
+	};
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+	return { plugin, calls, prefs };
+}
+
+test('submitQuery throws QuotaExhaustedError with the structured detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: QUOTA_DETAIL } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'QuotaExhaustedError');
+		assert.deepStrictEqual(err.detail, QUOTA_DETAIL);
+		assert.strictEqual(err.message, QUOTA_DETAIL.message);
+		return true;
+	});
+});
+
+test('submitQuery still throws a plain Error for a 503 with a string detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: 'Embedding service down' } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'Error');
+		assert.match(err.message, /HTTP 503 — Embedding service down/);
+		return true;
+	});
+});
+
+test('useStandin PUTs the preset name and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'RUNPOD_API_KEY', header_name: 'X-Runpod-Api-Key' }] } },
+	});
+	await plugin.useStandin('runpod');
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['PUT /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(calls[0].body, { preset_name: 'runpod' });
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['RUNPOD_API_KEY']);
+});
+
+test('useStandin throws the server message on a 409 and does not refresh keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 409, body: { detail: 'No quota is exhausted any more.' } },
+	});
+	await assert.rejects(plugin.useStandin('runpod'), /No quota is exhausted any more\./);
+	assert.deepStrictEqual(calls.map((c) => c.method), ['PUT']);
+});
+
+test('endStandin DELETEs the stand-in and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'KISSKI_API_KEY', header_name: 'X-Kisski-Api-Key' }] } },
+	});
+	await plugin.endStandin();
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['DELETE /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['KISSKI_API_KEY']);
+});
+
+test('syncStandinState refreshes required keys only when the stand-in changed', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('runpod');
+	calls.length = 0;
+	assert.strictEqual(await plugin.syncStandinState({ preset: 'runpod', until: 'x', replaces: 'kisski' }), false);
+	assert.deepStrictEqual(calls, []);
+	// The stand-in expired on the server: the user's own keys must be sent again.
+	assert.strictEqual(await plugin.syncStandinState(null), true);
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['GET /api/required-keys']);
+	assert.strictEqual(await plugin.syncStandinState(undefined), false);
+});

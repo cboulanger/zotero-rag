@@ -58,6 +58,15 @@ var ZoteroRAGDialog = {
 	/** @type {Set<string>} */
 	selectedLibraries: new Set(),
 
+	/** @type {QuotaExhaustedDetail|null} The used-up quota whose stand-ins are on offer */
+	_standinOffer: null,
+
+	/** @type {{question: string, libraryIds: Array<string>, options: QueryOptions}|null} The question to send again after a stand-in is chosen */
+	_standinRetry: null,
+
+	/** @type {string|null} Provider whose quota the chosen stand-in replaces (known only in the dialog that chose it) */
+	_standinProvider: null,
+
 	/** @type {Map<string, EventSource>} */
 
 	/** @type {Map<string, LibraryIndexMetadata|null>} */
@@ -342,6 +351,11 @@ var ZoteroRAGDialog = {
 			} catch (_) {}
 			disableRerankingCheckbox.addEventListener('change', () => this.updateRerankNotice());
 		}
+		const standinDismiss = document.getElementById('standin-offer-dismiss');
+		if (standinDismiss) standinDismiss.addEventListener('click', () => this.hideStandinOffer());
+		const standinEnd = document.getElementById('standin-end-button');
+		if (standinEnd) standinEnd.addEventListener('click', () => this.endStandinNow());
+
 		const rerankStartButton = document.getElementById('rerank-start-button');
 		if (rerankStartButton) rerankStartButton.addEventListener('click', () => this.startRerankEndpoint());
 
@@ -427,7 +441,10 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[]}} */ (await response.json());
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null}} */ (await response.json());
+				this.renderActiveStandin(config.standin || null);
+				// A stand-in that ended on the server (expired) means the user's own keys are needed again.
+				this.plugin.syncStandinState(config.standin).catch(() => {});
 				const defaultMinScore = config.default_min_score || 0.3;
 
 				// Update slider and display
@@ -991,6 +1008,217 @@ var ZoteroRAGDialog = {
 	},
 
 	/**
+	 * The structured detail of a used-up quota, or null for any other error. Checked by
+	 * shape, not `instanceof`: the error is created in the main window's scope.
+	 * @param {unknown} error
+	 * @returns {QuotaExhaustedDetail|null}
+	 */
+	quotaDetailOf(error) {
+		const e = /** @type {any} */ (error);
+		return e && e.name === 'QuotaExhaustedError' && e.detail && e.detail.code === 'quota_exhausted'
+			? /** @type {QuotaExhaustedDetail} */ (e.detail) : null;
+	},
+
+	/**
+	 * The message of an error thrown in another window's scope (where `instanceof Error` fails).
+	 * @param {unknown} error
+	 * @returns {string}
+	 */
+	errorText(error) {
+		const e = /** @type {any} */ (error);
+		return e && typeof e.message === 'string' ? e.message : String(error);
+	},
+
+	/**
+	 * Local wall-clock time of a date as HH:MM.
+	 * @param {Date} date
+	 * @returns {string}
+	 */
+	formatClock(date) {
+		return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+	},
+
+	/**
+	 * What the offer of stand-ins says, and which it offers. Pure.
+	 * @param {QuotaExhaustedDetail} detail - The 503 detail of POST /api/query
+	 * @param {Date} now
+	 * @param {(keyName: string) => boolean} [hasKey] - Whether the user has this personal key stored;
+	 *   a `key:<NAME>` need is dropped when they do, since the plugin sends it after the switch
+	 * @returns {{text: string, choices: StandinChoice[]}} `choices` in the server's order
+	 */
+	describeStandinOffer(detail, now, hasKey = () => false) {
+		const until = new Date(detail.available_at);
+		const minutes = Math.max(0, Math.round((until.getTime() - now.getTime()) / 60000));
+		const h = Math.floor(minutes / 60);
+		const m = minutes % 60;
+		const wait = h && m ? `${h} h ${m} min` : h ? `${h} h` : `${m} min`;
+		// The server's message names the provider and side ("<Provider>'s embedding quota is
+		// used up until 23:00 UTC."); keep its wording and give the time in the user's own zone.
+		const cut = (detail.message || '').indexOf(' until ');
+		const head = cut > 0
+			? detail.message.slice(0, cut)
+			: `${String(detail.provider || '').toUpperCase()}'s ${detail.side} quota is used up`;
+		const text = `${head} until ${this.formatClock(until)} (in ${wait}).`;
+		const choices = (detail.standins || []).map((c) => ({
+			preset: c.preset, label: c.label, cost: c.cost,
+			needs: (c.needs || []).filter((n) => !(n.startsWith('key:') && hasKey(n.slice(4)))),
+		}));
+		return { text, choices };
+	},
+
+	/**
+	 * What a stand-in needs before it can answer, in a few words.
+	 * @param {string[]} needs - `login:<provider>`, `key:<KEY_NAME>`, `start:<side>`
+	 * @returns {string}
+	 */
+	describeStandinNeeds(needs) {
+		if (!needs.length) return 'ready';
+		const parts = needs.map((n) => {
+			const [kind, what] = [n.slice(0, n.indexOf(':')), n.slice(n.indexOf(':') + 1)];
+			if (kind === 'login') return `${what.toUpperCase()} login`;
+			if (kind === 'start') return `start of the ${what} endpoint`;
+			return what;
+		});
+		return `needs ${parts.join(', ')}`;
+	},
+
+	/**
+	 * The line shown while a stand-in answers queries.
+	 * @param {ActiveStandin} standin
+	 * @param {string|null} provider - The provider whose quota ran out, when this dialog knows it
+	 * @returns {string}
+	 */
+	describeActiveStandin(standin, provider) {
+		const reason = provider ? `${provider.toUpperCase()} quota` : `instead of ${standin.replaces}`;
+		return `Using ${standin.preset} until ${this.formatClock(new Date(standin.until))} (${reason})`;
+	},
+
+	/**
+	 * Whether the user has stored this personal API key in the plugin.
+	 * @param {string} keyName
+	 * @returns {boolean}
+	 */
+	hasStoredKey(keyName) {
+		try {
+			// @ts-ignore - Zotero.Prefs is available in Zotero plugin context
+			return !!Zotero.Prefs.get(`extensions.zotero-rag.serviceApiKey.${keyName}`, true);
+		} catch (_) {
+			return false;
+		}
+	},
+
+	/**
+	 * Offer the stand-ins of a used-up quota in place of the plain error.
+	 * @param {QuotaExhaustedDetail} detail
+	 * @param {string} question - The question to send again once a stand-in is chosen
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {void}
+	 */
+	showStandinOffer(detail, question, libraryIds, options) {
+		this._standinOffer = detail;
+		this._standinRetry = { question, libraryIds, options };
+		const { text, choices } = this.describeStandinOffer(detail, new Date(), (k) => this.hasStoredKey(k));
+		const box = document.getElementById('standin-offer');
+		const textEl = document.getElementById('standin-offer-text');
+		const list = document.getElementById('standin-offer-list');
+		if (!box || !textEl || !list) {
+			this.showStatus(`Error: ${text}`, 'error');
+			return;
+		}
+		textEl.textContent = `${text} Use a stand-in until then?`;
+		/** @type {HTMLButtonElement[]} */
+		const buttons = [];
+		const rows = choices.map((choice) => {
+			const row = document.createElement('div');
+			row.className = 'standin-choice';
+			const label = document.createElement('span');
+			label.textContent = `${choice.preset} (${choice.cost}): ${choice.label}; ${this.describeStandinNeeds(choice.needs)}`;
+			const use = /** @type {HTMLButtonElement} */ (document.createElement('button'));
+			use.type = 'button';
+			use.textContent = 'Use';
+			use.addEventListener('click', async () => {
+				buttons.forEach((b) => { b.disabled = true; });
+				await this.useStandinAndRetry(choice.preset);
+				buttons.forEach((b) => { b.disabled = false; });
+			});
+			buttons.push(use);
+			row.append(label, use);
+			return row;
+		});
+		list.replaceChildren(...rows);
+		box.style.display = '';
+	},
+
+	/**
+	 * Hide the offer of stand-ins (Not now, or a new question).
+	 * @returns {void}
+	 */
+	hideStandinOffer() {
+		const box = document.getElementById('standin-offer');
+		if (box) box.style.display = 'none';
+	},
+
+	/**
+	 * Use a stand-in: store it, let the user log in to or start it where needed, then send
+	 * the question again without the model choice (the old preset's model may not exist in
+	 * the stand-in). A refusal (e.g. the quota is no longer used up) is shown, not resent.
+	 * @param {string} presetName
+	 * @returns {Promise<void>}
+	 */
+	async useStandinAndRetry(presetName) {
+		if (!this.plugin) return;
+		const retry = this._standinRetry;
+		try {
+			await this.plugin.useStandin(presetName);
+		} catch (error) {
+			this.showStatus(this.errorText(error), 'error');
+			return;
+		}
+		this._standinProvider = this._standinOffer ? this._standinOffer.provider : null;
+		this._standinRetry = null;
+		this.hideStandinOffer();
+		await this.checkPipelineOnOpen();
+		await this.loadPresetConfig();
+		if (!retry) return;
+		const { llmModel: _model, ...options } = retry.options;
+		await this.sendQuestion(retry.question, retry.libraryIds, options);
+	},
+
+	/**
+	 * Show or hide the line naming the active stand-in.
+	 * @param {ActiveStandin|null} standin
+	 * @returns {void}
+	 */
+	renderActiveStandin(standin) {
+		const line = document.getElementById('standin-line');
+		const text = document.getElementById('standin-line-text');
+		if (!line || !text) return;
+		if (!standin) {
+			line.style.display = 'none';
+			return;
+		}
+		text.textContent = this.describeActiveStandin(standin, this._standinProvider);
+		line.style.display = 'flex';
+	},
+
+	/**
+	 * End the active stand-in now (End now), so the user's own preset and keys apply again.
+	 * @returns {Promise<void>}
+	 */
+	async endStandinNow() {
+		if (!this.plugin) return;
+		try {
+			await this.plugin.endStandin();
+		} catch (error) {
+			this.showStatus(this.errorText(error), 'error');
+			return;
+		}
+		this._standinProvider = null;
+		await Promise.all([this.loadPresetConfig(), this.loadRerankInfo(), this.refreshEndpointHealth()]);
+	},
+
+	/**
 	 * Check the remote endpoints and keep the footer status and Submit/Index button in step
 	 * with them; polls until they are ready. The first time an endpoint is found cold, asks
 	 * the backend to wake it, so it is up by the time the user has typed the question.
@@ -1440,6 +1668,10 @@ var ZoteroRAGDialog = {
 		const advancedDetails = /** @type {HTMLDetailsElement|null} */ (document.querySelector('.advanced-options'));
 		if (advancedDetails) advancedDetails.open = false;
 		this.showProgress('Processing request...', 'Submitting query...');
+		this.hideStandinOffer();
+
+		/** @type {QueryOptions} */
+		const queryOptions = { minScore, topK, llmModel, enableRouting, enableReranking, includeTrace };
 
 		try {
 			const libraryIds = Array.from(this.selectedLibraries);
@@ -1465,50 +1697,91 @@ var ZoteroRAGDialog = {
 			// If cancelled mid-indexing, bail — abortOperation() already cleaned up.
 			if (!this.isOperationInProgress) return;
 
-			// Update progress for query phase
-			this.updateProgress(0, 'Processing query', 'Sending query to backend...');
-
-			const result = await this.runQuery(question, libraryIds, {
-				minScore: minScore,
-				topK: topK,
-				llmModel: llmModel,
-				enableRouting: enableRouting,
-				enableReranking: enableReranking,
-				includeTrace: includeTrace
-			}, (pct, label, message) => this.updateProgress(pct, label, message));
-
-			this.libraryIds = libraryIds;
-			this.turns = [{ question, result }];
-			// includeTrace deliberately excluded: a debug trace is only ever read from
-			// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
-			// so forwarding it on every follow-up would just waste backend computation.
-			this.queryOptions = { minScore, topK, llmModel, enableRouting, enableReranking };
-
-			this.updateProgress(100, 'Complete', 'Rendering result...');
-			this.switchToResultState();
-			this.renderResultContent();
-			this.updateExportButtonVisibility();
+			await this.answerQuestion(question, libraryIds, queryOptions);
 		} catch (error) {
 			// If cancelled, abortOperation() already cleaned up the UI — don't double-apply.
 			if (!this.isOperationInProgress) return;
+			await this.handleQueryError(error, question, Array.from(this.selectedLibraries), queryOptions);
+		}
+	},
 
-			const errorMessage = error instanceof Error ? error.message : String(error);
-			this.showStatus(`Error: ${errorMessage}`, 'error');
+	/**
+	 * Run the first question of a conversation and switch to the result view.
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async answerQuestion(question, libraryIds, options) {
+		this.updateProgress(0, 'Processing query', 'Sending query to backend...');
+		const result = await this.runQuery(question, libraryIds, options,
+			(pct, label, message) => this.updateProgress(pct, label, message));
 
-			// If the backend reports that a library has no indexed data, the vector
-			// store is out of sync (e.g. indexing ran but extracted 0 chunks).
-			// Clear the stale metadata so the UI reverts to "Index" mode.
-			if (errorMessage.includes('None of the specified libraries have been indexed')) {
-				this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
-				await this.clearLibraryIndexState(Array.from(this.selectedLibraries));
-				this.setSubmitEnabled(true);
-				this.setCancelMode('close');
-				this.hideProgress();
-				return;
-			}
+		this.libraryIds = libraryIds;
+		this.turns = [{ question, result }];
+		// includeTrace deliberately excluded: a debug trace is only ever read from
+		// this.turns[0].result.trace (see updateExportButtonVisibility()/exportDebugInfo()),
+		// so forwarding it on every follow-up would just waste backend computation.
+		const { includeTrace: _trace, ...followUpOptions } = options;
+		this.queryOptions = followUpOptions;
+
+		this.updateProgress(100, 'Complete', 'Rendering result...');
+		this.switchToResultState();
+		this.renderResultContent();
+		this.updateExportButtonVisibility();
+	},
+
+	/**
+	 * Show why the first question failed and reset the buttons. A used-up quota offers
+	 * stand-in presets instead of the plain error.
+	 * @param {unknown} error
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async handleQueryError(error, question, libraryIds, options) {
+		const quota = this.quotaDetailOf(error);
+		if (quota && Array.isArray(quota.standins) && quota.standins.length) {
+			this.showStandinOffer(quota, question, libraryIds, options);
 			this.setSubmitEnabled(true);
 			this.setCancelMode('close');
 			this.hideProgress();
+			return;
+		}
+
+		const errorMessage = error instanceof Error ? error.message : String(error);
+		this.showStatus(`Error: ${errorMessage}`, 'error');
+
+		// If the backend reports that a library has no indexed data, the vector
+		// store is out of sync (e.g. indexing ran but extracted 0 chunks).
+		// Clear the stale metadata so the UI reverts to "Index" mode.
+		if (errorMessage.includes('None of the specified libraries have been indexed')) {
+			this.showStatus('Index data is missing or corrupt — clearing cached index state...', 'error');
+			await this.clearLibraryIndexState(libraryIds);
+		}
+		this.setSubmitEnabled(true);
+		this.setCancelMode('close');
+		this.hideProgress();
+	},
+
+	/**
+	 * Send a question again from the input view (after a stand-in was chosen).
+	 * @param {string} question
+	 * @param {Array<string>} libraryIds
+	 * @param {QueryOptions} options
+	 * @returns {Promise<void>}
+	 */
+	async sendQuestion(question, libraryIds, options) {
+		this.clearStatusMessages();
+		this.setSubmitEnabled(false);
+		this.setCancelMode('abort');
+		this.showProgress('Processing request...', 'Submitting query...');
+		try {
+			await this.answerQuestion(question, libraryIds, options);
+		} catch (error) {
+			if (!this.isOperationInProgress) return;
+			await this.handleQueryError(error, question, libraryIds, options);
 		}
 	},
 

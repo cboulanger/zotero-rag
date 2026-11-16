@@ -1171,3 +1171,103 @@ test('checkPipelineOnOpen: a stopped answering model is reported as blocking que
 	assert.match(alerts[0], /start them or log in/);
 	assert.strictEqual(opened.length, 1);
 });
+
+// ── Stand-in presets ────────────────────────────────────────────────────────
+
+const QUOTA_DETAIL = {
+	code: 'quota_exhausted',
+	message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY', 'start:llm'] },
+	],
+};
+
+/** The local wall-clock time of an ISO datetime as HH:MM (the dialog shows local time). */
+function localClock(/** @type {string} */ iso) {
+	const d = new Date(iso);
+	return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+test('describeStandinOffer: says when the quota resets in local time and how long that is', () => {
+	const D = loadDialogMethods();
+	const { text } = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T19:00:00Z'), () => false);
+	assert.strictEqual(text, `KISSKI's embedding quota is used up until ${localClock(QUOTA_DETAIL.available_at)} (in 4 h).`);
+	const later = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T22:15:00Z'), () => false);
+	assert.match(later.text, /\(in 45 min\)\.$/);
+	const mixed = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T20:30:00Z'), () => false);
+	assert.match(mixed.text, /\(in 2 h 30 min\)\.$/);
+});
+
+test('describeStandinOffer: keeps the server order and drops a key need the user has stored', () => {
+	const D = loadDialogMethods();
+	const { choices } = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T19:00:00Z'), (/** @type {string} */ name) => name === 'RUNPOD_API_KEY');
+	assert.deepStrictEqual(JSON.parse(JSON.stringify(choices)), [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['start:llm'] },
+	]);
+	const none = D.describeStandinOffer(QUOTA_DETAIL, new Date('2026-11-16T19:00:00Z'), () => false);
+	assert.deepStrictEqual([...none.choices[1].needs], ['key:RUNPOD_API_KEY', 'start:llm']);
+});
+
+test('describeStandinNeeds: names what must happen first, or that it is ready', () => {
+	const D = loadDialogMethods();
+	assert.strictEqual(D.describeStandinNeeds([]), 'ready');
+	assert.strictEqual(D.describeStandinNeeds(['login:mpcdf', 'key:RUNPOD_API_KEY', 'start:llm']),
+		'needs MPCDF login, RUNPOD_API_KEY, start of the llm endpoint');
+});
+
+test('describeActiveStandin: names the stand-in, its end and the exhausted provider', () => {
+	const D = loadDialogMethods();
+	const standin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
+	assert.strictEqual(D.describeActiveStandin(standin, 'kisski'),
+		`Using remote-mpcdf until ${localClock(standin.until)} (KISSKI quota)`);
+	assert.strictEqual(D.describeActiveStandin(standin, null),
+		`Using remote-mpcdf until ${localClock(standin.until)} (instead of kisski)`);
+});
+
+/**
+ * A fake `this` for useStandinAndRetry recording the order of the steps.
+ * @param {(preset: string) => Promise<void>} useStandin
+ */
+function standinRetrySetup(useStandin) {
+	const D = loadDialogMethods();
+	/** @type {string[]} */
+	const steps = [];
+	/** @type {any[]} */
+	const sent = [];
+	/** @type {string[]} */
+	const statuses = [];
+	const self = Object.assign(Object.create(D), {
+		plugin: { useStandin: async (/** @type {string} */ p) => { steps.push(`use ${p}`); await useStandin(p); } },
+		_standinRetry: { question: 'What is Zotero?', libraryIds: ['u1'], options: { minScore: 0.3, topK: 10, llmModel: 'old-model', enableRouting: true } },
+		_standinOffer: QUOTA_DETAIL,
+		hideStandinOffer() { steps.push('hide'); },
+		checkPipelineOnOpen: async () => { steps.push('check'); },
+		loadPresetConfig: async () => { steps.push('config'); },
+		sendQuestion: async (/** @type {string} */ q, /** @type {string[]} */ ids, /** @type {any} */ opts) => { steps.push('send'); sent.push({ q, ids, opts }); },
+		showStatus: (/** @type {string} */ m) => { statuses.push(m); },
+	});
+	return { self, steps, sent, statuses };
+}
+
+test('retry after a stand-in drops llmModel', async () => {
+	const { self, steps, sent } = standinRetrySetup(async () => {});
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.deepStrictEqual(steps, ['use remote-mpcdf', 'hide', 'check', 'config', 'send']);
+	assert.strictEqual(sent.length, 1);
+	assert.strictEqual(sent[0].q, 'What is Zotero?');
+	assert.deepStrictEqual([...sent[0].ids], ['u1']);
+	assert.strictEqual('llmModel' in sent[0].opts, false);
+	assert.strictEqual(sent[0].opts.topK, 10);
+	assert.strictEqual(self._standinProvider, 'kisski');
+});
+
+test('a refused stand-in shows the server message and does not resend', async () => {
+	const { self, steps, sent, statuses } = standinRetrySetup(async () => { throw new Error('No quota is exhausted any more.'); });
+	await self.useStandinAndRetry('remote-mpcdf');
+	assert.deepStrictEqual(sent, []);
+	assert.ok(!steps.includes('check'));
+	assert.deepStrictEqual(statuses, ['No quota is exhausted any more.']);
+});
