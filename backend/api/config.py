@@ -458,6 +458,25 @@ class StandinUpdate(BaseModel):
     preset_name: str
 
 
+def _current_preset_exhaustion(request: Request, client_keys: Dict[str, str]):
+    """(settings, identity, user_id, current, exhausted) for the caller's own current preset.
+
+    Shared by the stand-in endpoints so they agree on whose quota counts. The middleware
+    may have bound an active stand-in, whose keys the dependency read; the quota in
+    question is the current preset's, so its own keys are read.
+    """
+    settings = get_settings()
+    identity = get_zotero_identity(request)
+    user_id = identity.user_id if identity else None
+    current = get_user_preset(settings, identity, allow_standin=False) or settings.get_default_preset()
+    own_keys = dict(client_keys)
+    for side_config_ in (current.embedding, current.llm):
+        name = (side_config_.model_kwargs or {}).get("api_key_env")
+        if name and (value := _caller_key(request, name)):
+            own_keys[name] = value
+    return settings, identity, user_id, current, current_exhausted_sides(settings, current, own_keys)
+
+
 @router.put("/config/my-preset/standin")
 def put_standin(update: StandinUpdate, request: Request, client_keys: Dict[str, str] = Depends(get_client_api_keys)) -> dict:
     """Use a stand-in preset until the exhausted quota of the caller's current preset resets.
@@ -466,18 +485,7 @@ def put_standin(update: StandinUpdate, request: Request, client_keys: Dict[str, 
     the client. 409 when no quota is exhausted for 15 minutes or more, or when the preset
     is not a stand-in for the exhausted side(s).
     """
-    settings = get_settings()
-    identity = get_zotero_identity(request)
-    user_id = identity.user_id if identity else None
-    current = get_user_preset(settings, identity, allow_standin=False) or settings.get_default_preset()
-    # The middleware may have bound an active stand-in, whose keys the dependency read;
-    # the quota being asked about is the current preset's, so read its own keys.
-    own_keys = dict(client_keys)
-    for side_config_ in (current.embedding, current.llm):
-        name = (side_config_.model_kwargs or {}).get("api_key_env")
-        if name and (value := _caller_key(request, name)):
-            own_keys[name] = value
-    exhausted = current_exhausted_sides(settings, current, own_keys)
+    settings, identity, user_id, current, exhausted = _current_preset_exhaustion(request, client_keys)
     if not exhausted:
         raise HTTPException(status_code=409, detail="No provider quota is exhausted for 15 minutes or more, so no stand-in is needed.")
     offered = {s.preset for s in find_standins(settings, current, exhausted, client_keys, user_id)}
@@ -497,16 +505,9 @@ def get_standin_offer(request: Request, client_keys: Dict[str, str] = Depends(ge
     """
     settings = get_settings()
     identity = get_zotero_identity(request)
-    user_id = identity.user_id if identity else None
-    if get_standin(settings.data_path, user_id):
+    if get_standin(settings.data_path, identity.user_id if identity else None):
         return {"offer": None}
-    current = get_user_preset(settings, identity, allow_standin=False) or settings.get_default_preset()
-    own_keys = dict(client_keys)
-    for side_config_ in (current.embedding, current.llm):
-        name = (side_config_.model_kwargs or {}).get("api_key_env")
-        if name and (value := _caller_key(request, name)):
-            own_keys[name] = value
-    exhausted = current_exhausted_sides(settings, current, own_keys)
+    settings, identity, user_id, current, exhausted = _current_preset_exhaustion(request, client_keys)
     return {"offer": standin_offer(settings, current, exhausted, client_keys, user_id)}
 
 
