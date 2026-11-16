@@ -319,6 +319,10 @@ class PresetViewApiTest(unittest.TestCase):
         self.assertEqual((action["label"], action["enabled"]), ("Use a stand-in until 23:00 UTC", True))
         self.assertIsNone(action["request"])
 
+    def test_an_exhausted_llm_quota_is_called_answering(self):
+        texts = [m["text"] for m in self._side(self._quota_view(), "llm")["messages"]]
+        self.assertIn("KISSKI's answering (LLM) quota is used up until 23:00 UTC.", texts)
+
     def test_kisski_card_only_saves_and_others_keep_auto_start(self):
         body = self._quota_view()
         cards = {c["id"]: c for c in body["accounts"]}

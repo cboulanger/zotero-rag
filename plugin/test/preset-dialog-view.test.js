@@ -429,7 +429,8 @@ test('the standin action fetches the offer and lists the choices without posting
 	prefs.set('extensions.zotero-rag.serviceApiKey.RUNPOD_API_KEY', 'k');
 	await controller.refresh();
 	await controller.runAction('embedding', controller.state.view.sides[0].actions[0]);
-	assert.strictEqual(fetches(), 1);
+	// Once when the dialog first found the used-up quota, once for the button.
+	assert.strictEqual(fetches(), 2);
 	assert.deepStrictEqual(posts, []);
 	assert.deepStrictEqual(used, []);
 	const offer = controller.state.local.standins;
@@ -498,4 +499,42 @@ test('an account card of a provider that cannot start endpoints reads Save, not 
 	const dump = JSON.stringify(refs.cards, (k, val) => (k === 'parentNode' || k === 'listeners' ? undefined : val));
 	assert.match(dump, /"textContent":"Save"/);
 	assert.doesNotMatch(dump, /Save and start/);
+});
+
+test('opening the dialog on a used-up quota offers the stand-ins at once, on that side, only once', async () => {
+	const other = side('extraction');
+	const kisski = view([other, quotaSide()]);
+	let fetches = 0;
+	const { controller, painted } = setup({ views: [kisski, kisski], extra: { fetchStandinOffer: async () => { fetches++; return OFFER; } } });
+	await controller.refresh();
+	assert.strictEqual(fetches, 1);
+	assert.strictEqual(controller.state.local.tab, 'embedding');
+	assert.strictEqual(controller.state.local.standins.choices.length, 2);
+	assert.match(painted.at(-1).notes.header.text, /quota is used up until 23:00 UTC\. Choose a stand-in/);
+	// Later refreshes (polling, Check now) do not ask again or move the user to another tab.
+	controller.selectTab('extraction');
+	await controller.refresh();
+	assert.strictEqual(fetches, 1);
+	assert.strictEqual(controller.state.local.tab, 'extraction');
+});
+
+test('Save of an account card stays disabled until a value is typed', () => {
+	const D = load();
+	const doc = { createElementNS, createTextNode: (t) => t, activeElement: null };
+	const refs = D.mount(doc, fakeNode('div'));
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+	D.paint(doc, refs, view([side('embedding')], [card({ auto_start: false })]), local,
+		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
+	/** @returns {any[]} every node below `node` */
+	const all = (node) => [node, ...(node.children || []).filter((c) => typeof c === 'object').flatMap(all)];
+	const nodes = all(refs.cards);
+	const save = nodes.find((n) => n.tag === 'button' && n.textContent === 'Save');
+	const input = nodes.find((n) => n.tag === 'input');
+	assert.strictEqual(save.disabled, true);
+	input.value = '   ';
+	input.listeners.input.forEach((fn) => fn({ target: input }));
+	assert.strictEqual(save.disabled, true, 'blanks are not a value');
+	input.value = 'new-key';
+	input.listeners.input.forEach((fn) => fn({ target: input }));
+	assert.strictEqual(save.disabled, false);
 });

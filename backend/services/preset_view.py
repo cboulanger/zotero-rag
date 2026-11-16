@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from backend.providers.types import OPTIONAL_SIDES, Health, Meter, preset_sides, side_config
+from backend.services.standin import side_noun
 from backend.providers.ui import (
     AccountCard,
     PresetHeader,
@@ -410,7 +411,7 @@ def build_preset_view(inputs: ViewInputs) -> PresetView:
             when = match.group(1) if match else ""
             who = view.provider.label if view.provider else "The provider"
             view.messages.append(UiMessage(
-                level="info", text=f"{who}'s {view.side} quota is used up" + (f" until {when} UTC." if when else ".")))
+                level="info", text=f"{who}'s {side_noun(view.side)} quota is used up" + (f" until {when} UTC." if when else ".")))
             view.actions.append(UiAction(id="standin", label=f"Use a stand-in until {when} UTC" if when else "Use a stand-in"))
         elif view.account and view.state == "down" and not any(a.id in ("start", "retry") and a.enabled for a in view.actions):
             view.messages.append(UiMessage(level="info", text="Check the credentials in the account card below."))

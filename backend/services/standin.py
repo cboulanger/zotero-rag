@@ -22,6 +22,15 @@ MIN_STANDIN_SECONDS = 900
 _ACTIVE_SESSION_STATES = ("ok", "active")
 
 
+#: How a message names a side's quota ("KISSKI's answering (LLM) quota").
+_SIDE_NOUNS = {"llm": "answering (LLM)"}
+
+
+def side_noun(side: str) -> str:
+    """The side as a quota message names it: the LLM side is "answering (LLM)"."""
+    return _SIDE_NOUNS.get(side, side)
+
+
 @dataclass
 class ExhaustedSide:
     """One side of the pipeline whose provider quota is used up."""
@@ -193,7 +202,7 @@ def standin_offer(settings, preset: HardwarePreset, exhausted: list[ExhaustedSid
     standins = find_standins(settings, preset, long_lived, client_keys, user_id)
     return {
         "code": "quota_exhausted",
-        "message": f"{label}'s {main.side} quota is used up until {until:%H:%M} UTC.",
+        "message": f"{label}'s {side_noun(main.side)} quota is used up until {until:%H:%M} UTC.",
         "side": main.side,
         "provider": main.provider,
         "available_at": until.strftime("%Y-%m-%dT%H:%M:%SZ"),

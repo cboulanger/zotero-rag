@@ -162,6 +162,13 @@ class QuotaDetailTest(unittest.TestCase):
         detail = self.detail(datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc))
         self.assertEqual(detail["message"], "KISSKI's embedding quota is used up until 23:00 UTC.")
 
+    def test_message_calls_the_llm_side_answering(self):
+        preset = get_preset("remote-kisski", self.data_path)
+        with patch("backend.providers.mpcdf.MpcdfProvider.session_status", return_value=None):
+            detail = quota_error_detail(self.settings, preset, "llm",
+                                        datetime(2026, 11, 16, 23, 0, tzinfo=timezone.utc), "raw", {}, 1, now=self.now)
+        self.assertEqual(detail["message"], "KISSKI's answering (LLM) quota is used up until 23:00 UTC.")
+
     def test_short_reset_returns_none(self):
         self.assertIsNone(self.detail(datetime(2026, 11, 16, 19, 5, tzinfo=timezone.utc)))
 
