@@ -570,3 +570,17 @@ test('a side changing state is announced to the other windows, an unchanged refr
 	await controller.refresh();
 	assert.strictEqual(announced, 1);
 });
+
+test('Start all that ends with a failed side says so in the header and shows that side', async () => {
+	const down = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')] })]);
+	const failed = view([side('extraction'), side('llm', { state: 'down', actions: [start('llm')],
+		messages: [{ level: 'error', text: 'Last job failed: no capacity' }] })]);
+	const { controller, painted } = setup({ views: [down, failed] });
+	await controller.refresh();
+	controller.selectTab('extraction');
+	await controller.runWorkflow('start');
+	assert.strictEqual(controller.state.local.tab, 'llm');
+	const header = painted.at(-1).notes.header;
+	assert.strictEqual(header.level, 'error');
+	assert.match(header.text, /llm.*Last job failed: no capacity/);
+});

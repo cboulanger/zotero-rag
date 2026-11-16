@@ -978,6 +978,17 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		}
 		note('header', errors.length ? 'error' : 'info', errors.length ? errors.join(' ') : '');
 		await poll();
+		// The job runs in the background: a side it failed on says so only in its own tab,
+		// which may not be the one shown. Name it here and show it.
+		const asked = new Set(requests.flatMap((r) => r.body.sides || []));
+		const failed = !errors.length && state.view
+			? state.view.sides.filter((s) => asked.has(s.side) && s.messages.some((m) => m.level === 'error' && m.text.startsWith('Last job failed')))
+			: [];
+		if (failed.length) {
+			const reason = /** @type {UiMessage} */ (failed[0].messages.find((m) => m.level === 'error' && m.text.startsWith('Last job failed')));
+			state.local.tab = failed[0].side;
+			note('header', 'error', `${kind === 'start' ? 'Starting' : 'Pausing'} ${failed.map((s) => s.title).join(', ')} failed. ${reason.text}`);
+		}
 		return requests.length;
 	};
 
