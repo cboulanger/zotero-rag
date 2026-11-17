@@ -41,6 +41,7 @@ from backend.services.access_gate import assert_can_access
 from backend.services import pending_upload_cache
 from backend.services.secret_store import get_key_store
 from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+from backend.services.cost_ledger import collect as collect_costs
 from backend.services.usage_meters import meters_from_headers
 from backend.services.diagnostics_collector import (
     DiagnosticsCollector,
@@ -236,6 +237,8 @@ class DocumentUploadResult(BaseModel):
     message: str = ""
     rate_limit_retries: int = 0
     rate_limit_meters: list[dict] | None = None
+    #: Estimated costs of the embedding calls for this document (see ``QueryResponse.costs``).
+    costs: list[dict] = []
     error_detail: Optional[str] = None
     # Set only on status="error": the raised exception's class name, and (for
     # EmbeddingRateLimitExhaustedError specifically) its available_at as an ISO
@@ -298,13 +301,16 @@ async def _execute_upload(*, include_diagnostics: bool = False, **kwargs) -> Doc
 
     Called by both the synchronous and async upload endpoints.
     """
-    if not include_diagnostics:
-        return await _execute_upload_impl(**kwargs)
-    collector = DiagnosticsCollector(server=build_server_info(kwargs.get("embedding_service")))
-    with activate_diagnostics(collector):
-        result = await _execute_upload_impl(**kwargs)
-        collector.set_final_status(result.status)
-        result.diagnostics = collector.finalize()
+    with collect_costs() as ledger:
+        if not include_diagnostics:
+            result = await _execute_upload_impl(**kwargs)
+        else:
+            collector = DiagnosticsCollector(server=build_server_info(kwargs.get("embedding_service")))
+            with activate_diagnostics(collector):
+                result = await _execute_upload_impl(**kwargs)
+                collector.set_final_status(result.status)
+                result.diagnostics = collector.finalize()
+    result.costs = ledger.as_dicts()
     return result
 
 
@@ -1099,6 +1105,23 @@ async def upload_and_index_abstract(
     identity: Optional[ZoteroIdentity] = Depends(get_zotero_identity),
     vector_store: VectorStore = Depends(get_vector_store),
 ):
+    """
+    Index a Zotero item using its abstractNote when no attachment file is available.
+
+    The result carries the estimated costs of the embedding calls (``costs``).
+    """
+    with collect_costs() as ledger:
+        result = await _index_abstract(http_request, request, identity, vector_store)
+    result.costs = ledger.as_dicts()
+    return result
+
+
+async def _index_abstract(
+    http_request: Request,
+    request: AbstractIndexRequest,
+    identity: Optional[ZoteroIdentity],
+    vector_store: Optional[VectorStore],
+) -> DocumentUploadResult:
     """
     Index a Zotero item using its abstractNote when no attachment file is available.
 

@@ -17,6 +17,7 @@
  * @property {string} [rate_limit_until] - ISO timestamp; set when skip_reason is "embedding_rate_limit"
  * @property {string} [library_name] - human-readable name, falls back to the raw slug server-side
  * @property {number} [owner_id] - numeric Zotero user id; not shown in the UI (no username resolution available), kept for potential future use
+ * @property {UsageCost[]} [costs] - estimated costs of this library's calls to paid providers in the run
  */
 
 /**
@@ -326,7 +327,22 @@ var ZoteroRAGAutoIndexStatus = {
 		this.updateAdminControlsVisibility(data);
 		this.runInProgress = data.running === true;
 		this.renderRateLimits(data);
+		this.renderRunCosts(data.slugs || {});
 		this.renderPresetRow(data);
+	},
+
+	/**
+	 * Show the estimated costs of the last (or current) run over the libraries shown.
+	 * Hidden when the run called no paid provider.
+	 * @param {Record<string, AutoIndexSlugStatus>} slugs
+	 * @returns {void}
+	 */
+	renderRunCosts(slugs) {
+		const widget = ZoteroRAGRateLimitWidget;
+		/** @type {UsageCost[]} */
+		let costs = [];
+		for (const info of Object.values(slugs)) costs = widget.addCosts(costs, info.costs);
+		widget.renderCosts(document, costs, { visible: costs.length > 0, prefix: 'ai-cost-', scope: 'of the last run' });
 	},
 
 	/**
@@ -371,7 +387,7 @@ var ZoteroRAGAutoIndexStatus = {
 	 */
 	paintRateLimits(info) {
 		const meters = this.rateLimitMeters;
-		ZoteroRAGRateLimitWidget.render(document, meters, { visible: !!meters, prefix: 'ai-' });
+		ZoteroRAGRateLimitWidget.render(document, meters, { visible: !!meters, prefix: 'ai-', maxRows: Infinity });
 		const asOf = document.getElementById('ai-rate-limit-asof');
 		if (asOf) {
 			const ago = info && info.as_of && meters ? this._formatDurationFromNow(info.as_of) : null;
@@ -1014,6 +1030,10 @@ var ZoteroRAGAutoIndexStatus = {
 			}
 			if (typeof info.chunks_added === 'number') {
 				parts.push(`${info.chunks_added} chunks added`);
+			}
+			if (info.costs && info.costs.length) {
+				const total = ZoteroRAGRateLimitWidget.addCosts([], info.costs);
+				parts.push(`est. ${total.map((c) => ZoteroRAGRateLimitWidget.formatAmount(c.amount, c.currency)).join(' + ')}`);
 			}
 			meta.textContent = parts.join(' — ');
 			row.appendChild(meta);

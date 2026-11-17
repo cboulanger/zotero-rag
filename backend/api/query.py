@@ -14,6 +14,8 @@ from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget
 from backend.models.trace import QueryTrace
 from backend.services.access_gate import assert_can_access
+from backend.providers import Cost
+from backend.services.cost_ledger import CostLedger, collect as collect_costs
 from backend.services.base_agent import (
     NeedsClarificationError, NeedsClientEvidenceError, NeedsUserInputError, QueryPlan,
 )
@@ -99,6 +101,9 @@ class QueryResponse(BaseModel):
     source_refs: List[str] = []                       # union of every used source's chunk_id,
                                                         # echoed back verbatim on the next turn
     clarification_message: Optional[str] = None        # populated when status == "needs_clarification"
+    # Estimated costs of this request's calls to paid providers, one entry per side and
+    # currency; empty when every call was free or had no known price.
+    costs: List[Cost] = []
 
 
 def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
@@ -170,6 +175,7 @@ async def query_libraries(
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
+    ledger = CostLedger()
     try:
         # Initialize services with client-supplied API keys
         settings = get_settings()
@@ -280,24 +286,25 @@ async def query_libraries(
             user_id=identity.user_id if identity is not None else None,
         ))
         try:
-            result = await orchestrator.query(
-                question=query.question,
-                library_ids=query.library_ids,
-                top_k=top_k,
-                min_score=min_score,
-                enable_routing=query.enable_routing,
-                trace=trace_collector,
-                client_evidence=query.client_evidence,
-                preset_plan=query.query_plan,
-                diversity_floor=diversity_floor,
-                diversity_escalation_factor=diversity_escalation_factor,
-                diversity_escalation_max_top_k=diversity_escalation_max_top_k,
-                max_chunks_per_document=max_chunks_per_document,
-                low_diversity_available_floor=low_diversity_available_floor,
-                enable_quality_self_review=query.enable_quality_self_review,
-                conversation_history=query.conversation_history,
-                force_fresh_retrieval=query.force_fresh_retrieval,
-            )
+            with collect_costs(ledger):
+                result = await orchestrator.query(
+                    question=query.question,
+                    library_ids=query.library_ids,
+                    top_k=top_k,
+                    min_score=min_score,
+                    enable_routing=query.enable_routing,
+                    trace=trace_collector,
+                    client_evidence=query.client_evidence,
+                    preset_plan=query.query_plan,
+                    diversity_floor=diversity_floor,
+                    diversity_escalation_factor=diversity_escalation_factor,
+                    diversity_escalation_max_top_k=diversity_escalation_max_top_k,
+                    max_chunks_per_document=max_chunks_per_document,
+                    low_diversity_available_floor=low_diversity_available_floor,
+                    enable_quality_self_review=query.enable_quality_self_review,
+                    conversation_history=query.conversation_history,
+                    force_fresh_retrieval=query.force_fresh_retrieval,
+                )
         finally:
             reset_rerank_request(rerank_token)
 
@@ -329,13 +336,14 @@ async def query_libraries(
             library_document_counts=library_document_counts,
             trace=trace_collector.finalize() if trace_collector is not None else None,
             source_refs=result.source_refs,
+            costs=ledger.costs(),
         )
 
     except NeedsUserInputError as exc:
         if isinstance(exc, NeedsClientEvidenceError):
-            return _needs_evidence_response(query, exc)
+            return _needs_evidence_response(query, exc).model_copy(update={"costs": ledger.costs()})
         if isinstance(exc, NeedsClarificationError):
-            return _needs_clarification_response(query, exc)
+            return _needs_clarification_response(query, exc).model_copy(update={"costs": ledger.costs()})
         raise
 
     except VectorStoreTimeoutError as e:

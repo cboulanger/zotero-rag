@@ -13,24 +13,28 @@ capabilities. See docs/superpowers/specs/2026-10-10-huggingface-preset-and-provi
 (section A2) for the contract and docs/providers.md and docs/backend-plugins.md for how to add one.
 """
 
+import fnmatch
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, ClassVar, Literal, Mapping, Optional, Sequence
 
 from pydantic import BaseModel
 
 from backend.providers.ui import UiAction, UiFact, UiField, UiMessage, UiQuota, UiRequest
 from backend.providers.types import (
+    Cost,
     Credentials,
     Health,
     Meter,
     ModelInfo,
     NoOptions,
     OPTIONAL_SIDES,
+    Pricing,
     ProviderDescriptor,
     ProvisionContext,
     Scope,
     Side,
     side_config,
+    Usage,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -404,6 +408,63 @@ class Provider:
             headers, side=self.side, as_of=as_of or _utc_now(), source=source
         )
 
+    # -- costs ------------------------------------------------------------------
+
+    #: Explains what a cost estimate of this provider leaves out (shown with the figure).
+    cost_note: ClassVar[str] = ""
+
+    def default_pricing(self, model: str) -> Optional[Pricing]:
+        """List prices of ``model`` on this side, when the provider knows them.
+
+        Paid providers override it with their price list. None means "unknown":
+        no cost is shown rather than a wrong one.
+        """
+        return None
+
+    def pricing(self, model: str) -> Optional[Pricing]:
+        """The prices used for cost estimates of ``model``: the preset's, else the provider's.
+
+        The side's ``model_kwargs.pricing`` is one ``Pricing`` object or a mapping of
+        model-name glob patterns to one. A free provider has no prices. Never raises:
+        a malformed preset value is ignored.
+        """
+        if self.cost == "free":
+            return None
+        cfg = self.side_config
+        configured = (cfg.model_kwargs or {}).get("pricing") if cfg is not None else None
+        if isinstance(configured, dict) and configured:
+            try:
+                if any(isinstance(v, dict) for v in configured.values()):
+                    table = [(p, Pricing.model_validate(v)) for p, v in configured.items() if isinstance(v, dict)]
+                    found = match_pricing(table, model)
+                    if found is not None:
+                        return found
+                else:
+                    return Pricing.model_validate(configured)
+            except ValueError:
+                pass
+        return self.default_pricing(model)
+
+    def configured_model(self) -> str:
+        """The model this side uses by default (the answering side's first model)."""
+        return str(self.side_config.model_name)
+
+    def estimate_cost(self, usage: Usage) -> Optional[Cost]:
+        """The estimated cost of ``usage``, or None when the model has no known price."""
+        prices = self.pricing(usage.model)
+        if prices is None:
+            return None
+        return Cost(
+            side=usage.side,
+            amount=prices.price(usage),
+            currency=prices.currency,
+            requests=usage.requests,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            seconds=usage.seconds,
+            note=self.cost_note,
+        )
+
     # -- health ----------------------------------------------------------------
 
     def health(self, creds: Credentials) -> Optional[Health]:
@@ -441,6 +502,15 @@ class Provider:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def match_pricing(table: Sequence[tuple[str, Pricing]], model: str) -> Optional[Pricing]:
+    """The first entry of ``(model-name glob, prices)`` pairs that matches ``model`` (case-insensitive)."""
+    name = (model or "").lower()
+    for pattern, prices in table:
+        if fnmatch.fnmatchcase(name, pattern.lower()):
+            return prices
+    return None
 
 
 def register_provider(cls: type[Provider]) -> type[Provider]:

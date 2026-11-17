@@ -56,6 +56,7 @@
  * @property {string|null} [clarification_message] - Human-readable narrowing prompt, populated when status is "needs_clarification"
  * @property {Array<{author: string, year: number|null, title_keywords: Array<string>}>} [citation_targets] - populated when status is "needs_client_evidence"
  * @property {any} [query_plan] - echo of the routing plan; present when status is "needs_client_evidence" or "needs_clarification" — pass through unchanged on resubmit
+ * @property {UsageCost[]} [costs] - estimated costs of this request's calls to paid providers
  */
 
 

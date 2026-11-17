@@ -9,6 +9,7 @@ from the ``inference.local`` capabilities of backend plugins (for example
 import json
 import logging
 import random
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
@@ -16,6 +17,8 @@ from typing import Any, Callable, Dict, Optional
 from backend.config.settings import Settings
 from backend.services.embeddings import KEYLESS_API_KEY, env_var_to_header, docs_url_for, _extract_error_detail
 from backend.services.endpoint_errors import classify_status_error, unavailable_message
+from backend.providers.types import Usage
+from backend.services.cost_ledger import record_usage, token_counts
 from backend.services.usage_meters import (
     RateLimitStillActive,
     extract_retry_after,
@@ -391,6 +394,14 @@ class RemoteLLMService(LLMService):
         except Exception:  # display-only signal, never break a generation
             logger.debug("Could not record usage headers", exc_info=True)
 
+    def _record_cost(self, usage_obj: Any, seconds: float) -> None:
+        """Add the estimated cost of one completed call to the request's cost ledger."""
+        input_tokens, output_tokens = token_counts(usage_obj)
+        record_usage(self._llm_provider(), Usage(
+            side="llm", model=self._model_name, input_tokens=input_tokens,
+            output_tokens=output_tokens, seconds=seconds,
+        ))
+
     def _llm_api(self) -> str:
         """Wire protocol of the LLM side, as declared by its provider."""
         from backend.providers import ProviderConfigError, get_providers
@@ -586,9 +597,11 @@ class RemoteLLMService(LLMService):
         extra_body = self.llm_config.model_kwargs.get("extra_body")
         self._dump_inference_request({**payload, **({"extra_body": extra_body} if extra_body else {})})
 
+        started = time.monotonic()
         raw = await client.chat.completions.with_raw_response.create(**payload, extra_body=extra_body)
         self._record_usage(raw.headers)
         response = raw.parse()
+        self._record_cost(getattr(response, "usage", None), time.monotonic() - started)
 
         choice = response.choices[0]
         generated_text = choice.message.content
@@ -621,9 +634,11 @@ class RemoteLLMService(LLMService):
         }
         self._dump_inference_request(payload)
 
+        started = time.monotonic()
         raw = await client.messages.with_raw_response.create(**payload)
         self._record_usage(raw.headers)
         response = raw.parse()
+        self._record_cost(getattr(response, "usage", None), time.monotonic() - started)
 
         generated_text = response.content[0].text
         if not generated_text:

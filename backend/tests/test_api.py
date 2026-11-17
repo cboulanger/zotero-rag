@@ -165,6 +165,25 @@ class TestQueryAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 504)
         self.assertIn("timed out after 30s", response.json()["detail"])
 
+    def test_query_response_carries_the_requests_estimated_costs(self):
+        """Costs recorded while the orchestrator runs come back in ``costs`` (#119)."""
+        from backend.providers import Cost
+        from backend.services.cost_ledger import current_ledger
+        from backend.services.rag_engine import QueryResult
+
+        async def fake_query(*args, **kwargs):
+            current_ledger().add(Cost(side="llm", amount=0.01, requests=1, input_tokens=100))
+            current_ledger().add(Cost(side="llm", amount=0.02, requests=1, input_tokens=200))
+            return QueryResult(question="q", answer="a", sources=[])
+
+        self._mock_vector_store_for_query()
+        with patch("backend.services.query_orchestrator.QueryOrchestrator.query", side_effect=fake_query):
+            response = self.client.post("/api/query", json={"question": "What is RAG?", "library_ids": ["1"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        (cost,) = response.json()["costs"]
+        self.assertEqual((cost["side"], cost["requests"], cost["input_tokens"]), ("llm", 2, 300))
+        self.assertAlmostEqual(cost["amount"], 0.03)
+
     def test_query_vector_store_error_surfaces_real_detail_not_a_timeout(self):
         """A VectorStoreError (e.g. Qdrant's disk-full response) is a distinct,
         non-transient failure — it must not be reported as a 504 timeout, and

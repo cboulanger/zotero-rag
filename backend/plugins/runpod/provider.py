@@ -25,6 +25,7 @@ from pydantic import Field
 from backend.providers.base import Provider
 from backend.providers.types import (
     CredentialDescriptor,
+    Pricing,
     Credentials,
     Health,
     ProviderDescriptor,
@@ -61,6 +62,22 @@ HEALTH_TIMEOUT_SECONDS = 10.0
 KEY_PATTERN = r"^rpa_[A-Za-z0-9]+$"
 BASE_URL_PATTERN = r"^https://api\.runpod\.ai/v2/[A-Za-z0-9]+/openai/v1$"
 _ENDPOINT_ID_RE = re.compile(r"/v2/([^/]+)/")
+
+#: Serverless flex-worker list prices in USD per second, by GPU (runpod.io/pricing),
+#: keyed by the GPU type id or catalog name the ``gpu`` option uses (lower case).
+#: A preset's ``model_kwargs.pricing`` overrides these.
+GPU_PRICE_PER_SECOND: dict[str, float] = {
+    **dict.fromkeys(("nvidia rtx a4000", "nvidia rtx a4500", "nvidia rtx 4000 ada generation",
+                     "nvidia rtx 2000 ada generation"), 0.00016),
+    **dict.fromkeys(("nvidia rtx a5000", "nvidia l4", "nvidia geforce rtx 3090"), 0.00019),
+    "nvidia geforce rtx 4090": 0.00031,
+    "nvidia geforce rtx 5090": 0.00044,
+    **dict.fromkeys(("nvidia rtx a6000", "nvidia a40"), 0.00034),
+    **dict.fromkeys(("nvidia l40", "nvidia l40s", "nvidia rtx 6000 ada generation"), 0.00053),
+    **dict.fromkeys(("nvidia a100 80gb pcie", "nvidia a100-sxm4-80gb"), 0.00076),
+    **dict.fromkeys(("nvidia h100 pcie", "nvidia h100 80gb hbm3", "nvidia h100 nvl"), 0.00116),
+    "nvidia h200": 0.00155,
+}
 
 # Indirection so tests can run the retry loop without really waiting.
 _sleep: Callable[[float], None] = time.sleep
@@ -162,6 +179,16 @@ class RunPodProvider(Provider):
         if env_var == "RUNPOD_API_KEY":
             return "https://www.runpod.io/console/user/settings"
         return super().key_docs_url(env_var)
+
+    cost_note = (
+        "RunPod bills worker time: this counts the time of each call, not the idle time "
+        "before a worker scales down."
+    )
+
+    def default_pricing(self, model: str) -> Optional[Pricing]:
+        """Per-second price of the side's GPU (the same for every model it serves)."""
+        rate = GPU_PRICE_PER_SECOND.get(self.options.gpu.strip().lower())
+        return Pricing(per_second=rate) if rate is not None else None
 
     def unavailable_hint(self) -> Optional[str]:
         return (

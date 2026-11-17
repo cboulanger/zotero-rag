@@ -65,6 +65,7 @@ Hooks, all optional: `describe()` (the provider-agnostic descriptor the plugin
 renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `unavailable_hint()` (remedy appended to "endpoint unavailable" errors),
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
+`default_pricing(model)` and `estimate_cost(usage)` (see [Cost estimates](#cost-estimates)),
 `health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
 `provision(ctx, progress)`, `suspend(ctx, progress)`, `rerank_credentials(request, refresh)` and
@@ -188,4 +189,57 @@ fingerprint (`backend/services/usage_meters.py`); the side's provider turns them
 into meters (`unit`, `period`, `limit`, `remaining`, `resets_at`). The plugin
 draws one bar per meter from `GET /api/rate-limits`, the autoindex status
 `rate_limits.meters` and the `rate_limit_meters` of an upload response. Meters
-show quota only; costs are read on the provider's own dashboard.
+show quota only; costs are estimated separately (see below).
+
+In the dialogs' button rows the usage widget has a fixed size: it shows the two
+meters closest to running out and lists every meter in its tooltip.
+
+## Cost estimates
+
+For paid providers the backend estimates what each request cost, from list
+prices. Each remote call reports what it consumed (a `Usage`: model, input and
+output tokens, wall-clock seconds); the side's provider prices it with
+`estimate_cost(usage)`, and `backend/services/cost_ledger.py` adds the result to
+the ledger of the surrounding request. The totals (one `Cost` per side and
+currency: `amount`, `currency`, `requests`, tokens, `seconds`, `note`) come back as:
+
+- `costs` of `POST /api/query` (also on a `needs_client_evidence` or
+  `needs_clarification` response, which can follow a routing call);
+- `costs` of every upload and abstract-indexing result;
+- `costs` of each library in the autoindex status (`slugs.<slug>.costs`), for the
+  last run.
+
+`GET /api/config` lists the `priced_sides` of the caller's preset. When it is not
+empty, the Ask dialog's usage widget shows the estimated costs of the dialog
+session (queries, follow-ups and indexing) instead of the quota bars; the
+**Indexing status** dialog shows the estimated cost of the last run over the
+libraries it lists.
+
+A provider defines its price list with `default_pricing(model)`, which returns a
+`Pricing` (`input_per_million_tokens`, `output_per_million_tokens`,
+`per_request`, `per_second`, `currency`, default `USD`) or None for an unknown
+model; `match_pricing(table, model)` looks a model up in a list of glob
+patterns. `cost_note` says what the estimate leaves out. A free provider
+(`cost = "free"`) never has prices.
+
+| Provider | Prices |
+|---|---|
+| `openai` | Per token, for the GPT-4o, GPT-4.1 and GPT-5 families and the `text-embedding-3` models |
+| `anthropic` | Per token, for the Claude Haiku, Sonnet and Opus 4 families |
+| `google` | Per token (paid tier), for Gemini 2.0/2.5 Flash, Flash-Lite and Pro and `gemini-embedding-001` |
+| `runpod` | Per second of call time, by the side's `gpu` option (flex workers); idle time before a worker scales down is not counted |
+| `huggingface` | None: Inference Endpoints bill instance uptime, not requests |
+
+A preset can set or correct prices per side in `model_kwargs.pricing`, either one
+`Pricing` object or a mapping of model-name glob patterns to one:
+
+```json
+"model_kwargs": {
+  "pricing": {
+    "gpt-4o-mini*": {"input_per_million_tokens": 0.15, "output_per_million_tokens": 0.60},
+    "*": {"input_per_million_tokens": 2.5, "output_per_million_tokens": 10}
+  }
+}
+```
+
+Vendors change their prices; the shipped lists are estimates, not a bill.

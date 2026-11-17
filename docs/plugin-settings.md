@@ -35,7 +35,8 @@ A single toggle: **Enable automatic indexing of my libraries**. When on, the bac
 periodically re-indexes your libraries on its own schedule using the Zotero API key
 configured above — you don't need to keep Zotero open or index manually. **View
 indexing status** opens a dialog showing recent run results, the remaining embedding
-rate limits (when the active embedding service reports them) and, for server admins,
+rate limits (when the active embedding service reports them), the estimated cost of the
+last run (when it used a paid provider) and, for server admins,
 a dropdown to switch the active preset. The same dialog opens from the **Indexing
 status** button in the footer of the Ask dialog, which is shown only when the server
 has auto-indexing configured. See
@@ -129,6 +130,18 @@ query).
 | **Disable query routing** | Skips the routing step that decides between content search, catalog search, and citation search, going straight to a content search. Faster, but loses metadata-filter extraction, catalog listings, and citation/mentions questions. See [Query Routing & Agent System](query-routing.md) for what routing normally does. |
 | **Disable re-ranking** | Only shown when the preset has a re-ranking step. Answers this question with the passages in plain similarity order, a few seconds faster. Checked and locked when re-ranking is switched off in the [Re-ranking tab](#re-ranking-tab). When the preset's re-ranking endpoint is not running, the dialog says so and, if you can start it, offers **Start re-ranking**. |
 | **Include debugging information in note** | Attaches the full execution trace (routing decision, retrieval scores, every LLM call and prompt) to the saved result note and makes it available for export from the result view. Useful when reporting an answer-quality issue. |
+
+## Query dialog usage widget
+
+The left end of the query dialog's button row has a small widget of fixed size. With a
+preset that uses a paid provider (OpenAI, Anthropic, Google, RunPod), it shows the
+estimated cost of everything done since the dialog was opened: questions, follow-ups and
+indexing, with a breakdown by step (embedding, answering, re-ranking). The figure is
+computed from the providers' list prices; its tooltip lists the tokens or seconds counted
+and what the estimate leaves out. Your provider's bill is what counts.
+
+With other presets it shows the remaining quota of the embedding service while indexing:
+the two limits closest to running out, with every limit in the tooltip.
 
 ## See also
 

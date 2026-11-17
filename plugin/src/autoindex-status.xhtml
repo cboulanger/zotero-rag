@@ -44,6 +44,7 @@
     #run-banner.crashed { color: #cc0000; }
     #ai-rate-limit-section { display: flex; flex-direction: column; gap: 5px; max-width: 360px; margin-top: 8px; }
     #ai-rate-limit-asof { font-size: 11px; color: #888; }
+    #ai-cost-rate-limit-section { display: flex; flex-direction: column; max-width: 360px; margin-top: 8px; }
     #rate-limit-banner { font-size: 12px; color: #8a6400; margin-top: 6px; }
     #admin-preset-row { align-items: center; }
     #admin-preset-row label { font-size: 12px; color: #333; }
@@ -95,6 +96,10 @@
     <div id="ai-rate-limit-section" style="display: none;">
       <div id="ai-rate-limit-bars"></div>
       <div id="ai-rate-limit-asof"></div>
+    </div>
+    <!-- Estimated costs of the last run (shown when it called a paid provider) -->
+    <div id="ai-cost-rate-limit-section" style="display: none;">
+      <div id="ai-cost-rate-limit-bars"></div>
     </div>
   </div>
   <div id="user-actions" class="actions-section">

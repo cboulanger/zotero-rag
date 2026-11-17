@@ -93,8 +93,14 @@ var ZoteroRAGDialog = {
 	/** Whether the active embedding service supports rate limits (remote model). */
 	rateLimitAvailable: false,
 
-	/** @type {Record<string,string>|null} */
+	/** @type {UsageMeter[]|null} */
 	rateLimitMeters: null,
+
+	/** Sides of the active preset that charge per use at a known price (`priced_sides` of GET /api/config). @type {string[]} */
+	pricedSides: [],
+
+	/** Estimated costs incurred since this dialog opened (queries, follow-ups and indexing). @type {UsageCost[]} */
+	sessionCosts: [],
 
 	/** @type {AbortController|null} */
 	abortController: null,
@@ -444,7 +450,7 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null}} */ (await response.json());
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null, priced_sides?: string[]}} */ (await response.json());
 				this.renderActiveStandin(config.standin || null);
 				// A stand-in that ended on the server (expired) means the user's own keys are needed again.
 				this.plugin.syncStandinState(config.standin).catch(() => {});
@@ -503,6 +509,8 @@ var ZoteroRAGDialog = {
 				}
 
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
+				this.pricedSides = Array.isArray(config.priced_sides) ? config.priced_sides : [];
+				this.updateRateLimitDisplay();
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
 					this.fetchRateLimitMeters();
@@ -1438,8 +1446,30 @@ var ZoteroRAGDialog = {
 	},
 
 	updateRateLimitDisplay() {
+		const widget = ZoteroRAGRateLimitWidget;
+		const costs = this.sessionCosts || [];
+		if ((this.pricedSides && this.pricedSides.length) || costs.length) {
+			// A paid preset: the session's estimated costs take the widget's place in both states.
+			widget.renderCosts(document, costs, { visible: true });
+			widget.renderCosts(document, costs, { visible: true, prefix: 'result-' });
+			return;
+		}
 		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
-		ZoteroRAGRateLimitWidget.render(document, this.rateLimitMeters, { visible: show });
+		widget.render(document, this.rateLimitMeters, { visible: show });
+		widget.render(document, this.rateLimitMeters, {
+			visible: this.rateLimitAvailable && !!(this.rateLimitMeters && this.rateLimitMeters.length), prefix: 'result-',
+		});
+	},
+
+	/**
+	 * Add the estimated costs of one request (a query or an indexed document) to the session's totals.
+	 * @param {UsageCost[]|null|undefined} costs
+	 * @returns {void}
+	 */
+	addSessionCosts(costs) {
+		if (!costs || !costs.length) return;
+		this.sessionCosts = ZoteroRAGRateLimitWidget.addCosts(this.sessionCosts || [], costs);
+		this.updateRateLimitDisplay();
 	},
 
 	/**
@@ -2220,6 +2250,7 @@ var ZoteroRAGDialog = {
 	 */
 	async runQuery(question, libraryIds, options, onProgress) {
 		let result = await this.plugin.submitQuery(question, libraryIds, options);
+		if (result.costs && result.costs.length) this.addSessionCosts(result.costs);
 
 		if (result.status === 'needs_client_evidence') {
 			if (onProgress) onProgress(25, 'Searching local library', 'Scanning full text for citations...');
@@ -2236,6 +2267,7 @@ var ZoteroRAGDialog = {
 				clientEvidence: evidence,
 				queryPlan: result.query_plan,
 			});
+			if (result.costs && result.costs.length) this.addSessionCosts(result.costs);
 
 			if (result.status === 'needs_client_evidence') {
 				throw new Error('Backend requested citation evidence a second time — this should not happen.');
@@ -2570,6 +2602,7 @@ var ZoteroRAGDialog = {
 						this.rateLimitMeters = meters;
 						this.updateRateLimitDisplay();
 					},
+					onCostsIncurred: (costs) => this.addSessionCosts(costs),
 				});
 				this.abortController = null;
 				this.updateLibraryProgressText(libraryId, null); // restore normal display

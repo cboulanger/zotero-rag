@@ -37,6 +37,7 @@ from backend.services.effective_preset import preset_for_target
 from backend.db.vector_store import VectorStore
 from backend.models.document import DocumentMetadata
 from backend.services.autoindex_key_store import AutoIndexKeyStore
+from backend.services.cost_ledger import collect as collect_costs
 from backend.services.document_processor import DocumentProcessor
 from backend.services.embeddings import (
     EmbeddingAuthenticationError,
@@ -464,7 +465,13 @@ class CronIndexer:
                 self._write_status(status)
                 self.log.info("Indexing %s (library_id=%s)", slug_info.slug, slug_info.library_id)
 
-                slug_stats = await self._index_slug(slug_info, status)
+                with collect_costs() as ledger:
+                    try:
+                        slug_stats = await self._index_slug(slug_info, status)
+                    finally:
+                        costs = ledger.as_dicts()
+                        if costs:
+                            status["slugs"][slug_info.slug]["costs"] = costs
 
                 rate_limit_headers = slug_stats.pop("rate_limit_headers", None)
                 if rate_limit_headers:

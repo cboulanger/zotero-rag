@@ -8,7 +8,30 @@ core, keyed by model name rather than by provider.
 
 from typing import Optional
 
-from backend.providers.base import Provider
+from backend.providers.base import Provider, match_pricing
+from backend.providers.types import Pricing
+
+
+def _p(input_usd: float, output_usd: float = 0.0) -> Pricing:
+    return Pricing(input_per_million_tokens=input_usd, output_per_million_tokens=output_usd)
+
+
+#: Standard-tier list prices in USD per million tokens (platform.openai.com/docs/pricing).
+#: More specific patterns first. A preset's ``model_kwargs.pricing`` overrides these.
+PRICES: list[tuple[str, Pricing]] = [
+    ("text-embedding-3-small", _p(0.02)),
+    ("text-embedding-3-large", _p(0.13)),
+    ("text-embedding-ada-002", _p(0.10)),
+    ("gpt-4o-mini*", _p(0.15, 0.60)),
+    ("gpt-4o*", _p(2.50, 10.00)),
+    ("gpt-4.1-nano*", _p(0.10, 0.40)),
+    ("gpt-4.1-mini*", _p(0.40, 1.60)),
+    ("gpt-4.1*", _p(2.00, 8.00)),
+    ("gpt-5-nano*", _p(0.05, 0.40)),
+    ("gpt-5-mini*", _p(0.25, 2.00)),
+    ("gpt-5", _p(1.25, 10.00)),
+    ("gpt-5-2025*", _p(1.25, 10.00)),
+]
 
 
 class OpenAIProvider(Provider):
@@ -25,3 +48,7 @@ class OpenAIProvider(Provider):
         if env_var == "OPENAI_API_KEY":
             return "https://platform.openai.com/api-keys"
         return super().key_docs_url(env_var)
+
+    def default_pricing(self, model: str) -> Optional[Pricing]:
+        # The embedding sentinel ``model_name: "openai"`` stands for text-embedding-3-small.
+        return match_pricing(PRICES, "text-embedding-3-small" if model == "openai" else model)

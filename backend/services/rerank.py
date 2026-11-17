@@ -172,10 +172,27 @@ class RemoteReranker(Reranker):
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             return await client.post(url, json=payload, headers=headers)
 
+    def _record_cost(self, data: Any, seconds: float) -> None:
+        """Add the estimated cost of one completed call to the request's cost ledger."""
+        from backend.providers.types import Usage
+        from backend.services.cost_ledger import record_usage
+
+        usage = data.get("usage") if isinstance(data, dict) else None
+        if isinstance(data, dict) and usage is None and isinstance(data.get("output"), dict):
+            usage = data["output"].get("usage")  # RunPod wraps the worker's answer
+        tokens = 0
+        if isinstance(usage, dict):
+            try:
+                tokens = int(usage.get("total_tokens") or usage.get("prompt_tokens") or 0)
+            except (TypeError, ValueError):
+                tokens = 0
+        record_usage(self.provider, Usage(side="rerank", model=self.model_name, input_tokens=tokens, seconds=seconds))
+
     async def score(self, question: str, texts: list[str]) -> list[float]:
         import httpx
 
         creds = await asyncio.to_thread(self._credentials)
+        started = time.monotonic()
         try:
             resp = await self._post(creds, question, texts)
             retry = resp.status_code in (401, 503)
@@ -199,6 +216,7 @@ class RemoteReranker(Reranker):
             except Exception as exc:  # activity reporting must never fail a query
                 logger.debug(f"Re-ranker activity report failed: {exc}")
         data = resp.json()
+        self._record_cost(data, time.monotonic() - started)
         unwrap = getattr(self.provider, "rerank_unwrap", None)
         if unwrap is not None:
             data = unwrap(data)

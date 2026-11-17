@@ -160,3 +160,79 @@ test('isServerIndexingRunning uses the shared status fetch and fails open', asyn
 	global.fetch = async () => { throw new Error('x'); };
 	assert.strictEqual(await D.isServerIndexingRunning.call(fake), false);
 });
+
+// --- fixed size (#105) and costs of paid providers (#119) ---------------------
+
+test('render shows at most two rows, the meters closest to running out, and lists all in the tooltip', () => {
+	const els = { 'rate-limit-section': fakeNode(), 'rate-limit-bars': fakeNode() };
+	const ctx = load(els);
+	ctx.document.createElementNS = createElementNS;
+	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, [m(100, 90, 'minute'), m(100, 10), m(100, 50, 'day')], { visible: true });
+	assert.deepStrictEqual(readRows(els['rate-limit-bars']).map((r) => r.text),
+		['10 requests left/hour', '50 requests left/day']);
+	assert.strictEqual(els['rate-limit-section'].title.split('\n').length, 3);
+	ctx.ZoteroRAGRateLimitWidget.render(ctx.document, [m(100, 90, 'minute'), m(100, 10), m(100, 50, 'day')],
+		{ visible: true, maxRows: Infinity });
+	assert.strictEqual(els['rate-limit-bars'].children.length, 3);
+});
+
+const cost = (side, amount, extra = {}) => ({ side, amount, currency: 'USD', requests: 1, input_tokens: 100, output_tokens: 10, ...extra });
+
+test('addCosts merges entries of the same side and currency without changing its inputs', () => {
+	const { ZoteroRAGRateLimitWidget: w } = load();
+	const first = [cost('llm', 0.01)];
+	const total = w.addCosts(first, [cost('llm', 0.02), cost('embedding', 0.001), cost('llm', 1, { currency: 'EUR' })]);
+	assert.strictEqual(first[0].amount, 0.01);
+	assert.strictEqual(total.length, 3);
+	assert.ok(Math.abs(total[0].amount - 0.03) < 1e-12);
+	assert.strictEqual(total[0].requests, 2);
+	assert.strictEqual(total[0].input_tokens, 200);
+	assert.deepStrictEqual(w.addCosts([], null), []);
+});
+
+test('formatAmount keeps four decimals below one cent', () => {
+	const { ZoteroRAGRateLimitWidget: w } = load();
+	assert.strictEqual(w.formatAmount(0.0042, 'USD'), '$0.0042');
+	assert.strictEqual(w.formatAmount(1.5, 'USD'), '$1.50');
+	assert.strictEqual(w.formatAmount(0, 'USD'), '$0.00');
+});
+
+test('describeCosts gives a total, a per-side line and a tooltip with notes', () => {
+	const { ZoteroRAGRateLimitWidget: w } = load();
+	const d = w.describeCosts([cost('llm', 0.02), cost('embedding', 0.005, { note: 'Idle time is not counted.' })]);
+	assert.strictEqual(d.total, 'Est. cost this session: $0.03');
+	assert.strictEqual(d.detail, 'Answering $0.02 · Embedding $0.0050');
+	assert.match(d.title, /Idle time is not counted\./);
+	assert.match(d.title, /100 input \/ 10 output tokens/);
+	assert.strictEqual(w.describeCosts([]).total, 'Est. cost this session: $0.00');
+});
+
+test('renderCosts paints the total and the breakdown into the same widget', () => {
+	const els = { 'result-rate-limit-section': fakeNode(), 'result-rate-limit-bars': fakeNode() };
+	const ctx = load(els);
+	ctx.document.createElementNS = createElementNS;
+	ctx.ZoteroRAGRateLimitWidget.renderCosts(ctx.document, [cost('llm', 0.25)], { visible: true, prefix: 'result-' });
+	const rows = els['result-rate-limit-bars'].children;
+	assert.strictEqual(rows[0].textContent, 'Est. cost this session: $0.25');
+	assert.strictEqual(rows[1].textContent, 'Answering $0.25');
+	ctx.ZoteroRAGRateLimitWidget.renderCosts(ctx.document, [], { visible: false, prefix: 'result-' });
+	assert.strictEqual(els['result-rate-limit-section'].style.display, 'none');
+	assert.strictEqual(rows.length, 2); // old array; the container was emptied
+	assert.strictEqual(els['result-rate-limit-bars'].children.length, 0);
+});
+
+test('Ask dialog shows session costs instead of quota bars for a paid preset', () => {
+	const els = { 'rate-limit-section': fakeNode(), 'rate-limit-bars': fakeNode() };
+	const ctx = load(els, true);
+	ctx.document.createElementNS = createElementNS;
+	const D = ctx.ZoteroRAGDialog;
+	const fake = { rateLimitAvailable: true, isOperationInProgress: false, isIndexOnlyMode: () => false,
+		rateLimitMeters: [m(100, 20)], pricedSides: ['llm'], sessionCosts: [],
+		updateRateLimitDisplay: D.updateRateLimitDisplay };
+	D.updateRateLimitDisplay.call(fake);
+	assert.strictEqual(els['rate-limit-section'].style.display, '');
+	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Est. cost this session: $0.00');
+	D.addSessionCosts.call(fake, [cost('llm', 0.01)]);
+	D.addSessionCosts.call(fake, [cost('llm', 0.02)]);
+	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Est. cost this session: $0.03');
+});

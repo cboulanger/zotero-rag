@@ -562,6 +562,14 @@ class RemoteEmbeddingService(EmbeddingService):
                 logger.debug(f"OpenAI embeddings client initialised, timeout={timeout}s")
         return self._client
 
+    def _record_cost(self, model: str, usage_obj: Any, seconds: float) -> None:
+        """Add the estimated cost of one completed call to the request's cost ledger."""
+        from backend.providers.types import Usage
+        from backend.services.cost_ledger import record_usage, token_counts
+
+        input_tokens, _ = token_counts(usage_obj)
+        record_usage(self._provider, Usage(side="embedding", model=model, input_tokens=input_tokens, seconds=seconds))
+
     def _capture_rate_limit_headers(self, headers: Any) -> None:
         """Extract and cache rate-limit headers from an API response."""
         recorder.record("embedding", headers, self._fingerprint)
@@ -634,6 +642,7 @@ class RemoteEmbeddingService(EmbeddingService):
 
         for attempt in range(max_attempts):
             try:
+                started = time.monotonic()
                 raw = await client.embeddings.with_raw_response.create(
                     model=model,
                     input=input,
@@ -641,7 +650,9 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 self._capture_rate_limit_headers(raw.headers)
                 recorder.clear_rate_limit("embedding", self._fingerprint)
-                return raw.parse()
+                parsed = raw.parse()
+                self._record_cost(model, getattr(parsed, "usage", None), time.monotonic() - started)
+                return parsed
             except (AuthenticationError, PermissionDeniedError) as exc:
                 # Invalid/expired API key (401) or forbidden (403): not recoverable
                 # by retrying. Raise a fatal error so the caller aborts the run and

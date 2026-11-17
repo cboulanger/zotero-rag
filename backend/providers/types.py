@@ -116,6 +116,61 @@ class Meter(BaseModel):
     source: Literal["run", "cache"] = "run"
 
 
+class Usage(BaseModel):
+    """What one inference call consumed, as measured by core (the input of cost estimates)."""
+
+    side: Side
+    model: str
+    requests: int = 1
+    input_tokens: int = 0
+    output_tokens: int = 0
+    #: Wall-clock seconds of the call (what time-billed endpoints charge for, at least).
+    seconds: float = 0.0
+
+
+class Pricing(BaseModel):
+    """List prices of one model, in ``currency``. Every rate that applies is added up.
+
+    A preset can set it per side in ``model_kwargs.pricing``: either one ``Pricing``
+    object, or an object mapping model-name glob patterns to one (the first matching
+    pattern wins). Without it the provider's ``default_pricing`` is used.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    currency: str = "USD"
+    input_per_million_tokens: float = Field(default=0.0, ge=0)
+    output_per_million_tokens: float = Field(default=0.0, ge=0)
+    per_request: float = Field(default=0.0, ge=0)
+    #: For endpoints billed by compute time (e.g. serverless GPU workers).
+    per_second: float = Field(default=0.0, ge=0)
+
+    def price(self, usage: "Usage") -> float:
+        """The cost of ``usage`` at these rates."""
+        return (
+            usage.input_tokens * self.input_per_million_tokens / 1_000_000
+            + usage.output_tokens * self.output_per_million_tokens / 1_000_000
+            + usage.requests * self.per_request
+            + usage.seconds * self.per_second
+        )
+
+
+class Cost(BaseModel):
+    """The estimated cost of what one side consumed (one call or a sum of calls)."""
+
+    side: Side
+    amount: float
+    currency: str = "USD"
+    requests: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    seconds: float = 0.0
+    #: Always true for now: computed from list prices, not read from the provider's bill.
+    estimated: bool = True
+    #: What the estimate leaves out (e.g. idle time a GPU worker is billed for).
+    note: str = ""
+
+
 class Credentials(BaseModel):
     """The key of whoever owns the resource, and the endpoint URL if known."""
 

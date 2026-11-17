@@ -533,3 +533,18 @@ test('switchPreset POSTs, then refreshes presets and status on success', async (
 	// Other open windows (the Preferences pane) are told to refresh.
 	assert.deepStrictEqual([...dialog.plugin.presetNotifications], ['autoindex-status']);
 });
+
+test('run costs: summed over the libraries shown, hidden when the run cost nothing', () => {
+	const els = statusElements();
+	els['ai-cost-rate-limit-section'] = fakeEl();
+	els['ai-cost-rate-limit-bars'] = fakeNode();
+	const dialog = widgetDialog(els);
+	dialog.rateLimitFallbackTried = true;
+	const usd = (amount) => ({ side: 'embedding', amount, currency: 'USD', requests: 1 });
+	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: false },
+		slugs: { 'users/1': { status: 'done', costs: [usd(0.25)] }, 'groups/2': { status: 'done', costs: [usd(0.5)] } } });
+	assert.strictEqual(els['ai-cost-rate-limit-section'].style.display, '');
+	assert.strictEqual(els['ai-cost-rate-limit-bars'].children[0].textContent, 'Est. cost of the last run: $0.75');
+	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: false }, slugs: { 'users/1': { status: 'done' } } });
+	assert.strictEqual(els['ai-cost-rate-limit-section'].style.display, 'none');
+});

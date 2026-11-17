@@ -326,6 +326,12 @@ how many of those were indexed successfully this run (and removed from the
 cache); `pending_errors` is how many failed and were kept, with their own
 retry counter, for the next run.
 
+`costs` is present on a library once its indexing called a paid provider with
+a known price: the estimated cost of those calls in this run, one entry per side
+and currency (`side`, `amount`, `currency`, `requests`, token counts, `seconds`,
+`note`). The **Indexing status** dialog adds them up over the libraries it shows
+and lists each library's share. See [Cost estimates](providers.md#cost-estimates).
+
 `key_issues` lists keys that failed re-validation this run. `pruned: true` means
 the key was permanently invalid and removed from the store; `pruned: false` means
 it failed transiently and was kept for retry. The list is empty when all keys
