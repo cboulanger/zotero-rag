@@ -96,6 +96,7 @@
  * @property {string} tab
  * @property {Record<string, boolean>} logOpen
  * @property {Record<string, boolean>} [billingOpen] - account card ids whose Billing section is expanded
+ * @property {Record<string, boolean>} [credsOpen] - account card ids whose credentials the user opened (true) or closed (false)
  * @property {Record<string, string>} drafts
  * @property {Record<string, {level: string, text: string}>} notes
  * @property {StandinList|null} [standins]
@@ -813,13 +814,6 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 		? (card.state === 'ready' ? 'Logged in' : 'Not logged in')
 		: (card.state === 'ready' ? 'Credentials complete' : 'Credentials missing');
 	state.children[1].textContent = ` ${stateText}${card.scope_note ? ` (${card.scope_note})` : ''}`;
-	node.appendChild(state);
-	if (card.quota) {
-		const quota = el('div', `pd-card-quota pd-msg-${card.quota.level}`);
-		quota.append(this._dot(el, card.quota.level === 'ok' ? 'ready' : card.quota.level === 'warn' ? 'starting' : 'down'), el('span'));
-		quota.children[1].textContent = ` Quota: ${card.quota.text}`;
-		node.appendChild(quota);
-	}
 	const scope = `account:${card.id}`;
 	/** @type {HTMLButtonElement|null} Enabled once a value is typed (see below). */
 	let save = null;
@@ -827,7 +821,42 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 		if (save) this._setButtonState(save, this.actionKey(scope, 'save'), this.hasAccountInput(card, local.drafts), local);
 	};
 	const fieldHandlers = { ...handlers, onDraft: updateSave };
-	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, fieldHandlers));
+	if (card.fields.length) {
+		// The credentials collapse under their state line: open while input is needed, closed
+		// once complete, unless the user toggled them (kept across repaints).
+		const creds = /** @type {HTMLDetailsElement} */ (el('details', 'pd-creds'));
+		const toggled = local.credsOpen?.[card.id];
+		creds.open = toggled ?? card.state === 'needs_input';
+		creds.addEventListener('toggle', () => {
+			local.credsOpen = { ...local.credsOpen, [card.id]: creds.open };
+		});
+		const summary = el('summary', 'pd-creds-head');
+		summary.appendChild(state);
+		const body = el('div', 'pd-creds-body');
+		for (const field of card.fields) body.appendChild(this._field(doc, field, scope, local, fieldHandlers));
+		// Their Save button belongs with them; billing saves itself and actions stay outside.
+		if (card.fields.some((f) => f.editable !== false && f.type !== 'readonly' && f.storage !== 'login')) {
+			save = el('button', `pd-button${hasLogin ? '' : ' pd-primary'}`);
+			save.textContent = card.auto_start ? 'Save and start' : 'Save';
+			save.title = card.auto_start ? 'Save the entered values, then start the endpoints that use them' : '';
+			save.addEventListener('click', () => handlers.onSaveAccount(card));
+			// Nothing typed, nothing to save: an emptied key field must not clear a stored key.
+			updateSave();
+			const saveRow = el('div', 'pd-actions');
+			saveRow.appendChild(save);
+			body.appendChild(saveRow);
+		}
+		creds.append(summary, body);
+		node.appendChild(creds);
+	} else {
+		node.appendChild(state);
+	}
+	if (card.quota) {
+		const quota = el('div', `pd-card-quota pd-msg-${card.quota.level}`);
+		quota.append(this._dot(el, card.quota.level === 'ok' ? 'ready' : card.quota.level === 'warn' ? 'starting' : 'down'), el('span'));
+		quota.children[1].textContent = ` Quota: ${card.quota.text}`;
+		node.appendChild(quota);
+	}
 	const billing = card.billing || [];
 	if (billing.length) {
 		// Saved as soon as changed (Zotero preferences): not part of the card's Save button.
@@ -851,15 +880,6 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	const note = local.notes[scope];
 	for (const message of note ? [note, ...card.messages] : card.messages) node.appendChild(this._message(el, message));
 	const row = el('div', 'pd-actions');
-	if (card.fields.some((f) => f.editable !== false && f.type !== 'readonly' && f.storage !== 'login')) {
-		save = el('button', `pd-button${hasLogin ? '' : ' pd-primary'}`);
-		save.textContent = card.auto_start ? 'Save and start' : 'Save';
-		save.title = card.auto_start ? 'Save the entered values, then start the endpoints that use them' : '';
-		save.addEventListener('click', () => handlers.onSaveAccount(card));
-		// Nothing typed, nothing to save: an emptied key field must not clear a stored key.
-		updateSave();
-		row.appendChild(save);
-	}
 	for (const action of actions) {
 		const button = el('button', `pd-button${action.kind === 'primary' ? ' pd-primary' : action.kind === 'danger' ? ' pd-danger' : ''}`);
 		button.textContent = action.label;
@@ -899,7 +919,7 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 	/** Refreshes while something is starting, after which polling stops (about 10 minutes). */
 	const MAX_POLLS = 120;
 	/** @type {{view: PresetView|null, local: LocalState}} */
-	const state = { view: null, local: { tab: '', logOpen: {}, billingOpen: {}, drafts: {}, notes: {}, standins: null, running: {} } };
+	const state = { view: null, local: { tab: '', logOpen: {}, billingOpen: {}, credsOpen: {}, drafts: {}, notes: {}, standins: null, running: {} } };
 	let polling = false;
 	// The stand-ins are offered by themselves once per dialog, the first time a side shows
 	// a used-up quota; afterwards only the side's button asks again.

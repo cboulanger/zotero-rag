@@ -287,7 +287,8 @@ test('a field the caller may not change is shown read-only, and a card without e
 		{ onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} });
 	const cardText = text(refs.cards);
 	assert.doesNotMatch(cardText, /Save/);
-	const input = refs.cards.children[0].children[2].children[1];
+	const all = (/** @type {any} */ node) => [node, ...(node.children || []).filter((/** @type {any} */ c) => typeof c === 'object').flatMap(all)];
+	const input = all(refs.cards).find((/** @type {any} */ n) => n.tag === 'input');
 	assert.strictEqual(input.readOnly, true);
 	assert.strictEqual(input.value, 'Set by the server admin');
 });
@@ -704,6 +705,35 @@ test('a clicked (focused) Save button still shows its spinner; a focused text fi
 	assert.strictEqual(all(refs.cards).find((n) => n.tag === 'input'), input, 'typing is not interrupted');
 });
 
+test('Credentials: collapsed when complete, open when input is needed, and a toggle survives repaints', () => {
+	const D = load();
+	const doc = fakeDoc();
+	const refs = D.mount(doc, createElementNS(null, 'div'));
+	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
+	const all = (/** @type {any} */ node) => [node, ...(node.children || []).filter((/** @type {any} */ c) => typeof c === 'object').flatMap(all)];
+	const creds = () => all(refs.cards).find((/** @type {any} */ n) => n.tag === 'details' && n.className.includes('pd-creds'));
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+
+	D.paint(doc, refs, view([side('llm')], [card()]), local, handlers);
+	assert.ok(creds(), 'credentials are a collapsible <details> section');
+	assert.strictEqual(creds().open, false, 'collapsed when the credentials are complete');
+	const summary = creds().children.find((/** @type {any} */ n) => n.tag === 'summary');
+	assert.match(text(summary), /Credentials complete/, 'the heading is the credentials state');
+	const inside = all(creds());
+	assert.ok(inside.some((/** @type {any} */ n) => n.tag === 'input'), 'the fields are inside');
+	assert.ok(inside.some((/** @type {any} */ n) => n.tag === 'button' && /Save/.test(n.textContent)), 'so is their Save button');
+
+	D.paint(doc, refs, view([side('llm')], [card({ state: 'needs_input' })]), { tab: '', logOpen: {}, drafts: {}, notes: {} }, handlers);
+	assert.strictEqual(creds().open, true, 'open when credentials must be entered');
+
+	// The user opens a complete card's credentials; a repaint keeps them open.
+	D.paint(doc, refs, view([side('llm')], [card()]), local, handlers);
+	creds().open = true;
+	creds().listeners.toggle.forEach((/** @type {Function} */ fn) => fn({}));
+	D.paint(doc, refs, view([side('llm')], [card()]), local, handlers);
+	assert.strictEqual(creds().open, true);
+});
+
 const billingFields = () => [
 	{ id: 'billing.mode', label: 'How this service bills you', type: 'select', storage: 'client_pref', key: 'billing.p1.mode',
 		options: ['Not set', 'Subscription', 'Token-based', 'Time-based'], default: 'Not set' },
@@ -756,7 +786,7 @@ test('Billing: the section is collapsed by default, names the chosen type, and s
 	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
 	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
 	const all = (/** @type {any} */ node) => [node, ...(node.children || []).filter((/** @type {any} */ c) => typeof c === 'object').flatMap(all)];
-	const section = () => all(refs.cards).find((/** @type {any} */ n) => n.tag === 'details');
+	const section = () => all(refs.cards).find((/** @type {any} */ n) => n.tag === 'details' && n.className.includes('pd-billing'));
 	D.paint(doc, refs, v, local, handlers);
 	assert.ok(section(), 'Billing is a collapsible <details> section');
 	assert.strictEqual(section().open, false, 'collapsed by default');

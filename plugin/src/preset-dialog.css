@@ -74,6 +74,10 @@ body { margin: 0; height: 100vh; display: flex; flex-direction: column; backgrou
 .pd-toggle { justify-self: start; margin: 0; }
 .pd-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .pd-card-state { font-size: 12px; display: flex; align-items: center; gap: 4px; }
+/* Credentials of an account card, collapsed under their state line once complete */
+.pd-creds-head { cursor: pointer; user-select: none; }
+.pd-creds-head > .pd-card-state { display: inline-flex; }
+.pd-creds-body { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .pd-card .pd-field { grid-template-columns: 140px minmax(0, 1fr) auto; }
 .pd-buttons { display: flex; justify-content: flex-end; padding: 8px 16px; border-top: 1px solid var(--pd-line); }
 [hidden] { display: none !important; }
