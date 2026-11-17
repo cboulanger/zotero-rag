@@ -326,6 +326,14 @@ how many of those were indexed successfully this run (and removed from the
 cache); `pending_errors` is how many failed and were kept, with their own
 retry counter, for the next run.
 
+`costs` is present on a library once its indexing called a paid provider: what
+those calls consumed in this run, one entry per side, provider, model and currency
+(`side`, `provider`, `model`, `requests`, token counts, `seconds`, `note`, the list
+prices in `pricing` and `amount` at those prices). The **Indexing status** dialog
+prices them with the viewer's Billing settings, adds them up over the libraries it
+shows and lists each library's share; with Billing not set or set to Subscription it
+shows no costs. See [Cost estimates](providers.md#cost-estimates).
+
 `key_issues` lists keys that failed re-validation this run. `pruned: true` means
 the key was permanently invalid and removed from the store; `pruned: false` means
 it failed transiently and was kept for retry. The list is empty when all keys
@@ -528,6 +536,8 @@ reason (revoked, expired, or downgraded to write scope).
 ## Per-user keys, presets and paused endpoints
 
 Each user's provider keys are stored per key name in the encrypted key store (`<data_path>/system/autoindex_keys.json`), so a user can hold, say, a KISSKI key and a Hugging Face token and switch presets without re-entering either. Every run indexes each owner's libraries on that owner's preset (their own choice, else the server default) with that owner's key for it; a preset with an admin-set key (`managed`/`shared` scope) needs no personal key. Keys are only pruned when they are permanently invalid.
+
+When the owner's embedding side runs in their own login session (a per-user MPCDF side, see [providers.md](providers.md), "Per-user sessions"), their libraries are skipped with an issue of kind `session`: such an endpoint needs the user to log in with a one-time code, so it cannot be started while they are away.
 
 When the owner has paused their embedding endpoint (see [presets.md](presets.md), "Pause and resume"), their libraries are skipped with the reason `embedding_paused` and no call is made to the endpoint, no queued upload's attempt count advances and their key's status is left alone. Other owners' libraries are indexed as usual, and a paused LLM does not affect indexing.
 

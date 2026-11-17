@@ -43,7 +43,10 @@ async function startup({ id, version, rootURI }) {
 		pluginID: 'zotero-rag@cboulanger.github.io',
 		src: rootURI + 'preferences.xhtml',
 		image: rootURI + 'icons/ask-rag.svg',
-		stylesheets: [rootURI + 'preferences.css']
+		stylesheets: [rootURI + 'preferences.css'],
+		// Calls initPrefPane() on the pane's load event; replaces an inline
+		// onload attribute that Firefox's baseline chrome CSP would block.
+		scripts: [rootURI + 'preferences-pane.js']
 	});
 
 	// Load Zotero Plugin Toolkit bundle
@@ -74,6 +77,8 @@ async function startup({ id, version, rootURI }) {
 	// Load main plugin script and preferences pane logic
 	Services.scriptloader.loadSubScript(rootURI + 'zotero-rag.js');
 	Services.scriptloader.loadSubScript(rootURI + 'provider-sections.js');
+	// Pure helpers of the "Configure preset" dialog; the Preferences pane uses them for its summary.
+	Services.scriptloader.loadSubScript(rootURI + 'preset-dialog-view.js');
 	Services.scriptloader.loadSubScript(rootURI + 'preferences.js');
 	ZoteroRAG.init({ id, version, rootURI });
 	Zotero.ZoteroRAG = ZoteroRAG;
@@ -81,11 +86,16 @@ async function startup({ id, version, rootURI }) {
 	await ZoteroRAG.main();
 }
 
+// Zotero can call these before startup() has run: it loads the plugin scope, awaits locale
+// registration and only then calls startup(), and a main window may finish loading in between.
+// startup() adds the UI to every main window open by then, so skipping here loses nothing.
 function onMainWindowLoad({ window }) {
+	if (!ZoteroRAG) return;
 	ZoteroRAG.addToWindow(window);
 }
 
 function onMainWindowUnload({ window }) {
+	if (!ZoteroRAG) return;
 	ZoteroRAG.removeFromWindow(window);
 }
 

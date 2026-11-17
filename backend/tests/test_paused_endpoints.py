@@ -97,7 +97,7 @@ class TestServicesFailFast(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_paused_llm_raises_the_llm_error(self):
         from backend.services.llm import LLMEndpointUnavailableError, RemoteLLMService
-        from backend.tests.test_providers_registry import make_preset
+        from backend.providers.testing import make_preset
         preset = make_preset()
         settings = MagicMock()
         settings.get_hardware_preset.return_value = preset

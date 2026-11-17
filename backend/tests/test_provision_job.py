@@ -10,12 +10,11 @@ from unittest.mock import AsyncMock, patch
 from backend.config.presets import ensure_default_presets, get_preset
 from backend.config.settings import get_settings, reset_settings
 from backend.providers import Provider, ProvisionContext, ProvisionError
-from backend.tests.runpod_variants import write_managed_runpod_preset
-from backend.providers.runpod import RunPodProvider
 from backend.services import provisioning
 from backend.services.admin_settings_store import get_remote_config_value, update_remote_config
 from backend.services.zotero_identity import ZoteroIdentity, reset_identity_cache
 from backend.zotero.group_roles import reset_admin_role_cache
+from backend.tests import fakes
 
 
 class _FakeProvider(Provider):
@@ -124,7 +123,7 @@ class RunJobTest(unittest.TestCase):
 
 
 class ProvisionEndpointsTest(unittest.TestCase):
-    EMB_URL, LLM_URL = "RUNPOD_EMBEDDING_BASE_URL", "RUNPOD_LLM_BASE_URL"
+    EMB_URL, LLM_URL = "TESTCLOUD_EMBEDDING_BASE_URL", "TESTCLOUD_LLM_BASE_URL"
 
     def setUp(self):
         from backend.main import app
@@ -137,7 +136,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
-        s.model_preset = write_managed_runpod_preset(s.data_path)
+        s.model_preset = fakes.write_managed_cloud_preset(s.data_path)
         self.app = app
         # Entered as a context manager so one event loop outlives the POST: the
         # provisioning task runs on it after the 202 response, as under uvicorn.
@@ -152,9 +151,9 @@ class ProvisionEndpointsTest(unittest.TestCase):
             self.calls.append((this.side, ctx.credential))
             progress("working")
             env = this.side_config.model_kwargs["shared_base_url_env"]
-            return {env: f"https://api.runpod.ai/v2/{this.side}/openai/v1"}
+            return {env: f"https://testcloud.invalid/{this.side}/v1"}
 
-        patcher = patch.object(RunPodProvider, "provision", fake_provision)
+        patcher = patch.object(fakes.cloud_cls(), "provision", fake_provision)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -171,8 +170,8 @@ class ProvisionEndpointsTest(unittest.TestCase):
         identity = ZoteroIdentity(user_id=1, username="admin", targets=["users/1"])
         self.app.dependency_overrides[require_authorized_group_admin] = lambda: identity
 
-    def _store_key(self, value="rpa_STORED"):
-        update_remote_config({"RUNPOD_API_KEY": value}, data_path=get_settings().data_path)
+    def _store_key(self, value="tck_STORED"):
+        update_remote_config({"TESTCLOUD_API_KEY": value}, data_path=get_settings().data_path)
 
     def _wait(self):
         status = {}
@@ -199,7 +198,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
 
     def test_400_when_no_side_can_be_provisioned(self):
         self._override_admin()
-        get_settings().model_preset = "remote-kisski"
+        get_settings().model_preset = "test-remote"
         r = self.client.post("/api/config/provision")
         self.assertEqual(r.status_code, 400)
         self.assertIn("no side that can be provisioned", r.json()["detail"])
@@ -213,7 +212,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
     def test_400_when_no_key_is_available_for_a_side(self):
         r, _ = self._provision({})
         self.assertEqual(r.status_code, 400)
-        self.assertIn("RUNPOD_API_KEY", r.json()["detail"])
+        self.assertIn("TESTCLOUD_API_KEY", r.json()["detail"])
         self.assertEqual(self.calls, [])
 
     def test_success_runs_both_sides_in_order_and_applies_the_urls(self):
@@ -221,29 +220,29 @@ class ProvisionEndpointsTest(unittest.TestCase):
         r, status = self._provision()
         self.assertEqual(r.status_code, 202)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.calls, [("embedding", "rpa_STORED"), ("llm", "rpa_STORED")])
+        self.assertEqual(self.calls, [("embedding", "tck_STORED"), ("llm", "tck_STORED")])
         self.assertEqual(status["sides"]["embedding"]["status"], "succeeded")
         self.assertEqual(status["progress"], ["embedding: working", "llm: working"])
         data_path = get_settings().data_path
         self.assertEqual(get_remote_config_value(self.EMB_URL, data_path=data_path),
-                         "https://api.runpod.ai/v2/embedding/openai/v1")
+                         "https://testcloud.invalid/embedding/v1")
         self.assertEqual(get_remote_config_value(self.LLM_URL, data_path=data_path),
-                         "https://api.runpod.ai/v2/llm/openai/v1")
+                         "https://testcloud.invalid/llm/v1")
 
     def test_a_supplied_key_is_used_for_this_run_only_and_never_stored(self):
-        r, status = self._provision({"keys": {"RUNPOD_API_KEY": "rpa_FULL"}})
+        r, status = self._provision({"keys": {"TESTCLOUD_API_KEY": "tck_FULL"}})
         self.assertEqual(r.status_code, 202)
-        self.assertEqual({c[1] for c in self.calls}, {"rpa_FULL"})
-        self.assertIsNone(get_remote_config_value("RUNPOD_API_KEY", data_path=get_settings().data_path))
+        self.assertEqual({c[1] for c in self.calls}, {"tck_FULL"})
+        self.assertIsNone(get_remote_config_value("TESTCLOUD_API_KEY", data_path=get_settings().data_path))
 
     def test_a_supplied_key_does_not_replace_a_stored_key(self):
-        self._store_key("rpa_RESTRICTED")
-        self._provision({"keys": {"RUNPOD_API_KEY": "rpa_FULL"}})
-        self.assertEqual({c[1] for c in self.calls}, {"rpa_FULL"})
-        self.assertEqual(get_remote_config_value("RUNPOD_API_KEY", data_path=get_settings().data_path), "rpa_RESTRICTED")
+        self._store_key("tck_RESTRICTED")
+        self._provision({"keys": {"TESTCLOUD_API_KEY": "tck_FULL"}})
+        self.assertEqual({c[1] for c in self.calls}, {"tck_FULL"})
+        self.assertEqual(get_remote_config_value("TESTCLOUD_API_KEY", data_path=get_settings().data_path), "tck_RESTRICTED")
 
     def test_rejects_a_malformed_supplied_key(self):
-        r, _ = self._provision({"keys": {"RUNPOD_API_KEY": "not-a-runpod-key"}})
+        r, _ = self._provision({"keys": {"TESTCLOUD_API_KEY": "not-a-runpod-key"}})
         self.assertEqual(r.status_code, 400)
         self.assertIn("expected format", r.json()["detail"])
         self.assertEqual(self.calls, [])
@@ -253,7 +252,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         self._store_key()
         r, status = self._provision({"sides": ["llm"]})
         self.assertEqual(r.status_code, 202)
-        self.assertEqual(self.calls, [("llm", "rpa_STORED")])
+        self.assertEqual(self.calls, [("llm", "tck_STORED")])
         self.assertEqual(set(status["sides"]), {"llm"})
         self.assertIsNone(get_remote_config_value(self.EMB_URL, data_path=get_settings().data_path))
 
@@ -261,7 +260,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
         self._store_key()
         self._override_admin()
         self.assertEqual(self.client.post("/api/config/provision", json={"sides": ["nope"]}).status_code, 400)
-        get_settings().model_preset = "remote-kisski"
+        get_settings().model_preset = "test-remote"
         r = self.client.post("/api/config/provision", json={"sides": ["llm"]})
         self.assertEqual(r.status_code, 400)
         self.assertIn("cannot be provisioned", r.json()["detail"])
@@ -277,7 +276,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
                 raise err
             return {this.side_config.model_kwargs["shared_base_url_env"]: f"https://{this.side}/v1"}
 
-        with patch.object(RunPodProvider, "provision", flaky):
+        with patch.object(fakes.cloud_cls(), "provision", flaky):
             _, status = self._provision()
             self.assertEqual(status["status"], "failed")
             self.assertEqual(status["sides"]["embedding"], {"status": "failed", "message": "no capacity"})
@@ -293,7 +292,7 @@ class ProvisionEndpointsTest(unittest.TestCase):
 
     def test_required_keys_omit_the_provisioned_base_urls_but_keep_the_key(self):
         keys = {k["key_name"]: k for k in self.client.get("/api/required-keys").json()["keys"]}
-        self.assertIn("RUNPOD_API_KEY", keys)
+        self.assertIn("TESTCLOUD_API_KEY", keys)
         self.assertNotIn(self.EMB_URL, keys)
         self.assertNotIn(self.LLM_URL, keys)
 
@@ -314,52 +313,31 @@ class HealthEndpointTest(unittest.TestCase):
         reset_settings()
 
     def test_null_for_preset_whose_providers_have_no_health_concept(self):
-        get_settings().model_preset = "remote-kisski"
+        get_settings().model_preset = "test-remote"
         r = self.client.get("/api/config/health")
-        self.assertEqual(r.json(), {"embedding": None, "llm": None})
+        self.assertEqual(r.json(), {"embedding": None, "llm": None, "rerank": None})
 
     def test_runpod_reports_statuses(self):
-        get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
+        get_settings().model_preset = fakes.write_managed_cloud_preset(get_settings().data_path)
         update_remote_config({
-            "RUNPOD_API_KEY": "k",
-            "RUNPOD_EMBEDDING_BASE_URL": "https://api.runpod.ai/v2/e1/openai/v1",
-            "RUNPOD_LLM_BASE_URL": "https://api.runpod.ai/v2/l1/openai/v1",
+            "TESTCLOUD_API_KEY": "k",
+            "TESTCLOUD_EMBEDDING_BASE_URL": "https://testcloud.invalid/e1/v1",
+            "TESTCLOUD_LLM_BASE_URL": "https://testcloud.invalid/l1/v1",
         }, data_path=get_settings().data_path)
         from backend.providers import Health
 
         def fake(self, creds):
             return Health(status="ready" if "e1" in creds.base_url else "cold", detail="d")
-        with patch.object(RunPodProvider, "health", fake):
+        with patch.object(fakes.cloud_cls(), "health", fake):
             r = self.client.get("/api/config/health")
         self.assertEqual(r.json()["embedding"]["status"], "ready")
         self.assertEqual(r.json()["llm"]["status"], "cold")
 
     def test_unconfigured_side_is_unreachable_not_null(self):
-        get_settings().model_preset = write_managed_runpod_preset(get_settings().data_path)
+        get_settings().model_preset = fakes.write_managed_cloud_preset(get_settings().data_path)
         with patch.dict("os.environ", {}, clear=True):
             r = self.client.get("/api/config/health")
-        self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured"})
-
-    def test_mpcdf_reports_an_expired_job(self):
-        get_settings().model_preset = "remote-mpcdf"
-        update_remote_config({
-            "MPCDF_EMBEDDING_API_KEY": "k", "MPCDF_EMBEDDING_BASE_URL": "https://llm.mpcdf.mpg.de/job1",
-            "MPCDF_LLM_API_KEY": "k", "MPCDF_LLM_BASE_URL": "https://llm.mpcdf.mpg.de/job2",
-        }, data_path=get_settings().data_path)
-        from backend.tests.provider_fakes import FakeHTTP, FakeResponse
-        from backend.providers.mpcdf import MpcdfProvider
-        fake = FakeHTTP({("GET", r"/job1/v1/models$"): FakeResponse(200, {}),
-                         ("GET", r"/job2/v1/models$"): FakeResponse(404, {})})
-        original = MpcdfProvider.__init__
-
-        def init(this, *a, **kw):
-            original(this, *a, **kw)
-            this._http_client = fake
-        with patch.object(MpcdfProvider, "__init__", init):
-            r = self.client.get("/api/config/health").json()
-        self.assertEqual(r["embedding"]["status"], "ready")
-        self.assertEqual(r["llm"]["status"], "unreachable")
-        self.assertIn("job expired or not started", r["llm"]["detail"])
+        self.assertEqual(r.json()["embedding"], {"status": "unreachable", "detail": "not configured", "waking": False})
 
 
 if __name__ == "__main__":
@@ -369,7 +347,7 @@ if __name__ == "__main__":
 class UserScopeProvisionTest(unittest.TestCase):
     """The bundled ``runpod`` preset (scope ``user``): the caller's own key, the caller's own job slot."""
 
-    KEY_HEADER = "X-Runpod-Api-Key"
+    KEY_HEADER = "X-Testcloud-Api-Key"
 
     def setUp(self):
         from backend.main import app
@@ -382,7 +360,7 @@ class UserScopeProvisionTest(unittest.TestCase):
         s = get_settings()
         s.data_path = Path(self.tmp.name)
         ensure_default_presets(s.data_path)
-        s.model_preset = "runpod"
+        s.model_preset = "test-cloud"
         s.api_host = "rag.example.com"  # not loopback: identities are required
         s.authorized_group_id = 999
         self.client = TestClient(app)
@@ -395,7 +373,7 @@ class UserScopeProvisionTest(unittest.TestCase):
             progress("working")
             return {}
 
-        patcher = patch.object(RunPodProvider, "provision", fake_provision)
+        patcher = patch.object(fakes.cloud_cls(), "provision", fake_provision)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -410,7 +388,7 @@ class UserScopeProvisionTest(unittest.TestCase):
         identity = ZoteroIdentity(user_id=user_id, username=f"u{user_id}", targets=[f"users/{user_id}"])
         return patch("backend.main.resolve_zotero_identity", new=AsyncMock(return_value=identity))
 
-    def _post(self, user_id, key="rpa_USER", body=None):
+    def _post(self, user_id, key="tck_USER", body=None):
         headers = {"X-Zotero-API-Key": "Z"}
         if key:
             headers[self.KEY_HEADER] = key
@@ -434,20 +412,26 @@ class UserScopeProvisionTest(unittest.TestCase):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.calls, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
+        self.assertEqual(self.calls, [("embedding", "tck_USER"), ("llm", "tck_USER")])  # re-ranking only on request
+
+    def test_the_rerank_side_is_provisioned_on_request(self):
+        r = self._post(7, body={"sides": ["rerank"]})
+        self.assertEqual(r.status_code, 202, r.text)
+        self._wait(7)
+        self.assertEqual(self.calls, [("rerank", "tck_USER")])
 
     def test_without_the_users_key_it_is_a_400_naming_the_key(self):
         r = self._post(7, key=None)
         self.assertEqual(r.status_code, 400)
-        self.assertIn("RUNPOD_API_KEY", r.json()["detail"])
+        self.assertIn("TESTCLOUD_API_KEY", r.json()["detail"])
 
     def test_a_one_time_key_in_the_body_wins_over_the_header(self):
-        self._post(7, key="rpa_HEADER", body={"keys": {"RUNPOD_API_KEY": "rpa_ONETIME"}})
+        self._post(7, key="tck_HEADER", body={"keys": {"TESTCLOUD_API_KEY": "tck_ONETIME"}})
         self._wait(7)
-        self.assertEqual({c for _, c in self.calls}, {"rpa_ONETIME"})
+        self.assertEqual({c for _, c in self.calls}, {"tck_ONETIME"})
 
     def test_unauthenticated_callers_are_refused(self):
-        r = self.client.post("/api/config/provision", headers={self.KEY_HEADER: "rpa_X"})
+        r = self.client.post("/api/config/provision", headers={self.KEY_HEADER: "tck_X"})
         self.assertIn(r.status_code, (401, 403))
         self.assertEqual(self.calls, [])
 
@@ -469,26 +453,26 @@ class UserScopeProvisionTest(unittest.TestCase):
 
         def endpoint_url(this, key):
             seen.append(("lookup", key))
-            return f"https://api.runpod.ai/v2/{this.side}-{key}/openai/v1"
+            return f"https://testcloud.invalid/{this.side}-{key}/v1"
 
         def health(this, creds):
             seen.append(("health", creds.api_key, creds.base_url))
             return Health(status="ready", detail="")
 
-        with patch.object(RunPodProvider, "endpoint_url", endpoint_url), \
-             patch.object(RunPodProvider, "health", health), self._as(7):
+        with patch.object(fakes.cloud_cls(), "endpoint_url", endpoint_url), \
+             patch.object(fakes.cloud_cls(), "health", health), self._as(7):
             from backend.services.endpoint_cache import endpoint_cache
             endpoint_cache.clear()
             r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z", self.KEY_HEADER: "alice"})
         self.assertEqual(r.json()["llm"]["status"], "ready")
-        self.assertIn(("health", "alice", "https://api.runpod.ai/v2/llm-alice/openai/v1"), seen)
+        self.assertIn(("health", "alice", "https://testcloud.invalid/llm-alice/v1"), seen)
 
     def test_health_without_a_provisioned_endpoint_says_so(self):
-        with patch.object(RunPodProvider, "endpoint_url", lambda this, key: None), self._as(7):
+        with patch.object(fakes.cloud_cls(), "endpoint_url", lambda this, key: None), self._as(7):
             from backend.services.endpoint_cache import endpoint_cache
             endpoint_cache.clear()
             r = self.client.get("/api/config/health", headers={"X-Zotero-API-Key": "Z", self.KEY_HEADER: "bob"})
-        self.assertEqual(r.json()["llm"], {"status": "unreachable", "detail": "not provisioned"})
+        self.assertEqual(r.json()["llm"], {"status": "unreachable", "detail": "not provisioned", "waking": False})
 
     def test_health_without_any_key_is_not_configured(self):
         with self._as(7):
@@ -507,11 +491,11 @@ class SuspendApiTest(UserScopeProvisionTest):
             self.suspended.append((this.side, ctx.credential))
             progress("paused")
 
-        patcher = patch.object(RunPodProvider, "suspend", fake_suspend)
+        patcher = patch.object(fakes.cloud_cls(), "suspend", fake_suspend)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _suspend(self, user_id, key="rpa_USER", body=None, admin=False):
+    def _suspend(self, user_id, key="tck_USER", body=None, admin=False):
         headers = {"X-Zotero-API-Key": "Z"}
         if key:
             headers[self.KEY_HEADER] = key
@@ -524,13 +508,14 @@ class SuspendApiTest(UserScopeProvisionTest):
         self.assertEqual(r.status_code, 202, r.text)
         status = self._wait(7)
         self.assertEqual(status["status"], "succeeded")
-        self.assertEqual(self.suspended, [("embedding", "rpa_USER"), ("llm", "rpa_USER")])
-        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused"])
+        # Pausing everything includes the re-ranking endpoint (provisioning everything does not).
+        self.assertEqual(self.suspended, [("embedding", "tck_USER"), ("llm", "tck_USER"), ("rerank", "tck_USER")])
+        self.assertEqual(status["progress"], ["embedding: paused", "llm: paused", "rerank: paused"])
 
     def test_sides_pauses_only_the_requested_side(self):
         self._suspend(7, body={"sides": ["llm"]})
         self._wait(7)
-        self.assertEqual(self.suspended, [("llm", "rpa_USER")])
+        self.assertEqual(self.suspended, [("llm", "tck_USER")])
 
     def test_pausing_does_not_provision(self):
         self._suspend(7)
@@ -543,7 +528,7 @@ class SuspendApiTest(UserScopeProvisionTest):
         self.assertEqual(self._suspend(8).status_code, 202)
 
     def test_a_side_that_cannot_be_paused_is_a_400(self):
-        with patch.object(RunPodProvider, "supports_suspend", False):
+        with patch.object(fakes.cloud_cls(), "supports_suspend", False):
             r = self._suspend(7)
         self.assertEqual(r.status_code, 400)
         self.assertIn("be paused", r.json()["detail"])
@@ -560,9 +545,9 @@ class SuspendApiTest(UserScopeProvisionTest):
         self.assertEqual(self.calls[0][0], "embedding")
 
     def test_managed_presets_need_an_admin_to_pause(self):
-        name = write_managed_runpod_preset(get_settings().data_path)
+        name = fakes.write_managed_cloud_preset(get_settings().data_path)
         get_settings().model_preset = name
-        update_remote_config({"RUNPOD_API_KEY": "rpa_STORED"}, data_path=get_settings().data_path)
+        update_remote_config({"TESTCLOUD_API_KEY": "tck_STORED"}, data_path=get_settings().data_path)
         self.assertEqual(self._suspend(21, key=None, admin=False).status_code, 403)
         self.assertEqual(self._suspend(22, key=None, admin=True).status_code, 202)
 

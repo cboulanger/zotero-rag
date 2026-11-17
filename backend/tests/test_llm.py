@@ -16,7 +16,6 @@ from backend.services.llm import (
     LLMEndpointUnavailableError,
     LLMRateLimitExhaustedError,
     LLMService,
-    LocalLLMService,
     RemoteLLMService,
     create_llm_service,
 )
@@ -24,11 +23,6 @@ from backend.config.settings import Settings
 from backend.config.presets import HardwarePreset, LLMConfig, EmbeddingConfig, ProviderConfig, RAGConfig
 from backend.services.usage_meters import recorder
 
-try:
-    import transformers  # noqa: F401
-    HAS_TRANSFORMERS = True
-except ImportError:
-    HAS_TRANSFORMERS = False
 
 
 def _raw(parsed):
@@ -81,10 +75,14 @@ class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
         mock_settings = Mock(spec=Settings)
         mock_settings.get_hardware_preset.return_value = self.local_preset
 
-        service = create_llm_service(mock_settings)
+        from backend.pluginhost import LocalInference
 
-        self.assertIsInstance(service, LocalLLMService)
-        self.assertEqual(service.llm_config.model_type, "local")
+        engine = LocalInference(side="llm", engine="fake", create=lambda settings, **kw: ("built", settings, kw))
+        with patch("backend.pluginhost.select_local_engine", return_value=engine) as select:
+            service = create_llm_service(mock_settings, model_name_override="m")
+        select.assert_called_once_with("llm", None)
+        self.assertEqual(service, ("built", mock_settings,
+                                   {"cache_dir": None, "hf_token": None, "model_name_override": "m"}))
 
     async def test_create_remote_llm_service(self):
         """Test creating remote LLM service."""
@@ -95,96 +93,6 @@ class TestLLMServiceFactory(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(service, RemoteLLMService)
         self.assertEqual(service.llm_config.model_type, "remote")
-
-
-@unittest.skipUnless(HAS_TRANSFORMERS, "transformers not installed")
-class TestLocalLLMService(unittest.IsolatedAsyncioTestCase):
-    """Test LocalLLMService class."""
-
-    def setUp(self):
-        """Set up test fixtures."""
-        self.preset = HardwarePreset(
-            name="test-local",
-            description="Test local preset",
-            embedding=EmbeddingConfig(
-                model_type="local",
-                model_name="test-embedding",
-            ),
-            llm=LLMConfig(
-                model_type="local",
-                model_names="test-model",
-                quantization="4bit",
-                temperature=0.7,
-            ),
-            rag=RAGConfig(),
-            memory_budget_gb=4.0,
-        )
-
-        self.mock_settings = Mock(spec=Settings)
-        self.mock_settings.get_hardware_preset.return_value = self.preset
-
-    async def test_init(self):
-        """Test initialization."""
-        service = LocalLLMService(
-            self.mock_settings,
-            cache_dir="/tmp/cache",
-            hf_token="test-token",
-        )
-
-        self.assertIsNone(service._model)
-        self.assertIsNone(service._tokenizer)
-        self.assertEqual(service.cache_dir, "/tmp/cache")
-        self.assertEqual(service.hf_token, "test-token")
-
-    async def test_generate_with_mocked_model(self):
-        """Test generation with mocked transformers."""
-        # We need to patch the imports that happen inside _load_model
-        with patch("transformers.AutoModelForCausalLM") as mock_model_class, \
-             patch("transformers.AutoTokenizer") as mock_tokenizer_class, \
-             patch("transformers.BitsAndBytesConfig") as mock_bnb_config, \
-             patch("torch.float16", "float16"):
-
-            # Mock input tensor with shape
-            mock_input_ids = Mock()
-            mock_input_ids.shape = (1, 5)  # 5 input tokens
-            mock_input_ids.to = Mock(return_value=mock_input_ids)
-
-            # Mock tokenizer
-            mock_tokenizer = Mock()
-            mock_tokenizer.return_value = {"input_ids": mock_input_ids}
-            mock_tokenizer.eos_token_id = 2
-            mock_tokenizer.decode.return_value = "This is the generated answer."
-            mock_tokenizer_class.from_pretrained.return_value = mock_tokenizer
-
-            # Mock output tensor (output has 10 total tokens, first 5 are input)
-            mock_output_tensor = Mock()
-            mock_output_tensor.__getitem__ = Mock(return_value=Mock())  # For slicing [5:]
-
-            # Mock model
-            mock_model = Mock()
-            mock_model.device = "cpu"
-            mock_model.generate.return_value = [mock_output_tensor]
-            mock_model_class.from_pretrained.return_value = mock_model
-
-            service = LocalLLMService(self.mock_settings)
-
-            # Test generation
-            result = await service.generate("Test prompt", max_tokens=100, temperature=0.5)
-
-            self.assertEqual(result, "This is the generated answer.")
-            mock_model.generate.assert_called_once()
-            mock_tokenizer.decode.assert_called_once()
-
-    async def test_generate_missing_dependencies(self):
-        """Test error handling when dependencies are missing."""
-        service = LocalLLMService(self.mock_settings)
-
-        # Patch the import itself
-        with patch.dict("sys.modules", {"transformers": None}):
-            with self.assertRaises(RuntimeError) as context:
-                await service.generate("Test prompt")
-
-            self.assertIn("Missing dependencies", str(context.exception))
 
 
 class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
@@ -203,7 +111,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="gpt-4o-mini",
                 temperature=0.7,
-                provider=ProviderConfig(id="openai"),
+                provider=ProviderConfig(id="testother"),
                 model_kwargs={"api_key_env": "OPENAI_API_KEY"},
             ),
             rag=RAGConfig(),
@@ -221,7 +129,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="claude-3-5-sonnet-20241022",
                 temperature=0.7,
-                provider=ProviderConfig(id="anthropic"),
+                provider=ProviderConfig(id="testmessages"),
                 model_kwargs={"api_key_env": "ANTHROPIC_API_KEY"},
             ),
             rag=RAGConfig(),
@@ -466,7 +374,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
 
     async def test_protocol_comes_from_the_provider_not_the_model_name(self):
         """A Claude-named model on an OpenAI-compatible provider uses the OpenAI
-        protocol; an unfamiliar model name on the anthropic provider uses Anthropic's."""
+        protocol; an unfamiliar model name on an Anthropic-protocol provider uses Anthropic's."""
         def settings_for(provider_id, model_name):
             preset = HardwarePreset(
                 name="t", description="t",
@@ -480,9 +388,9 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
             settings.get_hardware_preset.return_value = preset
             return settings
 
-        openai_service = RemoteLLMService(settings_for("openai", "claude-3-opus"), api_key="k")
+        openai_service = RemoteLLMService(settings_for("testother", "claude-3-opus"), api_key="k")
         self.assertEqual(openai_service._llm_api(), "openai")
-        anthropic_service = RemoteLLMService(settings_for("anthropic", "totally-unknown-model"), api_key="k")
+        anthropic_service = RemoteLLMService(settings_for("testmessages", "totally-unknown-model"), api_key="k")
         self.assertEqual(anthropic_service._llm_api(), "anthropic")
 
         mock_openai = AsyncMock()
@@ -571,7 +479,7 @@ class TestRemoteLLMService(unittest.IsolatedAsyncioTestCase):
                 model_names="qwen3.5-397b-a17b",
                 temperature=0.7,
                 model_kwargs={
-                    "base_url": "https://chat-ai.academiccloud.de/v1",
+                    "base_url": "https://testvendor.invalid/v1",
                     "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
                 },
             ),
@@ -671,7 +579,7 @@ class TestLLMRateLimitExhaustedError(unittest.IsolatedAsyncioTestCase):
                 model_type="remote",
                 model_names="gpt-4o-mini",
                 temperature=0.7,
-                provider=ProviderConfig(id="openai"),
+                provider=ProviderConfig(id="testother"),
                 model_kwargs={"api_key_env": "OPENAI_API_KEY"},
             ),
             rag=RAGConfig(),

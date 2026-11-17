@@ -70,10 +70,10 @@ async def test_health_endpoint(api_environment_validated, base_url: str):
 
 @pytest.mark.api
 @pytest.mark.asyncio
-async def test_root_endpoint(api_environment_validated, base_url: str):
-    """Test the root endpoint."""
+async def test_status_endpoint(api_environment_validated, base_url: str):
+    """Test the status endpoint."""
     async with httpx.AsyncClient() as client:
-        response = await client.get(f"{base_url}/")
+        response = await client.get(f"{base_url}/status")
 
         assert response.status_code == 200
         data = response.json()

@@ -38,16 +38,16 @@ function makeItem(key, { tagged = false, attachment = true, libraryID = 1 } = {}
 }
 
 /**
- * @param {{items?: any[], indexedOnBackend?: string[], editable?: boolean, prefs?: Record<string, any>, responses?: Record<string, any>}} [o]
+ * @param {{items?: any[], indexedOnBackend?: string[], editable?: boolean, library?: any, prefs?: Record<string, any>, responses?: Record<string, any>}} [o]
  */
-function setup({ items = [], indexedOnBackend = [], editable = true, prefs = {}, responses = {} } = {}) {
+function setup({ items = [], indexedOnBackend = [], editable = true, library = null, prefs = {}, responses = {} } = {}) {
 	const byKey = new Map(items.map(i => [i.key, i]));
 	const stored = { ...prefs };
 	/** @type {Array<{url: string, init: any}>} */
 	const calls = [];
 	const zotero = {
 		Prefs: { get: (/** @type {string} */ k) => stored[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { stored[k] = v; } },
-		Libraries: { userLibraryID: 1, get: () => ({ editable }) },
+		Libraries: { userLibraryID: 1, get: () => library || { editable, waitForDataLoad: async () => {} } },
 		Groups: { get: (/** @type {number} */ id) => (id === 77 ? { libraryID: 5 } : null) },
 		Items: { getByLibraryAndKey: (/** @type {number} */ _l, /** @type {string} */ k) => byKey.get(k) || false, get: (/** @type {number[]} */ ids) => ids.map(i => items[i]) },
 		Tags: { getID: () => 9, getTagItems: async () => items.map((_, i) => i) },
@@ -94,6 +94,25 @@ test('setTagged adds an automatic tag once and is idempotent', async () => {
 test('setTagged skips non-attachments and read-only libraries', async () => {
 	assert.strictEqual(await setup().T.setTagged(makeItem('N', { attachment: false }), true), 'skipped');
 	assert.strictEqual(await setup({ editable: false }).T.setTagged(makeItem('A'), true), 'skipped');
+});
+
+test('setTagged waits for the library\'s item data before reading tags', async () => {
+	// At startup Zotero has not loaded every library's item data yet; reading tags then
+	// throws UnloadedDataException until the library's data load has run.
+	const state = { loaded: false, waits: /** @type {string[]} */ ([]) };
+	const library = {
+		editable: true,
+		async waitForDataLoad(/** @type {string} */ type) { state.waits.push(type); state.loaded = true; },
+	};
+	const item = makeItem('A');
+	const hasTag = item.hasTag;
+	item.hasTag = (/** @type {string} */ t) => {
+		if (!state.loaded) throw new Error(`Item ${item.key} not yet loaded`);
+		return hasTag(t);
+	};
+	const { T } = setup({ library });
+	assert.strictEqual(await T.setTagged(item, true), 'changed');
+	deepEq(state.waits, ['item']);
 });
 
 test('indexed event tags immediately; unindexed is deferred then confirmed against the backend', async () => {
@@ -247,4 +266,97 @@ test('refresh surfaces a terminal error record', async () => {
 		},
 	});
 	await assert.rejects(() => T.refresh(), /boom/);
+});
+
+test('a failed event adds the failed tag and queues a confirmed removal of a stale indexed tag', async () => {
+	const item = makeItem('A', { tagged: true });
+	const { T } = setup({ items: [item], indexedOnBackend: [] });
+	await T.applyEvents([{ seq: 7, type: 'failed', library_id: 'u42', attachment_key: 'A' }], 0);
+	assert.strictEqual(item.hasTag(T.failedTag), true);
+	assert.strictEqual(item.hasTag(TAG), true, 'removal waits out the settle time');
+	await T.flushDueRemovals(T.REMOVE_SETTLE_MS);
+	assert.strictEqual(item.hasTag(TAG), false);
+});
+
+test('a failed event keeps the indexed tag when the backend still has chunks', async () => {
+	const item = makeItem('A', { tagged: true });
+	const { T } = setup({ items: [item], indexedOnBackend: ['A'] });
+	await T.applyEvents([{ seq: 7, type: 'failed', library_id: 'u42', attachment_key: 'A' }], 0);
+	await T.flushDueRemovals(1e9);
+	assert.strictEqual(item.hasTag(TAG), true);
+	assert.strictEqual(item.hasTag(T.failedTag), true);
+});
+
+const REFRESH_DONE = {
+	'/api/indexed-tags/refresh/': { offset: 1, done: true, records: [{ type: 'done' }] },
+	'/api/indexed-tags/refresh': { run_id: 'r1', tag: TAG },
+};
+
+test('automatic refresh is due when never run, after the interval, or when requested', () => {
+	const { T, stored } = setup();
+	const H = 3600000;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H), true, 'never reconciled');
+	stored[T.PREF_LAST_REFRESH] = String(10 * H);
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 23 * H), false);
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 24 * H), true);
+	T.autoRefreshWanted = true;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 1), true, 'gap/first contact overrides the interval');
+	stored[T.PREF_AUTO_REFRESH_HOURS] = 0;
+	assert.strictEqual(T.isAutoRefreshDue(10 * H + 1), false, '0 turns automatic runs off');
+	stored[T.PREF_AUTO_REFRESH_HOURS] = 2;
+	T.autoRefreshWanted = false;
+	assert.strictEqual(T.isAutoRefreshDue(12 * H), true);
+});
+
+test('a gap in the event log starts an automatic refresh that records its completion', async () => {
+	const item = makeItem('A');
+	const { T, stored, calls } = setup({
+		items: [item],
+		prefs: {
+			'extensions.zotero-rag.indexedTags.enabled': true,
+			'extensions.zotero-rag.indexedTags.cursor': '3',
+			'extensions.zotero-rag.indexedTags.lastRefresh': String(Date.now()),
+		},
+		responses: {
+			'/api/indexed-tags/events': { tag: TAG, events: [], last_seq: 9000, gap: true },
+			...REFRESH_DONE,
+		},
+	});
+	T.running = true;
+	T.cursor = 3;
+	await T.pollOnce();
+	assert.ok(T.autoRefreshInFlight, 'refresh started without blocking the poll');
+	await T.autoRefreshInFlight;
+	assert.ok(calls.some(c => c.url.endsWith('/api/indexed-tags/refresh') && c.init.method === 'POST'));
+	assert.strictEqual(T.autoRefreshWanted, false);
+	assert.ok(Number(stored[T.PREF_LAST_REFRESH]) > 0);
+	assert.strictEqual(T.autoRefreshInFlight, null);
+});
+
+test('only one automatic refresh runs at a time', () => {
+	const { T } = setup({ prefs: { 'extensions.zotero-rag.indexedTags.enabled': true }, responses: REFRESH_DONE });
+	T.running = true;
+	const first = T.maybeAutoRefresh();
+	assert.ok(first);
+	assert.strictEqual(T.maybeAutoRefresh(), null);
+	return first;
+});
+
+test('a failed automatic refresh backs off instead of retrying every poll', async () => {
+	const { T, stored } = setup({
+		prefs: { 'extensions.zotero-rag.indexedTags.enabled': true },
+		responses: { '/api/indexed-tags/refresh': () => { throw new Error('Enable automatic indexing in Preferences first'); } },
+	});
+	T.running = true;
+	await T.maybeAutoRefresh();
+	assert.strictEqual(stored[T.PREF_LAST_REFRESH], undefined);
+	assert.ok(T.autoRefreshNotBefore > Date.now());
+	assert.strictEqual(T.maybeAutoRefresh(), null);
+	assert.strictEqual(T.maybeAutoRefresh(T.autoRefreshNotBefore) !== null, true);
+});
+
+test('automatic refresh does not run while the feature is disabled', () => {
+	const { T } = setup({ responses: REFRESH_DONE });
+	T.running = true;
+	assert.strictEqual(T.maybeAutoRefresh(), null);
 });

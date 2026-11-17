@@ -226,6 +226,30 @@ class TestCronIndexerRun(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["slugs"]["users/1"]["status"], "done")
         self.assertEqual(status["slugs"]["groups/2"]["status"], "done")
 
+    async def test_run_records_each_slugs_estimated_costs(self):
+        """Costs of paid calls made while indexing a library land on its status entry (#119)."""
+        from backend.providers import Cost
+        from backend.services.cost_ledger import current_ledger
+
+        indexer = _make_indexer(["users/1", "groups/2"], self.tmp)
+
+        async def index_library(*args, **kwargs):
+            current_ledger().add(Cost(side="embedding", amount=0.5, requests=3))
+            return {"items_processed": 1, "chunks_added": 1, "mode": "full"}
+
+        with patch("backend.services.cron_indexer.ZoteroWebAPI") as MockWebAPI, \
+             patch("backend.services.cron_indexer.DocumentProcessor") as MockProcessor, \
+             _patch_embedding_service():
+            MockWebAPI.return_value.__aenter__ = AsyncMock(return_value=AsyncMock())
+            MockWebAPI.return_value.__aexit__ = AsyncMock(return_value=False)
+            MockProcessor.return_value.index_library = index_library
+            await indexer.run()
+
+        status = indexer._read_status()
+        expected = [Cost(side="embedding", amount=0.5, requests=3).model_dump()]
+        for slug in ("users/1", "groups/2"):
+            self.assertEqual(status["slugs"][slug]["costs"], expected)
+
     async def test_index_slug_constructs_the_processor_with_the_preset_s_chunk_size(self):
         # Regression: DocumentProcessor's own generic defaults (512/1500
         # chars) are disconnected from any particular embedding model's real

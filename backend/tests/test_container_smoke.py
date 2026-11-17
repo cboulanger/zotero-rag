@@ -18,7 +18,9 @@ from typing import Generator
 import httpx
 import pytest
 
-pytestmark = pytest.mark.container
+# The project-wide 30 s pytest-timeout would kill the image build in the module fixture,
+# which counts against the first test; the build and startup have their own bounds.
+pytestmark = [pytest.mark.container, pytest.mark.timeout(0)]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SMOKE_COMPOSE = PROJECT_ROOT / "docker-compose.smoke.yml"
@@ -100,9 +102,9 @@ def stack(runtime: str, built_image: str) -> Generator[str, None, None]:
         try:
             health = httpx.get(f"{BASE_URL}/health", timeout=5.0)
             if health.status_code == 200:
-                # /api/libraries/indexed returns 200 (empty list) when VectorStore
+                # /api/libraries returns 200 (a list) when VectorStore
                 # is initialised, and 503 while it's still starting up.
-                libs = httpx.get(f"{BASE_URL}/api/libraries/indexed", timeout=5.0)
+                libs = httpx.get(f"{BASE_URL}/api/libraries", timeout=5.0)
                 if libs.status_code == 200:
                     break
         except Exception as exc:
@@ -151,7 +153,7 @@ def test_version(stack: str) -> None:
 
 
 def test_indexed_libraries(stack: str) -> None:
-    """Indexed-libraries endpoint returns 200 with an empty list on a fresh stack."""
-    resp = httpx.get(f"{stack}/api/libraries/indexed", timeout=10.0)
+    """Libraries endpoint returns 200 with a list once the vector store is connected."""
+    resp = httpx.get(f"{stack}/api/libraries", timeout=10.0)
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)

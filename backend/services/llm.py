@@ -1,21 +1,24 @@
 """
 LLM service for text generation.
 
-Supports both local models (via transformers) and remote APIs (OpenAI, Anthropic).
+Remote APIs (OpenAI-compatible, Anthropic) are implemented here; local models come
+from the ``inference.local`` capabilities of backend plugins (for example
+``local_torch``, transformers on torch), chosen by the side's ``engine`` key.
 """
 
-import asyncio
 import json
 import logging
-import os
 import random
+import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from backend.config.settings import Settings
 from backend.services.embeddings import KEYLESS_API_KEY, env_var_to_header, docs_url_for, _extract_error_detail
 from backend.services.endpoint_errors import classify_status_error, unavailable_message
+from backend.providers.types import Usage
+from backend.services.cost_ledger import record_usage, token_counts
 from backend.services.usage_meters import (
     RateLimitStillActive,
     extract_retry_after,
@@ -109,161 +112,6 @@ class LLMService(ABC):
         pass
 
 
-class LocalLLMService(LLMService):
-    """
-    LLM service using local models via transformers.
-
-    Uses HuggingFace transformers for local inference with optional quantization.
-    """
-
-    def __init__(
-        self,
-        settings: Settings,
-        cache_dir: Optional[str] = None,
-        hf_token: Optional[str] = None,
-        model_name_override: Optional[str] = None,
-    ):
-        """
-        Initialize local LLM service.
-
-        Args:
-            settings: Application settings.
-            cache_dir: Directory to cache model weights.
-            hf_token: HuggingFace token for model downloads.
-            model_name_override: Override the preset default model name.
-        """
-        self.settings = settings
-        self.preset = settings.get_hardware_preset()
-        self.llm_config = self.preset.llm
-        self.cache_dir = cache_dir
-        self.hf_token = hf_token
-        self._model_name = model_name_override or self.llm_config.model_name
-
-        self._model = None
-        self._tokenizer = None
-
-        logger.info(f"Initialized LocalLLMService with model: {self._model_name}")
-
-    @property
-    def model_name(self) -> str:
-        return self._model_name
-
-    def _load_model(self):
-        """Lazy load the LLM model and tokenizer."""
-        if self._model is not None:
-            return
-
-        logger.info(f"Loading LLM model: {self._model_name}")
-
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-            import torch
-
-            # Set HuggingFace token if provided
-            if self.hf_token:
-                os.environ["HF_TOKEN"] = self.hf_token
-
-            # Build model kwargs
-            model_kwargs = self.llm_config.model_kwargs.copy()
-
-            # Add cache directory if provided
-            if self.cache_dir:
-                model_kwargs["cache_dir"] = self.cache_dir
-
-            # Configure quantization if specified
-            if self.llm_config.quantization and self.llm_config.quantization != "none":
-                logger.info(f"Configuring {self.llm_config.quantization} quantization")
-
-                if self.llm_config.quantization == "4bit":
-                    bnb_config = BitsAndBytesConfig(
-                        load_in_4bit=True,
-                        bnb_4bit_use_double_quant=True,
-                        bnb_4bit_quant_type="nf4",
-                        bnb_4bit_compute_dtype=torch.float16,
-                    )
-                    model_kwargs["quantization_config"] = bnb_config
-                    model_kwargs["device_map"] = "auto"
-
-                elif self.llm_config.quantization == "8bit":
-                    bnb_config = BitsAndBytesConfig(
-                        load_in_8bit=True,
-                    )
-                    model_kwargs["quantization_config"] = bnb_config
-                    model_kwargs["device_map"] = "auto"
-
-            # Load tokenizer
-            logger.info("Loading tokenizer...")
-            self._tokenizer = AutoTokenizer.from_pretrained(
-                self._model_name,
-                cache_dir=self.cache_dir,
-                token=self.hf_token,
-            )
-
-            # Load model
-            logger.info("Loading model weights...")
-            self._model = AutoModelForCausalLM.from_pretrained(
-                self._model_name,
-                token=self.hf_token,
-                **model_kwargs
-            )
-
-            logger.info("Model loaded successfully")
-
-        except ImportError as e:
-            logger.error(f"Missing required dependencies for local LLM: {e}")
-            logger.error("Install with: uv add transformers torch bitsandbytes accelerate")
-            raise RuntimeError("Missing dependencies for local LLM inference") from e
-        except Exception as e:
-            logger.error(f"Failed to load LLM model: {e}", exc_info=True)
-            raise
-
-    async def generate(
-        self,
-        prompt: str,
-        max_tokens: Optional[int] = None,
-        temperature: Optional[float] = None
-    ) -> str:
-        """Generate text using local model."""
-        self._load_model()
-
-        # Use config defaults if not specified
-        if max_tokens is None:
-            max_tokens = 512  # Reasonable default for answers
-        if temperature is None:
-            temperature = self.llm_config.temperature
-
-        logger.info(f"Generating completion (max_tokens={max_tokens}, temp={temperature})")
-
-        try:
-            # Tokenize input
-            inputs = self._tokenizer(prompt, return_tensors="pt")
-
-            # Move to same device as model
-            if hasattr(self._model, "device"):
-                inputs = {k: v.to(self._model.device) for k, v in inputs.items()}
-
-            # Generate
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                do_sample=temperature > 0,
-                pad_token_id=self._tokenizer.eos_token_id,
-            )
-
-            # Decode output
-            # Skip the input tokens to get only the generated part
-            generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
-            generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-            logger.info(f"Generated {len(generated_text)} characters")
-            return generated_text.strip()
-
-        except Exception as e:
-            logger.error(f"Error during generation: {e}", exc_info=True)
-            raise RuntimeError(f"LLM generation failed: {e}") from e
-
-
 class RemoteLLMService(LLMService):
     """LLM service using remote APIs (OpenAI, Anthropic, etc.)."""
 
@@ -287,6 +135,9 @@ class RemoteLLMService(LLMService):
         self.api_key = api_key
         self._provider = None
         self._resolved_base_url: Optional[str] = None
+        #: The caller's own endpoint (``SessionEndpoint``) for a provider that runs one per user session.
+        self._session: Any = None
+        self._session_key: Optional[str] = None
         self._model_name = model_name_override or self.llm_config.model_name
 
         # Initialize API clients
@@ -387,8 +238,20 @@ class RemoteLLMService(LLMService):
                     "(it is sent with each request, never read from the environment)."
                 )
             return self.api_key
+        if self._session_endpoint() is not None:
+            return getattr(self, "_session_key", None) or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self.api_key or KEYLESS_API_KEY
+
+    def _session_endpoint(self):
+        """The ``SessionEndpoint`` of a provider that runs one endpoint per user session, else None."""
+        # getattr: tests build services with __new__ and skip __init__.
+        if getattr(self, "_session", None) is None:
+            from backend.services.session_endpoint import SessionEndpoint, uses_session_endpoints
+
+            provider = self._llm_provider()
+            self._session = SessionEndpoint(provider) if uses_session_endpoints(provider) else False
+        return self._session or None
 
     def _llm_provider(self):
         if self._provider is None:
@@ -401,7 +264,9 @@ class RemoteLLMService(LLMService):
         return self._provider
 
     def _derives_endpoint(self) -> bool:
-        """True when this side's URL is found from the key rather than set in the preset."""
+        """True when this side's URL is found from the key (or the caller's session), not the preset."""
+        if self._session_endpoint() is not None:
+            return True
         kwargs = self.llm_config.model_kwargs
         provider = self._llm_provider()
         return bool(
@@ -413,6 +278,11 @@ class RemoteLLMService(LLMService):
 
     def _forget_endpoint(self) -> None:
         """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._session_endpoint() is not None:
+            self._resolved_base_url = None
+            self._session_key = None
+            self._openai_client = None
+            return
         if self._resolved_base_url and self._provider is not None:
             from backend.services.endpoint_cache import endpoint_cache
 
@@ -438,6 +308,9 @@ class RemoteLLMService(LLMService):
 
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._session_endpoint() is not None:
+            await self._ensure_session_endpoint()
+            return
         if self._openai_client is not None or self._resolved_base_url or not self._derives_endpoint():
             return
         import asyncio
@@ -448,6 +321,23 @@ class RemoteLLMService(LLMService):
         if not url:
             raise LLMEndpointUnavailableError(unavailable_message("llm", "The LLM endpoint is not provisioned."))
         self._resolved_base_url = url
+
+    async def _ensure_session_endpoint(self) -> None:
+        """Use the caller's own running endpoint (asked before every call: renewals change it)."""
+        from backend.services.session_endpoint import SessionEndpointError
+
+        try:
+            creds = await self._session_endpoint().resolve()
+        except SessionEndpointError as exc:
+            raise LLMEndpointUnavailableError(
+                unavailable_message("llm", f"The LLM endpoint is unavailable: {exc}.")
+            ) from exc
+        if creds is None or not creds.base_url:
+            raise LLMEndpointUnavailableError(unavailable_message("llm", "Your LLM endpoint is not running."))
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, getattr(self, "_session_key", None)):
+            self._openai_client = None
+        self._resolved_base_url = creds.base_url
+        self._session_key = creds.api_key
 
     def _get_openai_client(self):
         """Lazy initialize OpenAI client."""
@@ -503,6 +393,14 @@ class RemoteLLMService(LLMService):
             usage_recorder.record("llm", headers, key_fingerprint(self._resolve_api_key()))
         except Exception:  # display-only signal, never break a generation
             logger.debug("Could not record usage headers", exc_info=True)
+
+    def _record_cost(self, usage_obj: Any, seconds: float) -> None:
+        """Add the estimated cost of one completed call to the request's cost ledger."""
+        input_tokens, output_tokens = token_counts(usage_obj)
+        record_usage(self._llm_provider(), Usage(
+            side="llm", model=self._model_name, input_tokens=input_tokens,
+            output_tokens=output_tokens, seconds=seconds,
+        ))
 
     def _llm_api(self) -> str:
         """Wire protocol of the LLM side, as declared by its provider."""
@@ -699,9 +597,11 @@ class RemoteLLMService(LLMService):
         extra_body = self.llm_config.model_kwargs.get("extra_body")
         self._dump_inference_request({**payload, **({"extra_body": extra_body} if extra_body else {})})
 
+        started = time.monotonic()
         raw = await client.chat.completions.with_raw_response.create(**payload, extra_body=extra_body)
         self._record_usage(raw.headers)
         response = raw.parse()
+        self._record_cost(getattr(response, "usage", None), time.monotonic() - started)
 
         choice = response.choices[0]
         generated_text = choice.message.content
@@ -734,9 +634,11 @@ class RemoteLLMService(LLMService):
         }
         self._dump_inference_request(payload)
 
+        started = time.monotonic()
         raw = await client.messages.with_raw_response.create(**payload)
         self._record_usage(raw.headers)
         response = raw.parse()
+        self._record_cost(getattr(response, "usage", None), time.monotonic() - started)
 
         generated_text = response.content[0].text
         if not generated_text:
@@ -781,6 +683,9 @@ def create_llm_service(
     preset = settings.get_hardware_preset()
 
     if preset.llm.model_type == "local":
-        return LocalLLMService(settings, cache_dir=cache_dir, hf_token=hf_token, model_name_override=model_name_override)
+        from backend.pluginhost import select_local_engine
+
+        engine = select_local_engine("llm", preset.llm.engine)
+        return engine.create(settings, cache_dir=cache_dir, hf_token=hf_token, model_name_override=model_name_override)
     else:
         return RemoteLLMService(settings, api_key=api_key, model_name_override=model_name_override)

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from backend.services.document_processor import DocumentProcessor
 from backend.services.rag_engine import RAGEngine
-from backend.services.embeddings import LocalEmbeddingService
+from backend.services.embeddings import create_embedding_service
 from backend.services.llm import RemoteLLMService
 from backend.db.vector_store import VectorStore
 from backend.zotero.local_api import ZoteroLocalAPI
@@ -59,9 +59,7 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         )
 
         # Create services
-        self.embedding_service = LocalEmbeddingService(
-            config=self.preset.embedding
-        )
+        self.embedding_service = create_embedding_service(self.preset.embedding)
 
         # Get embedding dimension from service
         embedding_dim = self.embedding_service.get_embedding_dim()
@@ -233,7 +231,9 @@ class TestEndToEndWorkflow(unittest.IsolatedAsyncioTestCase):
         # Setup: Create mock LLM service
         mock_llm = Mock(spec=RemoteLLMService)
         mock_llm.generate = AsyncMock(
-            return_value="Machine learning is a subset of artificial intelligence that enables computers to learn from data."
+            # Cites [S1]: an answer without an [SN] citation triggers the engine's one-time
+            # quality retry, i.e. a second generate() call.
+            return_value="Machine learning is a subset of artificial intelligence that enables computers to learn from data [S1]."
         )
 
         # Mock settings with preset

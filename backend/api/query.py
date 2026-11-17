@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 from markdown_it import MarkdownIt
 
@@ -14,6 +14,8 @@ from backend.models.conversation import ChatTurn
 from backend.models.filters import CitationTarget
 from backend.models.trace import QueryTrace
 from backend.services.access_gate import assert_can_access
+from backend.providers import Cost
+from backend.services.cost_ledger import CostLedger, collect as collect_costs
 from backend.services.base_agent import (
     NeedsClarificationError, NeedsClientEvidenceError, NeedsUserInputError, QueryPlan,
 )
@@ -32,6 +34,7 @@ from backend.services.embeddings import (
 from backend.services.llm import LLMConfigurationError, LLMEndpointUnavailableError, LLMRateLimitExhaustedError
 from backend.db.vector_store import VectorStore, VectorStoreError, VectorStoreTimeoutError
 from backend.config.settings import get_settings
+from backend.services.rerank import RerankRequest, reset_rerank_request, set_rerank_request
 from backend.dependencies import get_client_api_keys, get_vector_store, get_zotero_identity, make_embedding_service, make_llm_service
 
 router = APIRouter()
@@ -61,6 +64,10 @@ class QueryRequest(BaseModel):
     query_plan: Optional[QueryPlan] = None  # echoed back from a prior "needs_client_evidence" response
     conversation_history: List[ChatTurn] = []  # prior turns of a follow-up chat conversation
     force_fresh_retrieval: bool = False        # ignore conversation_history for routing this turn
+    enable_reranking: bool = True  # False skips the preset's re-ranking step (Preferences / query dialog)
+    # Passages the re-ranker rescores (and the vector search fetches at least);
+    # None uses the preset's rerank.pool_size. Same bounds as RerankConfig.pool_size.
+    rerank_pool_size: Optional[int] = Field(default=None, ge=1, le=500)
 
     # Retrieval/answer-diversity tuning — client-configurable (plugin Preferences),
     # not exposed in the query dialog itself. See rag_engine.py's module docstrings
@@ -94,6 +101,9 @@ class QueryResponse(BaseModel):
     source_refs: List[str] = []                       # union of every used source's chunk_id,
                                                         # echoed back verbatim on the next turn
     clarification_message: Optional[str] = None        # populated when status == "needs_clarification"
+    # Estimated costs of this request's calls to paid providers, one entry per side and
+    # currency; empty when every call was free or had no known price.
+    costs: List[Cost] = []
 
 
 def _needs_evidence_response(query: QueryRequest, exc: NeedsClientEvidenceError) -> QueryResponse:
@@ -165,6 +175,7 @@ async def query_libraries(
     if vector_store is None:
         raise HTTPException(status_code=503, detail="Vector store is unavailable")
 
+    ledger = CostLedger()
     try:
         # Initialize services with client-supplied API keys
         settings = get_settings()
@@ -178,7 +189,15 @@ async def query_libraries(
                 status_code=400,
                 detail=f"Model '{query.llm_model}' not in preset model list: {preset.llm.model_names}"
             )
-        llm_service = make_llm_service(client_keys, model_name_override=query.llm_model or None)
+        llm_model = query.llm_model or None
+        if llm_model is None:
+            # No model named: the first one the caller's key can use (the provider's live
+            # list), since a key may have no access to the preset's static default.
+            from backend.api.config import _live_llm_models
+
+            live = await asyncio.to_thread(_live_llm_models, http_request, preset, require_key=True)
+            llm_model = live[0].id if live else None
+        llm_service = make_llm_service(client_keys, model_name_override=llm_model)
 
         # Use preset defaults if not specified in request
         top_k = query.top_k if query.top_k is not None else preset.rag.top_k
@@ -255,27 +274,39 @@ async def query_libraries(
                 "max_chunks_per_document": max_chunks_per_document,
                 "low_diversity_available_floor": low_diversity_available_floor,
                 "enable_quality_self_review": query.enable_quality_self_review,
+                "enable_reranking": query.enable_reranking,
+                "rerank_pool_size": query.rerank_pool_size,
             },
         ) if query.include_trace else None
 
-        result = await orchestrator.query(
-            question=query.question,
-            library_ids=query.library_ids,
-            top_k=top_k,
-            min_score=min_score,
-            enable_routing=query.enable_routing,
-            trace=trace_collector,
-            client_evidence=query.client_evidence,
-            preset_plan=query.query_plan,
-            diversity_floor=diversity_floor,
-            diversity_escalation_factor=diversity_escalation_factor,
-            diversity_escalation_max_top_k=diversity_escalation_max_top_k,
-            max_chunks_per_document=max_chunks_per_document,
-            low_diversity_available_floor=low_diversity_available_floor,
-            enable_quality_self_review=query.enable_quality_self_review,
-            conversation_history=query.conversation_history,
-            force_fresh_retrieval=query.force_fresh_retrieval,
-        )
+        rerank_token = set_rerank_request(RerankRequest(
+            enabled=query.enable_reranking,
+            pool_size=query.rerank_pool_size,
+            client_keys=client_keys,
+            user_id=identity.user_id if identity is not None else None,
+        ))
+        try:
+            with collect_costs(ledger):
+                result = await orchestrator.query(
+                    question=query.question,
+                    library_ids=query.library_ids,
+                    top_k=top_k,
+                    min_score=min_score,
+                    enable_routing=query.enable_routing,
+                    trace=trace_collector,
+                    client_evidence=query.client_evidence,
+                    preset_plan=query.query_plan,
+                    diversity_floor=diversity_floor,
+                    diversity_escalation_factor=diversity_escalation_factor,
+                    diversity_escalation_max_top_k=diversity_escalation_max_top_k,
+                    max_chunks_per_document=max_chunks_per_document,
+                    low_diversity_available_floor=low_diversity_available_floor,
+                    enable_quality_self_review=query.enable_quality_self_review,
+                    conversation_history=query.conversation_history,
+                    force_fresh_retrieval=query.force_fresh_retrieval,
+                )
+        finally:
+            reset_rerank_request(rerank_token)
 
         # Format citations
         sources = [
@@ -305,13 +336,14 @@ async def query_libraries(
             library_document_counts=library_document_counts,
             trace=trace_collector.finalize() if trace_collector is not None else None,
             source_refs=result.source_refs,
+            costs=ledger.costs(),
         )
 
     except NeedsUserInputError as exc:
         if isinstance(exc, NeedsClientEvidenceError):
-            return _needs_evidence_response(query, exc)
+            return _needs_evidence_response(query, exc).model_copy(update={"costs": ledger.costs()})
         if isinstance(exc, NeedsClarificationError):
-            return _needs_clarification_response(query, exc)
+            return _needs_clarification_response(query, exc).model_copy(update={"costs": ledger.costs()})
         raise
 
     except VectorStoreTimeoutError as e:
@@ -348,6 +380,20 @@ async def query_libraries(
         # backend's point of view, an expected and already-classified
         # upstream failure mode.
         logger.warning(f"Query failed: {e}")
+        if isinstance(e, (EmbeddingRateLimitExhaustedError, LLMRateLimitExhaustedError)):
+            from backend.services.standin import quota_error_detail
+
+            side = "embedding" if isinstance(e, EmbeddingRateLimitExhaustedError) else "llm"
+            try:
+                detail = await asyncio.to_thread(
+                    quota_error_detail, get_settings(), get_settings().get_hardware_preset(), side,
+                    e.available_at, str(e), client_keys,
+                    identity.user_id if identity is not None else None)
+            except Exception:
+                logger.exception("Could not build stand-in offer; falling back to plain error")
+                detail = None
+            if detail is not None:
+                raise HTTPException(status_code=503, detail=detail)
         raise HTTPException(status_code=503, detail=str(e))
 
     except Exception as e:

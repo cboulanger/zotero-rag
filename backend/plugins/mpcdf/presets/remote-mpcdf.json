@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "description": "Fully remote via the MPCDF LLM Inference Service (llm.mpcdf.mpg.de) on your own MPCDF account. Log in with your MPCDF username, password and one-time code in the account card of the Configure preset dialog, which starts its endpoints (re-ranking too, unless it is switched off in its tab); each runs as a job (up to 8 hours, renewed while in use) on your account.",
+  "embedding": {
+    "model_type": "remote",
+    "model_name": "intfloat/multilingual-e5-large-instruct",
+    "batch_size": 64,
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60, "image": "rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210", "envs": {"VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION"}, "build_timeout_minutes": 60}},
+    "model_kwargs": {}
+  },
+  "llm": {
+    "model_type": "remote",
+    "model_names": ["openai/gpt-oss-120b"],
+    "max_context_length": 131072,
+    "max_answer_tokens": 4096,
+    "temperature": 0.7,
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 2, "idle_minutes": 60}},
+    "model_kwargs": {}
+  },
+  "rerank": {
+    "model_type": "remote",
+    "model_name": "BAAI/bge-reranker-v2-m3",
+    "pool_size": 100,
+    "provider": {"id": "mpcdf", "scope": "user", "options": {"gpus": 1, "idle_minutes": 60, "image": "rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210", "envs": {"VLLM_ATTENTION_BACKEND": "FLEX_ATTENTION"}, "build_timeout_minutes": 60}}
+  },
+  "rag": {
+    "top_k": 10,
+    "score_threshold": 0.35,
+    "max_chunk_size": 800
+  },
+  "memory_budget_gb": 0.5,
+  "platform": "any"
+}

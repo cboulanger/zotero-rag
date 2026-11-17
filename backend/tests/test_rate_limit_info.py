@@ -10,18 +10,18 @@ from unittest.mock import AsyncMock, patch
 import backend.services.embeddings as emb
 from backend.services.rate_limit_info import get_cached_rate_limits
 from backend.services.usage_meters import key_fingerprint, recorder
-from backend.tests.test_providers_registry import make_preset
+from backend.providers.testing import make_preset
 
 HEADERS = {"x-ratelimit-limit-hour": "100", "x-ratelimit-remaining-hour": "40"}
 OPENAI_HEADERS = {"x-ratelimit-limit-requests": "60", "x-ratelimit-remaining-requests": "10"}
 
 
-def _settings(tmp: Path, model_type: str = "remote", name: str = "remote-kisski", kisski: bool = True):
+def _settings(tmp: Path, model_type: str = "remote", name: str = "test-remote", kisski: bool = True):
     preset = make_preset()
     preset.name = name
     if kisski:
-        preset.embedding.provider.id = "kisski"
-        preset.embedding.model_kwargs = {"api_key_env": "KISSKI_API_KEY"}
+        preset.embedding.provider.id = "testvendor"
+        preset.embedding.model_kwargs = {"api_key_env": "TESTVENDOR_API_KEY"}
     preset.embedding.model_type = model_type
     preset.llm.model_type = "local"
     return SimpleNamespace(data_path=tmp, get_hardware_preset=lambda: preset)
@@ -55,13 +55,13 @@ class TestGetCachedRateLimits(unittest.TestCase):
         self.assertIsNotNone(get_cached_rate_limits(_settings(self.path), {"embedding": key_fingerprint("someone-else")}))
 
     def test_cron_status_fallback(self):
-        self._write_cron({"headers": HEADERS, "at": "2026-10-09T09:00:00+00:00", "preset": "remote-kisski"})
+        self._write_cron({"headers": HEADERS, "at": "2026-10-09T09:00:00+00:00", "preset": "test-remote"})
         res = get_cached_rate_limits(_settings(self.path))
         self.assertEqual(res["source"], "cache")
         self.assertEqual(res["as_of"], "2026-10-09T09:00:00+00:00")
 
     def test_preset_mismatch_ignored(self):
-        self._write_cron({"headers": HEADERS, "at": "2026-10-09T09:00:00+00:00", "preset": "remote-mpcdf"})
+        self._write_cron({"headers": HEADERS, "at": "2026-10-09T09:00:00+00:00", "preset": "test-session"})
         self.assertIsNone(get_cached_rate_limits(_settings(self.path)))
 
     def test_generic_provider_reads_openai_style_headers(self):

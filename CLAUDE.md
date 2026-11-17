@@ -280,6 +280,8 @@ and CLI scripts.
 container run it inside the container (`podman exec <container> python bin/provision.py --preset runpod`)
 so the data volume is shared (`--pause` stops an endpoint's billing without deleting it, `--teardown` deletes it; resuming is provisioning again). To copy provisioned credentials to another instance, `POST` the values to
 `/api/config/remote-fields` on it (it encrypts them with its own `AUTOINDEX_SECRET`).
+RunPod and MPCDF credentials are never admin-shared (their terms forbid sharing an account): `runpod` sides
+take each user's own key (the CLI prompts for it), and per-user MPCDF sides run in each user's own login session.
 
 ## Migrating Library RAG Data Between Instances
 
@@ -382,7 +384,7 @@ build and upload it) and `scripts/hf_store.py` (`status`, `init`, `pull-*`, `pus
   retrieval: `top_k`, thresholds, dedup/cap/MMR, reranking, prompts, models, routing. Provider calls
   (KISSKI, Hugging Face) work because the session's outbound proxy injects the credentials; `gold_env.py up`
   sends a placeholder key header, so no key is needed in the session.
-- **Cannot:** run Kreuzberg (`ghcr.io/kreuzberg-dev/kreuzberg` is denied by the proxy) or podman (only a
+- **Cannot:** run Kreuzberg (`ghcr.io/xberg-io/xberg` is denied by the proxy) or podman (only a
   manually started `dockerd` exists, and Qdrant's image pulls from Docker Hub, but embedded mode makes it
   unnecessary). Re-indexing under a Kreuzberg preset there falls back to the `legacy` extractor, whose chunks
   differ from production, so **never judge Kreuzberg chunking or extraction changes in the cloud**; do those
@@ -666,6 +668,8 @@ called too early.
 
 - Use Python's built-in `unittest` framework
 - Test files should be named `test_*.py` and placed in a `tests/` directory
+- **Tests for a backend plugin ship with the plugin** in `backend/plugins/<id>/tests/` (or the external plugin's own `tests/`), never in `backend/tests`; they use `backend.providers.testing` (fakes, `ProviderContractSuite`) and `backend.pytest_plugin`, not `backend/tests` helpers. See `docs/backend-plugins.md`.
+- **Core tests (`backend/tests`) never depend on a shipped plugin**: they run on the test-only fake plugin in `backend/tests/fake_plugins/` (fake providers and `test-*` presets; helpers in `backend/tests/fakes.py`), and CI runs them again with every shipped plugin disabled.
 - Run tests with: `uv run pytest` (after installing pytest) or `uv run python -m unittest discover`
 - Aim for comprehensive coverage of all library methods and services
 - Write tests before or alongside implementation (TDD encouraged)

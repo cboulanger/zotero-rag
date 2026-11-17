@@ -26,7 +26,7 @@ def _mock_settings(model_type: str = "remote", model_kwargs: Optional[dict] = No
     settings.get_hardware_preset.return_value.name = "default-preset"
     settings.get_hardware_preset.return_value.embedding.model_type = model_type
     if model_kwargs is None:
-        model_kwargs = {"api_key_env": "KISSKI_API_KEY"} if model_type == "remote" else {}
+        model_kwargs = {"api_key_env": "TESTVENDOR_API_KEY"} if model_type == "remote" else {}
     settings.get_hardware_preset.return_value.embedding.model_kwargs = model_kwargs
     return settings
 
@@ -52,8 +52,8 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         v2 = KeyValidation(2, "b", ["users/2", "groups/99"], read_only=True)
         fp1 = store.add("KA", v1)
         fp2 = store.add("KB", v2)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
-        store.set_embedding_key(fp2, "EMB2", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
+        store.set_embedding_key(fp2, "EMB2", "TESTVENDOR_API_KEY")
         # Pre-set one fingerprint to a non-"ok" status so the assertion that
         # resolve refreshes it back to "ok" is meaningful.
         store.set_status(fp1, "stale")
@@ -75,7 +75,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1", "groups/99"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         self.assertEqual(store.get_target_labels(), {})
 
         v1_refreshed = KeyValidation(
@@ -93,7 +93,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         revoked = KeyValidation(1, "a", read_only=False, reason="Key not found (revoked or expired).")
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(return_value=revoked)):
@@ -109,7 +109,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1", "groups/5"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         transient = KeyValidation(1, "a", read_only=False, reason="Could not reach Zotero API: boom", transient=True)
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(return_value=transient)):
@@ -138,7 +138,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "BADEMB", "KISSKI_API_KEY", status="invalid")
+        store.set_embedding_key(fp1, "BADEMB", "TESTVENDOR_API_KEY", status="invalid")
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(return_value=v1)):
             targets, issues = await resolve_targets(store)
@@ -150,7 +150,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         store.set_embedding_key_status(fp1, "rate_limited", rate_limit_until=future)
         with patch("backend.services.autoindex_resolver.validate_key",
@@ -164,7 +164,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         store.set_embedding_key_status(fp1, "rate_limited", rate_limit_until=past)
         with patch("backend.services.autoindex_resolver.validate_key",
@@ -180,7 +180,7 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY", status="unverified")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY", status="unverified")
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(return_value=v1)):
             targets, issues = await resolve_targets(store)
@@ -196,8 +196,8 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         v2 = KeyValidation(2, "b", ["users/2", "groups/99"], read_only=True)
         fp1 = store.add("KA", v1)
         fp2 = store.add("KB", v2)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
-        store.set_embedding_key(fp2, "BADEMB", "KISSKI_API_KEY", status="invalid")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
+        store.set_embedding_key(fp2, "BADEMB", "TESTVENDOR_API_KEY", status="invalid")
         with patch("backend.services.autoindex_resolver.validate_key",
                    new=AsyncMock(side_effect=[v1, v2])):
             targets, issues = await resolve_targets(store)
@@ -209,18 +209,17 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(issues[0]["fingerprint"], fp2)
 
     async def test_shared_key_preset_bypasses_personal_key_gating(self):
-        """A preset with a shared, admin-set embedding key (e.g. remote-mpcdf,
-        which declares shared_api_key_env instead of api_key_env) has no
-        per-user key at all — a stale rate-limited status left over from a
-        previously-active *personal*-key preset (e.g. KISSKI) must not block
-        this user's targets. Regression test for a real bug: switching from
-        remote-kisski (personal key, hit a genuine KISSKI rate limit)
-        to remote-mpcdf (shared key, unaffected) still excluded every target
+        """A preset with a shared, admin-set embedding key (one that declares
+        shared_api_key_env instead of api_key_env) has no per-user key at all:
+        a stale rate-limited status left over from a previously-active
+        *personal*-key preset must not block this user's targets. Regression
+        test for a real bug: switching from a personal-key preset that hit a
+        genuine rate limit to a shared-key preset still excluded every target
         because resolve_targets only checked model_type == "remote"."""
         store = self._store()
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp1 = store.add("KA", v1)
-        store.set_embedding_key(fp1, "EMB1", "KISSKI_API_KEY")
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
         future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         store.set_embedding_key_status(fp1, "rate_limited", rate_limit_until=future)
         with patch("backend.services.autoindex_resolver.get_settings",
@@ -251,6 +250,26 @@ class ResolveTargetsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(targets["users/1"]["embedding_key"])
         self.assertIsNone(targets["users/1"]["embedding_key_name"])
         self.assertEqual(issues, [])
+
+
+    async def test_session_based_embedding_side_is_skipped_with_issue(self):
+        """An embedding side that runs in the user's own login session (MPCDF
+        with a one-time password) cannot be indexed while the user is away."""
+        store = self._store()
+        v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
+        fp1 = store.add("KA", v1)
+        store.set_embedding_key(fp1, "EMB1", "TESTVENDOR_API_KEY")
+        provider = MagicMock(uses_session_endpoints=True)
+        with patch("backend.providers.get_providers", return_value={"embedding": provider}), \
+             patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(return_value=v1)):
+            targets, issues = await resolve_targets(store)
+            listed, listed_issues = await resolve_targets(store, require_embedding_key=False)
+        self.assertEqual(targets, {})
+        self.assertEqual([i["kind"] for i in issues], ["session"])
+        self.assertFalse(issues[0]["pruned"])
+        # Callers that only need the target list (tag sync) still get it.
+        self.assertEqual(set(listed), {"users/1"})
+        self.assertEqual(listed_issues, [])
 
 
 class IsEmbeddingKeyUsableTest(unittest.TestCase):
@@ -303,7 +322,7 @@ class ResolveByKeyNameTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp = store.add("KA", v)
-        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY")
+        store.set_embedding_key(fp, "testvendor", "TESTVENDOR_API_KEY")
         store.set_embedding_key(fp, "hf", "HF_API_TOKEN")
         targets, issues = await self._resolve(store, "HF_API_TOKEN", v)
         self.assertEqual(targets["users/1"]["embedding_key"], "hf")
@@ -314,17 +333,17 @@ class ResolveByKeyNameTest(unittest.IsolatedAsyncioTestCase):
         store = self._store()
         v = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp = store.add("KA", v)
-        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY")
+        store.set_embedding_key(fp, "testvendor", "TESTVENDOR_API_KEY")
         targets, issues = await self._resolve(store, "HF_API_TOKEN", v)
         self.assertEqual(targets, {})
         self.assertIn("HF_API_TOKEN", issues[0]["reason"])
-        self.assertEqual(store.get_decrypted_embedding_key(fp, "KISSKI_API_KEY")[1], "kisski")  # kept
+        self.assertEqual(store.get_decrypted_embedding_key(fp, "TESTVENDOR_API_KEY")[1], "testvendor")  # kept
 
     async def test_status_of_another_key_does_not_block_this_one(self):
         store = self._store()
         v = KeyValidation(1, "a", ["users/1"], read_only=True)
         fp = store.add("KA", v)
-        store.set_embedding_key(fp, "kisski", "KISSKI_API_KEY", status="invalid")
+        store.set_embedding_key(fp, "testvendor", "TESTVENDOR_API_KEY", status="invalid")
         store.set_embedding_key(fp, "hf", "HF_API_TOKEN")
         targets, _ = await self._resolve(store, "HF_API_TOKEN", v)
         self.assertIn("users/1", targets)
@@ -356,22 +375,22 @@ class ResolvePerUserPresetTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tmp.cleanup)
         settings = get_settings()
         settings.data_path = Path(tmp.name)
-        settings.model_preset = "remote-kisski"
+        settings.model_preset = "test-remote"
         ensure_default_presets(settings.data_path)
-        set_preferred_preset(settings.data_path, 2, "runpod")
+        set_preferred_preset(settings.data_path, 2, "test-cloud")
 
         store = AutoIndexKeyStore(settings.data_path / "k.json", Fernet.generate_key().decode())
         v1 = KeyValidation(1, "a", ["users/1"], read_only=True)
         v2 = KeyValidation(2, "b", ["users/2"], read_only=True)
         fp1, fp2 = store.add("KA", v1), store.add("KB", v2)
-        store.set_embedding_key(fp1, "kisski-key", "KISSKI_API_KEY")
-        store.set_embedding_key(fp2, "runpod-key", "RUNPOD_API_KEY")
-        store.set_embedding_key(fp2, "other-kisski", "KISSKI_API_KEY")  # kept, not used
+        store.set_embedding_key(fp1, "vendor-key", "TESTVENDOR_API_KEY")
+        store.set_embedding_key(fp2, "cloud-key", "TESTCLOUD_API_KEY")
+        store.set_embedding_key(fp2, "other-vendor", "TESTVENDOR_API_KEY")  # kept, not used
 
         with patch("backend.services.autoindex_resolver.validate_key", new=AsyncMock(side_effect=[v1, v2])):
             targets, issues = await resolve_targets(store)
 
         self.assertEqual(issues, [])
-        self.assertEqual((targets["users/1"]["preset_name"], targets["users/1"]["embedding_key"]), ("remote-kisski", "kisski-key"))
-        self.assertEqual((targets["users/2"]["preset_name"], targets["users/2"]["embedding_key"]), ("runpod", "runpod-key"))
-        self.assertEqual(targets["users/2"]["embedding_key_name"], "RUNPOD_API_KEY")
+        self.assertEqual((targets["users/1"]["preset_name"], targets["users/1"]["embedding_key"]), ("test-remote", "vendor-key"))
+        self.assertEqual((targets["users/2"]["preset_name"], targets["users/2"]["embedding_key"]), ("test-cloud", "cloud-key"))
+        self.assertEqual(targets["users/2"]["embedding_key_name"], "TESTCLOUD_API_KEY")

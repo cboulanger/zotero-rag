@@ -2,7 +2,9 @@
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -72,6 +74,32 @@ class QueryAuthorizationTest(unittest.TestCase):
             json={"question": "q?", "library_ids": ["u1", "u2"]},
         )
         self.assertEqual(r.status_code, 403)
+
+
+    def test_long_quota_exhaustion_returns_structured_503(self):
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+
+        self._set_identity(None)
+        until = datetime.now(timezone.utc) + timedelta(hours=4)
+        err = EmbeddingRateLimitExhaustedError("quota used up", until)
+        with patch("backend.api.query.make_embedding_service", side_effect=err), \
+                patch("backend.services.standin.find_standins", return_value=[]):
+            r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["u1"]})
+        self.assertEqual(r.status_code, 503)
+        detail = r.json()["detail"]
+        self.assertEqual(detail["code"], "quota_exhausted")
+        self.assertEqual(detail["side"], "embedding")
+        self.assertTrue(detail["available_at"].endswith("Z"))
+
+    def test_short_quota_exhaustion_keeps_string_detail(self):
+        from backend.services.embeddings import EmbeddingRateLimitExhaustedError
+
+        self._set_identity(None)
+        err = EmbeddingRateLimitExhaustedError("quota used up", datetime.now(timezone.utc) + timedelta(minutes=2))
+        with patch("backend.api.query.make_embedding_service", side_effect=err):
+            r = self.client.post("/api/query", json={"question": "q?", "library_ids": ["u1"]})
+        self.assertEqual(r.status_code, 503)
+        self.assertIsInstance(r.json()["detail"], str)
 
 
 class NeedsEvidenceResponseTest(unittest.TestCase):

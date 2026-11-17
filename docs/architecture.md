@@ -28,10 +28,13 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 
 - **Semantic Search**: Ask natural language questions about your research library
 - **Multi-Library Support**: Query across multiple Zotero libraries simultaneously
-- **Local & Remote Models**: Local models (quantized) or remote providers (OpenAI-compatible APIs, Anthropic, KISSKI, MPCDF, and self-provisioned RunPod / Hugging Face endpoints), chosen separately for embeddings and answers
+- **Query Routing**: A router sends each question to one or more agents (full-text RAG, metadata, mentions) and synthesizes their answers (see [Query Routing & Agent Architecture](query-routing.md))
+- **Local & Remote Models**: Local models (quantized) or remote providers (OpenAI-compatible APIs, Anthropic, Google Gemini, KISSKI, MPCDF, and self-provisioned RunPod / Hugging Face endpoints), chosen separately for embeddings, re-ranking and answers
+- **Optional Re-ranking**: A cross-encoder, local or on a remote `/rerank` endpoint, rescores the vector-search candidates before the answer is generated
 - **Smart Citations**: Answers include source citations with page numbers and text anchors
 - **Real-Time Progress**: Live progress updates during library indexing
 - **Flexible Configuration**: JSON presets select a provider per side; each user can run on their own compatible preset and keys
+- **Stand-in Presets**: When a provider's quota is used up for a while, the plugin offers an equivalent preset until it resets
 - **Remote Server Support**: Backend can run on a separate machine with optional API key authentication
 
 ### Technology Stack
@@ -41,7 +44,7 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 - Python 3.12 with `uv` package manager
 - FastAPI for REST API
 - Qdrant for vector database
-- sentence-transformers for embeddings
+- sentence-transformers for local embeddings and local cross-encoder re-ranking
 - transformers + bitsandbytes for local LLM inference
 - Kreuzberg for document extraction (PDF, HTML, DOCX, EPUB; Rust-based, native async)
 - python-multipart for document upload
@@ -59,36 +62,44 @@ The backend can run locally or on a remote server. Indexing is push-based: the p
 
 ### Architecture
 
-```text
-┌────────────────────────────────────────────────────────────────┐
-│             Zotero Plugin + Zotero Desktop (local machine)     │
-│                                                                │
-│  Dialog UI → checkAndMonitorIndexing()                         │
-│     ↓                                                          │
-│  RemoteIndexer.indexLibrary()                                  │
-│     1. POST /api/libraries/{id}/check-indexed                  │
-│        (find which attachments need uploading)                 │
-│     2. IOUtils.read(localPath) → bytes                         │
-│     3. POST /api/index/document  (multipart: bytes + metadata) │
-│     4. Show progress per document                              │
-└────────────────────────────────────────────────────────────────┘
-              │  HTTP/HTTPS (configurable URL, X-Zotero-API-Key auth)
-              ▼
-┌────────────────────────────────────────────────────────────────┐
-│           FastAPI Backend (local or remote server)             │
-│                                                                │
-│  POST /api/index/document                                      │
-│     → resolve + gate caller's Zotero identity                  │
-│     → DocumentProcessor._process_attachment_bytes()            │
-│        (dedup check → extract → embed → store)                 │
-│                                                                │
-│  POST /api/libraries/{id}/check-indexed                        │
-│     → VectorStore.get_item_version() per attachment            │
-│     → return needs_indexing + reason per attachment            │
-│                                                                │
-│  POST /api/query                                               │
-│     → RAGEngine: embed query → search → generate → cite        │
-└────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Local["Zotero Desktop + plugin (local machine)"]
+        Dialog["Query dialog<br/>(dialog.js)"]
+        Prefs["Preferences +<br/>Configure preset dialog"]
+        Indexer["RemoteIndexer<br/>(remote_indexer.js)"]
+        Storage[("Zotero storage<br/>attachment files")]
+        Dialog --> Indexer
+        Indexer -- "IOUtils.read()" --> Storage
+    end
+
+    subgraph Backend["FastAPI backend (local or remote server)"]
+        Auth["Identity middleware<br/>(X-Zotero-API-Key, access gate,<br/>effective preset)"]
+        Upload["/api/libraries/{id}/check-indexed<br/>/api/index/document"]
+        Query["/api/query"]
+        Config["/api/config/*<br/>(presets, health, provisioning,<br/>sessions, stand-ins)"]
+        Processor["DocumentProcessor<br/>extract → chunk → embed → store"]
+        Orchestrator["QueryOrchestrator<br/>router → agents → synthesis"]
+        Engine["RAGEngine<br/>search → re-rank → generate → cite"]
+        Qdrant[("Qdrant")]
+        Auth --> Upload & Query & Config
+        Upload --> Processor --> Qdrant
+        Query --> Orchestrator --> Engine --> Qdrant
+    end
+
+    subgraph Providers["Model sides (local or via a provider)"]
+        Extract["Extraction<br/>(Kreuzberg / Docling)"]
+        Embed["Embedding"]
+        Rerank["Re-ranking<br/>(optional)"]
+        LLM["Answering (LLM)"]
+    end
+
+    Indexer -- "HTTP(S), multipart upload" --> Auth
+    Dialog -- "HTTP(S)" --> Auth
+    Prefs -- "HTTP(S)" --> Auth
+    Processor --> Extract & Embed
+    Engine --> Embed & Rerank & LLM
+    Config -. "provision / pause / health" .-> Providers
 ```
 
 **Backend URL:** stored in the `extensions.zotero-rag.backendURL` Zotero preference (configurable in the Preferences pane, default `http://localhost:8119`). Remote (non-loopback) backends require every caller to authenticate with a personal Zotero API key, entered in the plugin preferences and stored as `extensions.zotero-rag.zoteroApiKey` — see [Security & Privacy](#security--privacy).
@@ -106,19 +117,30 @@ The backend is organized into a layered architecture with clear separation of co
 **Entry Point:** [backend/main.py](../backend/main.py)
 
 - FastAPI application setup
-- Zotero-key identity middleware on every `/api/*` request except `/`, `/health`, `/api/version` — see [Security & Privacy](#security--privacy)
+- Zotero-key identity middleware on every `/api/*` request except `/api/version` (routes outside `/api/` are unauthenticated) — see [Security & Privacy](#security--privacy)
 - Configurable CORS (`ALLOWED_ORIGINS` env var)
-- Lifespan context management
+- Lifespan context management, including loading the [backend plugins](backend-plugins.md) and running their startup and shutdown hooks
+
+**Service routes:** [backend/api/status.py](../backend/api/status.py), unauthenticated, for the server's default preset
+
+- `GET /status` - Version, preset, retrieval settings, vector store counts, auto-indexing state, and the loaded backend plugins with the capabilities they registered (`plugins`, `capabilities`, `plugin_dirs`)
+- `GET /sides` - Each side of the default preset (embedding, answering, optional re-ranking): model, endpoint URL, side-specific settings and `served_by` (the capability and plugin serving it, and whether it is available)
+- `GET /health` - Reachability of the Kreuzberg and Qdrant sidecars
+- `GET /` - Service name, version and links to the routes above
 
 **Configuration API:** [backend/api/config.py](../backend/api/config.py)
 
 - `GET /api/config` - Available presets, the server default and the compatible/switchable ones
 - `POST /api/config` - Admin: switch the server default preset (credentials are not required; the preset is simply not ready until they are set)
 - `GET /PUT /api/config/my-preset` - The caller's own preset choice among compatible presets
-- `GET /api/config/providers` - Per-side provider descriptors that drive the plugin's Models section
-- `GET /api/config/health` - Readiness of each remote side (`ready` / `cold` / `throttled` / `paused` / `unreachable`)
-- `POST /api/config/provision`, `POST /api/config/suspend` - Create/resume and pause an endpoint (background jobs, one per side and slot)
+- `GET /api/config/providers` - Per-side provider descriptors (capabilities, credential scope, provisioning credential)
+- `PUT /DELETE /api/config/my-preset/standin` - Switch the caller to an offered stand-in preset until the exhausted quota resets, or end the switch early
+- `GET /api/config/preset-view` - The "Configure preset" dialog's view model: one tab per side in pipeline order (extraction, embedding, retrieval, re-ranking when the preset has one, answering) with state, fields, messages, job log and actions, and one account card per service provider (`backend/services/preset_view.py`, types in `backend/providers/ui.py`)
+- `GET /api/config/health` - Readiness of each remote side, the re-ranking side included (`ready` / `cold` / `throttled` / `paused` / `unreachable`)
+- `POST /api/config/provision`, `POST /api/config/suspend` - Create/resume and pause an endpoint (background jobs, one per side and slot); provisioning all sides leaves the re-ranking endpoint alone, pausing all includes it
 - `POST /api/config/warmup` - Wake the caller's cold endpoints (called when the question dialog opens)
+- `POST /api/config/session/login`, `POST /api/config/session/logout`, `GET /api/config/session` - Per-user provider sessions (MPCDF); a login starts the endpoints that account serves, re-ranking included unless the user switched it off
+- `GET /api/models/status` - Per-model demand of a remote LLM provider (traffic light in the query dialog)
 - `GET /api/version` - Version compatibility checking (exempt from identity check)
 
 **Libraries API:** [backend/api/libraries.py](../backend/api/libraries.py)
@@ -142,7 +164,7 @@ The backend is organized into a layered architecture with clear separation of co
 
 **Query API:** [backend/api/query.py](../backend/api/query.py)
 
-- `POST /api/query` - Submit RAG query and get answer with citations
+- `POST /api/query` - Submit RAG query and get answer with citations. `enable_reranking: false` skips the re-ranking step for this query; when a provider's quota is exhausted for at least 15 minutes, the error response lists stand-in presets
 
 #### 2. Service Layer
 
@@ -187,21 +209,38 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 - Device-aware (CPU, CUDA, MPS)
 - OpenAI-compatible API support
 
-**Providers:** [backend/providers/](../backend/providers/) — see [Providers](providers.md)
+**Providers:** [backend/providers/](../backend/providers/) (interface and generic provider) and the vendor plugins in [backend/plugins/](../backend/plugins/) — see [Providers](providers.md) and [Backend plugins](backend-plugins.md)
 
 - One small class per vendor owns everything vendor-specific about a side: credential scope, endpoint URL, usage meters, health, error classification, provisioning and pausing
 - The core never branches on a vendor name; services and API routes ask the side's provider
-- Supporting services: `endpoint_cache.py` (key-derived endpoint and paused-state caches), `provisioning.py` (background provision/pause jobs), `usage_meters.py` (quota bars), `effective_preset.py` (the per-request preset)
+- Supporting services: `endpoint_cache.py` (key-derived endpoint and paused-state caches), `provisioning.py` (background provision/pause jobs), `usage_meters.py` (quota bars), `effective_preset.py` (the per-request preset); per-user MPCDF login sessions live in the `mpcdf` plugin (`backend/plugins/mpcdf/sessions.py`)
+
+**Query Orchestration:** [backend/services/query_orchestrator.py](../backend/services/query_orchestrator.py) — see [Query Routing & Agent Architecture](query-routing.md)
+
+- `QueryRouter` makes one LLM call that picks the agents for a question and extracts metadata filters
+- Agents (`RAGAgent`, `MetadataAgent`, `MentionsAgent`) run in parallel; a failing agent does not stop the others
+- A synthesis LLM call combines their output (skipped when only the RAG agent ran)
 
 **RAG Query Engine:** [backend/services/rag_engine.py](../backend/services/rag_engine.py)
 
-- Complete RAG pipeline implementation
-- Query embedding generation
+- Query embedding generation (with the embedding model's task instruction)
 - Vector similarity search with library filtering
-- Context assembly from retrieved chunks
-- LLM prompt construction
-- Answer generation with source tracking
+- Candidate pool preparation, in this order: optional lexical (BM25) blend, optional cross-encoder re-ranking, optional embedding MMR, near-duplicate and text dedup, per-document cap, `top_k` cut
+- Retrieval escalation when results are too narrow; an escalation re-ranks only the candidates it adds
+- LLM prompt construction and answer generation with source tracking
 - Citation formatting (item_id, page, text_anchor, score)
+
+**Re-ranking:** [backend/services/rerank.py](../backend/services/rerank.py)
+
+- Optional fourth side of a preset (its `rerank` section); a preset without it uses the vector order
+- `LocalCrossEncoderReranker` runs a sentence-transformers `CrossEncoder` in the backend process; `RemoteReranker` calls `POST {base_url}/rerank` (Jina/Cohere format, served by vLLM, TEI and Infinity) on the user's own endpoint through the side's provider
+- `rerank_pool()` rescores the first `pool_size` candidates; scores are cached per query
+- Never blocks a query: when the user switched it off, the endpoint is not ready, the call fails or it exceeds `timeout_seconds`, the vector order is kept and the trace's `retrieval.rerank` entry records why (`ran` / `off` / `disabled` / `not_ready` / `timeout` / `error`)
+
+**Stand-in Presets:** [backend/services/standin.py](../backend/services/standin.py)
+
+- When a provider's quota stays exhausted for at least 15 minutes, derives compatible presets that serve the exhausted side with another provider, free before paid, then by `standin_priority`
+- Stores the user's temporary choice until the reset time; it applies to queries and the configuration endpoints only, never to indexing
 
 #### 3. Data Layer
 
@@ -239,10 +278,11 @@ Pluggable extraction adapter pattern. Supported MIME types: `application/pdf`, `
 **Configuration System:**
 
 - **Presets:** [backend/config/presets.py](../backend/config/presets.py)
-  - JSON files, one per preset; each side (embedding, LLM) names a provider by id, so sides can mix providers
-  - Local presets (`apple-silicon-32gb`, `high-memory`, `cpu-only`), remote presets (`remote-openai`, `remote-kisski`, `remote-mpcdf`, `cloud-server-kisski`, `windows-test`) and self-provisioned ones (`runpod`, `huggingface`); see [Presets](presets.md)
-  - Model configurations, retrieval parameters, memory budgets and quantization settings
+  - JSON files, one per preset; each side (embedding, LLM, optional re-ranker, optional extraction) names a provider by id, so sides can mix providers
+  - Local presets (`apple-silicon-32gb`, `high-memory`, `cpu-only`), remote presets (`remote-openai`, `remote-kisski`, `remote-gemini`, `kisski-gemini`, `kisski-docling`, `remote-mpcdf`, `kisski-rerank-mpcdf`, `cloud-server-kisski`, `windows-test`) and self-provisioned ones (`runpod`, `huggingface`); see [Presets](presets.md)
+  - Model configurations, retrieval and re-ranking parameters, memory budgets, quantization settings, and stand-in fields (`cost`, `standin`, `standin_priority`)
 - **Providers:** [backend/providers/](../backend/providers/), [Providers](providers.md)
+- **Backend plugins:** [backend/plugins/](../backend/plugins/), [backend/pluginhost/](../backend/pluginhost/), [Backend plugins](backend-plugins.md)
   - Validated per preset by `get_providers(preset)`; an invalid preset is not listed and cannot be activated
 - **Settings:** [backend/config/settings.py](../backend/config/settings.py)
   - Environment variable configuration (paths, deployment and access settings, `MODEL_PRESET`)
@@ -278,7 +318,9 @@ The plugin provides a user-friendly interface within Zotero for asking questions
 
 - HTML5-based dialog (no XUL dependency)
 - Question input, library selection, progress display
-- Endpoint readiness: on open it checks `GET /api/config/health`; while a needed remote endpoint is cold, paused or unreachable, Submit/Index is disabled and a status message appears left of the buttons (indexing needs the embedding side, a question both). A cold endpoint is woken once through `POST /api/config/warmup` and re-checked every few seconds
+- Endpoint readiness: on open it checks `GET /api/config/health`; while a needed remote endpoint is cold, paused or unreachable, Submit/Index is disabled and a status message appears left of the buttons (indexing needs the embedding side, a question also the answering side, and the re-ranking side when re-ranking is switched on). A cold endpoint is woken once through `POST /api/config/warmup` and re-checked every few seconds; a paused or stopped side opens the Configure preset dialog
+- Advanced options: per-query re-ranking switch (sent as `enable_reranking`)
+- Stand-in offer: when a query fails on an exhausted quota, offers the stand-in presets the backend listed, re-sends the question once the chosen one is ready and shows an active stand-in with a button to end it
 - Indexing mode selection (auto/incremental/full)
 - Library metadata display (last indexed, item counts, chunk counts)
 - Operation cancellation support (abort button)
@@ -301,7 +343,8 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 **Preferences:** [plugin/src/preferences.xhtml](../plugin/src/preferences.xhtml) + [plugin/src/preferences.js](../plugin/src/preferences.js)
 
 - Backend URL configuration (`extensions.zotero-rag.backendURL`, default `http://localhost:8119`)
-- Model preset group (server default for admins, "My preset" for users) and one **Models** section per side ([plugin/src/provider-sections.js](../plugin/src/provider-sections.js)) rendered entirely from the provider descriptors: key fields, health, Provision / Resume / Retry / Pause, and the in-memory management-token field (never saved)
+- Model preset group: the preset chooser ("My preset" for users), a one-line status per side and the **Configure preset…** button
+- **Configure preset** dialog ([plugin/src/preset-dialog.xhtml](../plugin/src/preset-dialog.xhtml), rendering and logic in [plugin/src/preset-dialog-view.js](../plugin/src/preset-dialog-view.js)): renders `GET /api/config/preset-view` without any provider knowledge. Header: preset description, server default (admins), Start all / Pause all / Check now. One tab per side (extraction, embedding, retrieval, re-ranking, answering) with a red/yellow/green indicator and Configuration, Status (with a log hidden by default) and Actions sections. Footer: one account card per provider holding its keys; saving a card starts the sides it serves. One-time management credentials are kept in memory only (never saved)
 - Zotero API key configuration (`extensions.zotero-rag.zoteroApiKey`), with live identity status (username + accessible library count)
 - Max concurrent queries setting
 - HTML-based preferences pane
@@ -324,57 +367,78 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 
 ### Indexing Workflow
 
-```text
-1. User selects "Ask Question" from Tools menu
-   ↓
-2. Plugin fetches list of available libraries from backend
-   ↓
-3. Plugin displays library metadata (last indexed, item counts)
-   ↓
-4. User selects libraries, indexing mode (auto/incremental/full), and enters question
-   ↓
-5. RemoteIndexer.indexLibrary() runs:
-   a. Collect all locally-stored attachments (Zotero JS API)
-   b. POST /api/libraries/{id}/check-indexed → get list of which need uploading
-   ↓
-6. For each attachment needing upload:
-   a. IOUtils.read(localFilePath) → bytes
-   b. Build FormData: file bytes + JSON metadata (title, authors, year, DOI, etc.)
-   c. POST /api/index/document with X-Zotero-API-Key header
-   d. Backend: resolve identity → dedup check → _process_attachment_bytes() → store
-   e. Plugin updates progress display
-   ↓
-7. When all attachments processed, plugin submits query
+```mermaid
+sequenceDiagram
+    actor User
+    participant Dialog as Query dialog
+    participant Indexer as RemoteIndexer
+    participant Zotero as Zotero JS API / IOUtils
+    participant API as Backend API
+    participant Proc as DocumentProcessor
+    participant VS as Qdrant
+
+    User->>Dialog: Tools → Ask Question
+    Dialog->>API: GET /api/libraries, GET /api/config/health
+    API-->>Dialog: library metadata, side readiness
+    User->>Dialog: select libraries, indexing mode, question
+    Dialog->>Indexer: indexLibrary()
+    Indexer->>Zotero: collect locally stored attachments
+    Indexer->>API: POST /api/libraries/{id}/check-indexed
+    API->>VS: stored item versions
+    API-->>Indexer: needs_indexing + reason per attachment
+    loop each attachment that needs indexing
+        Indexer->>Zotero: IOUtils.read(path)
+        Indexer->>API: POST /api/index/document (bytes + metadata)
+        API->>Proc: resolve identity → _process_attachment_bytes()
+        Proc->>Proc: dedup check → extract → chunk → embed
+        Proc->>VS: store chunks
+        API-->>Indexer: DocumentUploadResult
+        Indexer-->>Dialog: onProgress()
+    end
+    Dialog->>API: submit query (see below)
 ```
 
 ### Query Workflow
 
-```text
-1. User submits question with selected libraries
-   ↓
-2. Plugin sends POST /api/query request
-   (the dialog has already checked endpoint health and warmed a cold endpoint)
-   ↓
-3. The auth middleware binds the caller's effective preset (their own valid, compatible
-   preset, else the server default); embedding and LLM services resolve their provider,
-   key and endpoint from it. Then backend RAGEngine.query():
-   a. Generate query embedding (EmbeddingService)
-   b. Search vector store for similar chunks (top_k, min_score)
-   c. Filter by library_ids
-   d. Assemble context from retrieved chunks
-   e. Build LLM prompt with context
-   f. Generate answer (LLMService)
-   g. Extract source citations (item_id, page, text_anchor)
-   ↓
-4. Plugin receives QueryResult (answer + sources)
-   ↓
-5. Plugin creates note in current collection:
-   - Question as heading
-   - Answer as body
-   - Citations as bulleted list with Zotero links
-   - Metadata footer (timestamp, libraries)
-   ↓
-6. Success message displayed to user
+```mermaid
+sequenceDiagram
+    actor User
+    participant Dialog as Query dialog
+    participant MW as Identity middleware
+    participant Orch as QueryOrchestrator
+    participant Engine as RAGEngine
+    participant Emb as Embedding side
+    participant VS as Qdrant
+    participant RR as Re-ranking side
+    participant LLM as Answering side
+
+    User->>Dialog: question + libraries
+    Note over Dialog: endpoint health already checked,<br/>cold endpoints warmed
+    Dialog->>MW: POST /api/query (enable_reranking)
+    MW->>MW: bind effective preset<br/>(stand-in, own compatible preset, or server default)
+    MW->>Orch: query
+    Orch->>LLM: route question (QueryRouter)
+    Orch->>Engine: RAG agent (other agents in parallel)
+    Engine->>Emb: embed query
+    Engine->>VS: similarity search, filtered by library_ids
+    VS-->>Engine: candidate pool
+    opt preset has a rerank section and it is switched on
+        Engine->>RR: score first pool_size candidates
+        RR-->>Engine: cross-encoder scores (or vector order kept)
+    end
+    Engine->>Engine: MMR, dedup, per-document cap, top_k
+    Engine->>LLM: prompt with context
+    LLM-->>Engine: answer
+    Engine-->>Orch: answer + sources (item_id, page, text_anchor)
+    alt success
+        Orch-->>Dialog: QueryResult (synthesized if several agents ran)
+        Dialog->>Dialog: create note: question, answer,<br/>citations with Zotero links, metadata footer
+    else provider quota exhausted for at least 15 min
+        Orch-->>Dialog: error with stand-in offers
+        User->>Dialog: choose a stand-in
+        Dialog->>MW: PUT /api/config/my-preset/standin
+        Dialog->>MW: re-send the question once the stand-in is ready
+    end
 ```
 
 ---
@@ -383,13 +447,17 @@ Coordinates document upload. Loaded as a subscript in `dialog.xhtml`.
 
 ### Presets and Providers
 
-A preset is a JSON file that describes both sides of the pipeline (embedding model and LLM), the retrieval parameters and, for each remote side, a **provider** (a small Python class under `backend/providers/`). The full catalogue, the per-preset requirements and the schema are in [Presets](presets.md); the provider contract is in [Providers](providers.md).
+A preset is a JSON file that describes the sides of the pipeline (embedding model, LLM, and optionally an extraction service and a re-ranker), the retrieval parameters and, for each remote side, a **provider** (a small Python class contributed by a [backend plugin](backend-plugins.md)). The full catalogue, the per-preset requirements and the schema are in [Presets](presets.md); the provider contract is in [Providers](providers.md).
 
 **Credential scopes** (per side): `user` (each user's own key, sent with their requests), `managed` (an admin's key, the institution pays, admins operate the endpoint) and `shared` (set once by an admin for everyone). Keys are never read from the environment; users enter theirs in the plugin and admins set shared ones through `POST /api/config/remote-fields`. Secrets are encrypted at rest by `backend/services/secret_store.py`.
 
 **Default and per-user presets.** The server default comes from the stored admin choice, else `MODEL_PRESET`, else `remote-kisski`. A user may run on a different preset if both sides are remote and the embedding model is the same, so the vector space is shared. The auth middleware resolves the caller's preset for each request; the cron indexer records each owner's preset with their targets.
 
-**Endpoint lifecycle.** Remote endpoints can be cold (scaled to zero, wakes on a request), paused on purpose (billing stopped, wakes only through Resume) or not provisioned. Providers that support it create, resume and pause endpoints as background jobs per side (`POST /api/config/provision` and `/suspend`); readiness is reported by `GET /api/config/health`. A paused embedding side makes automatic indexing skip that owner's libraries and makes queries fail at once with a clear message.
+**Re-ranking side.** A preset's optional `rerank` section adds a cross-encoder step. A local re-ranker runs in the backend process; a remote one always runs on each user's own account or key (scope `user`), and a query without that key or with the endpoint not running simply keeps the vector order. Users switch the step off in the Configure preset dialog or per query. Details in [Presets](presets.md#the-rerank-section) and [Query Routing](query-routing.md#cross-encoder-re-ranking).
+
+**Endpoint lifecycle.** Remote endpoints can be cold (scaled to zero, wakes on a request), paused on purpose (billing stopped, wakes only through Resume) or not provisioned. Providers that support it create, resume and pause endpoints as background jobs per side (`POST /api/config/provision` and `/suspend`); readiness is reported by `GET /api/config/health`. A paused embedding side makes automatic indexing skip that owner's libraries and makes queries fail at once with a clear message. The re-ranking endpoint is started on its own (its tab, an account login, or the query dialog's prompt), never by "Start all".
+
+**Stand-ins.** When a provider's quota is exhausted for at least 15 minutes, `POST /api/query` lists compatible presets that serve that side with another provider; the user can switch to one until the reset (see [Presets](presets.md#stand-in-presets)).
 
 **Usage meters.** Providers parse their quota headers into per-side, per-key meters that the plugin draws as bars.
 
@@ -467,7 +535,7 @@ The `backendURL` preference is the single configuration point for server locatio
   [Query Routing & Agent Architecture](query-routing.md) for how this
   surfaces to the API and to sibling agents.
 
-### 3. Embedding Strategy
+### 2. Embedding Strategy
 
 **Decision:** Content-hash based caching
 
@@ -478,7 +546,7 @@ The `backendURL` preference is the single configuration point for server locatio
 - SHA256 hash ensures uniqueness
 - Stored in vector database for persistence
 
-### 4. Document Extraction Adapter Pattern
+### 3. Document Extraction Adapter Pattern
 
 **Decision:** Pluggable `DocumentExtractor` ABC with Kreuzberg as the default backend
 
@@ -497,7 +565,7 @@ The `backendURL` preference is the single configuration point for server locatio
 - `create_document_extractor()` factory mirrors `create_embedding_service()`
 - `KreuzbergExtractor` uses `ExtractionConfig(chunking=ChunkingConfig(...), disable_ocr=...)`
 
-### 5. LLM Flexibility
+### 4. LLM Flexibility
 
 **Decision:** Support local (quantized) and remote models behind one provider abstraction, chosen per side
 
@@ -508,6 +576,24 @@ The `backendURL` preference is the single configuration point for server locatio
 - Everything vendor-specific lives in a provider class selected by a preset's JSON, so adding a vendor never touches core code and a preset can mix providers (for example local embeddings with a hosted LLM)
 - Credential scopes let a user pay for their own endpoints, an institution pay for shared ones, or an admin share a free service
 - Presets make configuration easy, and each user can choose a compatible one
+
+### 5. Optional Re-ranking Step
+
+**Decision:** A cross-encoder re-ranker as an optional side of a preset, applied to the raw candidate pool and never allowed to block a query
+
+**Rationale:**
+
+- A cross-encoder reads the question and each passage together, so it orders candidates more precisely than vector similarity alone
+- Running it before MMR, dedup and the per-document cap lets those steps work on the sharper score
+- Pool sizes follow an offline comparison on the gold library: a small multilingual CPU model at 30 candidates for local presets, `BAAI/bge-reranker-v2-m3` at 100 candidates on a GPU endpoint for remote ones
+- A remote re-ranker runs on each user's own account or key, so nobody shares GPU costs or accounts whose terms forbid it
+- On any failure, timeout or missing endpoint the vector order is kept and the trace says why, so re-ranking can only improve an answer, never break the query
+
+**Implementation:**
+
+- `RerankConfig` (`backend/config/presets.py`) and `backend/services/rerank.py`
+- Per-request state (switched on or off, the caller's identity and keys) travels in a context variable set by the query API, so the orchestrator and agents need no extra parameters
+- The provider supplies the caller's `/rerank` URL and key through `rerank_credentials()`
 
 ### 6. Plugin UI Technology
 
@@ -545,11 +631,11 @@ The `backendURL` preference is the single configuration point for server locatio
 
 **Implementation:**
 
-- Each chunk stores `item_version` and `attachment_version`
-- `library_metadata` collection tracks `last_indexed_version`
-- Zotero API `?since=<version>` parameter fetches only changes
+- Each chunk stores `item_version` and `attachment_version`; the `library_metadata` collection tracks `last_indexed_version`
+- Plugin (push) indexing: `RemoteIndexer` sends every local attachment's key and versions to `POST /api/libraries/{id}/check-indexed`, which compares them with the stored versions and answers `not_indexed`, `version_changed` or `up_to_date`; only the first two are uploaded. The dialog skips the check altogether while the Zotero library version has not moved past the last completed run
+- Automatic (server-side) indexing: the scheduler or cron indexer reads the library through the Zotero Web API and fetches only items changed since `last_indexed_version` (`?since=<version>`); it switches to a full run after an interrupted run or when the library is clearly under-indexed
 - Automatic detection of metadata updates (title, author changes)
-- Hard reset API for manual full reindexing
+- Full mode resets the library's index (`force_reindex`) and re-uploads every attachment
 
 ### 9. Push-Based Indexing
 
@@ -613,11 +699,11 @@ The `backendURL` preference is the single configuration point for server locatio
 **Optimization:**
 
 - **Incremental indexing** - 80% faster by processing only changes
-- Version-based change detection using Zotero's `?since=` parameter
+- Version-based change detection: a batched `check-indexed` call for plugin uploads (cached server-side for 5 minutes), Zotero's `?since=` parameter for automatic indexing
 - Batch embedding generation
-- Content-hash deduplication (skip re-indexing)
+- Content-hash deduplication, within a library and across libraries (matching chunks are copied instead of re-extracted)
 - Progress callbacks for user feedback
-- Async I/O for Zotero API calls
+- Async I/O for Zotero Web API calls in automatic indexing
 - Cancellation support prevents wasted processing
 
 ### Query Performance
@@ -625,6 +711,7 @@ The `backendURL` preference is the single configuration point for server locatio
 **Factors:**
 
 - Vector search speed (top_k parameter)
+- Re-ranking time (pool size, local CPU vs. GPU endpoint; capped by `timeout_seconds`)
 - LLM inference time (model size, quantization)
 - Context assembly (retrieved chunk count)
 - `document_chunks` collection size (point count × vector dimension)
@@ -655,7 +742,8 @@ The `backendURL` preference is the single configuration point for server locatio
 - `apple-silicon-32gb`: ~10GB
 - `high-memory`: ~16GB
 - `cpu-only`: ~3GB
-- Remote presets (`remote-*`, `runpod`, `huggingface`, `windows-test`): ~0.5–2GB (minimal local); the models run on the provider's side
+- Remote presets (`remote-*`, `kisski-*`, `runpod`, `huggingface`, `windows-test`): ~0.5–2GB (minimal local); the models run on the provider's side
+- A local re-ranker (`cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` in the local presets and `cloud-server-kisski`) adds a small model loaded once per process; about 1 s per 30 passages on 4 CPU cores
 
 **Strategies:**
 

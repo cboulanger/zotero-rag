@@ -422,6 +422,86 @@ built to fix, and doesn't offset the specific regressions above. Raising it
 further is not expected to help: the failure mode is score dilution, not an
 insufficient blend ratio.
 
+### Cross-encoder re-ranking
+
+A preset with a `rerank` section (see [presets.md](presets.md#the-rerank-section)) rescores the
+first `pool_size` candidates of the raw pool with a cross-encoder, which reads the question and
+each passage together. The pool grows with the searched libraries' chunk count (from their
+index metadata): in a large index the vector scores of the top candidates lie close together,
+so a relevant passage can rank a few hundred places down and only a larger pool lets the
+re-ranker see it, while in a small index a larger pool mostly adds generic passages. Up to
+`pool_reference_chunks` (default 50,000) the preset's `pool_size` applies, above it
+`pool_size × (1 + log10(chunks / pool_reference_chunks))`, up to 500. A query may instead set its
+own `rerank_pool_size` (1-500; the plugin sends the Re-ranking tab's **Passages to rescore**).
+The vector search fetches at least as many candidates as are rescored, so the pool can exceed
+the engine's default candidate pool of 100. It runs after the lexical blend and before embedding MMR, near-duplicate
+removal, the per-document cap and the `top_k` cut, so all of those work on the cross-encoder score.
+The vector score stays in the result (`vector_score`, with `pre_rerank_rank`, in the trace's
+chunks). A retrieval escalation in the same query scores only the candidates it adds. Implemented
+in `backend/services/rerank.py`.
+
+The step never blocks a query. When the user switched it off (Preferences, or the query dialog's
+advanced options, which send `enable_reranking: false`), when a remote endpoint is not running or
+the caller has no key for it, or when scoring fails or takes longer than `timeout_seconds`, the
+pool keeps its vector order. The trace's `retrieval.rerank` entry says what happened (`ran`,
+`disabled`, `not_ready`, `timeout`, `error`), how many passages were scored and how long it took.
+
+### Embedding near-duplicate removal
+
+`RETRIEVAL_NEAR_DUP_THRESHOLD` (0-1, default 0 = off) drops every raw candidate
+whose embedding is at least that cosine-similar to a higher-scoring candidate,
+before the per-document cap and the `top_k` cut, so near-copies of one passage
+(not only the exact-text duplicates `_dedup_chunks_by_text` catches) don't take
+several slots. Kept candidates keep their vector scores. Implemented in
+`backend/services/near_dup_filter.py`.
+
+**Evaluated at 0.97/0.95/0.93/0.90 on the gold library (Docling and Kreuzberg
+indexes, retrieval only) and left at the `0` default**: at 0.93 and above the
+retrieved context did not change for any targeted fact (the per-document cap
+already removes most sibling crowding). At 0.90 Q02's figures entered the
+context, but Kreuzberg lost all of Q05's and two other facts, because with this
+embedding model 0.90 means "same topic", not "same text".
+
+### Query decomposition
+
+`RETRIEVAL_QUERY_DECOMPOSITION` (0-6, default 0 = off) asks the LLM for up to
+that many short search queries (one per part of the question, in English),
+searches with each plus the question, and fuses the ranked lists by reciprocal
+rank before dedup, cap and `top_k`. One extra LLM call per query; the fused pool
+replaces the escalation retry. Implemented in
+`backend/services/query_decomposition.py`.
+
+**Evaluated with 3 and 5 sub-queries on the gold library (retrieval only) and
+left at the `0` default**: no targeted fact gained, and total facts in context
+fell (Docling 21 -> 20/17 of 39, Kreuzberg 24 -> 24/19). Ranking each answer
+passage against each sub-query shows why: sub-queries describing the question's
+parts rank the answer passage *lower* than the question does (Q05's EndNote
+result: 28 -> 70-125), and only a sub-query that already guesses the answer's
+wording helps (Q09's "Zotero does not provide an API" passage: 1942 -> 57).
+
+### Query translation
+
+`RETRIEVAL_QUERY_TRANSLATION` (default `true`) helps questions in another language
+than the documents. A question that looks non-English (an accented letter, or at least
+two German, French or Spanish function words) is translated into English by the answering
+LLM (one short call; without an answer within 10 s, or on any error, the question is
+searched alone). The engine searches with both versions, fuses the two ranked lists
+by reciprocal rank, and the re-ranker scores the union of each list's own top
+`pool_size` passages against both versions, keeping each passage's higher score.
+English questions are not translated and cost nothing extra. Implemented in
+`backend/services/query_translation.py`; the trace's `retrieval.translated_query` shows
+the translation.
+
+Why both steps are needed: a German question embeds close to German passages and far
+from English ones, and the cross-encoder scores an on-topic English passage near zero
+against a German question (0.004 against 0.40 for its translation). On 17 questions with
+known answers in a 2.15M-chunk library, translation raised the share of targets in the
+final top 10 from 9 to 13 of 17; every German question about an English work had missed
+its target in the top 500 vector hits. On the gold set (gemma-4-31b-it, 3 repetitions)
+the judged recall rose from 80% to 83% and the German cloud-storage question (Q06)
+from 3 to 5 of 5. A translated question costs one LLM call and up to twice the passages,
+each scored twice, in the re-ranker.
+
 ## Schema Versioning
 
 `CURRENT_SCHEMA_VERSION` (in `backend/models/document.py`, currently `6`) is stored
@@ -467,8 +547,24 @@ Also accepts five optional retrieval/answer-diversity tuning fields —
 
 | Status | Cause |
 | --- | --- |
+| `503` | A provider's quota is used up for at least 15 minutes (structured `quota_exhausted` detail, below) or another service is unavailable (string detail) |
 | `504` | The Qdrant search backend did not respond within its configured timeout (`VectorStoreTimeoutError`) |
 | `500` | Any other unhandled error |
+
+A quota that stays used up for at least 15 minutes (the `available_at` of the rate limit) is answered with `503` and a structured detail instead of a string:
+
+```json
+{"detail": {
+  "code": "quota_exhausted",
+  "message": "KISSKI's embedding quota is used up until 23:00 UTC.",
+  "side": "embedding", "provider": "kisski", "available_at": "2026-11-16T23:00:00Z",
+  "standins": [
+    {"preset": "remote-mpcdf", "cost": "free", "label": "...", "needs": ["login:mpcdf"]}
+  ]
+}}
+```
+
+`needs` is empty for a stand-in that is ready. The user can switch to one with `PUT /api/config/my-preset/standin`; see [Stand-in presets](presets.md#stand-in-presets). Other `503` responses keep a string detail.
 
 ### `POST /api/index/items/metadata`
 

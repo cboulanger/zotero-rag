@@ -9,58 +9,7 @@
   <title>Ask Question - Zotero RAG</title>
   <meta charset="utf-8"/>
   <link rel="stylesheet" href="chrome://zotero-rag/content/rate-limit.css"/>
-  <script>
-    document.addEventListener("DOMContentLoaded", (ev) => {
-      try {
-        Services.scriptloader.loadSubScript(
-          "chrome://zotero/content/include.js",
-          this
-        );
-      } catch (e) {
-        console.error("Failed to load include.js:", e);
-      }
-
-      // Load remote indexer (must load before dialog.js)
-      try {
-        Services.scriptloader.loadSubScript(
-          "chrome://zotero-rag/content/remote_indexer.js",
-          window
-        );
-      } catch (e) {
-        console.error("Failed to load remote_indexer.js:", e);
-      }
-
-      // Load shared rate-limit bars (must load before dialog.js)
-      try {
-        Services.scriptloader.loadSubScript(
-          "chrome://zotero-rag/content/rate-limit-widget.js",
-          window
-        );
-      } catch (e) {
-        console.error("Failed to load rate-limit-widget.js:", e);
-      }
-
-      // Load mention/citation search (must load before dialog.js)
-      try {
-        Services.scriptloader.loadSubScript(
-          "chrome://zotero-rag/content/mentions.js",
-          window
-        );
-      } catch (e) {
-        console.error("Failed to load mentions.js:", e);
-      }
-
-      // Load dialog script
-      try {
-        Services.scriptloader.loadSubScript(
-          "chrome://zotero-rag/content/dialog.js",
-          window
-        );
-      } catch (e) {
-        console.error("Failed to load dialog.js:", e);
-      }
-    });
-  </script>
+  <script src="chrome://zotero-rag/content/dialog-loader.js"/>
   <style>
     /* Inline styles */
     /* The window cannot be made smaller than its initial size (the footer would collapse). */
@@ -91,7 +40,7 @@
     .status-message.info { color: #0066cc; }
     .status-message.success { color: #008000; }
     .status-message.error { color: #cc0000; }
-    .dialog-buttons { display: flex; justify-content: flex-end; gap: 10px; padding-top: 15px; border-top: 1px solid #ddd; flex-shrink: 0; }
+    .dialog-buttons { display: flex; justify-content: flex-end; align-items: center; gap: 10px; padding-top: 15px; border-top: 1px solid #ddd; flex-shrink: 0; }
     .dialog-button { padding: 8px 20px; border: 1px solid #ccc; border-radius: 4px; background-color: #f5f5f5; color: #333; cursor: pointer; }
     .dialog-button:hover { background-color: #e5e5e5; }
     .dialog-button:disabled { opacity: 0.5; cursor: not-allowed; background-color: #f5f5f5; }
@@ -100,7 +49,6 @@
     .dialog-button.primary:hover { background-color: #0052a3; }
     .dialog-button.primary:disabled { opacity: 0.5; cursor: not-allowed; background-color: #0066cc; }
     .dialog-button.primary:disabled:hover { background-color: #0066cc; }
-    #rate-limit-section { display: flex; flex-direction: column; justify-content: center; gap: 5px; width: 33%; flex-shrink: 0; align-self: stretch; border-right: 1px solid #ddd; padding-right: 10px; margin-right: 10px; }
     .advanced-options { margin-bottom: 15px; }
     .advanced-options > summary { cursor: pointer; font-weight: 500; margin-bottom: 8px; list-style: none; }
     .advanced-options > summary::before { content: '\25B6  '; font-size: 10px; }
@@ -130,6 +78,10 @@
        which fills a fixed-height slot shared with the progress bar in input state),
        since the result state has no progress widget to share space with. */
     #result-status-section { flex-shrink: 0; margin-bottom: 10px; padding: 10px; background-color: #fff5f5; border: 1px solid #ffcccc; border-radius: 4px; box-sizing: border-box; }
+    .standin-offer { font-size: 12px; margin: 4px 0; padding: 8px; background-color: #fffbe6; border: 1px solid #f0d78c; border-radius: 4px; }
+    .standin-choice { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+    .standin-choice span { flex: 1; }
+    .standin-choice button { flex-shrink: 0; white-space: nowrap; }
   </style>
 </head>
 
@@ -208,8 +160,33 @@
             <input type="checkbox" id="include-trace" />
             Include debugging information in note
           </label>
+          <label id="disable-reranking-row" style="display:none; align-items:center; gap:6px; font-weight:normal; cursor:pointer;">
+            <input type="checkbox" id="disable-reranking" />
+            Disable re-ranking (faster, less precise choice of passages)
+          </label>
         </div>
       </details>
+
+      <!-- Shown when the preset re-ranks but its endpoint is not running -->
+      <div id="rerank-notice" style="font-size: 12px; margin: 4px 0; display:none; align-items:center; gap:8px;">
+        <span id="rerank-notice-text" style="flex: 1;"></span>
+        <button id="rerank-start-button" type="button" hidden="hidden" style="flex-shrink: 0; white-space: nowrap;">Start re-ranking</button>
+      </div>
+
+      <!-- Shown while a stand-in preset answers queries (a provider's quota is used up) -->
+      <div id="standin-line" style="font-size: 12px; margin: 4px 0; display:none; align-items:center; gap:8px;">
+        <span id="standin-line-text" style="flex: 1;"></span>
+        <button id="standin-end-button" type="button" style="flex-shrink: 0; white-space: nowrap;">End now</button>
+      </div>
+
+      <!-- Offered in place of the error when a provider's quota is used up -->
+      <div id="standin-offer" class="standin-offer" style="display:none;">
+        <div id="standin-offer-text" style="margin-bottom: 6px;"></div>
+        <div id="standin-offer-list"></div>
+        <div style="text-align: right; margin-top: 6px;">
+          <button id="standin-offer-dismiss" type="button">Not now</button>
+        </div>
+      </div>
 
 
       <!-- Feedback container (fixed height) -->
@@ -242,8 +219,9 @@
         <input type="checkbox" id="force-full-reindex" style="margin-right: 5px;"/>
         <span style="font-size: 13px; color: #666;">Force Full Reindex (Dev)</span>
       </label>
-      <!-- Rate limit indicators (shown in Index mode when embedding has rate limits) -->
-      <div id="rate-limit-section" style="display: none;">
+      <!-- Usage widget: estimated session costs of a paid preset, else the quota bars
+           (shown in Index mode when embedding has rate limits). Fixed size, see rate-limit.css. -->
+      <div id="rate-limit-section" class="usage-widget" style="display: none;">
         <div id="rate-limit-bars"></div>
       </div>
       <button id="autoindex-status-button" type="button" class="dialog-button" style="display: none;" title="Show server-side automatic indexing status">Indexing status</button>
@@ -269,6 +247,15 @@
         <span>Processing query, please wait…</span>
       </div>
 
+      <!-- Offered in place of a follow-up's error when a provider's quota is used up -->
+      <div id="result-standin-offer" class="standin-offer" style="display:none; flex-shrink: 0; margin-bottom: 10px;">
+        <div id="result-standin-offer-text" style="margin-bottom: 6px;"></div>
+        <div id="result-standin-offer-list"></div>
+        <div style="text-align: right; margin-top: 6px;">
+          <button id="result-standin-offer-dismiss" type="button">Not now</button>
+        </div>
+      </div>
+
       <!-- Status messages for the result state (errors from submitFollowUp/saveAsNote/
            exportDebugInfo) — a separate element from #status-section because that one
            lives inside #input-content, which is hidden once switchToResultState() runs. -->
@@ -280,6 +267,10 @@
       </div>
 
       <div class="dialog-buttons">
+        <!-- Same usage widget as in the input state (costs of a paid preset, else quota) -->
+        <div id="result-rate-limit-section" class="usage-widget" style="display: none;">
+          <div id="result-rate-limit-bars"></div>
+        </div>
         <button id="export-debug-button" type="button" class="dialog-button" style="display: none; margin-right: auto;">Export Debug Info</button>
         <button id="save-note-button" type="button" class="dialog-button">Save as Note</button>
         <button id="result-close-button" type="button" class="dialog-button" title="Close this dialog">Close</button>

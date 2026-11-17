@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence
 from pydantic import BaseModel
 
 from backend.models.filters import MetadataFilters
@@ -20,7 +20,16 @@ from backend.services.embeddings import EmbeddingService
 from backend.services.llm import LLMService
 from backend.services.lexical_rerank import fuse_lexical
 from backend.services.embedding_mmr_rerank import rerank_embedding_mmr
+from backend.services.near_dup_filter import drop_near_duplicates
+from backend.services.query_translation import translate_question
+from backend.services.rerank import RerankOutcome, current_rerank_request, effective_pool_size, rerank_pool
+from backend.services.query_decomposition import (
+    build_decomposition_prompt,
+    fuse_ranked_lists,
+    parse_sub_queries,
+)
 from backend.db.vector_store import VectorStore
+from backend.config.presets import RerankConfig
 from backend.config.settings import Settings
 
 if TYPE_CHECKING:
@@ -612,6 +621,21 @@ class QueryResult(BaseModel):
     source_refs: list[str] = []   # union of every contributing source's chunk_id
 
 
+def _merge_rerank_outcomes(outcomes: list) -> Optional[dict]:
+    """One trace entry for every re-ranking pass of a query (None when none ran).
+
+    Status, model and provider come from the last pass; ``scored`` and
+    ``duration_ms`` add up across passes (an escalation only scores new chunks).
+    """
+    if not outcomes:
+        return None
+    last = outcomes[-1].model_dump()
+    last["passes"] = len(outcomes)
+    last["scored"] = sum(o.scored for o in outcomes)
+    last["duration_ms"] = sum(o.duration_ms for o in outcomes)
+    return last
+
+
 class RAGEngine:
     """
     RAG query engine for answering questions based on indexed documents.
@@ -655,6 +679,158 @@ class RAGEngine:
         determines whether search() needs to fetch vectors at all."""
         lambda_param = getattr(self.settings, "retrieval_embedding_mmr_lambda", 0.0)
         return isinstance(lambda_param, (int, float)) and lambda_param > 0
+
+    def _near_dup_threshold(self) -> float:
+        """settings.retrieval_near_dup_threshold when it enables near-duplicate
+        removal (see near_dup_filter), else 0."""
+        threshold = getattr(self.settings, "retrieval_near_dup_threshold", 0.0)
+        return threshold if isinstance(threshold, (int, float)) and threshold > 0 else 0.0
+
+    def _apply_near_dup_filter(self, results: list) -> list:
+        """Drop raw candidates near-identical (by embedding) to a higher-scoring
+        one when settings.retrieval_near_dup_threshold > 0; no-op otherwise."""
+        threshold = self._near_dup_threshold()
+        return drop_near_duplicates(results, threshold) if threshold else results
+
+    async def _prepare_pool(
+        self, question: str, results: list, rerank_cache: dict, outcome: list,
+        pool_size: Optional[int] = None,
+        extra_questions: Sequence[str] = (),
+    ) -> list:
+        """Lexical blend, optional cross-encoder re-ranking, then embedding MMR.
+
+        The re-ranker (the preset's ``rerank`` section, see backend.services.rerank)
+        runs between the two blends so MMR diversifies by the sharper score.
+        ``rerank_cache`` holds scores already computed in this query; the
+        outcome of the pass is appended to ``outcome`` for the trace.
+        ``pool_size`` is the pool resolved for this query (:meth:`_rerank_pool_size`);
+        ``extra_questions`` are other versions of the question the re-ranker also scores
+        against (the English translation, :meth:`_translation_variant`).
+        """
+        results = self._apply_lexical_fusion(question, results)
+        preset = self.settings.get_hardware_preset()
+        # isinstance, not "is not None": tests pass mock settings whose attributes are mocks.
+        if isinstance(getattr(preset, "rerank", None), RerankConfig):
+            results, result_outcome = await rerank_pool(
+                question, results, preset, cache=rerank_cache, pool_size=pool_size or None,
+                extra_questions=extra_questions,
+            )
+            outcome.append(result_outcome)
+        return self._apply_embedding_mmr(results)
+
+    def _searched_chunk_count(self, library_ids: List[str]) -> int:
+        """Total chunks of the searched libraries, from their index metadata (0 when unknown)."""
+        total = 0
+        for library_id in library_ids:
+            try:
+                count = getattr(self.vector_store.get_library_metadata(library_id), "total_chunks", 0)
+            except Exception as exc:  # the count only tunes the pool; never fail a query over it
+                logger.debug(f"No chunk count for library {library_id}: {exc}")
+                continue
+            if isinstance(count, int) and not isinstance(count, bool):
+                total += count
+        return total
+
+    async def _rerank_pool_size(self, library_ids: List[str]) -> int:
+        """The re-ranking pool size for this query when re-ranking runs, else 0.
+
+        The caller's ``rerank_pool_size``, else the preset's ``pool_size`` scaled to the
+        searched libraries' chunk count (``backend.services.rerank.scaled_pool_size``).
+        The vector search must fetch at least that many candidates: the re-ranker only
+        rescores what the search returned, so a pool above the engine's own candidate
+        pool would otherwise have no effect.
+        """
+        cfg = getattr(self.settings.get_hardware_preset(), "rerank", None)
+        if not isinstance(cfg, RerankConfig) or not current_rerank_request().enabled:
+            return 0
+        if current_rerank_request().pool_size is not None:
+            return effective_pool_size(cfg)
+        chunks = await asyncio.to_thread(self._searched_chunk_count, library_ids or [])
+        return effective_pool_size(cfg, chunks)
+
+    async def _translation_variant(self, question: str) -> tuple[Optional[str], Optional[list[float]]]:
+        """The English translation of a non-English question and its embedding, or (None, None).
+
+        Only when ``settings.retrieval_query_translation`` is on and the question looks
+        non-English (``_looks_like_non_english``); English questions cost nothing extra.
+        Any failure leaves the query with the question alone (see query_translation).
+        """
+        if getattr(self.settings, "retrieval_query_translation", False) is not True:
+            return None, None
+        if not _looks_like_non_english(question):
+            return None, None
+        translation = await translate_question(self.llm_service, question)
+        if not translation:
+            return None, None
+        try:
+            return translation, await self.embedding_service.embed_query(translation)
+        except Exception as exc:  # the translation only widens retrieval; never fail the query over it
+            logger.warning(f"Embedding the translated question failed ({type(exc).__name__}: {exc})")
+            return None, None
+
+    async def _search_variants(
+        self, vectors: list[list[float]], head_size: int = 0, **search_kwargs
+    ) -> tuple[list, int]:
+        """One vector search per question version; returns ``(results, rerank_head)``.
+
+        Several lists are fused by reciprocal rank. The re-ranker then has to see each
+        list's own top ``head_size`` (the re-ranking pool), not just the first
+        ``head_size`` of the fused list, which interleaves the lists and so holds only
+        about half of each one's depth: a passage at rank 204 of the question's own
+        search would otherwise never be rescored (spot check, 2.15M-chunk library).
+        The union of those tops is moved to the front, in fused order, and its size is
+        returned as the pool to rescore. With one list (or no re-ranking) the results
+        are unchanged and ``head_size`` is returned as is.
+        """
+        lists = [
+            await asyncio.to_thread(self.vector_store.search, query_vector=vector, **search_kwargs)
+            for vector in vectors
+        ]
+        if len(lists) == 1:
+            return lists[0], head_size
+        fused = fuse_ranked_lists(lists)
+        if head_size <= 0:
+            return fused, head_size
+        keep = {
+            r.chunk.metadata.chunk_id
+            for results in lists
+            for r in sorted(results, key=lambda r: r.score, reverse=True)[:head_size]
+        }
+        head = [r for r in fused if r.chunk.metadata.chunk_id in keep]
+        tail = [r for r in fused if r.chunk.metadata.chunk_id not in keep]
+        return head + tail, len(head)
+
+    async def _search_with_sub_queries(
+        self, question: str, results: list, search_kwargs: dict
+    ) -> list:
+        """When settings.retrieval_query_decomposition > 0, also search with
+        LLM-written sub-queries and fuse all ranked lists (see
+        query_decomposition); otherwise return ``results`` unchanged.
+
+        The fused pool is usually larger than one search's candidate pool, so
+        the escalation retry (which only fires when a search hit its fetch
+        limit) does not run on top of it: the sub-queries already widen the pool.
+        A failed or empty decomposition falls back to the original results.
+        """
+        max_queries = getattr(self.settings, "retrieval_query_decomposition", 0)
+        if not isinstance(max_queries, int) or isinstance(max_queries, bool) or max_queries <= 0:
+            return results
+        try:
+            text = await self.llm_service.generate(
+                prompt=build_decomposition_prompt(question, max_queries), max_tokens=300, temperature=0.0
+            )
+        except Exception as exc:  # decomposition is an optional improvement, never fatal
+            logger.warning(f"Query decomposition failed ({type(exc).__name__}: {exc}); using the question only")
+            return results
+        sub_queries = parse_sub_queries(text, max_queries, question)
+        logger.info(f"Query decomposition: {sub_queries}")
+        if not sub_queries:
+            return results
+        lists = [results]
+        for sub_query in sub_queries:
+            vector = await self.embedding_service.embed_query(sub_query)
+            lists.append(await asyncio.to_thread(self.vector_store.search, query_vector=vector, **search_kwargs))
+        return fuse_ranked_lists(lists)
 
     def _apply_embedding_mmr(self, results: list) -> list:
         """Re-rank the raw candidate pool by embedding-vector MMR when
@@ -733,8 +909,11 @@ class RAGEngine:
 
         # Step 1: Generate embedding for question
         logger.debug("Generating query embedding...")
-        query_embedding = await self.embedding_service.embed_text(question)
+        query_embedding = await self.embedding_service.embed_query(question)
         embedding_model = getattr(self.embedding_service, "model_name", "unknown")
+        translation, translation_embedding = await self._translation_variant(question)
+        search_vectors = [query_embedding] + ([translation_embedding] if translation_embedding else [])
+        extra_questions = [translation] if translation else []
 
         # Step 2: Search vector database for relevant chunks. Fetch a raw candidate
         # pool larger than top_k, then dedup+cap how many chunks any one document
@@ -742,22 +921,31 @@ class RAGEngine:
         # near-duplicate/high-scoring chunks can occupy the entire window and crowd
         # out a genuinely relevant, less-chunked document (see #87 and
         # _SEARCH_CANDIDATE_POOL_SIZE above).
-        candidate_pool_size = max(top_k, search_candidate_pool_size)
+        rerank_pool_size = await self._rerank_pool_size(library_ids)
+        candidate_pool_size = max(top_k, search_candidate_pool_size, rerank_pool_size)
         logger.debug(
             f"Searching for top {top_k} chunks (candidate pool {candidate_pool_size}) "
             f"in libraries: {library_ids}"
         )
         active_filters = filters if filters and not filters.is_empty() else None
-        use_embedding_mmr = self._use_embedding_mmr()
-        raw_results = await asyncio.to_thread(
-            self.vector_store.search,
-            query_vector=query_embedding,
+        fetch_vectors = self._use_embedding_mmr() or self._near_dup_threshold() > 0
+        raw_results, rerank_head = await self._search_variants(
+            search_vectors,
+            head_size=rerank_pool_size,
             limit=candidate_pool_size,
             score_threshold=min_score,
             library_ids=library_ids if library_ids else None,
             filters=active_filters,
-            with_vectors=use_embedding_mmr,
+            with_vectors=fetch_vectors,
         )
+
+        raw_results = await self._search_with_sub_queries(question, raw_results, dict(
+            limit=candidate_pool_size,
+            score_threshold=min_score,
+            library_ids=library_ids if library_ids else None,
+            filters=active_filters,
+            with_vectors=fetch_vectors,
+        ))
 
         if not raw_results:
             logger.warning("No relevant chunks found for query")
@@ -767,10 +955,15 @@ class RAGEngine:
                 sources=[]
             )
 
-        raw_results = self._apply_lexical_fusion(question, raw_results)
-        raw_results = self._apply_embedding_mmr(raw_results)
+        rerank_cache: dict[str, float] = {}
+        rerank_outcomes: list[RerankOutcome] = []
+        raw_results = await self._prepare_pool(
+            question, raw_results, rerank_cache, rerank_outcomes, rerank_head, extra_questions
+        )
 
-        capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+        capped_pool = _dedup_and_cap_chunks_per_document(
+            self._apply_near_dup_filter(raw_results), max_chunks_per_document
+        )
         search_results = capped_pool[:top_k]
 
         logger.info(f"Retrieved {len(search_results)} relevant chunks")
@@ -808,20 +1001,22 @@ class RAGEngine:
                     f"Retrieval escalation triggered ({reason}); "
                     f"escalating to top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size})"
                 )
-                escalated_raw_results = await asyncio.to_thread(
-                    self.vector_store.search,
-                    query_vector=query_embedding,
+                escalated_raw_results, escalated_head = await self._search_variants(
+                    search_vectors,
+                    head_size=rerank_pool_size,
                     limit=escalated_candidate_pool_size,
                     score_threshold=min_score,
                     library_ids=library_ids if library_ids else None,
                     filters=active_filters,
-                    with_vectors=use_embedding_mmr,
+                    with_vectors=fetch_vectors,
                 )
                 if len(escalated_raw_results) > len(raw_results):
-                    raw_results = escalated_raw_results
-                    raw_results = self._apply_lexical_fusion(question, raw_results)
-                    raw_results = self._apply_embedding_mmr(raw_results)
-                    capped_pool = _dedup_and_cap_chunks_per_document(raw_results, max_chunks_per_document)
+                    raw_results = await self._prepare_pool(
+                        question, escalated_raw_results, rerank_cache, rerank_outcomes, escalated_head, extra_questions
+                    )
+                    capped_pool = _dedup_and_cap_chunks_per_document(
+                        self._apply_near_dup_filter(raw_results), max_chunks_per_document
+                    )
                     search_results = capped_pool[:escalated_top_k]
                     escalated = True
                     logger.info(f"Escalated retrieval returned {len(search_results)} chunks")
@@ -892,20 +1087,22 @@ class RAGEngine:
                 f"Thin context coverage detected; escalating retrieval to "
                 f"top_k={escalated_top_k} (candidate pool {escalated_candidate_pool_size}) and regenerating once"
             )
-            retry_raw_results = await asyncio.to_thread(
-                self.vector_store.search,
-                query_vector=query_embedding,
+            retry_raw_results, retry_head = await self._search_variants(
+                search_vectors,
+                head_size=rerank_pool_size,
                 limit=escalated_candidate_pool_size,
                 score_threshold=min_score,
                 library_ids=library_ids if library_ids else None,
                 filters=active_filters,
-                with_vectors=use_embedding_mmr,
+                with_vectors=fetch_vectors,
             )
             retry_improved = False
             if len(retry_raw_results) > len(raw_results):
+                retry_pool = await self._prepare_pool(
+                    question, retry_raw_results, rerank_cache, rerank_outcomes, retry_head, extra_questions
+                )
                 retry_capped_pool = _dedup_and_cap_chunks_per_document(
-                    self._apply_embedding_mmr(self._apply_lexical_fusion(question, retry_raw_results)),
-                    max_chunks_per_document,
+                    self._apply_near_dup_filter(retry_pool), max_chunks_per_document,
                 )
                 retry_search_results = retry_capped_pool[:escalated_top_k]
                 retry_doc_chunks, retry_sorted_doc_keys = _group_chunks_by_document(retry_search_results)
@@ -979,6 +1176,8 @@ class RAGEngine:
                     page_number=r.chunk.metadata.page_number,
                     score=r.score,
                     text_preview=r.chunk.metadata.text_preview,
+                    vector_score=r.vector_score,
+                    pre_rerank_rank=r.pre_rerank_rank,
                 )
                 for r in search_results
             ]
@@ -992,6 +1191,7 @@ class RAGEngine:
                     "filters": active_filters.model_dump() if active_filters else None,
                 },
                 escalated=escalated,
+                translated_query=translation,
                 raw_results_count=len(search_results),
                 score_stats={
                     "min": min(scores),
@@ -1000,6 +1200,7 @@ class RAGEngine:
                 },
                 documents_grouped=len(sorted_doc_keys),
                 chunks=chunk_traces,
+                rerank=_merge_rerank_outcomes(rerank_outcomes),
             )
             trace.record(AgentExecutionTrace(
                 agent_name="rag",

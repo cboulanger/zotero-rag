@@ -987,6 +987,34 @@ test('submitQuery includes force_fresh_retrieval only when true', async () => {
 	assert.strictEqual(capturedBody.force_fresh_retrieval, true);
 });
 
+test('submitQuery sends rerank_pool_size from Preferences only when set and re-ranking is on', async () => {
+	/** @type {any} */
+	let capturedBody = null;
+	const fetchStub = async (/** @type {string} */ _url, /** @type {any} */ opts) => {
+		capturedBody = JSON.parse(opts.body);
+		return { ok: true, json: async () => ({ answer: 'ok' }) };
+	};
+	/** @type {Record<string, any>} */
+	const stored = {};
+	const zotero = { Libraries: { userLibraryID: 1 }, Prefs: { get: (/** @type {string} */ key) => stored[key] } };
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
+	plugin.backendURL = 'http://localhost:8119';
+
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+
+	stored['extensions.zotero-rag.rerankPoolSize'] = 300;
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, 300);
+
+	await plugin.submitQuery('Q', ['1'], { enableReranking: false });
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+
+	stored['extensions.zotero-rag.rerankPoolSize'] = 'abc';
+	await plugin.submitQuery('Q', ['1'], {});
+	assert.strictEqual(capturedBody.rerank_pool_size, undefined);
+});
+
 test('getIndexSnapshotsEnabled fetches and caches the value, defaulting to false on error', async () => {
 	const { zotero, ioUtils, pathUtils } = makeStubs();
 	let fetchCalls = 0;
@@ -1792,7 +1820,7 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		key_name: 'GATEWAY_EMBEDDING_BASE_URL',
 		header_name: 'X-Mpcdf-Embedding-Base-Url',
 		kind: 'shared_base_url',
 		description: 'Shared endpoint URL',
@@ -1810,10 +1838,10 @@ test('renderServiceApiKeyFields renders a shared_base_url field as a text input 
 	assert.strictEqual(input.type, 'text');
 	assert.strictEqual(input.value, ''); // never prefilled from a pref
 
-	await input.dispatchChange('https://llm.mpcdf.mpg.de/abc123/v1');
+	await input.dispatchChange('https://gateway.example.org/abc123/v1');
 
-	assert.deepStrictEqual(posted, { keyName: 'MPCDF_EMBEDDING_BASE_URL', value: 'https://llm.mpcdf.mpg.de/abc123/v1' });
-	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.MPCDF_EMBEDDING_BASE_URL'], undefined);
+	assert.deepStrictEqual(posted, { keyName: 'GATEWAY_EMBEDDING_BASE_URL', value: 'https://gateway.example.org/abc123/v1' });
+	assert.strictEqual(prefs['extensions.zotero-rag.serviceApiKey.GATEWAY_EMBEDDING_BASE_URL'], undefined);
 });
 
 test('renderServiceApiKeyFields dispatches zotero-rag-shared-field-saved after a shared field is saved', async () => {
@@ -1879,7 +1907,7 @@ test('renderServiceApiKeyFields leaves input.pattern unset when the field declar
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_BASE_URL',
+		key_name: 'GATEWAY_EMBEDDING_BASE_URL',
 		header_name: 'X-Mpcdf-Embedding-Base-Url',
 		kind: 'shared_base_url',
 		description: 'Shared endpoint URL',
@@ -1901,7 +1929,7 @@ test('renderServiceApiKeyFields renders a shared_api_key field as a password inp
 	const doc = makeFakeDoc();
 	const container = makeFakeContainer();
 	const requiredKeys = [{
-		key_name: 'MPCDF_EMBEDDING_API_KEY',
+		key_name: 'GATEWAY_EMBEDDING_API_KEY',
 		header_name: 'X-Mpcdf-Embedding-Api-Key',
 		kind: 'shared_api_key',
 		description: 'Shared API key',
@@ -1949,20 +1977,20 @@ test('setSharedRemoteField POSTs to /api/config/remote-fields and returns is_set
 	const fetchCalls = [];
 	const fetchStub = async (url, init) => {
 		fetchCalls.push({ url, init });
-		return { ok: true, status: 200, json: async () => ({ is_set: { MPCDF_EMBEDDING_BASE_URL: true } }) };
+		return { ok: true, status: 200, json: async () => ({ is_set: { GATEWAY_EMBEDDING_BASE_URL: true } }) };
 	};
 	const zotero = { Prefs: { get: () => null } };
 	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub });
 	plugin.backendURL = 'http://localhost:8119';
 	plugin.requiredApiKeys = [];
 
-	const result = await plugin.setSharedRemoteField('MPCDF_EMBEDDING_BASE_URL', 'https://llm.mpcdf.mpg.de/abc123/v1');
+	const result = await plugin.setSharedRemoteField('GATEWAY_EMBEDDING_BASE_URL', 'https://gateway.example.org/abc123/v1');
 
 	assert.strictEqual(fetchCalls.length, 1);
 	assert.strictEqual(fetchCalls[0].url, 'http://localhost:8119/api/config/remote-fields');
 	assert.deepStrictEqual(
 		JSON.parse(fetchCalls[0].init.body),
-		{ values: { MPCDF_EMBEDDING_BASE_URL: 'https://llm.mpcdf.mpg.de/abc123/v1' } },
+		{ values: { GATEWAY_EMBEDDING_BASE_URL: 'https://gateway.example.org/abc123/v1' } },
 	);
 	// `result` is an object literal returned from inside the vm context (a
 	// separate realm from this test's own global), so assert.deepStrictEqual
@@ -2075,4 +2103,216 @@ test('_dropBackendIndexed marks rows the server answered for as unindexed and ch
 	assert.deepStrictEqual(sizes, [200, 200, 50]);
 	assert.strictEqual(kept.length, 449);
 	assert.ok(kept.every((/** @type {any} */ r) => r.serverIndexState === 'unindexed'));
+});
+
+// ── Stand-in presets ────────────────────────────────────────────────────────
+
+const QUOTA_DETAIL = {
+	code: 'quota_exhausted',
+	message: "KISSKI's embedding quota is used up until 23:00 UTC.",
+	side: 'embedding', provider: 'kisski', available_at: '2026-11-16T23:00:00Z',
+	standins: [
+		{ preset: 'remote-mpcdf', cost: 'free', label: 'MPCDF', needs: ['login:mpcdf'] },
+		{ preset: 'runpod', cost: 'paid', label: 'RunPod', needs: ['key:RUNPOD_API_KEY'] },
+	],
+};
+
+/**
+ * A plugin whose fetch answers by "METHOD path" from `routes` and records each call.
+ * @param {Record<string, {status: number, body: any}>} routes
+ */
+function standinPlugin(routes) {
+	/** @type {Array<{method: string, path: string, body: any}>} */
+	const calls = [];
+	/** @type {Record<string, any>} */
+	const prefs = {};
+	const fetchStub = async (/** @type {string} */ url, /** @type {any} */ opts = {}) => {
+		const method = opts.method || 'GET';
+		const p = url.replace('http://localhost:8119', '');
+		calls.push({ method, path: p, body: opts.body ? JSON.parse(opts.body) : undefined });
+		const r = routes[`${method} ${p}`] || { status: 404, body: { detail: 'Not Found' } };
+		return {
+			ok: r.status < 400, status: r.status,
+			headers: { get: () => 'application/json' },
+			json: async () => r.body,
+			text: async () => JSON.stringify(r.body),
+		};
+	};
+	const zotero = {
+		Libraries: { userLibraryID: 1 },
+		Prefs: { get: (/** @type {string} */ k) => prefs[k], set: (/** @type {string} */ k, /** @type {any} */ v) => { prefs[k] = v; } },
+	};
+	const plugin = loadPlugin(zotero, {}, {}, { fetch: fetchStub, Services: { console: { logStringMessage() {} } } });
+	plugin.backendURL = 'http://localhost:8119';
+	return { plugin, calls, prefs };
+}
+
+test('submitQuery throws QuotaExhaustedError with the structured detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: QUOTA_DETAIL } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'QuotaExhaustedError');
+		assert.deepStrictEqual(err.detail, QUOTA_DETAIL);
+		assert.strictEqual(err.message, QUOTA_DETAIL.message);
+		return true;
+	});
+});
+
+test('submitQuery still throws a plain Error for a 503 with a string detail', async () => {
+	const { plugin } = standinPlugin({ 'POST /api/query': { status: 503, body: { detail: 'Embedding service down' } } });
+	await assert.rejects(plugin.submitQuery('Q', ['1'], {}), (/** @type {any} */ err) => {
+		assert.strictEqual(err.name, 'Error');
+		assert.match(err.message, /HTTP 503 — Embedding service down/);
+		return true;
+	});
+});
+
+test('useStandin PUTs the preset name and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'RUNPOD_API_KEY', header_name: 'X-Runpod-Api-Key' }] } },
+	});
+	await plugin.useStandin('runpod');
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['PUT /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(calls[0].body, { preset_name: 'runpod' });
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['RUNPOD_API_KEY']);
+});
+
+test('useStandin with startEndpoints starts the stand-in endpoints, and a refused start is not an error', async () => {
+	for (const status of [202, 409, 400]) {
+		const { plugin, calls } = standinPlugin({
+			'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod', until: '2026-11-16T23:00:00Z', replaces: 'kisski' } } },
+			'GET /api/required-keys': { status: 200, body: { keys: [] } },
+			'POST /api/config/provision': { status, body: { detail: 'x' } },
+		});
+		await plugin.useStandin('runpod', 'kisski', true);
+		assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`),
+			['PUT /api/config/my-preset/standin', 'GET /api/required-keys', 'POST /api/config/provision']);
+	}
+});
+
+test('useStandin throws the server message on a 409 and does not refresh keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 409, body: { detail: 'No quota is exhausted any more.' } },
+	});
+	await assert.rejects(plugin.useStandin('runpod'), /No quota is exhausted any more\./);
+	assert.deepStrictEqual(calls.map((c) => c.method), ['PUT']);
+});
+
+test('endStandin DELETEs the stand-in and refreshes required keys', async () => {
+	const { plugin, calls } = standinPlugin({
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [{ key_name: 'KISSKI_API_KEY', header_name: 'X-Kisski-Api-Key' }] } },
+	});
+	await plugin.endStandin();
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['DELETE /api/config/my-preset/standin', 'GET /api/required-keys']);
+	assert.deepStrictEqual(plugin.requiredApiKeys.map((/** @type {any} */ k) => k.key_name), ['KISSKI_API_KEY']);
+});
+
+test('syncStandinState refreshes required keys only when the stand-in changed', async () => {
+	const { plugin, calls } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: { standin: { preset: 'runpod' } } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('runpod');
+	calls.length = 0;
+	assert.strictEqual(await plugin.syncStandinState({ preset: 'runpod', until: 'x', replaces: 'kisski' }), false);
+	assert.deepStrictEqual(calls, []);
+	// The stand-in expired on the server: the user's own keys must be sent again.
+	assert.strictEqual(await plugin.syncStandinState(null), true);
+	assert.deepStrictEqual(calls.map((c) => `${c.method} ${c.path}`), ['GET /api/required-keys']);
+	assert.strictEqual(await plugin.syncStandinState(undefined), false);
+});
+
+test('describeActiveStandin names the stand-in, its end and the exhausted provider when known', () => {
+	const { plugin } = standinPlugin({});
+	const standin = { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' };
+	const d = new Date(standin.until);
+	const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+	assert.strictEqual(plugin.describeActiveStandin(standin, 'kisski'), `Using remote-mpcdf until ${hhmm} (KISSKI quota)`);
+	assert.strictEqual(plugin.describeActiveStandin(standin, null), `Using remote-mpcdf until ${hhmm} (instead of kisski)`);
+});
+
+test('renderStandinLine (shared by the query dialog and Preferences) shows and hides the line', async () => {
+	const { fakeNode } = require('./fake-dom.js');
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	const line = fakeNode();
+	const text = fakeNode('span');
+	plugin.renderStandinLine(line, text, { preset: 'remote-mpcdf', until: '2026-11-16T23:00:00Z', replaces: 'kisski' });
+	assert.strictEqual(line.style.display, 'flex');
+	assert.match(text.textContent, /^Using remote-mpcdf until \d\d:\d\d \(KISSKI quota\)$/);
+	plugin.renderStandinLine(line, text, null);
+	assert.strictEqual(line.style.display, 'none');
+	plugin.renderStandinLine(null, null, null); // missing markup is ignored
+});
+
+test('endStandin forgets the exhausted provider', async () => {
+	const { plugin } = standinPlugin({
+		'PUT /api/config/my-preset/standin': { status: 200, body: {} },
+		'DELETE /api/config/my-preset/standin': { status: 200, body: { standin: null } },
+		'GET /api/required-keys': { status: 200, body: { keys: [] } },
+	});
+	await plugin.useStandin('remote-mpcdf', 'kisski');
+	assert.strictEqual(plugin.standinProvider, 'kisski');
+	await plugin.endStandin();
+	assert.strictEqual(plugin.standinProvider, null);
+});
+
+test('fetchStandinOffer returns the offer, null when there is none, and null when the server cannot say', async () => {
+	const withOffer = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: QUOTA_DETAIL } } });
+	assert.deepStrictEqual(await withOffer.plugin.fetchStandinOffer(), QUOTA_DETAIL);
+	assert.deepStrictEqual(withOffer.calls.map((c) => `${c.method} ${c.path}`), ['GET /api/config/standins']);
+	const none = standinPlugin({ 'GET /api/config/standins': { status: 200, body: { offer: null } } });
+	assert.strictEqual(await none.plugin.fetchStandinOffer(), null);
+	const old = standinPlugin({}); // 404: a backend without the endpoint
+	assert.strictEqual(await old.plugin.fetchStandinOffer(), null);
+});
+
+/**
+ * Stubs for the toolbar "unavailable attachments" badge: one main window with the
+ * badge button, the personal library selected, and an in-memory prefs store.
+ * @returns {{ plugin: any, prefs: Map<string, any>, btn: any, badge: any }}
+ */
+function badgePlugin() {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const prefs = new Map();
+	/** @param {Record<string, string>} attrs */
+	const fakeElement = (attrs) => ({
+		attrs,
+		setAttribute(name, value) { this.attrs[name] = String(value); },
+		removeAttribute(name) { delete this.attrs[name]; },
+	});
+	const btn = fakeElement({ hidden: 'true' });
+	const badge = fakeElement({ value: '' });
+	const win = {
+		document: {
+			getElementById: (id) => ({ 'zotero-rag-unavailable-btn': btn, 'zotero-rag-unavailable-badge': badge })[id] || null,
+		},
+	};
+	zotero.Prefs = { get: (key) => prefs.get(key), set: (key, value) => { prefs.set(key, value); } };
+	zotero.Users = { getCurrentUserID: () => 42 };
+	zotero.Groups = { getByLibraryID: () => null };
+	zotero.getMainWindows = () => [win];
+	zotero.getActiveZoteroPane = () => ({ getSelectedLibraryIDs: () => [1] });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	return { plugin, prefs, btn, badge };
+}
+
+test('updateMissingFilesCount repaints the toolbar badge with the live count (#102)', () => {
+	const { plugin, prefs, btn, badge } = badgePlugin();
+	prefs.set('extensions.zotero-rag.missingFiles.u42', 17); // stale count from the last indexing run
+	plugin.refreshUnavailableBadge();
+	assert.strictEqual(badge.attrs.value, '17');
+	assert.strictEqual(btn.attrs.hidden, undefined);
+
+	// The Fix Unavailable dialog determined the real number.
+	plugin.updateMissingFilesCount('u42', 3);
+	assert.strictEqual(prefs.get('extensions.zotero-rag.missingFiles.u42'), 3);
+	assert.strictEqual(badge.attrs.value, '3');
+
+	plugin.updateMissingFilesCount('u42', 0);
+	assert.strictEqual(btn.attrs.hidden, 'true');
 });

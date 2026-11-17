@@ -165,6 +165,25 @@ class TestQueryAPI(unittest.TestCase):
         self.assertEqual(response.status_code, 504)
         self.assertIn("timed out after 30s", response.json()["detail"])
 
+    def test_query_response_carries_the_requests_estimated_costs(self):
+        """Costs recorded while the orchestrator runs come back in ``costs`` (#119)."""
+        from backend.providers import Cost
+        from backend.services.cost_ledger import current_ledger
+        from backend.services.rag_engine import QueryResult
+
+        async def fake_query(*args, **kwargs):
+            current_ledger().add(Cost(side="llm", amount=0.01, requests=1, input_tokens=100))
+            current_ledger().add(Cost(side="llm", amount=0.02, requests=1, input_tokens=200))
+            return QueryResult(question="q", answer="a", sources=[])
+
+        self._mock_vector_store_for_query()
+        with patch("backend.services.query_orchestrator.QueryOrchestrator.query", side_effect=fake_query):
+            response = self.client.post("/api/query", json={"question": "What is RAG?", "library_ids": ["1"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        (cost,) = response.json()["costs"]
+        self.assertEqual((cost["side"], cost["requests"], cost["input_tokens"]), ("llm", 2, 300))
+        self.assertAlmostEqual(cost["amount"], 0.03)
+
     def test_query_vector_store_error_surfaces_real_detail_not_a_timeout(self):
         """A VectorStoreError (e.g. Qdrant's disk-full response) is a distinct,
         non-transient failure — it must not be reported as a 504 timeout, and
@@ -280,9 +299,19 @@ class TestRootEndpoints(unittest.TestCase):
     def tearDown(self):
         del app.state.vector_store
 
-    def test_root(self):
-        """Test GET / endpoint."""
+    def test_root_points_to_status_and_sides(self):
+        """GET / only names the service and where the details are."""
         response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "/status")
+        self.assertEqual(data["sides"], "/sides")
+        self.assertIn("version", data)
+        self.assertNotIn("embedding", data)
+
+    def test_status(self):
+        """GET /status: service state, plugins and capabilities."""
+        response = self.client.get("/status")
         self.assertEqual(response.status_code, 200)
 
         data = response.json()
@@ -290,7 +319,7 @@ class TestRootEndpoints(unittest.TestCase):
         self.assertIn("version", data)
         self.assertEqual(data["status"], "running")
         self.assertIn("preset", data)
-        self.assertIn("embedding", data)
+        self.assertNotIn("embedding", data)  # side details live at /sides
         self.assertIn("vector_db", data)
         # Scalar library count (per-library breakdown lives at /api/libraries)
         self.assertIn("libraries_count", data["vector_db"])
@@ -298,6 +327,25 @@ class TestRootEndpoints(unittest.TestCase):
         # configured in the test environment the feature is disabled.
         self.assertIn("cron_indexing", data)
         self.assertIn("enabled", data["cron_indexing"])
+        plugins = {p["id"]: p for p in data["plugins"]}
+        self.assertTrue(plugins["core"]["builtin"])
+        self.assertEqual(plugins["testvendor"]["status"], "loaded")
+        self.assertIn("inference.provider:testvendor", plugins["testvendor"]["capabilities"])
+        kinds = {(c["kind"], c["id"]) for c in data["capabilities"]}
+        self.assertIn(("inference.provider", "generic"), kinds)
+        self.assertIn(("presets", "testvendor"), kinds)
+
+    def test_sides(self):
+        """GET /sides: one entry per side of the default preset, with what serves it."""
+        response = self.client.get("/sides")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("embedding", data["sides"])
+        self.assertIn("llm", data["sides"])
+        emb = data["sides"]["embedding"]
+        self.assertIn("model_name", emb)
+        self.assertIn("embedding_dim", emb)
+        self.assertIn("plugin", emb["served_by"])
 
     def test_health_check(self):
         """Test GET /health endpoint."""

@@ -102,7 +102,7 @@ class TestEngineEmbeddingMMR(unittest.IsolatedAsyncioTestCase):
         preset.llm.max_answer_tokens = 100
         settings.get_hardware_preset.return_value = preset
         embedding = Mock()
-        embedding.embed_text = AsyncMock(return_value=[0.1])
+        embedding.embed_query = AsyncMock(return_value=[0.1])
         llm = Mock()
         llm.generate = AsyncMock(return_value="Answer [S1]")
         store = Mock()

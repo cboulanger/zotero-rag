@@ -62,6 +62,7 @@ function formatFileSize(bytes) {
  * @property {string} message
  * @property {number} rate_limit_retries
  * @property {UsageMeter[]|null} rate_limit_meters
+ * @property {UsageCost[]} [costs] - estimated costs of this document's embedding calls
  * @property {string|null} [error_detail]
  */
 
@@ -100,10 +101,11 @@ var RemoteIndexer = {
 	 * @param {Map<string, string>} [opts.downloadedFilePaths] - Cache of attachment key → local path for recently downloaded files
 	 * @param {function(any): Promise<string|null>} [opts.downloadAttachment] - Download a single Zotero attachment item; returns local path or null on failure
 	 * @param {function(Record<string,string>): void} [opts.onRateLimitUpdate] - Called with fresh rate-limit headers after each upload
+	 * @param {function(UsageCost[]): void} [opts.onCostsIncurred] - Called with the estimated costs of each indexed document (paid providers only)
 	 * @param {function(): Promise<boolean>} [opts.getIndexSnapshotsEnabled] - Returns whether the admin has enabled indexing of Snapshot-titled webpage attachments; defaults to false (exclude) when omitted
 	 * @returns {Promise<{uploaded: number, skipped: number, noFile: number, linkedUrls: number, errors: number, parseErrors: number, parseErrorKeys: string[], skippedEmpty: number, skippedEmptyKeys: string[], skippedTimeout: number, skippedTimeoutKeys: string[], failedItems: FailedItem[], firstError: string|null, rateLimitMeters: UsageMeter[]|null}>}
 	 */
-	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate, getIndexSnapshotsEnabled }) {
+	async indexLibrary({ libraryId, libraryType, libraryName, backendURL, mode, userId, getAuthHeaders, log, onProgress, isCancelled, signal, downloadedFilePaths, downloadAttachment, onRateLimitUpdate, onCostsIncurred, getIndexSnapshotsEnabled }) {
 		log(`[RemoteIndexer] Starting remote indexing for library ${libraryId}`);
 
 		const indexSnapshotsEnabled = getIndexSnapshotsEnabled ? await getIndexSnapshotsEnabled() : false;
@@ -336,6 +338,7 @@ var RemoteIndexer = {
 					rateLimitMeters = uploadResult.rateLimitMeters;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitMeters);
 				}
+				if (onCostsIncurred && uploadResult.costs && uploadResult.costs.length) onCostsIncurred(uploadResult.costs);
 				if (uploadResult.parseError) {
 					parseErrors++;
 					parseErrorKeys.push(att.attachment_key);
@@ -428,6 +431,7 @@ var RemoteIndexer = {
 					rateLimitMeters = abstractResult.rateLimitMeters;
 					if (onRateLimitUpdate) onRateLimitUpdate(rateLimitMeters);
 				}
+				if (onCostsIncurred && abstractResult.costs && abstractResult.costs.length) onCostsIncurred(abstractResult.costs);
 				if (abstractResult.status === 'skipped_duplicate') {
 					skipped++;
 				} else {
@@ -815,7 +819,7 @@ var RemoteIndexer = {
 	 *   "Download debugging information" option. Defaults to false (no extra data requested).
 	 * @param {boolean} [opts.defer=false] - When true, upload to the deferred-indexing
 	 *   cache instead of indexing now; returns {queued, eta, queueBlockReason} immediately.
-	 * @returns {Promise<{rateLimitMeters: UsageMeter[]|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}>}
+	 * @returns {Promise<{rateLimitMeters: UsageMeter[]|null, queued?: boolean, eta?: string|null, queueBlockReason?: string|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any, costs?: UsageCost[]}>}
 	 */
 	async _uploadAttachment({ att, libraryId, libraryType, backendURL, userId, getAuthHeaders, log, signal, onStatusUpdate = null, timeoutMultiplier = 1.0, includeDiagnostics = false, defer = false }) {
 		/** @type {Record<string, any>|null} */
@@ -979,10 +983,13 @@ var RemoteIndexer = {
 	 * @param {UsageMeter[]|null} rateLimitMeters
 	 * @param {any} pluginDiag - When truthy, `diagnostics`/`pluginDiag` fields are included
 	 *   in the returned object (and on a thrown error's `.diagnostics`).
-	 * @returns {{rateLimitMeters: UsageMeter[]|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any}}
+	 * @returns {{rateLimitMeters: UsageMeter[]|null, parseError?: boolean, skippedEmpty?: boolean, skippedTimeout?: boolean, errorDetail?: string|null, diagnostics?: any, pluginDiag?: any, costs?: UsageCost[]}}
 	 */
 	_mapTerminalResult(result, rateLimitMeters, pluginDiag) {
-		const diagFields = pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {};
+		const diagFields = {
+			...(pluginDiag ? { diagnostics: result.diagnostics ?? null, pluginDiag } : {}),
+			...(result.costs && result.costs.length ? { costs: result.costs } : {}),
+		};
 		if (result.status === 'error') {
 			const err = /** @type {any} */ (new Error(result.message || 'Upload failed'));
 			err.diagnostics = result.diagnostics ?? null;
@@ -1374,7 +1381,7 @@ var RemoteIndexer = {
 		if (result.status === 'error') {
 			throw new Error(result.message || `Abstract indexing failed for ${abstractItem.item_key}`);
 		}
-		return { status: result.status, rateLimitMeters: result.rate_limit_meters || null };
+		return { status: result.status, rateLimitMeters: result.rate_limit_meters || null, costs: result.costs || [] };
 	},
 
 	/**

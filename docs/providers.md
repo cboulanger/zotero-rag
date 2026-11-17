@@ -14,10 +14,17 @@ a frontier LLM, or one vendor for embeddings and another for answers).
 "llm":       { "provider": { "id": "anthropic" }, "...": "..." }
 ```
 
-Code lives in `backend/providers/`; the registry resolves a preset with
-`get_providers(preset)`, which validates it and returns one instance per side.
+The interface and the generic provider live in `backend/providers/`; every vendor
+provider is a [backend plugin](backend-plugins.md) under `backend/plugins/<id>/`
+(or in an external plugin directory) that registers its class as an
+`inference.provider` capability. The registry resolves a preset with
+`get_providers(preset)`, which validates it and returns one instance per side. A
+preset that names a provider no loaded plugin provides is unavailable, and the
+message says so.
 
 ## Bundled providers
+
+`generic` is part of core; each of the others is a shipped plugin of the same id.
 
 | id | For | Credential scope | Notes |
 |---|---|---|---|
@@ -26,8 +33,8 @@ Code lives in `backend/providers/`; the registry resolves a preset with
 | `openai` | OpenAI | `user` | Key documentation link, OpenAI-style meters. |
 | `google` | Google Gemini (OpenAI-compatible endpoint) | `user` or `managed` | Key documentation link; live list of Flash models (newest first, further filtered by the preset's `model_names` patterns); OpenAI-style meters. |
 | `anthropic` | Anthropic (Claude) | `user`, LLM side only | Uses the Anthropic wire protocol (`llm_api = "anthropic"`). A preset that names a Claude model without this provider is warned about. |
-| `mpcdf` | MPCDF LLM Inference Service | `shared` | Ephemeral job URL and key set by the admin; health asks `/v1/models`. |
-| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (`workersMax` 0) and resumes endpoints; readiness from the data-plane `/health`, paused state from the management API. |
+| `mpcdf` | MPCDF LLM Inference Service | `user` | Every side (embedding, LLM, re-ranking): each user logs in with their own MPCDF account and the endpoint runs as a job on it (see below). |
+| `runpod` | RunPod serverless endpoints | `user` or `managed` | Provisions, pauses (at most 0 workers) and resumes endpoints through RunPod's management API v2 (`api.runpod.io/v2`); readiness from the data-plane `/health`, paused state from the management API. A re-ranking side (`zotero-rag-rerank`, scope `user`) runs vLLM's `/v1/rerank` on `worker-v1-vllm`; the platform's OpenAI route does not pass `/rerank` through, so calls go to `/runsync` with the worker's route proxy, and a call during a cold start counts as "not ready" (the query runs without re-ranking and the call wakes the worker). |
 | `huggingface` | Hugging Face Inference Endpoints | `user` or `managed` | One endpoint per side in the token owner's namespace; readiness from the endpoint's `status.state`; pause/resume via the REST API; the URL is derived from the token. |
 
 ## Credential scopes
@@ -37,9 +44,15 @@ a preset picks one with `provider.scope`.
 
 - `user`: each user's own key, sent with their requests. Usage is per key; the user operates the resource (provision, pause).
 - `managed`: the admin's key; the institution pays. Only admins operate the resource.
-- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example MPCDF).
+- `shared`: set once by the admin for everyone; free to the user, nothing to operate (for example an institution's own OpenAI-compatible gateway with the `generic` provider).
+
+A remote re-ranking side (`rerank`) always uses `user`.
 
 The scope decides the kind of key a side asks for: `user` declares `api_key_env` (the caller's own key, sent as a request header); `managed` and `shared` declare `shared_api_key_env` (the admin-set key). A preset whose key fields contradict its scope is rejected.
+
+## Cost class
+
+Every provider declares `cost`, `"free"` or `"paid"`. `kisski` and `mpcdf` are `free`; `runpod`, `huggingface`, `openai`, `google`, `anthropic` and `generic` (unknown cost counts as paid) are `paid`. A preset is free when each of its sides is local or served by a free provider; a preset can override this with its own `cost` field. The class orders the stand-in presets offered when a quota is exhausted, free ones first (see [presets.md](presets.md#stand-in-presets)).
 
 ## What a provider can define
 
@@ -52,16 +65,54 @@ Hooks, all optional: `describe()` (the provider-agnostic descriptor the plugin
 renders), `endpoint_url()`, `default_key_env()`, `key_docs_url()`,
 `unavailable_hint()` (remedy appended to "endpoint unavailable" errors),
 `live_models()`, `parse_usage(headers)` (quota meters, no billing),
-`health(creds)`, `classify_http_error(status, body)` (`"cold"` or `"paused"`;
+`default_pricing(model)` and `estimate_cost(usage)` (see [Cost estimates](#cost-estimates)),
+`health(creds)` (a `Health` whose `waking` flag marks a `cold` endpoint that is already coming up, so the dialog does not offer to wake it), `classify_http_error(status, body)` (`"cold"` or `"paused"`;
 called before an HTTP 400 is treated as a per-item problem),
-`provision(ctx, progress)`, `suspend(ctx, progress)`, `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
+`provision(ctx, progress)`, `suspend(ctx, progress)`, `rerank_credentials(request, refresh)` and
+`rerank_activity(request)` (the re-ranking side's endpoint for the calling user, and a report that it
+was used), `session_login(user_id, values)`, `session_logout(user_id)` and `session_status(user_id)`
+(for a provider whose endpoints run in the user's own login session), `is_paused(api_key)` (a cheap, non-raising check used to fail fast on a paused endpoint) and `teardown(ctx)`. A provider that supports pausing must also support provisioning, because resuming is provisioning again.
 Providers never raise from display-only hooks (`health`, `parse_usage`).
+
+The plugin's "Configure preset" dialog is fed by four more hooks, all with
+defaults in the base class (see `backend/providers/ui.py` for the data shapes and
+`backend/services/preset_view.py` for how core assembles them):
+
+- `side_facts()`: short label/value pairs for a side's Status section (model, account owner).
+- `side_messages(health)`: status messages; by default `unavailable_hint()` while the side is not ready.
+- `side_actions(health, job_status, operable)`: the side's buttons. Each action carries the request
+  to make (`path` and `body`), whether it belongs to the header's **Start all** or **Pause all**, and
+  the account whose one-time credentials go with it. The default offers start or resume, retry after
+  a failed job, wake for a cold endpoint and pause, as the capability flags allow. The optional
+  re-ranking side's start is not part of **Start all** (it is only ever started on its own); its
+  pause is part of **Pause all**.
+- `account_fields(fields, operable, session)`: the fields of the provider's account card in the
+  dialog's footer. Core passes the credentials the preset declares for the sides this provider
+  serves and, for a provider with an account login (`provisioning.login`), the caller's
+  `session_status`. The default adds the login form while the caller is logged out, and otherwise
+  the one-time provisioning credential.
+- `quota_summary(meters)`: one combined value for a side's quota (the account card shows the
+  highest of its sides; the tab shows every meter). The default takes the meter closest to running
+  out; KISSKI combines its hourly and daily limits.
+- `model_availability(creds)`: `available`, `busy` or `very busy` for the answering model, from
+  `live_models` (KISSKI); the tab warns while the model is very busy.
+- `account_session(session)`: for a provider with an account login, the card's status messages and
+  its **Log in and start** / **Log out** actions. Logging in posts the form's values once to
+  `POST /api/config/session/login`, which also starts the sides that run in the session. Until the
+  caller is logged in, the start actions of the sides the card serves are disabled.
+
+A side whose provider has no `health` check is checked with a minimal test request through the
+caller's key (`backend/services/side_probe.py`, cached per side and key), so the tab can still say
+whether the model answers.
+
+These hooks return data, never markup: the dialog runs with Zotero's privileges, so the plugin
+renders every field, message and action itself.
 
 ## Adding a provider
 
-1. Create `backend/providers/<name>.py` with a `Provider` subclass and a unique `id`; importing it registers it (`__init_subclass__`), so add it to `backend/providers/__init__.py`.
+1. Create a backend plugin (`backend/plugins/<name>/` for a shipped one, or a package in a directory listed in `BACKEND_PLUGIN_DIRS`) with a `Provider` subclass with a unique `id`, and list the class in an `InferenceProvider` capability returned by the plugin's `register()` (see [Backend plugins](backend-plugins.md)). Nothing in core needs to change.
 2. Override only what differs from a plain OpenAI-compatible API.
-3. Register a `ContractFixture` for it with `register_fixture` in `backend/tests/provider_fakes.py`. `test_provider_contract.py` then checks every registered provider against the same rules (descriptor shape, validation, display hooks never raising, scope handling). Add vendor tests next to `test_provider_runpod.py` using `FakeHTTP`.
+3. Add the plugin's tests to its own `tests/` package: run `ProviderContractSuite` with a `ContractFixture` in `tests/test_contract.py` (descriptor shape, validation, display hooks never raising, scope handling), and add vendor tests using `FakeHTTP` from `backend.providers.testing` (see `backend/plugins/runpod/tests/`).
 4. Point a preset at it with `"provider": {"id": "<name>"}`.
 
 ## Invalid configurations
@@ -83,6 +134,54 @@ command line, including `--pause` and `--teardown`. Pausing keeps the resources
 and their URLs but stops billing and wake-ups; provisioning again resumes. A
 key typed in the plugin is sent with each management request, kept only in memory in the running Zotero and never stored by the backend.
 
+## Per-user sessions (MPCDF)
+
+Some services allow neither a shared admin key nor a long-lived personal key: the MPCDF LLM
+Inference Service needs each user's own login (username, password, one-time code) and runs each
+endpoint as a Slurm job of at most 8 hours on that user's account. A provider of this kind sets
+`provisioning_needs_key = False` and describes a login form (`provisioning.login` in the descriptor:
+a title and the fields with their HTML `type` and `autocomplete`), which the plugin renders in the
+side's section instead of a key field. The form posts to `POST /api/config/session/login`
+(`{side, values}`, five attempts per user per ten minutes); `GET /api/config/session?side=` and
+`POST /api/config/session/logout` answer for the caller only. A successful login starts the
+caller's endpoints for the active preset's sides that run in that session (the same background job as
+`POST /api/config/provision`; the response carries it as `provisioning`, or a reason it could not
+start as `provisioning_error`); the plugin follows that job until the endpoints are ready. The
+re-ranking side is included unless the request says `"start_rerank": false`, which the plugin sends
+when the user has switched re-ranking off; the login is the one start of the re-ranker besides its
+own tab and the query dialog's prompt.
+
+For MPCDF this goes through the `mpcdf-llm` library, a dependency installed from
+its git repository (pinned in `pyproject.toml` under `[tool.uv.sources]`). `backend/plugins/mpcdf/sessions.py` keeps one manager per Zotero
+user in `<data_path>/system/mpcdf/<user-hash>/`; the session token and the user's Hugging Face
+token (every vLLM job there needs one) are sealed with `AUTOINDEX_SECRET`, and the password and
+one-time code are never stored. The library's supervisor renews a job shortly before it ends while
+it is used and cancels it after `idle_minutes` without a query; each re-ranking call reports use.
+The session lasts about 12 hours, and logging in to the MPCDF web interface ends it. Options of the
+`mpcdf` provider for a per-user side: `machine` (`Viper`), `gpu_type` (`mi300a`), `gpus` (1-2),
+`time_hours` (1-8), `idle_minutes`, `build_timeout_minutes`, `image` and `extra_args` (vLLM
+arguments without quotes, default `--enforce-eager`) and `envs` (environment variables of the job).
+
+**Images for embedding and re-ranking:** the service's default vLLM image (`vllm/vllm-openai-rocm:v0.30.0`
+in 2026-11) answers embedding and re-ranking requests (vLLM's pooling models) only in fixed cycles of
+about 53 seconds, whatever the request size, while text generation on it is fast. The cause is in that
+image, not in the attention backend (ROCM_ATTN, TRITON_ATTN and FLEX_ATTENTION all show it), the
+executor, the model runner, the number of GPUs or ROCm settings (#111). `remote-mpcdf` therefore runs
+its embedding and re-ranking sides on `rocm/vllm:rocm7.0.0_vllm_0.11.2_20251210` with
+`VLLM_ATTENTION_BACKEND=FLEX_ATTENTION` (that release's ROCm attention backend cannot run encoder-only
+models): re-ranking 100 candidates then takes about 1 s. The first start of a new image builds its
+container on the user's account first, hence `build_timeout_minutes` 60 for those sides; the first
+requests after a start take 10-20 s while kernels compile. The LLM side keeps the default image.
+
+A per-user side has no fixed URL or key: the provider sets `uses_session_endpoints` and answers
+`session_endpoint(user_id)` with the caller's running endpoint (or None) and `session_activity(user_id)`
+when it is used. The embedding and LLM services ask for it before every call, because a renewal changes
+both URL and key, and report use at most once a minute; the caller is the Zotero user of the request
+(`backend/services/caller_context.py`, bound by the auth middleware). A side whose endpoint is not running
+fails with "endpoint unavailable" and the provider's hint, and never falls back to another URL.
+Automatic indexing skips a user whose embedding side is such a session (issue kind `session`), since
+nobody is there to log in.
+
 ## Usage meters
 
 Each response's rate-limit headers are recorded per side and per key
@@ -90,4 +189,75 @@ fingerprint (`backend/services/usage_meters.py`); the side's provider turns them
 into meters (`unit`, `period`, `limit`, `remaining`, `resets_at`). The plugin
 draws one bar per meter from `GET /api/rate-limits`, the autoindex status
 `rate_limits.meters` and the `rate_limit_meters` of an upload response. Meters
-show quota only; costs are read on the provider's own dashboard.
+show quota only; costs are estimated separately (see below).
+
+In the dialogs' button rows the usage widget has a fixed size: it shows the two
+meters closest to running out and lists every meter in its tooltip.
+
+## Cost estimates
+
+Whether a paid service bills per token, per second or by subscription cannot be
+told from the outside, so costs are shown only when the user says how a service
+bills them, and the plugin computes them from the user's prices.
+
+For every call to a paid provider (`cost = "paid"`) the backend records a usage
+record. Each remote call reports what it consumed (a `Usage`: model, input and
+output tokens, wall-clock seconds); the side's provider turns it into a `Cost`
+with `estimate_cost(usage)`, and `backend/services/cost_ledger.py` adds it to the
+ledger of the surrounding request. A record (one per side, provider, model and
+currency) carries `provider`, `provider_label`, `model`, `requests`, tokens,
+`seconds`, `note`, the provider's list prices (`pricing`) and `amount` at those
+list prices (None without a known price). Free providers' calls are not recorded.
+The records come back as:
+
+- `costs` of `POST /api/query` (also on a `needs_client_evidence` or
+  `needs_clarification` response, which can follow a routing call);
+- `costs` of every upload and abstract-indexing result;
+- `costs` of each library in the autoindex status (`slugs.<slug>.costs`), for the
+  last run.
+
+`GET /api/config` lists the `paid_providers` of the caller's preset (`id`,
+`label`, `sides`). Each paid provider's account card in **Configure preset** has a
+**Billing** section (`AccountCard.billing`, built by `preset_view._billing_fields`):
+a select (Not set, Subscription, Token-based, Time-based) and, for the chosen type,
+one price field per side (input and output per 1M tokens, or per second), whose
+placeholder is the list price. The values are Zotero preferences
+(`billing.<provider>.mode`, `billing.<provider>.<side>.input|output|second`); a
+field's `show_if` hides the price fields of the other type. The plugin prices the
+records with them (`ZoteroRAGRateLimitWidget.priceCosts`): an empty price field
+uses the list price, and records of a service billed by subscription or with
+Billing not set are left out. The Ask dialog's usage widget then shows the
+estimated cost of the dialog session (queries, follow-ups and indexing) instead
+of the quota bars, and the **Indexing status** dialog the estimated cost of the
+last run over the libraries it lists. Both say that this is an estimate.
+
+A provider defines its price list with `default_pricing(model)`, which returns a
+`Pricing` (`input_per_million_tokens`, `output_per_million_tokens`,
+`per_request`, `per_second`, `currency`, default `USD`) or None for an unknown
+model; `match_pricing(table, model)` looks a model up in a list of glob
+patterns. These list prices are the defaults of the Billing price fields.
+`cost_note` says what the estimate leaves out. A free provider
+(`cost = "free"`) never has prices.
+
+| Provider | Prices |
+|---|---|
+| `openai` | Per token, for the GPT-4o, GPT-4.1 and GPT-5 families and the `text-embedding-3` models |
+| `anthropic` | Per token, for the Claude Haiku, Sonnet and Opus 4 families |
+| `google` | Per token (paid tier), for Gemini 2.0/2.5 Flash, Flash-Lite and Pro and `gemini-embedding-001` |
+| `runpod` | Per second of call time, by the side's `gpu` option (flex workers); idle time before a worker scales down is not counted |
+| `huggingface` | None: Inference Endpoints bill instance uptime, not requests |
+
+A preset can set or correct prices per side in `model_kwargs.pricing`, either one
+`Pricing` object or a mapping of model-name glob patterns to one:
+
+```json
+"model_kwargs": {
+  "pricing": {
+    "gpt-4o-mini*": {"input_per_million_tokens": 0.15, "output_per_million_tokens": 0.60},
+    "*": {"input_per_million_tokens": 2.5, "output_per_million_tokens": 10}
+  }
+}
+```
+
+Vendors change their prices; the shipped lists are estimates, not a bill, and
+the user's own prices in the Billing section override them.

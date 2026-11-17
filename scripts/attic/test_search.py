@@ -4,7 +4,8 @@
 import asyncio
 from pathlib import Path
 from backend.db.vector_store import VectorStore
-from backend.services.embeddings import LocalEmbeddingService, EmbeddingConfig
+from backend.config.presets import EmbeddingConfig
+from backend.plugins.local_torch.embedding import LocalEmbeddingService
 from backend.config.settings import get_settings
 from qdrant_client.models import Distance
 

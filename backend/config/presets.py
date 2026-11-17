@@ -45,7 +45,7 @@ import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import List, Literal, Optional, Protocol, TypeVar
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class _HasId(Protocol):
@@ -108,9 +108,23 @@ class EmbeddingConfig(BaseModel):
     model_kwargs: dict = Field(default_factory=dict, description="Additional model parameters")
     batch_size: int = Field(default=32, description="Batch size for embedding generation")
     cache_enabled: bool = Field(default=True, description="Enable content-hash based caching")
+    query_instruction: Optional[str] = Field(
+        default=None,
+        description=(
+            "Task instruction for instruction-tuned embedding models: search queries are embedded "
+            "as 'Instruct: <instruction>\\nQuery: <question>' while document chunks stay bare. "
+            "Unset uses the model's known default (see embeddings.DEFAULT_QUERY_INSTRUCTIONS); "
+            "an empty string embeds queries bare."
+        ),
+    )
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
 
@@ -127,6 +141,11 @@ class LLMConfig(BaseModel):
     provider: ProviderConfig = Field(
         default_factory=ProviderConfig,
         description="Provider class serving this side (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
     )
 
     @field_validator("model_names", mode="before")
@@ -183,6 +202,45 @@ class RAGConfig(BaseModel):
     max_chunk_size: int = Field(default=512, description="Maximum characters per chunk (passed to chunker as max_characters)")
 
 
+class RerankConfig(BaseModel):
+    """Optional re-ranking step: a cross-encoder rescores the vector-search candidate
+    pool before dedup and the per-document cap (see backend/services/rerank.py).
+
+    A preset without this section has no re-ranking step. ``local`` runs the model
+    in the backend process with a local engine from a backend plugin (the shipped
+    ``local_torch`` plugin: a sentence-transformers ``CrossEncoder``); ``remote`` calls a
+    ``/rerank`` endpoint served by the side's provider, which must use the ``user``
+    credential scope (each user's own account).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_type: Literal["local", "remote"] = "local"
+    model_name: str = Field(..., description="Cross-encoder model id, e.g. BAAI/bge-reranker-v2-m3")
+    pool_size: int = Field(default=100, ge=1, le=500, description="Candidates rescored per query (the rest keep their order after them)")
+    pool_reference_chunks: Optional[int] = Field(
+        default=50_000, ge=1,
+        description="Chunk count of the searched libraries up to which pool_size applies; above it the pool "
+                    "grows as pool_size * (1 + log10(chunks / this)), up to 500. None keeps pool_size fixed.",
+    )
+    max_length: int = Field(default=512, ge=16, description="Token limit per question+chunk pair (local models)")
+    batch_size: int = Field(default=16, ge=1, description="Pairs scored per forward pass (local models)")
+    timeout_seconds: float = Field(default=15.0, gt=0, description="Re-ranking gives up after this and keeps the vector order")
+    model_kwargs: dict = Field(
+        default_factory=dict,
+        description="Local: extra CrossEncoder keyword arguments (e.g. {\"backend\": \"onnx\"}); remote: endpoint fields",
+    )
+    provider: ProviderConfig = Field(
+        default_factory=ProviderConfig,
+        description="Provider class serving a remote re-ranker (see backend.providers).",
+    )
+    engine: Optional[str] = Field(
+        default=None,
+        description="Local only: the local inference engine (an inference.local capability of a backend "
+                    "plugin, e.g. \"torch\"). Unset picks the best engine available on this machine.",
+    )
+
+
 class ExtractionConfig(BaseModel):
     """Which document extractor indexes documents for this preset.
 
@@ -211,6 +269,10 @@ class HardwarePreset(BaseModel):
         default=None,
         description="Document extractor for indexing; None uses the server's EXTRACTOR_BACKEND.",
     )
+    rerank: Optional[RerankConfig] = Field(
+        default=None,
+        description="Optional re-ranking step; None means no re-ranking.",
+    )
     memory_budget_gb: float = Field(..., description="Estimated memory usage in GB")
     platform: Literal["any", "darwin", "linux", "windows"] = Field(
         default="any",
@@ -219,6 +281,20 @@ class HardwarePreset(BaseModel):
                     "preset that needs Apple Silicon's MPS backend, or a Windows-oriented "
                     "preset) is hidden from listings shown to a client on any other "
                     "platform — see current_platform() and list_presets()'s platform= arg.",
+    )
+    cost: Optional[Literal["free", "paid"]] = Field(
+        default=None,
+        description="Overrides the cost class derived from the providers (e.g. an institutional "
+                    "account that is free for its users); None derives it, see "
+                    "backend.services.standin.preset_cost.",
+    )
+    standin: bool = Field(
+        default=True,
+        description="False keeps this preset out of every stand-in offer (test or experimental presets).",
+    )
+    standin_priority: int = Field(
+        default=0,
+        description="Orders stand-in offers of the same cost class; higher comes first.",
     )
 
 
@@ -233,16 +309,41 @@ def current_platform() -> str:
     return _platform_module.system().lower()
 
 
+def bundled_preset_files() -> list[Path]:
+    """The bundled preset files: core's own, then those of the loaded backend plugins.
+
+    Core ships only presets that need no plugin provider; a preset that needs a
+    vendor's provider comes with that vendor's plugin (a ``presets`` capability).
+    A file name that is already taken is skipped with a warning.
+    """
+    files = {p.name: p for p in sorted(DEFAULT_PRESETS_DIR.glob("*.json"))}
+    from backend.pluginhost import PresetDirectory, get_plugin_host
+
+    for cap in get_plugin_host().capabilities(PresetDirectory.kind):
+        for path in cap.files():
+            if path.name in files:
+                logger.warning("Preset %s of plugin %s duplicates a bundled preset; skipped", path.name, cap.plugin_id)
+                continue
+            files[path.name] = path
+    return list(files.values())
+
+
+def bundled_preset_path(name: str) -> Optional[Path]:
+    """The bundled source file of preset ``name`` (core or plugin), or None."""
+    return next((p for p in bundled_preset_files() if p.stem == name), None)
+
+
 def _bundled_names() -> set[str]:
-    """File names (``<name>.json``) of the presets shipped with the backend."""
-    return {p.name for p in DEFAULT_PRESETS_DIR.glob("*.json")}
+    """File names (``<name>.json``) of the bundled presets (core and loaded plugins)."""
+    return {p.name for p in bundled_preset_files()}
 
 
 def ensure_default_presets(data_path: Path) -> None:
     """
     Seed <data_path>/presets/ with the bundled default preset files.
 
-    Every file under DEFAULT_PRESETS_DIR is written to the data directory
+    Every bundled preset (core's ``default_presets/`` and the ``presets``
+    directories of the loaded backend plugins) is written to the data directory
     unless the bytes already there are identical. A bundled-name file whose
     content differs (a local edit, or an older schema) is overwritten and a
     WARNING names it; customise a preset by copying it to a new file name.
@@ -258,7 +359,7 @@ def ensure_default_presets(data_path: Path) -> None:
 
     presets_dir = resolved / "presets"
     presets_dir.mkdir(parents=True, exist_ok=True)
-    for default_file in DEFAULT_PRESETS_DIR.glob("*.json"):
+    for default_file in bundled_preset_files():
         target = presets_dir / default_file.name
         content = default_file.read_bytes()
         if target.exists():

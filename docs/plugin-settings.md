@@ -21,13 +21,13 @@ setting.
 
 ### Model preset
 
-**My preset** (**Preset** on a server running on your own machine) chooses the model set you use. Everyone starts on the server's default preset; you can switch to any other preset that works with the server's vector store. A preset that needs a key you have not entered is marked "needs a key": choosing it asks for the key first. Server admins also get **Server default**, which sets the preset everyone starts on. A saved choice that stops being available is reported and you fall back to the default.
+**My preset** (**Preset** on a server running on your own machine) chooses the model set you use. Everyone starts on the server's default preset; you can switch to any other preset that works with the server's vector store. A preset that needs a key you have not entered is marked "needs a key": choosing it asks for the key first. A saved choice that stops being available is reported and you fall back to the default.
 
-### Models
+Below the chooser, one dot per side shows whether its service is ready (green), starting (yellow) or down (red). **Configure preset…** opens the dialog described in [Configure preset](#configure-preset).
 
-One section each for the **Embedding model** and the **Answering model (LLM)** of your preset, showing the provider, who operates it (your own account, the server admin, or your institution) and its live status (`ready`, `cold`, `paused`, `throttled` or `unreachable`). Each section holds the API key fields that side needs, each with a link to where you can obtain it and a status line confirming whether the backend accepted it; your own keys are sent to the backend on every request rather than stored there, so the backend operator never has to hold your provider credentials.
+When a query fails because a provider's quota is used up until a time at least 15 minutes away, the query dialog offers stand-in presets instead of the plain error: it names the side and provider that ran out and when it resets, and lists the alternatives with their cost ("free" or "paid") and what each needs first (a login or a key). **Use** switches you to that preset until the reset. A stand-in that is ready gets the question sent again immediately. If it needs a login or a key, or its endpoint is not running (the dialog's pipeline check notices that after the switch), the Configure preset dialog opens instead and the query dialog asks you to submit the question again once the preset is ready. **Not now** dismisses the offer; nothing is switched automatically. Indexing and uploads keep using your own preset.
 
-For an endpoint that can be provisioned (created, woken or resumed), the section offers **Provision endpoint** / **Resume** when the endpoint is not reachable, runs it on your own account (or, for an institution-funded one, only for admins), shows its progress, and offers **Retry** for just the side that failed. An optional key field takes a broader key for managing the endpoint. It is kept in memory in the running Zotero, so Resume, Retry and Pause need no re-entry, and it is never saved anywhere; after Zotero restarts it has to be entered again. The two sides run independently; only a side that already has a job running is disabled.
+While a stand-in is active, the query dialog and this pane show "Using *preset* until *time* (*provider* quota) — **End now**". **End now** returns to your own preset immediately; otherwise it applies again by itself after the reset. Choosing a preset by hand also ends the stand-in.
 
 ### Automatic indexing
 
@@ -35,31 +35,13 @@ A single toggle: **Enable automatic indexing of my libraries**. When on, the bac
 periodically re-indexes your libraries on its own schedule using the Zotero API key
 configured above — you don't need to keep Zotero open or index manually. **View
 indexing status** opens a dialog showing recent run results, the remaining embedding
-rate limits (when the active embedding service reports them) and, for server admins,
+rate limits (when the active embedding service reports them), the estimated cost of the
+last run (when it used a paid provider) and, for server admins,
 a dropdown to switch the active preset. The same dialog opens from the **Indexing
 status** button in the footer of the Ask dialog, which is shown only when the server
 has auto-indexing configured. See
 [Automatic Indexing Setup](auto-indexing-setup.md) for the full picture, including
 what group admins can additionally control.
-
-### Retrieval Tuning
-
-Advanced knobs controlling how broadly the backend searches when an answer looks
-too narrow, and when it retries an answer that only cites one source despite
-several being available. Leave any field blank to reset it to its default — most
-users never need to change these.
-
-| Setting | Default | What it does |
-|---|---|---|
-| **Diversity floor** | 3 | Minimum number of distinct documents a search must turn up before the backend is satisfied. Below this, it broadens the search automatically. |
-| **Escalation factor** | 3 | When broadening a search (see above), the search size is multiplied by this factor. |
-| **Escalation ceiling** | 30 | The largest a broadened search is allowed to grow to, keeping response time and cost bounded. |
-| **Max passages per document** | 4 | Caps how many excerpts from a single document can be included in the material sent to the AI model, so one very large or finely-indexed document can't crowd out everything else. |
-| **Single-source retry floor** | 3 | If at least this many distinct sources were found but the generated answer only cites one of them, the backend asks the model to double-check whether the others are relevant too and revise the answer once. |
-
-These same values are recorded in a query's debug trace (see **Include debugging
-information in note** below), so if an answer still looks too narrow or too broad
-after adjusting a setting, the trace shows exactly what was used.
 
 ### Performance
 
@@ -81,20 +63,102 @@ already been indexed. Use this if the plugin thinks everything is up to date but
 the backend reports no data (e.g. after the backend's index was wiped) — the next
 indexing run will re-check every item against the backend from scratch.
 
+## Configure preset
+
+Opened with **Configure preset…** next to the preset chooser. Everything about how your preset's models run lives here.
+
+**Header.** The preset's name and description, an overall status and three buttons that act on every side at once: **Start all** starts, wakes or resumes every endpoint that is not running, **Pause all** pauses every endpoint that can be paused (stops billing), and **Check now** checks again. Server admins also get **Server default**, which sets the preset everyone starts on.
+
+**Tabs.** One tab per step of the pipeline, in the order a document and a question pass through it: **Extraction**, **Embedding**, **Retrieval**, **Re-ranking** (only when the preset has that step) and **Answering (LLM)**. The dot on each tab shows whether the service behind it is ready (green), starting (yellow: being created, woken or resumed), down (red: not running, paused, out of capacity or missing credentials) has no status check (grey) or is switched off (hollow, re-ranking only). Each tab has the same three sections:
+
+- **Configuration**: the settings of that step only. Credentials are not entered here but in the account cards below.
+- **Status**: a summary line, messages (for example what to do while the endpoint is down), short facts such as the model, the quota with one bar per limit (when the provider reports one) and **Show log** with the progress of the last start or pause. A provider without a status check of its own (KISSKI, OpenAI and similar) is checked with a one-word test request through your key: green when it is answered, red with the reason when not. The result is reused for five minutes after a success (one minute after a failure), so the dialog does not use up your quota; **Check now** after that sends a new one. For KISSKI the tab also shows how busy the answering model is and warns when it is very busy.
+- **Actions**: for example **Start endpoint**, **Resume**, **Retry**, **Wake up** or **Pause**. A disabled button says why.
+
+**Service accounts.** The footer has one card per provider your preset uses, listing which tabs it serves. It holds that provider's keys: your own personal keys, which are stored in Zotero and sent with your requests (never stored on the server), and keys the server admin sets for everyone, which only admins can change. For providers whose endpoints you start yourself, an optional management key can be entered; it is kept in memory until Zotero quits and never saved. **Save and start** saves what you entered and starts the endpoints that use it. A provider that reports a quota shows how much of it is used on its card, combined into one value by the provider (for KISSKI, whichever of the hourly and daily quota is closer to running out); the tabs show the details.
+
+A provider whose endpoints run in your own login session (MPCDF) has a login form in its card instead: your username, password, one-time code and, for MPCDF, a Hugging Face token. **Log in and start** sends them once (the password and code are never stored, and the form is cleared), keeps the session on the server encrypted and starts the embedding and answering endpoints in it. Until you log in, the tabs it serves say so and their **Start endpoint** is disabled. While you are logged in the card shows the session and **Log out**.
+
+### Re-ranking tab
+
+Shown only when your preset has a re-ranking step. A re-ranker reads your question together with
+each candidate passage and puts the most relevant ones first before the answer is written, which
+costs a few seconds per question. The tab names the model and how many passages it rescores, and
+has the **Use re-ranking** switch (on by default; switched off, the tab's dot is hollow) and
+**Passages to rescore**: how many of the best-matching passages the re-ranker reads per question
+(at most 500). Left empty, the size of the searched libraries decides: the preset's value (usually
+100) for libraries up to 50,000 passages, more for larger ones (about 260 at two million). Large
+libraries profit from a higher value, because a relevant passage can rank low in the first,
+vector-only search; in a small library a higher value mostly adds generic passages. Each
+additional 100 passages costs a fraction of a second. A
+re-ranker that runs on the server needs nothing else. One that runs on your own provider account
+shows its live status and **Start endpoint** / **Resume** here. **Start all** leaves it alone,
+since it is an optional extra cost; **Pause all** includes it. If it is not running when you ask
+a question, the question is answered without re-ranking.
+
+### Retrieval tab
+
+Advanced knobs controlling how broadly the backend searches when an answer looks
+too narrow, and when it retries an answer that only cites one source despite
+several being available. Leave any field blank to reset it to its default — most
+users never need to change these.
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Diversity floor** | 3 | Minimum number of distinct documents a search must turn up before the backend is satisfied. Below this, it broadens the search automatically. |
+| **Escalation factor** | 3 | When broadening a search (see above), the search size is multiplied by this factor. |
+| **Escalation ceiling** | 30 | The largest a broadened search is allowed to grow to, keeping response time and cost bounded. |
+| **Max passages per document** | 4 | Caps how many excerpts from a single document can be included in the material sent to the AI model, so one very large or finely-indexed document can't crowd out everything else. |
+| **Single-source retry floor** | 3 | If at least this many distinct sources were found but the generated answer only cites one of them, the backend asks the model to double-check whether the others are relevant too and revise the answer once. |
+
+These same values are recorded in a query's debug trace (see **Include debugging
+information in note** below), so if an answer still looks too narrow or too broad
+after adjusting a setting, the trace shows exactly what was used.
+
 ## Query dialog "Advanced options"
 
 Collapsed by default in the search dialog, under the library list. These apply to
 the query you're about to run, not saved as a persistent preference (with the
-exception of the LLM model and routing choices, which are remembered for your next
+exception of the LLM model, routing and re-ranking choices, which are remembered for your next
 query).
 
 | Setting | What it does |
 |---|---|
 | **LLM to use for RAG** | Only shown when the backend preset offers more than one model. Picks which model generates the answer. |
 | **Similarity** | How closely a passage must match your question to be considered — lower values cast a wider net but pull in less relevant material. |
-| **Sources** | How many passages to retrieve before answering (this is `top_k` in the API and in [Retrieval Tuning](#retrieval-tuning) above) — higher values search more broadly but take longer and cost more per query. |
+| **Sources** | How many passages to retrieve before answering (this is `top_k` in the API; see also the [Retrieval tab](#retrieval-tab) of Configure preset) — higher values search more broadly but take longer and cost more per query. |
 | **Disable query routing** | Skips the routing step that decides between content search, catalog search, and citation search, going straight to a content search. Faster, but loses metadata-filter extraction, catalog listings, and citation/mentions questions. See [Query Routing & Agent System](query-routing.md) for what routing normally does. |
+| **Disable re-ranking** | Only shown when the preset has a re-ranking step. Answers this question with the passages in plain similarity order, a few seconds faster. Checked and locked when re-ranking is switched off in the [Re-ranking tab](#re-ranking-tab). When the preset's re-ranking endpoint is not running, the dialog says so and, if you can start it, offers **Start re-ranking**. |
 | **Include debugging information in note** | Attaches the full execution trace (routing decision, retrieval scores, every LLM call and prompt) to the saved result note and makes it available for export from the result view. Useful when reporting an answer-quality issue. |
+
+## Query dialog usage widget
+
+The left end of the query dialog's button row has a small widget of fixed size; it never
+changes the height of the buttons. What it shows depends on the **Billing** setting of the
+services the preset uses.
+
+Each paid service (OpenAI, Anthropic, Google, RunPod) has a **Billing** section in its
+account card in **Configure preset**. Choose how the service bills you:
+
+- **Not set** (the default): no costs are shown.
+- **Subscription**: no costs; the widget shows the service's quota, when it reports one.
+- **Token-based**: enter the price per 1M input and output tokens of each step the service
+  does (embedding, answering, re-ranking).
+- **Time-based**: enter the price per second of each step (for example a RunPod worker).
+
+An empty price field uses the list price shown as its placeholder. The settings are stored
+in this Zotero's preferences and take effect at once.
+
+When a service is set to Token-based or Time-based, the widget shows the estimated cost of
+everything done since the dialog was opened: questions, follow-ups and indexing, with a
+breakdown by step. Its tooltip lists the tokens or seconds counted and what the estimate
+leaves out. This is an estimate from your prices, not your bill. The **Indexing status**
+dialog shows the estimated cost of the last automatic indexing run in the same way, in
+total and per library.
+
+Otherwise the widget shows the remaining quota of the embedding service while indexing
+(also for free services such as KISSKI): the two limits closest to running out, with every
+limit in the tooltip. If no service reports a quota, the widget is hidden.
 
 ## See also
 

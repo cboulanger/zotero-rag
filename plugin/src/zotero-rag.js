@@ -56,6 +56,7 @@
  * @property {string|null} [clarification_message] - Human-readable narrowing prompt, populated when status is "needs_clarification"
  * @property {Array<{author: string, year: number|null, title_keywords: Array<string>}>} [citation_targets] - populated when status is "needs_client_evidence"
  * @property {any} [query_plan] - echo of the routing plan; present when status is "needs_client_evidence" or "needs_clarification" — pass through unchanged on resubmit
+ * @property {UsageCost[]} [costs] - estimated costs of this request's calls to paid providers
  */
 
 
@@ -75,11 +76,40 @@
  * @property {number} [minScore] - Minimum similarity score (default: 0.5)
  * @property {string} [llmModel] - LLM model override (must be in preset's model list)
  * @property {boolean} [enableRouting] - When false, skips routing and runs pure-RAG mode (default: true)
+ * @property {boolean} [enableReranking] - When false, skips the preset's re-ranking step (default: true)
  * @property {boolean} [includeTrace] - When true, request a full execution trace from the backend
  * @property {any} [clientEvidence] - Citation-mention evidence gathered client-side, sent back on the resubmit half of the two-phase "needs_client_evidence" flow
  * @property {any} [queryPlan] - The `query_plan` echoed back from a prior `needs_client_evidence` response, so the backend can skip re-running the routing LLM call
  * @property {Array<Object>} [conversationHistory] - Prior follow-up turns to echo back
  * @property {boolean} [forceFreshRetrieval] - Ignore conversationHistory for this turn's routing
+ */
+
+/**
+ * A preset that can stand in while a provider's quota is used up (POST /api/query 503).
+ * @typedef {Object} StandinChoice
+ * @property {string} preset - Preset name
+ * @property {'free'|'paid'|string} cost - What using it costs
+ * @property {string} label - Short description of the preset
+ * @property {string[]} needs - What must happen first: `login:<provider>`, `key:<KEY_NAME>`
+ */
+
+/**
+ * The structured detail of a `quota_exhausted` 503 from POST /api/query.
+ * @typedef {Object} QuotaExhaustedDetail
+ * @property {'quota_exhausted'} code
+ * @property {string} message - Human-readable message (reset time in UTC)
+ * @property {string} side - Exhausted side, e.g. `embedding` or `llm`
+ * @property {string} provider - Provider id
+ * @property {string} available_at - ISO datetime when the quota resets
+ * @property {StandinChoice[]} standins - Ranked stand-ins, in the server's order
+ */
+
+/**
+ * The caller's active stand-in as reported by GET /api/config.
+ * @typedef {Object} ActiveStandin
+ * @property {string} preset - The stand-in preset now answering queries
+ * @property {string} until - ISO datetime when it ends
+ * @property {string} replaces - The preset it replaces
  */
 
 
@@ -150,6 +180,23 @@ function errorDiag(err, includeDiagnostics) {
 	return { backendDiag: (err && err.diagnostics) ?? null, pluginDiag: (err && err.pluginDiag) ?? null };
 }
 
+/**
+ * Thrown by submitQuery when a provider's quota is used up for a while; `detail`
+ * lists the presets that can stand in until it resets.
+ */
+class QuotaExhaustedError extends Error {
+	/** @param {QuotaExhaustedDetail} detail */
+	constructor(detail) {
+		super(detail.message);
+		this.name = 'QuotaExhaustedError';
+		/** @type {QuotaExhaustedDetail} */
+		this.detail = detail;
+	}
+}
+
+/** Pref holding the stand-in preset the required-keys cache was last filled for. */
+const STANDIN_PREF = 'extensions.zotero-rag.activeStandin';
+
 /** Observer topic for cross-window preset-switch notifications. */
 const PRESET_CHANGED_TOPIC = 'zotero-rag:preset-changed';
 
@@ -182,6 +229,16 @@ class ZoteroRAGPlugin {
 		/** @type {Set<string>} */
 		this.activeQueries = new Set();
 
+		/** @type {string|null} Provider whose used-up quota the active stand-in covers (known once chosen here) */
+		this.standinProvider = null;
+
+		/**
+		 * Endpoint side states (ZoteroRAGPresetDialog.sideStates) last shown by Preferences or the
+		 * Configure preset dialog; the dialog tells the other windows when it finds them changed.
+		 * @type {string|null}
+		 */
+		this.presetSideStates = null;
+
 		/** @type {number} */
 		this.maxConcurrentQueries = 5;
 
@@ -209,6 +266,12 @@ class ZoteroRAGPlugin {
 
 		/** @type {Window|null} */
 		this._autoindexStatusWindow = null;
+
+		/** @type {Window|null} */
+		this._presetDialogWindow = null;
+
+		/** @type {Record<string, string>|undefined} One-time provisioning credentials, memory only. */
+		this._sessionKeys = undefined;
 
 		// Set by dialog.js's init() to the live ZoteroRAGDialog object (not just its
 		// window), so other windows (e.g. the autoindex-status dialog) can read its
@@ -408,12 +471,14 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Add plugin UI elements to a window.
+	 * Add plugin UI elements to a window. Does nothing for a window that already has them:
+	 * startup() adds to every open window and Zotero's onMainWindowLoad can follow for the same one.
 	 * @param {Window} window - Zotero window
 	 * @returns {void}
 	 */
 	addToWindow(window) {
 		let doc = window.document;
+		if (doc.getElementById('zotero-rag-ask-question')) return;
 		const iconURL = `chrome://zotero-rag/content/icons/ask-rag.svg`;
 		const ui = this.toolkit.uiTool;
 
@@ -427,6 +492,9 @@ class ZoteroRAGPlugin {
 				attributes: {
 					label: 'Zotero RAG: Ask Question...',
 					image: iconURL,
+					// Zotero 11 (Firefox 153) renders menu icons as <html:img> driven by
+					// --menuitem-icon; `image` still covers Zotero 7-10.
+					style: `--menuitem-icon: url("${iconURL}")`,
 				},
 				listeners: [{ type: 'command', listener: async () => this.openQueryDialog(window) }],
 			});
@@ -649,20 +717,37 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
-	 * Fetch root endpoint and log service configuration and vector DB statistics.
+	 * Fetch the status and sides endpoints and log the service configuration,
+	 * vector DB statistics and the backend plugins that are loaded.
 	 * @returns {Promise<void>}
 	 */
 	async logServerInfo() {
-		const response = await fetch(`${this.backendURL}/`, { headers: this.getAuthHeaders() });
-		if (!response.ok) return;
-		/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, embedding:{model_type:string,model_name:string,base_url:string|null,embedding_dim:number,distance:string}, llm:{model_type:string,model_name:string,base_url:string|null,max_context_length:number,temperature:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string,chunks:number,indexed_documents:number,libraries_count:number}}} */
-		const info = await response.json();
-		const { preset, embedding, llm, rag, vector_db } = info;
-		this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
-		this.log(`Embedding: [${embedding.model_type}] ${embedding.model_name}${embedding.base_url ? ` @ ${embedding.base_url}` : ''} (${embedding.embedding_dim}-dim, ${embedding.distance})`);
-		this.log(`LLM: [${llm.model_type}] ${llm.model_name}${llm.base_url ? ` @ ${llm.base_url}` : ''} (ctx ${llm.max_context_length}, temp ${llm.temperature})`);
-		this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
-		this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
+		const headers = this.getAuthHeaders();
+		const [statusResponse, sidesResponse] = await Promise.all([
+			fetch(`${this.backendURL}/status`, { headers }),
+			fetch(`${this.backendURL}/sides`, { headers }),
+		]);
+		if (statusResponse.ok) {
+			/** @type {{preset:{name:string,description:string,memory_budget_gb:number}, rag:{top_k:number,score_threshold:number,max_chunk_size:number}, vector_db:{path:string|null,chunks:number,indexed_documents:number,libraries_count:number}, plugins:Array<{id:string,status:string,version?:string,error?:string}>}} */
+			const info = await statusResponse.json();
+			const { preset, rag, vector_db, plugins } = info;
+			this.log(`Preset: ${preset.name} — ${preset.description} (${preset.memory_budget_gb} GB)`);
+			this.log(`RAG: top_k=${rag.top_k}, score_threshold=${rag.score_threshold}, chunk_size=${rag.max_chunk_size}`);
+			this.log(`Vector DB: ${vector_db.chunks} chunks, ${vector_db.indexed_documents} documents, ${vector_db.libraries_count} libraries (${vector_db.path})`);
+			this.log(`Backend plugins: ${(plugins || []).map((p) => `${p.id}${p.status === 'loaded' ? '' : ` (${p.status})`}`).join(', ')}`);
+		}
+		if (sidesResponse.ok) {
+			/** @type {{preset:string, sides:Record<string, {model_type:string, model_name:string, base_url:string|null, embedding_dim?:number|null, distance?:string|null, max_context_length?:number, temperature?:number, served_by:{plugin:string|null, available:boolean}}>}} */
+			const data = await sidesResponse.json();
+			for (const [side, cfg] of Object.entries(data.sides || {})) {
+				const where = cfg.base_url ? ` @ ${cfg.base_url}` : '';
+				const via = cfg.served_by && cfg.served_by.plugin ? ` via ${cfg.served_by.plugin}` : '';
+				let extra = '';
+				if (side === 'embedding') extra = ` (${cfg.embedding_dim}-dim, ${cfg.distance})`;
+				else if (side === 'llm') extra = ` (ctx ${cfg.max_context_length}, temp ${cfg.temperature})`;
+				this.log(`${side}: [${cfg.model_type}] ${cfg.model_name}${where}${via}${extra}`);
+			}
+		}
 	}
 
 	/**
@@ -713,6 +798,144 @@ class ZoteroRAGPlugin {
 		} catch (e) {
 			this.log('Could not fetch required API keys: ' + e);
 		}
+	}
+
+	/**
+	 * Use `presetName` as a stand-in until the exhausted quota resets (the server decides
+	 * how long), then refresh the required-keys cache so the stand-in's keys are sent.
+	 * @param {string} presetName
+	 * @param {string|null} [provider] - The provider whose quota ran out, shown in the active-stand-in line
+	 * @param {boolean} [startEndpoints] - Also start the stand-in's endpoints (when nothing, such as a
+	 *   login, has to happen first). A start the server refuses or already runs is left to the dialogs.
+	 * @returns {Promise<void>}
+	 * @throws {Error} With the server's message when it refuses (e.g. 409: no quota is exhausted any more)
+	 */
+	async useStandin(presetName, provider = null, startEndpoints = false) {
+		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
+			method: 'PUT',
+			headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+			body: JSON.stringify({ preset_name: presetName }),
+		});
+		if (!response.ok) {
+			const data = /** @type {any} */ (await response.json().catch(() => ({})));
+			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+		}
+		this._setStandinPref(presetName);
+		this.standinProvider = provider;
+		await this.fetchRequiredApiKeys();
+		if (startEndpoints) {
+			try {
+				const started = await fetch(`${this.backendURL}/api/config/provision`, { method: 'POST', headers: this.getAuthHeaders() });
+				if (!started.ok) this.log(`Starting the endpoints of ${presetName}: HTTP ${started.status}`);
+			} catch (e) {
+				this.log(`Could not start the endpoints of ${presetName}: ${e}`);
+			}
+		}
+		this._notifyStandinChanged();
+	}
+
+	/**
+	 * The stand-ins on offer for a used-up quota, asked for outside a failed query (the
+	 * dialogs ask when they find a side down). Null when nothing is on offer: no quota is
+	 * used up for long, a stand-in already answers, or the server cannot say.
+	 * @returns {Promise<QuotaExhaustedDetail|null>}
+	 */
+	async fetchStandinOffer() {
+		try {
+			const response = await fetch(`${this.backendURL}/api/config/standins`, { headers: this.getAuthHeaders() });
+			if (!response.ok) return null;
+			const data = /** @type {{offer?: QuotaExhaustedDetail|null}} */ (await response.json());
+			return data && data.offer ? data.offer : null;
+		} catch (e) {
+			this.log('Could not fetch the stand-in offer: ' + e);
+			return null;
+		}
+	}
+
+	/**
+	 * End the active stand-in now, so the user's own preset (and keys) apply again.
+	 * @returns {Promise<void>}
+	 * @throws {Error} When the server refuses
+	 */
+	async endStandin() {
+		const response = await fetch(`${this.backendURL}/api/config/my-preset/standin`, {
+			method: 'DELETE',
+			headers: this.getAuthHeaders(),
+		});
+		if (!response.ok) {
+			const data = /** @type {any} */ (await response.json().catch(() => ({})));
+			throw new Error(typeof data.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+		}
+		this._setStandinPref('');
+		this.standinProvider = null;
+		await this.fetchRequiredApiKeys();
+		this._notifyStandinChanged();
+	}
+
+	/**
+	 * Bring the required-keys cache in step with the stand-in GET /api/config reports:
+	 * when it started or ended elsewhere (e.g. it expired on the server), refetch the keys.
+	 * Does nothing when `standin` is undefined (the server did not say).
+	 * @param {ActiveStandin|null|undefined} standin
+	 * @returns {Promise<boolean>} true when the cache was refreshed
+	 */
+	async syncStandinState(standin) {
+		if (standin === undefined) return false;
+		const current = standin ? standin.preset : '';
+		/** @type {string} */
+		let known = '';
+		try { known = String(Zotero.Prefs.get(STANDIN_PREF, true) || ''); } catch (_) {}
+		if (known === current) return false;
+		this._setStandinPref(current);
+		this.standinProvider = null;
+		await this.fetchRequiredApiKeys();
+		return true;
+	}
+
+	/**
+	 * The line shown while a stand-in answers queries (query dialog and Preferences).
+	 * @param {ActiveStandin} standin
+	 * @param {string|null} provider - The provider whose quota ran out, when known
+	 * @returns {string}
+	 */
+	describeActiveStandin(standin, provider) {
+		const until = new Date(standin.until);
+		const clock = `${String(until.getHours()).padStart(2, '0')}:${String(until.getMinutes()).padStart(2, '0')}`;
+		const reason = provider ? `${provider.toUpperCase()} quota` : `instead of ${standin.replaces}`;
+		return `Using ${standin.preset} until ${clock} (${reason})`;
+	}
+
+	/**
+	 * Show the active stand-in in `line`/`text`, or hide the line when there is none.
+	 * @param {HTMLElement|null} line - Container, shown as flex
+	 * @param {HTMLElement|null} text - Element that gets the description
+	 * @param {ActiveStandin|null} standin
+	 * @returns {void}
+	 */
+	renderStandinLine(line, text, standin) {
+		if (!line || !text) return;
+		if (!standin) {
+			line.style.display = 'none';
+			return;
+		}
+		text.textContent = this.describeActiveStandin(standin, this.standinProvider);
+		line.style.display = 'flex';
+	}
+
+	/**
+	 * @param {string} presetName - '' when no stand-in is active
+	 * @returns {void}
+	 */
+	_setStandinPref(presetName) {
+		try { Zotero.Prefs.set(STANDIN_PREF, presetName, true); } catch (_) {}
+	}
+
+	/**
+	 * Tell other open windows (Configure preset, Preferences) that the active preset changed.
+	 * @returns {void}
+	 */
+	_notifyStandinChanged() {
+		try { this.notifyPresetChanged('standin'); } catch (_) {}
 	}
 
 	/**
@@ -1400,6 +1623,18 @@ class ZoteroRAGPlugin {
 	}
 
 	/**
+	 * The re-ranking pool size set in the preset dialog's Re-ranking tab
+	 * (`rerankPoolSize` preference), or undefined to use the preset's own value.
+	 * @returns {number|undefined}
+	 */
+	getRerankPoolSize() {
+		const stored = Zotero.Prefs.get('extensions.zotero-rag.rerankPoolSize', true);
+		const value = Number(stored);
+		return stored !== undefined && stored !== null && stored !== '' && Number.isInteger(value)
+			&& value >= 1 && value <= 500 ? value : undefined;
+	}
+
+	/**
 	 * Submit a query to the backend.
 	 * @param {string} question - Question to ask
 	 * @param {Array<string>} libraryIDs - Library IDs to query
@@ -1440,6 +1675,12 @@ class ZoteroRAGPlugin {
 			if (options.enableRouting === false) {
 				payload.enable_routing = false;
 			}
+			if (options.enableReranking === false) {
+				payload.enable_reranking = false;
+			} else {
+				const poolSize = this.getRerankPoolSize();
+				if (poolSize !== undefined) payload.rerank_pool_size = poolSize;
+			}
 			if (options.includeTrace) {
 				payload.include_trace = true;
 			}
@@ -1467,6 +1708,9 @@ class ZoteroRAGPlugin {
 				const errorData = ct.includes('application/json')
 					? /** @type {any} */ (await response.json().catch(() => ({})))
 					: { detail: (await response.text().catch(() => '')).slice(0, 300) };
+				if (errorData.detail && typeof errorData.detail === 'object' && errorData.detail.code === 'quota_exhausted') {
+					throw new QuotaExhaustedError(/** @type {QuotaExhaustedDetail} */ (errorData.detail));
+				}
 				throw new Error(`POST /api/query: HTTP ${response.status}${errorData.detail ? ` — ${errorData.detail}` : ''}`);
 			}
 
@@ -2220,7 +2464,8 @@ class ZoteroRAGPlugin {
 			// Derive backendLibraryId from the Zotero internal ID
 			const libs = this.getLibraries();
 			const matched = libs.find(l => this._resolveZoteroLibraryID(l.id) === zoteroLibraryID);
-			backendLibraryId = matched ? matched.id : String(zoteroLibraryID);
+			// Fall back to the same ID convention the toolbar badge reads its count under.
+			backendLibraryId = matched ? matched.id : this.getBackendLibraryId(zoteroLibraryID);
 		} else {
 			zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
 		}
@@ -2262,6 +2507,58 @@ class ZoteroRAGPlugin {
 			'chrome,centerscreen,resizable=yes,width=520,height=480',
 			{ plugin: this }
 		);
+	}
+
+	/**
+	 * Open the "Configure preset" dialog (endpoints, credentials and tuning of the
+	 * caller's preset), focusing an existing instance instead of opening a duplicate.
+	 * @param {Window} win - Parent window
+	 * @returns {void}
+	 */
+	openPresetDialog(win) {
+		if (this._presetDialogWindow && !this._presetDialogWindow.closed) {
+			this._presetDialogWindow.focus();
+			return;
+		}
+		// @ts-ignore - openDialog is available in XUL/Firefox extension context
+		this._presetDialogWindow = win.openDialog(
+			'chrome://zotero-rag/content/preset-dialog.xhtml',
+			'zotero-rag-preset-dialog',
+			'chrome,centerscreen,resizable=yes,width=780,height=720',
+			{ plugin: this }
+		);
+	}
+
+	/**
+	 * Keep the auto-indexer's copy of the caller's embedding key in step with the one
+	 * just entered locally: when automatic indexing is on for this user, re-submit the
+	 * registration with the new key. Does nothing when automatic indexing is off.
+	 * @param {string} value - the new embedding key ('' when cleared)
+	 * @returns {Promise<{synced: boolean, status?: string, error?: string}>}
+	 */
+	async syncAutoindexEmbeddingKey(value) {
+		if (!this.zoteroApiKey) return { synced: false };
+		try {
+			const current = await fetch(`${this.backendURL}/api/autoindex/keys`, { headers: this.getAuthHeaders() });
+			if (!current.ok) return { synced: false };
+			/** @type {{keys?: unknown[]}} */
+			const registered = await current.json();
+			if (!Array.isArray(registered.keys) || registered.keys.length === 0) return { synced: false };
+			const response = await fetch(`${this.backendURL}/api/autoindex/keys`, {
+				method: 'POST',
+				headers: this.getAuthHeaders({ 'Content-Type': 'application/json' }),
+				body: JSON.stringify({ api_key: this.zoteroApiKey, embedding_api_key: value }),
+			});
+			if (!response.ok) {
+				const err = await response.json().catch(() => ({}));
+				return { synced: false, error: err.detail || `HTTP ${response.status}` };
+			}
+			/** @type {{embedding_key_status?: string, embedding_key_error?: string}} */
+			const data = await response.json();
+			return { synced: true, status: data.embedding_key_status, error: data.embedding_key_error };
+		} catch (e) {
+			return { synced: false, error: String(e) };
+		}
 	}
 
 	/**
@@ -2406,6 +2703,8 @@ class ZoteroRAGPlugin {
 				}
 			}
 		} catch (_) {}
+		// The toolbar badge reads the same pref; repaint it so it shows the live count.
+		this.refreshUnavailableBadge();
 	}
 
 	/** @param {string} backendLibraryId */

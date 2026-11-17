@@ -29,6 +29,8 @@ dependencies = [
     "tqdm>=4.0.0",
     "huggingface-hub>=0.26.0",
     "pikepdf>=10.5.1",
+    # Per-user MPCDF endpoints (login sessions, job provisioning); source in [tool.uv.sources].
+    "mpcdf-llm>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -44,6 +46,10 @@ eval = [
     "ir-datasets>=0.5.5",
 ]
 
+[tool.uv.sources]
+# From git: the GitLab instance sends archive downloads by scripts to its sign-in page.
+mpcdf-llm = { git = "https://gitlab.mpcdf.mpg.de/cboul/llm-mpcdf.git", rev = "bbb92e7b267bd9380af96ff1e477a3f7f57a2c5c" }
+
 [project.scripts]
 # Short, stable names for the most-used debugging scripts (`uv run <name>`),
 # decoupled from the underlying file's path — move/rename the script and only
@@ -55,7 +61,7 @@ rag-index = "bin.index_libraries:main"
 rag-check-gold-index = "scripts.rag_check_gold_index:main"
 
 [tool.pytest.ini_options]
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "backend/plugins"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

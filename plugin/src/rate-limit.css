@@ -1,6 +1,14 @@
-/* Rate-limit bars shared by dialog.xhtml and autoindex-status.xhtml */
-.rate-limit-row { display: flex; align-items: center; gap: 8px; font-size: 11px; line-height: 1.6; }
+/* Usage widget (quota bars or estimated costs) shared by dialog.xhtml and autoindex-status.xhtml */
+.rate-limit-row { display: flex; align-items: center; gap: 6px; font-size: 10px; line-height: 13px; }
 /* Fixed track width (not flex: 1) so all bars have the same length and the labels line up. */
-.rate-limit-bar-track { flex: 0 0 80px; width: 80px; height: 3px; background: #e0e0e0; border-radius: 2px; overflow: hidden; }
+.rate-limit-bar-track { flex: 0 0 60px; width: 60px; height: 3px; background: #e0e0e0; border-radius: 2px; overflow: hidden; }
 .rate-limit-bar { height: 100%; border-radius: 2px; width: 0%; transition: width 0.3s, background-color 0.3s; }
-.rate-limit-text { flex: 1 1 auto; min-width: 0; color: #555; white-space: nowrap; }
+.rate-limit-text { flex: 1 1 auto; min-width: 0; color: #555; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-cost-total { font-size: 11px; line-height: 14px; color: #333; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-cost-detail { font-size: 10px; line-height: 13px; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The widget in a dialog's button row: a fixed box that never changes the row's height. */
+.usage-widget {
+  display: flex; flex-direction: column; justify-content: center;
+  flex: 0 0 250px; width: 250px; height: 28px; overflow: hidden; box-sizing: border-box;
+  border-right: 1px solid #ddd; padding-right: 8px; margin-right: 4px;
+}

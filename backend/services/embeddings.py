@@ -1,7 +1,9 @@
 """
 Embedding service for generating text embeddings.
 
-Supports both local models (sentence-transformers) and remote APIs (OpenAI-compatible).
+Remote APIs (OpenAI-compatible) are implemented here; local models come from the
+``inference.local`` capabilities of backend plugins (for example ``local_torch``,
+sentence-transformers on torch), chosen by the side's ``engine`` key.
 Includes content-hash based caching to avoid recomputing embeddings.
 """
 
@@ -9,15 +11,12 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
-import os
 import re
 import time
 import random
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Callable, Optional
-
-import numpy as np
 
 from backend.config.presets import EmbeddingConfig
 from backend.services.endpoint_errors import classify_status_error, unavailable_message
@@ -194,6 +193,39 @@ _KNOWN_DIMS: dict[str, int] = {
 }
 
 
+# Query-side task instructions for instruction-tuned embedding models, keyed by the
+# model name without its organisation prefix. These models are trained to embed a
+# search query as "Instruct: <task>\nQuery: <query>" and documents without any prefix,
+# so only queries get it and existing indexes stay valid. Measured on the gold library
+# (HF dataset evaluations/retrieval-improvements-20261113): top-10 passage hit rate
+# .67 -> .74/.75 on the Docling/Kreuzberg indexes. A preset overrides this with
+# EmbeddingConfig.query_instruction ("" turns it off).
+DEFAULT_QUERY_INSTRUCTIONS: dict[str, str] = {
+    "multilingual-e5-large-instruct": (
+        "Given a question, retrieve passages from academic documents that contain the answer"
+    ),
+}
+
+
+def resolve_query_instruction(config: Optional["EmbeddingConfig"], model_name: str) -> Optional[str]:
+    """Return the query instruction to use, or None to embed queries bare.
+
+    An explicit ``config.query_instruction`` wins (empty string disables it);
+    otherwise the model's entry in DEFAULT_QUERY_INSTRUCTIONS applies.
+    """
+    explicit = getattr(config, "query_instruction", None) if config is not None else None
+    if explicit is not None:
+        return explicit.strip() or None
+    return DEFAULT_QUERY_INSTRUCTIONS.get(model_name.rsplit("/", 1)[-1].lower())
+
+
+def format_query_for_embedding(query: str, instruction: Optional[str]) -> str:
+    """Wrap a search query in the instruction format, or return it unchanged."""
+    if not instruction:
+        return query
+    return f"Instruct: {instruction}\nQuery: {query}"
+
+
 class EmbeddingService(ABC):
     """Abstract base class for embedding services."""
 
@@ -207,6 +239,18 @@ class EmbeddingService(ABC):
     @abstractmethod
     async def embed_text(self, text: str) -> list[float]:
         """Generate embedding for a single text."""
+
+    def get_query_instruction(self) -> Optional[str]:
+        """Return the task instruction applied to search queries, or None."""
+        return resolve_query_instruction(getattr(self, "config", None), self.get_model_name())
+
+    async def embed_query(self, query: str) -> list[float]:
+        """Embed a search query (as opposed to a document chunk).
+
+        Instruction-tuned models get the query wrapped in their task instruction;
+        everything else is embedded exactly like ``embed_text``.
+        """
+        return await self.embed_text(format_query_for_embedding(query, self.get_query_instruction()))
 
     @abstractmethod
     async def embed_batch(
@@ -252,163 +296,6 @@ class EmbeddingService(ABC):
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-class LocalEmbeddingService(EmbeddingService):
-    """
-    Embedding service using local sentence-transformer models.
-
-    sentence-transformers (and torch) are imported lazily so that the module
-    can be loaded without them when a remote preset is used.
-    """
-
-    def __init__(
-        self,
-        config: EmbeddingConfig,
-        cache_dir: Optional[str] = None,
-        hf_token: Optional[str] = None,
-    ):
-        self.config = config
-        self.cache_dir = cache_dir
-        self.hf_token = hf_token
-        self._model: Optional[Any] = None  # SentenceTransformer, imported lazily
-        self._embedding_cache: dict[str, list[float]] = {}
-        logger.debug(f"Initialized LocalEmbeddingService with model: {config.model_name}")
-
-    def _load_model(self):
-        """Lazy-load the embedding model (imports sentence-transformers on first call)."""
-        if self._model is None:
-            logger.debug(f"Loading embedding model: {self.config.model_name}")
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError:
-                raise RuntimeError(
-                    "sentence-transformers is required for local embeddings. "
-                    "Install it with: uv add sentence-transformers"
-                )
-
-            model_kwargs = self.config.model_kwargs.copy()
-            if self.cache_dir:
-                model_kwargs["cache_folder"] = self.cache_dir
-            if self.hf_token:
-                os.environ["HF_TOKEN"] = self.hf_token
-                model_kwargs["token"] = self.hf_token
-
-            # Auto-select best available device when the preset doesn't specify one.
-            if "device" not in model_kwargs:
-                try:
-                    import torch
-                    if torch.backends.mps.is_available():
-                        model_kwargs["device"] = "mps"
-                        logger.debug("MPS (Apple Silicon) detected — using GPU acceleration.")
-                    elif torch.cuda.is_available():
-                        model_kwargs["device"] = "cuda"
-                        logger.debug("CUDA detected — using GPU acceleration.")
-                except ImportError:
-                    pass
-
-            self._model = SentenceTransformer(self.config.model_name, **model_kwargs)
-            logger.debug(
-                f"Model loaded on {model_kwargs.get('device', 'cpu')}. "
-                f"Embedding dimension: {self._model.get_sentence_embedding_dimension()}"
-            )
-
-    async def embed_text(self, text: str) -> list[float]:
-        """Generate embedding for a single text."""
-        if self.config.cache_enabled:
-            content_hash = self.compute_content_hash(text)
-            if content_hash in self._embedding_cache:
-                logger.debug(f"Cache hit for text hash: {content_hash[:8]}...")
-                return self._embedding_cache[content_hash]
-
-        self._load_model()
-        embedding = await asyncio.to_thread(self._model.encode, text, convert_to_numpy=True)
-        embedding_list = embedding.tolist()
-
-        if self.config.cache_enabled:
-            content_hash = self.compute_content_hash(text)
-            self._embedding_cache[content_hash] = embedding_list
-
-        return embedding_list
-
-    async def embed_batch(
-        self,
-        texts: list[str],
-        on_batch: Optional[Callable[[int, int], None]] = None,
-    ) -> list[list[float]]:
-        """Generate embeddings for multiple texts."""
-        if not texts:
-            return []
-
-        uncached_texts: list[str] = []
-        uncached_indices: list[int] = []
-        results: list[Optional[list[float]]] = [None] * len(texts)
-
-        if self.config.cache_enabled:
-            for i, text in enumerate(texts):
-                content_hash = self.compute_content_hash(text)
-                if content_hash in self._embedding_cache:
-                    results[i] = self._embedding_cache[content_hash]
-                else:
-                    uncached_texts.append(text)
-                    uncached_indices.append(i)
-        else:
-            uncached_texts = texts
-            uncached_indices = list(range(len(texts)))
-
-        if uncached_texts:
-            self._load_model()
-            logger.debug(f"Generating embeddings for {len(uncached_texts)} texts")
-            embeddings = await asyncio.to_thread(
-                self._model.encode,
-                uncached_texts,
-                batch_size=self.config.batch_size,
-                convert_to_numpy=True,
-                show_progress_bar=len(uncached_texts) > 10,
-            )
-            for i, idx in enumerate(uncached_indices):
-                embedding_list = embeddings[i].tolist()
-                results[idx] = embedding_list
-                if self.config.cache_enabled:
-                    content_hash = self.compute_content_hash(texts[idx])
-                    self._embedding_cache[content_hash] = embedding_list
-
-        if on_batch:
-            on_batch(len(texts), len(texts))
-        return results  # type: ignore[return-value]
-
-    def get_embedding_dim(self) -> int:
-        """Get the dimensionality of embeddings."""
-        self._load_model()
-        return self._model.get_sentence_embedding_dimension()
-
-    def get_model_name(self) -> str:
-        """Return the model identifier."""
-        return self.config.model_name
-
-    async def get_rate_limit_info(self) -> dict[str, str] | None:
-        return None
-
-    def clear_cache(self):
-        """Clear the embedding cache."""
-        self._embedding_cache.clear()
-        logger.info("Embedding cache cleared")
-
-    def close(self):
-        """Release model from memory and clear CUDA cache if available."""
-        try:
-            if self._model is not None:
-                del self._model
-                self._model = None
-                try:
-                    import torch
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                except (ImportError, RuntimeError):
-                    pass
-                logger.debug("LocalEmbeddingService model cleaned up")
-        except Exception as e:
-            logger.debug(f"Error during embedding service cleanup: {e}")
-
-
 class RemoteEmbeddingService(EmbeddingService):
     """
     Embedding service using any OpenAI-compatible embeddings API.
@@ -434,6 +321,11 @@ class RemoteEmbeddingService(EmbeddingService):
         self._provider = provider
         self._resolved_base_url: Optional[str] = None
         self._api_key = api_key  # explicit override; falls back to env-var lookup
+        from backend.services.session_endpoint import SessionEndpoint, uses_session_endpoints
+
+        #: The caller's own endpoint, for a provider that runs one per user session.
+        self._session: Optional[SessionEndpoint] = SessionEndpoint(provider) if uses_session_endpoints(provider) else None
+        self._session_key: Optional[str] = None
         # Resolves shared-field admin settings (base_url/API key) in _get_client().
         # Falls back to the global settings singleton when not provided, so
         # callers that don't care (e.g. the cron indexer, which wants the same
@@ -528,11 +420,19 @@ class RemoteEmbeddingService(EmbeddingService):
                     "(it is sent with each request, never read from the environment)."
                 )
             return self._api_key
+        if self._session_obj() is not None:
+            return getattr(self, "_session_key", None) or KEYLESS_API_KEY
         # No key declared: an OpenAI-compatible server that needs none.
         return self._api_key or KEYLESS_API_KEY
 
+    def _session_obj(self):
+        # getattr: tests build services with __new__ and skip __init__.
+        return getattr(self, "_session", None)
+
     def _derives_endpoint(self) -> bool:
-        """True when this side's URL is found from the key rather than set in the preset."""
+        """True when this side's URL is found from the key (or the caller's session), not the preset."""
+        if self._session_obj() is not None:
+            return True
         kwargs = self.config.model_kwargs
         return bool(
             self._provider is not None
@@ -543,6 +443,11 @@ class RemoteEmbeddingService(EmbeddingService):
 
     def _forget_endpoint(self) -> None:
         """Drop a derived endpoint that stopped answering, so the next call looks it up again."""
+        if self._session_obj() is not None:
+            self._resolved_base_url = None
+            self._session_key = None
+            self._client = None
+            return
         if self._resolved_base_url and self._provider is not None:
             from backend.services.endpoint_cache import endpoint_cache
 
@@ -573,6 +478,9 @@ class RemoteEmbeddingService(EmbeddingService):
 
     async def _ensure_endpoint(self) -> None:
         """Look up the key-derived endpoint off the event loop, before the client is built."""
+        if self._session_obj() is not None:
+            await self._ensure_session_endpoint()
+            return
         if self._client is not None or self._resolved_base_url or not self._derives_endpoint():
             return
         import asyncio
@@ -586,6 +494,25 @@ class RemoteEmbeddingService(EmbeddingService):
                 unavailable_message("embedding", "The embedding endpoint is not provisioned.")
             )
         self._resolved_base_url = url
+
+    async def _ensure_session_endpoint(self) -> None:
+        """Use the caller's own running endpoint (asked before every call: renewals change it)."""
+        from backend.services.session_endpoint import SessionEndpointError
+
+        try:
+            creds = await self._session.resolve()
+        except SessionEndpointError as exc:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", f"The embedding endpoint is unavailable: {exc}.")
+            ) from exc
+        if creds is None or not creds.base_url:
+            raise EmbeddingEndpointUnavailableError(
+                unavailable_message("embedding", "Your embedding endpoint is not running.")
+            )
+        if (creds.base_url, creds.api_key) != (self._resolved_base_url, getattr(self, "_session_key", None)):
+            self._client = None
+        self._resolved_base_url = creds.base_url
+        self._session_key = creds.api_key
 
     def _get_client(self):
         """Lazy-initialize the AsyncOpenAI client."""
@@ -634,6 +561,14 @@ class RemoteEmbeddingService(EmbeddingService):
                 self._client = AsyncOpenAI(api_key=api_key, timeout=timeout)
                 logger.debug(f"OpenAI embeddings client initialised, timeout={timeout}s")
         return self._client
+
+    def _record_cost(self, model: str, usage_obj: Any, seconds: float) -> None:
+        """Add the estimated cost of one completed call to the request's cost ledger."""
+        from backend.providers.types import Usage
+        from backend.services.cost_ledger import record_usage, token_counts
+
+        input_tokens, _ = token_counts(usage_obj)
+        record_usage(self._provider, Usage(side="embedding", model=model, input_tokens=input_tokens, seconds=seconds))
 
     def _capture_rate_limit_headers(self, headers: Any) -> None:
         """Extract and cache rate-limit headers from an API response."""
@@ -707,6 +642,7 @@ class RemoteEmbeddingService(EmbeddingService):
 
         for attempt in range(max_attempts):
             try:
+                started = time.monotonic()
                 raw = await client.embeddings.with_raw_response.create(
                     model=model,
                     input=input,
@@ -714,7 +650,9 @@ class RemoteEmbeddingService(EmbeddingService):
                 )
                 self._capture_rate_limit_headers(raw.headers)
                 recorder.clear_rate_limit("embedding", self._fingerprint)
-                return raw.parse()
+                parsed = raw.parse()
+                self._record_cost(model, getattr(parsed, "usage", None), time.monotonic() - started)
+                return parsed
             except (AuthenticationError, PermissionDeniedError) as exc:
                 # Invalid/expired API key (401) or forbidden (403): not recoverable
                 # by retrying. Raise a fatal error so the caller aborts the run and
@@ -1043,7 +981,10 @@ def create_embedding_service(
                    derives the endpoint from the key (RunPod) supply the URL.
     """
     if config.model_type == "local":
-        return LocalEmbeddingService(config, cache_dir=cache_dir, hf_token=hf_token)
+        from backend.pluginhost import select_local_engine
+
+        engine = select_local_engine("embedding", config.engine)
+        return engine.create(config, cache_dir=cache_dir, hf_token=hf_token)
     elif config.model_type == "remote":
         return RemoteEmbeddingService(config, api_key=api_key, data_path=data_path, provider=provider)
     else:
