@@ -21,12 +21,13 @@ const vm = require('node:vm');
 const SOURCE_PATH = path.join(__dirname, '..', 'src', 'dialog.js');
 
 /** @returns {any} the ZoteroRAGDialog object (methods only — no live state) */
-function loadDialogMethods() {
+function loadDialogMethods(extra = {}) {
 	const src = fs.readFileSync(SOURCE_PATH, 'utf8');
 	const context = {
 		document: { readyState: 'loading', addEventListener() {} },
 		window: {},
 		console,
+		...extra,
 	};
 	vm.createContext(context);
 	vm.runInContext(src, context, { filename: 'dialog.js' });
@@ -1538,4 +1539,22 @@ test('health is checked again while a wanted re-ranker is not ready, sooner whil
 	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: { status: 'unreachable', detail: '' } }, null, false), 0);
 	// A blocking side sets the pace.
 	assert.strictEqual(D.healthPollDelay({ embedding: ready, llm: ready, rerank: null }, { retryMs: 5000 }, false), 5000);
+});
+
+test('onUnavailableCountUpdated stores the count and repaints the toolbar badge (#102)', () => {
+	const prefs = new Map();
+	const ZoteroRAGDialog = loadDialogMethods({ Zotero: { Prefs: { set: (k, v) => prefs.set(k, v) } } });
+	let badgeRefreshes = 0;
+	const statusUpdates = [];
+	const fakeThis = {
+		plugin: { refreshUnavailableBadge() { badgeRefreshes++; } },
+		libraryMissingFilesCount: new Map(),
+		libraryMetadata: new Map(),
+		updateLibraryStatusIcon(libraryId) { statusUpdates.push(libraryId); },
+	};
+	ZoteroRAGDialog.onUnavailableCountUpdated.call(fakeThis, 'lib1', 4);
+	assert.strictEqual(fakeThis.libraryMissingFilesCount.get('lib1'), 4);
+	assert.strictEqual(prefs.get('extensions.zotero-rag.missingFiles.lib1'), 4);
+	assert.deepStrictEqual(statusUpdates, ['lib1']);
+	assert.strictEqual(badgeRefreshes, 1);
 });

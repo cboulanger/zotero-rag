@@ -2908,6 +2908,10 @@ var ZoteroRAGDialog = {
 		// @ts-ignore
 		Zotero.Prefs.set(`extensions.zotero-rag.missingFiles.${libraryId}`, count, true);
 		this.updateLibraryStatusIcon(libraryId, this.libraryMetadata.get(libraryId) ?? null);
+		// The toolbar badge in the main window reads the same pref; keep it in step.
+		if (this.plugin && typeof this.plugin.refreshUnavailableBadge === 'function') {
+			this.plugin.refreshUnavailableBadge();
+		}
 	},
 
 	/** @param {Date} date */

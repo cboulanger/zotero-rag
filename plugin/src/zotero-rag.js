@@ -2451,7 +2451,8 @@ class ZoteroRAGPlugin {
 			// Derive backendLibraryId from the Zotero internal ID
 			const libs = this.getLibraries();
 			const matched = libs.find(l => this._resolveZoteroLibraryID(l.id) === zoteroLibraryID);
-			backendLibraryId = matched ? matched.id : String(zoteroLibraryID);
+			// Fall back to the same ID convention the toolbar badge reads its count under.
+			backendLibraryId = matched ? matched.id : this.getBackendLibraryId(zoteroLibraryID);
 		} else {
 			zoteroLibraryID = this._resolveZoteroLibraryID(backendLibraryId);
 		}
@@ -2689,6 +2690,8 @@ class ZoteroRAGPlugin {
 				}
 			}
 		} catch (_) {}
+		// The toolbar badge reads the same pref; repaint it so it shows the live count.
+		this.refreshUnavailableBadge();
 	}
 
 	/** @param {string} backendLibraryId */

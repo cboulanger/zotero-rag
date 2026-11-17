@@ -2270,3 +2270,49 @@ test('fetchStandinOffer returns the offer, null when there is none, and null whe
 	const old = standinPlugin({}); // 404: a backend without the endpoint
 	assert.strictEqual(await old.plugin.fetchStandinOffer(), null);
 });
+
+/**
+ * Stubs for the toolbar "unavailable attachments" badge: one main window with the
+ * badge button, the personal library selected, and an in-memory prefs store.
+ * @returns {{ plugin: any, prefs: Map<string, any>, btn: any, badge: any }}
+ */
+function badgePlugin() {
+	const { zotero, ioUtils, pathUtils } = makeStubs();
+	const prefs = new Map();
+	/** @param {Record<string, string>} attrs */
+	const fakeElement = (attrs) => ({
+		attrs,
+		setAttribute(name, value) { this.attrs[name] = String(value); },
+		removeAttribute(name) { delete this.attrs[name]; },
+	});
+	const btn = fakeElement({ hidden: 'true' });
+	const badge = fakeElement({ value: '' });
+	const win = {
+		document: {
+			getElementById: (id) => ({ 'zotero-rag-unavailable-btn': btn, 'zotero-rag-unavailable-badge': badge })[id] || null,
+		},
+	};
+	zotero.Prefs = { get: (key) => prefs.get(key), set: (key, value) => { prefs.set(key, value); } };
+	zotero.Users = { getCurrentUserID: () => 42 };
+	zotero.Groups = { getByLibraryID: () => null };
+	zotero.getMainWindows = () => [win];
+	zotero.getActiveZoteroPane = () => ({ getSelectedLibraryIDs: () => [1] });
+	const plugin = loadPlugin(zotero, ioUtils, pathUtils);
+	return { plugin, prefs, btn, badge };
+}
+
+test('updateMissingFilesCount repaints the toolbar badge with the live count (#102)', () => {
+	const { plugin, prefs, btn, badge } = badgePlugin();
+	prefs.set('extensions.zotero-rag.missingFiles.u42', 17); // stale count from the last indexing run
+	plugin.refreshUnavailableBadge();
+	assert.strictEqual(badge.attrs.value, '17');
+	assert.strictEqual(btn.attrs.hidden, undefined);
+
+	// The Fix Unavailable dialog determined the real number.
+	plugin.updateMissingFilesCount('u42', 3);
+	assert.strictEqual(prefs.get('extensions.zotero-rag.missingFiles.u42'), 3);
+	assert.strictEqual(badge.attrs.value, '3');
+
+	plugin.updateMissingFilesCount('u42', 0);
+	assert.strictEqual(btn.attrs.hidden, 'true');
+});
