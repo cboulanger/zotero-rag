@@ -6,22 +6,7 @@
   <title>Configure preset - Zotero RAG</title>
   <meta charset="utf-8"/>
   <link rel="stylesheet" href="chrome://zotero-rag/content/preset-dialog.css"/>
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      try {
-        Services.scriptloader.loadSubScript("chrome://zotero/content/include.js", this);
-      } catch (e) {
-        console.error("Failed to load include.js:", e);
-      }
-      for (const script of ["preset-dialog-view.js", "preset-dialog.js"]) {
-        try {
-          Services.scriptloader.loadSubScript(`chrome://zotero-rag/content/${script}`, window);
-        } catch (e) {
-          console.error(`Failed to load ${script}:`, e);
-        }
-      }
-    });
-  </script>
+  <script src="chrome://zotero-rag/content/preset-dialog-loader.js"/>
 </head>
 <body>
   <div id="pd-root"></div>

@@ -43,7 +43,10 @@ async function startup({ id, version, rootURI }) {
 		pluginID: 'zotero-rag@cboulanger.github.io',
 		src: rootURI + 'preferences.xhtml',
 		image: rootURI + 'icons/ask-rag.svg',
-		stylesheets: [rootURI + 'preferences.css']
+		stylesheets: [rootURI + 'preferences.css'],
+		// Calls initPrefPane() on the pane's load event; replaces an inline
+		// onload attribute that Firefox's baseline chrome CSP would block.
+		scripts: [rootURI + 'preferences-pane.js']
 	});
 
 	// Load Zotero Plugin Toolkit bundle
