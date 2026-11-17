@@ -20,18 +20,28 @@
  */
 
 /**
- * The estimated cost of what one side consumed (`costs` in query and upload responses,
- * and per library in the auto-indexing status). Computed from list prices.
+ * What one side of one paid provider consumed (`costs` in query and upload responses, and
+ * per library in the auto-indexing status). The plugin prices it with the user's Billing
+ * settings (`priceCosts`); `amount` and `pricing` are the provider's list prices.
  * @typedef {Object} UsageCost
  * @property {'embedding'|'llm'|'rerank'} side
- * @property {number} amount
+ * @property {string} [provider] - provider id
+ * @property {string} [provider_label]
+ * @property {string} [model]
+ * @property {number|null} [amount] - at list prices from the server; at the user's prices after `priceCosts`
  * @property {string} currency - ISO 4217 code, e.g. "USD"
  * @property {number} [requests]
  * @property {number} [input_tokens]
  * @property {number} [output_tokens]
  * @property {number} [seconds]
+ * @property {{input_per_million_tokens?: number, output_per_million_tokens?: number, per_second?: number, per_request?: number}|null} [pricing]
  * @property {boolean} [estimated]
  * @property {string} [note] - What the estimate leaves out
+ */
+
+/**
+ * A paid provider of the active preset (`paid_providers` of GET /api/config).
+ * @typedef {{id: string, label: string, sides: string[]}} PaidProvider
  */
 
 /**
@@ -133,8 +143,99 @@ var ZoteroRAGRateLimitWidget = {
 
 	// -- costs of paid providers ------------------------------------------------
 
+	/** Billing types of an account card's Billing select (backend/services/preset_view.py). */
+	BILLING: { NOT_SET: 'Not set', SUBSCRIPTION: 'Subscription', TOKENS: 'Token-based', TIME: 'Time-based' },
+
 	/**
-	 * Add `more` to running totals, merging entries of the same side and currency (pure).
+	 * Read `extensions.zotero-rag.<name>` from Zotero's preferences (undefined outside Zotero).
+	 * @param {string} name
+	 * @returns {any}
+	 */
+	zoteroPref(name) {
+		try {
+			// @ts-ignore - Zotero is a global in the plugin's windows
+			return typeof Zotero !== 'undefined' ? Zotero.Prefs.get(`extensions.zotero-rag.${name}`, true) : undefined;
+		} catch (_) {
+			return undefined;
+		}
+	},
+
+	/**
+	 * How the user is billed for a provider: the Billing select of its account card.
+	 * @param {string|undefined} provider
+	 * @param {(name: string) => any} getPref - reads `extensions.zotero-rag.<name>`
+	 * @returns {string}
+	 */
+	billingMode(provider, getPref) {
+		if (!provider) return this.BILLING.NOT_SET;
+		try {
+			const mode = getPref(`billing.${provider}.mode`);
+			return typeof mode === 'string' && mode ? mode : this.BILLING.NOT_SET;
+		} catch (_) {
+			return this.BILLING.NOT_SET;
+		}
+	},
+
+	/**
+	 * Whether any of these providers is billed per token or per second, so costs are shown instead of quota.
+	 * @param {PaidProvider[]|null|undefined} providers
+	 * @param {(name: string) => any} getPref
+	 * @returns {boolean}
+	 */
+	showsCosts(providers, getPref) {
+		return (providers || []).some((p) => {
+			const mode = this.billingMode(p.id, getPref);
+			return mode === this.BILLING.TOKENS || mode === this.BILLING.TIME;
+		});
+	},
+
+	/**
+	 * The user's price for one rate, else the list price, else 0.
+	 * @param {any} stored - the preference value (a decimal string), or undefined
+	 * @param {number|undefined} listPrice
+	 * @returns {number}
+	 */
+	_rate(stored, listPrice) {
+		const n = typeof stored === 'string' && stored.trim() ? Number(stored) : typeof stored === 'number' ? stored : NaN;
+		if (Number.isFinite(n) && n >= 0) return n;
+		return typeof listPrice === 'number' && Number.isFinite(listPrice) ? listPrice : 0;
+	},
+
+	/**
+	 * Price usage records with the user's Billing settings (pure apart from `getPref`).
+	 * Token-based: input and output tokens at the side's prices; time-based: seconds at the
+	 * side's price per second. Records of providers billed by subscription or not set are left out.
+	 * @param {UsageCost[]|null|undefined} usage
+	 * @param {(name: string) => any} getPref
+	 * @returns {UsageCost[]} new records with `amount` at the user's prices
+	 */
+	priceCosts(usage, getPref) {
+		/** @type {UsageCost[]} */
+		const priced = [];
+		for (const u of usage || []) {
+			if (!u) continue;
+			const mode = this.billingMode(u.provider, getPref);
+			const base = `billing.${u.provider}.${u.side}`;
+			const list = u.pricing || {};
+			/** @param {string} name */
+			const pref = (name) => { try { return getPref(`${base}.${name}`); } catch (_) { return undefined; } };
+			let amount;
+			if (mode === this.BILLING.TOKENS) {
+				amount = (u.input_tokens || 0) * this._rate(pref('input'), list.input_per_million_tokens) / 1e6
+					+ (u.output_tokens || 0) * this._rate(pref('output'), list.output_per_million_tokens) / 1e6;
+			} else if (mode === this.BILLING.TIME) {
+				amount = (u.seconds || 0) * this._rate(pref('second'), list.per_second);
+			} else {
+				continue;
+			}
+			priced.push({ ...u, amount, currency: u.currency || 'USD' });
+		}
+		return priced;
+	},
+
+	/**
+	 * Add usage records to running totals, merging records of the same side, provider, model
+	 * and currency (pure). `amount`s add up where present.
 	 * @param {UsageCost[]} totals
 	 * @param {UsageCost[]|null|undefined} more
 	 * @returns {UsageCost[]} new totals; the inputs are not changed
@@ -143,13 +244,14 @@ var ZoteroRAGRateLimitWidget = {
 		/** @type {UsageCost[]} */
 		const result = totals.map((c) => ({ ...c }));
 		for (const cost of more || []) {
-			if (!cost || typeof cost.amount !== 'number') continue;
-			const same = result.find((c) => c.side === cost.side && c.currency === cost.currency);
+			if (!cost || !cost.side) continue;
+			const same = result.find((c) => c.side === cost.side && (c.provider || '') === (cost.provider || '')
+				&& (c.model || '') === (cost.model || '') && c.currency === cost.currency);
 			if (!same) {
 				result.push({ ...cost });
 				continue;
 			}
-			same.amount += cost.amount;
+			if (typeof cost.amount === 'number') same.amount = (same.amount || 0) + cost.amount;
 			for (const key of /** @type {const} */ (['requests', 'input_tokens', 'output_tokens', 'seconds'])) {
 				same[key] = (same[key] || 0) + (cost[key] || 0);
 			}
@@ -176,22 +278,31 @@ var ZoteroRAGRateLimitWidget = {
 	},
 
 	/**
-	 * The widget's text for running cost totals (pure).
-	 * @param {UsageCost[]} costs
+	 * The widget's text for priced totals (pure).
+	 * @param {UsageCost[]} costs - priced (see `priceCosts`)
 	 * @param {string} [scope] - What the total covers, e.g. "this session"
 	 * @returns {{total: string, detail: string, title: string}}
 	 */
 	describeCosts(costs, scope = 'this session') {
 		/** @type {Record<string, number>} */
 		const byCurrency = {};
-		for (const c of costs) byCurrency[c.currency] = (byCurrency[c.currency] || 0) + c.amount;
+		/** @type {Map<string, {currency: string, amount: number}>} */
+		const bySide = new Map();
+		for (const c of costs) {
+			const amount = c.amount || 0;
+			byCurrency[c.currency] = (byCurrency[c.currency] || 0) + amount;
+			const key = `${c.side}|${c.currency}`;
+			const side = bySide.get(key) || { currency: c.currency, amount: 0 };
+			side.amount += amount;
+			bySide.set(key, side);
+		}
 		const currencies = Object.keys(byCurrency);
 		const sum = currencies.length
 			? currencies.map((cur) => this.formatAmount(byCurrency[cur], cur)).join(' + ')
 			: this.formatAmount(0, 'USD');
-		const total = `Est. cost ${scope}: ${sum}`;
-		const detail = costs
-			.map((c) => `${this.SIDE_LABELS[c.side] || c.side} ${this.formatAmount(c.amount, c.currency)}`)
+		const total = `Estimated cost ${scope}: ${sum}`;
+		const detail = [...bySide.entries()]
+			.map(([key, v]) => `${this.SIDE_LABELS[key.split('|')[0]] || key.split('|')[0]} ${this.formatAmount(v.amount, v.currency)}`)
 			.join(' \u00b7 ');
 		const lines = costs.map((c) => {
 			const parts = [];
@@ -200,17 +311,18 @@ var ZoteroRAGRateLimitWidget = {
 			}
 			if (c.seconds) parts.push(`${c.seconds.toFixed(1)} s`);
 			if (c.requests) parts.push(`${c.requests} calls`);
-			return `${this.SIDE_LABELS[c.side] || c.side}: ${this.formatAmount(c.amount, c.currency)}${parts.length ? ` (${parts.join(', ')})` : ''}`;
+			const who = c.provider_label || c.provider;
+			return `${this.SIDE_LABELS[c.side] || c.side}${who ? ` (${who})` : ''}: ${this.formatAmount(c.amount || 0, c.currency)}${parts.length ? ` (${parts.join(', ')})` : ''}`;
 		});
 		const notes = [...new Set(costs.map((c) => c.note).filter(Boolean))];
-		const title = [total, ...lines, 'Estimated from list prices; your bill may differ.', ...notes].join('\n');
+		const title = [total, ...lines, 'This is an estimate from the prices in Configure preset, not your bill.', ...notes].join('\n');
 		return { total, detail, title };
 	},
 
 	/**
-	 * Paint running cost totals into `<prefix>rate-limit-bars` (the same fixed-size widget as the quota bars).
+	 * Paint priced totals into `<prefix>rate-limit-bars` (the same fixed-size widget as the quota bars).
 	 * @param {Document} doc
-	 * @param {UsageCost[]} costs
+	 * @param {UsageCost[]} costs - priced (see `priceCosts`)
 	 * @param {{visible: boolean, prefix?: string, scope?: string}} options
 	 * @returns {void}
 	 */

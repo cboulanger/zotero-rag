@@ -11,7 +11,7 @@ import logging
 import os
 import re
 
-from backend.services.cost_ledger import priced_sides
+from backend.services.cost_ledger import paid_providers
 from backend.config.settings import get_settings
 from backend.config.presets import get_preset, list_presets, current_platform, HardwarePreset
 from backend.dependencies import get_client_api_keys, get_zotero_identity, require_authorized_group_admin
@@ -248,9 +248,9 @@ class ConfigResponse(BaseModel):
     default_min_score: float
     max_chunk_size: int
     extractor_backend: str = ""  # the extractor indexing runs with under ``preset_name``
-    # Sides whose provider charges per use and whose model has a known price: the query
-    # dialog shows the session's estimated costs for these instead of quota bars.
-    priced_sides: List[str] = []
+    # Paid providers of the preset's remote sides ({id, label, sides}); the plugin shows
+    # estimated costs for those whose Billing setting is token- or time-based.
+    paid_providers: List[Dict[str, Any]] = []
 
 
 class ApiKeyRequirement(BaseModel):
@@ -372,7 +372,7 @@ def get_config(request: Request):
         preset_fell_back=_fell_back_choice(settings, identity, preset),
         standin=_active_standin(settings, identity, preset),
         extractor_backend=effective_extractor_backend(settings, preset),
-        priced_sides=priced_sides(preset),
+        paid_providers=paid_providers(preset),
         # RAG configuration from preset
         default_top_k=preset.rag.top_k,
         default_min_score=preset.rag.score_threshold,

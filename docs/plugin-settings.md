@@ -133,15 +133,32 @@ query).
 
 ## Query dialog usage widget
 
-The left end of the query dialog's button row has a small widget of fixed size. With a
-preset that uses a paid provider (OpenAI, Anthropic, Google, RunPod), it shows the
-estimated cost of everything done since the dialog was opened: questions, follow-ups and
-indexing, with a breakdown by step (embedding, answering, re-ranking). The figure is
-computed from the providers' list prices; its tooltip lists the tokens or seconds counted
-and what the estimate leaves out. Your provider's bill is what counts.
+The left end of the query dialog's button row has a small widget of fixed size; it never
+changes the height of the buttons. What it shows depends on the **Billing** setting of the
+services the preset uses.
 
-With other presets it shows the remaining quota of the embedding service while indexing:
-the two limits closest to running out, with every limit in the tooltip.
+Each paid service (OpenAI, Anthropic, Google, RunPod) has a **Billing** section in its
+account card in **Configure preset**. Choose how the service bills you:
+
+- **Not set** (the default): no costs are shown.
+- **Subscription**: no costs; the widget shows the service's quota, when it reports one.
+- **Token-based**: enter the price per 1M input and output tokens of each step the service
+  does (embedding, answering, re-ranking).
+- **Time-based**: enter the price per second of each step (for example a RunPod worker).
+
+An empty price field uses the list price shown as its placeholder. The settings are stored
+in this Zotero's preferences and take effect at once.
+
+When a service is set to Token-based or Time-based, the widget shows the estimated cost of
+everything done since the dialog was opened: questions, follow-ups and indexing, with a
+breakdown by step. Its tooltip lists the tokens or seconds counted and what the estimate
+leaves out. This is an estimate from your prices, not your bill. The **Indexing status**
+dialog shows the estimated cost of the last automatic indexing run in the same way, in
+total and per library.
+
+Otherwise the widget shows the remaining quota of the embedding service while indexing
+(also for free services such as KISSKI): the two limits closest to running out, with every
+limit in the tooltip. If no service reports a quota, the widget is hidden.
 
 ## See also
 

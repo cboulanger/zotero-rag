@@ -356,6 +356,8 @@ def _accounts(inputs: ViewInputs) -> list[AccountCard]:
 
     for pid, card in cards.items():
         provider = providers[pid]
+        if provider.cost != "free":
+            card.billing = _billing_fields(provider, list(card.serves), inputs.preset)
         descriptor = provider.describe()
         has_login = bool(descriptor.provisioning and descriptor.provisioning.login)
         if not provider.supports_provisioning:
@@ -378,6 +380,69 @@ def _accounts(inputs: ViewInputs) -> list[AccountCard]:
         elif missing:
             card.messages.append(UiMessage(level="warn", text="Enter the missing key to start the sides that use it."))
     return [cards[pid] for pid in cards]
+
+
+#: Choices of an account card's Billing select. The plugin shows estimated costs for the
+#: token- and time-based ones and the quota for a subscription (plugin/src/rate-limit-widget.js).
+BILLING_MODES = ("Not set", "Subscription", "Token-based", "Time-based")
+
+#: A price: a non-negative decimal number.
+PRICE_PATTERN = r"\d+(\.\d+)?"
+
+#: Short side names in the Billing fields' labels.
+_SIDE_NOUNS = {"embedding": "Embedding", "llm": "Answering", "rerank": "Re-ranking"}
+
+
+def _price(value: Optional[float]) -> str:
+    """A list price as the plugin shows it (no float noise, no exponent)."""
+    return f"{value:.6f}".rstrip("0").rstrip(".") if value is not None else ""
+
+
+def _billing_fields(provider: Any, sides: list[str], preset: Any) -> list[UiField]:
+    """The Billing fields of a paid provider's account card (Zotero preferences of the caller).
+
+    A select for how the service bills the user, then the user's prices per side, shown
+    for the matching billing type. An empty price uses the provider's list price.
+    """
+    pid = provider.id
+    mode_id = "billing.mode"
+    fields = [UiField(
+        id=mode_id, label="How this service bills you", type="select", options=list(BILLING_MODES),
+        default=BILLING_MODES[0], storage="client_pref", key=f"billing.{pid}.mode",
+        help="Token- and time-based billing show the estimated cost of your queries and indexing; "
+             "Subscription shows the quota instead (when the service reports one). Not set shows neither.",
+    )]
+    for side in sides:
+        side_provider = provider if provider.side == side else None
+        try:
+            from backend.providers import get_providers
+
+            side_provider = side_provider or get_providers(preset)[side]
+            model = side_provider.configured_model()
+            prices = side_provider.pricing(model)
+        except Exception:
+            model, prices = "", None
+        noun = _SIDE_NOUNS.get(side, side)
+
+        def price_field(suffix: str, label: str, list_price: Optional[float], mode: str) -> UiField:
+            shown = _price(list_price) if list_price else ""
+            return UiField(
+                id=f"billing.{side}.{suffix}", label=label, type="text", pattern=PRICE_PATTERN,
+                storage="client_pref", key=f"billing.{pid}.{side}.{suffix}", optional=True,
+                placeholder=f"List price: {shown}" if shown else "Enter your price",
+                help=f"Empty uses the list price for {model}." if shown
+                else "No list price is known: enter the price of your contract.",
+                show_if={mode_id: [mode]},
+            )
+
+        fields.append(price_field("input", f"{noun}: input, USD per 1M tokens",
+                                  prices.input_per_million_tokens if prices else None, "Token-based"))
+        if side == "llm":
+            fields.append(price_field("output", f"{noun}: output, USD per 1M tokens",
+                                      prices.output_per_million_tokens if prices else None, "Token-based"))
+        fields.append(price_field("second", f"{noun}: USD per second", prices.per_second if prices else None,
+                                  "Time-based"))
+    return fields
 
 
 def _docling_key(inputs: ViewInputs) -> Optional[str]:

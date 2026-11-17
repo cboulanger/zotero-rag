@@ -340,9 +340,29 @@ var ZoteroRAGAutoIndexStatus = {
 	renderRunCosts(slugs) {
 		const widget = ZoteroRAGRateLimitWidget;
 		/** @type {UsageCost[]} */
-		let costs = [];
-		for (const info of Object.values(slugs)) costs = widget.addCosts(costs, info.costs);
+		let usage = [];
+		for (const info of Object.values(slugs)) usage = widget.addCosts(usage, info.costs);
+		const costs = this.priceCosts(usage);
 		widget.renderCosts(document, costs, { visible: costs.length > 0, prefix: 'ai-cost-', scope: 'of the last run' });
+	},
+
+	/**
+	 * Reads the user's Billing settings (`extensions.zotero-rag.<name>`); replaced in tests.
+	 * @param {string} name
+	 * @returns {any}
+	 */
+	getBillingPref(name) {
+		return ZoteroRAGRateLimitWidget.zoteroPref(name);
+	},
+
+	/**
+	 * Usage records priced with the user's Billing settings; empty for services billed by
+	 * subscription or with Billing not set.
+	 * @param {UsageCost[]|null|undefined} usage
+	 * @returns {UsageCost[]}
+	 */
+	priceCosts(usage) {
+		return ZoteroRAGRateLimitWidget.priceCosts(usage, (name) => this.getBillingPref(name));
 	},
 
 	/**
@@ -1031,9 +1051,12 @@ var ZoteroRAGAutoIndexStatus = {
 			if (typeof info.chunks_added === 'number') {
 				parts.push(`${info.chunks_added} chunks added`);
 			}
-			if (info.costs && info.costs.length) {
-				const total = ZoteroRAGRateLimitWidget.addCosts([], info.costs);
-				parts.push(`est. ${total.map((c) => ZoteroRAGRateLimitWidget.formatAmount(c.amount, c.currency)).join(' + ')}`);
+			const priced = this.priceCosts(info.costs);
+			if (priced.length) {
+				/** @type {Record<string, number>} */
+				const byCurrency = {};
+				for (const c of priced) byCurrency[c.currency] = (byCurrency[c.currency] || 0) + (c.amount || 0);
+				parts.push(`est. ${Object.entries(byCurrency).map(([cur, amount]) => ZoteroRAGRateLimitWidget.formatAmount(amount, cur)).join(' + ')}`);
 			}
 			meta.textContent = parts.join(' — ');
 			row.appendChild(meta);

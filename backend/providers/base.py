@@ -452,18 +452,27 @@ class Provider:
         return str(self.side_config.model_name)
 
     def estimate_cost(self, usage: Usage) -> Optional[Cost]:
-        """The estimated cost of ``usage``, or None when the model has no known price."""
-        prices = self.pricing(usage.model)
-        if prices is None:
+        """What ``usage`` consumed, with its cost at list prices when the model has one.
+
+        None for a free provider: its calls are never billed. A paid provider's call is
+        always recorded (``amount`` None without a known price), so the user's own prices
+        can still be applied to it.
+        """
+        if self.cost == "free":
             return None
+        prices = self.pricing(usage.model)
         return Cost(
             side=usage.side,
-            amount=prices.price(usage),
-            currency=prices.currency,
+            provider=self.id,
+            provider_label=self.label,
+            model=usage.model,
+            amount=prices.price(usage) if prices is not None else None,
+            currency=prices.currency if prices is not None else "USD",
             requests=usage.requests,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             seconds=usage.seconds,
+            pricing=prices,
             note=self.cost_note,
         )
 

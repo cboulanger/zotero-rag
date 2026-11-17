@@ -540,11 +540,21 @@ test('run costs: summed over the libraries shown, hidden when the run cost nothi
 	els['ai-cost-rate-limit-bars'] = fakeNode();
 	const dialog = widgetDialog(els);
 	dialog.rateLimitFallbackTried = true;
-	const usd = (amount) => ({ side: 'embedding', amount, currency: 'USD', requests: 1 });
-	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: false },
-		slugs: { 'users/1': { status: 'done', costs: [usd(0.25)] }, 'groups/2': { status: 'done', costs: [usd(0.5)] } } });
+	/** @type {Record<string, string>} */
+	const prefs = { 'billing.acme.mode': 'Token-based' };
+	dialog.getBillingPref = (name) => prefs[name];
+	const tokens = (n) => ({ side: 'embedding', provider: 'acme', model: 'e', amount: null, currency: 'USD', requests: 1,
+		input_tokens: n, pricing: { input_per_million_tokens: 1 } });
+	const run = { enabled: true, keys_registered: 1, rate_limits: { available: false },
+		slugs: { 'users/1': { status: 'done', costs: [tokens(250_000)] }, 'groups/2': { status: 'done', costs: [tokens(500_000)] } } };
+	dialog.render(run);
 	assert.strictEqual(els['ai-cost-rate-limit-section'].style.display, '');
-	assert.strictEqual(els['ai-cost-rate-limit-bars'].children[0].textContent, 'Est. cost of the last run: $0.75');
+	assert.strictEqual(els['ai-cost-rate-limit-bars'].children[0].textContent, 'Estimated cost of the last run: $0.75');
+	// Billed by subscription (or not set): no costs.
+	prefs['billing.acme.mode'] = 'Subscription';
+	dialog.render(run);
+	assert.strictEqual(els['ai-cost-rate-limit-section'].style.display, 'none');
+	prefs['billing.acme.mode'] = 'Token-based';
 	dialog.render({ enabled: true, keys_registered: 1, rate_limits: { available: false }, slugs: { 'users/1': { status: 'done' } } });
 	assert.strictEqual(els['ai-cost-rate-limit-section'].style.display, 'none');
 });

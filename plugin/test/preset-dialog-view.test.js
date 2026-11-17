@@ -703,3 +703,60 @@ test('a clicked (focused) Save button still shows its spinner; a focused text fi
 	D.paint(doc, refs, v, local, handlers);
 	assert.strictEqual(all(refs.cards).find((n) => n.tag === 'input'), input, 'typing is not interrupted');
 });
+
+const billingFields = () => [
+	{ id: 'billing.mode', label: 'How this service bills you', type: 'select', storage: 'client_pref', key: 'billing.p1.mode',
+		options: ['Not set', 'Subscription', 'Token-based', 'Time-based'], default: 'Not set' },
+	{ id: 'billing.llm.input', label: 'Answering input, USD per 1M tokens', type: 'text', storage: 'client_pref',
+		key: 'billing.p1.llm.input', optional: true, show_if: { 'billing.mode': ['Token-based'] } },
+	{ id: 'billing.llm.second', label: 'Answering, USD per second', type: 'text', storage: 'client_pref',
+		key: 'billing.p1.llm.second', optional: true, show_if: { 'billing.mode': ['Time-based'] } },
+];
+
+test('Billing: the select shows its default until chosen, and price fields only for the chosen type', () => {
+	const D = load();
+	const v = view([side('llm')], [card({ billing: billingFields() })]);
+	D.applyLocalState(v, () => undefined);
+	const [mode, input, second] = v.accounts[0].billing;
+	assert.strictEqual(mode.value, 'Not set');
+	assert.strictEqual(D.isShown(input, v.accounts[0].billing), false);
+	const prefs = { 'extensions.zotero-rag.billing.p1.mode': 'Token-based', 'extensions.zotero-rag.billing.p1.llm.input': '0.15' };
+	D.applyLocalState(v, (n) => prefs[n]);
+	assert.strictEqual(mode.value, 'Token-based');
+	assert.strictEqual(input.value, '0.15');
+	assert.strictEqual(D.isShown(input, v.accounts[0].billing), true);
+	assert.strictEqual(D.isShown(second, v.accounts[0].billing), false);
+	assert.strictEqual(D.isShown(mode, v.accounts[0].billing), true);
+});
+
+test('Billing: the account card paints a Billing section with the visible fields', () => {
+	const D = load();
+	const doc = fakeDoc();
+	const refs = D.mount(doc, createElementNS(null, 'div'));
+	const billing = billingFields();
+	billing[0].value = 'Time-based';
+	const v = view([side('llm')], [card({ billing })]);
+	const local = { tab: '', logOpen: {}, drafts: {}, notes: {} };
+	const handlers = { onTab() {}, onToggleLog() {}, onAction() {}, onFieldChange() {}, onSaveAccount() {}, onDefaultChange() {} };
+	D.paint(doc, refs, v, local, handlers);
+	const painted = text(refs.cards);
+	assert.match(painted, /Billing/);
+	assert.match(painted, /How this service bills you/);
+	assert.match(painted, /Answering, USD per second/);
+	assert.doesNotMatch(painted, /per 1M tokens/);
+});
+
+test('Billing: choosing a type saves it in the Zotero preferences at once', async () => {
+	const billing = billingFields();
+	const { controller, prefs } = setup({ views: [view([side('llm')], [card({ billing })])] });
+	await controller.refresh();
+	const mode = controller.state.view.accounts[0].billing[0];
+	await controller.setSideField(mode, 'Token-based', 'account:p1');
+	assert.strictEqual(prefs.store['extensions.zotero-rag.billing.p1.mode'], 'Token-based');
+	assert.strictEqual(mode.value, 'Token-based');
+	const input = controller.state.view.accounts[0].billing[1];
+	await controller.setSideField(input, '0.20', 'account:p1');
+	assert.strictEqual(prefs.store['extensions.zotero-rag.billing.p1.llm.input'], '0.20');
+	await controller.setSideField(input, '', 'account:p1');
+	assert.ok(!('extensions.zotero-rag.billing.p1.llm.input' in prefs.store));
+});

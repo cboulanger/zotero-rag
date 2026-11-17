@@ -54,6 +54,9 @@ class UiField(BaseModel):
     docs_url: Optional[str] = None
     #: Server-side settings that read this field (e.g. "indexing"); lets the plugin re-sync copies.
     required_for: list[str] = Field(default_factory=list)
+    #: Show the field only while another field of the same list has one of these values
+    #: (``{"<field id>": ["<value>", ...]}``); None shows it always.
+    show_if: Optional[dict[str, list[str]]] = None
 
 
 class UiMessage(BaseModel):
@@ -153,6 +156,9 @@ class AccountCard(BaseModel):
     auto_start: bool = True
     #: The most used quota of the sides this account serves.
     quota: Optional[UiQuota] = None
+    #: How the user is billed for this paid service and the prices of their contract
+    #: (``client_pref`` fields, saved when changed). Empty for a free service.
+    billing: list[UiField] = Field(default_factory=list)
 
 
 class PresetHeader(BaseModel):

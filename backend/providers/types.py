@@ -161,16 +161,27 @@ class Pricing(BaseModel):
 
 
 class Cost(BaseModel):
-    """The estimated cost of what one side consumed (one call or a sum of calls)."""
+    """What one side of one paid provider consumed (one call or a sum of calls).
+
+    Whether it costs money, and how much, depends on the user's contract: the plugin
+    prices it with the billing mode and prices the user set (see the account card's
+    Billing fields), falling back to ``pricing``, the provider's list prices.
+    """
 
     side: Side
-    amount: float
+    provider: str = ""
+    provider_label: str = ""
+    model: str = ""
+    #: The cost at list prices; None when the provider knows no price for the model.
+    amount: Optional[float] = None
     currency: str = "USD"
     requests: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     seconds: float = 0.0
-    #: Always true for now: computed from list prices, not read from the provider's bill.
+    #: The list prices ``amount`` was computed with, the defaults of the user's own prices.
+    pricing: Optional[Pricing] = None
+    #: Always true: computed from prices, never read from the provider's bill.
     estimated: bool = True
     #: What the estimate leaves out (e.g. idle time a GPU worker is billed for).
     note: str = ""

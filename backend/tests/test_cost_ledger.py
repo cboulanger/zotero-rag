@@ -10,7 +10,7 @@ from backend.config.settings import Settings
 from backend.providers import Cost, Pricing, Usage, get_providers
 from backend.providers.base import match_pricing
 from backend.providers.testing import preset_with
-from backend.services.cost_ledger import CostLedger, collect, current_ledger, priced_sides, record_usage, token_counts
+from backend.services.cost_ledger import CostLedger, collect, current_ledger, paid_providers, record_usage, token_counts
 
 PRICES = {"input_per_million_tokens": 1.0, "output_per_million_tokens": 4.0}
 
@@ -38,16 +38,20 @@ class TestPricing(unittest.TestCase):
 
 
 class TestProviderPricing(unittest.TestCase):
-    def test_generic_provider_has_no_default_prices(self):
+    def test_a_paid_call_without_a_known_price_is_still_recorded(self):
         provider = llm_provider()
         self.assertIsNone(provider.pricing("m"))
-        self.assertIsNone(provider.estimate_cost(Usage(side="llm", model="m", input_tokens=10)))
+        cost = provider.estimate_cost(Usage(side="llm", model="m", input_tokens=10))
+        self.assertIsNone(cost.amount)
+        self.assertIsNone(cost.pricing)
+        self.assertEqual((cost.provider, cost.model, cost.input_tokens), ("generic", "m", 10))
 
     def test_preset_pricing_object_applies_to_every_model(self):
         provider = llm_provider({"pricing": PRICES})
         cost = provider.estimate_cost(Usage(side="llm", model="any", input_tokens=1_000_000, output_tokens=500_000))
         self.assertIsInstance(cost, Cost)
         self.assertAlmostEqual(cost.amount, 3.0)
+        self.assertEqual(cost.pricing.output_per_million_tokens, 4.0)
         self.assertEqual((cost.currency, cost.side, cost.input_tokens), ("USD", "llm", 1_000_000))
 
     def test_preset_pricing_by_model_glob(self):
@@ -59,10 +63,11 @@ class TestProviderPricing(unittest.TestCase):
         provider = llm_provider({"pricing": {"per_token": 3}})
         self.assertIsNone(provider.pricing("m"))
 
-    def test_free_provider_never_has_prices(self):
+    def test_free_provider_is_never_billed(self):
         provider = llm_provider({"pricing": PRICES})
         provider.cost = "free"  # instance attribute shadows the class's
         self.assertIsNone(provider.pricing("m"))
+        self.assertIsNone(provider.estimate_cost(Usage(side="llm", model="m", input_tokens=10)))
 
 
 class TestLedger(unittest.TestCase):
@@ -82,11 +87,16 @@ class TestLedger(unittest.TestCase):
         self.assertEqual(total.input_tokens, 3_000_000)
         self.assertIsNone(current_ledger())
 
-    def test_ledger_keeps_currencies_apart(self):
+    def test_ledger_keeps_providers_models_and_currencies_apart(self):
         ledger = CostLedger()
-        ledger.add(Cost(side="llm", amount=1.0, currency="USD"))
-        ledger.add(Cost(side="llm", amount=2.0, currency="EUR"))
-        self.assertEqual([(c.currency, c.amount) for c in ledger.costs()], [("USD", 1.0), ("EUR", 2.0)])
+        ledger.add(Cost(side="llm", provider="a", model="m", amount=1.0))
+        ledger.add(Cost(side="llm", provider="a", model="m", amount=None, input_tokens=5))
+        ledger.add(Cost(side="llm", provider="a", model="n", amount=2.0))
+        ledger.add(Cost(side="llm", provider="b", model="m", amount=None))
+        ledger.add(Cost(side="llm", provider="a", model="m", amount=3.0, currency="EUR"))
+        self.assertEqual([(c.provider, c.model, c.currency, c.amount) for c in ledger.costs()],
+                         [("a", "m", "USD", 1.0), ("a", "n", "USD", 2.0), ("b", "m", "USD", None), ("a", "m", "EUR", 3.0)])
+        self.assertEqual(ledger.costs()[0].input_tokens, 5)
 
     def test_nested_collect_also_adds_to_the_outer_ledger(self):
         provider = llm_provider({"pricing": PRICES})
@@ -118,9 +128,11 @@ class TestLedger(unittest.TestCase):
             self.assertIsNone(record_usage(broken, Usage(side="llm", model="m")))
         self.assertEqual(ledger.costs(), [])
 
-    def test_unpriced_calls_leave_the_ledger_empty(self):
+    def test_free_calls_leave_the_ledger_empty(self):
+        provider = llm_provider()
+        provider.cost = "free"
         with collect() as ledger:
-            record_usage(llm_provider(), Usage(side="llm", model="m", input_tokens=5))
+            record_usage(provider, Usage(side="llm", model="m", input_tokens=5))
         self.assertEqual(ledger.as_dicts(), [])
 
 
@@ -133,11 +145,13 @@ class TestTokenCounts(unittest.TestCase):
         self.assertEqual(token_counts(Mock()), (0, 0))
 
 
-class TestPricedSides(unittest.TestCase):
-    def test_only_sides_with_a_known_price(self):
-        preset = preset_with("generic", kwargs={"api_key_env": "SIDE_KEY", "pricing": PRICES})
-        self.assertEqual(priced_sides(preset), ["llm"])
-        self.assertEqual(priced_sides(preset_with("generic")), [])
+class TestPaidProviders(unittest.TestCase):
+    def test_remote_sides_of_paid_providers_grouped_by_provider(self):
+        found = paid_providers(preset_with("generic"))
+        self.assertEqual([(p["id"], p["sides"]) for p in found], [("generic", ["embedding", "llm"])])
+
+    def test_free_providers_are_left_out(self):
+        self.assertEqual(paid_providers(preset_with("testvendor")), [{"id": "generic", "label": "Generic (OpenAI-compatible)", "sides": ["embedding"]}])
 
 
 class TestServicesRecordCosts(unittest.IsolatedAsyncioTestCase):

@@ -368,6 +368,24 @@ class PresetViewApiTest(unittest.TestCase):
         cloud = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"})
         self.assertTrue(cloud["accounts"][0]["auto_start"])
 
+    def test_a_paid_account_card_has_billing_fields_saved_in_zotero(self):
+        """#119: how the user is billed is theirs to say; the prices are per side, shown per type."""
+        card = self._get("test-cloud", headers={"X-Testcloud-Api-Key": "tck_x"})["accounts"][0]
+        billing = {f["id"]: f for f in card["billing"]}
+        mode = billing["billing.mode"]
+        self.assertEqual((mode["type"], mode["storage"], mode["key"], mode["default"]),
+                         ("select", "client_pref", "billing.testcloud.mode", "Not set"))
+        self.assertEqual(mode["options"], ["Not set", "Subscription", "Token-based", "Time-based"])
+        self.assertEqual(billing["billing.llm.output"]["show_if"], {"billing.mode": ["Token-based"]})
+        self.assertEqual(billing["billing.rerank.second"]["show_if"], {"billing.mode": ["Time-based"]})
+        self.assertEqual(billing["billing.embedding.input"]["key"], "billing.testcloud.embedding.input")
+        self.assertNotIn("billing.embedding.output", billing)  # no output tokens on that side
+        self.assertTrue(all(f["storage"] == "client_pref" for f in card["billing"]))
+
+    def test_a_free_account_card_has_no_billing(self):
+        body = self._get("test-remote", headers={"X-Testvendor-Api-Key": "k"})
+        self.assertEqual(body["accounts"][0]["billing"], [])
+
     def test_a_very_busy_model_is_reported(self):
         body, _ = self._vendor(SideProbe(ok=True), availability="very busy")
         side = self._side(body, "llm")

@@ -196,12 +196,19 @@ meters closest to running out and lists every meter in its tooltip.
 
 ## Cost estimates
 
-For paid providers the backend estimates what each request cost, from list
-prices. Each remote call reports what it consumed (a `Usage`: model, input and
-output tokens, wall-clock seconds); the side's provider prices it with
-`estimate_cost(usage)`, and `backend/services/cost_ledger.py` adds the result to
-the ledger of the surrounding request. The totals (one `Cost` per side and
-currency: `amount`, `currency`, `requests`, tokens, `seconds`, `note`) come back as:
+Whether a paid service bills per token, per second or by subscription cannot be
+told from the outside, so costs are shown only when the user says how a service
+bills them, and the plugin computes them from the user's prices.
+
+For every call to a paid provider (`cost = "paid"`) the backend records a usage
+record. Each remote call reports what it consumed (a `Usage`: model, input and
+output tokens, wall-clock seconds); the side's provider turns it into a `Cost`
+with `estimate_cost(usage)`, and `backend/services/cost_ledger.py` adds it to the
+ledger of the surrounding request. A record (one per side, provider, model and
+currency) carries `provider`, `provider_label`, `model`, `requests`, tokens,
+`seconds`, `note`, the provider's list prices (`pricing`) and `amount` at those
+list prices (None without a known price). Free providers' calls are not recorded.
+The records come back as:
 
 - `costs` of `POST /api/query` (also on a `needs_client_evidence` or
   `needs_clarification` response, which can follow a routing call);
@@ -209,17 +216,27 @@ currency: `amount`, `currency`, `requests`, tokens, `seconds`, `note`) come back
 - `costs` of each library in the autoindex status (`slugs.<slug>.costs`), for the
   last run.
 
-`GET /api/config` lists the `priced_sides` of the caller's preset. When it is not
-empty, the Ask dialog's usage widget shows the estimated costs of the dialog
-session (queries, follow-ups and indexing) instead of the quota bars; the
-**Indexing status** dialog shows the estimated cost of the last run over the
-libraries it lists.
+`GET /api/config` lists the `paid_providers` of the caller's preset (`id`,
+`label`, `sides`). Each paid provider's account card in **Configure preset** has a
+**Billing** section (`AccountCard.billing`, built by `preset_view._billing_fields`):
+a select (Not set, Subscription, Token-based, Time-based) and, for the chosen type,
+one price field per side (input and output per 1M tokens, or per second), whose
+placeholder is the list price. The values are Zotero preferences
+(`billing.<provider>.mode`, `billing.<provider>.<side>.input|output|second`); a
+field's `show_if` hides the price fields of the other type. The plugin prices the
+records with them (`ZoteroRAGRateLimitWidget.priceCosts`): an empty price field
+uses the list price, and records of a service billed by subscription or with
+Billing not set are left out. The Ask dialog's usage widget then shows the
+estimated cost of the dialog session (queries, follow-ups and indexing) instead
+of the quota bars, and the **Indexing status** dialog the estimated cost of the
+last run over the libraries it lists. Both say that this is an estimate.
 
 A provider defines its price list with `default_pricing(model)`, which returns a
 `Pricing` (`input_per_million_tokens`, `output_per_million_tokens`,
 `per_request`, `per_second`, `currency`, default `USD`) or None for an unknown
 model; `match_pricing(table, model)` looks a model up in a list of glob
-patterns. `cost_note` says what the estimate leaves out. A free provider
+patterns. These list prices are the defaults of the Billing price fields.
+`cost_note` says what the estimate leaves out. A free provider
 (`cost = "free"`) never has prices.
 
 | Provider | Prices |
@@ -242,4 +259,5 @@ A preset can set or correct prices per side in `model_kwargs.pricing`, either on
 }
 ```
 
-Vendors change their prices; the shipped lists are estimates, not a bill.
+Vendors change their prices; the shipped lists are estimates, not a bill, and
+the user's own prices in the Billing section override them.

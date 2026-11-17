@@ -200,11 +200,12 @@ test('formatAmount keeps four decimals below one cent', () => {
 test('describeCosts gives a total, a per-side line and a tooltip with notes', () => {
 	const { ZoteroRAGRateLimitWidget: w } = load();
 	const d = w.describeCosts([cost('llm', 0.02), cost('embedding', 0.005, { note: 'Idle time is not counted.' })]);
-	assert.strictEqual(d.total, 'Est. cost this session: $0.03');
+	assert.strictEqual(d.total, 'Estimated cost this session: $0.03');
 	assert.strictEqual(d.detail, 'Answering $0.02 · Embedding $0.0050');
 	assert.match(d.title, /Idle time is not counted\./);
 	assert.match(d.title, /100 input \/ 10 output tokens/);
-	assert.strictEqual(w.describeCosts([]).total, 'Est. cost this session: $0.00');
+	assert.match(d.title, /This is an estimate from the prices in Configure preset, not your bill\./);
+	assert.strictEqual(w.describeCosts([]).total, 'Estimated cost this session: $0.00');
 });
 
 test('renderCosts paints the total and the breakdown into the same widget', () => {
@@ -213,7 +214,7 @@ test('renderCosts paints the total and the breakdown into the same widget', () =
 	ctx.document.createElementNS = createElementNS;
 	ctx.ZoteroRAGRateLimitWidget.renderCosts(ctx.document, [cost('llm', 0.25)], { visible: true, prefix: 'result-' });
 	const rows = els['result-rate-limit-bars'].children;
-	assert.strictEqual(rows[0].textContent, 'Est. cost this session: $0.25');
+	assert.strictEqual(rows[0].textContent, 'Estimated cost this session: $0.25');
 	assert.strictEqual(rows[1].textContent, 'Answering $0.25');
 	ctx.ZoteroRAGRateLimitWidget.renderCosts(ctx.document, [], { visible: false, prefix: 'result-' });
 	assert.strictEqual(els['result-rate-limit-section'].style.display, 'none');
@@ -221,18 +222,65 @@ test('renderCosts paints the total and the breakdown into the same widget', () =
 	assert.strictEqual(els['result-rate-limit-bars'].children.length, 0);
 });
 
-test('Ask dialog shows session costs instead of quota bars for a paid preset', () => {
+/** @param {Record<string, any>} prefs */
+const prefsReader = (prefs) => (name) => prefs[name];
+
+const usage = (provider, side, extra = {}) => ({ side, provider, model: 'm', amount: null, currency: 'USD', requests: 1,
+	input_tokens: 0, output_tokens: 0, seconds: 0, ...extra });
+
+test('billingMode and showsCosts follow the Billing select of the account card', () => {
+	const { ZoteroRAGRateLimitWidget: w } = load();
+	const providers = [{ id: 'acme', label: 'Acme', sides: ['llm'] }];
+	assert.strictEqual(w.billingMode('acme', prefsReader({})), 'Not set');
+	assert.strictEqual(w.showsCosts(providers, prefsReader({})), false);
+	assert.strictEqual(w.showsCosts(providers, prefsReader({ 'billing.acme.mode': 'Subscription' })), false);
+	assert.strictEqual(w.showsCosts(providers, prefsReader({ 'billing.acme.mode': 'Token-based' })), true);
+	assert.strictEqual(w.showsCosts(providers, prefsReader({ 'billing.acme.mode': 'Time-based' })), true);
+	assert.strictEqual(w.showsCosts(providers, () => { throw new Error('no prefs'); }), false);
+});
+
+test('priceCosts uses your prices, else the list prices, and leaves out other billing types', () => {
+	const { ZoteroRAGRateLimitWidget: w } = load();
+	const records = [
+		usage('acme', 'llm', { input_tokens: 1_000_000, output_tokens: 500_000,
+			pricing: { input_per_million_tokens: 1, output_per_million_tokens: 4 } }),
+		usage('gpu', 'embedding', { seconds: 10, pricing: { per_second: 0.5 } }),
+		usage('sub', 'llm', { input_tokens: 10 }),
+	];
+	const listPrices = w.priceCosts(records, prefsReader({
+		'billing.acme.mode': 'Token-based', 'billing.gpu.mode': 'Time-based', 'billing.sub.mode': 'Subscription',
+	}));
+	assert.strictEqual(JSON.stringify(listPrices.map((c) => [c.provider, c.amount])), JSON.stringify([['acme', 3], ['gpu', 5]]));
+	const own = w.priceCosts(records, prefsReader({
+		'billing.acme.mode': 'Token-based', 'billing.acme.llm.input': '2', 'billing.acme.llm.output': '',
+		'billing.gpu.mode': 'Time-based', 'billing.gpu.embedding.second': '0.1',
+	}));
+	assert.strictEqual(JSON.stringify(own.map((c) => [c.provider, c.amount])), JSON.stringify([['acme', 4], ['gpu', 1]]));
+	assert.strictEqual(records[0].amount, null); // inputs unchanged
+	// No list price and no price entered: zero, not a crash.
+	assert.strictEqual(w.priceCosts([usage('x', 'llm', { input_tokens: 5 })],
+		prefsReader({ 'billing.x.mode': 'Token-based' }))[0].amount, 0);
+});
+
+test('Ask dialog shows session costs instead of quota bars for a service billed per token', () => {
 	const els = { 'rate-limit-section': fakeNode(), 'rate-limit-bars': fakeNode() };
 	const ctx = load(els, true);
 	ctx.document.createElementNS = createElementNS;
 	const D = ctx.ZoteroRAGDialog;
+	const prefs = { 'billing.acme.mode': 'Token-based' };
 	const fake = { rateLimitAvailable: true, isOperationInProgress: false, isIndexOnlyMode: () => false,
-		rateLimitMeters: [m(100, 20)], pricedSides: ['llm'], sessionCosts: [],
-		updateRateLimitDisplay: D.updateRateLimitDisplay };
+		rateLimitMeters: [m(100, 20)], paidProviders: [{ id: 'acme', label: 'Acme', sides: ['llm'] }], sessionCosts: [],
+		getBillingPref: prefsReader(prefs), updateRateLimitDisplay: D.updateRateLimitDisplay };
 	D.updateRateLimitDisplay.call(fake);
 	assert.strictEqual(els['rate-limit-section'].style.display, '');
-	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Est. cost this session: $0.00');
-	D.addSessionCosts.call(fake, [cost('llm', 0.01)]);
-	D.addSessionCosts.call(fake, [cost('llm', 0.02)]);
-	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Est. cost this session: $0.03');
+	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Estimated cost this session: $0.00');
+	const call = () => usage('acme', 'llm', { input_tokens: 10_000, pricing: { input_per_million_tokens: 1 } });
+	D.addSessionCosts.call(fake, [call()]);
+	D.addSessionCosts.call(fake, [call()]);
+	assert.strictEqual(els['rate-limit-bars'].children[0].textContent, 'Estimated cost this session: $0.02');
+	// Subscription: the quota bars come back (shown while indexing), and no costs.
+	prefs['billing.acme.mode'] = 'Subscription';
+	fake.isOperationInProgress = true;
+	D.updateRateLimitDisplay.call(fake);
+	assert.doesNotMatch(els['rate-limit-bars'].children[0].textContent || '', /Estimated cost/);
 });

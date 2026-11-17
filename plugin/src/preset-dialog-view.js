@@ -31,6 +31,7 @@
  * @property {boolean} [editable]
  * @property {string|null} [docs_url]
  * @property {string[]} [required_for]
+ * @property {Record<string, string[]>|null} [show_if] - shown only while the named field of the same list has one of these values
  *
  * @typedef {{level: 'ok'|'info'|'warn'|'error', text: string, link?: string|null}} UiMessage
  * @typedef {{label: string, value: string}} UiFact
@@ -75,6 +76,7 @@
  * @property {UiField[]} fields
  * @property {UiMessage[]} messages
  * @property {UiAction[]} [actions] - log in / log out of a provider with an account login
+ * @property {UiField[]} [billing] - how a paid service bills the user and their prices (Zotero preferences, saved when changed)
  * @property {boolean} auto_start
  * @property {UiQuota|null} [quota] - the most used quota of the sides it serves
  *
@@ -198,7 +200,30 @@ var ZoteroRAGPresetDialog = {
 				}
 			}
 		}
+		for (const card of view.accounts || []) {
+			for (const field of card.billing || []) {
+				if (field.storage !== 'client_pref' || !field.key) continue;
+				const stored = getPref(this.PREF_PREFIX + field.key);
+				const unset = stored === undefined || stored === null || stored === '';
+				// A select always shows one of its options: its default until one is chosen.
+				field.value = unset ? (field.type === 'select' ? field.default ?? '' : '') : stored;
+			}
+		}
 		return view;
+	},
+
+	/**
+	 * Whether a field is shown, given the other fields of its list (`show_if`).
+	 * @param {UiField} field
+	 * @param {UiField[]} fields
+	 * @returns {boolean}
+	 */
+	isShown(field, fields) {
+		if (!field.show_if) return true;
+		return Object.entries(field.show_if).every(([id, values]) => {
+			const other = fields.find((f) => f.id === id);
+			return !!other && values.includes(String(other.value ?? other.default ?? ''));
+		});
 	},
 
 	/**
@@ -710,8 +735,8 @@ ZoteroRAGPresetDialog._field = function (doc, field, scope, local, handlers) {
 			local.drafts[draftKey] = control.value;
 			if (handlers.onDraft) handlers.onDraft();
 		});
-		// Side fields save on change; account fields wait for the card's Save button.
-		if (scope.startsWith('side:')) {
+		// Side fields and client preferences save on change; account credentials wait for the card's Save button.
+		if (scope.startsWith('side:') || field.storage === 'client_pref') {
 			control.addEventListener('change', () => handlers.onFieldChange(field, control.value, scope));
 		}
 	}
@@ -802,6 +827,18 @@ ZoteroRAGPresetDialog._card = function (doc, card, view, local, handlers) {
 	};
 	const fieldHandlers = { ...handlers, onDraft: updateSave };
 	for (const field of card.fields) node.appendChild(this._field(doc, field, scope, local, fieldHandlers));
+	const billing = card.billing || [];
+	if (billing.length) {
+		// Saved as soon as changed (Zotero preferences): not part of the card's Save button.
+		const box = el('div', 'pd-billing');
+		const heading = el('div', 'pd-billing-head');
+		heading.textContent = 'Billing';
+		box.appendChild(heading);
+		for (const field of billing) {
+			if (this.isShown(field, billing)) box.appendChild(this._field(doc, field, scope, local, handlers));
+		}
+		node.appendChild(box);
+	}
 	const note = local.notes[scope];
 	for (const message of note ? [note, ...card.messages] : card.messages) node.appendChild(this._message(el, message));
 	const row = el('div', 'pd-actions');
@@ -1122,6 +1159,8 @@ ZoteroRAGPresetDialog.createController = function (deps) {
 		}
 		if (!value) deps.prefs.clear(name);
 		else deps.prefs.set(name, field.type === 'number' ? Number(value) : value);
+		// Shown at once (a billing type shows its price fields) without asking the server again.
+		field.value = value || (field.type === 'select' ? field.default ?? '' : '');
 		delete state.local.drafts[`${scope}/${field.id}`];
 		note(scope, 'ok', `${field.label} saved.`);
 	};

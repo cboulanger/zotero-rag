@@ -96,11 +96,20 @@ var ZoteroRAGDialog = {
 	/** @type {UsageMeter[]|null} */
 	rateLimitMeters: null,
 
-	/** Sides of the active preset that charge per use at a known price (`priced_sides` of GET /api/config). @type {string[]} */
-	pricedSides: [],
+	/** Paid providers of the active preset (`paid_providers` of GET /api/config). @type {PaidProvider[]} */
+	paidProviders: [],
 
-	/** Estimated costs incurred since this dialog opened (queries, follow-ups and indexing). @type {UsageCost[]} */
+	/** Usage of paid providers since this dialog opened (queries, follow-ups and indexing), at list prices. @type {UsageCost[]} */
 	sessionCosts: [],
+
+	/**
+	 * Reads the user's Billing settings (`extensions.zotero-rag.<name>`); replaced in tests.
+	 * @param {string} name
+	 * @returns {any}
+	 */
+	getBillingPref(name) {
+		return ZoteroRAGRateLimitWidget.zoteroPref(name);
+	},
 
 	/** @type {AbortController|null} */
 	abortController: null,
@@ -450,7 +459,7 @@ var ZoteroRAGDialog = {
 				return;
 			}
 			if (response.ok) {
-				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null, priced_sides?: string[]}} */ (await response.json());
+				const config = /** @type {{default_min_score?: number, default_top_k?: number, embedding_model_type?: string, preset_name?: string, llm_models?: string[], standin?: ActiveStandin|null, paid_providers?: PaidProvider[]}} */ (await response.json());
 				this.renderActiveStandin(config.standin || null);
 				// A stand-in that ended on the server (expired) means the user's own keys are needed again.
 				this.plugin.syncStandinState(config.standin).catch(() => {});
@@ -509,7 +518,7 @@ var ZoteroRAGDialog = {
 				}
 
 				this.rateLimitAvailable = config.embedding_model_type === 'remote';
-				this.pricedSides = Array.isArray(config.priced_sides) ? config.priced_sides : [];
+				this.paidProviders = Array.isArray(config.paid_providers) ? config.paid_providers : [];
 				this.updateRateLimitDisplay();
 				this.plugin.log(`Loaded preset '${config.preset_name}' with min_score=${defaultMinScore}, top_k=${defaultTopK}, llm_models=${llmModels.join(', ')}`);
 				if (this.rateLimitAvailable) {
@@ -1447,18 +1456,18 @@ var ZoteroRAGDialog = {
 
 	updateRateLimitDisplay() {
 		const widget = ZoteroRAGRateLimitWidget;
-		const costs = this.sessionCosts || [];
-		if ((this.pricedSides && this.pricedSides.length) || costs.length) {
-			// A paid preset: the session's estimated costs take the widget's place in both states.
+		/** @param {string} name */
+		const getPref = (name) => this.getBillingPref(name);
+		if (widget.showsCosts(this.paidProviders, getPref)) {
+			// A service billed per token or second: the session's estimated costs take the widget's place.
+			const costs = widget.priceCosts(this.sessionCosts || [], getPref);
 			widget.renderCosts(document, costs, { visible: true });
 			widget.renderCosts(document, costs, { visible: true, prefix: 'result-' });
 			return;
 		}
-		const show = (this.isIndexOnlyMode() || this.isOperationInProgress) && this.rateLimitAvailable;
-		widget.render(document, this.rateLimitMeters, { visible: show });
-		widget.render(document, this.rateLimitMeters, {
-			visible: this.rateLimitAvailable && !!(this.rateLimitMeters && this.rateLimitMeters.length), prefix: 'result-',
-		});
+		const hasQuota = this.rateLimitAvailable && !!(this.rateLimitMeters && this.rateLimitMeters.length);
+		widget.render(document, this.rateLimitMeters, { visible: hasQuota && (this.isIndexOnlyMode() || this.isOperationInProgress) });
+		widget.render(document, this.rateLimitMeters, { visible: hasQuota, prefix: 'result-' });
 	},
 
 	/**

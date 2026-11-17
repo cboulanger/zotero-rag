@@ -1,9 +1,12 @@
-"""Estimated costs of the inference calls made while handling one request or run.
+"""What the calls to paid providers consumed while handling one request or run.
 
 The embedding, answering and re-ranking services report what each remote call
-consumed (``record_usage``); the side's provider prices it
-(``Provider.estimate_cost``) and the cost is added to the ledger collected by
-the surrounding request (``collect``). Nothing is recorded outside a ``collect``
+consumed (``record_usage``); the side's provider turns it into a ``Cost`` record
+(``Provider.estimate_cost``: provider, model, tokens, seconds and the cost at
+list prices) and it is added to the ledger of the surrounding request
+(``collect``). Free providers' calls are not recorded. The plugin prices the
+records with the user's billing settings, since only the user knows whether a
+service bills them per token, per second or by subscription. Nothing is recorded outside a ``collect``
 block, and nothing here ever raises into an inference call: costs are a
 display-only signal.
 
@@ -25,21 +28,22 @@ logger = logging.getLogger(__name__)
 
 
 class CostLedger:
-    """Running per-side, per-currency totals of estimated costs."""
+    """Running totals of what paid providers' calls consumed, per side, provider and model."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._totals: dict[tuple[str, str], Cost] = {}
+        self._totals: dict[tuple[str, str, str, str], Cost] = {}
 
     def add(self, cost: Cost) -> None:
-        """Add one call's cost to the totals of its side and currency."""
+        """Add one call to the totals of its side, provider, model and currency."""
         with self._lock:
-            key = (cost.side, cost.currency)
+            key = (cost.side, cost.provider, cost.model, cost.currency)
             total = self._totals.get(key)
             if total is None:
                 self._totals[key] = cost.model_copy()
                 return
-            total.amount += cost.amount
+            if cost.amount is not None:
+                total.amount = (total.amount or 0.0) + cost.amount
             total.requests += cost.requests
             total.input_tokens += cost.input_tokens
             total.output_tokens += cost.output_tokens
@@ -48,12 +52,12 @@ class CostLedger:
                 total.note = f"{total.note} {cost.note}".strip()
 
     def costs(self) -> list[Cost]:
-        """One entry per side and currency, in the order they were first incurred."""
+        """One entry per side, provider, model and currency, in the order first used."""
         with self._lock:
             return [c.model_copy() for c in self._totals.values()]
 
     def as_dicts(self) -> list[dict]:
-        """JSON-ready ``costs`` (empty when nothing priced was called)."""
+        """JSON-ready ``costs`` (empty when no paid provider was called)."""
         return [c.model_dump() for c in self.costs()]
 
 
@@ -110,22 +114,24 @@ def record_usage(provider: Any, usage: Usage) -> Optional[Cost]:
     return cost
 
 
-def priced_sides(preset: Any) -> list[str]:
-    """The sides of ``preset`` whose configured model has a known price (never raises)."""
+def paid_providers(preset: Any) -> list[dict]:
+    """The paid providers of ``preset``'s remote sides: ``{id, label, sides}`` each (never raises)."""
     try:
         from backend.providers import get_providers
 
         providers = get_providers(preset)
     except Exception:
         return []
-    sides = []
+    found: dict[str, dict] = {}
     for side, provider in providers.items():
         try:
-            if provider.side_config.model_type == "remote" and provider.pricing(provider.configured_model()):
-                sides.append(side)
+            if provider.cost == "free" or provider.side_config.model_type != "remote":
+                continue
         except Exception:
             continue
-    return sides
+        entry = found.setdefault(provider.id, {"id": provider.id, "label": provider.label, "sides": []})
+        entry["sides"].append(side)
+    return list(found.values())
 
 
 def token_counts(usage_obj: Any) -> tuple[int, int]:
